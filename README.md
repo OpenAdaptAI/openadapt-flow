@@ -66,21 +66,34 @@ Every replay generates an illustrated run report:
 pip install -e '.[dev]'
 playwright install chromium
 
-# End-to-end demo against the bundled MockMed app:
-openadapt-flow demo-record --out /tmp/rec                          # scripted demonstration
+# 1. Record a demonstration (drives the bundled MockMed demo app):
+openadapt-flow demo-record --out /tmp/rec
+
+# 2. Compile it into a workflow bundle:
 openadapt-flow compile /tmp/rec --out /tmp/bundle --name triage-demo
-openadapt-flow bench /tmp/bundle --n 1 --run-root /tmp/bench       # serves MockMed and replays
-open /tmp/bench/BENCH.md
+
+# 3. Replay it — deterministic, local, zero model calls:
+openadapt-flow replay /tmp/bundle --run-dir /tmp/run
+open /tmp/run/REPORT.md
+
+# 4. Drift the UI (dark theme it has never seen) and watch it heal:
+openadapt-flow replay /tmp/bundle --drift theme \
+    --run-dir /tmp/run-drift --save-healed-to /tmp/healed
+open /tmp/run-drift/REPORT.md
 ```
 
-To replay a bundle against your own running app (parameters default to the
-values recorded during the demo; `--param` overrides them):
+Steps 3–4 serve the bundled MockMed app automatically. To replay against your
+own running app, pass `--url` (parameters default to the values recorded
+during the demo; `--param` overrides them):
 
 ```bash
 openadapt-flow replay /tmp/bundle --url <APP_URL> \
     --run-dir /tmp/run --param note="Booking 3 months"
-open /tmp/run/REPORT.md
 ```
+
+`bench` replays a bundle N times and aggregates success rate, latency
+percentiles, and cost: `openadapt-flow bench /tmp/bundle --n 10 --run-root
+/tmp/bench`.
 
 The test suite includes the full drift matrix (theme, moved buttons, renamed
 buttons, surprise modal) end to end:

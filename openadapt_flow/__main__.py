@@ -5,7 +5,8 @@ imported lazily inside each handler so ``--help`` always works):
 
 - ``demo-record`` — serve MockMed locally and record the canonical demo.
 - ``compile`` — compile a recording directory into a workflow bundle.
-- ``replay`` — replay a bundle against a live app URL.
+- ``replay`` — replay a bundle; serves the bundled MockMed demo app when no
+  ``--url`` is given (with optional ``--drift`` to demonstrate healing).
 - ``bench`` — replay a bundle N times against MockMed and aggregate.
 - ``emit-skill`` — emit an Agent Skills folder for a bundle.
 - ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
@@ -93,23 +94,45 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     workflow = Workflow.load(bundle)
     params = _parse_params(args.param)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not args.headed)
-        page = browser.new_page(viewport=_VIEWPORT)
-        page.goto(args.url)
-        try:
-            backend = PlaywrightBackend(page)
-            report = Replayer(backend).run(
-                workflow,
-                params=params,
-                bundle_dir=bundle,
-                run_dir=run_dir,
-                save_healed_to=(
-                    Path(args.save_healed_to) if args.save_healed_to else None
-                ),
-            )
-        finally:
-            browser.close()
+    if args.url and args.drift:
+        raise SystemExit(
+            "--drift only applies to the bundled MockMed demo app; "
+            "omit --url to use it (drift your own app for real)."
+        )
+
+    stop = None
+    url = args.url
+    if url is None:
+        from openadapt_flow.mockmed.server import serve
+
+        url, stop = serve(port=0)
+        url = _with_drift(url, args.drift)
+        drift_note = f" (drift: {args.drift})" if args.drift else ""
+        print(f"No --url given; replaying against bundled MockMed{drift_note}")
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not args.headed)
+            page = browser.new_page(viewport=_VIEWPORT)
+            page.goto(url)
+            try:
+                backend = PlaywrightBackend(page)
+                report = Replayer(backend).run(
+                    workflow,
+                    params=params,
+                    bundle_dir=bundle,
+                    run_dir=run_dir,
+                    save_healed_to=(
+                        Path(args.save_healed_to)
+                        if args.save_healed_to
+                        else None
+                    ),
+                )
+            finally:
+                browser.close()
+    finally:
+        if stop is not None:
+            stop()
 
     report_md = render_run_report(run_dir)
     outcome = "success" if report.success else "FAILED"
@@ -222,9 +245,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", required=True, help="Workflow name")
     p.set_defaults(func=_cmd_compile)
 
-    p = sub.add_parser("replay", help="Replay a bundle against a live app")
+    p = sub.add_parser(
+        "replay",
+        help=(
+            "Replay a bundle (serves the bundled MockMed demo app when "
+            "no --url is given)"
+        ),
+    )
     p.add_argument("bundle", help="Workflow bundle directory")
-    p.add_argument("--url", required=True, help="URL of the target app")
+    p.add_argument(
+        "--url",
+        default=None,
+        help=(
+            "URL of the target app (default: serve the bundled MockMed "
+            "demo app)"
+        ),
+    )
+    p.add_argument(
+        "--drift",
+        default=None,
+        help=(
+            "Comma-separated MockMed drift modes (theme,move,rename,modal) "
+            "to demonstrate self-healing; only valid without --url"
+        ),
+    )
     p.add_argument(
         "--run-dir",
         default=None,

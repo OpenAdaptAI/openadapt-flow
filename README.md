@@ -25,13 +25,22 @@ browser (reference/test backend), a native desktop, or an RDP session.
 ## Quickstart
 
 ```bash
-pip install -e .[dev]
+pip install -e '.[dev]'
 playwright install chromium
 
 # End-to-end demo against the bundled MockMed app:
-openadapt-flow demo-record /tmp/rec           # scripted demonstration
-openadapt-flow compile /tmp/rec /tmp/bundle   # recording -> workflow bundle
-openadapt-flow replay /tmp/bundle --run-dir /tmp/run --param note="Booking 3 months"
+openadapt-flow demo-record --out /tmp/rec                          # scripted demonstration
+openadapt-flow compile /tmp/rec --out /tmp/bundle --name triage-demo
+openadapt-flow bench /tmp/bundle --n 1 --run-root /tmp/bench       # serves MockMed and replays
+open /tmp/bench/BENCH.md
+```
+
+To replay a bundle against your own running app (parameters default to the
+values recorded during the demo; `--param` overrides them):
+
+```bash
+openadapt-flow replay /tmp/bundle --url <APP_URL> \
+    --run-dir /tmp/run --param note="Booking 3 months"
 open /tmp/run/REPORT.md
 ```
 
@@ -45,7 +54,9 @@ pytest -q
 ## Status
 
 v0: reference implementation validated end-to-end against MockMed (a bundled
-mock EMR-like app) including drift/healing scenarios, in CI. Native macOS and
+mock EMR-like app) including drift/healing scenarios, via the bundled test
+suite (`pytest -q`; a GitHub Actions workflow in `.github/workflows/ci.yml`
+runs the same suite and uploads run reports as artifacts). Native macOS and
 RDP backends are planned adapters behind the same `Backend` protocol.
 
 See `DESIGN.md` for architecture and module contracts. MIT license.

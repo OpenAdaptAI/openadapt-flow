@@ -96,16 +96,25 @@ def wait_settled(backend, *, interval_s: float = 0.1,
 
 `openadapt_flow.compiler.compile_recording(recording_dir, out_bundle_dir, *, name) -> Workflow`
 
-Per click event: crop a template around the click point (target-sized crop,
+Per click event (and `double_click`, compiled identically with action
+DOUBLE_CLICK): crop a template around the click point (target-sized crop,
 e.g. 160x64 clamped to frame, centered on click), OCR the crop for `ocr_text`,
-extract up to 2 landmarks (nearest OCR lines outside the crop), set
+extract up to 2 landmarks (nearest OCR lines outside the crop, carrying both
+relation/distance and exact `dx_px`/`dy_px` offsets to the click point), set
 `click_point`, `region`. Per type event: TYPE step with `text` or `param` (from
 events.jsonl). Postconditions from the after-frame: pick the largest changed
 region between before/after (cv2.absdiff + threshold + bounding rect),
 REGION_STABLE with its phash; plus TEXT_PRESENT for the most distinctive new
-OCR text (text in after, not in before; prefer longest). Intent: rule-based
-`"click '<ocr_text>'"` / `"type <param or text preview>"` (VLM annotation is a
-later enhancement — design for it, don't call any API).
+OCR text (text in after, not in before — compared whitespace-insensitively
+so OCR jitter cannot make permanently visible chrome look "new"; prefer
+longest). Parameterized typed values vary per run and are NEVER asserted in
+any step's postconditions — including downstream steps whose after-frames
+embed the typed value (e.g. a save-confirmation banner). Click target labels
+(any anchor's `ocr_text`) are likewise never asserted: they are mutable
+evidence the resolution ladder heals through under rename drift, not
+invariants. Intent: rule-based `"click '<ocr_text>'"` /
+`"type <param or text preview>"` (VLM annotation is a later enhancement —
+design for it, don't call any API).
 
 Also emit a readable Python *rendering* of the workflow (`workflow.py` in the
 bundle, generated, not parsed back) so humans can code-review the automation.
@@ -120,11 +129,15 @@ class Replayer:
             save_healed_to: Path | None = None) -> RunReport
 ```
 
+Parameters not supplied in `params` fall back to the recorded example/default
+values in `workflow.params`, so a bundle replays without any explicit params.
+
 Resolution ladder per step with an anchor (record rung + confidence + ms):
 1. `template` — find_template within anchor.region padded by search_pad
 2. `template_global` — find_template full frame
 3. `ocr` — find_text(anchor.ocr_text) full frame
-4. `geometry` — landmarks: locate landmark text, offset by relation/distance
+4. `geometry` — landmarks: locate landmark text, offset by the exact
+   `dx_px`/`dy_px` offsets when recorded, else by relation/distance
 5. `grounder` — optional injected `Grounder.locate(png, intent) -> Match|None`
    (protocol in `runtime/grounder.py`; ship a `NullGrounder`; an Anthropic
    implementation goes behind the `grounder` extra and is NOT used in tests)
@@ -161,7 +174,9 @@ styles.css, no external resources, no CSS transitions/animations, font-size
   40 chars of note>` and the encounter listed
 
 Drift modes via query string `?drift=a,b` (applied before render):
-- `theme` — dark palette (breaks template matching, OCR still works)
+- `theme` — dark palette (breaks template matching for every anchor; OCR
+  still works for labeled targets, while unlabeled input-field anchors fall
+  through to the geometry rung)
 - `move` — "New Encounter" and "Save Encounter" buttons relocated to the
   opposite side of their container (breaks local template search)
 - `rename` — "Save Encounter"→"Submit Encounter", "Open"→"View" (breaks
@@ -194,15 +209,20 @@ with the same action methods plus `type_text(text, param=None)` and
   replay N times; success rate, p50/p95 total ms, rung histogram, model calls
   (0 in v0), cost 0; serialize bench.json.
 - `emit/skill.py`: workflow bundle → `SKILL.md` folder (Agent Skills format:
-  name, description, when-to-use, `openadapt-flow replay <bundle> --param k=v`
-  invocation). `emit/mcp_tool.py`: generate a standalone `server.py` exposing
-  the workflow as an MCP tool (string template; must `ast.parse`; do not
-  import mcp at generation time).
+  name, description, when-to-use, `openadapt-flow replay bundle --param k=v`
+  invocation). The bundle is copied into the skill folder (`bundle/`) so the
+  artifact is self-contained and portable. `emit/mcp_tool.py`: generate a
+  standalone `server.py` exposing the workflow as an MCP tool (string
+  template; must `ast.parse`; do not import mcp at generation time); the
+  bundle is copied next to `server.py` and referenced relative to
+  `__file__`, never by an emitting-machine absolute path.
 - `__main__.py` CLI: `demo-record`, `compile`, `replay`, `bench`, `emit-skill`,
-  `emit-mcp` (thin wrappers over the module APIs above).
+  `emit-mcp` (thin wrappers over the module APIs above). `replay --run-dir`
+  is optional and defaults to `runs/replay-<UTC timestamp>`.
 - CI (`.github/workflows/ci.yml`): ubuntu-latest, py3.12,
   `pip install -e .[dev]`, `playwright install --with-deps chromium`,
-  `pytest -q`, upload `runs/**/REPORT.md` + PNGs as artifacts.
+  `pytest -q --basetemp=runs/ci` (temp dirs pinned inside the workspace so
+  run artifacts survive), upload `runs/**/REPORT.md` + PNGs as artifacts.
 
 ## Test policy
 
@@ -213,7 +233,11 @@ with the same action methods plus `type_text(text, param=None)` and
 - No network beyond localhost. No API keys required anywhere in tests.
 - E2E matrix (integrator): baseline ×3 all-template zero-heal; theme / move /
   rename each succeed WITH heals then replay-healed all-template; modal fails
-  gracefully naming the step; params substitution verified via banner OCR.
+  gracefully naming the step; params substitution verified via banner OCR
+  with a note value DIFFERENT from the recorded one (the identity case
+  cannot distinguish substitution from replaying the baked-in literal); the
+  irreversible-step risk gate exercised end-to-end (step marked irreversible
+  + drift forcing a below-ocr rung must refuse to act).
 
 ## Repo policies
 

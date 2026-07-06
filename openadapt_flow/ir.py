@@ -37,11 +37,27 @@ class ActionKind(str, Enum):
 
 
 class Landmark(BaseModel):
-    """A stable nearby text element, used by the geometry resolution rung."""
+    """A stable nearby text element, used by the geometry resolution rung.
+
+    ``relation`` describes where the LANDMARK sits relative to the target:
+    a landmark that is ``left_of`` the target implies the target is
+    ``distance_px`` to the landmark's right. ``dx_px``/``dy_px``, when set,
+    are the exact pixel offsets from the landmark's center to the target
+    click point (target = landmark_center + (dx_px, dy_px)); the geometry
+    rung prefers them over the coarser relation/distance estimate.
+    """
 
     relation: Literal["left_of", "right_of", "above", "below"]
     ocr_text: str
     distance_px: int
+    dx_px: Optional[int] = Field(
+        default=None,
+        description="Exact x offset landmark center -> target click point",
+    )
+    dy_px: Optional[int] = Field(
+        default=None,
+        description="Exact y offset landmark center -> target click point",
+    )
 
 
 class Anchor(BaseModel):

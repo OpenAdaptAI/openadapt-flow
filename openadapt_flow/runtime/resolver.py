@@ -41,6 +41,15 @@ _GEOMETRY_CONFIDENCE_SCALE = 0.9  # geometry is indirect evidence
 # treated as template-stable.
 TEMPLATE_THRESHOLD = 0.985
 
+# The OCR rung locates the anchor's own label. 0.8 (the vision default) is
+# loose enough to accept a *different but similar* label — e.g. a form
+# heading "New Encounter" for a button labeled "Save Encounter" (difflib
+# ratio ≈ 0.81) — which clicks the wrong element and turns recoverable
+# rename drift into a postcondition abort. 0.9 rejects near-miss labels
+# (they fall through to the geometry rung) while true labels, which OCR
+# reads near-verbatim, still match at ≈ 1.0.
+OCR_MIN_RATIO = 0.9
+
 
 def is_below_ocr(rung: Rung) -> bool:
     """Return True if ``rung`` is weaker evidence than the ``ocr`` rung.
@@ -227,7 +236,9 @@ def resolve(
 
     # Rung 3: OCR text match.
     if anchor.ocr_text:
-        match = vision.find_text(screen_png, anchor.ocr_text)
+        match = vision.find_text(
+            screen_png, anchor.ocr_text, min_ratio=OCR_MIN_RATIO
+        )
         if match is not None:
             resolution = Resolution(
                 rung="ocr",
@@ -241,7 +252,9 @@ def resolve(
     estimates: list[Point] = []
     confidences: list[float] = []
     for landmark in anchor.landmarks:
-        lm_match = vision.find_text(screen_png, landmark.ocr_text)
+        lm_match = vision.find_text(
+            screen_png, landmark.ocr_text, min_ratio=OCR_MIN_RATIO
+        )
         if lm_match is None:
             continue
         estimates.append(

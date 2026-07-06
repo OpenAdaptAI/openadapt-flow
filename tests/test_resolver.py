@@ -273,3 +273,52 @@ def test_viewport_parsed_from_png_header_when_omitted(anchor):
     assert resolution.rung == "template"
     # Search region clamped to the parsed 123x77 viewport.
     assert vision.template_calls[0] == (70, 70, 53, 7)
+
+
+class RatioRecordingVision(FakeVision):
+    """FakeVision that records the min_ratio passed per find_text query."""
+
+    def __init__(self):
+        super().__init__()
+        self.min_ratios: dict = {}
+
+    def find_text(self, screen_png, text, *, region=None, min_ratio=0.8):
+        self.min_ratios[text] = min_ratio
+        return super().find_text(
+            screen_png, text, region=region, min_ratio=min_ratio
+        )
+
+
+def test_ocr_rung_requires_strict_label_ratio(screen, anchor):
+    """Regression: the ocr rung must query with min_ratio >= 0.9 so a
+    near-miss label (e.g. 'New Encounter' for 'Save Encounter', difflib
+    ratio ~0.81) cannot hijack the click; resolution falls through to
+    geometry instead."""
+    strict_anchor = anchor.model_copy(
+        update={
+            "landmarks": [
+                Landmark(
+                    relation="left_of",
+                    ocr_text="Note",
+                    distance_px=40,
+                    dx_px=40,
+                    dy_px=0,
+                )
+            ]
+        }
+    )
+    vision = RatioRecordingVision()
+    # A strict matcher returns nothing for the renamed label...
+    vision.text_results = {
+        "Save": None,
+        "Note": Match(point=(70, 105), region=(50, 95, 40, 20), confidence=0.97),
+    }
+    resolution, _ = resolve(
+        strict_anchor, screen, vision, None, "click 'Save'",
+        template_png=None, viewport=VIEWPORT,
+    )
+    assert resolution is not None
+    assert resolution.rung == "geometry"
+    assert resolution.point == (110, 105)
+    assert vision.min_ratios["Save"] >= 0.9
+    assert vision.min_ratios["Note"] >= 0.9

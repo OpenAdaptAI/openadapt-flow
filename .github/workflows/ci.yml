@@ -25,7 +25,7 @@ jobs:
       # by default they land in the system temp dir and are unrecoverable
       # when a drift/heal test fails in CI.
       - name: Test
-        run: pytest -q --basetemp=runs/ci
+        run: mkdir -p runs && pytest -q --basetemp=runs/ci
 
       - name: Upload run artifacts
         if: always()

@@ -436,3 +436,33 @@ class TestCliSmoke:
         assert len(skill_files) == 1
         content = skill_files[0].read_text()
         assert "openadapt-flow replay" in content
+
+        # README quickstart contract: `replay` with no --url self-serves
+        # MockMed, and --drift demonstrates healing in one command.
+        selfserve_run = tmp_path / "run-selfserve"
+        healed = tmp_path / "healed"
+        proc = cli(
+            "replay",
+            str(bundle),
+            "--drift",
+            "theme",
+            "--run-dir",
+            str(selfserve_run),
+            "--save-healed-to",
+            str(healed),
+        )
+        assert proc.returncode == 0, (
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+        assert "bundled MockMed" in proc.stdout
+        assert (selfserve_run / "report.json").is_file()
+        assert (healed / "workflow.json").is_file()
+        report = json.loads((selfserve_run / "report.json").read_text())
+        assert report["success"] and report["heal_count"] >= 1
+
+        # --url and --drift together must be rejected loudly.
+        proc = cli(
+            "replay", str(bundle), "--url", mockmed_url, "--drift", "theme"
+        )
+        assert proc.returncode != 0
+        assert "--drift" in proc.stderr

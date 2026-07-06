@@ -1,0 +1,305 @@
+"""openadapt-flow CLI.
+
+Subcommands (thin wrappers over the module APIs; sibling modules are
+imported lazily inside each handler so ``--help`` always works):
+
+- ``demo-record`` — serve MockMed locally and record the canonical demo.
+- ``compile`` — compile a recording directory into a workflow bundle.
+- ``replay`` — replay a bundle against a live app URL.
+- ``bench`` — replay a bundle N times against MockMed and aggregate.
+- ``emit-skill`` — emit an Agent Skills folder for a bundle.
+- ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Sequence
+
+_VIEWPORT = {"width": 1280, "height": 800}
+
+
+def _parse_params(pairs: Sequence[str] | None) -> dict[str, str]:
+    """Parse repeated ``--param k=v`` flags into a dict."""
+    params: dict[str, str] = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            raise SystemExit(f"--param expects k=v, got {pair!r}")
+        key, value = pair.split("=", 1)
+        params[key] = value
+    return params
+
+
+def _with_drift(url: str, drift: str | None) -> str:
+    """Append a ``?drift=...`` query to a MockMed base URL."""
+    if not drift:
+        return url
+    return f"{url.rstrip('/')}/?drift={drift}"
+
+
+def _cmd_demo_record(args: argparse.Namespace) -> int:
+    from openadapt_flow.demo_driver import record_triage_demo
+    from openadapt_flow.mockmed.server import serve
+
+    url, stop = serve(port=0)
+    try:
+        url = _with_drift(url, args.drift)
+        out = record_triage_demo(
+            url,
+            Path(args.out),
+            note_text=args.note_text,
+            param_name=args.param_name,
+            headed=args.headed,
+        )
+        print(f"Recording written to {out}")
+    finally:
+        stop()
+    return 0
+
+
+def _cmd_compile(args: argparse.Namespace) -> int:
+    from openadapt_flow.compiler import compile_recording
+
+    workflow = compile_recording(
+        Path(args.recording), Path(args.out), name=args.name
+    )
+    print(
+        f"Compiled {len(workflow.steps)} steps into {args.out} "
+        f"(workflow: {workflow.name!r})"
+    )
+    return 0
+
+
+def _default_run_dir() -> Path:
+    """Timestamped default run directory under ``runs/``."""
+    from datetime import datetime, timezone
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return Path("runs") / f"replay-{stamp}"
+
+
+def _cmd_replay(args: argparse.Namespace) -> int:
+    from playwright.sync_api import sync_playwright
+
+    from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.report import render_run_report
+    from openadapt_flow.runtime import Replayer
+
+    bundle = Path(args.bundle)
+    run_dir = Path(args.run_dir) if args.run_dir else _default_run_dir()
+    workflow = Workflow.load(bundle)
+    params = _parse_params(args.param)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not args.headed)
+        page = browser.new_page(viewport=_VIEWPORT)
+        page.goto(args.url)
+        try:
+            backend = PlaywrightBackend(page)
+            report = Replayer(backend).run(
+                workflow,
+                params=params,
+                bundle_dir=bundle,
+                run_dir=run_dir,
+                save_healed_to=(
+                    Path(args.save_healed_to) if args.save_healed_to else None
+                ),
+            )
+        finally:
+            browser.close()
+
+    report_md = render_run_report(run_dir)
+    outcome = "success" if report.success else "FAILED"
+    print(f"Replay {outcome}: {report_md}")
+    return 0 if report.success else 1
+
+
+def _cmd_bench(args: argparse.Namespace) -> int:
+    from contextlib import contextmanager
+
+    from openadapt_flow.bench import run_bench
+    from openadapt_flow.mockmed.server import serve
+    from openadapt_flow.report import render_bench_report
+
+    url, stop = serve(port=0)
+    target_url = _with_drift(url, args.drift)
+
+    @contextmanager
+    def backend_factory():
+        from playwright.sync_api import sync_playwright
+
+        from openadapt_flow.backends.playwright_backend import (
+            PlaywrightBackend,
+        )
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not args.headed)
+            page = browser.new_page(viewport=_VIEWPORT)
+            page.goto(target_url)
+            try:
+                yield PlaywrightBackend(page)
+            finally:
+                browser.close()
+
+    run_root = Path(args.run_root)
+    try:
+        result = run_bench(
+            Path(args.bundle),
+            backend_factory,
+            args.n,
+            params=_parse_params(args.param),
+            run_root=run_root,
+        )
+    finally:
+        stop()
+
+    report_md = render_bench_report(
+        run_root / "bench.json", run_root / "BENCH.md"
+    )
+    print(
+        f"Bench: {result['success_count']}/{result['n']} succeeded "
+        f"(p50 {result['total_ms_p50']:.0f} ms) — {report_md}"
+    )
+    return 0 if result["success_count"] == result["n"] else 1
+
+
+def _cmd_emit_skill(args: argparse.Namespace) -> int:
+    from openadapt_flow.emit.skill import emit_skill
+
+    skill_dir = emit_skill(Path(args.bundle), Path(args.out))
+    print(f"Skill written to {skill_dir}")
+    return 0
+
+
+def _cmd_emit_mcp(args: argparse.Namespace) -> int:
+    from openadapt_flow.emit.mcp_tool import emit_mcp_server
+
+    server_path = emit_mcp_server(Path(args.bundle), Path(args.out))
+    print(f"MCP server written to {server_path}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the top-level argument parser."""
+    parser = argparse.ArgumentParser(
+        prog="openadapt-flow",
+        description=(
+            "Record a workflow once, compile it into a deterministic "
+            "vision-anchored script, replay it locally, heal it on drift."
+        ),
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser(
+        "demo-record",
+        help="Serve MockMed and record the canonical triage demo",
+    )
+    p.add_argument("--out", required=True, help="Recording output directory")
+    p.add_argument(
+        "--note-text",
+        default="Follow-up in 2 weeks; BP recheck.",
+        help="Note text typed during the demo (recorded as a parameter)",
+    )
+    p.add_argument(
+        "--param-name", default="note", help="Parameter name for the note"
+    )
+    p.add_argument(
+        "--drift", default=None, help="Comma-separated MockMed drift modes"
+    )
+    p.add_argument(
+        "--headed", action="store_true", help="Run the browser headed"
+    )
+    p.set_defaults(func=_cmd_demo_record)
+
+    p = sub.add_parser(
+        "compile", help="Compile a recording into a workflow bundle"
+    )
+    p.add_argument("recording", help="Recording directory")
+    p.add_argument("--out", required=True, help="Output bundle directory")
+    p.add_argument("--name", required=True, help="Workflow name")
+    p.set_defaults(func=_cmd_compile)
+
+    p = sub.add_parser("replay", help="Replay a bundle against a live app")
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument("--url", required=True, help="URL of the target app")
+    p.add_argument(
+        "--run-dir",
+        default=None,
+        help=(
+            "Run output directory "
+            "(default: runs/replay-<UTC timestamp> under the current "
+            "directory)"
+        ),
+    )
+    p.add_argument(
+        "--param",
+        action="append",
+        metavar="K=V",
+        help="Parameter substitution (repeatable)",
+    )
+    p.add_argument(
+        "--save-healed-to",
+        default=None,
+        help="Write the healed bundle to this directory",
+    )
+    p.add_argument(
+        "--headed", action="store_true", help="Run the browser headed"
+    )
+    p.set_defaults(func=_cmd_replay)
+
+    p = sub.add_parser(
+        "bench", help="Replay a bundle N times against MockMed and aggregate"
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument("--n", type=int, default=3, help="Number of iterations")
+    p.add_argument(
+        "--drift",
+        default=None,
+        help="Comma-separated drift modes forwarded to the MockMed URL",
+    )
+    p.add_argument(
+        "--run-root", required=True, help="Directory for per-iteration runs"
+    )
+    p.add_argument(
+        "--param",
+        action="append",
+        metavar="K=V",
+        help="Parameter substitution (repeatable)",
+    )
+    p.add_argument(
+        "--headed", action="store_true", help="Run the browser headed"
+    )
+    p.set_defaults(func=_cmd_bench)
+
+    p = sub.add_parser(
+        "emit-skill", help="Emit an Agent Skills folder for a bundle"
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--out", required=True, help="Parent directory for the skill folder"
+    )
+    p.set_defaults(func=_cmd_emit_skill)
+
+    p = sub.add_parser(
+        "emit-mcp", help="Emit a standalone MCP server.py for a bundle"
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--out", required=True, help="Path for the generated server.py"
+    )
+    p.set_defaults(func=_cmd_emit_mcp)
+
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entry point. Returns a process exit code."""
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

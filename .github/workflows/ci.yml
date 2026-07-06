@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e .[dev]
+
+      - name: Install Playwright browser
+        run: playwright install --with-deps chromium
+
+      # --basetemp pins pytest's tmp_path factory inside the workspace so
+      # run dirs (REPORT.md + step/heal PNGs) survive for artifact upload;
+      # by default they land in the system temp dir and are unrecoverable
+      # when a drift/heal test fails in CI.
+      - name: Test
+        run: pytest -q --basetemp=runs/ci
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runs
+          path: |
+            runs/**/REPORT.md
+            runs/**/BENCH.md
+            runs/**/report.json
+            runs/**/*.png
+          if-no-files-found: warn

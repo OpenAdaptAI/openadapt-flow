@@ -113,4 +113,4 @@ build artifacts. Compiled workflows can also be emitted as Agent Skills
 Solid for the reference browser backend; everything else should be treated as
 a design seam, not a finished feature. See `DESIGN.md` for module contracts
 and `docs/L1_INTEGRATION.md` for feeding layered clinical-data platforms
-(Retinology-style L1→L2 contracts). MIT license.
+(L1→L2 acquisition contracts). MIT license.

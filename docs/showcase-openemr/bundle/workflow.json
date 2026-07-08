@@ -1,0 +1,813 @@
+{
+  "schema_version": 1,
+  "name": "openemr-add-patient-note",
+  "recording_id": "50758ec282e94c4a9f99f69ab7415678",
+  "created_at": "2026-07-08T17:09:36.744875+00:00",
+  "viewport": [
+    1280,
+    800
+  ],
+  "params": {
+    "note": "Reviewed hypertension follow-up; BP within target range today."
+  },
+  "steps": [
+    {
+      "id": "step_000",
+      "intent": "click 'ername'",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_000.png",
+        "region": [
+          625,
+          372,
+          160,
+          64
+        ],
+        "click_point": [
+          705,
+          404
+        ],
+        "ocr_text": "ername",
+        "landmarks": [
+          {
+            "relation": "left_of",
+            "ocr_text": "PracticeManagementsolution.",
+            "distance_px": 82,
+            "dx_px": 65,
+            "dy_px": 50
+          },
+          {
+            "relation": "left_of",
+            "ocr_text": "Password",
+            "distance_px": 86,
+            "dx_px": 67,
+            "dy_px": -54
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            555,
+            351,
+            301,
+            106
+          ],
+          "phash": "c3dbd8dac3d098d0",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_000_expect.png"
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_001",
+      "intent": "type 'admin'",
+      "action": "type",
+      "anchor": null,
+      "text": "admin",
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            570,
+            365,
+            138,
+            77
+          ],
+          "phash": "ce7cb37ccc78b040",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_001_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "admin",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_002",
+      "intent": "click 'Password'",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_002.png",
+        "region": [
+          604,
+          426,
+          160,
+          64
+        ],
+        "click_point": [
+          684,
+          458
+        ],
+        "ocr_text": "Password",
+        "landmarks": [
+          {
+            "relation": "below",
+            "ocr_text": "Default-English(Standard)",
+            "distance_px": 56,
+            "dx_px": -24,
+            "dy_px": -51
+          },
+          {
+            "relation": "left_of",
+            "ocr_text": "admin",
+            "distance_px": 80,
+            "dx_px": 59,
+            "dy_px": 54
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            555,
+            351,
+            301,
+            160
+          ],
+          "phash": "c14adac6dacae1d8",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_002_expect.png"
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_003",
+      "intent": "type 'pass'",
+      "action": "type",
+      "anchor": null,
+      "text": "pass",
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            571,
+            419,
+            133,
+            77
+          ],
+          "phash": "a27f9178c7c79038",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_003_expect.png"
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_004",
+      "intent": "click 'Login'",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_004.png",
+        "region": [
+          559,
+          534,
+          160,
+          64
+        ],
+        "click_point": [
+          639,
+          566
+        ],
+        "ocr_text": "Login",
+        "landmarks": [
+          {
+            "relation": "below",
+            "ocr_text": "Acknowledgments,Licensing and Certification",
+            "distance_px": 45,
+            "dx_px": -2,
+            "dy_px": -45
+          },
+          {
+            "relation": "right_of",
+            "ocr_text": "Default-English(Standard)",
+            "distance_px": 89,
+            "dx_px": -69,
+            "dy_px": 56
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            555,
+            353,
+            299,
+            206
+          ],
+          "phash": "ce31b1ceb131ce31",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_004_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "CalendarFinderFlowRecallsMessagesPatientFeesModulesInventoryProceduresAdminReportsMiscellaneousPopups",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_005",
+      "intent": "click 'Searchbyanydemogre'",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_005.png",
+        "region": [
+          1041,
+          0,
+          160,
+          64
+        ],
+        "click_point": [
+          1121,
+          31
+        ],
+        "ocr_text": "Searchbyanydemogre",
+        "landmarks": [
+          {
+            "relation": "right_of",
+            "ocr_text": "Q",
+            "distance_px": 98,
+            "dx_px": -98,
+            "dy_px": 1
+          },
+          {
+            "relation": "below",
+            "ocr_text": "Day",
+            "distance_px": 145,
+            "dx_px": -36,
+            "dy_px": -140
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            286,
+            531,
+            994,
+            84
+          ],
+          "phash": "fff881038670f07c",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_005_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "12:12INo",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_006",
+      "intent": "type 'Phil'",
+      "action": "type",
+      "anchor": null,
+      "text": "Phil",
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            1017,
+            0,
+            209,
+            71
+          ],
+          "phash": "eae01715fb7a801d",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_006_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "Phil",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_007",
+      "intent": "press Enter",
+      "action": "key",
+      "anchor": null,
+      "text": null,
+      "param": null,
+      "key": "Enter",
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            0,
+            72,
+            1280,
+            728
+          ],
+          "phash": "fbf70460c387a568",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_007_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "ving1to1of1entries(filteredfrom57totalentries)",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_008",
+      "intent": "click 'ford,Phil'",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_008.png",
+        "region": [
+          0,
+          411,
+          160,
+          64
+        ],
+        "click_point": [
+          17,
+          443
+        ],
+        "ocr_text": "ford,Phil",
+        "landmarks": [
+          {
+            "relation": "above",
+            "ocr_text": "Name",
+            "distance_px": 45,
+            "dx_px": -10,
+            "dy_px": 44
+          },
+          {
+            "relation": "above",
+            "ocr_text": "earchbyName",
+            "distance_px": 104,
+            "dx_px": -37,
+            "dy_px": 97
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            0,
+            195,
+            1280,
+            326
+          ],
+          "phash": "fee1e1a6b28180db",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_008_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "Notreatmentinterventionpreferencesrecorded.",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_009",
+      "intent": "scroll by (0, 400)",
+      "action": "scroll",
+      "anchor": null,
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": 0,
+      "scroll_dy": 400,
+      "expect": [],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_010",
+      "intent": "scroll by (0, 400)",
+      "action": "scroll",
+      "anchor": null,
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": 0,
+      "scroll_dy": 400,
+      "expect": [],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_011",
+      "intent": "scroll by (0, 400)",
+      "action": "scroll",
+      "anchor": null,
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": 0,
+      "scroll_dy": 400,
+      "expect": [],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_012",
+      "intent": "scroll by (0, 400)",
+      "action": "scroll",
+      "anchor": null,
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": 0,
+      "scroll_dy": 400,
+      "expect": [],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_013",
+      "intent": "click at (815, 369)",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_013.png",
+        "region": [
+          735,
+          337,
+          160,
+          64
+        ],
+        "click_point": [
+          815,
+          369
+        ],
+        "ocr_text": null,
+        "landmarks": [
+          {
+            "relation": "right_of",
+            "ocr_text": "None",
+            "distance_px": 123,
+            "dx_px": -87,
+            "dy_px": 87
+          },
+          {
+            "relation": "above",
+            "ocr_text": "Yes",
+            "distance_px": 153,
+            "dx_px": 5,
+            "dy_px": 153
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            0,
+            176,
+            691,
+            174
+          ],
+          "phash": "c3da3fb5b7408590",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_013_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "PatientMessagesforBelford,Phil",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_014",
+      "intent": "click '+Add <B'",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_014.png",
+        "region": [
+          10,
+          249,
+          160,
+          64
+        ],
+        "click_point": [
+          90,
+          281
+        ],
+        "ocr_text": "+Add <B",
+        "landmarks": [
+          {
+            "relation": "below",
+            "ocr_text": "Show All",
+            "distance_px": 98,
+            "dx_px": -21,
+            "dy_px": -96
+          },
+          {
+            "relation": "above",
+            "ocr_text": "alendarx",
+            "distance_px": 102,
+            "dx_px": 32,
+            "dy_px": 97
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            0,
+            0,
+            1280,
+            800
+          ],
+          "phash": "c6e62f272d9090ed",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_014_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "Calendar Finder Flow Recalls Messa",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_015",
+      "intent": "click at (639, 357)",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_015.png",
+        "region": [
+          479,
+          293,
+          320,
+          128
+        ],
+        "click_point": [
+          639,
+          357
+        ],
+        "ocr_text": null,
+        "landmarks": [
+          {
+            "relation": "left_of",
+            "ocr_text": "Save as new message",
+            "distance_px": 169,
+            "dx_px": 139,
+            "dy_px": -97
+          },
+          {
+            "relation": "left_of",
+            "ocr_text": "Smith, Billy",
+            "distance_px": 216,
+            "dx_px": 197,
+            "dy_px": 89
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            351,
+            269,
+            578,
+            178
+          ],
+          "phash": "e8d0c0f0f8f87a6a",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_015_expect.png"
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_016",
+      "intent": "type <note>",
+      "action": "type",
+      "anchor": null,
+      "text": "Reviewed hypertension follow-up; BP within target range today.",
+      "param": "note",
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    },
+    {
+      "id": "step_017",
+      "intent": "click 'Save as new messag'",
+      "action": "click",
+      "anchor": {
+        "template": "templates/step_017.png",
+        "region": [
+          409,
+          420,
+          160,
+          64
+        ],
+        "click_point": [
+          489,
+          452
+        ],
+        "ocr_text": "Save as new messag",
+        "landmarks": [
+          {
+            "relation": "right_of",
+            "ocr_text": "Reviewed hypertension follow-up;BP within target range today.",
+            "distance_px": 185,
+            "dx_px": -132,
+            "dy_px": 130
+          },
+          {
+            "relation": "above",
+            "ocr_text": "Smith, Billy",
+            "distance_px": 191,
+            "dx_px": 48,
+            "dy_px": 185
+          }
+        ],
+        "search_pad": 80
+      },
+      "text": null,
+      "param": null,
+      "key": null,
+      "scroll_dx": null,
+      "scroll_dy": null,
+      "expect": [
+        {
+          "kind": "region_stable",
+          "text": null,
+          "region": [
+            0,
+            0,
+            1280,
+            800
+          ],
+          "phash": "c0d91b9db162c6a7",
+          "phash_tolerance": 16,
+          "timeout_s": 5.0,
+          "template": "templates/step_017_expect.png"
+        },
+        {
+          "kind": "text_present",
+          "text": "CalendarFinderFlowRecallsMessagesPatientFeesModulesInventoryProceduresAdminReportsMiscellaneousPopups",
+          "region": null,
+          "phash": null,
+          "phash_tolerance": 8,
+          "timeout_s": 5.0,
+          "template": null
+        }
+      ],
+      "risk": "reversible",
+      "timeout_s": 10.0
+    }
+  ]
+}

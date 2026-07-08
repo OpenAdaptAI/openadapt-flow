@@ -1,0 +1,80 @@
+{
+  "started_at": "2026-07-08T17:09:36.981276+00:00",
+  "demo_url": "https://demo.openemr.io/openemr/index.php",
+  "runs": [
+    {
+      "run": 1,
+      "success": true,
+      "note_visible": true,
+      "steps_ok": 18,
+      "steps_total": 18,
+      "rung_counts": {
+        "template": 8,
+        "geometry": 1
+      },
+      "heal_count": 1,
+      "total_s": 29.8,
+      "first_failure": null
+    },
+    {
+      "run": 2,
+      "success": true,
+      "note_visible": true,
+      "steps_ok": 18,
+      "steps_total": 18,
+      "rung_counts": {
+        "template": 8,
+        "geometry": 1
+      },
+      "heal_count": 1,
+      "total_s": 29.0,
+      "first_failure": null
+    },
+    {
+      "run": 3,
+      "success": true,
+      "note_visible": false,
+      "steps_ok": 18,
+      "steps_total": 18,
+      "rung_counts": {
+        "template": 8,
+        "geometry": 1
+      },
+      "heal_count": 1,
+      "total_s": 28.9,
+      "first_failure": null
+    },
+    {
+      "run": 4,
+      "success": true,
+      "note_visible": false,
+      "steps_ok": 18,
+      "steps_total": 18,
+      "rung_counts": {
+        "template": 8,
+        "geometry": 1
+      },
+      "heal_count": 1,
+      "total_s": 32.4,
+      "first_failure": null
+    },
+    {
+      "run": 5,
+      "success": false,
+      "note_visible": false,
+      "steps_ok": 13,
+      "steps_total": 18,
+      "rung_counts": {
+        "template": 5
+      },
+      "heal_count": 0,
+      "total_s": 26.5,
+      "first_failure": {
+        "step": "step_013",
+        "error": "Postconditions failed for step 'step_013' (click at (815, 369)): expected screen state not reached (semantic drift) \u2014 failed: region_stable region=(0, 176, 691, 174); text_present 'PatientMessagesforBelford,Phil' \u2014 run aborted"
+      }
+    }
+  ],
+  "success_rate": "4/5",
+  "verified_rate": "2/5"
+}

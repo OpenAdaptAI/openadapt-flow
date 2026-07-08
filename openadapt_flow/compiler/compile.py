@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -91,6 +92,19 @@ SEEN_BEFORE_RATIO = 0.9
 # invariant would turn cosmetic label drift into a false semantic-drift
 # abort.
 LABEL_MATCH_RATIO = 0.85
+
+# A TEXT_PRESENT candidate containing a date or clock time is volatile by
+# construction — timestamped content (log rows, message-list entries,
+# "last updated" chrome) names a moment, not an invariant screen state, so
+# it cannot survive replay against live data. Observed on OpenEMR: opening
+# a dialog nudged a timestamped message row into view, the row won the
+# longest-new-text contest, and the compiled bundle then aborted every
+# replay once newer rows displaced it.
+TIMESTAMP_RE = re.compile(
+    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"  # 2026-07-08, 2026/7/8
+    r"|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"  # 07/08/2026, 8.7.26
+    r"|\d{1,2}:\d{2}"  # 18:38, 6:05
+)
 
 
 def _load_events(recording_dir: Path) -> list[dict]:
@@ -368,6 +382,8 @@ def _new_text_postcondition(
         text = line.text.strip()
         norm = normalize_text(text)
         if len(norm) < MIN_TEXT_PRESENT_LEN or seen_before(text, norm):
+            continue
+        if TIMESTAMP_RE.search(text):
             continue
         if _contains_excluded(text, exclude_texts):
             continue

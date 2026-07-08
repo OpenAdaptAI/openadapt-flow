@@ -48,8 +48,10 @@ MAX_TOKENS = 4096
 
 _SUPPORTED_ACTIONS = (
     "screenshot, left_click, double_click, triple_click, type, key, "
-    "wait, mouse_move"
+    "scroll, wait, mouse_move"
 )
+#: Pixels dispatched per computer-use ``scroll_amount`` unit (wheel click).
+SCROLL_PX_PER_UNIT = 120
 
 
 def load_api_key() -> str:
@@ -104,6 +106,40 @@ def triage_task_prompt(note_text: str) -> str:
         "You are done when you are back on the patient's page and see the "
         "'Encounter saved' confirmation. Then stop and reply with a one-line "
         "summary. Start by taking a screenshot to see the current state."
+    )
+
+
+def openemr_task_prompt(note_text: str) -> str:
+    """Build the natural-language task prompt for the OpenEMR demo task.
+
+    Same intent-level phrasing rules as :func:`triage_task_prompt`: what a
+    real user would tell an agent — credentials as the user would state
+    them, the target patient, the exact note text — no coordinates and no
+    click script.
+
+    Args:
+        note_text: The note the agent must add to the patient's messages.
+
+    Returns:
+        The task prompt string.
+    """
+    return (
+        "You are looking at the OpenEMR public demo (a real EMR web app "
+        "with fake demo patients only). Complete this task:\n\n"
+        "1. Sign in with username \"admin\" and password \"pass\".\n"
+        "2. Use the patient search box in the top bar to search for "
+        "\"Phil\" and open the chart of the patient \"Belford, Phil\".\n"
+        "3. On the patient's dashboard, open the Patient Messages section "
+        "(the Messages card — you will likely need to scroll down to "
+        "find it).\n"
+        "4. Add a new note and enter exactly this text as the note: "
+        f"\"{note_text}\"\n"
+        "5. Save it as a new message.\n\n"
+        "You are done when you are back on the patient-message list and "
+        "can see the new note. Then stop and reply with a one-line "
+        "summary. The app is slow and heavily framed; wait for pages to "
+        "load after navigation. Start by taking a screenshot to see the "
+        "current state."
     )
 
 
@@ -209,6 +245,19 @@ def _execute_action(backend: Any, block: Any) -> dict[str, Any]:
             backend.type_text(str(inp["text"]))
         elif action == "key":
             backend.press(str(inp["text"]))
+        elif action == "scroll":
+            # The wheel dispatches at the current pointer position (the
+            # coordinate field is accepted but not used to move the
+            # pointer, matching mouse_move semantics on this backend).
+            amount = int(inp.get("scroll_amount", 3)) * SCROLL_PX_PER_UNIT
+            direction = str(inp.get("scroll_direction", "down"))
+            dx, dy = {
+                "down": (0, amount),
+                "up": (0, -amount),
+                "right": (amount, 0),
+                "left": (-amount, 0),
+            }.get(direction, (0, amount))
+            backend.scroll(dx, dy)
         elif action == "wait":
             time.sleep(min(float(inp.get("duration", 1.0)), 2.0))
         elif action == "mouse_move":

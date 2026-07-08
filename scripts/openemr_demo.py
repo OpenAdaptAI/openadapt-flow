@@ -12,11 +12,14 @@ Record time cheats with Playwright locators to find pixel coordinates
 
 Not shipped in the package — this is the showcase driver:
 
-    .venv/bin/python scripts/openemr_demo.py record   # record + compile
-    .venv/bin/python scripts/openemr_demo.py replay   # replay 5x, report
+    .venv/bin/python scripts/openemr_demo.py record     # record + compile
+    .venv/bin/python scripts/openemr_demo.py replay     # replay 5x, report
     .venv/bin/python scripts/openemr_demo.py all
+    .venv/bin/python scripts/openemr_demo.py benchmark  # compiled vs agent
 
-Artifacts land in docs/showcase-openemr/.
+Showcase artifacts land in docs/showcase-openemr/; ``benchmark`` records
+a fresh demonstration into a temporary directory and writes results to
+benchmark/openemr/ (see openadapt_flow.benchmark.openemr_benchmark).
 """
 
 from __future__ import annotations
@@ -104,15 +107,15 @@ def _locate_any_frame(page, selector: str):
     raise RuntimeError(f"no visible {selector!r} in any frame")
 
 
-def record(headed: bool = False) -> Path:
+def record(headed: bool = False, recording_dir: Path = RECORDING_DIR) -> Path:
     """Record the OpenEMR demonstration; returns the recording dir."""
-    if RECORDING_DIR.exists():
-        shutil.rmtree(RECORDING_DIR)
+    if recording_dir.exists():
+        shutil.rmtree(recording_dir)
     backend, close = PlaywrightBackend.launch(DEMO_URL, headless=not headed)
     try:
         page = backend.page
         page.wait_for_load_state("networkidle", timeout=60000)
-        recorder = Recorder(backend, RECORDING_DIR, app_url=DEMO_URL, **SETTLE)
+        recorder = Recorder(backend, recording_dir, app_url=DEMO_URL, **SETTLE)
 
         # -- login -----------------------------------------------------------
         recorder.click(*_center(page.locator("#authUser")))
@@ -165,15 +168,17 @@ def record(headed: bool = False) -> Path:
         close()
 
 
-def compile_bundle() -> None:
+def compile_bundle(
+    recording_dir: Path = RECORDING_DIR, bundle_dir: Path = BUNDLE_DIR
+) -> None:
     from openadapt_flow.compiler import compile_recording
 
-    if BUNDLE_DIR.exists():
-        shutil.rmtree(BUNDLE_DIR)
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
     workflow = compile_recording(
-        RECORDING_DIR, BUNDLE_DIR, name="openemr-add-patient-note"
+        recording_dir, bundle_dir, name="openemr-add-patient-note"
     )
-    print(f"compiled {len(workflow.steps)} steps -> {BUNDLE_DIR}")
+    print(f"compiled {len(workflow.steps)} steps -> {bundle_dir}")
     for step in workflow.steps:
         print(f"  {step.id}: {step.intent}  expect={len(step.expect)}")
 
@@ -181,33 +186,12 @@ def compile_bundle() -> None:
 def _note_visible(final_png: bytes, note: str) -> bool:
     """True when the replayed note text is visible on the final screen.
 
-    The message list embeds the note inside a longer line ("<timestamp>
-    (admin to admin) <note>") and wraps it, so whole-line fuzzy matching
-    misses. Worse, rapidocr drops some dense table lines entirely at this
-    DPI, so even squashed containment can under-count. Accept when 80
-    percent of the note's squashed characters appear in the frame's
-    squashed OCR text, or when a single contiguous run of at least 16
-    characters does (a distinctive fragment of a wrapped note that OCR
-    partially captured).
+    Delegates to the benchmark's shared arm-independent check
+    (``verify_note_saved``) so the criterion is implemented exactly once.
     """
-    import difflib
+    from openadapt_flow.benchmark.verify import verify_note_saved
 
-    import openadapt_flow.vision as vision
-
-    def squash(text: str) -> str:
-        return "".join(text.lower().split())
-
-    hay = squash(" ".join(line.text for line in vision.ocr(final_png)))
-    needle = squash(note)
-    if not needle:
-        return False
-    if needle in hay:
-        return True
-    matcher = difflib.SequenceMatcher(None, needle, hay)
-    blocks = matcher.get_matching_blocks()
-    matched = sum(block.size for block in blocks)
-    longest = max((block.size for block in blocks), default=0)
-    return matched / len(needle) >= 0.8 or longest >= 16
+    return verify_note_saved(final_png, note).success
 
 
 def replay(n: int = 5) -> dict:
@@ -288,6 +272,29 @@ def replay(n: int = 5) -> dict:
     return summary
 
 
+def benchmark() -> None:
+    """Record a fresh demonstration, then run compiled-vs-agent benchmark.
+
+    Records into a temporary directory (the committed showcase artifacts
+    under docs/showcase-openemr/ are left untouched) and writes
+    results.json / BENCHMARK.md / latency_cost.png to benchmark/openemr/.
+    """
+    import tempfile
+
+    from openadapt_flow.benchmark.openemr_benchmark import (
+        run_openemr_benchmark,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="oaf-openemr-rec-") as tmp_str:
+        tmp = Path(tmp_str)
+        recording_dir = tmp / "recording"
+        bundle_dir = tmp / "bundle"
+        rec = record(recording_dir=recording_dir)
+        print("recorded ->", rec)
+        compile_bundle(recording_dir=recording_dir, bundle_dir=bundle_dir)
+        run_openemr_benchmark(REPO / "benchmark" / "openemr", bundle_dir)
+
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     if mode in ("record", "all"):
@@ -298,3 +305,5 @@ if __name__ == "__main__":
         compile_bundle()
     if mode in ("replay", "all"):
         replay(5)
+    if mode == "benchmark":
+        benchmark()

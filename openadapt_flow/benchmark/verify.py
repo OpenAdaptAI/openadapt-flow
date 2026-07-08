@@ -1,20 +1,28 @@
-"""Arm-independent success criterion for the benchmark.
+"""Arm-independent success criteria for the benchmarks.
 
 Both arms — compiled replay and the computer-use agent — are judged by the
-exact same check, applied to a screenshot of the final state: OCR must find
-(a) the ``Encounter saved — <note>`` banner and (b) the saved encounter row
-(``<type> — <note>``). MockMed renders both only on the patient screen after
-a successful save, so the check passes only in the navigated-back-to-patient
-state a user would accept as "done". Neither arm's internal notion of
-success (the replayer's ``RunReport.success``, the agent's own claim of
-completion) is used.
+exact same check, applied to a screenshot of the final state. Neither arm's
+internal notion of success (the replayer's ``RunReport.success``, the
+agent's own claim of completion) is used.
+
+Two checks live here, one per benchmark target:
+
+- :func:`verify_encounter_saved` (MockMed): OCR must find (a) the
+  ``Encounter saved — <note>`` banner and (b) the saved encounter row
+  (``<type> — <note>``). MockMed renders both only on the patient screen
+  after a successful save, so the check passes only in the
+  navigated-back-to-patient state a user would accept as "done".
+- :func:`verify_note_saved` (OpenEMR): OCR of the final screen must show
+  the run's parameterized note text in the patient-message list.
 """
 
 from __future__ import annotations
 
+import difflib
+
 from pydantic import BaseModel
 
-from openadapt_flow.vision import find_text
+from openadapt_flow.vision import find_text, ocr
 
 BANNER_PREFIX = "Encounter saved"
 #: MockMed truncation limits (static/app.js): banner shows note[:40], the
@@ -86,3 +94,120 @@ def verify_encounter_saved(
         banner_found=banner_found,
         note_found=note_found,
     )
+
+
+class NoteVerifyResult(BaseModel):
+    """Outcome of the OpenEMR saved-note check.
+
+    Attributes:
+        success: True iff the note evidence was found on the final screen.
+        matched_ratio: Fraction of the note's squashed characters that OCR
+            matched somewhere in the frame's squashed text (diagnostic
+            only — non-contiguous matches accumulate from unrelated text
+            on a dense screen, so this never decides success).
+        longest_run: Longest contiguous matched character run (this is
+            the criterion).
+    """
+
+    success: bool
+    matched_ratio: float
+    longest_run: int
+
+
+def _squash(text: str) -> str:
+    """Lowercase and remove all whitespace (OCR-tolerant comparison form)."""
+    return "".join(text.lower().split())
+
+
+def _upscale_png(screen_png: bytes, factor: int = 2) -> bytes:
+    """Upscale a PNG (cubic) so OCR can read dense small table text."""
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(screen_png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return screen_png
+    up = cv2.resize(
+        img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC
+    )
+    ok, buf = cv2.imencode(".png", up)
+    return buf.tobytes() if ok else screen_png
+
+
+def _score_note(hay: str, needle: str) -> NoteVerifyResult:
+    """Score squashed OCR text against a squashed note."""
+    if needle in hay:
+        return NoteVerifyResult(
+            success=True, matched_ratio=1.0, longest_run=len(needle)
+        )
+    # autojunk=False: the default heuristic marks every frequent character
+    # of a long OCR haystack as junk, silently collapsing real matches.
+    blocks = difflib.SequenceMatcher(
+        None, needle, hay, autojunk=False
+    ).get_matching_blocks()
+    matched = sum(block.size for block in blocks)
+    longest = max((block.size for block in blocks), default=0)
+    return NoteVerifyResult(
+        success=False,
+        matched_ratio=round(matched / len(needle), 4),
+        longest_run=longest,
+    )
+
+
+def verify_note_saved(
+    screen_png: bytes,
+    note_text: str,
+    *,
+    min_run: int = 16,
+) -> NoteVerifyResult:
+    """Check a final-state screenshot for the saved OpenEMR note.
+
+    The message list embeds the note inside a longer line (``<timestamp>
+    (admin to admin) <note>``) and wraps it, so whole-line fuzzy matching
+    misses; and rapidocr drops some dense table lines entirely at
+    1280x800, so when the raw frame does not pass, the frame is retried
+    at 2x resolution, which recovers most dropped lines.
+
+    The criterion is a **contiguous** matched run of at least ``min_run``
+    squashed characters between the note and the frame's OCR text. A
+    non-contiguous matched-character fraction is deliberately NOT a
+    criterion: on a dense screen full of similar English text, scattered
+    subsequence matches accumulate past any sane threshold for notes that
+    are not on screen at all (measured 0.9+ for absent notes), while
+    contiguous runs separate cleanly (>=29 for present notes vs <=8 for
+    absent ones on audited frames). Callers must use note texts whose
+    pairwise longest common squashed substring stays below ``min_run`` —
+    several runs' notes are visible on the same final screen.
+
+    This is the shared success criterion for BOTH arms of the OpenEMR
+    benchmark — the compiled replay and the computer-use agent are judged
+    by this exact function on their final screenshots.
+
+    Args:
+        screen_png: Full-frame screenshot of the final state as PNG bytes.
+        note_text: The parameterized note the run was asked to enter.
+        min_run: Minimum contiguous matched run length to accept.
+
+    Returns:
+        A :class:`NoteVerifyResult`.
+    """
+    needle = _squash(note_text)
+    if not needle:
+        return NoteVerifyResult(success=False, matched_ratio=0.0, longest_run=0)
+
+    best = NoteVerifyResult(success=False, matched_ratio=0.0, longest_run=0)
+    for png in (screen_png, _upscale_png(screen_png)):
+        hay = _squash(" ".join(line.text for line in ocr(png)))
+        result = _score_note(hay, needle)
+        if result.success or result.longest_run >= min_run:
+            return NoteVerifyResult(
+                success=True,
+                matched_ratio=result.matched_ratio,
+                longest_run=result.longest_run,
+            )
+        if (result.longest_run, result.matched_ratio) > (
+            best.longest_run,
+            best.matched_ratio,
+        ):
+            best = result
+    return best

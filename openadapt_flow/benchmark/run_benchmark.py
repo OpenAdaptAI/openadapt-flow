@@ -44,15 +44,22 @@ def _compiled_run(
     run_dir: Path,
     note_text: str,
     *,
+    verify_fn: Callable[[bytes, str], Any] = verify_encounter_saved,
+    save_final_to: Path | None = None,
     headed: bool = False,
 ) -> dict[str, Any]:
     """One compiled-replay run against a fresh browser; verified via OCR.
 
     Args:
         bundle_dir: Compiled workflow bundle.
-        url: MockMed URL (may carry a drift query).
+        url: Target app URL (may carry a drift query).
         run_dir: Scratch run directory for replay artifacts.
-        note_text: Note parameter value (same value both arms use).
+        note_text: Note parameter value.
+        verify_fn: Arm-independent success check applied to the final
+            screenshot; extra fields of its result (beyond ``success``)
+            are merged into the row.
+        save_final_to: Optional path to save the final screenshot to (for
+            post-hoc audit of the OCR verdict).
         headed: Run the browser headed.
 
     Returns:
@@ -73,30 +80,43 @@ def _compiled_run(
             run_dir=run_dir,
         )
         wall_s = time.monotonic() - start
-        verdict = verify_encounter_saved(backend.screenshot(), note_text)
+        final_png = backend.screenshot()
+        verdict = verify_fn(final_png, note_text)
+        if save_final_to is not None:
+            save_final_to.parent.mkdir(parents=True, exist_ok=True)
+            save_final_to.write_bytes(final_png)
     finally:
         close()
-    return {
+    failed = [r for r in report.results if not r.ok]
+    row = {
         "arm": "compiled",
         "wall_s": wall_s,
         "success": verdict.success,
-        "banner_found": verdict.banner_found,
-        "note_found": verdict.note_found,
         "replayer_success": report.success,
         "heal_count": report.heal_count,
         "actions": len(report.results),
+        "first_failure": (
+            {"step": failed[0].step_id, "error": failed[0].error}
+            if failed
+            else None
+        ),
         "api_calls": 0,
         "input_tokens": 0,
         "output_tokens": 0,
         "cost_usd": 0.0,
         "error": None,
     }
+    row.update(verdict.model_dump(exclude={"success"}))
+    return row
 
 
 def _agent_run(
     url: str,
     note_text: str,
     *,
+    task: str | None = None,
+    verify_fn: Callable[[bytes, str], Any] = verify_encounter_saved,
+    save_final_to: Path | None = None,
     client: Any = None,
     headed: bool = False,
     max_actions: int = agent_baseline.MAX_ACTIONS,
@@ -104,8 +124,14 @@ def _agent_run(
     """One computer-use-agent run against a fresh browser; verified via OCR.
 
     Args:
-        url: MockMed URL (may carry a drift query).
+        url: Target app URL (may carry a drift query).
         note_text: Note the agent is asked to enter.
+        task: Task prompt; defaults to the MockMed triage prompt.
+        verify_fn: Arm-independent success check applied to the final
+            screenshot; extra fields of its result (beyond ``success``)
+            are merged into the row.
+        save_final_to: Optional path to save the final screenshot to (for
+            post-hoc audit of the OCR verdict).
         client: Optional injected Anthropic client (tests).
         headed: Run the browser headed.
         max_actions: Action budget forwarded to the agent loop.
@@ -116,7 +142,8 @@ def _agent_run(
     """
     from openadapt_flow.backends.playwright_backend import PlaywrightBackend
 
-    task = agent_baseline.triage_task_prompt(note_text)
+    if task is None:
+        task = agent_baseline.triage_task_prompt(note_text)
     backend, close = PlaywrightBackend.launch(url, headless=not headed)
     try:
         try:
@@ -128,8 +155,6 @@ def _agent_run(
                 "arm": "agent",
                 "wall_s": 0.0,
                 "success": False,
-                "banner_found": False,
-                "note_found": False,
                 "actions": 0,
                 "api_calls": 0,
                 "input_tokens": 0,
@@ -139,15 +164,16 @@ def _agent_run(
                 "model_stop_reason": None,
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        verdict = verify_encounter_saved(result.final_screenshot, note_text)
+        verdict = verify_fn(result.final_screenshot, note_text)
+        if save_final_to is not None:
+            save_final_to.parent.mkdir(parents=True, exist_ok=True)
+            save_final_to.write_bytes(result.final_screenshot)
     finally:
         close()
-    return {
+    row = {
         "arm": "agent",
         "wall_s": result.wall_s,
         "success": verdict.success,
-        "banner_found": verdict.banner_found,
-        "note_found": verdict.note_found,
         "actions": result.actions,
         "api_calls": result.api_calls,
         "input_tokens": result.input_tokens,
@@ -157,6 +183,8 @@ def _agent_run(
         "model_stop_reason": result.model_stop_reason,
         "error": None,
     }
+    row.update(verdict.model_dump(exclude={"success"}))
+    return row
 
 
 def _arm_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:

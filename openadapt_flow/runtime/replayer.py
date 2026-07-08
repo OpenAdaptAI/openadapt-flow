@@ -14,6 +14,7 @@ healed bundle is written.
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,14 @@ from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 # and the minimum template-match score to accept it.
 PC_TEMPLATE_SEARCH_PAD = 80
 PC_TEMPLATE_THRESHOLD = 0.9
+
+# Closed-loop scroll: a SCROLL step keeps scrolling by its recorded delta
+# until the NEXT anchored step's anchor resolves on a settled frame, bounded
+# by this multiple of the step's own recorded scroll distance. Consecutive
+# SCROLL steps hand the loop to each other (each probes first and no-ops
+# once the anchor is in view), so a run of N recorded scrolls has a combined
+# budget of ~2.5x the total recorded distance.
+SCROLL_BUDGET_FACTOR = 2.5
 
 
 class Replayer:
@@ -115,10 +124,11 @@ class Replayer:
         new_crops: dict[str, bytes] = {}
         t_run = time.monotonic()
 
-        for step in workflow.steps:
+        for step_index, step in enumerate(workflow.steps):
             result = self._run_step(
                 step,
                 workflow=workflow,
+                step_index=step_index,
                 params=params,
                 bundle_dir=bundle_dir,
                 run_dir=run_dir,
@@ -155,6 +165,7 @@ class Replayer:
         step: Step,
         *,
         workflow: Workflow,
+        step_index: int,
         params: dict[str, str],
         bundle_dir: Path,
         run_dir: Path,
@@ -196,7 +207,15 @@ class Replayer:
                 )
             result.resolution = resolution
             if error is None:
-                error = self._act(step, resolution, params)
+                error = self._act(
+                    step,
+                    resolution,
+                    params,
+                    workflow=workflow,
+                    step_index=step_index,
+                    bundle_dir=bundle_dir,
+                    before_png=before_png,
+                )
 
             if error is None:
                 after_png = self.vision.wait_settled(self.backend)
@@ -295,6 +314,11 @@ class Replayer:
         step: Step,
         resolution: Optional[Resolution],
         params: dict[str, str],
+        *,
+        workflow: Workflow,
+        step_index: int,
+        bundle_dir: Path,
+        before_png: bytes,
     ) -> Optional[str]:
         """Perform the step's action through the backend.
 
@@ -340,10 +364,116 @@ class Replayer:
             return None
 
         if step.action is ActionKind.SCROLL:
-            self.backend.scroll(step.scroll_dx or 0, step.scroll_dy or 0)
-            return None
+            return self._act_scroll(
+                step,
+                workflow=workflow,
+                step_index=step_index,
+                bundle_dir=bundle_dir,
+                before_png=before_png,
+            )
 
         return f"Step '{step.id}' has unsupported action {step.action!r}"
+
+    # -- closed-loop scroll ------------------------------------------------------
+
+    def _act_scroll(
+        self,
+        step: Step,
+        *,
+        workflow: Workflow,
+        step_index: int,
+        bundle_dir: Path,
+        before_png: bytes,
+    ) -> Optional[str]:
+        """Execute a SCROLL step as a closed loop on the next anchor.
+
+        A recorded scroll's purpose is to bring the next target into view,
+        so the step scrolls by its recorded delta until the NEXT anchored
+        step's anchor resolves on a settled frame — not a fixed number of
+        times. The step probes BEFORE scrolling (a preceding SCROLL step may
+        already have brought the target into view, making this one a no-op)
+        and stops as soon as a probe resolves.
+
+        The loop is bounded: this step may scroll at most
+        ``SCROLL_BUDGET_FACTOR`` times its own recorded distance. On budget
+        exhaustion the step fails loudly — unless the immediately following
+        step is another SCROLL step, which inherits the loop (so a recorded
+        run of N scrolls shares a combined ~2.5x budget).
+
+        Falls back to the fixed recorded delta (open-loop, one gesture) when
+        no later step has an anchor or the recorded delta is zero. Probes
+        never call the grounder: closed-loop scrolling must stay model-free.
+
+        Returns:
+            An error string on budget exhaustion (see above) or None.
+        """
+        dx = step.scroll_dx or 0
+        dy = step.scroll_dy or 0
+        next_step = self._next_anchored_step(workflow, step_index)
+        if next_step is None or (dx == 0 and dy == 0):
+            self.backend.scroll(dx, dy)
+            return None
+
+        if self._probe_anchor(next_step, before_png, bundle_dir):
+            return None  # target already in view; nothing to scroll
+
+        increment = math.hypot(dx, dy)
+        budget = SCROLL_BUDGET_FACTOR * increment
+        scrolled = 0.0
+        while scrolled + increment <= budget:
+            self.backend.scroll(dx, dy)
+            scrolled += increment
+            frame = self.vision.wait_settled(self.backend)
+            if self._probe_anchor(next_step, frame, bundle_dir):
+                return None
+
+        following = (
+            workflow.steps[step_index + 1]
+            if step_index + 1 < len(workflow.steps)
+            else None
+        )
+        if following is not None and following.action is ActionKind.SCROLL:
+            # The next SCROLL step continues the loop with its own budget.
+            return None
+        return (
+            f"Step '{step.id}' ({step.intent}): closed-loop scroll exhausted "
+            f"its budget ({scrolled:.0f}px of {budget:.0f}px allowed, "
+            f"{SCROLL_BUDGET_FACTOR}x the recorded distance) without the "
+            f"anchor of step '{next_step.id}' ({next_step.intent}) resolving "
+            "— target never came into view; run aborted"
+        )
+
+    @staticmethod
+    def _next_anchored_step(workflow: Workflow, step_index: int) -> Optional[Step]:
+        """The first step after ``step_index`` that carries an anchor."""
+        for candidate in workflow.steps[step_index + 1:]:
+            if candidate.anchor is not None:
+                return candidate
+        return None
+
+    def _probe_anchor(
+        self, step: Step, frame_png: bytes, bundle_dir: Path
+    ) -> bool:
+        """Single ladder pass for ``step``'s anchor against ``frame_png``.
+
+        Used by the closed-loop scroll to test whether the scroll target is
+        in view. No timeout retries and no grounder (a probe per scroll
+        gesture must stay fast and model-free).
+        """
+        assert step.anchor is not None  # guaranteed by _next_anchored_step
+        template_png: Optional[bytes] = None
+        template_path = Path(bundle_dir) / step.anchor.template
+        if template_path.is_file():
+            template_png = template_path.read_bytes()
+        return resolve(
+            step.anchor,
+            frame_png,
+            self.vision,
+            None,  # never ground during a scroll probe
+            step.intent,
+            template_png=template_png,
+            viewport=self.backend.viewport,
+        ) is not None
 
     # -- postconditions --------------------------------------------------------
 

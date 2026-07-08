@@ -513,6 +513,125 @@ def test_scroll_step_scrolls_backend(bundle, run_dir):
     assert report.heal_count == 0
 
 
+def scroll_step(step_id="sc1", dx=0, dy=400) -> Step:
+    return Step(id=step_id, intent=f"scroll by ({dx}, {dy})",
+                action=ActionKind.SCROLL, scroll_dx=dx, scroll_dy=dy)
+
+
+def test_closed_loop_scroll_stops_when_next_anchor_resolves(bundle, run_dir):
+    """A SCROLL step followed by an anchored step scrolls incrementally by
+    the recorded delta until that anchor resolves on a settled frame."""
+    vision = FakeVision()
+    target = Match(point=(110, 105), region=(100, 100, 50, 20),
+                   confidence=0.95)
+    # Probe on the pre-scroll frame misses (local+global), the probe after
+    # the first scroll resolves; the click step then resolves for itself.
+    vision.template_results = [None, None, target, target]
+    backend = FakeBackend()
+    workflow = Workflow(name="wf", steps=[scroll_step(), click_step()])
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert backend.actions == [
+        ("scroll", 0, 400),
+        ("click", 110, 105, False),
+    ]
+    # The scroll step itself records no resolution (the probe belongs to the
+    # next step's anchor); only the click counts a rung.
+    assert report.results[0].resolution is None
+    assert report.rung_counts == {"template": 1}
+
+
+def test_closed_loop_scroll_noops_when_anchor_already_in_view(bundle, run_dir):
+    """The pre-scroll probe resolving means the target is already on screen:
+    the SCROLL step must not scroll at all."""
+    vision = FakeVision()
+    target = Match(point=(110, 105), region=(100, 100, 50, 20),
+                   confidence=0.95)
+    vision.template_results = [target, target]  # probe, then click resolve
+    backend = FakeBackend()
+    workflow = Workflow(name="wf", steps=[scroll_step(), click_step()])
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert backend.actions == [("click", 110, 105, False)]
+
+
+def test_closed_loop_scroll_budget_exhaustion_fails_loudly(bundle, run_dir):
+    """When the anchor never resolves and no further SCROLL step follows,
+    the loop stops at ~2.5x the recorded distance and fails the run,
+    naming the anchor that never came into view."""
+    vision = FakeVision()  # every probe misses
+    backend = FakeBackend()
+    workflow = Workflow(
+        name="wf",
+        steps=[scroll_step(dy=-400), click_step(step_id="pencil")],
+    )
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is False
+    assert len(report.results) == 1  # aborted at the scroll step
+    error = report.results[0].error
+    assert "budget" in error
+    assert "pencil" in error  # names the anchor that never resolved
+    # Budget 2.5 x 400px allows exactly two 400px gestures, both upward
+    # (direction comes from the recorded delta).
+    assert backend.actions == [("scroll", 0, -400), ("scroll", 0, -400)]
+
+
+def test_consecutive_scroll_steps_share_the_loop(bundle, run_dir):
+    """A SCROLL step exhausting its own budget does NOT fail when the next
+    step is another SCROLL step: that step inherits the loop (probe-first),
+    so a recorded run of N scrolls has a combined ~2.5x budget."""
+    vision = FakeVision()
+    target = Match(point=(110, 105), region=(100, 100, 50, 20),
+                   confidence=0.95)
+    # 4 failed probes (2 template calls each: local + global), then the
+    # second scroll step's first post-scroll probe resolves, then the click
+    # resolves for itself.
+    vision.template_results = [None] * 8 + [target, target]
+    backend = FakeBackend()
+    workflow = Workflow(
+        name="wf",
+        steps=[scroll_step("sc1"), scroll_step("sc2"), click_step()],
+    )
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    # sc1 scrolls twice (budget exhausted, handed over), sc2 scrolls once
+    # (probe resolves), then the click acts.
+    assert backend.actions == [
+        ("scroll", 0, 400),
+        ("scroll", 0, 400),
+        ("scroll", 0, 400),
+        ("click", 110, 105, False),
+    ]
+    assert report.results[0].ok and report.results[1].ok
+
+
+def test_scroll_without_later_anchor_stays_open_loop(bundle, run_dir):
+    """No later anchored step -> nothing to probe: the recorded delta
+    replays once, exactly as recorded (open-loop fallback)."""
+    vision = FakeVision()
+    backend = FakeBackend()
+    workflow = Workflow(
+        name="wf",
+        steps=[scroll_step(dx=-30, dy=-120),
+               Step(id="k1", intent="press enter", action=ActionKind.KEY,
+                    key="Enter")],
+    )
+    report = Replayer(backend, vision=vision).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert backend.actions == [("scroll", -30, -120), ("press", "Enter")]
+    assert vision.template_calls == []  # no probe without an anchor
+
+
 def test_key_step_presses_key(bundle, run_dir):
     vision = FakeVision()
     backend = FakeBackend()

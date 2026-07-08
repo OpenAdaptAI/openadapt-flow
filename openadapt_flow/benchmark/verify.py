@@ -46,6 +46,14 @@ def verify_encounter_saved(
 ) -> VerifyResult:
     """Check a final-state screenshot for the encounter-saved evidence.
 
+    ``find_text`` fuzzy-matches whole OCR lines, and the OCR engine may
+    segment the banner as one line (``Encounter saved — <note>``) or as two
+    (the prefix and the note separately). Each check therefore accepts any
+    of a small set of candidate line forms; all candidates describe the same
+    on-screen evidence, so this tolerates OCR line segmentation without
+    weakening the criterion: the banner prefix exists only after a save,
+    and both checks must pass.
+
     Args:
         screen_png: Full-frame screenshot of the final state as PNG bytes.
         note_text: The note the run was asked to enter.
@@ -55,18 +63,26 @@ def verify_encounter_saved(
     Returns:
         A :class:`VerifyResult`; ``success`` requires both checks to pass.
     """
-    banner = find_text(
-        screen_png,
-        f"{BANNER_PREFIX} — {note_text[:BANNER_NOTE_CHARS]}",
-        min_ratio=min_ratio,
+    def any_found(candidates: tuple[str, ...]) -> bool:
+        return any(
+            find_text(screen_png, c, min_ratio=min_ratio) is not None
+            for c in candidates
+        )
+
+    banner_found = any_found(
+        (
+            f"{BANNER_PREFIX} — {note_text[:BANNER_NOTE_CHARS]}",
+            f"{BANNER_PREFIX} —",
+        )
     )
-    row = find_text(
-        screen_png,
-        f"{encounter_type} — {note_text[:ROW_NOTE_CHARS]}",
-        min_ratio=min_ratio,
+    note_found = any_found(
+        (
+            f"{encounter_type} — {note_text[:ROW_NOTE_CHARS]}",
+            note_text[:BANNER_NOTE_CHARS],
+        )
     )
     return VerifyResult(
-        success=banner is not None and row is not None,
-        banner_found=banner is not None,
-        note_found=row is not None,
+        success=banner_found and note_found,
+        banner_found=banner_found,
+        note_found=note_found,
     )

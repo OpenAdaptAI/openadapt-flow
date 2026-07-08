@@ -447,6 +447,26 @@ class TestVerify:
         assert verdict.note_found
         assert verdict.success
 
+    def test_split_banner_lines_pass(self) -> None:
+        # OCR sometimes segments the banner into two lines (prefix + note);
+        # the criterion must tolerate segmentation, not require one line.
+        screen = self.make_screen(
+            "Encounter saved -",
+            NOTE[:40],
+            f"Triage - {NOTE[:60]}",
+        )
+        verdict = verify_encounter_saved(screen, NOTE)
+        assert verdict.success
+
+    def test_note_in_form_without_banner_fails(self) -> None:
+        # The typed note is visible on the encounter form BEFORE saving;
+        # without the banner that must not count as success.
+        screen = self.make_screen("Note", NOTE[:40], "Save Encounter")
+        verdict = verify_encounter_saved(screen, NOTE)
+        assert verdict.note_found
+        assert not verdict.banner_found
+        assert not verdict.success
+
     def test_blank_screen_fails(self) -> None:
         verdict = verify_encounter_saved(BLANK_PNG, NOTE)
         assert not verdict.success

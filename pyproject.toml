@@ -23,7 +23,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-timeout>=2.2"]
+dev = [
+    "pytest>=8",
+    "pytest-timeout>=2.2",
+    # Benchmark harness: agent baseline (anthropic) + chart rendering.
+    "anthropic>=0.40",
+    "matplotlib>=3.8",
+]
 grounder = ["anthropic>=0.40"]
 
 [project.scripts]

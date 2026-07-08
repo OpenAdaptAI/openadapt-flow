@@ -31,3 +31,8 @@ class Backend(Protocol):
     def press(self, key: str) -> None:
         """Press a key or chord, e.g. 'Enter', 'Tab', 'Meta+a'."""
         ...
+
+    def scroll(self, dx: int, dy: int) -> None:
+        """Scroll by (dx, dy) pixels — a wheel gesture at the current
+        pointer position (positive dy scrolls content up / view down)."""
+        ...

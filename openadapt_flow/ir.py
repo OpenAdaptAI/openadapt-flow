@@ -34,6 +34,7 @@ class ActionKind(str, Enum):
     TYPE = "type"
     KEY = "key"
     WAIT = "wait"
+    SCROLL = "scroll"
 
 
 class Landmark(BaseModel):
@@ -103,6 +104,8 @@ class Step(BaseModel):
     text: Optional[str] = None  # literal text for TYPE
     param: Optional[str] = None  # if set, TYPE text comes from params[param]
     key: Optional[str] = None  # for KEY, e.g. "Enter"
+    scroll_dx: Optional[int] = None  # for SCROLL: wheel delta, px right
+    scroll_dy: Optional[int] = None  # for SCROLL: wheel delta, px down
     expect: list[Postcondition] = Field(default_factory=list)
     risk: Literal["reversible", "irreversible"] = "reversible"
     timeout_s: float = 10.0

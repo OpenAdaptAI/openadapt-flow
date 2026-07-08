@@ -14,7 +14,15 @@ permission-free); native OS / RDP backends are future adapters.
 
 - `openadapt_flow/ir.py` — Workflow/Step/Anchor/Postcondition + runtime result
   models. FROZEN for v0. Additive changes only, and only by the integrator.
-- `openadapt_flow/backend.py` — Backend protocol. FROZEN.
+  Additive change (OpenEMR spike): `ActionKind.SCROLL` plus optional
+  `Step.scroll_dx`/`Step.scroll_dy` wheel deltas.
+- `openadapt_flow/backend.py` — Backend protocol. FROZEN. Additive change
+  (OpenEMR spike): `scroll(dx, dy)` — a wheel gesture at the current pointer
+  position, so it scrolls whatever container is under the pointer (iframes
+  included). SCROLL steps compile with NO postconditions: a scroll shifts the
+  whole viewport, so frame diffs would assert mutable page content; the
+  scroll's purpose (bringing the next target into view) is verified by the
+  next anchored step's resolution ladder.
 
 ## Bundle & recording formats
 
@@ -34,6 +42,7 @@ permission-free); native OS / RDP backends are future adapters.
                      # {"i":0,"kind":"click","x":123,"y":45,"t":1.20}
                      # {"i":1,"kind":"type","text":"...","param":"note","t":2.03}
                      # {"i":2,"kind":"key","key":"Enter","t":3.10}
+                     # {"i":3,"kind":"scroll","dx":0,"dy":400,"t":4.02}
                      # "param" present iff the typed value is a parameter
   frames/{i:04d}_before.png
   frames/{i:04d}_after.png   # after the action settled
@@ -141,6 +150,11 @@ Resolution ladder per step with an anchor (record rung + confidence + ms):
 5. `grounder` — optional injected `Grounder.locate(png, intent) -> Match|None`
    (protocol in `runtime/grounder.py`; ship a `NullGrounder`; an Anthropic
    implementation goes behind the `grounder` extra and is NOT used in tests)
+
+Ladder failures retry with fresh settled frames until `step.timeout_s`
+(remote apps present settled-looking but still-loading frames; the target
+often appears moments later). Structural errors (missing anchor) and the
+risk gate do not retry.
 
 Click point = matched region origin + (anchor.click_point - anchor.region
 origin), scaled by match scale. After acting: `wait_settled`, then check

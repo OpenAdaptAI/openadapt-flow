@@ -277,6 +277,48 @@ class TestCompileRecording:
         # regenerating from the model matches what's on disk
         assert source == render_workflow_py(compiled["workflow"])
 
+    def test_scroll_event_compiles(self, tmp_path: Path) -> None:
+        """scroll events compile to SCROLL steps with deltas and NO
+        postconditions (a scroll shifts the whole viewport; asserting the
+        resulting frame would bake mutable page content into the bundle —
+        the next anchored step's resolution verifies the scroll landed)."""
+        recording = tmp_path / "rec"
+        (recording / "frames").mkdir(parents=True)
+        before = blank()
+        draw_text(before, 540, 84, "MockMed Portal")
+        after = blank()
+        draw_text(after, 540, 700, "MockMed Portal")  # content shifted
+        write_frame(recording, 0, "before", before)
+        write_frame(recording, 0, "after", after)
+        (recording / "events.jsonl").write_text(
+            json.dumps({"i": 0, "kind": "scroll", "dx": 0, "dy": 400, "t": 1.0})
+            + "\n"
+        )
+        (recording / "meta.json").write_text(
+            json.dumps(
+                {
+                    "id": "rec-scroll",
+                    "created_at": "2026-07-06T00:00:00+00:00",
+                    "viewport": list(VIEWPORT),
+                    "app_url": "http://localhost:0/",
+                    "params": {},
+                }
+            )
+        )
+        bundle = tmp_path / "bundle"
+        workflow = compile_recording(recording, bundle, name="scrolly")
+        assert len(workflow.steps) == 1
+        step = workflow.steps[0]
+        assert step.action is ActionKind.SCROLL
+        assert step.scroll_dx == 0
+        assert step.scroll_dy == 400
+        assert step.anchor is None
+        assert step.expect == []
+        assert step.intent == "scroll by (0, 400)"
+        source = (bundle / "workflow.py").read_text()
+        ast.parse(source)
+        assert "flow.scroll(0, 400)" in source
+
     def test_double_click_event_compiles(self, tmp_path: Path) -> None:
         """double_click events (Recorder.double_click) must compile."""
         recording = tmp_path / "rec"

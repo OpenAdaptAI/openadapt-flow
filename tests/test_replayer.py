@@ -105,6 +105,9 @@ class FakeBackend:
     def press(self, key):
         self.actions.append(("press", key))
 
+    def scroll(self, dx, dy):
+        self.actions.append(("scroll", dx, dy))
+
 
 def click_step(step_id="s1", *, risk="reversible", expect=(),
                template="templates/btn.png", ocr_text="Save",
@@ -432,6 +435,28 @@ def test_wait_step_only_settles(bundle, run_dir):
     assert vision.settle_count == 2  # settle before + settle after
 
 
+def test_scroll_step_scrolls_backend(bundle, run_dir):
+    vision = FakeVision()
+    backend = FakeBackend()
+    workflow = Workflow(
+        name="wf",
+        steps=[
+            Step(id="sc1", intent="scroll by (0, 400)",
+                 action=ActionKind.SCROLL, scroll_dx=0, scroll_dy=400),
+            Step(id="sc2", intent="scroll by (-30, -120)",
+                 action=ActionKind.SCROLL, scroll_dx=-30, scroll_dy=-120),
+        ],
+    )
+    report = Replayer(backend, vision=vision).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert backend.actions == [("scroll", 0, 400), ("scroll", -30, -120)]
+    # No anchor -> no resolution, no heal.
+    assert report.results[0].resolution is None
+    assert report.heal_count == 0
+
+
 def test_key_step_presses_key(bundle, run_dir):
     vision = FakeVision()
     backend = FakeBackend()
@@ -450,7 +475,9 @@ def test_key_step_presses_key(bundle, run_dir):
 def test_unresolvable_click_step_fails_without_acting(bundle, run_dir):
     vision = FakeVision()  # everything misses
     backend = FakeBackend()
-    workflow = Workflow(name="wf", steps=[click_step()])
+    step = click_step()
+    step.timeout_s = 0.2  # keep the resolution retry budget short in tests
+    workflow = Workflow(name="wf", steps=[step])
     report = Replayer(backend, vision=vision).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
     )
@@ -458,3 +485,26 @@ def test_unresolvable_click_step_fails_without_acting(bundle, run_dir):
     assert backend.actions == []
     assert "resolve" in report.results[0].error.lower()
     assert "s1" in report.results[0].error
+
+
+def test_resolution_retries_until_target_appears(bundle, run_dir):
+    """A ladder miss on a stale frame retries with fresh settled frames
+    until step.timeout_s (Step.timeout_s is the resolution retry budget)."""
+    vision = FakeVision()
+    # First OCR lookups miss (still-loading screen); then the label appears.
+    vision.text_results["Save"] = [
+        None,
+        None,
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95),
+    ]
+    backend = FakeBackend()
+    step = click_step(template="templates/missing.png")  # no template rungs
+    step.timeout_s = 5.0
+    workflow = Workflow(name="wf", steps=[step])
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert ("click", 110, 105, False) in backend.actions
+    assert report.results[0].resolution.rung == "ocr"
+    assert vision.settle_count >= 3  # initial + at least two retries

@@ -114,6 +114,16 @@ class PlaywrightBackend:
         """Press a key or chord, e.g. ``'Enter'`` or ``'Meta+a'``."""
         self.page.keyboard.press(_normalize_chord(key))
 
+    def scroll(self, dx: int, dy: int) -> None:
+        """Dispatch a wheel gesture at the current mouse position.
+
+        The wheel event targets whatever element is under the pointer, so
+        scrolling works inside iframes and nested scroll containers exactly
+        as it does for a human — position the pointer first (a preceding
+        click does this naturally during both record and replay).
+        """
+        self.page.mouse.wheel(dx, dy)
+
     @classmethod
     def launch(
         cls, url: str, headless: bool = True

@@ -572,6 +572,28 @@ def compile_recording(
                     after_png,
                 )
             )
+        elif kind == "scroll":
+            dx, dy = int(event.get("dx", 0)), int(event.get("dy", 0))
+            # SCROLL steps get NO postconditions (note the (None, None)
+            # frames): scrolling shifts the whole viewport, so a frame diff
+            # spans nearly the full screen and would assert mutable page
+            # content as an invariant. The scroll's purpose — bringing the
+            # next target into view — is verified by the next anchored
+            # step's resolution ladder, which fails if the scroll did not
+            # land.
+            pending.append(
+                (
+                    Step(
+                        id=step_id,
+                        intent=f"scroll by ({dx}, {dy})",
+                        action=ActionKind.SCROLL,
+                        scroll_dx=dx,
+                        scroll_dy=dy,
+                    ),
+                    None,
+                    None,
+                )
+            )
         else:
             raise ValueError(f"unknown event kind {kind!r} (event {i})")
 

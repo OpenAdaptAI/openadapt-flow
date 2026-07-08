@@ -47,6 +47,8 @@ def _step_call(step: Step) -> str:
         return f"    flow.press({(step.key or '')!r})"
     if step.action is ActionKind.WAIT:
         return f"    flow.wait(timeout_s={step.timeout_s!r})"
+    if step.action is ActionKind.SCROLL:
+        return f"    flow.scroll({step.scroll_dx or 0!r}, {step.scroll_dy or 0!r})"
     raise ValueError(f"unknown action {step.action!r}")
 
 

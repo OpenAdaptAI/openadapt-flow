@@ -167,6 +167,27 @@ class Replayer:
             resolution, matched_region, error = self._resolve_step(
                 step, before_png, bundle_dir
             )
+            # Retry ladder failures with fresh settled frames until
+            # ``step.timeout_s``: a remote app can present a settled-looking
+            # but still-loading frame (wait_settled times out), and the
+            # target only appears moments later. Structural errors (missing
+            # anchor) and the risk gate (resolution is not None) never retry.
+            deadline = t0 + step.timeout_s
+            while (
+                error is not None
+                and resolution is None
+                and step.anchor is not None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(self.poll_interval_s)
+                before_png = self.vision.wait_settled(self.backend)
+                result.before_png = self._save_step_png(
+                    run_dir, step.id, "before", before_png
+                )
+                last_frame = before_png
+                resolution, matched_region, error = self._resolve_step(
+                    step, before_png, bundle_dir
+                )
             result.resolution = resolution
             if error is None:
                 error = self._act(step, resolution, params)
@@ -310,6 +331,10 @@ class Replayer:
 
         if step.action is ActionKind.WAIT:
             # WAIT means wait_settled only; the post-action settle handles it.
+            return None
+
+        if step.action is ActionKind.SCROLL:
+            self.backend.scroll(step.scroll_dx or 0, step.scroll_dy or 0)
             return None
 
         return f"Step '{step.id}' has unsupported action {step.action!r}"

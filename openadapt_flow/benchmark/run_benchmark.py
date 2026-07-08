@@ -103,6 +103,8 @@ def _compiled_run(
         "api_calls": 0,
         "input_tokens": 0,
         "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
         "cost_usd": 0.0,
         "error": None,
     }
@@ -120,6 +122,8 @@ def _agent_run(
     client: Any = None,
     headed: bool = False,
     max_actions: int = agent_baseline.MAX_ACTIONS,
+    max_cost_usd: float = agent_baseline.MAX_COST_USD,
+    log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """One computer-use-agent run against a fresh browser; verified via OCR.
 
@@ -135,6 +139,8 @@ def _agent_run(
         client: Optional injected Anthropic client (tests).
         headed: Run the browser headed.
         max_actions: Action budget forwarded to the agent loop.
+        max_cost_usd: Per-run cost cap forwarded to the agent loop.
+        log: Per-API-call usage logger forwarded to the agent loop.
 
     Returns:
         A per-run row dict. API failures are recorded as failed rows with
@@ -148,7 +154,12 @@ def _agent_run(
     try:
         try:
             result = agent_baseline.run_agent(
-                backend, task, client=client, max_actions=max_actions
+                backend,
+                task,
+                client=client,
+                max_actions=max_actions,
+                max_cost_usd=max_cost_usd,
+                log=log,
             )
         except Exception as exc:  # noqa: BLE001 - a failed run is a data point
             return {
@@ -159,6 +170,8 @@ def _agent_run(
                 "api_calls": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "cost_usd": 0.0,
                 "stopped": "error",
                 "model_stop_reason": None,
@@ -178,6 +191,8 @@ def _agent_run(
         "api_calls": result.api_calls,
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
+        "cache_creation_input_tokens": result.cache_creation_input_tokens,
+        "cache_read_input_tokens": result.cache_read_input_tokens,
         "cost_usd": result.cost_usd,
         "stopped": result.stopped,
         "model_stop_reason": result.model_stop_reason,
@@ -213,6 +228,12 @@ def _arm_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "input_tokens_total": sum(r["input_tokens"] for r in rows),
         "output_tokens_total": sum(r["output_tokens"] for r in rows),
+        "cache_creation_input_tokens_total": sum(
+            r.get("cache_creation_input_tokens", 0) for r in rows
+        ),
+        "cache_read_input_tokens_total": sum(
+            r.get("cache_read_input_tokens", 0) for r in rows
+        ),
         "cost_usd_per_run": statistics.fmean(costs) if costs else 0.0,
         "cost_usd_total": sum(costs),
     }

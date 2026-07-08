@@ -276,12 +276,20 @@ def benchmark() -> None:
     """Record a fresh demonstration, then run compiled-vs-agent benchmark.
 
     Records into a temporary directory (the committed showcase artifacts
-    under docs/showcase-openemr/ are left untouched) and writes
-    results.json / BENCHMARK.md / latency_cost.png to benchmark/openemr/.
+    under docs/showcase-openemr/ are left untouched) and writes rows.jsonl
+    (incremental, per run) plus results.json / BENCHMARK.md /
+    latency_cost.png to benchmark/openemr/.
+
+    Hard cost guardrails (see openadapt_flow.benchmark.openemr_benchmark):
+    an API preflight before any spend, a $1.50 per-run cap, an $8.00
+    total agent-arm ceiling, and an abort on consecutive billing errors.
+    All at list price — billed cost under the intro rate is lower.
     """
     import tempfile
 
+    from openadapt_flow.benchmark import agent_baseline
     from openadapt_flow.benchmark.openemr_benchmark import (
+        MAX_TOTAL_COST_USD,
         run_openemr_benchmark,
     )
 
@@ -292,7 +300,12 @@ def benchmark() -> None:
         rec = record(recording_dir=recording_dir)
         print("recorded ->", rec)
         compile_bundle(recording_dir=recording_dir, bundle_dir=bundle_dir)
-        run_openemr_benchmark(REPO / "benchmark" / "openemr", bundle_dir)
+        run_openemr_benchmark(
+            REPO / "benchmark" / "openemr",
+            bundle_dir,
+            max_cost_per_run_usd=agent_baseline.MAX_COST_USD,
+            max_total_cost_usd=MAX_TOTAL_COST_USD,
+        )
 
 
 if __name__ == "__main__":

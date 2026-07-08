@@ -11,20 +11,43 @@ Model and API facts (checked 2026-07-08 against the Anthropic docs):
 - Model: ``claude-sonnet-5`` (the current Sonnet).
 - Computer-use tool ``computer_20251124`` with beta header
   ``computer-use-2025-11-24``.
-- List pricing: $3.00 / MTok input, $15.00 / MTok output. An introductory
-  $2.00 / $10.00 rate applies through 2026-08-31; costs here are computed at
-  the durable list price so the numbers stay comparable after the promo.
+- List pricing: $3.00 / MTok input, $15.00 / MTok output. Prompt-cache
+  writes (5-minute TTL) bill at 1.25x input and cache reads at 0.1x input.
+  An introductory $2.00 / $10.00 rate applies through 2026-08-31; costs
+  here are computed at the durable list price so the numbers stay
+  comparable after the promo (billed cost today is therefore BELOW every
+  cap computed here — the safe direction).
 
 Loop mechanics:
 
 - screenshot -> model -> execute tool actions -> repeat, until the model
-  stops requesting actions or the ``max_actions`` budget (default 25) is hit.
+  stops requesting actions, the ``max_actions`` budget (default 25) is hit,
+  or the run's list-price cost exceeds ``max_cost_usd`` (default $1.50 —
+  a hard per-run cost cap, checked after every API call).
 - Every executed action returns a settled screenshot in its ``tool_result``
   (the same settle logic the replayer uses), so the model always sees the
   post-action state without spending an extra action on it.
 - Conversation history is bounded: only the last ``keep_screenshots``
   (default 3) screenshot image blocks are kept; older ones are replaced with
   a small text stub.
+
+Prompt caching:
+
+- ``cache_control: {"type": "ephemeral"}`` breakpoints are placed on the
+  computer-use tool definition (stable across the whole run) and on the
+  last content block of the newest user message each turn; stale per-turn
+  markers are stripped so the request never exceeds the 4-breakpoint limit.
+- Interaction with screenshot truncation: ``_truncate_screenshots``
+  rewrites the screenshot block ~``keep_screenshots`` turns back into a
+  text stub each turn, mutating the prefix at that point. Cache matching
+  falls back to the longest still-valid earlier prefix (the API checks
+  ~20 content blocks behind each breakpoint), so everything before the
+  newly stubbed block — the ever-growing stable prefix of stubs and
+  assistant turns — is still served from cache; only the last few turns
+  (the intact screenshots) are re-processed. Per-call usage
+  (``input_tokens``, ``cache_creation_input_tokens``,
+  ``cache_read_input_tokens``) is logged so the realized hit rate is
+  visible in the run log.
 """
 
 from __future__ import annotations
@@ -34,7 +57,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 MODEL = "claude-sonnet-5"
 COMPUTER_USE_BETA = "computer-use-2025-11-24"
@@ -42,6 +65,12 @@ COMPUTER_TOOL_TYPE = "computer_20251124"
 #: List price, USD per million tokens (see module docstring re: intro rate).
 INPUT_USD_PER_MTOK = 3.00
 OUTPUT_USD_PER_MTOK = 15.00
+#: 5-minute-TTL cache writes bill at 1.25x input list price.
+CACHE_WRITE_USD_PER_MTOK = INPUT_USD_PER_MTOK * 1.25
+#: Cache reads bill at 0.1x input list price.
+CACHE_READ_USD_PER_MTOK = INPUT_USD_PER_MTOK * 0.10
+#: Hard per-run cost cap at list price (checked after every API call).
+MAX_COST_USD = 1.50
 MAX_ACTIONS = 25
 KEEP_SCREENSHOTS = 3
 MAX_TOKENS = 4096
@@ -143,12 +172,21 @@ def openemr_task_prompt(note_text: str) -> str:
     )
 
 
-def compute_cost(input_tokens: int, output_tokens: int) -> float:
-    """Cost in USD for a token usage pair at list pricing.
+def compute_cost(
+    input_tokens: int,
+    output_tokens: int,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+) -> float:
+    """Cost in USD for API usage at list pricing, all four buckets.
 
     Args:
-        input_tokens: Total input tokens across all API calls.
-        output_tokens: Total output tokens across all API calls.
+        input_tokens: Uncached input tokens across all API calls.
+        output_tokens: Output tokens across all API calls.
+        cache_creation_input_tokens: Tokens written to the prompt cache
+            (billed at 1.25x input list price for the 5-minute TTL).
+        cache_read_input_tokens: Tokens served from the prompt cache
+            (billed at 0.1x input list price).
 
     Returns:
         The cost in USD.
@@ -156,7 +194,43 @@ def compute_cost(input_tokens: int, output_tokens: int) -> float:
     return (
         input_tokens / 1_000_000 * INPUT_USD_PER_MTOK
         + output_tokens / 1_000_000 * OUTPUT_USD_PER_MTOK
+        + cache_creation_input_tokens / 1_000_000 * CACHE_WRITE_USD_PER_MTOK
+        + cache_read_input_tokens / 1_000_000 * CACHE_READ_USD_PER_MTOK
     )
+
+
+def preflight_check(
+    client: Any = None, model: str = MODEL
+) -> tuple[bool, str | None]:
+    """Make one minimal API call to verify the key has usable credit.
+
+    A one-word prompt with ``max_tokens=1`` — the cheapest possible probe
+    (fractions of a cent). Used by the benchmark orchestrator before
+    starting any paid runs, so a dead key skips the agent arm cleanly
+    instead of burning pace time on doomed runs.
+
+    Args:
+        client: Anthropic client; when None, one is constructed with the
+            key from ``ANTHROPIC_API_KEY`` or ``~/.anthropic/api_key``.
+        model: Model ID to probe.
+
+    Returns:
+        ``(True, None)`` when the call succeeds, else
+        ``(False, "<ExceptionType>: <message>")``.
+    """
+    try:
+        if client is None:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=load_api_key())
+        client.messages.create(
+            model=model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+    except Exception as exc:  # noqa: BLE001 - any failure means "don't spend"
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
 
 
 @dataclass
@@ -166,12 +240,19 @@ class AgentRunResult:
     Attributes:
         actions: Number of computer actions executed.
         api_calls: Number of Messages API calls made.
-        input_tokens: Total input tokens (from API usage fields).
+        input_tokens: Total uncached input tokens (from API usage fields).
         output_tokens: Total output tokens (from API usage fields).
-        cost_usd: Cost at list pricing (see module docstring).
+        cache_creation_input_tokens: Total tokens written to the prompt
+            cache across all API calls.
+        cache_read_input_tokens: Total tokens served from the prompt cache
+            across all API calls.
+        cost_usd: Cost at list pricing, all four buckets (see
+            :func:`compute_cost`).
         wall_s: Wall-clock seconds for the whole loop.
         stopped: Why the loop ended: ``"model_done"`` (the model stopped
-            requesting actions) or ``"budget_exhausted"``.
+            requesting actions), ``"budget_exhausted"`` (action budget),
+            or ``"cost_cap"`` (the run's list-price cost exceeded
+            ``max_cost_usd``).
         model_stop_reason: The final API response's ``stop_reason``.
         final_screenshot: PNG bytes of the final state (for verification).
         action_log: One short line per executed action (for debugging).
@@ -181,6 +262,8 @@ class AgentRunResult:
     api_calls: int
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
     cost_usd: float
     wall_s: float
     stopped: str
@@ -314,6 +397,35 @@ def _truncate_screenshots(
         }
 
 
+def _apply_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
+    """Strip stale per-turn cache markers and mark the newest user message.
+
+    Called immediately before every API call. Removes ``cache_control``
+    from every dict content block in the history (assistant messages carry
+    SDK block objects, never dicts we added markers to, so they are left
+    alone), then places a single ephemeral marker on the last content
+    block of the last message. Together with the marker on the tool
+    definition this keeps the request at 2 of the allowed 4 breakpoints,
+    with the per-turn marker always at the newest position.
+
+    Args:
+        messages: The conversation history (mutated in place). The last
+            entry must be a user message; string content is converted to
+            a text block so it can carry the marker.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict):
+                block.pop("cache_control", None)
+    last = messages[-1]
+    if isinstance(last["content"], str):
+        last["content"] = [{"type": "text", "text": last["content"]}]
+    last["content"][-1]["cache_control"] = {"type": "ephemeral"}
+
+
 def run_agent(
     backend: Any,
     task: str,
@@ -323,6 +435,8 @@ def run_agent(
     max_actions: int = MAX_ACTIONS,
     keep_screenshots: int = KEEP_SCREENSHOTS,
     max_tokens: int = MAX_TOKENS,
+    max_cost_usd: float = MAX_COST_USD,
+    log: Callable[[str], None] | None = None,
 ) -> AgentRunResult:
     """Run the computer-use agent loop against a backend until done.
 
@@ -336,6 +450,12 @@ def run_agent(
         max_actions: Hard budget on executed computer actions.
         keep_screenshots: How many recent screenshots to keep in history.
         max_tokens: Per-response output token cap.
+        max_cost_usd: Hard per-run cost cap at list price. Checked after
+            every API call; when exceeded, the loop stops with
+            ``stopped="cost_cap"`` and returns normally (a capped run is
+            a recorded data point, not an exception).
+        log: Per-API-call usage logger (cache hit rate visibility); None
+            disables per-call logging.
 
     Returns:
         An :class:`AgentRunResult` with counters, cost, and the final
@@ -353,6 +473,9 @@ def run_agent(
             "name": "computer",
             "display_width_px": width,
             "display_height_px": height,
+            # Stable for the whole run: caches the tools portion of the
+            # prefix once, then reads it on every subsequent call.
+            "cache_control": {"type": "ephemeral"},
         }
     ]
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
@@ -361,12 +484,16 @@ def run_agent(
     api_calls = 0
     input_tokens = 0
     output_tokens = 0
+    cache_creation = 0
+    cache_read = 0
+    cost_usd = 0.0
     stopped = "model_done"
     model_stop_reason: str | None = None
     action_log: list[str] = []
     start = time.monotonic()
 
     while True:
+        _apply_cache_breakpoint(messages)
         response = client.beta.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -375,9 +502,34 @@ def run_agent(
             messages=messages,
         )
         api_calls += 1
-        input_tokens += response.usage.input_tokens
-        output_tokens += response.usage.output_tokens
+        usage = response.usage
+        call_in = usage.input_tokens
+        call_out = usage.output_tokens
+        call_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        call_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        input_tokens += call_in
+        output_tokens += call_out
+        cache_creation += call_write
+        cache_read += call_read
+        cost_usd = compute_cost(
+            input_tokens, output_tokens, cache_creation, cache_read
+        )
         model_stop_reason = response.stop_reason
+        if log is not None:
+            log(
+                f"  api call {api_calls}: in={call_in} "
+                f"cache_write={call_write} cache_read={call_read} "
+                f"out={call_out} run_cost=${cost_usd:.4f}"
+            )
+
+        if cost_usd > max_cost_usd:
+            stopped = "cost_cap"
+            if log is not None:
+                log(
+                    f"  cost cap tripped: ${cost_usd:.4f} > "
+                    f"${max_cost_usd:.2f} after {api_calls} calls"
+                )
+            break
 
         tool_uses = [
             b for b in response.content if getattr(b, "type", None) == "tool_use"
@@ -416,7 +568,9 @@ def run_agent(
         api_calls=api_calls,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        cost_usd=compute_cost(input_tokens, output_tokens),
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
+        cost_usd=cost_usd,
         wall_s=wall_s,
         stopped=stopped,
         model_stop_reason=model_stop_reason,

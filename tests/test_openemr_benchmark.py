@@ -145,22 +145,41 @@ def tool_use(action: dict[str, Any], block_id: str = "tu_1") -> Any:
     )
 
 
-def response(blocks: list[Any], stop_reason: str) -> Any:
+def response(
+    blocks: list[Any],
+    stop_reason: str,
+    *,
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+) -> Any:
     return SimpleNamespace(
         content=blocks,
         stop_reason=stop_reason,
-        usage=SimpleNamespace(input_tokens=100, output_tokens=50),
+        usage=SimpleNamespace(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+        ),
     )
 
 
 class FakeClient:
+    """Scripted beta.messages.create; records a deep copy of each request."""
+
     def __init__(self, script: list[Any]) -> None:
         self.script = list(script)
+        self.calls: list[dict[str, Any]] = []
         self.beta = SimpleNamespace(
             messages=SimpleNamespace(create=self._create)
         )
 
     def _create(self, **kwargs: Any) -> Any:
+        import copy
+
+        self.calls.append(copy.deepcopy(kwargs))
         return self.script.pop(0)
 
 
@@ -256,7 +275,14 @@ def compiled_row(i: int, *, success: bool = True, wall: float = 38.0) -> dict:
     }
 
 
-def agent_row(i: int, *, success: bool = True, wall: float = 150.0) -> dict:
+def agent_row(
+    i: int,
+    *,
+    success: bool = True,
+    wall: float = 150.0,
+    cost: float = 0.5,
+    error: str | None = None,
+) -> dict:
     return {
         "arm": "agent",
         "i": i,
@@ -267,12 +293,14 @@ def agent_row(i: int, *, success: bool = True, wall: float = 150.0) -> dict:
         "longest_run": 40 if success else 4,
         "actions": 30,
         "api_calls": 31,
-        "input_tokens": 900_000,
+        "input_tokens": 90_000,
         "output_tokens": 9_000,
-        "cost_usd": 0.5,
+        "cache_creation_input_tokens": 120_000,
+        "cache_read_input_tokens": 700_000,
+        "cost_usd": cost,
         "stopped": "model_done" if success else "budget_exhausted",
         "model_stop_reason": "end_turn",
-        "error": None,
+        "error": error,
     }
 
 
@@ -338,6 +366,7 @@ class TestOpenemrOrchestrator:
 
         def fake_agent(url, note, **kwargs):
             assert kwargs["max_actions"] == 40
+            assert kwargs["max_cost_usd"] == 1.50
             assert note in kwargs["task"]
             return agent_row(0)
 
@@ -351,6 +380,7 @@ class TestOpenemrOrchestrator:
             n_compiled=3,
             n_agent=2,
             pace_s=30.0,
+            preflight=lambda: (True, None),
             sleep=sleeps.append,
             log=lambda _msg: None,
         )
@@ -360,5 +390,329 @@ class TestOpenemrOrchestrator:
         rows = results["runs"]["compiled"]
         assert [r["success"] for r in rows] == [True, False, True]
         assert "demo instance hiccup" in rows[1]["error"]
+        assert results["agent_arm_note"] is None
         assert (tmp_path / "results.json").is_file()
         assert (tmp_path / "BENCHMARK.md").is_file()
+
+
+# -- cost guardrails -------------------------------------------------------
+
+
+class TestComputeCostCacheBuckets:
+    def test_each_bucket_priced_at_list(self) -> None:
+        import math
+
+        mtok = 1_000_000
+        assert agent_baseline.compute_cost(mtok, 0) == 3.00
+        assert agent_baseline.compute_cost(0, mtok) == 15.00
+        # 5-minute cache writes bill at 1.25x input list price.
+        assert agent_baseline.compute_cost(0, 0, mtok, 0) == 3.75
+        # Cache reads bill at 0.1x input list price.
+        assert math.isclose(agent_baseline.compute_cost(0, 0, 0, mtok), 0.30)
+
+    def test_buckets_sum(self) -> None:
+        cost = agent_baseline.compute_cost(
+            500_000, 100_000, 200_000, 2_000_000
+        )
+        expected = 0.5 * 3.00 + 0.1 * 15.00 + 0.2 * 3.75 + 2.0 * 0.30
+        assert abs(cost - expected) < 1e-9
+
+
+class TestPerRunCostCap:
+    def test_cap_trips_and_stops_loop(self) -> None:
+        # 200K uncached input tokens/call = $0.60/call at list. With a
+        # $1.00 cap the second call exceeds it; the loop must stop with
+        # stopped="cost_cap" without executing that turn's actions.
+        backend = FakeBackend()
+        click = tool_use({"action": "left_click", "coordinate": [10, 10]})
+        client = FakeClient(
+            [
+                response([click], "tool_use", input_tokens=200_000),
+                response([click], "tool_use", input_tokens=200_000),
+                response([click], "tool_use", input_tokens=200_000),
+            ]
+        )
+        result = run_agent(backend, "task", client=client, max_cost_usd=1.0)
+        assert result.stopped == "cost_cap"
+        assert result.api_calls == 2
+        assert result.actions == 1  # second turn's action never executed
+        assert result.cost_usd > 1.0
+        assert client.script  # third scripted response never requested
+
+    def test_capped_run_returns_normally_with_counters(self) -> None:
+        backend = FakeBackend()
+        client = FakeClient(
+            [
+                response(
+                    [],
+                    "end_turn",
+                    input_tokens=1_000_000,
+                    cache_creation_input_tokens=100_000,
+                    cache_read_input_tokens=400_000,
+                )
+            ]
+        )
+        result = run_agent(backend, "task", client=client, max_cost_usd=0.5)
+        assert result.stopped == "cost_cap"
+        assert result.input_tokens == 1_000_000
+        assert result.cache_creation_input_tokens == 100_000
+        assert result.cache_read_input_tokens == 400_000
+        assert result.cost_usd == agent_baseline.compute_cost(
+            1_000_000, 50, 100_000, 400_000
+        )
+
+
+class TestCacheControlPlacement:
+    def test_tools_and_newest_message_marked_stale_stripped(self) -> None:
+        backend = FakeBackend()
+        click = tool_use({"action": "left_click", "coordinate": [10, 10]})
+        client = FakeClient(
+            [
+                response([click], "tool_use"),
+                response([click], "tool_use"),
+                response([], "end_turn"),
+            ]
+        )
+        run_agent(backend, "task", client=client)
+        assert len(client.calls) == 3
+        for call in client.calls:
+            # The tool definition carries a stable breakpoint on every call.
+            assert call["tools"][0]["cache_control"] == {"type": "ephemeral"}
+            # Exactly one per-turn marker, on the last block of the last
+            # (newest user) message; stale markers are stripped.
+            marked = [
+                (mi, bi)
+                for mi, msg in enumerate(call["messages"])
+                if isinstance(msg.get("content"), list)
+                for bi, block in enumerate(msg["content"])
+                if isinstance(block, dict) and "cache_control" in block
+            ]
+            last_mi = len(call["messages"]) - 1
+            last_bi = len(call["messages"][last_mi]["content"]) - 1
+            assert marked == [(last_mi, last_bi)], call["messages"]
+
+    def test_first_call_task_string_becomes_marked_text_block(self) -> None:
+        backend = FakeBackend()
+        client = FakeClient([response([], "end_turn")])
+        run_agent(backend, "do the thing", client=client)
+        (msg,) = client.calls[0]["messages"]
+        assert msg["content"] == [
+            {
+                "type": "text",
+                "text": "do the thing",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+
+def _patch_arms(monkeypatch: Any, agent_fn: Any) -> None:
+    monkeypatch.setattr(
+        openemr_benchmark, "_compiled_run",
+        lambda bundle, url, run_dir, note, **kw: compiled_row(0),
+    )
+    monkeypatch.setattr(openemr_benchmark, "_agent_run", agent_fn)
+
+
+class TestTotalCostCap:
+    def test_truncates_arm_and_discloses(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        _patch_arms(
+            monkeypatch, lambda url, note, **kw: agent_row(0, cost=3.0)
+        )
+        results = run_openemr_benchmark(
+            tmp_path,
+            tmp_path / "bundle",
+            n_compiled=1,
+            n_agent=5,
+            pace_s=0.0,
+            max_cost_per_run_usd=3.0,
+            max_total_cost_usd=8.0,
+            preflight=lambda: (True, None),
+            sleep=lambda _s: None,
+            log=lambda _msg: None,
+        )
+        # Runs 1 and 2 fit ($0+$3, $3+$3 <= $8); run 3 could reach $9.
+        assert len(results["runs"]["agent"]) == 2
+        note = results["agent_arm_note"]
+        assert "truncated by $8.00 cost ceiling after 2 of 5 runs" in note
+        assert note in (tmp_path / "BENCHMARK.md").read_text()
+        assert note in (tmp_path / "results.json").read_text()
+
+
+class TestRowsJsonl:
+    def test_appended_after_every_run_in_both_arms(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        import json as _json
+
+        _patch_arms(monkeypatch, lambda url, note, **kw: agent_row(0))
+        run_openemr_benchmark(
+            tmp_path,
+            tmp_path / "bundle",
+            n_compiled=3,
+            n_agent=2,
+            pace_s=0.0,
+            preflight=lambda: (True, None),
+            sleep=lambda _s: None,
+            log=lambda _msg: None,
+        )
+        lines = (tmp_path / "rows.jsonl").read_text().splitlines()
+        rows = [_json.loads(line) for line in lines]
+        assert [r["arm"] for r in rows] == ["compiled"] * 3 + ["agent"] * 2
+
+    def test_rows_survive_a_mid_arm_crash(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        # An unexpected crash on compiled run 3 must not lose runs 1-2.
+        import json as _json
+
+        calls = {"n": 0}
+
+        def crashing_compiled(bundle, url, run_dir, note, **kw):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise KeyboardInterrupt  # not caught by the per-run except
+            return compiled_row(0)
+
+        monkeypatch.setattr(
+            openemr_benchmark, "_compiled_run", crashing_compiled
+        )
+        try:
+            run_openemr_benchmark(
+                tmp_path,
+                tmp_path / "bundle",
+                n_compiled=5,
+                n_agent=0,
+                pace_s=0.0,
+                preflight=lambda: (True, None),
+                sleep=lambda _s: None,
+                log=lambda _msg: None,
+            )
+        except KeyboardInterrupt:
+            pass
+        lines = (tmp_path / "rows.jsonl").read_text().splitlines()
+        assert len(lines) == 2
+        assert all(_json.loads(line)["arm"] == "compiled" for line in lines)
+
+
+class TestBillingErrorAbort:
+    def test_two_consecutive_billing_errors_abort_arm(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        _patch_arms(
+            monkeypatch,
+            lambda url, note, **kw: agent_row(
+                0,
+                success=False,
+                cost=0.0,
+                error=(
+                    "AuthenticationError: Error code: 401 - your credit "
+                    "balance is too low"
+                ),
+            ),
+        )
+        results = run_openemr_benchmark(
+            tmp_path,
+            tmp_path / "bundle",
+            n_compiled=1,
+            n_agent=6,
+            pace_s=0.0,
+            preflight=lambda: (True, None),
+            sleep=lambda _s: None,
+            log=lambda _msg: None,
+        )
+        assert len(results["runs"]["agent"]) == 2
+        note = results["agent_arm_note"]
+        assert "aborted after 2 consecutive auth/billing errors" in note
+        assert note in (tmp_path / "BENCHMARK.md").read_text()
+
+    def test_transient_errors_do_not_abort(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        # Non-billing failures (demo weather) keep the arm going.
+        _patch_arms(
+            monkeypatch,
+            lambda url, note, **kw: agent_row(
+                0, success=False, cost=0.01,
+                error="TimeoutError: navigation timed out",
+            ),
+        )
+        results = run_openemr_benchmark(
+            tmp_path,
+            tmp_path / "bundle",
+            n_compiled=1,
+            n_agent=4,
+            pace_s=0.0,
+            preflight=lambda: (True, None),
+            sleep=lambda _s: None,
+            log=lambda _msg: None,
+        )
+        assert len(results["runs"]["agent"]) == 4
+        assert results["agent_arm_note"] is None
+
+    def test_billing_error_detector(self) -> None:
+        looks = openemr_benchmark._looks_like_billing_error
+        assert looks("Error code: 401 - invalid x-api-key")
+        assert looks("Error code: 402 - payment required")
+        assert looks("your credit balance is too low")
+        assert looks("BillingError: card declined")
+        assert not looks("TimeoutError: page load took 45000 ms")
+        assert not looks("replayed 14000 steps")  # 400 as a substring only
+
+
+class TestPreflight:
+    def test_failed_preflight_skips_agent_arm_keeps_compiled(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        def no_agent(url, note, **kw):  # pragma: no cover - must not run
+            raise AssertionError("agent arm must not run after preflight")
+
+        _patch_arms(monkeypatch, no_agent)
+        results = run_openemr_benchmark(
+            tmp_path,
+            tmp_path / "bundle",
+            n_compiled=2,
+            n_agent=5,
+            pace_s=0.0,
+            preflight=lambda: (
+                False,
+                "AuthenticationError: credit balance too low",
+            ),
+            sleep=lambda _s: None,
+            log=lambda _msg: None,
+        )
+        assert len(results["runs"]["compiled"]) == 2
+        assert results["runs"]["agent"] == []
+        note = results["agent_arm_note"]
+        assert note.startswith("skipped: API preflight failed")
+        assert "credit balance too low" in note
+        # Compiled-only outputs are still written cleanly.
+        assert note in (tmp_path / "BENCHMARK.md").read_text()
+        assert (tmp_path / "latency_cost.png").is_file()
+
+    def test_preflight_check_reports_exception(self) -> None:
+        class Boom:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    raise RuntimeError("Error code: 402 - no credit")
+
+        ok, err = agent_baseline.preflight_check(client=Boom())
+        assert not ok
+        assert "402" in err
+
+    def test_preflight_check_passes_minimal_call(self) -> None:
+        seen = {}
+
+        class Ok:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    seen.update(kwargs)
+                    return SimpleNamespace()
+
+        ok, err = agent_baseline.preflight_check(client=Ok())
+        assert ok and err is None
+        assert seen["max_tokens"] == 1
+        assert seen["model"] == agent_baseline.MODEL

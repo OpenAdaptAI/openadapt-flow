@@ -17,14 +17,34 @@ Public-demo courtesy: runs are paced ``pace_s`` seconds apart, compiled and
 agent Ns are small (defaults 20 and 10), and per-run failures are recorded
 as data points rather than retried against the shared instance.
 
-Outputs written to ``out_dir``: ``results.json``, ``BENCHMARK.md``, and
-``latency_cost.png`` (same chart as the MockMed benchmark).
+Hard cost guardrails (the agent arm spends real money; the compiled arm is
+free):
+
+- **Preflight**: one minimal API call before any run. If it fails with an
+  auth/billing error, the compiled arm still runs and the agent arm is
+  recorded as skipped — a dead key is a reportable outcome, not a crash.
+- **Per-run cap**: each agent run is passed ``max_cost_per_run_usd``
+  (default $1.50 at list price); the loop stops with ``stopped="cost_cap"``.
+- **Total cap**: before each agent run, if cumulative agent-arm cost plus
+  the per-run cap could exceed ``max_total_cost_usd`` (default $8.00), the
+  arm stops and the truncation is disclosed in results and markdown.
+- **Billing-error abort**: two consecutive agent runs failing with what
+  looks like an auth/billing/credit error abort the arm — no point burning
+  pace time on a dead key.
+- **Incremental persistence**: every finished run (both arms) is appended
+  as one JSON line to ``out_dir/rows.jsonl``, so a stop or crash never
+  loses completed-run data.
+
+Outputs written to ``out_dir``: ``rows.jsonl`` (incremental),
+``results.json``, ``BENCHMARK.md``, and ``latency_cost.png`` (same chart
+as the MockMed benchmark).
 """
 
 from __future__ import annotations
 
 import json
 import platform
+import re
 import shutil
 import tempfile
 import time
@@ -48,6 +68,29 @@ N_AGENT = 10
 PACE_S = 30.0
 #: 18 steps plus headroom for dense, slow screens.
 AGENT_MAX_ACTIONS = 40
+#: Hard ceiling on total agent-arm spend at list price.
+MAX_TOTAL_COST_USD = 8.00
+#: Consecutive auth/billing-looking failures that abort the agent arm.
+BILLING_ABORT_AFTER = 2
+
+#: Auth/billing/credit failure fingerprints: HTTP 400-403 as standalone
+#: numbers, or credit/billing wording anywhere in the error string.
+_BILLING_ERROR_RE = re.compile(
+    r"\b40[0-3]\b|credit|billing|authentication|permission", re.IGNORECASE
+)
+
+
+def _looks_like_billing_error(message: str) -> bool:
+    """True when an error string looks like an auth/billing/credit failure.
+
+    Args:
+        message: The recorded row ``error`` string.
+
+    Returns:
+        Whether the error suggests the API key cannot spend (as opposed to
+        a transient network/demo failure worth continuing past).
+    """
+    return bool(_BILLING_ERROR_RE.search(message))
 
 # One unique sentence per run across BOTH arms. Deliberately mutually
 # dissimilar: several runs' notes are visible in the same message list at
@@ -108,17 +151,31 @@ def note_for(arm: str, i: int) -> str:
 def aggregate_openemr_results(
     compiled_rows: list[dict[str, Any]],
     agent_rows: list[dict[str, Any]],
+    *,
+    agent_arm_note: str | None = None,
+    max_cost_per_run_usd: float = agent_baseline.MAX_COST_USD,
+    max_total_cost_usd: float = MAX_TOTAL_COST_USD,
 ) -> dict[str, Any]:
     """Assemble the full results document from per-run rows.
 
     Args:
         compiled_rows: Rows from the compiled arm.
         agent_rows: Rows from the agent arm.
+        agent_arm_note: Honest-disclosure note when the agent arm was
+            skipped (preflight failure), truncated (total cost cap), or
+            aborted (consecutive billing errors); None when it ran fully.
+        max_cost_per_run_usd: Per-run cost cap that was enforced.
+        max_total_cost_usd: Total agent-arm cost ceiling that was enforced.
 
     Returns:
         The results dict serialized to ``results.json``.
     """
     return {
+        "agent_arm_note": agent_arm_note,
+        "cost_caps_usd": {
+            "per_run": max_cost_per_run_usd,
+            "total": max_total_cost_usd,
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "task": (
             "OpenEMR public demo: log in, search the demo patient, open "
@@ -134,6 +191,8 @@ def aggregate_openemr_results(
         "pricing_usd_per_mtok": {
             "input": agent_baseline.INPUT_USD_PER_MTOK,
             "output": agent_baseline.OUTPUT_USD_PER_MTOK,
+            "cache_write": agent_baseline.CACHE_WRITE_USD_PER_MTOK,
+            "cache_read": agent_baseline.CACHE_READ_USD_PER_MTOK,
             "note": (
                 "list price; an introductory $2/$10 rate applies through "
                 "2026-08-31"
@@ -160,6 +219,11 @@ def render_openemr_markdown(results: dict[str, Any]) -> str:
     c = results["arms"]["compiled"]
     a = results["arms"]["agent"]
     date = results["generated_at"][:10]
+    caps = results.get("cost_caps_usd", {})
+    per_run_cap = caps.get("per_run", agent_baseline.MAX_COST_USD)
+    total_cap = caps.get("total", MAX_TOTAL_COST_USD)
+    note = results.get("agent_arm_note")
+    note_block = f"\n> **Agent arm disclosure:** {note}\n" if note else ""
     agent_errors = [
         r for r in results["runs"]["agent"] if not r["success"]
     ]
@@ -214,7 +278,10 @@ BOTH arms), save.
 | total model cost | $0 | ${a['cost_usd_total']:.2f} |
 | tokens (in/out, total) | 0 / 0 | {a['input_tokens_total']:,} / \
 {a['output_tokens_total']:,} |
-
+| cache tokens (write/read, total) | 0 / 0 | \
+{a['cache_creation_input_tokens_total']:,} / \
+{a['cache_read_input_tokens_total']:,} |
+{note_block}
 Failed runs, reported honestly:
 
 Compiled arm:
@@ -267,9 +334,21 @@ below.
 - **Cost** is computed from API `usage` token counts at list pricing
   (${results['pricing_usd_per_mtok']['input']:.2f} /
   ${results['pricing_usd_per_mtok']['output']:.2f} per MTok input/output
-  for {results['model']}). An introductory $2/$10 rate applies through
-  2026-08-31, so billed cost today is about a third lower than reported.
-  Compiled replay makes zero model calls.
+  for {results['model']}, plus prompt-cache writes at 1.25x and cache
+  reads at 0.1x the input rate). An introductory $2/$10 rate applies
+  through 2026-08-31, so billed cost today is about a third lower than
+  reported. Compiled replay makes zero model calls.
+- **Prompt caching.** The agent loop places `cache_control` breakpoints on
+  the tool definition and the newest user message each turn, so each API
+  call reuses the cached conversation prefix; screenshot truncation
+  partially invalidates the prefix each turn, so the realized hit rate is
+  below 100% by design. Cache token counts are reported per run.
+- **Hard cost guardrails.** Every agent run is capped at
+  ${per_run_cap:.2f} (list price; the loop stops with `stopped="cost_cap"`
+  and the run is recorded as-is), and the whole agent arm is capped at
+  ${total_cap:.2f} — if the next run could exceed the ceiling, the arm
+  stops and the truncation is disclosed above. A preflight API call runs
+  before any spend; two consecutive auth/billing failures abort the arm.
 
 ## Caveats — read before quoting these numbers
 
@@ -340,8 +419,11 @@ def run_openemr_benchmark(
     n_agent: int = N_AGENT,
     pace_s: float = PACE_S,
     max_actions: int = AGENT_MAX_ACTIONS,
+    max_cost_per_run_usd: float = agent_baseline.MAX_COST_USD,
+    max_total_cost_usd: float = MAX_TOTAL_COST_USD,
     headed: bool = False,
     agent_client: Any = None,
+    preflight: Callable[[], tuple[bool, str | None]] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     log: Callable[[str], None] = print,
 ) -> dict[str, Any]:
@@ -352,17 +434,29 @@ def run_openemr_benchmark(
     ``scripts/openemr_demo.py benchmark``, which records first and then
     calls this). Per-run exceptions in either arm are recorded as failed
     rows, never raised — a broken shared demo is a result, not a crash.
+    Cost guardrails (preflight, per-run cap, total cap, billing-error
+    abort, incremental ``rows.jsonl``) are described in the module
+    docstring.
 
     Args:
-        out_dir: Directory for ``results.json`` / ``BENCHMARK.md`` / chart.
+        out_dir: Directory for ``rows.jsonl`` / ``results.json`` /
+            ``BENCHMARK.md`` / chart.
         bundle_dir: Compiled OpenEMR workflow bundle.
         url: OpenEMR demo URL.
         n_compiled: Compiled-replay iterations.
         n_agent: Agent iterations.
         pace_s: Courtesy sleep between runs (both arms).
         max_actions: Agent action budget.
+        max_cost_per_run_usd: Hard per-agent-run cost cap at list price.
+        max_total_cost_usd: Hard ceiling on total agent-arm list-price
+            spend; the arm is truncated (with disclosure) before any run
+            that could exceed it.
         headed: Run browsers headed (debugging).
         agent_client: Optional injected Anthropic client (tests).
+        preflight: Callable returning ``(ok, error)`` used to probe the
+            API before any run; None uses
+            :func:`agent_baseline.preflight_check` against
+            ``agent_client`` (or a real client when that is None too).
         sleep: Sleep function (injectable for tests).
         log: Progress logger.
 
@@ -371,9 +465,30 @@ def run_openemr_benchmark(
     """
     out = Path(out_dir)
     bundle = Path(bundle_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    # Incremental per-run persistence: one JSON line per finished run, so
+    # a stop or crash never loses completed-run data.
+    rows_path = out / "rows.jsonl"
+
+    def persist(row: dict[str, Any]) -> None:
+        with rows_path.open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
+
     # Final screenshots per run, for post-hoc audit of the OCR verdict
     # (kept out of version control; see .gitignore).
     finals = out / "finals"
+
+    # Preflight BEFORE any run: a dead key skips the agent arm cleanly
+    # (the compiled arm costs $0 and still runs).
+    if preflight is None:
+        preflight = lambda: agent_baseline.preflight_check(  # noqa: E731
+            client=agent_client
+        )
+    agent_arm_note: str | None = None
+    preflight_ok, preflight_err = preflight()
+    if not preflight_ok:
+        agent_arm_note = f"skipped: API preflight failed — {preflight_err}"
+        log(f"AGENT ARM SKIPPED: {agent_arm_note}")
 
     compiled_rows: list[dict[str, Any]] = []
     agent_rows: list[dict[str, Any]] = []
@@ -403,12 +518,15 @@ def run_openemr_benchmark(
                     "api_calls": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
                     "cost_usd": 0.0,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             row["i"] = i
             row["note"] = note
             compiled_rows.append(row)
+            persist(row)
             if row["success"]:
                 shutil.rmtree(run_dir, ignore_errors=True)
             elif run_dir.exists():
@@ -427,22 +545,56 @@ def run_openemr_benchmark(
                 f"{row['wall_s']:.1f}s err={row['error']}"
             )
 
+        consecutive_billing_errors = 0
         for i in range(n_agent):
+            if not preflight_ok:
+                break
+            spent = sum(r["cost_usd"] for r in agent_rows)
+            if spent + max_cost_per_run_usd > max_total_cost_usd:
+                agent_arm_note = (
+                    f"agent arm truncated by ${max_total_cost_usd:.2f} "
+                    f"cost ceiling after {i} of {n_agent} runs "
+                    f"(${spent:.2f} spent at list price; the next run's "
+                    f"${max_cost_per_run_usd:.2f} cap could exceed the "
+                    f"ceiling)"
+                )
+                log(f"AGENT ARM TRUNCATED: {agent_arm_note}")
+                break
             sleep(pace_s)
             note = note_for("agent", i)
-            row = _agent_run(
-                url,
-                note,
-                task=agent_baseline.openemr_task_prompt(note),
-                verify_fn=verify_note_saved,
-                save_final_to=finals / f"agent_{i:03d}.png",
-                client=agent_client,
-                headed=headed,
-                max_actions=max_actions,
-            )
+            try:
+                row = _agent_run(
+                    url,
+                    note,
+                    task=agent_baseline.openemr_task_prompt(note),
+                    verify_fn=verify_note_saved,
+                    save_final_to=finals / f"agent_{i:03d}.png",
+                    client=agent_client,
+                    headed=headed,
+                    max_actions=max_actions,
+                    max_cost_usd=max_cost_per_run_usd,
+                    log=log,
+                )
+            except Exception as exc:  # noqa: BLE001 - a failed run is data
+                row = {
+                    "arm": "agent",
+                    "wall_s": 0.0,
+                    "success": False,
+                    "actions": 0,
+                    "api_calls": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cost_usd": 0.0,
+                    "stopped": "error",
+                    "model_stop_reason": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
             row["i"] = i
             row["note"] = note
             agent_rows.append(row)
+            persist(row)
             log(
                 f"agent {i + 1}/{n_agent}: success={row['success']} "
                 f"ratio={row.get('matched_ratio')} "
@@ -451,8 +603,27 @@ def run_openemr_benchmark(
                 f"actions={row['actions']} stopped={row.get('stopped')} "
                 f"err={row['error']}"
             )
+            if row.get("error") and _looks_like_billing_error(row["error"]):
+                consecutive_billing_errors += 1
+                if consecutive_billing_errors >= BILLING_ABORT_AFTER:
+                    agent_arm_note = (
+                        f"agent arm aborted after "
+                        f"{consecutive_billing_errors} consecutive "
+                        f"auth/billing errors ({i + 1} of {n_agent} runs "
+                        f"attempted) — last error: {row['error']}"
+                    )
+                    log(f"AGENT ARM ABORTED: {agent_arm_note}")
+                    break
+            else:
+                consecutive_billing_errors = 0
 
-    results = aggregate_openemr_results(compiled_rows, agent_rows)
+    results = aggregate_openemr_results(
+        compiled_rows,
+        agent_rows,
+        agent_arm_note=agent_arm_note,
+        max_cost_per_run_usd=max_cost_per_run_usd,
+        max_total_cost_usd=max_total_cost_usd,
+    )
     results["pace_s"] = pace_s
     write_openemr_outputs(results, out)
     log(f"Wrote {out / 'results.json'}, BENCHMARK.md, latency_cost.png")

@@ -189,6 +189,28 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     return 0 if result["success_count"] == result["n"] else 1
 
 
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    from openadapt_flow.benchmark.run_benchmark import run_benchmark
+
+    results = run_benchmark(
+        Path(args.out),
+        n_compiled=args.n_compiled,
+        n_agent=args.n_agent,
+        note_text=args.note_text,
+        headed=args.headed,
+    )
+    compiled = results["arms"]["compiled"]
+    agent = results["arms"]["agent"]
+    print(
+        f"compiled: {compiled['success_count']}/{compiled['n']} "
+        f"(p50 {compiled['wall_s_p50']:.1f}s, $0/run) | "
+        f"agent: {agent['success_count']}/{agent['n']} "
+        f"(p50 {agent['wall_s_p50']:.1f}s, "
+        f"${agent['cost_usd_per_run']:.4f}/run)"
+    )
+    return 0
+
+
 def _cmd_emit_skill(args: argparse.Namespace) -> int:
     from openadapt_flow.emit.skill import emit_skill
 
@@ -317,6 +339,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--headed", action="store_true", help="Run the browser headed"
     )
     p.set_defaults(func=_cmd_bench)
+
+    p = sub.add_parser(
+        "benchmark",
+        help=(
+            "Benchmark compiled replay vs. a Claude computer-use agent on "
+            "the MockMed triage task (agent arm needs an Anthropic API key "
+            "and costs real money)"
+        ),
+    )
+    p.add_argument(
+        "--n-compiled",
+        type=int,
+        default=100,
+        help="Compiled-replay iterations",
+    )
+    p.add_argument(
+        "--n-agent", type=int, default=20, help="Agent iterations"
+    )
+    p.add_argument(
+        "--out",
+        default="benchmark/",
+        help="Output directory for results.json / BENCHMARK.md / chart",
+    )
+    p.add_argument(
+        "--note-text",
+        default="Follow-up in 2 weeks; BP recheck.",
+        help="Note text both arms enter",
+    )
+    p.add_argument(
+        "--headed", action="store_true", help="Run the browsers headed"
+    )
+    p.set_defaults(func=_cmd_benchmark)
 
     p = sub.add_parser(
         "emit-skill", help="Emit an Agent Skills folder for a bundle"

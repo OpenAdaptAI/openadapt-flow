@@ -144,6 +144,91 @@ def test_template_global_fallback_with_scaled_click_point(screen, anchor):
     assert vision.template_calls[1] is None  # full-frame search
 
 
+def _icon_anchor() -> Anchor:
+    """Unlabeled (icon-only) anchor with one exact-offset landmark."""
+    return Anchor(
+        template="templates/pencil.png",
+        region=(100, 100, 50, 20),
+        click_point=(110, 105),
+        ocr_text=None,
+        landmarks=[
+            Landmark(
+                relation="left_of",
+                ocr_text="Messages",
+                distance_px=60,
+                dx_px=60,
+                dy_px=0,
+            )
+        ],
+    )
+
+
+def test_global_template_rejected_when_landmarks_contradict(screen):
+    """An unlabeled anchor's global template match is rejected when its
+    locatable landmarks place the target elsewhere (repeated-icon UIs: an
+    identical glyph on another card outscores the true target); the ladder
+    falls through to geometry, which resolves via the landmark."""
+    vision = FakeVision()
+    vision.template_results = [
+        None,  # local search misses (content near the true target changed)
+        # Global finds a look-alike icon 300px below the true target.
+        Match(point=(125, 410), region=(100, 400, 50, 20), confidence=0.99),
+    ]
+    # The landmark says the target is at (50, 105) + (60, 0) = (110, 105).
+    vision.text_results = {
+        "Messages": Match(
+            point=(50, 105), region=(20, 95, 60, 20), confidence=0.95
+        )
+    }
+    resolution, matched = resolve(
+        _icon_anchor(), screen, vision, template_png=b"tpl",
+        viewport=(300, 500),
+    )
+    assert resolution is not None
+    assert resolution.rung == "geometry"
+    assert resolution.point == (110, 105)
+
+
+def test_global_template_accepted_when_landmarks_agree(screen):
+    """The guard accepts a global match that the landmarks corroborate."""
+    vision = FakeVision()
+    vision.template_results = [
+        None,
+        # Global finds the icon 12px below its recorded position (layout
+        # shift), which the landmark agrees with.
+        Match(point=(125, 122), region=(100, 112, 50, 20), confidence=0.99),
+    ]
+    vision.text_results = {
+        "Messages": Match(
+            point=(50, 117), region=(20, 107, 60, 20), confidence=0.95
+        )
+    }
+    resolution, matched = resolve(
+        _icon_anchor(), screen, vision, template_png=b"tpl",
+        viewport=(300, 500),
+    )
+    assert resolution is not None
+    assert resolution.rung == "template_global"
+    assert matched == (100, 112, 50, 20)
+
+
+def test_global_template_accepted_when_no_landmark_locatable(screen):
+    """With no locatable landmark the global match is accepted unchallenged
+    (nothing to corroborate against)."""
+    vision = FakeVision()
+    vision.template_results = [
+        None,
+        Match(point=(125, 410), region=(100, 400, 50, 20), confidence=0.99),
+    ]
+    vision.text_results = {"Messages": None}
+    resolution, matched = resolve(
+        _icon_anchor(), screen, vision, template_png=b"tpl",
+        viewport=(300, 500),
+    )
+    assert resolution is not None
+    assert resolution.rung == "template_global"
+
+
 def test_ocr_rung_uses_match_point_directly(screen, anchor):
     vision = FakeVision()
     vision.text_results = {

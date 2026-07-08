@@ -8,6 +8,7 @@ Recording format (DESIGN.md):
       events.jsonl       # {"i":0,"kind":"click","x":123,"y":45,"t":1.20}
                          # {"i":1,"kind":"type","text":"...","param":"note",...}
                          # {"i":2,"kind":"key","key":"Enter","t":3.10}
+                         # {"i":3,"kind":"scroll","dx":0,"dy":400,"t":4.02}
       frames/{i:04d}_before.png
       frames/{i:04d}_after.png   # captured after the action settled
 
@@ -112,6 +113,13 @@ class Recorder:
     def press(self, key: str) -> None:
         """Press a key or chord (e.g. ``'Enter'``), recording the event."""
         self._record({"kind": "key", "key": key}, lambda: self._backend.press(key))
+
+    def scroll(self, dx: int, dy: int) -> None:
+        """Scroll by (dx, dy) pixels via the wheel, recording the event."""
+        self._record(
+            {"kind": "scroll", "dx": int(dx), "dy": int(dy)},
+            lambda: self._backend.scroll(int(dx), int(dy)),
+        )
 
     # -- lifecycle -----------------------------------------------------------
 

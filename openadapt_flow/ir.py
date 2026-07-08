@@ -34,6 +34,7 @@ class ActionKind(str, Enum):
     TYPE = "type"
     KEY = "key"
     WAIT = "wait"
+    SCROLL = "scroll"
 
 
 class Landmark(BaseModel):
@@ -93,6 +94,14 @@ class Postcondition(BaseModel):
     phash: Optional[str] = None
     phash_tolerance: int = 8
     timeout_s: float = 5.0
+    template: Optional[str] = Field(
+        default=None,
+        description=(
+            "Bundle-relative PNG crop of the expected REGION_STABLE content;"
+            " lets the check tolerate small layout shifts (content found"
+            " near, not exactly at, the recorded region)"
+        ),
+    )
 
 
 class Step(BaseModel):
@@ -103,6 +112,8 @@ class Step(BaseModel):
     text: Optional[str] = None  # literal text for TYPE
     param: Optional[str] = None  # if set, TYPE text comes from params[param]
     key: Optional[str] = None  # for KEY, e.g. "Enter"
+    scroll_dx: Optional[int] = None  # for SCROLL: wheel delta, px right
+    scroll_dy: Optional[int] = None  # for SCROLL: wheel delta, px down
     expect: list[Postcondition] = Field(default_factory=list)
     risk: Literal["reversible", "irreversible"] = "reversible"
     timeout_s: float = 10.0

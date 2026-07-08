@@ -386,12 +386,33 @@ def _postconditions(
     *,
     exclude_texts: tuple[str, ...] = (),
     avoid_labels: tuple[str, ...] = (),
+    bundle: Optional[Path] = None,
+    step_id: Optional[str] = None,
+    include_region_stable: bool = True,
 ) -> list[Postcondition]:
-    """Derive postconditions from a step's before/after frames."""
+    """Derive postconditions from a step's before/after frames.
+
+    When ``bundle`` and ``step_id`` are given, the REGION_STABLE
+    postcondition also carries a template crop of the expected region
+    content (``templates/<step_id>_expect.png``): real apps re-layout by a
+    few pixels between runs (auto-scrolling panes, banner heights), which a
+    fixed-position phash cannot tolerate — the replayer first looks for the
+    expected content NEAR the recorded region and only then falls back to
+    the exact-position hash.
+
+    ``include_region_stable=False`` skips the diff-based REGION_STABLE
+    entirely: for parameterized TYPE steps the changed region IS the typed
+    value's pixels, and the value varies per run — asserting its rendering
+    is the pixel-level equivalent of asserting the excluded text.
+    """
     if before_png is None or after_png is None:
         return []
     expect: list[Postcondition] = []
-    changed = _largest_changed_region(before_png, after_png)
+    changed = (
+        _largest_changed_region(before_png, after_png)
+        if include_region_stable
+        else None
+    )
     if changed is not None:
         after = cv2.imdecode(
             np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR
@@ -403,12 +424,17 @@ def _postconditions(
         x1 = min(frame_w, x + w + REGION_STABLE_PAD)
         y1 = min(frame_h, y + h + REGION_STABLE_PAD)
         padded: Region = (x0, y0, x1 - x0, y1 - y0)
+        template_rel: Optional[str] = None
+        if bundle is not None and step_id is not None:
+            template_rel = f"templates/{step_id}_expect.png"
+            (bundle / template_rel).write_bytes(_crop_png(after_png, padded))
         expect.append(
             Postcondition(
                 kind=PostconditionKind.REGION_STABLE,
                 region=padded,
                 phash=phash_png(after_png, region=padded),
                 phash_tolerance=REGION_STABLE_TOLERANCE,
+                template=template_rel,
             )
         )
     text_pc = _new_text_postcondition(
@@ -572,6 +598,28 @@ def compile_recording(
                     after_png,
                 )
             )
+        elif kind == "scroll":
+            dx, dy = int(event.get("dx", 0)), int(event.get("dy", 0))
+            # SCROLL steps get NO postconditions (note the (None, None)
+            # frames): scrolling shifts the whole viewport, so a frame diff
+            # spans nearly the full screen and would assert mutable page
+            # content as an invariant. The scroll's purpose — bringing the
+            # next target into view — is verified by the next anchored
+            # step's resolution ladder, which fails if the scroll did not
+            # land.
+            pending.append(
+                (
+                    Step(
+                        id=step_id,
+                        intent=f"scroll by ({dx}, {dy})",
+                        action=ActionKind.SCROLL,
+                        scroll_dx=dx,
+                        scroll_dy=dy,
+                    ),
+                    None,
+                    None,
+                )
+            )
         else:
             raise ValueError(f"unknown event kind {kind!r} (event {i})")
 
@@ -589,6 +637,13 @@ def compile_recording(
             step_after,
             exclude_texts=exclude_texts,
             avoid_labels=anchor_labels,
+            bundle=bundle,
+            step_id=step.id,
+            # A parameterized TYPE step's changed region is the typed
+            # value's own pixels — never assert it (it varies per run).
+            include_region_stable=not (
+                step.action is ActionKind.TYPE and step.param is not None
+            ),
         )
         steps.append(step)
 

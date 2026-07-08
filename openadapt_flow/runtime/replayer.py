@@ -30,7 +30,13 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.runtime import heal as heal_mod
-from openadapt_flow.runtime.resolver import is_below_ocr, resolve
+from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
+
+# REGION_STABLE template check: how far the expected content may shift from
+# the recorded region (real apps re-layout by a few pixels between runs),
+# and the minimum template-match score to accept it.
+PC_TEMPLATE_SEARCH_PAD = 80
+PC_TEMPLATE_THRESHOLD = 0.9
 
 
 class Replayer:
@@ -167,6 +173,27 @@ class Replayer:
             resolution, matched_region, error = self._resolve_step(
                 step, before_png, bundle_dir
             )
+            # Retry ladder failures with fresh settled frames until
+            # ``step.timeout_s``: a remote app can present a settled-looking
+            # but still-loading frame (wait_settled times out), and the
+            # target only appears moments later. Structural errors (missing
+            # anchor) and the risk gate (resolution is not None) never retry.
+            deadline = t0 + step.timeout_s
+            while (
+                error is not None
+                and resolution is None
+                and step.anchor is not None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(self.poll_interval_s)
+                before_png = self.vision.wait_settled(self.backend)
+                result.before_png = self._save_step_png(
+                    run_dir, step.id, "before", before_png
+                )
+                last_frame = before_png
+                resolution, matched_region, error = self._resolve_step(
+                    step, before_png, bundle_dir
+                )
             result.resolution = resolution
             if error is None:
                 error = self._act(step, resolution, params)
@@ -175,7 +202,7 @@ class Replayer:
                 after_png = self.vision.wait_settled(self.backend)
                 last_frame = after_png
                 postconditions_ok, last_frame, failed = (
-                    self._check_postconditions(step, after_png)
+                    self._check_postconditions(step, after_png, bundle_dir)
                 )
                 result.postconditions_ok = postconditions_ok
                 if not postconditions_ok:
@@ -312,12 +339,16 @@ class Replayer:
             # WAIT means wait_settled only; the post-action settle handles it.
             return None
 
+        if step.action is ActionKind.SCROLL:
+            self.backend.scroll(step.scroll_dx or 0, step.scroll_dy or 0)
+            return None
+
         return f"Step '{step.id}' has unsupported action {step.action!r}"
 
     # -- postconditions --------------------------------------------------------
 
     def _check_postconditions(
-        self, step: Step, frame_png: bytes
+        self, step: Step, frame_png: bytes, bundle_dir: Path
     ) -> tuple[bool, bytes, list[str]]:
         """Poll postconditions until each passes or times out.
 
@@ -330,7 +361,7 @@ class Replayer:
             on, plus human-readable descriptions of the postconditions that
             failed the final check (empty when ok).
         """
-        ok, frame_png = self._poll_postconditions(step, frame_png)
+        ok, frame_png = self._poll_postconditions(step, frame_png, bundle_dir)
         if ok:
             return True, frame_png, []
         # One re-settle retry.
@@ -338,7 +369,7 @@ class Replayer:
         failed = [
             self._describe_postcondition(pc)
             for pc in step.expect
-            if not self._postcondition_passes(pc, frame_png)
+            if not self._postcondition_passes(pc, frame_png, bundle_dir)
         ]
         return not failed, frame_png, failed
 
@@ -351,13 +382,13 @@ class Replayer:
         return f"{kind} region={tuple(pc.region) if pc.region else None}"
 
     def _poll_postconditions(
-        self, step: Step, frame_png: bytes
+        self, step: Step, frame_png: bytes, bundle_dir: Path
     ) -> tuple[bool, bytes]:
         """First pass: poll each postcondition until pass or timeout."""
         for pc in step.expect:
             deadline = time.monotonic() + pc.timeout_s
             while True:
-                if self._postcondition_passes(pc, frame_png):
+                if self._postcondition_passes(pc, frame_png, bundle_dir):
                     break
                 if time.monotonic() >= deadline:
                     return False, frame_png
@@ -365,7 +396,9 @@ class Replayer:
                 frame_png = self.backend.screenshot()
         return True, frame_png
 
-    def _postcondition_passes(self, pc: Any, frame_png: bytes) -> bool:
+    def _postcondition_passes(
+        self, pc: Any, frame_png: bytes, bundle_dir: Path
+    ) -> bool:
         """Evaluate a single postcondition against a frame."""
         kind = pc.kind.value if hasattr(pc.kind, "value") else pc.kind
         if kind == "text_present":
@@ -381,10 +414,37 @@ class Replayer:
         if kind == "region_stable":
             if pc.region is None or pc.phash is None:
                 return True
-            live = self.vision.phash_png(frame_png, region=tuple(pc.region))
+            region = tuple(pc.region)
+            # Template check first: real apps re-layout by a few pixels
+            # between runs (auto-scrolling panes, variable banner heights),
+            # which the exact-position phash cannot tolerate — accept the
+            # expected content anywhere near the recorded region.
+            template_png = self._postcondition_template(pc, bundle_dir)
+            if template_png is not None:
+                search = pad_region(
+                    region, PC_TEMPLATE_SEARCH_PAD, self.backend.viewport
+                )
+                match = self.vision.find_template(
+                    frame_png,
+                    template_png,
+                    search_region=search,
+                    threshold=PC_TEMPLATE_THRESHOLD,
+                )
+                if match is not None:
+                    return True
+            live = self.vision.phash_png(frame_png, region=region)
             distance = self.vision.phash_distance(live, pc.phash)
             return distance <= pc.phash_tolerance
         return False
+
+    @staticmethod
+    def _postcondition_template(pc: Any, bundle_dir: Path) -> Optional[bytes]:
+        """Bytes of a REGION_STABLE postcondition's template crop, if any."""
+        rel = getattr(pc, "template", None)
+        if not rel:
+            return None
+        path = Path(bundle_dir) / rel
+        return path.read_bytes() if path.is_file() else None
 
     # -- healing ---------------------------------------------------------------
 

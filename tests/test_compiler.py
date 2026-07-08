@@ -236,9 +236,10 @@ class TestCompileRecording:
         assert all(
             pc.kind is not PostconditionKind.TEXT_PRESENT for pc in step.expect
         )
-        # but the diff-based REGION_STABLE is still derived
-        assert any(
-            pc.kind is PostconditionKind.REGION_STABLE for pc in step.expect
+        # and the diff-based REGION_STABLE is skipped too: the changed
+        # region is the typed value's own pixels, which vary per run
+        assert all(
+            pc.kind is not PostconditionKind.REGION_STABLE for pc in step.expect
         )
 
     def test_key_step(self, compiled) -> None:
@@ -276,6 +277,63 @@ class TestCompileRecording:
         assert "triage-demo" in source
         # regenerating from the model matches what's on disk
         assert source == render_workflow_py(compiled["workflow"])
+
+    def test_region_stable_carries_expected_content_template(
+        self, compiled
+    ) -> None:
+        """Every REGION_STABLE postcondition ships a crop of the expected
+        region content so the replayer can tolerate small layout shifts."""
+        bundle = compiled["bundle"]
+        seen = 0
+        for step in compiled["workflow"].steps:
+            for pc in step.expect:
+                if pc.kind is PostconditionKind.REGION_STABLE:
+                    assert pc.template, f"{step.id} region_stable lacks crop"
+                    assert (bundle / pc.template).exists()
+                    seen += 1
+        assert seen > 0
+
+    def test_scroll_event_compiles(self, tmp_path: Path) -> None:
+        """scroll events compile to SCROLL steps with deltas and NO
+        postconditions (a scroll shifts the whole viewport; asserting the
+        resulting frame would bake mutable page content into the bundle —
+        the next anchored step's resolution verifies the scroll landed)."""
+        recording = tmp_path / "rec"
+        (recording / "frames").mkdir(parents=True)
+        before = blank()
+        draw_text(before, 540, 84, "MockMed Portal")
+        after = blank()
+        draw_text(after, 540, 700, "MockMed Portal")  # content shifted
+        write_frame(recording, 0, "before", before)
+        write_frame(recording, 0, "after", after)
+        (recording / "events.jsonl").write_text(
+            json.dumps({"i": 0, "kind": "scroll", "dx": 0, "dy": 400, "t": 1.0})
+            + "\n"
+        )
+        (recording / "meta.json").write_text(
+            json.dumps(
+                {
+                    "id": "rec-scroll",
+                    "created_at": "2026-07-06T00:00:00+00:00",
+                    "viewport": list(VIEWPORT),
+                    "app_url": "http://localhost:0/",
+                    "params": {},
+                }
+            )
+        )
+        bundle = tmp_path / "bundle"
+        workflow = compile_recording(recording, bundle, name="scrolly")
+        assert len(workflow.steps) == 1
+        step = workflow.steps[0]
+        assert step.action is ActionKind.SCROLL
+        assert step.scroll_dx == 0
+        assert step.scroll_dy == 400
+        assert step.anchor is None
+        assert step.expect == []
+        assert step.intent == "scroll by (0, 400)"
+        source = (bundle / "workflow.py").read_text()
+        ast.parse(source)
+        assert "flow.scroll(0, 400)" in source
 
     def test_double_click_event_compiles(self, tmp_path: Path) -> None:
         """double_click events (Recorder.double_click) must compile."""

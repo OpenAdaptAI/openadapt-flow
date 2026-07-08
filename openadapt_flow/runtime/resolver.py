@@ -17,6 +17,7 @@ and ``find_text``.
 
 from __future__ import annotations
 
+import math
 import struct
 import time
 from typing import Any, Optional
@@ -49,6 +50,15 @@ TEMPLATE_THRESHOLD = 0.985
 # (they fall through to the geometry rung) while true labels, which OCR
 # reads near-verbatim, still match at ≈ 1.0.
 OCR_MIN_RATIO = 0.9
+
+# The global template rung for UNLABELED anchors (no ocr_text) must not
+# contradict the anchor's landmarks by more than this many pixels. Repeated
+# icon UIs (an identical glyph per card/row — e.g. an edit pencil per
+# dashboard card) make a full-frame template match ambiguous: when mutable
+# content near the true target changes, a look-alike elsewhere can outscore
+# it. Labeled anchors are exempt — their template carries the label, which
+# is discriminative, and rename/move drift relies on global acceptance.
+GLOBAL_LANDMARK_TOLERANCE_PX = 40
 
 
 def is_below_ocr(rung: Rung) -> bool:
@@ -160,6 +170,54 @@ def _estimate_from_landmark(
     raise ValueError(f"unknown landmark relation: {relation!r}")
 
 
+def _landmarks_contradict(
+    anchor: Anchor,
+    point: Point,
+    screen_png: bytes,
+    vision: Any,
+) -> bool:
+    """True when every locatable landmark places the target far from ``point``.
+
+    Guards the global template rung for unlabeled anchors: landmarks are the
+    only labeled evidence such anchors carry. Landmarks that cannot be
+    located (or carry no exact offsets) abstain; with no located landmark
+    the match is accepted unchallenged.
+
+    Args:
+        anchor: The anchor whose landmarks corroborate or contradict.
+        point: Candidate click point from the global template match.
+        screen_png: The live frame.
+        vision: Namespace exposing ``find_text``.
+
+    Returns:
+        True when at least one landmark was located and ALL located
+        landmarks put the target more than GLOBAL_LANDMARK_TOLERANCE_PX
+        away from ``point``.
+    """
+    estimates: list[Point] = []
+    for landmark in anchor.landmarks:
+        if landmark.dx_px is None or landmark.dy_px is None:
+            continue
+        match = vision.find_text(
+            screen_png, landmark.ocr_text, min_ratio=OCR_MIN_RATIO
+        )
+        if match is None:
+            continue
+        estimates.append(
+            (
+                int(match.point[0]) + landmark.dx_px,
+                int(match.point[1]) + landmark.dy_px,
+            )
+        )
+    if not estimates:
+        return False
+    return all(
+        math.hypot(ex - point[0], ey - point[1])
+        > GLOBAL_LANDMARK_TOLERANCE_PX
+        for ex, ey in estimates
+    )
+
+
 def resolve(
     anchor: Anchor,
     screen_png: bytes,
@@ -218,7 +276,11 @@ def resolve(
             )
             return resolution, tuple(match.region)
 
-        # Rung 2: template over the full frame.
+        # Rung 2: template over the full frame. For unlabeled anchors the
+        # match must not contradict the anchor's landmarks (repeated-icon
+        # UIs: an identical glyph elsewhere can outscore the true target
+        # when mutable content near the target changed); a contradicted
+        # match falls through to the ocr/geometry rungs.
         match = vision.find_template(
             screen_png,
             template_png,
@@ -226,13 +288,17 @@ def resolve(
             prefer_near=(anchor.region[0], anchor.region[1]),
         )
         if match is not None:
-            resolution = Resolution(
-                rung="template_global",
-                point=_scaled_click_point(anchor, tuple(match.region)),
-                confidence=float(match.confidence),
-                elapsed_ms=elapsed_ms(),
-            )
-            return resolution, tuple(match.region)
+            point = _scaled_click_point(anchor, tuple(match.region))
+            if anchor.ocr_text or not _landmarks_contradict(
+                anchor, point, screen_png, vision
+            ):
+                resolution = Resolution(
+                    rung="template_global",
+                    point=point,
+                    confidence=float(match.confidence),
+                    elapsed_ms=elapsed_ms(),
+                )
+                return resolution, tuple(match.region)
 
     # Rung 3: OCR text match.
     if anchor.ocr_text:

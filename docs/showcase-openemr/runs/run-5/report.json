@@ -1,0 +1,233 @@
+{
+  "workflow_name": "openemr-add-patient-note",
+  "started_at": "2026-07-08T17:11:54.190831+00:00",
+  "params": {
+    "note": "Replay run 5: home BP log reviewed, readings stable."
+  },
+  "results": [
+    {
+      "step_id": "step_000",
+      "intent": "click 'ername'",
+      "ok": true,
+      "resolution": {
+        "rung": "template",
+        "point": [
+          705,
+          404
+        ],
+        "confidence": 1.0,
+        "elapsed_ms": 12.076500001057866
+      },
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_000_before.png",
+      "after_png": "steps/step_000_after.png",
+      "elapsed_ms": 362.91574999995646
+    },
+    {
+      "step_id": "step_001",
+      "intent": "type 'admin'",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_001_before.png",
+      "after_png": "steps/step_001_after.png",
+      "elapsed_ms": 646.9722080000793
+    },
+    {
+      "step_id": "step_002",
+      "intent": "click 'Password'",
+      "ok": true,
+      "resolution": {
+        "rung": "template",
+        "point": [
+          684,
+          458
+        ],
+        "confidence": 1.0,
+        "elapsed_ms": 12.184125000203494
+      },
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_002_before.png",
+      "after_png": "steps/step_002_after.png",
+      "elapsed_ms": 371.74729199978174
+    },
+    {
+      "step_id": "step_003",
+      "intent": "type 'pass'",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_003_before.png",
+      "after_png": "steps/step_003_after.png",
+      "elapsed_ms": 341.8715000007069
+    },
+    {
+      "step_id": "step_004",
+      "intent": "click 'Login'",
+      "ok": true,
+      "resolution": {
+        "rung": "template",
+        "point": [
+          639,
+          566
+        ],
+        "confidence": 0.9999997615814209,
+        "elapsed_ms": 12.437833000149112
+      },
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_004_before.png",
+      "after_png": "steps/step_004_after.png",
+      "elapsed_ms": 3102.7710830003343
+    },
+    {
+      "step_id": "step_005",
+      "intent": "click 'Searchbyanydemogre'",
+      "ok": true,
+      "resolution": {
+        "rung": "template",
+        "point": [
+          1121,
+          31
+        ],
+        "confidence": 1.0,
+        "elapsed_ms": 10.241250000035507
+      },
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_005_before.png",
+      "after_png": "steps/step_005_after.png",
+      "elapsed_ms": 5283.206957999937
+    },
+    {
+      "step_id": "step_006",
+      "intent": "type 'Phil'",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_006_before.png",
+      "after_png": "steps/step_006_after.png",
+      "elapsed_ms": 1243.9877090000664
+    },
+    {
+      "step_id": "step_007",
+      "intent": "press Enter",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_007_before.png",
+      "after_png": "steps/step_007_after.png",
+      "elapsed_ms": 2036.2209579998307
+    },
+    {
+      "step_id": "step_008",
+      "intent": "click 'ford,Phil'",
+      "ok": true,
+      "resolution": {
+        "rung": "template",
+        "point": [
+          17,
+          457
+        ],
+        "confidence": 0.999998152256012,
+        "elapsed_ms": 11.711917000866379
+      },
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_008_before.png",
+      "after_png": "steps/step_008_after.png",
+      "elapsed_ms": 2201.0679579998396
+    },
+    {
+      "step_id": "step_009",
+      "intent": "scroll by (0, 400)",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_009_before.png",
+      "after_png": "steps/step_009_after.png",
+      "elapsed_ms": 418.27891700086184
+    },
+    {
+      "step_id": "step_010",
+      "intent": "scroll by (0, 400)",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_010_before.png",
+      "after_png": "steps/step_010_after.png",
+      "elapsed_ms": 429.08566699952644
+    },
+    {
+      "step_id": "step_011",
+      "intent": "scroll by (0, 400)",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_011_before.png",
+      "after_png": "steps/step_011_after.png",
+      "elapsed_ms": 447.6697080008307
+    },
+    {
+      "step_id": "step_012",
+      "intent": "scroll by (0, 400)",
+      "ok": true,
+      "resolution": null,
+      "postconditions_ok": true,
+      "heal": null,
+      "error": null,
+      "before_png": "steps/step_012_before.png",
+      "after_png": "steps/step_012_after.png",
+      "elapsed_ms": 430.0569170009112
+    },
+    {
+      "step_id": "step_013",
+      "intent": "click at (815, 369)",
+      "ok": false,
+      "resolution": {
+        "rung": "geometry",
+        "point": [
+          814,
+          356
+        ],
+        "confidence": 0.9,
+        "elapsed_ms": 2778.7898750011664
+      },
+      "postconditions_ok": false,
+      "heal": null,
+      "error": "Postconditions failed for step 'step_013' (click at (815, 369)): expected screen state not reached (semantic drift) — failed: region_stable region=(0, 176, 691, 174); text_present 'PatientMessagesforBelford,Phil' — run aborted",
+      "before_png": "steps/step_013_before.png",
+      "after_png": "steps/step_013_after.png",
+      "elapsed_ms": 9168.154000000868
+    }
+  ],
+  "success": false,
+  "rung_counts": {
+    "template": 5
+  },
+  "heal_count": 0,
+  "model_calls": 0,
+  "est_model_cost_usd": 0.0,
+  "total_ms": 26484.042916999897
+}

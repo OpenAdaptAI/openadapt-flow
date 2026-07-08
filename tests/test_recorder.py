@@ -46,6 +46,9 @@ class FakeBackend:
     def press(self, key: str) -> None:
         self.calls.append(("key", key))
 
+    def scroll(self, dx: int, dy: int) -> None:
+        self.calls.append(("scroll", dx, dy))
+
 
 def _read_events(rec_dir: Path) -> list[dict]:
     lines = (rec_dir / "events.jsonl").read_text().splitlines()
@@ -113,6 +116,24 @@ def test_recorder_writes_recording_format(tmp_path: Path) -> None:
         ("type", "world"),
         ("key", "Enter"),
     ]
+
+
+def test_recorder_scroll_event(tmp_path: Path) -> None:
+    """scroll() records a {"kind": "scroll", "dx", "dy"} event with frames."""
+    backend = FakeBackend()
+    rec = Recorder(backend, tmp_path / "rec")
+    rec.scroll(0, 400)
+    rec.scroll(-30, -120)
+    rec_dir = rec.finish()
+
+    events = _read_events(rec_dir)
+    assert [e["kind"] for e in events] == ["scroll", "scroll"]
+    assert events[0]["dx"] == 0 and events[0]["dy"] == 400
+    assert events[1]["dx"] == -30 and events[1]["dy"] == -120
+    for i in range(2):
+        for suffix in ("before", "after"):
+            assert (rec_dir / "frames" / f"{i:04d}_{suffix}.png").exists()
+    assert backend.calls == [("scroll", 0, 400), ("scroll", -30, -120)]
 
 
 def test_recorder_settle_timeout_on_unstable_screen(tmp_path: Path) -> None:

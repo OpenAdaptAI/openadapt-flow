@@ -30,6 +30,12 @@ Compiled arm:
 
 - none
 
+Compiled runs that self-flagged, also reported honestly (success is judged by the arm-independent OCR check both arms share, not the replayer's self-report):
+
+- compiled run 20: postconditions flagged expected-screen drift at step_017 and the replayer aborted; the arm-independent OCR check verified the note saved (matched 100%)
+
+On a shared instance every run — ours and other visitors' — grows the message list, so a postcondition can drift after the action lands. The self-flag is the point: the replayer detects the drift and halts instead of improvising.
+
 Agent arm:
 
 - none

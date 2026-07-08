@@ -345,6 +345,29 @@ class TestOpenemrOrchestrator:
         ):
             assert banned not in md.lower(), banned
 
+    def test_markdown_discloses_compiled_self_flags(self) -> None:
+        # A run whose replayer self-flagged postcondition drift but whose
+        # note the arm-independent OCR check verified saved counts as a
+        # success AND is disclosed.
+        compiled = [compiled_row(i) for i in range(20)]
+        compiled[19]["replayer_success"] = False
+        compiled[19]["first_failure"] = {"step": "step_017", "error": "drift"}
+        results = aggregate_openemr_results(
+            compiled, [agent_row(i) for i in range(10)]
+        )
+        results["pace_s"] = 30.0
+        md = render_openemr_markdown(results)
+        assert "100% (20/20)" in md  # headline unchanged
+        assert "self-flagged" in md
+        assert "compiled run 20" in md
+        assert "step_017" in md
+        assert "arm-independent OCR check" in md
+        # No self-flag block when nothing self-flagged (a genuinely failed
+        # run belongs in the failed-runs list, not here).
+        assert "self-flagged" not in render_openemr_markdown(
+            self.make_results()
+        )
+
     def test_write_outputs(self, tmp_path: Path) -> None:
         import json
 

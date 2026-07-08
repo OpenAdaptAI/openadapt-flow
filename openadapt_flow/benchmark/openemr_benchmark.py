@@ -252,6 +252,30 @@ def render_openemr_markdown(results: dict[str, Any]) -> str:
         + "\n"
         for r in compiled_failures
     ) or "- none\n"
+    compiled_self_flags = [
+        r
+        for r in results["runs"]["compiled"]
+        if r["success"] and r.get("replayer_success") is False
+    ]
+    self_flag_lines = "".join(
+        f"- compiled run {r['i'] + 1}: postconditions flagged expected-screen "
+        f"drift at {(r.get('first_failure') or {}).get('step', '?')} and the "
+        f"replayer aborted; the arm-independent OCR check verified the note "
+        f"saved (matched {r.get('matched_ratio', 0):.0%})\n"
+        for r in compiled_self_flags
+    )
+    self_flag_block = (
+        "\nCompiled runs that self-flagged, also reported honestly (success "
+        "is judged by the arm-independent OCR check both arms share, not the "
+        "replayer's self-report):\n\n"
+        + self_flag_lines
+        + "\nOn a shared instance every run — ours and other visitors' — "
+        "grows the message list, so a postcondition can drift after the "
+        "action lands. The self-flag is the point: the replayer detects the "
+        "drift and halts instead of improvising.\n"
+        if self_flag_lines
+        else ""
+    )
     return f"""# Benchmark: compiled replay vs. computer-use agent — OpenEMR (real app)
 
 Date: {date}. Same head-to-head as the [MockMed benchmark](../BENCHMARK.md),
@@ -286,7 +310,7 @@ Failed runs, reported honestly:
 
 Compiled arm:
 
-{compiled_failure_lines}
+{compiled_failure_lines}{self_flag_block}
 Agent arm:
 
 {failure_lines}

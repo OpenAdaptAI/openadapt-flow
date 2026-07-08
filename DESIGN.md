@@ -123,7 +123,9 @@ OCR text (text in after, not in before — compared whitespace-insensitively
 so OCR jitter cannot make permanently visible chrome look "new"; prefer
 longest). Parameterized typed values vary per run and are NEVER asserted in
 any step's postconditions — including downstream steps whose after-frames
-embed the typed value (e.g. a save-confirmation banner). Click target labels
+embed the typed value (e.g. a save-confirmation banner), and including the
+pixel form: parameterized TYPE steps get no REGION_STABLE at all, since the
+changed region is the typed value's own rendering. Click target labels
 (any anchor's `ocr_text`) are likewise never asserted: they are mutable
 evidence the resolution ladder heals through under rename drift, not
 invariants. Intent: rule-based `"click '<ocr_text>'"` /

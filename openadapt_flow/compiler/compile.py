@@ -388,6 +388,7 @@ def _postconditions(
     avoid_labels: tuple[str, ...] = (),
     bundle: Optional[Path] = None,
     step_id: Optional[str] = None,
+    include_region_stable: bool = True,
 ) -> list[Postcondition]:
     """Derive postconditions from a step's before/after frames.
 
@@ -398,11 +399,20 @@ def _postconditions(
     fixed-position phash cannot tolerate — the replayer first looks for the
     expected content NEAR the recorded region and only then falls back to
     the exact-position hash.
+
+    ``include_region_stable=False`` skips the diff-based REGION_STABLE
+    entirely: for parameterized TYPE steps the changed region IS the typed
+    value's pixels, and the value varies per run — asserting its rendering
+    is the pixel-level equivalent of asserting the excluded text.
     """
     if before_png is None or after_png is None:
         return []
     expect: list[Postcondition] = []
-    changed = _largest_changed_region(before_png, after_png)
+    changed = (
+        _largest_changed_region(before_png, after_png)
+        if include_region_stable
+        else None
+    )
     if changed is not None:
         after = cv2.imdecode(
             np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR
@@ -629,6 +639,11 @@ def compile_recording(
             avoid_labels=anchor_labels,
             bundle=bundle,
             step_id=step.id,
+            # A parameterized TYPE step's changed region is the typed
+            # value's own pixels — never assert it (it varies per run).
+            include_region_stable=not (
+                step.action is ActionKind.TYPE and step.param is not None
+            ),
         )
         steps.append(step)
 

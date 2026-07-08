@@ -236,9 +236,10 @@ class TestCompileRecording:
         assert all(
             pc.kind is not PostconditionKind.TEXT_PRESENT for pc in step.expect
         )
-        # but the diff-based REGION_STABLE is still derived
-        assert any(
-            pc.kind is PostconditionKind.REGION_STABLE for pc in step.expect
+        # and the diff-based REGION_STABLE is skipped too: the changed
+        # region is the typed value's own pixels, which vary per run
+        assert all(
+            pc.kind is not PostconditionKind.REGION_STABLE for pc in step.expect
         )
 
     def test_key_step(self, compiled) -> None:

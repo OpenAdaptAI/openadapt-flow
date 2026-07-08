@@ -10,97 +10,82 @@ A model only touches the script to repair it.
 
 ![One demonstration, two UIs, same compiled workflow — the right side self-heals under a theme it has never seen](docs/showcase/demo.gif)
 
-*Every frame above is a real screenshot saved by the replayer during the two
-runs in [`docs/showcase/`](docs/showcase). Left: the UI the demonstration was
-recorded on — every step resolves by template match in ~10ms. Right: a dark
-theme the workflow has never seen — steps re-resolve through OCR and
-geometry, and each fix is written back to the script as a reviewable diff.
-Zero model calls on either side.*
+*Real screenshots from the two runs in [`docs/showcase/`](docs/showcase).
+Left: the UI the demo was recorded on. Right: a theme it had never seen — each
+step re-resolves through OCR or geometry, and each fix is written back to the
+script as a reviewable diff. Zero model calls on either side.*
 
-## Try it in five commands
+## Try it
 
 ```bash
 pip install openadapt-flow && playwright install chromium
 
-openadapt-flow demo-record --out rec              # 1. record a demonstration
-openadapt-flow compile rec --out bundle --name my-task   # 2. compile it
-openadapt-flow replay bundle                      # 3. replay: deterministic, local, $0
-openadapt-flow replay bundle --drift theme        # 4. drift the UI — watch it heal
+openadapt-flow demo-record --out rec                     # record a demonstration
+openadapt-flow compile rec --out bundle --name my-task   # compile it
+openadapt-flow replay bundle                             # replay: local, $0
+openadapt-flow replay bundle --drift theme               # drift the UI, watch it heal
 ```
 
-Steps 3–4 serve the bundled MockMed demo app automatically and write an
-illustrated `REPORT.md` per run — what ran, what it saw, what healed. To
-replay against your own app, pass `--url` (recorded parameter values are the
-defaults; `--param note="Booking 3 months"` overrides them).
+The last two commands serve the bundled MockMed demo app and write an
+illustrated `REPORT.md` per run. Pass `--url` to replay against your own app;
+recorded parameter values are the defaults and `--param` overrides them.
 
-## Why compile, when agents exist?
+## How it works
 
 Computer-use agents re-reason through your task with a large model on every
-run: slow, non-deterministic, and billed per run. That's the right shape for
-a task nobody has automated before, and the wrong one for the 500th referral
-this month. openadapt-flow makes the other bet:
+run. That's the right shape for a task nobody has automated before, and the
+wrong one for the 500th referral this month. openadapt-flow compiles the
+demonstration instead.
 
-- **Compile once.** A recorded demonstration becomes an editable script:
-  every step carries redundant visual evidence (template crop, OCR label,
-  geometry landmarks), the action, and postcondition assertions derived from
-  what actually changed on screen during the demo.
-- **Replay for free.** A resolution ladder finds each target: local template
-  match → global template match → OCR → landmark geometry → (optional)
-  grounding model. Healthy scripts never leave the first rung — milliseconds,
-  zero model calls, zero marginal cost.
-- **Heal on drift, as a diff.** When the UI shifts, a lower rung still finds
-  the target and the fix is written back to the bundle for review. The
-  automation gets cheaper and more robust over time instead of re-reasoning
-  the same eleven clicks.
-- **Halt on surprise.** Postconditions verify every step. If the screen stops
-  matching expectations (an unexpected dialog, a changed process), the run
-  stops with an illustrated report instead of guessing. Steps tagged
-  irreversible refuse to act on low-confidence resolutions at all.
+Each compiled step carries a template crop, an OCR label, geometry landmarks,
+and postconditions derived from what the demo actually changed on screen. At
+replay time a resolution ladder tries them in order: local template match,
+global template match, OCR, landmark geometry, then (optionally) a grounding
+model. Healthy scripts never leave the first rung. Milliseconds, no model
+calls, no per-run cost.
 
-The runtime is **vision-only** — PNG in, clicks and keys out — behind a small
-`Backend` protocol. The reference backend drives a headless browser, which is
-why the whole loop runs in CI with no OS permissions. Native desktop and RDP
-backends are planned adapters behind the same protocol.
+When the UI drifts, a lower rung still finds the target and the fix lands in
+the bundle as a diff you can review. When the screen stops matching
+expectations entirely, the run halts with a report instead of guessing, and
+steps tagged irreversible won't act on a low-confidence match at all.
 
-## Proof, not promises
+The runtime is vision-only (PNG in, clicks and keys out) behind a small
+`Backend` protocol. The reference backend is a headless browser, which is why
+the whole loop runs in CI with no OS permissions. Desktop and RDP backends
+are adapters to come, not rewrites.
 
-The E2E suite records a demonstration, compiles it, and proves the claims on
-every CI run:
+## Proof
+
+Every CI run records a demonstration, compiles it, and checks:
 
 | Scenario | Outcome |
 |---|---|
 | Baseline replay ×3 | all steps `template` rung, 0 heals, 0 model calls |
-| Theme drift (dark UI) | succeeds; 8/8 anchors healed; healed bundle replays all-`template` |
-| Moved buttons | succeeds via global template search, heals |
-| Renamed buttons | succeeds via landmark geometry, heals refresh the labels |
-| Surprise modal | **fails loudly**, naming the violated postcondition with screenshots |
+| Theme drift | succeeds; 8/8 anchors healed; healed bundle replays clean |
+| Moved buttons | succeeds via global template search |
+| Renamed buttons | succeeds via landmark geometry |
+| Surprise modal | fails loudly, naming the violated postcondition |
 | Non-recorded parameter | substituted and verified by OCR of the final screen |
 
-Browse the artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md)
-· [theme-drift run report with heals](docs/showcase/theme-drift-run/REPORT.md).
+Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) ·
+[theme-drift run report](docs/showcase/theme-drift-run/REPORT.md).
 
-Compiled workflows can also be emitted as Agent Skills (`SKILL.md`) and MCP
-servers (`openadapt-flow emit-skill` / `emit-mcp`), so other agents can invoke
-them.
+Compiled workflows can also be emitted as Agent Skills or MCP servers
+(`emit-skill` / `emit-mcp`), so other agents can invoke them.
 
 ## Status
 
-v0 (124 tests, the drift matrix runs headlessly in CI). Solid for the
-reference browser backend; native desktop and RDP backends are design seams,
-not finished features. See [`DESIGN.md`](DESIGN.md) for module contracts and
-[`docs/L1_INTEGRATION.md`](docs/L1_INTEGRATION.md) for feeding layered
-clinical-data platforms (L1→L2 acquisition contracts).
+v0: 124 tests, drift matrix in CI. Solid for the reference browser backend.
+`DESIGN.md` has the module contracts; `docs/L1_INTEGRATION.md` covers feeding
+layered clinical-data platforms.
 
 ## Development
 
 ```bash
 git clone https://github.com/OpenAdaptAI/openadapt-flow && cd openadapt-flow
 pip install -e '.[dev]' && playwright install chromium
-pytest -q        # full suite incl. the E2E drift matrix
+pytest -q
 ```
 
-The demo GIF is generated from real run artifacts:
-`python scripts/make_demo_gif.py --baseline docs/showcase/baseline-run
---drift docs/showcase/theme-drift-run --out docs/showcase/demo.gif`.
-
-MIT license.
+The demo GIF is generated from real run artifacts by
+`scripts/make_demo_gif.py`. MIT license.

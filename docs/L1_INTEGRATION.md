@@ -1,7 +1,6 @@
 # Feeding a layered clinical-data platform (L1 integration)
 
-Layered clinical research platforms — [Retinology (L2)](https://github.com/kzaslavsky/Retinology)
-is the reference — separate **acquisition** (L1: get artifacts out of source
+Layered clinical research platforms separate **acquisition** (L1: get artifacts out of source
 systems) from **standardization** (L2: parse artifacts into a research-grade
 common data model) and **federation** (L3). The L1→L2 seam is deliberately
 thin: *an on-disk file under a resolved extraction directory, plus manifest

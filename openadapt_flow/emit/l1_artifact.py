@@ -1,6 +1,7 @@
 """Emit workflow outputs as L1 acquisition artifacts.
 
-Layered clinical-data platforms (e.g. Retinology's L2 standardization layer)
+Layered clinical-data platforms (an L2 standardization layer over L1
+acquisition)
 ingest acquisition output through a deliberately thin contract: an on-disk
 file under a resolved extraction directory, addressed by a canonical
 ``{file_number}_{date}_{doctype}`` filename, plus a manifest row carrying

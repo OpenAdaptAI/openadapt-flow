@@ -73,6 +73,19 @@ Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) ·
 Compiled workflows can also be emitted as Agent Skills or MCP servers
 (`emit-skill` / `emit-mcp`), so other agents can invoke them.
 
+## Benchmark
+
+![Latency and cost: compiled replay vs computer-use agent](benchmark/latency_cost.png)
+
+We ran the same MockMed task both ways on 2026-07-08 with the same OCR
+success check: 100 compiled replays against 20 runs of a claude-sonnet-5
+computer-use agent. Both arms went 100 for 100 and 20 for 20, so on an app
+this simple the story isn't success rate. It's that a compiled replay
+finishes in 4.9s (p50; 5.1s p95) with zero model calls, while the agent
+takes 37.5s (p50; 43.4s p95) at about $0.27 per run at list price, every
+run, forever. Full numbers, methodology, and caveats:
+[benchmark/BENCHMARK.md](benchmark/BENCHMARK.md).
+
 ## Status
 
 v0: 124 tests, drift matrix in CI. Solid for the reference browser backend.

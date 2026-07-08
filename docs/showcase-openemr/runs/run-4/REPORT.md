@@ -1,6 +1,6 @@
 # ✅ openemr-add-patient-note — success
 
-- **Started:** 2026-07-08T17:11:18.643951+00:00
+- **Started:** 2026-07-08T17:36:46.111314+00:00
 - **Steps:** 18/18 ok
 - **Heals:** 1
 
@@ -14,24 +14,24 @@
 
 | # | Step | Intent | Rung | Confidence | ms | Healed | OK |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `step_000` | click 'ername' | template | 1.00 | 381 |  | ✅ |
-| 2 | `step_001` | type 'admin' | &mdash; | &mdash; | 788 |  | ✅ |
-| 3 | `step_002` | click 'Password' | template | 1.00 | 345 |  | ✅ |
-| 4 | `step_003` | type 'pass' | &mdash; | &mdash; | 337 |  | ✅ |
-| 5 | `step_004` | click 'Login' | template | 1.00 | 3277 |  | ✅ |
-| 6 | `step_005` | click 'Searchbyanydemogre' | template | 1.00 | 5396 |  | ✅ |
-| 7 | `step_006` | type 'Phil' | &mdash; | &mdash; | 1392 |  | ✅ |
-| 8 | `step_007` | press Enter | &mdash; | &mdash; | 2489 |  | ✅ |
-| 9 | `step_008` | click 'ford,Phil' | template | 1.00 | 2553 |  | ✅ |
-| 10 | `step_009` | scroll by (0, 400) | &mdash; | &mdash; | 413 |  | ✅ |
-| 11 | `step_010` | scroll by (0, 400) | &mdash; | &mdash; | 434 |  | ✅ |
-| 12 | `step_011` | scroll by (0, 400) | &mdash; | &mdash; | 434 |  | ✅ |
-| 13 | `step_012` | scroll by (0, 400) | &mdash; | &mdash; | 432 |  | ✅ |
-| 14 | `step_013` | click at (815, 369) | geometry | 0.90 | 7209 | 🩹 | ✅ |
-| 15 | `step_014` | click '+Add <B' | template | 1.00 | 2697 |  | ✅ |
-| 16 | `step_015` | click at (639, 357) | template | 1.00 | 453 |  | ✅ |
+| 1 | `step_000` | click 'ername' | template | 1.00 | 417 |  | ✅ |
+| 2 | `step_001` | type 'admin' | &mdash; | &mdash; | 644 |  | ✅ |
+| 3 | `step_002` | click 'Password' | template | 1.00 | 383 |  | ✅ |
+| 4 | `step_003` | type 'pass' | &mdash; | &mdash; | 335 |  | ✅ |
+| 5 | `step_004` | click 'Login' | template | 1.00 | 3314 |  | ✅ |
+| 6 | `step_005` | click 'Searchbyanydemogre' | template | 1.00 | 3188 |  | ✅ |
+| 7 | `step_006` | type 'Phil' | &mdash; | &mdash; | 1308 |  | ✅ |
+| 8 | `step_007` | press Enter | &mdash; | &mdash; | 1869 |  | ✅ |
+| 9 | `step_008` | click 'ford,Phil' | template | 1.00 | 2470 |  | ✅ |
+| 10 | `step_009` | scroll by (0, 400) | &mdash; | &mdash; | 5974 |  | ✅ |
+| 11 | `step_010` | scroll by (0, 400) | &mdash; | &mdash; | 4087 |  | ✅ |
+| 12 | `step_011` | scroll by (0, 400) | &mdash; | &mdash; | 2133 |  | ✅ |
+| 13 | `step_012` | scroll by (0, 400) | &mdash; | &mdash; | 2145 |  | ✅ |
+| 14 | `step_013` | click at (815, 369) | geometry | 0.90 | 3484 | 🩹 | ✅ |
+| 15 | `step_014` | click '+Add <B' | template | 1.00 | 2099 |  | ✅ |
+| 16 | `step_015` | click at (639, 357) | template | 1.00 | 458 |  | ✅ |
 | 17 | `step_016` | type <note> | &mdash; | &mdash; | 416 |  | ✅ |
-| 18 | `step_017` | click 'Save as new messag' | template | 1.00 | 2904 |  | ✅ |
+| 18 | `step_017` | click 'Save as new messag' | template | 1.00 | 1818 |  | ✅ |
 
 ## Screenshots
 
@@ -69,7 +69,7 @@
 
 | Metric | Value |
 | --- | --- |
-| Total time | 32350 ms |
+| Total time | 36543 ms |
 | Steps ok | 18/18 |
 | Heals | 1 |
 | model_calls | 0 |

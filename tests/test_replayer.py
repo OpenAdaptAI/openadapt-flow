@@ -435,6 +435,62 @@ def test_wait_step_only_settles(bundle, run_dir):
     assert vision.settle_count == 2  # settle before + settle after
 
 
+def test_region_stable_template_tolerates_layout_shift(bundle, run_dir):
+    """A REGION_STABLE postcondition with a template crop passes when the
+    expected content is found near the recorded region, even though the
+    exact-position phash misses (small layout shift between runs)."""
+    vision = FakeVision()
+    vision.phash_dist = 99  # exact-position hash always misses
+    vision.template_results = [
+        Match(point=(120, 60), region=(80, 48, 100, 40), confidence=0.97)
+    ]
+    (bundle / "templates" / "pc.png").write_bytes(make_png((100, 40)))
+    backend = FakeBackend()
+    pc = Postcondition(
+        kind=PostconditionKind.REGION_STABLE,
+        region=(80, 40, 100, 40),
+        phash="aa",
+        template="templates/pc.png",
+        timeout_s=0.2,
+    )
+    workflow = Workflow(
+        name="wf",
+        steps=[Step(id="k1", intent="press enter", action=ActionKind.KEY,
+                    key="Enter", expect=[pc])],
+    )
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    # The template search was constrained to the padded region.
+    assert vision.template_calls, "find_template was not consulted"
+    assert vision.template_calls[0] is not None
+
+
+def test_region_stable_fails_when_template_and_phash_miss(bundle, run_dir):
+    vision = FakeVision()
+    vision.phash_dist = 99
+    (bundle / "templates" / "pc.png").write_bytes(make_png((100, 40)))
+    backend = FakeBackend()
+    pc = Postcondition(
+        kind=PostconditionKind.REGION_STABLE,
+        region=(80, 40, 100, 40),
+        phash="aa",
+        template="templates/pc.png",
+        timeout_s=0.2,
+    )
+    workflow = Workflow(
+        name="wf",
+        steps=[Step(id="k1", intent="press enter", action=ActionKind.KEY,
+                    key="Enter", expect=[pc])],
+    )
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is False
+    assert "region_stable" in report.results[0].error
+
+
 def test_scroll_step_scrolls_backend(bundle, run_dir):
     vision = FakeVision()
     backend = FakeBackend()

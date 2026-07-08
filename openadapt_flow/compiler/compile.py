@@ -386,8 +386,19 @@ def _postconditions(
     *,
     exclude_texts: tuple[str, ...] = (),
     avoid_labels: tuple[str, ...] = (),
+    bundle: Optional[Path] = None,
+    step_id: Optional[str] = None,
 ) -> list[Postcondition]:
-    """Derive postconditions from a step's before/after frames."""
+    """Derive postconditions from a step's before/after frames.
+
+    When ``bundle`` and ``step_id`` are given, the REGION_STABLE
+    postcondition also carries a template crop of the expected region
+    content (``templates/<step_id>_expect.png``): real apps re-layout by a
+    few pixels between runs (auto-scrolling panes, banner heights), which a
+    fixed-position phash cannot tolerate — the replayer first looks for the
+    expected content NEAR the recorded region and only then falls back to
+    the exact-position hash.
+    """
     if before_png is None or after_png is None:
         return []
     expect: list[Postcondition] = []
@@ -403,12 +414,17 @@ def _postconditions(
         x1 = min(frame_w, x + w + REGION_STABLE_PAD)
         y1 = min(frame_h, y + h + REGION_STABLE_PAD)
         padded: Region = (x0, y0, x1 - x0, y1 - y0)
+        template_rel: Optional[str] = None
+        if bundle is not None and step_id is not None:
+            template_rel = f"templates/{step_id}_expect.png"
+            (bundle / template_rel).write_bytes(_crop_png(after_png, padded))
         expect.append(
             Postcondition(
                 kind=PostconditionKind.REGION_STABLE,
                 region=padded,
                 phash=phash_png(after_png, region=padded),
                 phash_tolerance=REGION_STABLE_TOLERANCE,
+                template=template_rel,
             )
         )
     text_pc = _new_text_postcondition(
@@ -611,6 +627,8 @@ def compile_recording(
             step_after,
             exclude_texts=exclude_texts,
             avoid_labels=anchor_labels,
+            bundle=bundle,
+            step_id=step.id,
         )
         steps.append(step)
 

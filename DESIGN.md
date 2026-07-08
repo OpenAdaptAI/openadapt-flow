@@ -111,9 +111,14 @@ e.g. 160x64 clamped to frame, centered on click), OCR the crop for `ocr_text`,
 extract up to 2 landmarks (nearest OCR lines outside the crop, carrying both
 relation/distance and exact `dx_px`/`dy_px` offsets to the click point), set
 `click_point`, `region`. Per type event: TYPE step with `text` or `param` (from
-events.jsonl). Postconditions from the after-frame: pick the largest changed
-region between before/after (cv2.absdiff + threshold + bounding rect),
-REGION_STABLE with its phash; plus TEXT_PRESENT for the most distinctive new
+events.jsonl). Per scroll event: SCROLL step carrying the wheel deltas, no
+anchor, no postconditions. Postconditions from the after-frame: pick the
+largest changed region between before/after (cv2.absdiff + threshold +
+bounding rect), REGION_STABLE with its phash plus a template crop of the
+expected content (`templates/<step_id>_expect.png`) — the replayer first
+searches for that content near the recorded region (real apps re-layout by a
+few pixels between runs) and only then falls back to the exact-position
+phash; plus TEXT_PRESENT for the most distinctive new
 OCR text (text in after, not in before — compared whitespace-insensitively
 so OCR jitter cannot make permanently visible chrome look "new"; prefer
 longest). Parameterized typed values vary per run and are NEVER asserted in
@@ -143,7 +148,11 @@ values in `workflow.params`, so a bundle replays without any explicit params.
 
 Resolution ladder per step with an anchor (record rung + confidence + ms):
 1. `template` — find_template within anchor.region padded by search_pad
-2. `template_global` — find_template full frame
+2. `template_global` — find_template full frame; for UNLABELED anchors
+   (no ocr_text) the match is rejected when every locatable landmark places
+   the target more than 40px away (repeated-icon UIs: an identical glyph on
+   another card can outscore the true target when mutable content near the
+   target changed) — the ladder then continues to ocr/geometry
 3. `ocr` — find_text(anchor.ocr_text) full frame
 4. `geometry` — landmarks: locate landmark text, offset by the exact
    `dx_px`/`dy_px` offsets when recorded, else by relation/distance

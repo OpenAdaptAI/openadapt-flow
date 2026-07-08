@@ -94,6 +94,14 @@ class Postcondition(BaseModel):
     phash: Optional[str] = None
     phash_tolerance: int = 8
     timeout_s: float = 5.0
+    template: Optional[str] = Field(
+        default=None,
+        description=(
+            "Bundle-relative PNG crop of the expected REGION_STABLE content;"
+            " lets the check tolerate small layout shifts (content found"
+            " near, not exactly at, the recorded region)"
+        ),
+    )
 
 
 class Step(BaseModel):

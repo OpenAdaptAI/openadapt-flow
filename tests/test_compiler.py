@@ -277,6 +277,21 @@ class TestCompileRecording:
         # regenerating from the model matches what's on disk
         assert source == render_workflow_py(compiled["workflow"])
 
+    def test_region_stable_carries_expected_content_template(
+        self, compiled
+    ) -> None:
+        """Every REGION_STABLE postcondition ships a crop of the expected
+        region content so the replayer can tolerate small layout shifts."""
+        bundle = compiled["bundle"]
+        seen = 0
+        for step in compiled["workflow"].steps:
+            for pc in step.expect:
+                if pc.kind is PostconditionKind.REGION_STABLE:
+                    assert pc.template, f"{step.id} region_stable lacks crop"
+                    assert (bundle / pc.template).exists()
+                    seen += 1
+        assert seen > 0
+
     def test_scroll_event_compiles(self, tmp_path: Path) -> None:
         """scroll events compile to SCROLL steps with deltas and NO
         postconditions (a scroll shifts the whole viewport; asserting the

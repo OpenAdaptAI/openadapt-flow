@@ -22,7 +22,8 @@ permission-free); native OS / RDP backends are future adapters.
   included). SCROLL steps compile with NO postconditions: a scroll shifts the
   whole viewport, so frame diffs would assert mutable page content; the
   scroll's purpose (bringing the next target into view) is verified by the
-  next anchored step's resolution ladder.
+  next anchored step's resolution ladder — and enforced at replay time by
+  the closed-loop scroll semantics (see Runtime).
 
 ## Bundle & recording formats
 
@@ -166,6 +167,33 @@ Ladder failures retry with fresh settled frames until `step.timeout_s`
 (remote apps present settled-looking but still-loading frames; the target
 often appears moments later). Structural errors (missing anchor) and the
 risk gate do not retry.
+
+**Closed-loop SCROLL:** a SCROLL step's execution semantics are "scroll
+until the NEXT anchored step's anchor resolves, starting from the recorded
+delta" — not "replay the recorded delta blindly". Open-loop fixed-count
+scrolling breaks whenever content above the target grows between record and
+replay (everything below lands displaced; see the OpenEMR findings). At
+replay time a SCROLL step:
+
+1. finds the next step (in workflow order) that carries an anchor; when
+   none exists, or the recorded delta is zero, it falls back to the fixed
+   recorded delta (one open-loop gesture);
+2. probes that anchor against the current settled frame with a single
+   ladder pass (no timeout retries, grounder never consulted — the loop
+   stays model-free): if it already resolves, the step is a no-op (an
+   earlier SCROLL step may have brought the target into view);
+3. otherwise repeats scroll-by-recorded-delta → settle → probe until the
+   anchor resolves, bounded by ~2.5x the step's own recorded scroll
+   distance (`SCROLL_BUDGET_FACTOR`);
+4. on budget exhaustion: if the immediately following step is another
+   SCROLL step, it inherits the loop (a recorded run of N scrolls shares a
+   combined ~2.5x budget, and trailing steps no-op via the probe-first
+   rule once the target appears); otherwise the step FAILS loudly, naming
+   the anchor that never came into view.
+
+The anchored step that follows still re-resolves on its own settled frame
+and remains the authority on where to click; the scroll loop only decides
+when to stop scrolling.
 
 Click point = matched region origin + (anchor.click_point - anchor.region
 origin), scaled by match scale. After acting: `wait_settled`, then check

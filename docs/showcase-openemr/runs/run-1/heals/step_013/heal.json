@@ -37,13 +37,13 @@
     "template": "templates/step_013.png",
     "region": [
       734,
-      337,
+      736,
       160,
       64
     ],
     "click_point": [
       814,
-      369
+      768
     ],
     "ocr_text": null,
     "landmarks": [

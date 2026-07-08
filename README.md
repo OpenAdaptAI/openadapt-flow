@@ -70,6 +70,15 @@ Every CI run records a demonstration, compiles it, and checks:
 Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) ·
 [theme-drift run report](docs/showcase/theme-drift-run/REPORT.md).
 
+The same loop has also run against a real third-party app: the official
+OpenEMR public demo (fake patients only, resets daily). An 18-step clinical
+workflow — log in, find a patient, scroll a dense dashboard, add a
+parameterized note — replayed **5/5 in fresh browsers with zero model
+calls**, scrolling closed-loop (each SCROLL step scrolls until the next
+anchor actually resolves, so content growth between runs can't displace the
+targets below it). Full runs, failure analysis, and honest caveats:
+[docs/showcase-openemr/FINDINGS.md](docs/showcase-openemr/FINDINGS.md).
+
 Compiled workflows can also be emitted as Agent Skills or MCP servers
 (`emit-skill` / `emit-mcp`), so other agents can invoke them.
 
@@ -88,7 +97,7 @@ run, forever. Full numbers, methodology, and caveats:
 
 ## Status
 
-v0: 124 tests, drift matrix in CI. Solid for the reference browser backend.
+v0: 163 tests, drift matrix in CI. Solid for the reference browser backend.
 `DESIGN.md` has the module contracts; `docs/L1_INTEGRATION.md` covers feeding
 layered clinical-data platforms.
 

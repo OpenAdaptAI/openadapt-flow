@@ -9,13 +9,17 @@ OpenEMR was chosen because it is nothing like MockMed: a dense,
 frame-heavy, slow, LAMP-era EMR whose screens are being mutated all day by
 other demo users.
 
-Short answer: yes, after four capability fixes. Final result: **4/5
-replays succeeded end to end (18/18 steps)**, each run substituting a
+Short answer: yes, after four capability fixes. The spike round scored
+**4/5 replays end to end (18/18 steps)**, each run substituting a
 different parameterized note value; the fifth run failed safely (a
 resolution landed 12 px off an 18 px-tall icon, the click hit dead space,
 and postconditions aborted the run without a wrong action). Every replay
 was a fresh browser with no session state, driven purely by screenshots
 and pixel coordinates.
+
+A follow-up change removed the failure mode that broke run 5 —
+closed-loop scrolling (see below) — and a fresh 5-run round against the
+live demo then went **5/5 (18/18 steps each, zero model calls)**.
 
 ## The workflow
 
@@ -107,7 +111,22 @@ never tested. All are additive; the full unit suite (158 tests) passes.
    failed exactly this way when its note text was shorter than the
    recorded example).
 
-## Replay results (final round, 5 fresh-browser runs)
+5. **Closed-loop scrolling** (follow-up, after the spike round). The spike
+   replayed SCROLL steps open-loop — four fixed 400 px gestures — and that
+   is what ultimately broke run 5: earlier replays had grown the dashboard,
+   so the recorded scroll distance left the post-scroll viewport ~12 px
+   displaced. A SCROLL step's execution semantics are now "scroll until
+   the NEXT anchored step's anchor resolves, starting from the recorded
+   delta": the step probes the next anchor on the current settled frame
+   (no-op when a previous scroll already brought it into view), then
+   repeats scroll-by-recorded-delta → settle → probe until the anchor
+   resolves, bounded by ~2.5x the step's recorded distance. Consecutive
+   SCROLL steps hand the loop to each other; exhausting the budget with no
+   further SCROLL step fails the run loudly, naming the anchor that never
+   appeared. Steps with no later anchored step keep the fixed recorded
+   delta. Probes never call the grounder, so replays stay model-free.
+
+## Replay results, spike round (open-loop scrolling, 5 fresh-browser runs)
 
 | run | outcome | steps | rungs | heals | note verified on final screen | wall time |
 |----:|---------|------:|-------|------:|------------------------------|----------:|
@@ -128,8 +147,7 @@ icon. Cause: the dashboard's total content height had grown (each earlier
 replay appends a message to the card), shifting the post-scroll viewport
 by about the same 12 px, and OCR bounding-box jitter on the landmark text
 did not fully track it. The click hit the card border, nothing happened,
-and both postconditions failed the step. Failure artifacts are in
-[`runs/run-5/report.json`](runs/run-5/report.json).
+and both postconditions failed the step.
 
 Note on the two "OCR miss" rows: the replayed note is plainly visible in
 the saved `final.png` of runs 3 and 4, but rapidocr dropped the table line
@@ -139,19 +157,47 @@ limitation of the verification script, not a replay failure — and a fair
 sample of rapidocr's line coverage on dense 13-14 px table text at
 1280x800.
 
+## Replay results, closed-loop round (current, 5 fresh-browser runs)
+
+Re-run the same day with closed-loop scrolling (change 5 above), same
+bundle, five new parameterized note values, fresh browser per run:
+
+| run | outcome | steps | rungs | heals | note verified on final screen | wall time |
+|----:|---------|------:|-------|------:|------------------------------|----------:|
+| 1 | success | 18/18 | template 8, geometry 1 | 1 | yes | 37.7 s |
+| 2 | success | 18/18 | template 8, geometry 1 | 1 | yes | 36.0 s |
+| 3 | success | 18/18 | template 8, geometry 1 | 1 | no (OCR miss; note visibly present in `final.png`) | 37.3 s |
+| 4 | success | 18/18 | template 8, geometry 1 | 1 | yes | 36.5 s |
+| 5 | success | 18/18 | template 8, geometry 1 | 1 | no (same) | 37.1 s |
+
+**Success rate 5/5. Zero model calls in every run.** By this point the
+demo instance carried nine-plus replay-appended messages (this round ran
+on top of the spike round's mutations — more content growth than broke
+the open-loop run 5), and the scroll loop absorbed the displacement in
+every run: each SCROLL step probes the pencil anchor and stops scrolling
+only when it actually resolves, so the pencil-icon step's geometry
+resolution starts from a viewport the anchor is verifiably inside. The
+pencil step still resolves via the geometry rung (the card's mutated
+content keeps defeating its template) — that residual dependence on
+OCR-box precision for small icons remains real, it just no longer
+compounds with scroll displacement.
+
+Two costs, reported honestly: wall time rose from ~29 s to ~37 s per run
+(each scroll step settles and runs a ladder probe per gesture — a fair
+trade for removing the round's only failure mode), and the out-of-band
+note verification again OCR-missed two runs whose notes are plainly
+visible in the saved final screens (the same rapidocr line-coverage
+limitation as the spike round).
+
 ## What is still rough
 
 - **Shared mutable demo state is the dominant noise source.** The public
   demo is writable by anyone and resets daily. Replays mutate it too:
   every successful run appends a message, which grows the dashboard,
-  which shifts the post-scroll layout, which is what ultimately broke
-  run 5. Against a per-tenant instance (the realistic deployment) this
-  class of drift shrinks to the app's own dynamic content.
-- **Fixed-count scrolling is open-loop.** Four SCROLL steps of 400 px
-  replay exactly; if content above the target grows, everything below
-  lands displaced. The resolution ladder absorbs small displacements, but
-  a closed-loop "scroll until anchor resolves" primitive would remove the
-  failure mode run 5 hit. Deliberately not built in this spike.
+  which shifts the post-scroll layout, which is what ultimately broke the
+  spike round's run 5. Closed-loop scrolling now absorbs the scroll-axis
+  component of this drift; against a per-tenant instance (the realistic
+  deployment) the rest shrinks to the app's own dynamic content.
 - **rapidocr on dense EMR text is mediocre.** Labels compile with missing
   or mangled characters ("ername" for Username, "Searchbyanydemogre" for
   the search placeholder), whole table lines are sometimes dropped, and
@@ -184,7 +230,7 @@ recording/          meta.json, events.jsonl, frames/ (18 events, before/after)
 bundle/             workflow.json, workflow.py, templates/ (anchor + expect crops)
 runs/run-1/         full artifacts: report.json, REPORT.md, steps/, heals/, final.png
 runs/run-2..5/      report.json, REPORT.md, final.png (step frames trimmed for size)
-runs/summary.json   per-run outcomes for the final round
+runs/summary.json   per-run outcomes for the closed-loop round
 failure-evidence/   the round-1 calendar-region crops (recorded vs replay)
 ```
 

@@ -986,6 +986,48 @@ def _verdict(results: dict[str, Any]) -> str:
     )
 
 
+def _demo_conditioning_note(b: dict[str, Any], c: dict[str, Any]) -> str:
+    """One computed paragraph answering: did the demo help the agent (C vs B)?"""
+    if not b.get("n") or not c.get("n"):
+        return (
+            "Demo-conditioning (C vs B): not measurable — a paid arm "
+            "recorded no runs."
+        )
+    delta = c["cost_usd_per_run"] - b["cost_usd_per_run"]
+    numbers = (
+        f"Demo-conditioning finding (C vs B): success "
+        f"{c['success_count']}/{c['n']} vs {b['success_count']}/{b['n']}; "
+        f"mean cost/run ${c['cost_usd_per_run']:.4f} vs "
+        f"${b['cost_usd_per_run']:.4f} "
+        f"({'+' if delta >= 0 else '−'}${abs(delta):.4f}); mean actions "
+        f"{c['actions_mean']:.1f} vs {b['actions_mean']:.1f}."
+    )
+    if (
+        c["success_rate"] <= b["success_rate"]
+        and c["cost_usd_per_run"] >= b["cost_usd_per_run"]
+    ):
+        return (
+            f"{numbers} On this schedule the serialized demonstration "
+            "made the from-scratch agent neither cheaper nor more "
+            "reliable (the extra prompt tokens cost slightly more); its "
+            "measured value showed up in the hybrid's mid-workflow "
+            "fallback instead."
+        )
+    if (
+        c["success_rate"] >= b["success_rate"]
+        and c["cost_usd_per_run"] < b["cost_usd_per_run"]
+    ):
+        return (
+            f"{numbers} On this schedule the serialized demonstration "
+            "made the from-scratch agent cheaper without hurting "
+            "reliability."
+        )
+    return (
+        f"{numbers} Mixed effect on this schedule — see per-run rows for "
+        "detail."
+    )
+
+
 def render_hybrid_markdown(results: dict[str, Any]) -> str:
     """Render ``BENCHMARK.md`` from the results dict.
 
@@ -1129,6 +1171,8 @@ safe-halted ({d.get('fallback_rate', 0):.0%} fallback rate);
 ${d.get('fallback_cost_usd_mean', 0):.4f} fallback cost;
 {d.get('fallback_skipped_count', 0)} fallbacks skipped by the budget
 guardrail.
+
+{_demo_conditioning_note(b, c)}
 
 {notes_block}{wrong_action_block}
 Failed runs, reported honestly:

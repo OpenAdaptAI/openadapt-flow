@@ -1,0 +1,377 @@
+"""Track C — interaction-primitive taxonomy (adversarial validation).
+
+For each interaction primitive the widgets lab page
+(``openadapt_flow/mockmed/static/widgets.html?panel=<name>``) exposes one
+control; each test records a tiny demonstration against it, compiles, and
+replays on a fresh page. The support matrix these tests back — including
+the primitives that are unsupported STRUCTURALLY (file upload,
+drag-and-drop, conditional branching, multi-window) and therefore have no
+test here — lives in ``docs/validation/VALIDATION.md`` and
+``docs/LIMITS.md``.
+
+Several tests are characterizations of weak behavior (vacuous successes on
+steps that compiled with zero postconditions; position-based resolution of
+parameterized typeahead; wrong-row clicks under reorder). Comments state
+the desired behavior where it differs from the observed one.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+import pytest
+
+from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+from openadapt_flow.compiler import compile_recording
+from openadapt_flow.recorder import Recorder
+
+from .validation_utils import describe, failing_step, replay_on_page
+
+pytestmark = pytest.mark.timeout(600)
+
+VIEWPORT = {"width": 1280, "height": 800}
+
+
+def center(page, selector: str) -> tuple[int, int]:
+    """Center pixel coordinates of the first element matching ``selector``.
+
+    Record-time-only cheat, exactly like ``demo_driver.record_triage_demo``.
+    """
+    locator = page.locator(selector).first
+    locator.wait_for(state="visible")
+    box = locator.bounding_box()
+    assert box is not None, f"no bounding box for {selector!r}"
+    return (
+        int(box["x"] + box["width"] / 2),
+        int(box["y"] + box["height"] / 2),
+    )
+
+
+def record_and_compile(
+    browser,
+    url: str,
+    ops: Callable[[object, Recorder], None],
+    tmp_path: Path,
+    name: str,
+):
+    """Record ``ops`` against ``url``, compile, return (workflow, dirs...)."""
+    rec_dir = tmp_path / "rec"
+    bundle_dir = tmp_path / "bundle"
+    page = browser.new_page(viewport=VIEWPORT, device_scale_factor=1)
+    try:
+        page.goto(url)
+        recorder = Recorder(PlaywrightBackend(page), rec_dir, app_url=url)
+        ops(page, recorder)
+        recorder.finish()
+        recorded_status = page.locator("#status").text_content()
+    finally:
+        page.close()
+    workflow = compile_recording(rec_dir, bundle_dir, name=name)
+    return workflow, bundle_dir, recorded_status
+
+
+class TestNativeSelect:
+    def test_arrow_key_selection_is_faithfully_replayed_even_when_inert(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """PARTIAL / HAZARD. A native <select> driven by click + ArrowDown +
+        Enter. The dropdown popup is browser chrome — it never appears in
+        page screenshots — and whether the arrow keys change the value at
+        all is platform-dependent (observed inert on macOS headless
+        chromium). The replay faithfully reproduces whatever the recording
+        did; when the recording did NOTHING, the steps compile with zero
+        postconditions and the replay is a VACUOUS success."""
+        url = f"{mockmed_url}widgets.html?panel=select"
+
+        def ops(page, r):
+            r.click(*center(page, "#pet"))
+            r.press("ArrowDown")
+            r.press("Enter")
+
+        wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "select-arrows"
+        )
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert state["status"] == recorded, describe(report, state)
+        if recorded == "Ready and waiting.":  # the select never changed
+            # Nothing changed on screen, so nothing was asserted: the
+            # compiled workflow cannot detect that it does nothing.
+            assert all(len(s.expect) == 0 for s in wf.steps)
+
+    def test_type_prefix_fallback_selects_an_option(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """SUPPORTED (workaround). click + type 'd' + Enter drives the
+        select through its type-to-select behavior — the keyboard fallback
+        predicted in docs/showcase-openemr/FINDINGS.md, confirmed here."""
+        url = f"{mockmed_url}widgets.html?panel=select"
+
+        def ops(page, r):
+            r.click(*center(page, "#pet"))
+            r.type_text("d")
+            r.press("Enter")
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "select-prefix"
+        )
+        assert recorded == "Species set to Dog."
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert state["status"] == "Species set to Dog.", describe(report, state)
+
+
+class TestCheckboxRadio:
+    def test_checkbox_and_radio_clicks_replay(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """SUPPORTED. Plain clicks on a checkbox and a radio button."""
+        url = f"{mockmed_url}widgets.html?panel=checks"
+
+        def ops(page, r):
+            r.click(*center(page, "#consent"))
+            r.click(*center(page, "#prio-urgent"))
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "checks"
+        )
+        assert recorded == "Consent yes, priority Urgent."
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert state["status"] == recorded
+
+
+class TestDateInput:
+    def test_typed_date_is_replayed_faithfully_garbage_included(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """PARTIAL / HAZARD. Typing digits into a native date input is
+        segment- and locale-dependent: in this harness '07082026' produced
+        the value 70820-02-06 AT RECORD TIME, and the replay reproduced the
+        same wrong value byte-for-byte. Faithful replay of a bad recording
+        is still bad data — and the calendar popup alternative is browser
+        chrome that vision never sees."""
+        url = f"{mockmed_url}widgets.html?panel=date"
+
+        def ops(page, r):
+            r.click(*center(page, "#when"))
+            r.type_text("07082026")
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "date"
+        )
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        # Whatever the recording produced (correct or garbage), the replay
+        # reproduces it exactly.
+        assert state["status"] == recorded, describe(report, state)
+
+
+class TestModalDialog:
+    def test_open_and_confirm_dom_modal(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """SUPPORTED. DOM-rendered modal open + confirm are ordinary clicks."""
+        url = f"{mockmed_url}widgets.html?panel=modal"
+
+        def ops(page, r):
+            r.click(*center(page, "#open-survey"))
+            r.click(*center(page, "#confirm-survey"))
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "modal"
+        )
+        assert recorded == "Survey response recorded."
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert state["status"] == recorded
+
+
+class TestTypeahead:
+    def test_fixed_value_suggestion_click_replays(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """SUPPORTED (fixed value). Type a prefix, click a suggestion."""
+        url = f"{mockmed_url}widgets.html?panel=typeahead"
+
+        def ops(page, r):
+            r.click(*center(page, "#q"))
+            r.type_text("Al")
+            r.click(*center(page, "#suggestions button >> nth=0"))
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "typeahead"
+        )
+        assert recorded == "Contact chosen: Alice Anders."
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert state["status"] == recorded
+
+    def test_parameterized_prefix_resolves_suggestion_by_position(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """PARTIAL / HAZARD (characterization). The typed prefix is a
+        workflow parameter; replaying with 'Bo' makes different suggestions
+        appear. The recorded suggestion anchor ('Alice Anders') cannot
+        match, so resolution falls to the geometry rung and clicks
+        WHATEVER sits at the first-suggestion position — correct here by
+        coincidence of intent, unverified by construction (the compiler
+        also excluded the status text from postconditions because it
+        embeds the parameter). Observed on macOS: picks 'Bob Baker' and
+        reports success. A halt before the click is the other acceptable
+        pin (platform OCR differences decide which)."""
+        url = f"{mockmed_url}widgets.html?panel=typeahead"
+
+        def ops(page, r):
+            r.click(*center(page, "#q"))
+            r.type_text("Al", param="prefix")
+            r.click(*center(page, "#suggestions button >> nth=0"))
+
+        _wf, bundle_dir, _recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "typeahead-param"
+        )
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run",
+            params={"prefix": "Bo"},
+        )
+        # It must never claim the recorded contact was chosen.
+        assert state["status"] != "Contact chosen: Alice Anders.", describe(
+            report, state
+        )
+        if report.success:
+            # Position-based click on the first 'Bo' suggestion.
+            assert state["status"] == "Contact chosen: Bob Baker.", describe(
+                report, state
+            )
+        else:
+            # Or it halted before clicking anything.
+            assert state["status"] == "Ready and waiting.", describe(
+                report, state
+            )
+
+
+class TestTablePagination:
+    def test_recorded_pagination_clicks_replay(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """SUPPORTED (as recorded). 'Next' then pick a row on page 2. Note
+        the limit: pagination must be DEMONSTRATED; if data growth moves
+        the target onto another page at replay time, no recorded step
+        exists to reach it (no conditional control flow)."""
+        url = f"{mockmed_url}widgets.html?panel=table"
+
+        def ops(page, r):
+            r.click(*center(page, "#next-page"))
+            r.click(*center(page, ".pick-btn >> nth=0"))
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "pagination"
+        )
+        assert recorded == "Order picked: Dermatology consult."
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert state["status"] == recorded
+
+
+class TestSortReorder:
+    def test_reordered_rows_never_pick_the_recorded_order(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """WRONG-ACTION then halt (characterization). Record picking the
+        second row (ascending order), replay against ?presort=desc where
+        every row moved. Identical 'Pick' buttons defeat the template rung's
+        discrimination (row text sits mostly outside the crop): observed on
+        macOS, the replay CLICKED the wrong row (writing 'Order picked:
+        Echocardiogram.' into app state) before the postcondition halted
+        the run. The pinned invariants: the run never succeeds, and the
+        recorded order is never the one picked."""
+        url = f"{mockmed_url}widgets.html?panel=table"
+
+        def ops(page, r):
+            r.click(*center(page, ".pick-btn >> nth=1"))
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "sort-reorder"
+        )
+        assert recorded == "Order picked: Basic metabolic panel."
+        report, state = replay_on_page(
+            _browser, bundle_dir, url + "&presort=desc", tmp_path / "run",
+            params={},
+        )
+        assert report.success is False, describe(report, state)
+        assert state["status"] != recorded, describe(report, state)
+        failed = failing_step(report)
+        assert failed is not None and failed.step_id == "step_000"
+        if state["status"] != "Ready and waiting.":
+            # A wrong-row click actually executed before the halt.
+            assert state["status"].startswith("Order picked: "), describe(
+                report, state
+            )
+
+
+class TestKeyboardFlow:
+    def test_tab_type_enter_flow_replays(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """SUPPORTED. One focusing click, then keyboard only (type, Tab,
+        type, Enter)."""
+        url = f"{mockmed_url}widgets.html?panel=kbd"
+
+        def ops(page, r):
+            r.click(*center(page, "#kb-name"))
+            r.type_text("Rivera")
+            r.press("Tab")
+            r.type_text("North")
+            r.press("Enter")
+
+        _wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "kbd"
+        )
+        assert recorded == "Request submitted for Rivera on ward North."
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert state["status"] == recorded
+
+
+class TestNewTab:
+    def test_target_blank_link_is_a_vacuous_success(
+        self, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """UNSUPPORTED / SILENT (characterization). Clicking a
+        target=_blank link opens a tab the single-page backend never sees.
+        The recorded before/after frames are identical, so the step
+        compiles with ZERO postconditions — and the replay reports success
+        while whatever happened in the new tab goes entirely unobserved.
+        Desired: at minimum, a compile-time warning for steps that assert
+        nothing."""
+        url = f"{mockmed_url}widgets.html?panel=newtab"
+
+        def ops(page, r):
+            r.click(*center(page, "#report-link"))
+
+        wf, bundle_dir, recorded = record_and_compile(
+            _browser, url, ops, tmp_path, "newtab"
+        )
+        assert recorded == "Ready and waiting."  # original page unchanged
+        report, state = replay_on_page(
+            _browser, bundle_dir, url, tmp_path / "run", params={}
+        )
+        assert report.success is True, describe(report, state)
+        assert sum(len(s.expect) for s in wf.steps) == 0

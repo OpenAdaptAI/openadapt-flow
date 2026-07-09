@@ -11,35 +11,50 @@ change.
 ## The dangerous list: today's silent failure modes
 
 These are the cases where compiled replay does the wrong thing and reports
-success. They are open problems, not caveats.
+success. They are open problems, not caveats. (Two former members of this
+list — wrong-entity clicks in repeated structures, and unverified typed
+input — were fixed on 2026-07-08 and moved to the safe-halt section below.)
 
-- **Look-alike targets in repeated structures.** When the demonstrated
-  target is one row/card/icon among visually identical siblings and the
-  data shifts between runs — a row added above, the target's row deleted —
-  the replay can act on the sibling that now occupies the demonstrated
-  position. In our MockMed clinic app this saved an encounter to the
-  **wrong patient** and reported success, in four separate reproductions.
-  The discriminative text (the patient's name) sits outside the template
-  crop, and the compiled postconditions happened to assert only
-  patient-agnostic text. Match confidence was ~1.0 precisely because the
-  imposter's pixels were identical: **confidence measures pixel similarity,
-  not identity.**
-- **Typed input is never verified.** If focus is lost between the focusing
-  click and the keystrokes (a late re-render, a stray dialog), the text
-  lands nowhere, and the run completes green — we saved an encounter with
-  an empty note. Parameterized values are deliberately excluded from every
-  assertion (they vary per run), which means the values that matter most
-  are checked least.
 - **Steps that changed nothing assert nothing.** An action whose recorded
   before/after frames are identical (a click that opens a new tab the
   runtime can't see, an inert widget) compiles with zero postconditions
   and can never fail. There is currently no minimum-verification floor.
+- **Targets whose only discriminative text is their own label.** The
+  identity check deliberately excludes the target's own label (labels are
+  mutable evidence the resolution ladder heals through under rename
+  drift), so a control with no OTHER text on its row — e.g. a typeahead
+  suggestion for a *parameterized* prefix — compiles with no identity
+  context and is still clicked by position, unverified.
 
 ## What it halts on (safely, but it halts)
 
 Failures below stop the run with an accurate per-step report — no wrong
 actions observed — at the cost of availability:
 
+- **Wrong-entity targets in repeated structures** (fixed 2026-07-08;
+  formerly the top silent failure mode). When data shifts between runs —
+  a row added above the target, the target's row deleted, a look-alike
+  sibling, a re-sorted table — the resolver still finds a pixel-identical
+  target at a plausible position, but the pre-click **identity check**
+  compares the resolved row's text (full-width OCR band, minus the
+  target's own label and timestamp-bearing cells) against the recorded
+  row and refuses to click on mismatch. For a parameterized target (e.g.
+  *which patient* to open), the live band must name the **run's**
+  parameter value instead. Caveats, disclosed: when the live band is
+  unreadable even at 2x resolution, reversible steps proceed exactly as
+  before with the step flagged in the run report (`identity:
+  "unreadable"`), and irreversible steps refuse; dense-table OCR
+  undercount is real, which is why the 2x retry exists.
+- **Typed input that cannot be confirmed** (fixed 2026-07-08). After every
+  TYPE action the field region is screenshot-diffed and (where legible)
+  OCRed for the typed value; if nothing landed — e.g. focus stolen by a
+  late re-render, keystrokes falling on `<body>` — the replayer re-clicks
+  the field, selects-all, retypes once, and halts if the input still
+  cannot be confirmed. In the focus-theft reproduction the retry recovers
+  and the run completes with the correct text. Caveat: the diff layer
+  detects "keystrokes rendered nothing", not "keystrokes rendered in the
+  wrong visible field"; the OCR layer covers legible values, masked
+  (password) values rely on the diff alone.
 - **Anything that rescales or reflows the screen.** Browser zoom, display
   scale factor, or a font-size preference bump aborts at the first step.
   Self-healing covers palette changes, moved controls, and renamed labels;
@@ -63,21 +78,38 @@ actions observed — at the cost of availability:
   swallowed harmlessly and the run halts on postconditions. Vision cannot
   tell "the app ignored my click" from "my click never arrived."
 
-## Parameters: exact-value substitution only
+## Parameters: exact-value substitution, now identity-gated
 
 Parameterizing the *typed text* of a step works and is verified end to end
-(distinct note per run on the live OpenEMR demo). Parameterizing a value
-that **changes what appears on screen** — which patient to open — is
-position-bound and unverified: anchors recorded on "Belford, Phil" cannot
-match "Underwood, Susan", so resolution degrades to geometry, which clicks
-where the demonstrated row *was*. With a unique search match that happens
-to be right; with several matches nothing checks which row was clicked.
-Worse, making a value a parameter strips it from every assertion — the
-compiler deleted `Patient Messages for Belford, Phil`, the strongest
-identity check in the bundle, the moment the patient became a parameter.
-Recorded parameter values also leak into geometry landmarks, quietly
-degrading healing for any run whose values differ from the demo (i.e., all
-of them).
+(distinct note per run on the live OpenEMR demo, plus per-step typed-input
+verification since 2026-07-08). Parameterizing a value that **changes what
+appears on screen** — which patient to open — is still position-bound:
+anchors recorded on "Belford, Phil" cannot match "Underwood, Susan", so
+resolution degrades to geometry, which clicks where the demonstrated row
+*was*. Since 2026-07-08 that click is no longer blind: the identity
+check's param mode requires the **run's** value to appear in the resolved
+row's text before acting — a wrong row halts the run instead of opening
+the wrong chart. Still true and still costly: making a value a parameter
+strips it from every compiled assertion (by design — it varies per run),
+and recorded parameter values leak into geometry landmarks, quietly
+degrading healing for any run whose values differ from the demo (i.e.,
+all of them).
+
+## Known remaining (deliberately not attempted in the 2026-07-08 fix)
+
+- **Cosmetic global drift** (browser zoom, device scale factor, font-size
+  preference) still zeroes availability — false abort at the first step.
+- **Postcondition mining still overfits** to demonstrated/instance state
+  (data rows, other users' content); per-tenant re-recording remains the
+  working assumption.
+- **Vacuous zero-postcondition steps** still exist (no
+  minimum-verification floor or compile-time warning).
+- **Unreadable identity bands fall back to the old behavior** (flagged in
+  the report, refused only for irreversible steps) — an icon-only repeated
+  structure with no OCRable row text is still exposed to wrong-entity
+  clicks.
+- **Label-only targets** (see the dangerous list) compile with no identity
+  context at all.
 
 ## What a demonstration cannot express
 

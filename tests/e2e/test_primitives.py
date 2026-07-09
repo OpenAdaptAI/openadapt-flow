@@ -11,8 +11,9 @@ test here — lives in ``docs/validation/VALIDATION.md`` and
 
 Several tests are characterizations of weak behavior (vacuous successes on
 steps that compiled with zero postconditions; position-based resolution of
-parameterized typeahead; wrong-row clicks under reorder). Comments state
-the desired behavior where it differs from the observed one.
+parameterized typeahead). The wrong-row click under reorder was FIXED on
+2026-07-08 (pre-click identity check) — its test now pins the safe-halt.
+Comments state the desired behavior where it differs from the observed one.
 """
 
 from __future__ import annotations
@@ -289,17 +290,18 @@ class TestTablePagination:
 
 
 class TestSortReorder:
-    def test_reordered_rows_never_pick_the_recorded_order(
+    def test_reordered_rows_halt_before_any_click(
         self, mockmed_url, _browser, tmp_path
     ) -> None:
-        """WRONG-ACTION then halt (characterization). Record picking the
+        """FIXED (was: wrong-action then halt — the replay CLICKED the
+        wrong row, writing 'Order picked: Echocardiogram.' into app state
+        before the postcondition stopped the run). Record picking the
         second row (ascending order), replay against ?presort=desc where
-        every row moved. Identical 'Pick' buttons defeat the template rung's
-        discrimination (row text sits mostly outside the crop): observed on
-        macOS, the replay CLICKED the wrong row (writing 'Order picked:
-        Echocardiogram.' into app state) before the postcondition halted
-        the run. The pinned invariants: the run never succeeds, and the
-        recorded order is never the one picked."""
+        every row moved. Identical 'Pick' buttons still defeat the template
+        rung's discrimination (row text sits mostly outside the crop), but
+        the pre-click identity check compares the resolved row's band text
+        against the recorded row and halts BEFORE anything is clicked — no
+        state is written at all."""
         url = f"{mockmed_url}widgets.html?panel=table"
 
         def ops(page, r):
@@ -314,14 +316,13 @@ class TestSortReorder:
             params={},
         )
         assert report.success is False, describe(report, state)
-        assert state["status"] != recorded, describe(report, state)
+        # No click fired: app state untouched.
+        assert state["status"] == "Ready and waiting.", describe(report, state)
         failed = failing_step(report)
         assert failed is not None and failed.step_id == "step_000"
-        if state["status"] != "Ready and waiting.":
-            # A wrong-row click actually executed before the halt.
-            assert state["status"].startswith("Order picked: "), describe(
-                report, state
-            )
+        assert "Identity check failed" in (failed.error or ""), describe(
+            report, state
+        )
 
 
 class TestKeyboardFlow:

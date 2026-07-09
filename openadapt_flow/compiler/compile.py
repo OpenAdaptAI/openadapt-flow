@@ -11,7 +11,6 @@ from __future__ import annotations
 import difflib
 import json
 import math
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +28,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.runtime.identity import TIMESTAMP_RE, band_region, context_from_lines
 from openadapt_flow.vision.hashing import phash_png
 from openadapt_flow.vision.ocr import OcrLine, normalize_text, ocr
 
@@ -99,12 +99,8 @@ LABEL_MATCH_RATIO = 0.85
 # it cannot survive replay against live data. Observed on OpenEMR: opening
 # a dialog nudged a timestamped message row into view, the row won the
 # longest-new-text contest, and the compiled bundle then aborted every
-# replay once newer rows displaced it.
-TIMESTAMP_RE = re.compile(
-    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"  # 2026-07-08, 2026/7/8
-    r"|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"  # 07/08/2026, 8.7.26
-    r"|\d{1,2}:\d{2}"  # 18:38, 6:05
-)
+# replay once newer rows displaced it. (Shared with the identity context
+# extractor — TIMESTAMP_RE lives in runtime.identity.)
 
 
 def _load_events(recording_dir: Path) -> list[dict]:
@@ -475,9 +471,12 @@ def compile_recording(
 
     For each click (or double_click) event: crop a template (160x64, clamped
     to the frame, centered on the click), OCR the crop for ``ocr_text``,
-    derive up to two landmarks from nearby OCR lines outside the crop, and
-    derive postconditions (REGION_STABLE on the largest changed region plus
-    TEXT_PRESENT for the most distinctive new text). Type/key events carry
+    derive up to two landmarks from nearby OCR lines outside the crop,
+    record the target's identity context band (``anchor.context_text`` —
+    row text outside the crop, verified before every click at replay time;
+    see :mod:`openadapt_flow.runtime.identity`), and derive postconditions
+    (REGION_STABLE on the largest changed region plus TEXT_PRESENT for the
+    most distinctive new text). Type/key events carry
     their text/param/key through. Parameterized typed values and click
     target labels are never asserted in any step's postconditions (the
     former vary per run; the latter are mutable evidence the resolution
@@ -551,11 +550,24 @@ def compile_recording(
             )
             frame_lines = ocr(before_png)
             landmarks = _landmarks_for(frame_lines, crop_region, click)
+            # Identity evidence: the target's row text OUTSIDE its own crop
+            # (a table row's discriminative name column sits outside the
+            # 160x64 template — see runtime.identity). Verified against the
+            # live band before every click at replay time.
+            context_text = context_from_lines(
+                frame_lines,
+                exclude_region=crop_region,
+                band=band_region(
+                    click, crop_region[3], (frame.shape[1], frame.shape[0])
+                ),
+                min_confidence=MIN_OCR_CONFIDENCE,
+            )
             anchor = Anchor(
                 template=template_rel,
                 region=crop_region,
                 click_point=click,
                 ocr_text=ocr_text,
+                context_text=context_text,
                 landmarks=landmarks,
             )
             verb = "double-click" if kind == "double_click" else "click"

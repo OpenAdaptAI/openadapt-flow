@@ -1,10 +1,14 @@
 """Replayer: execute a compiled Workflow against a Backend.
 
 Per step: settle, screenshot, resolve the anchor via the resolution ladder,
-enforce the irreversible-step risk gate, act through the Backend, settle
-again, and poll postconditions until they pass or time out (with one
-re-settle retry). Postcondition failure is semantic drift: the run halts,
-naming the step and embedding its before/after screenshots in the report.
+enforce the irreversible-step risk gate, verify the resolved target's
+IDENTITY against the anchor's recorded context band (never click a
+positional look-alike — see ``runtime.identity``), act through the Backend
+(TYPE actions additionally verify the input visibly landed, with one
+refocus-and-retype retry), settle again, and poll postconditions until they
+pass or time out (with one re-settle retry). Postcondition failure is
+semantic drift: the run halts, naming the step and embedding its
+before/after screenshots in the report.
 
 Steps that succeed via any rung other than ``template`` are healed: the
 anchor is refreshed from the live frame, the heal is recorded under
@@ -23,6 +27,8 @@ from typing import Any, Optional
 from openadapt_flow.backend import Backend
 from openadapt_flow.ir import (
     ActionKind,
+    IdentityCheck,
+    Point,
     Region,
     Resolution,
     RunReport,
@@ -31,6 +37,7 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.runtime import heal as heal_mod
+from openadapt_flow.runtime import identity as identity_mod
 from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 
 # REGION_STABLE template check: how far the expected content may shift from
@@ -38,6 +45,14 @@ from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 # and the minimum template-match score to accept it.
 PC_TEMPLATE_SEARCH_PAD = 80
 PC_TEMPLATE_THRESHOLD = 0.9
+
+# Typed-input verification: size of the "field region" diffed/OCRed around
+# the focusing click point after a TYPE action. Generous on purpose — the
+# typed text renders at the field's own left edge / first line, not at the
+# click point — and clamped to the viewport. When no focusing click is
+# known (keyboard-only focus moves, e.g. Tab between fields), the whole
+# frame is used instead.
+FIELD_REGION_SIZE = (640, 240)
 
 # Closed-loop scroll: a SCROLL step keeps scrolling by its recorded delta
 # until the NEXT anchored step's anchor resolves on a settled frame, bounded
@@ -77,6 +92,9 @@ class Replayer:
         self.vision = vision
         self.grounder = grounder
         self.poll_interval_s = poll_interval_s
+        # Point of the most recent successful click (the focusing click for
+        # a following TYPE step); reset per run.
+        self._last_click_point: Optional[Point] = None
 
     # -- public API ----------------------------------------------------------
 
@@ -122,6 +140,7 @@ class Replayer:
             params=params,
         )
         new_crops: dict[str, bytes] = {}
+        self._last_click_point: Optional[Point] = None
         t_run = time.monotonic()
 
         for step_index, step in enumerate(workflow.steps):
@@ -206,6 +225,50 @@ class Replayer:
                     step, before_png, bundle_dir
                 )
             result.resolution = resolution
+            if (
+                error is None
+                and resolution is not None
+                and step.action in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK)
+                and step.anchor is not None
+                and step.anchor.context_text
+            ):
+                # Identity gate: the ladder proves the resolved target LOOKS
+                # right at a plausible position; the recorded context band
+                # proves it IS the recorded target (or, for a parameterized
+                # target, the run's entity). Wrong identity must never be
+                # clicked — data drift in repeated structures (rows/cards)
+                # otherwise redirects the whole tail of the workflow to the
+                # wrong entity with a green report (VALIDATION.md, Track A).
+                check = self._verify_identity(
+                    step, resolution, before_png, params, workflow
+                )
+                result.identity = check
+                if check.status == "mismatch":
+                    error = (
+                        f"Identity check failed for step '{step.id}' "
+                        f"({step.intent}): a target was found positionally "
+                        f"(rung '{resolution.rung}', confidence "
+                        f"{resolution.confidence:.2f}) but its surrounding "
+                        f"text does not match the recorded target's — "
+                        f"expected {check.expected!r}, observed "
+                        f"{check.observed!r}"
+                        + (
+                            f" (parameter '{check.param}')"
+                            if check.param
+                            else f" (coverage {check.coverage:.2f})"
+                        )
+                        + " — refusing to act; run aborted"
+                    )
+                elif (
+                    check.status == "unreadable"
+                    and step.risk == "irreversible"
+                ):
+                    error = (
+                        f"Step '{step.id}' ({step.intent}) is irreversible "
+                        "and its target identity could not be read from the "
+                        "live screen (context band OCR found no usable "
+                        "text) — needs human confirmation; refusing to act"
+                    )
             if error is None:
                 error = self._act(
                     step,
@@ -215,6 +278,7 @@ class Replayer:
                     step_index=step_index,
                     bundle_dir=bundle_dir,
                     before_png=before_png,
+                    result=result,
                 )
 
             if error is None:
@@ -319,6 +383,7 @@ class Replayer:
         step_index: int,
         bundle_dir: Path,
         before_png: bytes,
+        result: StepResult,
     ) -> Optional[str]:
         """Perform the step's action through the backend.
 
@@ -329,6 +394,7 @@ class Replayer:
             assert resolution is not None  # guaranteed by _resolve_step
             x, y = resolution.point
             self.backend.click(x, y, double=step.action is ActionKind.DOUBLE_CLICK)
+            self._last_click_point = (x, y)
             return None
 
         if step.action is ActionKind.TYPE:
@@ -346,12 +412,32 @@ class Replayer:
                     f"Step '{step.id}' ({step.intent}) is a TYPE step with "
                     "neither text nor param"
                 )
+            # The field point: this step's own focusing click (anchored
+            # TYPE), or the immediately preceding step's click point (the
+            # recorder's click-to-focus-then-type pattern). When focus was
+            # moved some other way (Tab between fields), there is no known
+            # field point — verification diffs the whole frame and the
+            # retry cannot re-click.
+            field_point: Optional[Point] = None
             if resolution is not None:
                 # Anchored TYPE: click to focus the field first.
                 x, y = resolution.point
                 self.backend.click(x, y)
+                field_point = (x, y)
+                # Fresh baseline AFTER the focusing click so its own focus
+                # ring never counts as "input landed".
+                before_png = self.backend.screenshot()
+            elif step_index > 0 and workflow.steps[step_index - 1].action in (
+                ActionKind.CLICK,
+                ActionKind.DOUBLE_CLICK,
+            ):
+                field_point = self._last_click_point
             self.backend.type_text(text)
-            return None
+            if not text:
+                return None  # nothing typed, nothing to verify
+            return self._verify_typed_input(
+                step, text, field_point, before_png, result
+            )
 
         if step.action is ActionKind.KEY:
             if not step.key:
@@ -373,6 +459,147 @@ class Replayer:
             )
 
         return f"Step '{step.id}' has unsupported action {step.action!r}"
+
+    # -- identity verification (pre-click) --------------------------------------
+
+    def _verify_identity(
+        self,
+        step: Step,
+        resolution: Resolution,
+        before_png: bytes,
+        params: dict[str, str],
+        workflow: Workflow,
+    ) -> IdentityCheck:
+        """Verify the resolved target's identity via its live context band.
+
+        OCRs the full-width band around the RESOLVED click point (same
+        height as the recorded crop) and compares it to the anchor's
+        recorded ``context_text`` (see :mod:`openadapt_flow.runtime.identity`
+        for the matching rules and the param-mode re-anchoring). Dense small
+        text is undercounted by OCR at native resolution, so a non-verified
+        first pass is retried once at 2x resolution before the verdict.
+
+        Returns:
+            The best :class:`IdentityCheck` across the two attempts.
+        """
+        assert step.anchor is not None and step.anchor.context_text
+        band = identity_mod.band_region(
+            resolution.point, step.anchor.region[3], self.backend.viewport
+        )
+
+        def attempt(png: bytes, region: Optional[Region]) -> IdentityCheck:
+            lines = self.vision.ocr(png, region=region)
+            observed = " ".join(
+                line.text.strip() for line in lines if line.text.strip()
+            )
+            return identity_mod.verify_target_identity(
+                step.anchor.context_text,
+                observed,
+                params=params,
+                param_examples=workflow.params,
+            )
+
+        check = attempt(before_png, band)
+        if check.status == "verified":
+            return check
+        upscaled = identity_mod.upscale_crop(before_png, band)
+        if upscaled is None:
+            return check
+        retry = attempt(upscaled, None)
+        rank = {"unreadable": 0, "mismatch": 1, "verified": 2}
+        if (rank[retry.status], retry.coverage) > (
+            rank[check.status],
+            check.coverage,
+        ):
+            return retry
+        return check
+
+    # -- typed-input verification -------------------------------------------------
+
+    def _field_region(self, field_point: Optional[Point]) -> Optional[Region]:
+        """Region to observe for typed input, or None for the whole frame."""
+        if field_point is None:
+            return None
+        vw, vh = self.backend.viewport
+        w = min(FIELD_REGION_SIZE[0], vw)
+        h = min(FIELD_REGION_SIZE[1], vh)
+        x = min(max(0, field_point[0] - w // 2), max(0, vw - w))
+        y = min(max(0, field_point[1] - h // 2), max(0, vh - h))
+        return (x, y, w, h)
+
+    def _typed_input_landed(
+        self, text: str, field_point: Optional[Point], baseline_png: bytes
+    ) -> bool:
+        """Did the just-typed ``text`` visibly land?
+
+        Two layers: (1) screenshot-diff of the field region (any change at
+        all separates "keystrokes rendered somewhere visible" from "fell on
+        a non-rendering target such as <body> after focus theft"); (2) when
+        the diff sees nothing, lenient OCR of the field region for the typed
+        value (contiguous squashed run, scaled for short values), retried at
+        2x resolution — masked fields (password dots) rely on layer 1 alone.
+        """
+        after_png = self.vision.wait_settled(self.backend)
+        region = self._field_region(field_point)
+        if self.vision.pixels_changed(baseline_png, after_png, region=region):
+            return True
+        needle = identity_mod.squash(text)
+        if len(needle) < identity_mod.MIN_PARAM_CHARS:
+            return False  # too short for OCR to arbitrate
+        need = identity_mod.required_run(len(needle))
+        lines = self.vision.ocr(after_png, region=region)
+        hay = identity_mod.squash(" ".join(line.text for line in lines))
+        if identity_mod.longest_run(needle, hay) >= need:
+            return True
+        if region is not None:
+            upscaled = identity_mod.upscale_crop(after_png, region)
+            if upscaled is not None:
+                lines = self.vision.ocr(upscaled)
+                hay = identity_mod.squash(
+                    " ".join(line.text for line in lines)
+                )
+                if identity_mod.longest_run(needle, hay) >= need:
+                    return True
+        return False
+
+    def _verify_typed_input(
+        self,
+        step: Step,
+        text: str,
+        field_point: Optional[Point],
+        baseline_png: bytes,
+        result: StepResult,
+    ) -> Optional[str]:
+        """Verify a TYPE action landed; one refocus-and-retype retry.
+
+        On first failure: re-click the field (when its point is known),
+        select-all so a false-negative first attempt is REPLACED rather
+        than duplicated, and retype. On second failure: an error string —
+        the run safe-halts (typed input that cannot be confirmed must never
+        be reported as success; see VALIDATION.md 'focus stolen' finding).
+        """
+        if self._typed_input_landed(text, field_point, baseline_png):
+            result.input_verified = True
+            return None
+        result.input_retried = True
+        if field_point is not None:
+            self.backend.click(*field_point)
+            # Replace, don't append: if the first attempt DID land but was
+            # not visible to the diff/OCR, retyping raw would double it.
+            self.backend.press("ControlOrMeta+a")
+        retry_baseline = self.backend.screenshot()
+        self.backend.type_text(text)
+        if self._typed_input_landed(text, field_point, retry_baseline):
+            result.input_verified = True
+            return None
+        result.input_verified = False
+        return (
+            f"Typed input could not be verified for step '{step.id}' "
+            f"({step.intent}): the screen did not change where the text "
+            "should have appeared and OCR could not find the typed value, "
+            "after one refocus-and-retype retry — keystrokes likely fell on "
+            "a non-input target (focus lost); run aborted"
+        )
 
     # -- closed-loop scroll ------------------------------------------------------
 

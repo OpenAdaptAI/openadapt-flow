@@ -180,6 +180,25 @@ textarea#note {
 
 #survey-modal h2 { margin-top: 0; }
 
+/* Larger type (drift mode "font"): a user-side font-size preference bump.
+   Reflows text and shifts every element below the first size change. */
+body.drift-font { font-size: 19px; }
+body.drift-font button,
+body.drift-font input,
+body.drift-font textarea,
+body.drift-font p { font-size: 19px; }
+body.drift-font th, body.drift-font td { font-size: 18px; }
+body.drift-font label { font-size: 18px; }
+body.drift-font h1 { font-size: 28px; }
+body.drift-font h2 { font-size: 24px; }
+body.drift-font #patient-banner { font-size: 20px; }
+body.drift-font #saved-banner { font-size: 19px; }
+
+/* Whole-page scale (drift mode "zoom"): approximates browser zoom at 125%.
+   Every element grows and moves; pixel coordinates no longer line up with
+   the recorded frame. */
+body.drift-zoom { zoom: 1.25; }
+
 /* Dark palette (drift mode "theme"): breaks template matching, keeps
    contrast high so OCR still works. */
 body.drift-theme { background: #161a22; color: #e6e9ef; }

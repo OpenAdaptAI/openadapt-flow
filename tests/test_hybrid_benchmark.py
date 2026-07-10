@@ -509,6 +509,125 @@ class TestHybridRun:
         assert ledger.spent == pytest.approx(0.21)
         assert row["success"]  # final screen verified independently
 
+    def test_fallback_mid_run_crash_records_partial_spend(
+        self,
+        bundle: Path,
+        fake_launch: FakeBackend,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """ADDED 2026-07-09 (review): a fallback that crashes mid-run
+        previously recorded $0 to the SpendLedger and a zero-cost row —
+        real paid calls vanished from the ceiling. The partial usage must
+        reach the row AND the shared ledger."""
+        from types import SimpleNamespace
+
+        install_fake_replayer(
+            monkeypatch,
+            FakeReport(
+                [FakeStepResult("step_000", "click", False, error="drift")],
+                success=False,
+            ),
+        )
+
+        def crashing_run_agent(backend, task, **kwargs):
+            usage = kwargs["ledger"]
+            for _ in range(2):  # two paid calls, then the API dies
+                usage.record(
+                    SimpleNamespace(
+                        input_tokens=200_000,
+                        output_tokens=50,
+                        cache_creation_input_tokens=0,
+                        cache_read_input_tokens=0,
+                    )
+                )
+            raise RuntimeError("Error code: 529 - overloaded_error")
+
+        monkeypatch.setattr(agent_baseline, "run_agent", crashing_run_agent)
+        ledger = SpendLedger(1.5, 8.0)
+        row = _hybrid_run(
+            bundle,
+            "http://x/",
+            tmp_path / "run",
+            NOTE,
+            demo_text="1. click",
+            ledger=ledger,
+        )
+        expected = agent_baseline.compute_cost(400_000, 100)
+        assert row["error"] == "RuntimeError: Error code: 529 - overloaded_error"
+        assert row["fallback_used"]
+        assert row["api_calls"] == 2
+        assert row["input_tokens"] == 400_000
+        assert row["cost_usd"] == pytest.approx(expected)
+        assert row["fallback_cost_usd"] == pytest.approx(expected)
+        assert ledger.spent == pytest.approx(expected)  # counts to ceiling
+
+    def test_failed_report_without_failing_step_counts_all_completed(
+        self,
+        bundle: Path,
+        fake_launch: FakeBackend,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """ADDED 2026-07-09 (review): success=False with every step result
+        ok used to blame the LAST COMPLETED step and undercount
+        completed_steps by one in the handoff prompt."""
+        install_fake_replayer(
+            monkeypatch,
+            FakeReport(
+                [
+                    FakeStepResult("step_000", "click 'Username'", True),
+                    FakeStepResult("step_001", "type 'nurse.demo'", True),
+                ],
+                success=False,
+            ),
+        )
+        seen: dict[str, Any] = {}
+
+        def fake_run_agent(backend, task, **kwargs):
+            seen["task"] = task
+            return agent_baseline.AgentRunResult(
+                actions=1,
+                api_calls=1,
+                input_tokens=100,
+                output_tokens=10,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                cost_usd=0.001,
+                wall_s=1.0,
+                stopped="model_done",
+                model_stop_reason="end_turn",
+                final_screenshot=SUCCESS_SCREEN,
+            )
+
+        monkeypatch.setattr(agent_baseline, "run_agent", fake_run_agent)
+        ledger = SpendLedger(1.5, 8.0)
+        row = _hybrid_run(
+            bundle,
+            "http://x/",
+            tmp_path / "run",
+            NOTE,
+            demo_text="1. click",
+            ledger=ledger,
+        )
+        assert row["halted"]
+        assert row["halt_step"] is None  # no failing step to name
+        # Both completed steps count; not len - 1.
+        assert "Steps 1..2 of" in seen["task"]
+        assert "no failing step recorded" in seen["task"]
+
+    def test_failed_result_index_edge_cases(self) -> None:
+        from openadapt_flow.benchmark.hybrid_benchmark import (
+            _failed_result_index,
+        )
+
+        ok = FakeStepResult("a", "x", True)
+        bad = FakeStepResult("b", "y", False, error="boom")
+        assert _failed_result_index(FakeReport([ok, bad, ok], False)) == 1
+        assert _failed_result_index(FakeReport([bad], False)) == 0
+        assert _failed_result_index(FakeReport([ok, ok], False)) is None
+        assert _failed_result_index(FakeReport([], False)) is None
+
     def test_halt_with_exhausted_budget_skips_fallback(
         self,
         bundle: Path,
@@ -717,8 +836,19 @@ def install_fake_arms(
     tmp_path: Path,
     *,
     agent_cost: float = 0.27,
+    url_log: list | None = None,
 ) -> None:
-    """Fake recording/compiling/serving and the three run helpers."""
+    """Fake recording/compiling/serving and the three run helpers.
+
+    When ``url_log`` is given, every run helper appends ``(arm, url)`` in
+    call order — the URLs the arms ACTUALLY received, so tests can assert
+    on the real per-slot conditions rather than orchestrator-stamped
+    labels.
+    """
+
+    def log_url(arm: str, url: str) -> None:
+        if url_log is not None:
+            url_log.append((arm, url))
     import openadapt_flow.compiler as compiler
     import openadapt_flow.demo_driver as demo_driver
     import openadapt_flow.mockmed.server as server
@@ -739,15 +869,14 @@ def install_fake_arms(
 
     monkeypatch.setattr(compiler, "compile_recording", fake_compile)
 
-    monkeypatch.setattr(
-        hybrid_benchmark,
-        "_compiled_run",
-        lambda bundle, url, run_dir, note, **kw: _row(
-            "compiled", 0, "x", success="drift" not in url
-        ),
-    )
+    def fake_compiled_run(bundle, url, run_dir, note, **kw):
+        log_url("compiled", url)
+        return _row("compiled", 0, "x", success="drift" not in url)
+
+    monkeypatch.setattr(hybrid_benchmark, "_compiled_run", fake_compiled_run)
 
     def fake_hybrid_run(bundle, url, run_dir, note, *, ledger, **kw):
+        log_url("hybrid", url)
         if "drift" not in url:
             return _row(
                 "hybrid", 0, "x", success=True,
@@ -771,13 +900,14 @@ def install_fake_arms(
         )
 
     monkeypatch.setattr(hybrid_benchmark, "_hybrid_run", fake_hybrid_run)
-    monkeypatch.setattr(
-        hybrid_benchmark,
-        "_agent_run",
-        lambda url, note, **kw: _row(
+
+    def fake_agent_run(url, note, **kw):
+        log_url("agent", url)
+        return _row(
             "agent", 0, "x", success=True, cost=agent_cost, api_calls=13
-        ),
-    )
+        )
+
+    monkeypatch.setattr(hybrid_benchmark, "_agent_run", fake_agent_run)
 
 
 class TestOrchestratorGuardrails:
@@ -839,12 +969,40 @@ class TestOrchestratorGuardrails:
     def test_arms_see_identical_conditions_per_slot(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        install_fake_arms(monkeypatch, tmp_path)
+        """Asserted on the URLs each arm ACTUALLY received (captured from
+        the run helpers), not on the orchestrator-stamped condition labels
+        — the labels come from the same schedule lookup the orchestrator
+        uses to build the URLs, so asserting on them alone is circular."""
+        from openadapt_flow.benchmark.hybrid_benchmark import (
+            AGENT_SLOTS,
+            condition_url,
+        )
+
+        url_log: list = []
+        install_fake_arms(monkeypatch, tmp_path, url_log=url_log)
         results = run_hybrid_benchmark(
             tmp_path / "out",
             preflight=lambda: (True, None),
             log=lambda s: None,
         )
+        base = "http://x:1/"
+        n = len(SCHEDULE)
+        # Call order is deterministic: compiled over the full schedule,
+        # hybrid over the full schedule, then agent and demo_agent over
+        # the subsample (both through the same _agent_run helper).
+        expected = (
+            [("compiled", s) for s in range(n)]
+            + [("hybrid", s) for s in range(n)]
+            + [("agent", s) for s in AGENT_SLOTS]
+            + [("agent", s) for s in AGENT_SLOTS]
+        )
+        assert len(url_log) == len(expected)
+        for (arm, url), (want_arm, slot) in zip(url_log, expected):
+            assert arm == want_arm
+            assert url == condition_url(base, SCHEDULE[slot]), (
+                arm, slot, url
+            )
+        # And the stamped labels agree with the URLs actually used.
         by_slot: dict[int, set[str]] = {}
         for rows in results["runs"].values():
             for r in rows:

@@ -8,7 +8,7 @@
     "input": 3.0,
     "output": 15.0,
     "cache_write": 3.75,
-    "cache_read": 0.30000000000000004,
+    "cache_read": 0.3,
     "note": "list price; an introductory $2/$10 rate applies through 2026-08-31"
   },
   "cost_caps_usd": {

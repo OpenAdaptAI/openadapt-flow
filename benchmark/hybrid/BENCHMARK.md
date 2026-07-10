@@ -80,6 +80,8 @@ run all slots; arms B and C run the 8-slot
 subsample [0, 2, 4, 5, 8, 10, 15, 18] (5 clean + one of each drift type).
 Every arm sees the identical condition at the same slot index.
 
+Disclosure: the B/C agent subsample is 3/8 = 37.5% drift versus the 20-slot schedule's 30% — drifted runs cost more, so the agent-only mean is measured on a slightly drift-heavier mix than the hybrid arm ran: a small cost bias in the hybrid's FAVOR of about $0.00239/run (B mean $0.23770 measured vs ~$0.23530 reweighted to the schedule mix; cost-per-run ratio 8.2x measured vs 8.1x reweighted). Conclusions unchanged.
+
 | condition | what changes | compiled halt point (probed free, 3/3 deterministic) | intent-level recovery |
 |---|---|---|---|
 | `notice` | a "What's New" interstitial replaces the tasks screen after sign-in until dismissed | Sign In click (postcondition: tasks screen never appears) | click "Continue to tasks" |

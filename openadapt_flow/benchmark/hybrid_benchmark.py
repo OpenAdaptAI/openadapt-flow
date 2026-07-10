@@ -507,12 +507,18 @@ class SpendLedger:
 # -- hybrid run (arm D) ----------------------------------------------------------
 
 
-def _failed_result_index(report: Any) -> int:
-    """Index of the first failed step result in a run report."""
+def _failed_result_index(report: Any) -> Optional[int]:
+    """Index of the first failed step result in a run report.
+
+    Returns None when no result failed (a failed report whose step
+    results are all ok): the earlier fallback of ``len(results) - 1``
+    blamed the last COMPLETED step and undercounted ``completed_steps``
+    by one in the handoff prompt.
+    """
     for i, result in enumerate(report.results):
         if not result.ok:
             return i
-    return len(report.results) - 1
+    return None
 
 
 def _hybrid_run(
@@ -599,22 +605,43 @@ def _hybrid_run(
 
         if not report.success:
             failed_i = _failed_result_index(report)
-            failed = report.results[failed_i]
+            if failed_i is None:
+                # Defensive: a failed report where every step result is ok
+                # (nothing to name). All listed steps completed; the
+                # fallback prompt must not blame the last completed step.
+                completed_steps = len(report.results)
+                halt_step = None
+                halt_intent = "(no failing step recorded)"
+                halt_reason = (
+                    "replayer reported failure without a failing step"
+                )
+            else:
+                failed = report.results[failed_i]
+                completed_steps = failed_i
+                halt_step = failed.step_id
+                halt_intent = failed.intent
+                halt_reason = failed.error or "unknown"
             row["halted"] = True
-            row["halt_step"] = failed.step_id
-            row["halt_reason"] = failed.error
+            row["halt_step"] = halt_step
+            row["halt_reason"] = halt_reason
             if not ledger.can_start():
                 row["fallback_skipped_reason"] = ledger.blocked_reason()
             else:
                 task = handoff_task_prompt(
                     note_text,
                     demo_text,
-                    completed_steps=failed_i,
+                    completed_steps=completed_steps,
                     total_steps=len(workflow.steps),
-                    halted_step_intent=failed.intent,
-                    halt_reason=failed.error or "unknown",
+                    halted_step_intent=halt_intent,
+                    halt_reason=halt_reason,
                 )
                 row["fallback_used"] = True
+                # Usage is recorded into this ledger the moment each API
+                # response arrives, so a fallback that crashes mid-run
+                # still surfaces its paid usage to the row and the shared
+                # SpendLedger (crashed spend must count against the
+                # ceiling, never vanish with the exception).
+                usage = agent_baseline.UsageLedger()
                 try:
                     result = agent_baseline.run_agent(
                         backend,
@@ -623,10 +650,23 @@ def _hybrid_run(
                         max_actions=fallback_max_actions,
                         max_cost_usd=ledger.per_run_cap,
                         log=log,
+                        ledger=usage,
                     )
                 except Exception as exc:  # noqa: BLE001 - a failed run is data
                     row["error"] = f"{type(exc).__name__}: {exc}"
-                    ledger.record(0.0, error=row["error"])
+                    row["fallback_api_calls"] = usage.api_calls
+                    row["fallback_cost_usd"] = usage.cost_usd
+                    row["api_calls"] = usage.api_calls
+                    row["input_tokens"] = usage.input_tokens
+                    row["output_tokens"] = usage.output_tokens
+                    row["cache_creation_input_tokens"] = (
+                        usage.cache_creation_input_tokens
+                    )
+                    row["cache_read_input_tokens"] = (
+                        usage.cache_read_input_tokens
+                    )
+                    row["cost_usd"] = usage.cost_usd
+                    ledger.record(usage.cost_usd, error=row["error"])
                 else:
                     row["fallback_actions"] = result.actions
                     row["fallback_api_calls"] = result.api_calls
@@ -1028,6 +1068,54 @@ def _demo_conditioning_note(b: dict[str, Any], c: dict[str, Any]) -> str:
     )
 
 
+def _subsample_mix_note(results: dict[str, Any]) -> str:
+    """Disclosure sentence for the B/C subsample's drift-mix bias.
+
+    Arms B and C run a subsample of the schedule; when the subsample's
+    drift fraction differs from the full schedule's, the agent-only mean
+    cost per run is measured on a slightly different mix than the hybrid
+    arm's (drifted runs cost more). Reports the measured agent mean next
+    to the mean reweighted to the full schedule's mix, and both cost
+    ratios, so the small bias is visible. Empty when the mixes match or
+    the reweighting cannot be computed from the rows.
+    """
+    sched = results["schedule"]
+    slots = sched["agent_slots"]
+    sub = [sched["conditions"][s] for s in slots]
+    sub_drift = sum(1 for c in sub if c != "clean")
+    sub_fraction = sub_drift / len(sub) if sub else 0.0
+    full_fraction = sched["drift_fraction"]
+    if abs(sub_fraction - full_fraction) < 1e-9:
+        return ""
+    agent_rows = results["runs"].get("agent", [])
+    clean = [r["cost_usd"] for r in agent_rows if r["condition"] == "clean"]
+    drift = [r["cost_usd"] for r in agent_rows if r["condition"] != "clean"]
+    if not clean or not drift:
+        return ""
+    measured = statistics.fmean(r["cost_usd"] for r in agent_rows)
+    reweighted = (1 - full_fraction) * statistics.fmean(clean) + (
+        full_fraction * statistics.fmean(drift)
+    )
+    hybrid_mean = results["arms"]["hybrid"]["cost_usd_per_run"]
+    ratios = ""
+    if hybrid_mean > 0:
+        ratios = (
+            f"; cost-per-run ratio {measured / hybrid_mean:.1f}x measured "
+            f"vs {reweighted / hybrid_mean:.1f}x reweighted"
+        )
+    return (
+        f"\nDisclosure: the B/C agent subsample is {sub_drift}/{len(sub)} "
+        f"= {sub_fraction:.1%} drift versus the "
+        f"{len(sched['conditions'])}-slot schedule's {full_fraction:.0%} — "
+        f"drifted runs cost more, so the agent-only mean is measured on a "
+        f"slightly drift-heavier mix than the hybrid arm ran: a small cost "
+        f"bias in the hybrid's FAVOR of about "
+        f"${measured - reweighted:.5f}/run (B mean ${measured:.5f} "
+        f"measured vs ~${reweighted:.5f} reweighted to the schedule "
+        f"mix{ratios}). Conclusions unchanged.\n"
+    )
+
+
 def render_hybrid_markdown(results: dict[str, Any]) -> str:
     """Render ``BENCHMARK.md`` from the results dict.
 
@@ -1082,6 +1170,8 @@ def render_hybrid_markdown(results: dict[str, Any]) -> str:
             f"note={r.get('note_found')}, "
             f"right_patient={r.get('right_patient')})"
         )
+
+    mix_note = _subsample_mix_note(results)
 
     def failures(arm: str) -> str:
         lines = "".join(
@@ -1198,7 +1288,7 @@ Hybrid (D):
 run all slots; arms B and C run the {len(sched['agent_slots'])}-slot
 subsample {sched['agent_slots']} (5 clean + one of each drift type).
 Every arm sees the identical condition at the same slot index.
-
+{mix_note}
 | condition | what changes | compiled halt point (probed free, 3/3 deterministic) | intent-level recovery |
 |---|---|---|---|
 | `notice` | a "What's New" interstitial replaces the tasks screen after sign-in until dismissed | Sign In click (postcondition: tasks screen never appears) | click "Continue to tasks" |
@@ -1335,7 +1425,9 @@ def write_hybrid_outputs(results: dict[str, Any], out_dir: Path) -> None:
         out_dir: Output directory (created if needed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(json.dumps(results, indent=2))
+    (out_dir / "results.json").write_text(
+        json.dumps(results, indent=2) + "\n"
+    )
     render_hybrid_chart(results, out_dir / "success_cost.png")
     (out_dir / "BENCHMARK.md").write_text(render_hybrid_markdown(results))
 

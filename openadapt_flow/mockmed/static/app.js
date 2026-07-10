@@ -17,6 +17,15 @@ var DRIFT = new Set(
 
 if (DRIFT.has('theme')) { document.body.classList.add('drift-theme'); }
 if (DRIFT.has('move')) { document.body.classList.add('drift-move'); }
+if (DRIFT.has('font')) { document.body.classList.add('drift-font'); }
+if (DRIFT.has('zoom')) { document.body.classList.add('drift-zoom'); }
+
+// Navigation renders are delayed by SLOW_MS when drift mode "slow" is on
+// (the previous screen stays up meanwhile, like a slow server round-trip).
+// The initial render is never delayed. Override the delay with ?slowms=N.
+var SLOW_MS = DRIFT.has('slow')
+  ? parseInt(new URLSearchParams(location.search).get('slowms') || '4000', 10)
+  : 0;
 
 var LABEL_SAVE = DRIFT.has('rename') ? 'Submit Encounter' : 'Save Encounter';
 var LABEL_OPEN = DRIFT.has('rename') ? 'View' : 'Open';
@@ -34,6 +43,38 @@ var PATIENTS = [
   { id: 'p3', name: 'Sam Specimen', dob: '1990-09-09',
     reason: 'Dermatology consult', priority: 'Low' }
 ];
+
+// Data-drift modes rewrite the referral list before first render:
+//  - grow: four unrelated referrals arrive above the recorded target, so
+//    every recorded row moves ~180 px down (data growth between runs).
+//  - lookalike: ONE new referral with the same reason and priority as the
+//    recorded target lands directly above it — the pixels around its Open
+//    button are identical to the recorded crop (the patient name column is
+//    outside the 160 px template), at exactly the recorded position.
+//  - missing: the recorded target's referral is gone; similar rows remain.
+//  - empty: no referrals at all.
+if (DRIFT.has('grow')) {
+  PATIENTS = [
+    { id: 'g1', name: 'Pat Placeholder', dob: '1988-02-02',
+      reason: 'Orthopedics intake', priority: 'Low' },
+    { id: 'g2', name: 'Robin Redacted', dob: '1971-03-03',
+      reason: 'Neurology referral', priority: 'Medium' },
+    { id: 'g3', name: 'Casey Control', dob: '1969-04-04',
+      reason: 'Endocrine consult', priority: 'Low' },
+    { id: 'g4', name: 'Drew Dataset', dob: '1994-06-06',
+      reason: 'Physio assessment', priority: 'Medium' }
+  ].concat(PATIENTS);
+}
+if (DRIFT.has('lookalike')) {
+  PATIENTS = [
+    { id: 'p0', name: 'Taylor Duplicate', dob: '1982-12-12',
+      reason: 'Knee pain referral', priority: 'High' }
+  ].concat(PATIENTS);
+}
+if (DRIFT.has('missing')) {
+  PATIENTS = PATIENTS.filter(function (p) { return p.id !== 'p1'; });
+}
+if (DRIFT.has('empty')) { PATIENTS = []; }
 
 var state = {
   currentPatientId: null,
@@ -108,7 +149,8 @@ function renderTasks() {
     '<h1>Referral Tasks</h1>' +
     '<table id="tasks-table"><thead><tr>' +
     '<th>Patient</th><th>Reason</th><th>Priority</th><th>Action</th>' +
-    '</tr></thead><tbody>' + rows + '</tbody></table>';
+    '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    (PATIENTS.length ? '' : '<p id="no-referrals">No pending referrals.</p>');
   app.querySelectorAll('.open-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
       location.hash = '#patient/' + btn.getAttribute('data-id');
@@ -277,5 +319,11 @@ function route() {
   }
 }
 
-window.addEventListener('hashchange', route);
+var slowTimer = null;
+window.addEventListener('hashchange', function () {
+  if (!SLOW_MS) { route(); return; }
+  // Slow drift: keep the previous screen up for SLOW_MS, then render.
+  if (slowTimer !== null) { clearTimeout(slowTimer); }
+  slowTimer = setTimeout(function () { slowTimer = null; route(); }, SLOW_MS);
+});
 route();

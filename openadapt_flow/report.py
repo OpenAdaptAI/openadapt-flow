@@ -87,8 +87,11 @@ def render_run_report(run_dir: Path | str) -> Path:
     # -- Per-step table ---------------------------------------------------
     lines.append("## Steps")
     lines.append("")
-    lines.append("| # | Step | Intent | Rung | Confidence | ms | Healed | OK |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        "| # | Step | Intent | Rung | Confidence | Verified | ms "
+        "| Healed | OK |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for i, result in enumerate(report.results, start=1):
         rung = result.resolution.rung if result.resolution else "&mdash;"
         conf = (
@@ -98,10 +101,25 @@ def render_run_report(run_dir: Path | str) -> Path:
         )
         healed = "\U0001fa79" if result.heal else ""
         status = "✅" if result.ok else "❌"
+        # Identity (clicks) / typed-input (TYPE) verification outcome —
+        # "unreadable" identity means the step proceeded on positional
+        # evidence alone and is flagged, never silent.
+        verified_parts = []
+        if result.identity is not None:
+            marker = {
+                "verified": "id ✓", "mismatch": "id ✗", "unreadable": "id ⚠"
+            }[result.identity.status]
+            verified_parts.append(marker)
+        if result.input_verified is not None:
+            marker = "input ✓" if result.input_verified else "input ✗"
+            if result.input_retried:
+                marker += " (retried)"
+            verified_parts.append(marker)
+        verified = ", ".join(verified_parts) or "&mdash;"
         lines.append(
             f"| {i} | `{_md_escape(result.step_id)}` "
             f"| {_md_escape(result.intent)} | {rung} | {conf} "
-            f"| {result.elapsed_ms:.0f} | {healed} | {status} |"
+            f"| {verified} | {result.elapsed_ms:.0f} | {healed} | {status} |"
         )
     lines.append("")
 

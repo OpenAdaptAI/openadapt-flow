@@ -74,6 +74,16 @@ class Anchor(BaseModel):
     ocr_text: Optional[str] = Field(
         default=None, description="Text label at/near the target, if any"
     )
+    context_text: Optional[str] = Field(
+        default=None,
+        description=(
+            "Identity evidence: OCR text on the target's row (full-width"
+            " band at the crop's height) EXCLUDING the target's own crop"
+            " and timestamp-bearing lines. Verified before every click"
+            " (see runtime.identity); None when the band had no usable"
+            " text at compile time."
+        ),
+    )
     landmarks: list[Landmark] = Field(default_factory=list)
     search_pad: int = Field(
         default=80,
@@ -85,6 +95,16 @@ class PostconditionKind(str, Enum):
     TEXT_PRESENT = "text_present"
     TEXT_ABSENT = "text_absent"
     REGION_STABLE = "region_stable"  # phash of `region` within tolerance
+    # Structural postconditions — mined as a fallback for steps whose action
+    # changed nothing visible in the single-page frame (new-tab navigation,
+    # SPA route changes off-screen), so such steps are no longer vacuous.
+    # They compare the step's END state against its START state on the live
+    # backend; nothing instance-specific (no literal URL/title) is baked in.
+    # On a backend that cannot observe the property, they pass with the step
+    # honestly still unverified (see docs/LIMITS.md).
+    URL_CHANGED = "url_changed"  # page URL differs from the step's start
+    TITLE_CHANGED = "title_changed"  # page title differs from the step's start
+    NEW_TAB_OPENED = "new_tab_opened"  # browser page count increased
 
 
 class Postcondition(BaseModel):
@@ -164,6 +184,34 @@ class Resolution(BaseModel):
     elapsed_ms: float
 
 
+class IdentityCheck(BaseModel):
+    """Outcome of the pre-click target-identity check (runtime.identity).
+
+    Attributes:
+        status: ``verified`` (band matched), ``mismatch`` (band readable but
+            wrong — the run must halt, never click), or ``unreadable`` (OCR
+            found no usable text in the live band; identity could not be
+            judged — the step proceeds flagged, and irreversible steps
+            refuse).
+        mode: ``context`` compares against the recorded band text;
+            ``param`` re-anchors on the RUN's value for a parameter whose
+            demo value was embedded in the recorded band.
+        coverage: Matched fraction (context mode) or run/required ratio
+            (param mode), diagnostic.
+        expected: What the check looked for (recorded band text, or the
+            run's param value on a param-mode mismatch).
+        observed: Live band text the verdict was based on.
+        param: The parameter that drove a param-mode check, if any.
+    """
+
+    status: Literal["verified", "mismatch", "unreadable"]
+    mode: Literal["context", "param"] = "context"
+    coverage: float = 0.0
+    expected: str = ""
+    observed: str = ""
+    param: Optional[str] = None
+
+
 class HealEvent(BaseModel):
     step_id: str
     kind: Literal["anchor_refresh"] = "anchor_refresh"
@@ -179,6 +227,9 @@ class StepResult(BaseModel):
     intent: str
     ok: bool
     resolution: Optional[Resolution] = None
+    identity: Optional[IdentityCheck] = None  # pre-click identity verdict
+    input_verified: Optional[bool] = None  # TYPE steps: typed input landed
+    input_retried: bool = False  # TYPE steps: refocus-and-retype fired
     postconditions_ok: Optional[bool] = None
     heal: Optional[HealEvent] = None
     error: Optional[str] = None

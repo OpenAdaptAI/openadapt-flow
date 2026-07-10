@@ -298,8 +298,12 @@ def test_build_heal_event_clamps_region_at_frame_edge():
     assert event.new_anchor.ocr_text == "Save Encounter"  # old text kept
     assert png_dims(crop) == (50, 20)
     assert event.applied is False  # build does not apply
-    # Re-OCR was attempted over the new region.
-    assert vision.ocr_calls == [(0, 0, 50, 20)]
+    # Re-OCR over the new region, then a full-frame pass for the identity
+    # context refresh (region=None).
+    assert vision.ocr_calls == [(0, 0, 50, 20), None]
+    # Nothing recognized on the frame -> the healed anchor carries no
+    # identity context (the check is honestly disabled, never stale).
+    assert event.new_anchor.context_text is None
 
 
 def test_write_healed_bundle_direct(tmp_path):
@@ -313,3 +317,55 @@ def test_write_healed_bundle_direct(tmp_path):
     assert (dest / "workflow.json").is_file()
     assert (dest / "templates" / "a.png").is_file()
     assert (dest / "templates" / "s1.png").read_bytes() == new_crop
+
+
+def test_heal_refreshes_identity_context_from_live_band(bundle, run_dir):
+    """A healed anchor's context_text is re-derived from the live frame at
+    the NEW position (its old band text may describe the old surroundings)."""
+    vision = _drifted_vision()
+    # One line on the resolved row (outside the healed region), one far away.
+    vision.ocr_lines = [
+        OcrLine("Submit Encounter", region=(126, 141, 48, 18)),  # in region
+        OcrLine("Jane Sample chart details", region=(10, 142, 90, 16)),
+        OcrLine("Unrelated header far away", region=(10, 10, 90, 16)),
+    ]
+    step = ocr_anchored_step()
+    # Same identity evidence, differently segmented at record time — the
+    # pre-click identity check passes, and the heal must refresh the field
+    # to what the band reads NOW.
+    step.anchor.context_text = "Sample chart details Jane"
+    workflow = Workflow(name="wf", steps=[step])
+    report = Replayer(FakeBackend(), vision=vision).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    heal = report.results[0].heal
+    assert heal is not None
+    # Band at the resolved point (150,150) x region height 20: keeps the
+    # same-row line, drops the in-region label and the far-away header.
+    assert heal.new_anchor.context_text == "Jane Sample chart details"
+
+
+def test_heal_recontext_keeps_dob_lines_and_drops_clocks(bundle, run_dir):
+    """The heal-time band refresh anchors volatility on TODAY: a DOB line
+    (far from any heal date) is identity evidence and must survive the
+    refreshed band, while a clock line is dropped. Before the 2026-07-09
+    review fix, _recontext passed no reference_date, so EVERY date-bearing
+    line — including the DOB, the band's most discriminative evidence —
+    was conservatively dropped from healed anchors."""
+    vision = _drifted_vision()
+    vision.ocr_lines = [
+        OcrLine("Submit Encounter", region=(126, 141, 48, 18)),  # in region
+        OcrLine("Jane Sample DOB 1980-01-01", region=(10, 142, 90, 16)),
+        OcrLine("Updated 14:32", region=(200, 142, 60, 16)),  # clock: drop
+    ]
+    step = ocr_anchored_step()
+    step.anchor.context_text = "Jane Sample DOB 1980-01-01"
+    workflow = Workflow(name="wf", steps=[step])
+    report = Replayer(FakeBackend(), vision=vision).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    heal = report.results[0].heal
+    assert heal is not None
+    assert heal.new_anchor.context_text == "Jane Sample DOB 1980-01-01"

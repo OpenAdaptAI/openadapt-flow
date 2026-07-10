@@ -8,7 +8,40 @@ OS layer (pyautogui/Quartz), or an RDP session.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class StructuralBackend(Protocol):
+    """Optional structural observations a backend MAY expose.
+
+    Vision alone cannot see effects that never render in the frame — a
+    new-tab click, an SPA route change below the fold. Backends that can
+    cheaply observe URL / title / page count expose these read-only
+    properties; the recorder captures them per event and the compiler mines
+    *structural* postconditions (URL_CHANGED, TITLE_CHANGED, NEW_TAB_OPENED)
+    as a fallback for steps that would otherwise assert nothing. Backends
+    without these observations (native OS, RDP) simply don't implement them;
+    such steps stay honestly unverified (docs/LIMITS.md).
+
+    Each property returns None when the observation is momentarily
+    unavailable (e.g. mid-navigation).
+    """
+
+    @property
+    def url(self) -> Optional[str]:
+        """Current page URL, or None if unobservable."""
+        ...
+
+    @property
+    def page_title(self) -> Optional[str]:
+        """Current page title, or None if unobservable."""
+        ...
+
+    @property
+    def page_count(self) -> Optional[int]:
+        """Number of open pages/tabs, or None if unobservable."""
+        ...
 
 
 @runtime_checkable

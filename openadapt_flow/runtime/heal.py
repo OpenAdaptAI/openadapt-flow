@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import shutil
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.runtime import identity as identity_mod
 
 _HEAL_TEMPLATE_NAME = "template.png"
 _HEAL_SCREEN_NAME = "screen.png"
@@ -99,6 +101,44 @@ def _reocr_text(
     return best.text.strip()
 
 
+def _recontext(
+    vision: Any,
+    frame_png: bytes,
+    region: Region,
+    click_point: Point,
+    frame: tuple[int, int],
+) -> str | None:
+    """Re-derive the anchor's identity context band from the live frame.
+
+    A healed anchor lives at a NEW position; its recorded context band
+    (neighbouring text on the target's row) may no longer describe the new
+    surroundings, so it is refreshed from the same frame the heal was
+    derived from — exactly what a re-record at this position would capture.
+    Returns None (disabling the identity check for the step, honestly) when
+    the band yields no usable text.
+
+    The volatility reference date is *today*: the band is being re-recorded
+    NOW, so near/far date discrimination anchors on heal time exactly as it
+    anchors on the recording date at compile time. Without it every
+    date-bearing line is conservatively dropped — a healed anchor in a
+    patient banner would silently lose its DOB line, the band's most
+    discriminative identity evidence.
+    """
+    try:
+        lines = vision.ocr(frame_png)
+    except Exception:
+        return None
+    return identity_mod.context_from_lines(
+        lines,
+        exclude_region=region,
+        band=identity_mod.band_region(click_point, region[3], frame),
+        # Same row refinement the compiler applies: record only the click
+        # point's own text row, matching what verification reads back.
+        point=click_point,
+        reference_date=date.today(),
+    )
+
+
 def build_heal_event(
     step: Step,
     resolution: Resolution,
@@ -148,11 +188,13 @@ def build_heal_event(
     new_text = _reocr_text(
         vision, frame_png, new_region, click_y=resolution.point[1]
     )
+    new_context = _recontext(vision, frame_png, new_region, resolution.point, frame)
     new_anchor = old_anchor.model_copy(
         update={
             "region": new_region,
             "click_point": resolution.point,
             "ocr_text": new_text if new_text is not None else old_anchor.ocr_text,
+            "context_text": new_context,
         }
     )
     event = HealEvent(

@@ -390,7 +390,7 @@ self-healing (baseline code-gen re-mint 6.7K; rename heal 5.0K).
   matrix — the study targets the deterministic-replay surface, and the
   baseline `code_generation` run already characterizes agent behavior once.
   Its drift behavior under agent mode remains unmeasured here.
-- Runs per cell: W3 2x (identical), Skyvern lookalike 2x (identical), all
+- Runs per cell: W3 2x (identical), Skyvern lookalike 3x (identical), all
   other cells 1x; no nondeterminism was observed in any repeated cell.
 
 ## Infeasible / not testable, and why

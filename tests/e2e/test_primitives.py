@@ -82,7 +82,9 @@ class TestNativeSelect:
         all is platform-dependent (observed inert on macOS headless
         chromium). The replay faithfully reproduces whatever the recording
         did; when the recording did NOTHING, the steps compile with zero
-        postconditions and the replay is a VACUOUS success."""
+        postconditions (no visual change AND no structural change — the
+        URL/title/tab-count fallback has nothing to assert either) and the
+        replay is a VACUOUS success. Still a known limit: docs/LIMITS.md."""
         url = f"{mockmed_url}widgets.html?panel=select"
 
         def ops(page, r):
@@ -383,16 +385,19 @@ class TestKeyboardFlow:
 
 
 class TestNewTab:
-    def test_target_blank_link_is_a_vacuous_success(
+    def test_target_blank_link_is_verified_structurally(
         self, mockmed_url, _browser, tmp_path
     ) -> None:
-        """UNSUPPORTED / SILENT (characterization). Clicking a
-        target=_blank link opens a tab the single-page backend never sees.
-        The recorded before/after frames are identical, so the step
-        compiles with ZERO postconditions — and the replay reports success
-        while whatever happened in the new tab goes entirely unobserved.
-        Desired: at minimum, a compile-time warning for steps that assert
-        nothing."""
+        """FIXED (was: vacuous success with zero postconditions). Clicking
+        a target=_blank link opens a tab the single-page frame never shows;
+        the recorded before/after frames are identical, so nothing visual
+        can be asserted. The recorder now captures the backend's structural
+        observations, and the compiler mines a NEW_TAB_OPENED fallback
+        postcondition — the step passes only if a tab actually opened, and
+        would fail if the click stopped working. (What happens INSIDE the
+        new tab remains unobserved: single-window scope, docs/LIMITS.md.)"""
+        from openadapt_flow.ir import PostconditionKind
+
         url = f"{mockmed_url}widgets.html?panel=newtab"
 
         def ops(page, r):
@@ -402,8 +407,10 @@ class TestNewTab:
             _browser, url, ops, tmp_path, "newtab"
         )
         assert recorded == "Ready and waiting."  # original page unchanged
+        kinds = [pc.kind for s in wf.steps for pc in s.expect]
+        assert PostconditionKind.NEW_TAB_OPENED in kinds, wf.steps
         report, state = replay_on_page(
             _browser, bundle_dir, url, tmp_path / "run", params={}
         )
         assert report.success is True, describe(report, state)
-        assert sum(len(s.expect) for s in wf.steps) == 0
+        assert report.results[0].postconditions_ok is True

@@ -227,3 +227,58 @@ def test_record_triage_demo_produces_valid_recording(
             with Image.open(frame) as img:
                 assert img.format == "PNG"
                 assert img.size == (1280, 800)
+
+
+def test_recorder_captures_structural_state_when_backend_exposes_it(
+    tmp_path: Path,
+) -> None:
+    """A backend with StructuralBackend observations gets url/title/pages
+    _before/_after keys on every event; a click that opens a new tab shows
+    up as pages 1 -> 2 even though the frame never changed."""
+
+    class StructuralFake(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self._url = "http://app/"
+            self._title = "Inbox"
+            self._pages = 1
+
+        @property
+        def url(self) -> str:
+            return self._url
+
+        @property
+        def page_title(self) -> str:
+            return self._title
+
+        @property
+        def page_count(self) -> int:
+            return self._pages
+
+        def click(self, x: int, y: int, *, double: bool = False) -> None:
+            super().click(x, y, double=double)
+            self._pages = 2  # the click opened a tab
+
+    backend = StructuralFake()
+    rec = Recorder(backend, tmp_path / "rec", app_url="http://app/")
+    rec.click(10, 20)
+    rec.finish()
+    (event,) = _read_events(tmp_path / "rec")
+    assert event["url_before"] == "http://app/"
+    assert event["url_after"] == "http://app/"
+    assert event["title_before"] == "Inbox"
+    assert event["pages_before"] == 1
+    assert event["pages_after"] == 2
+
+
+def test_recorder_omits_structural_keys_on_plain_backend(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend()
+    rec = Recorder(backend, tmp_path / "rec")
+    rec.click(1, 2)
+    rec.finish()
+    (event,) = _read_events(tmp_path / "rec")
+    for key in ("url_before", "url_after", "title_before", "title_after",
+                "pages_before", "pages_after"):
+        assert key not in event

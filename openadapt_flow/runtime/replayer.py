@@ -216,6 +216,10 @@ class Replayer:
         before_png = self.vision.wait_settled(self.backend)
         result.before_png = self._save_step_png(run_dir, step.id, "before", before_png)
         last_frame = before_png
+        # Structural start state (URL/title/page count, when the backend
+        # can observe them): structural postconditions compare the step's
+        # END state against this — never against a recorded literal.
+        start_state = self._structural_state()
 
         try:
             resolution, matched_region, error = self._resolve_step(
@@ -309,7 +313,9 @@ class Replayer:
                 after_png = self.vision.wait_settled(self.backend)
                 last_frame = after_png
                 postconditions_ok, last_frame, failed = (
-                    self._check_postconditions(step, after_png, bundle_dir)
+                    self._check_postconditions(
+                        step, after_png, bundle_dir, start_state
+                    )
                 )
                 result.postconditions_ok = postconditions_ok
                 if not postconditions_ok:
@@ -810,8 +816,48 @@ class Replayer:
 
     # -- postconditions --------------------------------------------------------
 
+    def _structural_state(self) -> dict[str, Any]:
+        """Structural observations the backend can provide right now.
+
+        Backends MAY expose ``url`` / ``page_title`` / ``page_count`` (see
+        ``openadapt_flow.backend.StructuralBackend``). Missing observations
+        are simply absent from the dict.
+        """
+        state: dict[str, Any] = {}
+        for key in ("url", "page_title", "page_count"):
+            try:
+                value = getattr(self.backend, key, None)
+            except Exception:
+                value = None
+            if value is not None:
+                state[key] = value
+        return state
+
+    def _structural_changed(
+        self, key: str, start_state: dict[str, Any]
+    ) -> Optional[bool]:
+        """Whether structural observation ``key`` differs from step start.
+
+        Returns None when the observation is unavailable on either side —
+        the caller treats that as an honestly-unverifiable pass (a bundle
+        recorded on a structural backend may replay on one that is not;
+        see docs/LIMITS.md).
+        """
+        try:
+            current = getattr(self.backend, key, None)
+        except Exception:
+            current = None
+        start = start_state.get(key)
+        if current is None or start is None:
+            return None
+        return current != start
+
     def _check_postconditions(
-        self, step: Step, frame_png: bytes, bundle_dir: Path
+        self,
+        step: Step,
+        frame_png: bytes,
+        bundle_dir: Path,
+        start_state: dict[str, Any],
     ) -> tuple[bool, bytes, list[str]]:
         """Poll postconditions until each passes or times out.
 
@@ -824,7 +870,9 @@ class Replayer:
             on, plus human-readable descriptions of the postconditions that
             failed the final check (empty when ok).
         """
-        ok, frame_png = self._poll_postconditions(step, frame_png, bundle_dir)
+        ok, frame_png = self._poll_postconditions(
+            step, frame_png, bundle_dir, start_state
+        )
         if ok:
             return True, frame_png, []
         # One re-settle retry.
@@ -832,7 +880,9 @@ class Replayer:
         failed = [
             self._describe_postcondition(pc)
             for pc in step.expect
-            if not self._postcondition_passes(pc, frame_png, bundle_dir)
+            if not self._postcondition_passes(
+                pc, frame_png, bundle_dir, start_state
+            )
         ]
         return not failed, frame_png, failed
 
@@ -842,16 +892,24 @@ class Replayer:
         kind = pc.kind.value if hasattr(pc.kind, "value") else pc.kind
         if kind in ("text_present", "text_absent"):
             return f"{kind} {pc.text!r}"
+        if kind in ("url_changed", "title_changed", "new_tab_opened"):
+            return f"{kind} (vs. the step's start state)"
         return f"{kind} region={tuple(pc.region) if pc.region else None}"
 
     def _poll_postconditions(
-        self, step: Step, frame_png: bytes, bundle_dir: Path
+        self,
+        step: Step,
+        frame_png: bytes,
+        bundle_dir: Path,
+        start_state: dict[str, Any],
     ) -> tuple[bool, bytes]:
         """First pass: poll each postcondition until pass or timeout."""
         for pc in step.expect:
             deadline = time.monotonic() + pc.timeout_s
             while True:
-                if self._postcondition_passes(pc, frame_png, bundle_dir):
+                if self._postcondition_passes(
+                    pc, frame_png, bundle_dir, start_state
+                ):
                     break
                 if time.monotonic() >= deadline:
                     return False, frame_png
@@ -860,10 +918,37 @@ class Replayer:
         return True, frame_png
 
     def _postcondition_passes(
-        self, pc: Any, frame_png: bytes, bundle_dir: Path
+        self,
+        pc: Any,
+        frame_png: bytes,
+        bundle_dir: Path,
+        start_state: Optional[dict[str, Any]] = None,
     ) -> bool:
         """Evaluate a single postcondition against a frame."""
         kind = pc.kind.value if hasattr(pc.kind, "value") else pc.kind
+        if kind in ("url_changed", "title_changed", "new_tab_opened"):
+            key = {
+                "url_changed": "url",
+                "title_changed": "page_title",
+                "new_tab_opened": "page_count",
+            }[kind]
+            changed = self._structural_changed(key, start_state or {})
+            if changed is None:
+                # Unobservable on this backend: pass, honestly unverified
+                # (docs/LIMITS.md "vacuous" caveat).
+                return True
+            if kind == "new_tab_opened":
+                try:
+                    current = getattr(self.backend, "page_count", None)
+                except Exception:
+                    current = None
+                start = (start_state or {}).get("page_count")
+                return (
+                    current is not None
+                    and start is not None
+                    and current > start
+                )
+            return changed
         if kind == "text_present":
             # text_present (not find_text): presence must not depend on
             # whether the OCR engine merged the target into a longer box

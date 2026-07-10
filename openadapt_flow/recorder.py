@@ -9,6 +9,9 @@ Recording format (DESIGN.md):
                          # {"i":1,"kind":"type","text":"...","param":"note",...}
                          # {"i":2,"kind":"key","key":"Enter","t":3.10}
                          # {"i":3,"kind":"scroll","dx":0,"dy":400,"t":4.02}
+                         # Events additionally carry url/title/pages
+                         # _before/_after keys when the backend exposes
+                         # structural observations (StructuralBackend).
       frames/{i:04d}_before.png
       frames/{i:04d}_after.png   # captured after the action settled
 
@@ -143,14 +146,43 @@ class Recorder:
         i = self._i
         before = self._backend.screenshot()
         (self._frames_dir / f"{i:04d}_before.png").write_bytes(before)
+        structural_before = self._structural_state()
         act()
         after = self._wait_settled()
         (self._frames_dir / f"{i:04d}_after.png").write_bytes(after)
         line: dict[str, Any] = {"i": i, **event}
+        for key, value in structural_before.items():
+            line[f"{key}_before"] = value
+        for key, value in self._structural_state().items():
+            line[f"{key}_after"] = value
         line["t"] = round(time.monotonic() - self._t0, 3)
         with self._events_path.open("a") as f:
             f.write(json.dumps(line) + "\n")
         self._i += 1
+
+    def _structural_state(self) -> dict[str, Any]:
+        """Structural observations the backend can provide right now.
+
+        Backends MAY expose ``url`` / ``page_title`` / ``page_count`` (see
+        ``openadapt_flow.backend.StructuralBackend``); whatever is available
+        is captured per event so the compiler can mine structural
+        postconditions (URL/title change, new tab) for steps whose action
+        changed nothing visible in the frame. Missing observations are
+        simply absent from the event.
+        """
+        state: dict[str, Any] = {}
+        for attr, key in (
+            ("url", "url"),
+            ("page_title", "title"),
+            ("page_count", "pages"),
+        ):
+            try:
+                value = getattr(self._backend, attr, None)
+            except Exception:
+                value = None
+            if value is not None:
+                state[key] = value
+        return state
 
     def _wait_settled(self) -> bytes:
         """Poll screenshots until N consecutive identical hashes or timeout.

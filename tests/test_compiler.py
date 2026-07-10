@@ -597,6 +597,437 @@ class TestIdentityContext:
                 assert step.anchor.context_text is None, step.id
 
 
+def _write_recording(
+    recording: Path,
+    events: list[dict],
+    frames: dict[int, tuple[np.ndarray, np.ndarray]],
+    *,
+    params: dict[str, str] | None = None,
+    created_at: str = "2026-07-06T00:00:00+00:00",
+) -> None:
+    """Write a synthetic recording directory (events + frames + meta)."""
+    (recording / "frames").mkdir(parents=True, exist_ok=True)
+    for i, (before, after) in frames.items():
+        write_frame(recording, i, "before", before)
+        write_frame(recording, i, "after", after)
+    (recording / "events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n"
+    )
+    (recording / "meta.json").write_text(
+        json.dumps(
+            {
+                "id": "rec-synth",
+                "created_at": created_at,
+                "viewport": list(VIEWPORT),
+                "app_url": "http://localhost:0/",
+                "params": params or {},
+            }
+        )
+    )
+
+
+class TestStabilitySelectedMining:
+    """Postcondition mining selects for STABILITY, not novelty — the fix for
+    the ':01'-class false halts (docs/validation/VALIDATION.md, Track D)."""
+
+    def test_clock_fragment_never_wins_even_when_longest(
+        self, tmp_path: Path
+    ) -> None:
+        """A new timestamped log row (longer text!) must lose to shorter
+        stable UI text; no mined TEXT_PRESENT may carry a clock time."""
+        before = blank()
+        draw_button(before, 560, 400, 160, 48, "Open")
+        after = before.copy()
+        # The volatile candidate is deliberately the LONGEST new text.
+        draw_text(after, 120, 244, "Message received 2026-07-05 18:01:07")
+        draw_text(after, 120, 560, "Inbox loaded")
+        events = [{"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0}]
+        recording = tmp_path / "rec"
+        _write_recording(recording, events, {0: (before, after)})
+        wf = compile_recording(recording, tmp_path / "bundle", name="clock")
+        text_pcs = [
+            pc
+            for pc in wf.steps[0].expect
+            if pc.kind is PostconditionKind.TEXT_PRESENT
+        ]
+        assert text_pcs, "expected the stable candidate to be asserted"
+        assert fuzzy_eq(text_pcs[0].text, "Inbox loaded")
+        for pc in text_pcs:
+            assert ":0" not in pc.text and "2026" not in pc.text
+
+    def test_ephemeral_text_not_asserted(self, tmp_path: Path) -> None:
+        """Text present in a step's after frame but already GONE by the next
+        step's before frame (same screen, moments later) is ephemeral —
+        a toast/spinner — and must not be mined."""
+        before = blank()
+        draw_button(before, 560, 400, 160, 48, "Save")
+        after = before.copy()
+        draw_text(after, 120, 244, "Saving in progress please wait")  # toast
+        draw_text(after, 120, 560, "Record updated")  # persists
+        next_before = before.copy()
+        draw_text(next_before, 120, 560, "Record updated")  # toast gone
+        next_after = next_before.copy()
+        draw_text(next_after, 120, 620, "Done reviewing")
+        events = [
+            {"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0},
+            {"i": 1, "kind": "key", "key": "Enter", "t": 2.0},
+        ]
+        recording = tmp_path / "rec"
+        _write_recording(
+            recording,
+            events,
+            {0: (before, after), 1: (next_before, next_after)},
+        )
+        wf = compile_recording(recording, tmp_path / "bundle", name="toast")
+        text_pcs = [
+            pc
+            for pc in wf.steps[0].expect
+            if pc.kind is PostconditionKind.TEXT_PRESENT
+        ]
+        assert text_pcs
+        assert fuzzy_eq(text_pcs[0].text, "Record updated")
+
+    def test_self_mutating_region_not_asserted(self, tmp_path: Path) -> None:
+        """A changed region that KEEPS changing between the after frame and
+        the next before frame (no action in between — an animation/clock)
+        must not become a REGION_STABLE postcondition."""
+        before = blank()
+        draw_button(before, 560, 400, 160, 48, "Save")
+        after = before.copy()
+        draw_text(after, 120, 244, "spinnerframeone")
+        next_before = before.copy()
+        draw_text(next_before, 120, 244, "otherframe")  # same spot, changed
+        next_after = next_before.copy()
+        draw_text(next_after, 120, 620, "Done reviewing")
+        events = [
+            {"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0},
+            {"i": 1, "kind": "key", "key": "Enter", "t": 2.0},
+        ]
+        recording = tmp_path / "rec"
+        _write_recording(
+            recording,
+            events,
+            {0: (before, after), 1: (next_before, next_after)},
+        )
+        wf = compile_recording(recording, tmp_path / "bundle", name="spin")
+        kinds = [pc.kind for pc in wf.steps[0].expect]
+        assert PostconditionKind.REGION_STABLE not in kinds, wf.steps[0].expect
+
+    def test_dob_banner_in_identity_region_is_asserted(
+        self, tmp_path: Path
+    ) -> None:
+        """FIXED: the old blanket timestamp filter dropped the patient
+        banner because a DOB looks like a date, leaving only patient-
+        agnostic text. A date FAR from the recording date is identity data
+        and the banner must survive mining, DOB included."""
+        before = blank()
+        draw_button(before, 560, 400, 160, 48, "Open")
+        after = blank()
+        draw_button(after, 560, 400, 160, 48, "Open")
+        draw_text(after, 200, 244, "Jane Sample DOB 1980-01-01")
+        events = [{"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0}]
+        recording = tmp_path / "rec"
+        _write_recording(recording, events, {0: (before, after)})
+        wf = compile_recording(recording, tmp_path / "bundle", name="dob")
+        text_pcs = [
+            pc
+            for pc in wf.steps[0].expect
+            if pc.kind is PostconditionKind.TEXT_PRESENT
+        ]
+        assert text_pcs, "the DOB banner must not be filtered as a timestamp"
+        assert fuzzy_eq(text_pcs[0].text, "Jane Sample DOB 1980-01-01", 0.6)
+
+    def test_dob_line_kept_in_identity_context(self, tmp_path: Path) -> None:
+        """The identity context band keeps a row whose only date is a far
+        DOB — that date is discriminative identity data."""
+        before = blank()
+        draw_text(before, 40, 430, "Jane Sample")
+        draw_text(before, 260, 430, "1980-01-01")
+        draw_button(before, 560, 400, 160, 48, "Open")
+        after = before.copy()
+        draw_text(after, 420, 244, BANNER_TASKS)
+        events = [{"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0}]
+        recording = tmp_path / "rec"
+        _write_recording(recording, events, {0: (before, after)})
+        wf = compile_recording(recording, tmp_path / "bundle", name="dobctx")
+        anchor = wf.steps[0].anchor
+        assert anchor is not None and anchor.context_text is not None
+        context = normalize_text(anchor.context_text)
+        assert "jane" in context and "sample" in context
+        assert "1980" in context  # the far date is KEPT as identity data
+
+
+class TestParameterHygiene:
+    def test_param_value_never_becomes_a_landmark(self, tmp_path: Path) -> None:
+        """FIXED: on OpenEMR the save step's geometry landmark was the
+        recorded note text itself — a demo parameter value leaking into
+        geometry evidence, silently degrading healing for every run whose
+        value differs from the demo (i.e., all of them)."""
+        base = blank()
+        draw_text(base, 540, 84, "Patient Chart Overview")
+        draw_button(base, 560, 400, 160, 48, "Save")
+
+        typed = base.copy()
+        # The (parameterized) note renders right above the Save button —
+        # nearest text, i.e. the winning landmark under the old rules.
+        draw_text(typed, 560, 380, NOTE_VALUE)
+
+        saved = typed.copy()
+        draw_text(saved, 200, 620, "Chart synchronization complete")
+
+        events = [
+            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note",
+             "t": 1.0},
+            {"i": 1, "kind": "click", "x": 640, "y": 424, "t": 2.0},
+        ]
+        recording = tmp_path / "rec"
+        _write_recording(
+            recording,
+            events,
+            {0: (base, typed), 1: (typed, saved)},
+            params={"note": NOTE_VALUE},
+        )
+        wf = compile_recording(recording, tmp_path / "bundle", name="lmk")
+        anchor = wf.steps[1].anchor
+        assert anchor is not None
+        squashed_note = "".join(normalize_text(NOTE_VALUE).split())
+        for lm in anchor.landmarks:
+            hay = "".join(normalize_text(lm.ocr_text).split())
+            matcher = difflib.SequenceMatcher(None, squashed_note, hay)
+            contained = sum(
+                b.size for b in matcher.get_matching_blocks()
+            ) / len(squashed_note)
+            assert contained < 0.8, f"param leaked into landmark {lm.ocr_text!r}"
+
+    def test_lint_flags_param_value_in_postcondition(self) -> None:
+        from openadapt_flow.compiler import lint_param_leakage
+        from openadapt_flow.ir import Anchor, Landmark, Postcondition, Step
+
+        wf = Workflow(
+            name="leaky",
+            params={"note": NOTE_VALUE},
+            steps=[
+                Step(
+                    id="step_000",
+                    intent="click 'Save'",
+                    action=ActionKind.CLICK,
+                    anchor=Anchor(
+                        template="templates/step_000.png",
+                        region=(0, 0, 10, 10),
+                        click_point=(5, 5),
+                        landmarks=[
+                            Landmark(
+                                relation="above",
+                                ocr_text=NOTE_VALUE,  # leaked
+                                distance_px=10,
+                            )
+                        ],
+                    ),
+                    expect=[
+                        Postcondition(
+                            kind=PostconditionKind.TEXT_PRESENT,
+                            text=f"Saved {NOTE_VALUE}",  # leaked
+                        )
+                    ],
+                )
+            ],
+        )
+        violations = lint_param_leakage(wf, (NOTE_VALUE,))
+        assert len(violations) == 2
+        assert any("postcondition" in v for v in violations)
+        assert any("landmark" in v for v in violations)
+
+    def test_lint_allows_designated_slots(self) -> None:
+        from openadapt_flow.compiler import lint_param_leakage
+        from openadapt_flow.ir import Anchor, Step
+
+        wf = Workflow(
+            name="clean",
+            params={"patient": "Belford, Phil"},
+            steps=[
+                Step(
+                    id="step_000",
+                    intent="type <patient>",
+                    action=ActionKind.TYPE,
+                    text="Belford, Phil",  # designated: recorded example
+                    param="patient",
+                ),
+                Step(
+                    id="step_001",
+                    intent="click 'Belford, Phil'",
+                    action=ActionKind.CLICK,
+                    anchor=Anchor(
+                        template="templates/step_001.png",
+                        region=(0, 0, 10, 10),
+                        click_point=(5, 5),
+                        # Designated: resolution/identity evidence — the
+                        # identity check re-anchors on the RUN's value.
+                        ocr_text="Belford, Phil",
+                        context_text="Belford, Phil 1948-01-01 male",
+                    ),
+                ),
+            ],
+        )
+        assert lint_param_leakage(wf, ("Belford, Phil",)) == []
+
+    def test_lint_skips_too_short_values(self) -> None:
+        from openadapt_flow.compiler import lint_param_leakage
+        from openadapt_flow.ir import Postcondition, Step
+
+        wf = Workflow(
+            name="short",
+            params={"initial": "d"},
+            steps=[
+                Step(
+                    id="step_000",
+                    intent="press Enter",
+                    action=ActionKind.KEY,
+                    key="Enter",
+                    expect=[
+                        Postcondition(
+                            kind=PostconditionKind.TEXT_PRESENT,
+                            text="Species set to Dog.",
+                        )
+                    ],
+                )
+            ],
+        )
+        assert lint_param_leakage(wf, ("d",)) == []
+
+    def test_compile_fails_loudly_on_injected_leak(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: if mining ever regresses and emits a leaked value,
+        compilation itself must fail — no silently demo-bound bundles."""
+        from openadapt_flow.compiler import compile as compile_mod
+        from openadapt_flow.ir import Postcondition
+
+        base = blank()
+        draw_button(base, 560, 400, 160, 48, "Save")
+        typed = base.copy()
+        draw_text(typed, 200, 320, NOTE_VALUE)
+        events = [
+            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note",
+             "t": 1.0},
+        ]
+        recording = tmp_path / "rec"
+        _write_recording(
+            recording, events, {0: (base, typed)}, params={"note": NOTE_VALUE}
+        )
+
+        def leaky_postconditions(*args, **kwargs):
+            return [
+                Postcondition(
+                    kind=PostconditionKind.TEXT_PRESENT,
+                    text=f"Saved {NOTE_VALUE}",
+                )
+            ]
+
+        monkeypatch.setattr(compile_mod, "_postconditions", leaky_postconditions)
+        with pytest.raises(ValueError, match="parameter leakage"):
+            compile_recording(recording, tmp_path / "bundle", name="leak")
+
+
+class TestStructuralPostconditions:
+    def _navigation_recording(
+        self, tmp_path: Path, extra: dict
+    ) -> tuple[Path, Path]:
+        """A click whose before/after frames are IDENTICAL (the visual
+        runtime saw nothing) plus recorder-captured structural keys."""
+        frame = blank()
+        draw_button(frame, 560, 400, 160, 48, "Report")
+        events = [
+            {"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0, **extra}
+        ]
+        recording = tmp_path / "rec"
+        _write_recording(recording, events, {0: (frame, frame)})
+        return recording, tmp_path / "bundle"
+
+    def test_new_tab_click_mines_new_tab_postcondition(
+        self, tmp_path: Path
+    ) -> None:
+        recording, bundle = self._navigation_recording(
+            tmp_path,
+            {
+                "url_before": "http://app/",
+                "url_after": "http://app/",
+                "pages_before": 1,
+                "pages_after": 2,
+            },
+        )
+        wf = compile_recording(recording, bundle, name="newtab")
+        kinds = [pc.kind for pc in wf.steps[0].expect]
+        assert kinds == [PostconditionKind.NEW_TAB_OPENED]
+
+    def test_navigation_click_mines_url_changed(self, tmp_path: Path) -> None:
+        recording, bundle = self._navigation_recording(
+            tmp_path,
+            {
+                "url_before": "http://app/#inbox",
+                "url_after": "http://app/#report",
+                "pages_before": 1,
+                "pages_after": 1,
+            },
+        )
+        wf = compile_recording(recording, bundle, name="nav")
+        kinds = [pc.kind for pc in wf.steps[0].expect]
+        assert kinds == [PostconditionKind.URL_CHANGED]
+
+    def test_title_only_change_mines_title_changed(self, tmp_path: Path) -> None:
+        recording, bundle = self._navigation_recording(
+            tmp_path,
+            {
+                "url_before": "http://app/",
+                "url_after": "http://app/",
+                "title_before": "Inbox",
+                "title_after": "Report",
+            },
+        )
+        wf = compile_recording(recording, bundle, name="title")
+        kinds = [pc.kind for pc in wf.steps[0].expect]
+        assert kinds == [PostconditionKind.TITLE_CHANGED]
+
+    def test_no_structural_change_stays_honestly_vacuous(
+        self, tmp_path: Path
+    ) -> None:
+        recording, bundle = self._navigation_recording(
+            tmp_path,
+            {
+                "url_before": "http://app/",
+                "url_after": "http://app/",
+                "pages_before": 1,
+                "pages_after": 1,
+            },
+        )
+        wf = compile_recording(recording, bundle, name="inert")
+        assert wf.steps[0].expect == []
+
+    def test_structural_is_fallback_only(self, tmp_path: Path) -> None:
+        """A step with visual postconditions does not also get structural
+        ones (fallback keeps the false-abort surface minimal)."""
+        before = blank()
+        draw_button(before, 560, 400, 160, 48, "Sign In")
+        after = before.copy()
+        draw_text(after, 420, 244, BANNER_TASKS)
+        events = [
+            {
+                "i": 0,
+                "kind": "click",
+                "x": 640,
+                "y": 424,
+                "t": 1.0,
+                "url_before": "http://app/",
+                "url_after": "http://app/#tasks",
+            }
+        ]
+        recording = tmp_path / "rec"
+        _write_recording(recording, events, {0: (before, after)})
+        wf = compile_recording(recording, tmp_path / "bundle", name="fb")
+        kinds = {pc.kind for pc in wf.steps[0].expect}
+        assert PostconditionKind.TEXT_PRESENT in kinds
+        assert PostconditionKind.URL_CHANGED not in kinds
+
+
 class TestRiskOverrides:
     """Risk is opt-in at compile time — never auto-assigned. Without an
     override every step is reversible, which means the irreversible

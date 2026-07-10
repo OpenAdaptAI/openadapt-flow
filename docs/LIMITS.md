@@ -11,14 +11,21 @@ change.
 ## The dangerous list: today's silent failure modes
 
 These are the cases where compiled replay does the wrong thing and reports
-success. They are open problems, not caveats. (Two former members of this
-list — wrong-entity clicks in repeated structures, and unverified typed
-input — were fixed on 2026-07-08 and moved to the safe-halt section below.)
+success. They are open problems, not caveats. (Former members of this
+list: wrong-entity clicks in repeated structures and unverified typed
+input were fixed on 2026-07-08; anti-robust postcondition mining — clock
+fragments, "longest new text" grabbing data, DOB banners eaten by the
+timestamp filter, parameter values leaking into landmarks — was fixed on
+2026-07-09. Both moved to the safe-halt section below.)
 
-- **Steps that changed nothing assert nothing.** An action whose recorded
-  before/after frames are identical (a click that opens a new tab the
-  runtime can't see, an inert widget) compiles with zero postconditions
-  and can never fail. There is currently no minimum-verification floor.
+- **Steps with no visual AND no structural effect assert nothing.** Since
+  2026-07-09 an action whose recorded before/after frames are identical
+  falls back to structural postconditions (URL change, title change, new
+  tab opened) when the recording backend can observe them — the new-tab
+  click is now verified. What remains vacuous: actions with no structural
+  effect either (an inert native `<select>`), and bundles recorded on
+  backends without structural observations (native OS, RDP). There is
+  still no minimum-verification floor.
 - **Targets whose only discriminative text is their own label.** The
   identity check deliberately excludes the target's own label (labels are
   mutable evidence the resolution ladder heals through under rename
@@ -95,12 +102,45 @@ actions observed — at the cost of availability:
   Self-healing covers palette changes, moved controls, and renamed labels;
   it does not cover scale or reflow. A purely cosmetic 125% zoom currently
   means 0% replayability.
-- **State the demonstration accidentally froze.** Postconditions are mined
-  from what the demo changed on screen, and they routinely capture data —
-  a neighbouring table row's text, another user's message fragment. A
-  bundle recorded on one OpenEMR demo instance halts at login on a second
-  instance of the *same version* because the module menu and calendar
-  content differ. Per-tenant re-recording is the working assumption.
+- **Volatile screen fragments frozen as assertions** (fixed 2026-07-09;
+  formerly the top availability killer on live apps — a fresh OpenEMR
+  recording mined `text_present ':01'`, a clock-minute OCR fragment, and
+  every later replay false-halted on it). Mining now selects for
+  **stability, not novelty**: clock times (colon and unambiguous
+  European dot forms — `18.38`), month-name dates (`Jul 8, 2026`,
+  `July 2026` — OpenEMR's post-login calendar header alone would
+  false-halt every replay the next month), relative-time phrases
+  (`3 min ago`, `just now`, a standalone `Yesterday`), dates near the
+  recording date, counts and pagination position (`56 total entries`,
+  `1 to 1 of 1`, `Page 2 of 9` — navigation/volume state, not identity),
+  parenthesized badge counters (`Inbox (2)`), digit-dominated fragments
+  and low-entropy noise are all rejected; candidates must persist across
+  the recording's own frames (fading toasts and self-mutating regions are
+  volatile by demonstration); ranking prefers alphabetic text near the
+  click target over "longest new text". A date FAR from the recording
+  date — a DOB in a patient banner, numeric or month-name form — is
+  deliberately kept: it is identity data, and the old blanket timestamp
+  filter's habit of eating identity banners is gone.
+- **State the demonstration accidentally froze** (narrowed 2026-07-09,
+  still real). Text that is stable within the recording but specific to
+  the instance or dataset — a module menu, a persistent data row — can
+  still be mined as an assertion. (Entry counts like "filtered from 56
+  total entries" were in this class until the same-day review hardening;
+  count phrases now classify as volatile and are rejected at compile
+  time.) A bundle recorded on one OpenEMR demo instance halts at login on
+  a second instance of the *same version* because the module menu and
+  calendar content differ. Per-tenant re-recording is the working
+  assumption.
+- **Identity bands recorded through modal dialogs** (exposed 2026-07-09
+  once the `':01'` halts stopped masking it; FIXED the same day by the
+  matcher rework). A click inside a dialog records a context band that
+  includes background chrome, and OCR segmentation/order of that chrome
+  does not reproduce between reads; the earlier order-sensitive coverage
+  matcher scored the permuted re-read at ~0.66 and refused the click
+  (observed reproducibly on the OpenEMR note-dialog textarea — control
+  replays capped at 14/17, safe halt, nothing written). The token-wise
+  order-insensitive matcher scores that same permuted band at 1.0; the
+  shape is pinned verified in `tests/test_identity.py`.
 - **Viewports smaller than demonstrated.** If the target is below the fold
   and no scroll was demonstrated, there is no recorded gesture to extend —
   the run halts (closed-loop scrolling extends recorded scrolls; it does
@@ -134,19 +174,28 @@ halts even on the CORRECT row — re-anchoring only verifies when the
 band's non-param residue is stable across entities. Clicking by position
 is what caused the wrong-patient writes; we take the halt. Still true and
 still costly: making a value a parameter strips it from every compiled
-assertion (by design — it varies per run), and recorded parameter values
-leak into geometry landmarks, quietly degrading healing for any run whose
-values differ from the demo (i.e., all of them).
+assertion (by design — it varies per run).
+The other half of the cost was fixed on 2026-07-09: recorded parameter
+values no longer leak into geometry landmarks, and a compile-time lint
+fails the build outright if a demonstrated parameter value appears in any
+**text** postcondition or in any landmark's OCR text. Scoped precisely:
+the lint reads text evidence only — a later step's REGION_STABLE template
+can still embed the demo value's rendered *pixels* (e.g. a saved note
+visible in a subsequent screen region). That failure is in the false-halt
+direction (the region won't match under a different run value and the run
+stops safely); it cannot cause a wrong action, but it is not linted (see
+known remaining).
 
 ## Known remaining (deliberately not attempted in the 2026-07-08/09 fixes)
 
 - **Cosmetic global drift** (browser zoom, device scale factor, font-size
   preference) still zeroes availability — false abort at the first step.
-- **Postcondition mining still overfits** to demonstrated/instance state
-  (data rows, other users' content); per-tenant re-recording remains the
-  working assumption.
-- **Vacuous zero-postcondition steps** still exist (no
-  minimum-verification floor or compile-time warning).
+- **Mining still freezes instance-stable state** (entry counts, module
+  menus, persistent data rows — volatile *fragments* are fixed, instance
+  *state* is not); per-tenant re-recording remains the working assumption.
+- **Vacuous steps with no structural effect** still exist (inert native
+  `<select>`; non-structural recording backends) — no minimum-verification
+  floor.
 - **Unreadable identity bands fall back to the old behavior** (flagged in
   the report, refused only for compile-time-marked irreversible steps) —
   an icon-only repeated structure with no OCRable row text is still
@@ -159,6 +208,37 @@ values differ from the demo (i.e., all of them).
 - **Param targets whose row text varies with the entity** halt on the
   correct row (see the parameters section) — a re-anchoring strategy that
   can verify such rows without falling back to position is future work.
+- **REGION_STABLE templates can embed rendered parameter pixels.** The
+  parameter-leakage lint scans text postconditions and landmark OCR text
+  only; a later step's stable-region crop may contain the demo value as
+  pixels. False-halt direction only (safe), but unlinted.
+- **Long-line anchors are OCR-segmentation-fragile at the resolution
+  rung.** `find_text` fuzzy-matches whole OCR lines with no multi-line
+  joining, so a long anchor `ocr_text` the engine re-segments differently
+  at replay can miss the OCR rung and degrade resolution to geometry.
+  The *postcondition* side of this fragility was fixed on 2026-07-09:
+  TEXT_PRESENT/ABSENT checks go through `vision.text_present`, which also
+  accepts a contiguous >=0.8-of-target run across the concatenated OCR
+  lines (merged-box and split-box re-reads pass — exercised against the
+  real engine in `tests/test_vision.py`), so a mined line that OCR
+  re-segments at replay no longer false-halts the presence check.
+- **Fuzzy text matching cannot see one-digit count differences.** A line
+  differing from the recorded one by a single digit scores above the 0.8
+  per-line fuzzy threshold. Mitigated by rejecting count-bearing lines at
+  compile time (they no longer become assertions); the matcher itself was
+  not redesigned.
+- **Structural checks pass as unverified on a transient None.** When a
+  structural observation (URL/title/page count) reads None on either side
+  — even on a backend that normally provides it — the postcondition
+  passes honestly-unverified rather than halting.
+- **NEW_TAB_OPENED false-halts on named-window reuse.** A link that
+  re-targets an existing named window navigates it instead of increasing
+  the page count; the mined page-count postcondition then fails a
+  successful action (safe direction, costs availability).
+- **The persistence check has no coverage on the recording's final step.**
+  There is no next-step before-frame to test persistence against, so a
+  toast that appears on the last demonstrated action can still be mined
+  as an assertion.
 
 ## What a demonstration cannot express
 

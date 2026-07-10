@@ -54,6 +54,14 @@ PC_TEMPLATE_THRESHOLD = 0.9
 # frame is used instead.
 FIELD_REGION_SIZE = (640, 240)
 
+# Typed-input verification, diff-only acceptance: when the typed value is
+# OCR-able but OCR cannot find it, a pixel change alone is accepted only if
+# the field region gained no other readable text (masked fields render
+# dots, which OCR reads as nothing or a couple of stray glyphs). A dialog
+# rendering over the region changes pixels AND adds readable text — that
+# must never count as "input landed".
+MASKED_NEW_TEXT_SLACK = 3
+
 # Closed-loop scroll: a SCROLL step keeps scrolling by its recorded delta
 # until the NEXT anchored step's anchor resolves on a settled frame, bounded
 # by this multiple of the step's own recorded scroll distance. Consecutive
@@ -229,7 +237,8 @@ class Replayer:
             if (
                 error is None
                 and resolution is not None
-                and step.action in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK)
+                and step.action
+                in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK, ActionKind.TYPE)
                 and step.anchor is not None
                 and step.anchor.context_text
             ):
@@ -240,6 +249,11 @@ class Replayer:
                 # clicked — data drift in repeated structures (rows/cards)
                 # otherwise redirects the whole tail of the workflow to the
                 # wrong entity with a green report (VALIDATION.md, Track A).
+                # Anchored TYPE steps are gated too: their focusing click is
+                # a click like any other (compiled bundles currently emit
+                # TYPE steps without anchors, so this arm is exercised by
+                # hand-built workflows; the guard is cheap and closes the
+                # gap either way).
                 check = self._verify_identity(
                     step, resolution, before_png, params, workflow
                 )
@@ -473,12 +487,17 @@ class Replayer:
     ) -> IdentityCheck:
         """Verify the resolved target's identity via its live context band.
 
-        OCRs the full-width band around the RESOLVED click point (same
-        height as the recorded crop) and compares it to the anchor's
-        recorded ``context_text`` (see :mod:`openadapt_flow.runtime.identity`
-        for the matching rules and the param-mode re-anchoring). Dense small
-        text is undercounted by OCR at native resolution, so a non-verified
-        first pass is retried once at 2x resolution before the verdict.
+        OCRs the full-width band around the RESOLVED click point (the
+        recorded crop's height as a coarse window), keeps only the lines of
+        the point's OWN text row (the 64px crop height spans 2-3 rows of a
+        dense table — a one-row-off resolution must not verify on text
+        bleed from the adjacent true row; see
+        :func:`openadapt_flow.runtime.identity.lines_near_point`), and
+        compares them to the anchor's recorded ``context_text`` (see
+        :mod:`openadapt_flow.runtime.identity` for the matching rules and
+        the param-mode substitution). Dense small text is undercounted by
+        OCR at native resolution, so a non-verified first pass is retried
+        once at 2x resolution before the verdict.
 
         Returns:
             The best :class:`IdentityCheck` across the two attempts.
@@ -488,8 +507,12 @@ class Replayer:
             resolution.point, step.anchor.region[3], self.backend.viewport
         )
 
-        def attempt(png: bytes, region: Optional[Region]) -> IdentityCheck:
-            lines = self.vision.ocr(png, region=region)
+        def attempt(
+            png: bytes, region: Optional[Region], point_y: int
+        ) -> IdentityCheck:
+            lines = identity_mod.lines_near_point(
+                self.vision.ocr(png, region=region), point_y
+            )
             observed = " ".join(
                 line.text.strip() for line in lines if line.text.strip()
             )
@@ -500,13 +523,15 @@ class Replayer:
                 param_examples=workflow.params,
             )
 
-        check = attempt(before_png, band)
+        check = attempt(before_png, band, resolution.point[1])
         if check.status == "verified":
             return check
         upscaled = identity_mod.upscale_crop(before_png, band)
         if upscaled is None:
             return check
-        retry = attempt(upscaled, None)
+        # In the upscaled crop's coordinate space the point's y is its
+        # offset from the band origin, times the upscale factor.
+        retry = attempt(upscaled, None, (resolution.point[1] - band[1]) * 2)
         rank = {"unreadable": 0, "mismatch": 1, "verified": 2}
         if (rank[retry.status], retry.coverage) > (
             rank[check.status],
@@ -528,40 +553,58 @@ class Replayer:
         y = min(max(0, field_point[1] - h // 2), max(0, vh - h))
         return (x, y, w, h)
 
+    def _ocr_squashed(self, png: bytes, region: Optional[Region]) -> str:
+        """Squashed OCR text of a (region of a) frame."""
+        lines = self.vision.ocr(png, region=region)
+        return identity_mod.squash(" ".join(line.text for line in lines))
+
     def _typed_input_landed(
         self, text: str, field_point: Optional[Point], baseline_png: bytes
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Did the just-typed ``text`` visibly land?
 
-        Two layers: (1) screenshot-diff of the field region (any change at
-        all separates "keystrokes rendered somewhere visible" from "fell on
-        a non-rendering target such as <body> after focus theft"); (2) when
-        the diff sees nothing, lenient OCR of the field region for the typed
-        value (contiguous squashed run, scaled for short values), retried at
-        2x resolution — masked fields (password dots) rely on layer 1 alone.
+        For an OCR-able value (>= ``identity.MIN_PARAM_CHARS`` squashed
+        chars) the OCR layer decides: a contiguous squashed run of the
+        value (scaled for short values, retried at 2x resolution) must be
+        readable in the field region. A pixel change alone is accepted
+        only when the region gained no other readable text — that is the
+        masked-field rendering (password dots read as nothing); a dialog
+        painting over the region changes pixels AND adds readable text
+        without the value, and must never count as "input landed". Values
+        too short for OCR to arbitrate fall back to the diff alone.
+
+        Returns:
+            ``(landed, changed)`` — the verdict, and whether the field
+            region's pixels changed at all (the caller's retry decision:
+            retyping is only safe when nothing changed).
         """
         after_png = self.vision.wait_settled(self.backend)
         region = self._field_region(field_point)
-        if self.vision.pixels_changed(baseline_png, after_png, region=region):
-            return True
+        changed = self.vision.pixels_changed(
+            baseline_png, after_png, region=region
+        )
         needle = identity_mod.squash(text)
         if len(needle) < identity_mod.MIN_PARAM_CHARS:
-            return False  # too short for OCR to arbitrate
+            return changed, changed  # too short for OCR to arbitrate
         need = identity_mod.required_run(len(needle))
-        lines = self.vision.ocr(after_png, region=region)
-        hay = identity_mod.squash(" ".join(line.text for line in lines))
-        if identity_mod.longest_run(needle, hay) >= need:
-            return True
+        after_hay = self._ocr_squashed(after_png, region)
+        if identity_mod.longest_run(needle, after_hay) >= need:
+            return True, changed
         if region is not None:
             upscaled = identity_mod.upscale_crop(after_png, region)
             if upscaled is not None:
-                lines = self.vision.ocr(upscaled)
-                hay = identity_mod.squash(
-                    " ".join(line.text for line in lines)
-                )
-                if identity_mod.longest_run(needle, hay) >= need:
-                    return True
-        return False
+                up_hay = self._ocr_squashed(upscaled, None)
+                if identity_mod.longest_run(needle, up_hay) >= need:
+                    return True, changed
+        if not changed:
+            return False, False
+        # Pixels changed but the value is unreadable: masked rendering is
+        # the only acceptable explanation, and masked rendering adds no
+        # readable text. Anything else (a dialog over the field, another
+        # widget's text) must fail the verdict.
+        baseline_hay = self._ocr_squashed(baseline_png, region)
+        landed = len(after_hay) <= len(baseline_hay) + MASKED_NEW_TEXT_SLACK
+        return landed, changed
 
     def _verify_typed_input(
         self,
@@ -571,17 +614,35 @@ class Replayer:
         baseline_png: bytes,
         result: StepResult,
     ) -> Optional[str]:
-        """Verify a TYPE action landed; one refocus-and-retype retry.
+        """Verify a TYPE action landed; one guarded refocus-and-retype retry.
 
-        On first failure: re-click the field (when its point is known),
-        select-all so a false-negative first attempt is REPLACED rather
-        than duplicated, and retype. On second failure: an error string —
-        the run safe-halts (typed input that cannot be confirmed must never
-        be reported as success; see VALIDATION.md 'focus stolen' finding).
+        The retry only fires when the first attempt changed NOTHING in the
+        field region (keystrokes fell on a non-rendering target): re-click
+        the field (when its point is known), select-all so a false-negative
+        first attempt is replaced rather than duplicated, retype. When the
+        region DID change but the value cannot be read (a dialog over the
+        field, an unexpected re-render), retyping is not safe — select-all
+        could destroy pre-existing field content and the re-click could
+        re-fire whatever now sits at that point — so the run halts
+        immediately with the accurate reason. Typed input that cannot be
+        confirmed must never be reported as success (VALIDATION.md 'focus
+        stolen' finding).
         """
-        if self._typed_input_landed(text, field_point, baseline_png):
+        landed, changed = self._typed_input_landed(
+            text, field_point, baseline_png
+        )
+        if landed:
             result.input_verified = True
             return None
+        if changed:
+            result.input_verified = False
+            return (
+                f"Typed input could not be verified for step '{step.id}' "
+                f"({step.intent}): the field region changed but the typed "
+                "value is not readable there (something else rendered over "
+                "or instead of the input) — retyping is unsafe in this "
+                "state; run aborted"
+            )
         result.input_retried = True
         if field_point is not None:
             self.backend.click(*field_point)
@@ -590,7 +651,10 @@ class Replayer:
             self.backend.press("ControlOrMeta+a")
         retry_baseline = self.backend.screenshot()
         self.backend.type_text(text)
-        if self._typed_input_landed(text, field_point, retry_baseline):
+        landed, _changed = self._typed_input_landed(
+            text, field_point, retry_baseline
+        )
+        if landed:
             result.input_verified = True
             return None
         result.input_verified = False

@@ -595,3 +595,50 @@ class TestIdentityContext:
         for step in compiled["workflow"].steps:
             if step.anchor is not None:
                 assert step.anchor.context_text is None, step.id
+
+
+class TestRiskOverrides:
+    """Risk is opt-in at compile time — never auto-assigned. Without an
+    override every step is reversible, which means the irreversible
+    safeguards (below-OCR-rung refusal, unreadable-identity-band refusal)
+    are UNREACHABLE from a default compile; this is disclosed in
+    docs/LIMITS.md. The override is the supported way to arm them."""
+
+    def test_default_compile_marks_every_step_reversible(self, compiled):
+        assert all(s.risk == "reversible" for s in compiled["workflow"].steps)
+
+    def test_override_marks_step_irreversible(self, compiled, tmp_path):
+        workflow = compile_recording(
+            compiled["recording"],
+            tmp_path / "bundle",
+            name="risky",
+            risk_overrides={"step_003": "irreversible"},
+        )
+        by_id = {s.id: s for s in workflow.steps}
+        assert by_id["step_003"].risk == "irreversible"
+        assert all(
+            s.risk == "reversible" for s in workflow.steps if s.id != "step_003"
+        )
+        # The risk survives the bundle round-trip.
+        reloaded = Workflow.load(tmp_path / "bundle")
+        assert {s.id: s.risk for s in reloaded.steps} == {
+            s.id: s.risk for s in workflow.steps
+        }
+
+    def test_unknown_step_id_rejected(self, compiled, tmp_path):
+        with pytest.raises(ValueError, match="unknown step"):
+            compile_recording(
+                compiled["recording"],
+                tmp_path / "bundle",
+                name="risky",
+                risk_overrides={"step_999": "irreversible"},
+            )
+
+    def test_invalid_risk_value_rejected(self, compiled, tmp_path):
+        with pytest.raises(ValueError, match="invalid risk"):
+            compile_recording(
+                compiled["recording"],
+                tmp_path / "bundle",
+                name="risky",
+                risk_overrides={"step_000": "dangerous"},
+            )

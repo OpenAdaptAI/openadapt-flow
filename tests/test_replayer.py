@@ -49,6 +49,9 @@ class FakeVision:
         self.text_results: dict = {}
         self.text_calls: list = []
         self.ocr_lines: list = []
+        # Scripted per-call OCR results (popped per call); when exhausted,
+        # falls back to the static ocr_lines.
+        self.ocr_results: list = []
         self.phash_value = "aa"
         self.phash_dist = 0
         self.settle_count = 0
@@ -83,6 +86,8 @@ class FakeVision:
         )
 
     def ocr(self, screen_png, *, region=None):
+        if self.ocr_results:
+            return self.ocr_results.pop(0)
         return self.ocr_lines
 
     def pixels_changed(self, before_png, after_png, *, region=None,
@@ -710,7 +715,11 @@ def test_resolution_retries_until_target_appears(bundle, run_dir):
 
 
 class OcrLine:
-    def __init__(self, text, region=(0, 0, 10, 10), confidence=0.9):
+    # Default region sits on the resolved point's row (resolving_vision
+    # resolves to (110, 105)): identity verification reads only the lines
+    # of the point's OWN text row (identity.lines_near_point), so fakes
+    # must place their lines there to be seen.
+    def __init__(self, text, region=(0, 95, 400, 20), confidence=0.9):
         self.text = text
         self.region = region
         self.confidence = confidence
@@ -767,12 +776,14 @@ def test_identity_verified_clicks_normally(bundle, run_dir):
 
 def test_identity_param_mode_reanchors_on_run_value(bundle, run_dir):
     """When the recorded band embeds a parameter's demo value (a
-    parameterized TARGET, e.g. the patient row), identity is judged against
-    the RUN's value — the recorded row text describes the demo's entity."""
+    parameterized TARGET, e.g. the patient row), the run's value is
+    substituted into the recorded band and the WHOLE substituted band is
+    verified — the recorded row text describes the demo's entity, but its
+    non-param residue must still match."""
     vision = resolving_vision()
-    vision.ocr_lines = [OcrLine("Underwood, Susan Ardmore")]
+    vision.ocr_lines = [OcrLine("Open chart for Susan (active)")]
     backend = FakeBackend()
-    step = context_click_step("Belford, Phil MRN A12")
+    step = context_click_step("Open chart for Phil (active)")
     workflow = Workflow(
         name="wf", params={"patient": "Phil"}, steps=[step]
     )
@@ -786,6 +797,71 @@ def test_identity_param_mode_reanchors_on_run_value(bundle, run_dir):
     assert identity.status == "verified"
     assert identity.mode == "param"
     assert identity.param == "patient"
+
+
+def test_identity_param_mode_value_alone_does_not_verify(bundle, run_dir):
+    """FLIPPED 2026-07-09 (adversarial review, B2/P1a): previously ANY band
+    containing the run's value verified — a messages row mentioning 'Susan'
+    passed for patient 'Susan', and the value-only rule let a short param
+    demo value disarm the whole check. Now the band's non-param residue
+    must match too; when the entity's own row text varies with the entity
+    (a search result carries the surname), the run halts — disclosed in
+    LIMITS.md as availability cost, never a wrong click."""
+    vision = resolving_vision()
+    vision.ocr_lines = [OcrLine("Underwood, Susan Ardmore")]
+    backend = FakeBackend()
+    step = context_click_step("Belford, Phil MRN A12")
+    workflow = Workflow(
+        name="wf", params={"patient": "Phil"}, steps=[step]
+    )
+    report = Replayer(backend, vision=vision).run(
+        workflow, params={"patient": "Susan"},
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is False
+    assert backend.actions == []  # never clicked
+    identity = report.results[0].identity
+    assert identity.status == "mismatch"
+    assert identity.mode == "param"
+
+
+def test_identity_one_row_off_resolution_mismatches(bundle, run_dir):
+    """The 64px band spans 2-3 dense-table rows: a resolution one row off
+    must be judged by ITS row's text, not verified on text bleed from the
+    adjacent true row. The fake resolves to y=105; the recorded row's text
+    sits one row up (y~75) and the resolved row is a different entity."""
+    vision = resolving_vision()
+    vision.ocr_lines = [
+        OcrLine("Jane Sample Knee pain referral High", region=(0, 65, 400, 20)),
+        OcrLine("Taylor Duplicate Knee pain referral High",
+                region=(0, 95, 400, 20)),
+    ]
+    backend = FakeBackend()
+    step = context_click_step("Jane Sample Knee pain referral High")
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].identity.status == "mismatch"
+
+
+def test_identity_gates_anchored_type_focusing_click(bundle, run_dir):
+    """An anchored TYPE step's focusing click is a click like any other:
+    a wrong-entity band must refuse before the focusing click fires (and
+    before anything is typed)."""
+    vision = resolving_vision()
+    vision.ocr_lines = [OcrLine("Taylor Duplicate Knee pain referral High")]
+    backend = FakeBackend()
+    step = context_click_step("Jane Sample Knee pain referral High")
+    step.action = ActionKind.TYPE
+    step.text = "hello"
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is False
+    assert backend.actions == []  # no focusing click, nothing typed
+    assert report.results[0].identity.status == "mismatch"
 
 
 def test_identity_param_mode_mismatch_halts(bundle, run_dir):
@@ -950,6 +1026,83 @@ def test_type_verification_failure_halts_run(bundle, run_dir):
     assert result.input_retried is True
     assert "Typed input could not be verified" in result.error
     assert ("press", "Enter") not in backend.actions
+
+
+def _type_workflow() -> Workflow:
+    return Workflow(
+        name="wf",
+        steps=[
+            click_step(),
+            Step(id="t1", intent="type note", action=ActionKind.TYPE,
+                 param="note"),
+        ],
+    )
+
+
+def _type_vision() -> FakeVision:
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    ]
+    return vision
+
+
+def test_type_verification_ocr_reads_the_value(bundle, run_dir):
+    """The OCR layer is the decider for OCR-able values: the typed text is
+    readable in the field region — verified, no retry."""
+    vision = _type_vision()
+    vision.ocr_results = [[OcrLine("hello world")]]
+    backend = FakeBackend()
+    report = Replayer(backend, vision=vision).run(
+        _type_workflow(), params={"note": "hello world"},
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is True
+    assert report.results[1].input_verified is True
+    assert report.results[1].input_retried is False
+
+
+def test_type_dialog_over_field_halts_without_retyping(bundle, run_dir):
+    """ADDED 2026-07-09 (adversarial review, P2a/P2b): a dialog rendering
+    over the field region changes pixels — under the old diff-alone rule
+    that false-verified while the keystrokes fell elsewhere. Now an
+    OCR-able value must be READ; pixels-changed-but-value-unreadable (the
+    region gained other readable text) halts immediately WITHOUT the
+    select-all retype, which could destroy pre-existing field content."""
+    vision = _type_vision()
+    dialog = [OcrLine("Are you sure you want to discard this draft?")]
+    # attempt 1: after-OCR (1x), after-OCR (2x upscale), baseline-OCR.
+    vision.ocr_results = [dialog, dialog, []]
+    vision.pixels_changed_results = [True]
+    backend = FakeBackend()
+    report = Replayer(backend, vision=vision).run(
+        _type_workflow(), params={"note": "hello world"},
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is False
+    result = report.results[1]
+    assert result.input_verified is False
+    assert result.input_retried is False  # retype is unsafe here
+    assert "retyping is unsafe" in result.error
+    # Exactly one type action — never retyped, never selected-all.
+    assert backend.actions.count(("type", "hello world")) == 1
+    assert ("press", "ControlOrMeta+a") not in backend.actions
+
+
+def test_type_masked_field_accepts_diff_without_new_text(bundle, run_dir):
+    """Masked fields (password dots) render pixels but no readable text:
+    the diff plus an unchanged-OCR region is the accepted masked shape."""
+    vision = _type_vision()
+    vision.ocr_results = [[], [], []]  # nothing readable before or after
+    vision.pixels_changed_results = [True]
+    backend = FakeBackend()
+    report = Replayer(backend, vision=vision).run(
+        _type_workflow(), params={"note": "hunter2secret"},
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is True
+    assert report.results[1].input_verified is True
+    assert report.results[1].input_retried is False
 
 
 def test_type_without_known_field_diffs_full_frame_and_cannot_refocus(

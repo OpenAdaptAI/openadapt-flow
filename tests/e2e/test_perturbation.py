@@ -150,7 +150,7 @@ class TestDataDrift:
         recorded template at exactly the recorded position, so the template
         rung still matches it at confidence ~1.0 — but the identity band
         reads 'Taylor Duplicate ...' where 'Jane Sample ...' was recorded
-        (coverage ~0.70 from the shared reason/priority columns, below the
+        (coverage ~0.67 from the shared reason/priority columns, below the
         0.8 bar) and the run halts without clicking anything."""
         report, state = replay_on_page(
             _browser, bundle.dir, drift_url(mockmed_url, "lookalike"), run_dir,

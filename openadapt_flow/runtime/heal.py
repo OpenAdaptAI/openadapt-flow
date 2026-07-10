@@ -124,6 +124,9 @@ def _recontext(
         lines,
         exclude_region=region,
         band=identity_mod.band_region(click_point, region[3], frame),
+        # Same row refinement the compiler applies: record only the click
+        # point's own text row, matching what verification reads back.
+        point=click_point,
     )
 
 

@@ -150,15 +150,22 @@ class TestCheckboxRadio:
 
 
 class TestDateInput:
-    def test_typed_date_is_replayed_faithfully_garbage_included(
+    def test_typed_date_halts_when_readback_cannot_verify(
         self, mockmed_url, _browser, tmp_path
     ) -> None:
-        """PARTIAL / HAZARD. Typing digits into a native date input is
-        segment- and locale-dependent: in this harness '07082026' produced
-        the value 70820-02-06 AT RECORD TIME, and the replay reproduced the
-        same wrong value byte-for-byte. Faithful replay of a bad recording
-        is still bad data — and the calendar popup alternative is browser
-        chrome that vision never sees."""
+        """PARTIAL / HAZARD, shape changed 2026-07-09. Typing digits into a
+        native date input is segment- and locale-dependent: in this harness
+        '07082026' produced the value 70820-02-06 AT RECORD TIME. Under the
+        original typed-input rule the replay reproduced the same wrong
+        value byte-for-byte (faithful garbage); the hardened verification
+        (an OCR-able typed value must be READ BACK from the field — a mere
+        pixel change with other readable text is the dialog-over-field
+        false-verify shape) cannot read '07082026' out of the widget's
+        transformed rendering, so the replay now SAFE-HALTS at the type
+        step instead of writing the garbage again. A false abort on
+        value-transforming widgets is the disclosed cost (docs/LIMITS.md)
+        of closing the dialog-over-field hole — and the calendar popup
+        alternative remains browser chrome that vision never sees."""
         url = f"{mockmed_url}widgets.html?panel=date"
 
         def ops(page, r):
@@ -168,13 +175,15 @@ class TestDateInput:
         _wf, bundle_dir, recorded = record_and_compile(
             _browser, url, ops, tmp_path, "date"
         )
+        assert "70820-02-06" in recorded  # the record-time garbage, pinned
         report, state = replay_on_page(
             _browser, bundle_dir, url, tmp_path / "run", params={}
         )
-        assert report.success is True, describe(report, state)
-        # Whatever the recording produced (correct or garbage), the replay
-        # reproduces it exactly.
-        assert state["status"] == recorded, describe(report, state)
+        assert report.success is False, describe(report, state)
+        failed = failing_step(report)
+        assert failed is not None
+        assert "Typed input could not be verified" in (failed.error or "")
+        assert "retyping is unsafe" in (failed.error or "")
 
 
 class TestModalDialog:

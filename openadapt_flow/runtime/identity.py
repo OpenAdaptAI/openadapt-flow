@@ -13,14 +13,20 @@ identity). The compiler stores the band text on the anchor
 (``Anchor.context_text``); the replayer re-reads the band around the
 *resolved* point before clicking and requires either:
 
-- **context mode** — a lenient coverage match against the recorded band
-  text (contiguous common runs of >= ``MIN_BLOCK`` squashed characters must
-  cover >= ``COVERAGE_THRESHOLD`` of it), or
+- **context mode** — an order-insensitive token match against the recorded
+  band text (see :func:`band_match`): matched tokens must cover >=
+  ``COVERAGE_THRESHOLD`` of the recorded band AND no contiguous run of
+  uncovered recorded characters may exceed ``UNCOVERED_RUN_CAP`` — a wrong
+  entity is a contiguous mismatch (a replaced name), even when long shared
+  row text keeps raw coverage high. Order-insensitivity matters because
+  OCR re-reads the same band in a different segmentation order between
+  visits (e.g. page chrome around a modal), or
 - **param mode** — when a workflow parameter's demonstrated value is
   embedded in the recorded band (a parameterized *target*, e.g. the patient
-  row), the RUN's value for that parameter must appear in the live band
-  instead. This is how a parameterized-target bundle re-anchors: the
-  recorded row text describes the demo's entity, not the run's.
+  row), the run's value is substituted into the recorded band and the WHOLE
+  substituted band is verified: the run's value must appear in the live
+  band AND the band's non-param residue must still match. A band that
+  merely mentions the run's value somewhere is not identity.
 
 Both checks compare squashed (lowercased, whitespace-free) text, the same
 OCR-tolerant form used by ``benchmark.verify``. Timestamp-bearing lines are
@@ -45,26 +51,59 @@ from typing import Any, Iterable, Optional
 from openadapt_flow.ir import IdentityCheck, Point, Region
 
 # Recorded band text shorter than this (squashed) is too weak to
-# discriminate anything and is not stored — the check must never fire on
-# e.g. a lone stray glyph.
-MIN_CONTEXT_CHARS = 8
+# discriminate anything and is not stored — generic fragments like
+# "Active High 3" (11 squashed chars) otherwise arm false confidence: any
+# sibling row sharing the generic columns would verify. Bands this short
+# also yield "unreadable" (proceed flagged, never verified) when they
+# reach verification via an older bundle.
+MIN_CONTEXT_CHARS = 12
 
 # A workflow parameter's demonstrated value must be at least this long
-# (squashed) to switch the check into param mode; 1-2 char examples match
-# everywhere by accident.
-MIN_PARAM_CHARS = 3
+# (squashed) to switch the check into param mode; 1-3 char examples match
+# everywhere by accident. Kept at 4 (not higher) so real-world first-name
+# parameters ("Phil") still get param-mode substitution — an over-trigger
+# is harmless now that param mode verifies the WHOLE substituted band
+# (the run's value alone can no longer disarm the residue check).
+MIN_PARAM_CHARS = 4
 
-# Context mode: fraction of the recorded band's squashed characters that
-# must be covered by contiguous common runs of >= MIN_BLOCK chars. Measured
-# on MockMed: the true row re-reads at ~1.0; a look-alike row sharing every
-# column except the name covers ~0.67 (the shared columns) — 0.8 splits the
+# Fraction of the recorded band's squashed characters that must be covered
+# by matched tokens. Measured with the token matcher on MockMed rows: the
+# true row re-reads at 1.0 (0.97+ under injected OCR jitter); a look-alike
+# row sharing every column except the name covers ~0.67 — 0.8 splits the
 # populations with margin on both sides.
 COVERAGE_THRESHOLD = 0.8
+
+# Coverage alone is defeated when shared text dominates the band (a short
+# wrong name next to a long shared procedure string covers 0.89): a wrong
+# entity is a CONTIGUOUS mismatch, so no contiguous run of unmatched
+# recorded characters (adjacent unmatched tokens merge) may exceed this
+# cap. 4 tolerates a single genuinely mutable short cell ("with" garbled
+# beyond token similarity, a 1-char counter) while a replaced name —
+# "Jane Li" -> "Ann Wu" leaves 6 contiguous uncovered chars — fails.
+UNCOVERED_RUN_CAP = 4
+
+# Token matching tiers (see band_match): a token is matched when it appears
+# verbatim among the observed tokens, OR >= TOKEN_RUN_FRACTION of it
+# appears as one contiguous run anywhere in the squashed observed text
+# (segmentation-independent containment), OR some observed token is
+# whole-token similar at >= TOKEN_SIM_RATIO. 0.7 separates OCR jitter
+# ("paln" ~ "pain" 0.75, "hlgh" ~ "high" 0.75) from different words that
+# merely share letters ("jane" ~ "panel" 0.67, "jane" ~ "ann" 0.57).
 MIN_BLOCK = 3
+TOKEN_RUN_FRACTION = 0.8
+TOKEN_SIM_RATIO = 0.7
 
 # Param mode: required contiguous run for the run's parameter value, scaled
 # for short values (a full 16-char run cannot exist inside a 5-char name).
 MAX_RUN_REQUIRED = 16
+
+# Band-line refinement: a line belongs to the resolved point's row when its
+# vertical center is within this fraction of its own height from the point
+# (minimum slack in px below). The anchor's 64px template height spans 2-3
+# rows of a dense table (~25px/row); matching per-row prevents a
+# one-row-off resolution from verifying on text bleed from the true row.
+ROW_PROXIMITY_FACTOR = 0.75
+ROW_PROXIMITY_MIN_PX = 4
 
 # Lines containing a date or clock time are volatile by construction and
 # never part of the recorded context (the compiler applies the same rule to
@@ -107,11 +146,40 @@ def _intersects(a: Region, b: Region) -> bool:
     return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
 
 
+def lines_near_point(lines: Iterable[Any], point_y: int) -> list[Any]:
+    """Filter OCR lines to the single text row containing ``point_y``.
+
+    A line belongs to the point's row when its vertical center is within
+    ``ROW_PROXIMITY_FACTOR`` of its own height from ``point_y`` (with a
+    small minimum slack). The coarse band (the anchor's template height,
+    64px) spans 2-3 rows of a dense table; identity must be judged against
+    the resolved point's OWN row, or a one-row-off resolution verifies on
+    text bleed from the adjacent true row.
+
+    Args:
+        lines: OCR line objects (``text``/``region``).
+        point_y: The click point's y in the same coordinate space as the
+            lines' regions.
+
+    Returns:
+        The lines belonging to the point's row.
+    """
+    kept = []
+    for line in lines:
+        _, ly, _, lh = line.region
+        center_y = ly + lh // 2
+        slack = max(ROW_PROXIMITY_MIN_PX, int(ROW_PROXIMITY_FACTOR * lh))
+        if abs(center_y - point_y) <= slack:
+            kept.append(line)
+    return kept
+
+
 def context_from_lines(
     lines: Iterable[Any],
     *,
     exclude_region: Region,
     band: Region,
+    point: Optional[Point] = None,
     min_confidence: float = 0.5,
 ) -> Optional[str]:
     """Extract the context-band text from full-frame OCR lines.
@@ -120,12 +188,17 @@ def context_from_lines(
     which do NOT intersect ``exclude_region`` (the target's own crop: its
     label is mutable evidence, healed through on rename drift, so it must
     not participate in identity). Timestamp-bearing lines are dropped as
-    volatile. Kept lines are joined left-to-right.
+    volatile. When ``point`` is given, lines are further restricted to the
+    point's own text row (see :func:`lines_near_point`) so the recorded
+    band matches what replay-time verification reads — one row, not the
+    2-3 rows a 64px band spans in a dense table. Kept lines are joined
+    left-to-right.
 
     Args:
         lines: OCR line objects (``text``/``region``/``confidence``).
         exclude_region: The anchor's template crop region.
         band: The context band (see :func:`band_region`).
+        point: The click point (row refinement); None keeps the whole band.
         min_confidence: Minimum OCR confidence for a line to count.
 
     Returns:
@@ -146,11 +219,14 @@ def context_from_lines(
             continue
         if TIMESTAMP_RE.search(text):
             continue
-        kept.append((lx, text))
+        kept.append((lx, line, text))
+    if point is not None:
+        near = lines_near_point([line for _, line, _ in kept], point[1])
+        kept = [item for item in kept if item[1] in near]
     if not kept:
         return None
     kept.sort(key=lambda item: item[0])
-    joined = " ".join(text for _, text in kept)
+    joined = " ".join(text for _, _, text in kept)
     if len(squash(joined)) < MIN_CONTEXT_CHARS:
         return None
     return joined
@@ -188,7 +264,9 @@ def coverage(needle: str, hay: str) -> float:
     """Fraction of ``needle`` covered by contiguous runs >= ``MIN_BLOCK``.
 
     Scattered 1-2 char coincidences accumulate on any text-dense screen, so
-    only blocks of at least ``MIN_BLOCK`` characters count.
+    only blocks of at least ``MIN_BLOCK`` characters count. Used for
+    embedded-parameter detection; band verification uses the stricter
+    :func:`band_match` (which also penalizes uncovered residue).
     """
     if not needle or not hay:
         return 0.0
@@ -198,6 +276,125 @@ def coverage(needle: str, hay: str) -> float:
         b.size for b in _matching_blocks(needle, hay) if b.size >= MIN_BLOCK
     )
     return matched / len(needle)
+
+
+def tokenize(text: str) -> list[str]:
+    """Split on whitespace and squash each token (lowercase, no spaces)."""
+    return [squash(tok) for tok in text.split() if squash(tok)]
+
+
+def _token_matched(token: str, hay_squashed: str, hay_tokens: list[str]) -> bool:
+    """Whether one recorded token is present in the observed band.
+
+    Three tiers, all order-insensitive (OCR re-reads the same band in a
+    different segmentation order between visits — token order must not
+    matter):
+
+    1. verbatim: the token appears as an observed token;
+    2. containment: >= ``TOKEN_RUN_FRACTION`` of the token appears as ONE
+       contiguous run anywhere in the squashed observed text (tolerates
+       the engine merging tokens: recorded "ShowActive" vs observed
+       "Show Active"); requires the run to be >= ``MIN_BLOCK`` chars, so
+       1-2 char tokens can only match verbatim (a lone "li" must not
+       match inside "lipid");
+    3. similarity: some observed token of >= ``MIN_BLOCK`` chars is
+       whole-token similar at >= ``TOKEN_SIM_RATIO`` (OCR jitter:
+       "paln" ~ "pain"; a genuinely different name — "ann" vs "jane",
+       ratio 0.57 — stays below the bar).
+    """
+    if token in hay_tokens:
+        return True
+    if len(token) >= MIN_BLOCK:
+        need = max(MIN_BLOCK, -(-len(token) * 4 // 5))  # ceil(0.8 * len)
+        if longest_run(token, hay_squashed) >= need:
+            return True
+        for observed in hay_tokens:
+            if len(observed) < MIN_BLOCK:
+                continue
+            ratio = difflib.SequenceMatcher(
+                None, token, observed, autojunk=False
+            ).ratio()
+            if ratio >= TOKEN_SIM_RATIO:
+                return True
+    return False
+
+
+def band_match(expected_text: str, observed_text: str) -> tuple[float, int]:
+    """Match a recorded band against a live band, token-wise.
+
+    Order-insensitive (see :func:`_token_matched`) with residue tracking:
+    walking the recorded tokens in order, contiguous runs of UNMATCHED
+    tokens accumulate their squashed lengths — a wrong entity is a
+    contiguous mismatch ("Jane Li" replaced by "Ann Wu" leaves a 6-char
+    uncovered run) even when long shared text keeps overall coverage high.
+
+    Args:
+        expected_text: The recorded (or parameter-substituted) band text.
+        observed_text: The live band text.
+
+    Returns:
+        ``(coverage, max_uncovered_run)`` — the fraction of recorded
+        squashed characters in matched tokens, and the longest contiguous
+        run of uncovered squashed characters.
+    """
+    expected_tokens = tokenize(expected_text)
+    if not expected_tokens:
+        return 0.0, 0
+    hay_squashed = squash(observed_text)
+    hay_tokens = tokenize(observed_text)
+    matched_chars = 0
+    total_chars = 0
+    uncovered_runs: list[int] = []
+    current_run = 0
+    for token in expected_tokens:
+        total_chars += len(token)
+        if hay_squashed and _token_matched(token, hay_squashed, hay_tokens):
+            matched_chars += len(token)
+            if current_run:
+                uncovered_runs.append(current_run)
+                current_run = 0
+        else:
+            current_run += len(token)
+    if current_run:
+        uncovered_runs.append(current_run)
+    return matched_chars / total_chars, max(uncovered_runs, default=0)
+
+
+def _token_belongs_to(token: str, value_squashed: str) -> bool:
+    """Whether a band token is (part of) a parameter's demonstrated value."""
+    if not token or not value_squashed:
+        return False
+    if token in value_squashed or value_squashed in token:
+        return True
+    ratio = difflib.SequenceMatcher(
+        None, token, value_squashed, autojunk=False
+    ).ratio()
+    # Same-token-with-OCR-jitter question ("Phi1" ~ "Phil"): the token
+    # similarity tier's threshold applies.
+    return ratio >= TOKEN_SIM_RATIO
+
+
+def substitute_param(band_text: str, example: str, value: str) -> str:
+    """Replace a parameter's demonstrated value in the band with the run's.
+
+    Verbatim occurrences are replaced in place (case-insensitive). When
+    the example does not appear verbatim (OCR mangled it into the band),
+    tokens belonging to the example are dropped and the run's value is
+    appended — band matching is order-insensitive, so the position of the
+    substituted value does not matter.
+    """
+    if not example.strip():
+        return band_text
+    pattern = re.compile(re.escape(example), re.IGNORECASE)
+    if pattern.search(band_text):
+        return pattern.sub(value, band_text)
+    example_squashed = squash(example)
+    kept = [
+        tok
+        for tok in band_text.split()
+        if not _token_belongs_to(squash(tok), example_squashed)
+    ]
+    return " ".join(kept + [value])
 
 
 def embedded_params(
@@ -252,14 +449,33 @@ def verify_target_identity(
     hay = squash(observed_text)
     expected = context_text
 
+    if len(squash(context_text)) < MIN_CONTEXT_CHARS:
+        # A band this short ("Active High 3") is generic: any sibling row
+        # sharing the generic columns would verify. The compiler no longer
+        # stores such bands; when one arrives via an older bundle, identity
+        # cannot be judged — proceed flagged, never verified.
+        return IdentityCheck(
+            status="unreadable", expected=expected, observed=observed_text
+        )
+
     in_band = embedded_params(context_text, param_examples)
     if in_band:
         # Param mode: the demonstrated band embeds a parameter's demo value,
-        # so the band text describes the DEMO's entity. Re-anchor on the
-        # run's value instead of the recorded text.
+        # so that PART of the band describes the demo's entity — substitute
+        # the run's value into the recorded band and verify the WHOLE
+        # substituted band. The recorded non-param residue is never
+        # discarded: a band that merely contains the run's value somewhere
+        # (any row mentioning "Susan") must not verify.
         if not hay:
             return IdentityCheck(
                 status="unreadable", mode="param", expected=expected
+            )
+        substituted = context_text
+        for name in in_band:
+            substituted = substitute_param(
+                substituted,
+                param_examples[name],
+                params.get(name, param_examples[name]),
             )
         for name in in_band:
             value = squash(params.get(name, param_examples[name]))
@@ -274,20 +490,23 @@ def verify_target_identity(
                     observed=observed_text,
                     param=name,
                 )
+        cov, uncovered = band_match(substituted, observed_text)
+        ok = cov >= COVERAGE_THRESHOLD and uncovered <= UNCOVERED_RUN_CAP
         return IdentityCheck(
-            status="verified",
+            status="verified" if ok else "mismatch",
             mode="param",
-            coverage=1.0,
-            expected=expected,
+            coverage=round(cov, 4),
+            expected=substituted,
             observed=observed_text,
             param=in_band[0],
         )
 
     if not hay:
         return IdentityCheck(status="unreadable", expected=expected)
-    cov = coverage(squash(context_text), hay)
+    cov, uncovered = band_match(context_text, observed_text)
+    ok = cov >= COVERAGE_THRESHOLD and uncovered <= UNCOVERED_RUN_CAP
     return IdentityCheck(
-        status="verified" if cov >= COVERAGE_THRESHOLD else "mismatch",
+        status="verified" if ok else "mismatch",
         coverage=round(cov, 4),
         expected=expected,
         observed=observed_text,

@@ -1,0 +1,1114 @@
+{
+  "study": "competitor drift study (COMPETITOR_STUDY.md)",
+  "date": "2026-07-10",
+  "total_estimated_usd_list_price": 0.9367,
+  "budget_cap_usd": 10.0,
+  "budget_abort_usd": 8.0,
+  "pins": {
+    "workflow-use": "18d4613 (pkg 0.2.11), browser-use 0.9.5",
+    "skyvern": "fd9c1eb (pkg 1.0.46)",
+    "playwright": "1.61.0"
+  },
+  "spend_ledger": [
+    {
+      "ts": "2026-07-10T12:00:08",
+      "phase": "workflow-use build_workflow",
+      "calls": 1,
+      "in_tokens": 4697,
+      "out_tokens": 2596,
+      "usd": 0.053031,
+      "note": "exact usage from API"
+    },
+    {
+      "ts": "2026-07-10T12:11:04",
+      "phase": "workflow-use replay wfu-det-baseline",
+      "calls": 2,
+      "in_tokens": 309,
+      "out_tokens": 477,
+      "usd": 0.008082,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:12:45",
+      "phase": "workflow-use replay wfu-det-lookalike",
+      "calls": 3,
+      "in_tokens": 14707,
+      "out_tokens": 814,
+      "usd": 0.056331,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:13:28",
+      "phase": "workflow-use replay wfu-det-missing",
+      "calls": 3,
+      "in_tokens": 15046,
+      "out_tokens": 1053,
+      "usd": 0.060933,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:14:00",
+      "phase": "workflow-use replay wfu-det-grow",
+      "calls": 3,
+      "in_tokens": 14796,
+      "out_tokens": 837,
+      "usd": 0.056943,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:15:24",
+      "phase": "workflow-use replay wfu-det-theme",
+      "calls": 2,
+      "in_tokens": 7450,
+      "out_tokens": 612,
+      "usd": 0.03153,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:15:54",
+      "phase": "workflow-use replay wfu-det-rename",
+      "calls": 2,
+      "in_tokens": 7405,
+      "out_tokens": 474,
+      "usd": 0.029325,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:16:20",
+      "phase": "workflow-use replay wfu-det-move",
+      "calls": 2,
+      "in_tokens": 7399,
+      "out_tokens": 371,
+      "usd": 0.027762,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:22:36",
+      "phase": "workflow-use replay wfu-det-lookalike",
+      "calls": 3,
+      "in_tokens": 16192,
+      "out_tokens": 738,
+      "usd": 0.059646,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:23:12",
+      "phase": "workflow-use replay wfu-det-missing",
+      "calls": 3,
+      "in_tokens": 14601,
+      "out_tokens": 824,
+      "usd": 0.056163,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:23:44",
+      "phase": "workflow-use replay wfu-det-grow",
+      "calls": 3,
+      "in_tokens": 14752,
+      "out_tokens": 821,
+      "usd": 0.056571,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:24:14",
+      "phase": "workflow-use replay wfu-det-theme",
+      "calls": 2,
+      "in_tokens": 7410,
+      "out_tokens": 471,
+      "usd": 0.029295,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:24:50",
+      "phase": "workflow-use replay wfu-det-rename",
+      "calls": 3,
+      "in_tokens": 14643,
+      "out_tokens": 1001,
+      "usd": 0.058944,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:25:16",
+      "phase": "workflow-use replay wfu-det-move",
+      "calls": 2,
+      "in_tokens": 7393,
+      "out_tokens": 394,
+      "usd": 0.028089,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:41:08",
+      "phase": "skyvern sky-codegen-baseline",
+      "calls": 5,
+      "in_tokens": 32697,
+      "out_tokens": 4306,
+      "usd": 0.162681,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:44:35",
+      "phase": "skyvern sky-code-baseline",
+      "calls": 1,
+      "in_tokens": 6660,
+      "out_tokens": 1809,
+      "usd": 0.047115,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:46:13",
+      "phase": "skyvern sky-code-lookalike",
+      "calls": 1,
+      "in_tokens": 2490,
+      "out_tokens": 299,
+      "usd": 0.011955,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:47:20",
+      "phase": "skyvern sky-code-missing",
+      "calls": 1,
+      "in_tokens": 2481,
+      "out_tokens": 299,
+      "usd": 0.011928,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:48:28",
+      "phase": "skyvern sky-code-grow",
+      "calls": 1,
+      "in_tokens": 2482,
+      "out_tokens": 312,
+      "usd": 0.012126,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:49:58",
+      "phase": "skyvern sky-code-theme",
+      "calls": 1,
+      "in_tokens": 2480,
+      "out_tokens": 266,
+      "usd": 0.01143,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:51:56",
+      "phase": "skyvern sky-code-rename",
+      "calls": 1,
+      "in_tokens": 5008,
+      "out_tokens": 1101,
+      "usd": 0.031539,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T12:53:03",
+      "phase": "skyvern sky-code-move",
+      "calls": 1,
+      "in_tokens": 2481,
+      "out_tokens": 284,
+      "usd": 0.011703,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T13:00:31",
+      "phase": "skyvern sky-code-lookalike-rep2",
+      "calls": 1,
+      "in_tokens": 2502,
+      "out_tokens": 255,
+      "usd": 0.011331,
+      "note": ""
+    },
+    {
+      "ts": "2026-07-10T13:31:18",
+      "phase": "skyvern sky-code-lookalike-beaconcheck",
+      "calls": 1,
+      "in_tokens": 2509,
+      "out_tokens": 314,
+      "usd": 0.012237,
+      "note": ""
+    }
+  ],
+  "runs": [
+    {
+      "file": "codegen/codegen-baseline.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "none",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.5,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen/codegen-grow.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "grow",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.4,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen/codegen-lookalike.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "lookalike",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.4,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen/codegen-missing.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "missing",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 32.3,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": "ss_venv/lib/python3.12/site-packages/playwright/_impl/_connection.py\", line 69, in send\n    return await self._connection.wrap_api_call(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/abrichr/oa/src/openadapt-flow/.claude/worktrees/agent-abf683c4fb70a5449/runs/competitor_study/harness_venv/lib/python3.12/site-packages/playwright/_impl/_connection.py\", line 563, in wrap_api_call\n    raise rewrite_error(error, f\"{parsed_st['apiName']}: {error}\") from None\nplaywright._impl._errors.TimeoutError: Locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"#open-p1\")"
+    },
+    {
+      "file": "codegen/codegen-move.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "move",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.5,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen/codegen-rename.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "rename",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 32.3,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": "te-packages/playwright/_impl/_connection.py\", line 69, in send\n    return await self._connection.wrap_api_call(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/abrichr/oa/src/openadapt-flow/.claude/worktrees/agent-abf683c4fb70a5449/runs/competitor_study/harness_venv/lib/python3.12/site-packages/playwright/_impl/_connection.py\", line 563, in wrap_api_call\n    raise rewrite_error(error, f\"{parsed_st['apiName']}: {error}\") from None\nplaywright._impl._errors.TimeoutError: Locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for get_by_role(\"button\", name=\"Save Encounter\")"
+    },
+    {
+      "file": "codegen/codegen-theme.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "theme",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.4,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen_beaconcheck/codegen-baseline.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "none",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.9,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen_beaconcheck/codegen-grow.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "grow",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.8,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen_beaconcheck/codegen-lookalike.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "lookalike",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.4,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen_beaconcheck/codegen-missing.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "missing",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 32.6,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": "ss_venv/lib/python3.12/site-packages/playwright/_impl/_connection.py\", line 69, in send\n    return await self._connection.wrap_api_call(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/abrichr/oa/src/openadapt-flow/.claude/worktrees/agent-abf683c4fb70a5449/runs/competitor_study/harness_venv/lib/python3.12/site-packages/playwright/_impl/_connection.py\", line 563, in wrap_api_call\n    raise rewrite_error(error, f\"{parsed_st['apiName']}: {error}\") from None\nplaywright._impl._errors.TimeoutError: Locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"#open-p1\")"
+    },
+    {
+      "file": "codegen_beaconcheck/codegen-move.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "move",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.7,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "codegen_beaconcheck/codegen-rename.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "rename",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 32.3,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": "te-packages/playwright/_impl/_connection.py\", line 69, in send\n    return await self._connection.wrap_api_call(\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/abrichr/oa/src/openadapt-flow/.claude/worktrees/agent-abf683c4fb70a5449/runs/competitor_study/harness_venv/lib/python3.12/site-packages/playwright/_impl/_connection.py\", line 563, in wrap_api_call\n    raise rewrite_error(error, f\"{parsed_st['apiName']}: {error}\") from None\nplaywright._impl._errors.TimeoutError: Locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for get_by_role(\"button\", name=\"Save Encounter\")"
+    },
+    {
+      "file": "codegen_beaconcheck/codegen-theme.result.json",
+      "tool": "playwright-codegen",
+      "mode": null,
+      "drift": "theme",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study codegen-record 20260710T125628"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": null,
+      "llm_out_tokens": null,
+      "wall_time_s": 2.5,
+      "expected_note": "competitor-study codegen-record 20260710T125628",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-baseline.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "none",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study sky-code-baseline 20260710T124258"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 1,
+      "llm_in_tokens": 6660,
+      "llm_out_tokens": 1809,
+      "wall_time_s": 97.0,
+      "expected_note": "competitor-study sky-code-baseline 20260710T124258",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-grow.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "grow",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "g1",
+          "type": "Triage",
+          "note": "competitor-study sky-code-grow 20260710T124720"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 1,
+      "llm_in_tokens": 2482,
+      "llm_out_tokens": 312,
+      "wall_time_s": 67.6,
+      "expected_note": "competitor-study sky-code-grow 20260710T124720",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-lookalike-beaconcheck.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "lookalike",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "p0",
+          "type": "Triage",
+          "note": "competitor-study sky-code-lookalike-beaconcheck 20260710T133008"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 1,
+      "llm_in_tokens": 2509,
+      "llm_out_tokens": 314,
+      "wall_time_s": 70.1,
+      "expected_note": "competitor-study sky-code-lookalike-beaconcheck 20260710T133008",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-lookalike-rep2.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "lookalike",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "p0",
+          "type": "Triage",
+          "note": "competitor-study sky-code-lookalike-rep2 20260710T125924"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 1,
+      "llm_in_tokens": 2502,
+      "llm_out_tokens": 255,
+      "wall_time_s": 67.1,
+      "expected_note": "competitor-study sky-code-lookalike-rep2 20260710T125924",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-lookalike.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "lookalike",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "p0",
+          "type": "Triage",
+          "note": "competitor-study sky-code-lookalike 20260710T124506"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 1,
+      "llm_in_tokens": 2490,
+      "llm_out_tokens": 299,
+      "wall_time_s": 67.2,
+      "expected_note": "competitor-study sky-code-lookalike 20260710T124506",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-missing.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "missing",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "p2",
+          "type": "Triage",
+          "note": "competitor-study sky-code-missing 20260710T124613"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 1,
+      "llm_in_tokens": 2481,
+      "llm_out_tokens": 299,
+      "wall_time_s": 67.0,
+      "expected_note": "competitor-study sky-code-missing 20260710T124613",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-move.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "move",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study sky-code-move 20260710T125156"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 1,
+      "llm_in_tokens": 2481,
+      "llm_out_tokens": 284,
+      "wall_time_s": 67.2,
+      "expected_note": "competitor-study sky-code-move 20260710T125156",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-rename.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "rename",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study sky-code-rename 20260710T124959"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 1,
+      "llm_in_tokens": 5008,
+      "llm_out_tokens": 1101,
+      "wall_time_s": 117.6,
+      "expected_note": "competitor-study sky-code-rename 20260710T124959",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-code-theme.result.json",
+      "tool": "skyvern",
+      "mode": "code",
+      "drift": "theme",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study sky-code-theme 20260710T124851"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 1,
+      "llm_in_tokens": 2480,
+      "llm_out_tokens": 266,
+      "wall_time_s": 67.2,
+      "expected_note": "competitor-study sky-code-theme 20260710T124851",
+      "tool_error": null
+    },
+    {
+      "file": "skyvern/sky-codegen-baseline.result.json",
+      "tool": "skyvern",
+      "mode": null,
+      "drift": "none",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study sky-codegen-baseline 20260710T123930"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 5,
+      "llm_in_tokens": 32697,
+      "llm_out_tokens": 4306,
+      "wall_time_s": 97.0,
+      "expected_note": "competitor-study sky-codegen-baseline 20260710T123930",
+      "tool_error": null
+    },
+    {
+      "file": "workflow_use/wfu-det-baseline.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "none",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.1,
+      "expected_note": "competitor-study wfu-det-baseline 20260710T120203",
+      "tool_error": "ValueError: Deterministic step 6 (click) failed: 1 validation error for ClickActionModel\nclick.cssSelector\n  Field required [type=missing, input_value={'expected_outcome': 'The...http://127.0.0.1:8765/'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing"
+    },
+    {
+      "file": "workflow_use/wfu-det-grow.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "grow",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 8.0,
+      "expected_note": "competitor-study wfu-det-grow 20260710T121733",
+      "tool_error": "ValueError: Deterministic step 6 (click) failed: 1 validation error for ClickActionModel\nclick.cssSelector\n  Field required [type=missing, input_value={'expected_outcome': 'The...http://127.0.0.1:8765/'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing"
+    },
+    {
+      "file": "workflow_use/wfu-det-lookalike.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "lookalike",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 7.9,
+      "expected_note": "competitor-study wfu-det-lookalike 20260710T121712",
+      "tool_error": "ValueError: Deterministic step 6 (click) failed: 1 validation error for ClickActionModel\nclick.cssSelector\n  Field required [type=missing, input_value={'expected_outcome': 'The...http://127.0.0.1:8765/'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing"
+    },
+    {
+      "file": "workflow_use/wfu-det-missing.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "missing",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 8.0,
+      "expected_note": "competitor-study wfu-det-missing 20260710T121723",
+      "tool_error": "ValueError: Deterministic step 6 (click) failed: 1 validation error for ClickActionModel\nclick.cssSelector\n  Field required [type=missing, input_value={'expected_outcome': 'The...http://127.0.0.1:8765/'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing"
+    },
+    {
+      "file": "workflow_use/wfu-det-move.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "move",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 8.1,
+      "expected_note": "competitor-study wfu-det-move 20260710T121806",
+      "tool_error": "ValueError: Deterministic step 6 (click) failed: 1 validation error for ClickActionModel\nclick.cssSelector\n  Field required [type=missing, input_value={'expected_outcome': 'The...http://127.0.0.1:8765/'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing"
+    },
+    {
+      "file": "workflow_use/wfu-det-rename.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "rename",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 8.2,
+      "expected_note": "competitor-study wfu-det-rename 20260710T121754",
+      "tool_error": "ValueError: Deterministic step 6 (click) failed: 1 validation error for ClickActionModel\nclick.cssSelector\n  Field required [type=missing, input_value={'expected_outcome': 'The...http://127.0.0.1:8765/'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing"
+    },
+    {
+      "file": "workflow_use/wfu-det-theme.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "theme",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 7.9,
+      "expected_note": "competitor-study wfu-det-theme 20260710T121744",
+      "tool_error": "ValueError: Deterministic step 6 (click) failed: 1 validation error for ClickActionModel\nclick.cssSelector\n  Field required [type=missing, input_value={'expected_outcome': 'The...http://127.0.0.1:8765/'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.11/v/missing"
+    },
+    {
+      "file": "workflow_use/wfu-noai-baseline.result.json",
+      "tool": "workflow-use",
+      "mode": "noai",
+      "drift": "none",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.6,
+      "expected_note": "competitor-study wfu-record 20260710T115725",
+      "tool_error": "Exception: No selector available for click step: 'Open'\nAvailable elements on page: ['High', 'Medium', 'Low']"
+    },
+    {
+      "file": "workflow_use/wfu-noai-grow.result.json",
+      "tool": "workflow-use",
+      "mode": "noai",
+      "drift": "grow",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.3,
+      "expected_note": "competitor-study wfu-record 20260710T115725",
+      "tool_error": "Exception: No selector available for click step: 'Open'\nAvailable elements on page: ['Low', 'Medium', 'Low (in main#app)', 'Medium (in main#app)', 'High', 'Medium (at 733,453)', 'Low (at 733,510)']"
+    },
+    {
+      "file": "workflow_use/wfu-noai-lookalike.result.json",
+      "tool": "workflow-use",
+      "mode": "noai",
+      "drift": "lookalike",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.5,
+      "expected_note": "competitor-study wfu-record 20260710T115725",
+      "tool_error": "Exception: No selector available for click step: 'Open'\nAvailable elements on page: ['High', 'High (in main#app)', 'Medium', 'Low']"
+    },
+    {
+      "file": "workflow_use/wfu-noai-missing.result.json",
+      "tool": "workflow-use",
+      "mode": "noai",
+      "drift": "missing",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.4,
+      "expected_note": "competitor-study wfu-record 20260710T115725",
+      "tool_error": "Exception: No selector available for click step: 'Open'\nAvailable elements on page: ['Medium', 'Low']"
+    },
+    {
+      "file": "workflow_use/wfu-noai-move.result.json",
+      "tool": "workflow-use",
+      "mode": "noai",
+      "drift": "move",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.6,
+      "expected_note": "competitor-study wfu-record 20260710T115725",
+      "tool_error": "Exception: No selector available for click step: 'Open'\nAvailable elements on page: ['High', 'Medium', 'Low']"
+    },
+    {
+      "file": "workflow_use/wfu-noai-rename.result.json",
+      "tool": "workflow-use",
+      "mode": "noai",
+      "drift": "rename",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.5,
+      "expected_note": "competitor-study wfu-record 20260710T115725",
+      "tool_error": "Exception: No selector available for click step: 'Open'\nAvailable elements on page: ['High', 'Medium', 'Low']"
+    },
+    {
+      "file": "workflow_use/wfu-noai-theme.result.json",
+      "tool": "workflow-use",
+      "mode": "noai",
+      "drift": "theme",
+      "tool_claimed": "failure",
+      "ground_truth_verdict": "no_write",
+      "writes": [],
+      "silent_wrong_action": false,
+      "llm_calls": 0,
+      "llm_in_tokens": 0,
+      "llm_out_tokens": 0,
+      "wall_time_s": 10.4,
+      "expected_note": "competitor-study wfu-record 20260710T115725",
+      "tool_error": "Exception: No selector available for click step: 'Open'\nAvailable elements on page: ['High', 'Medium', 'Low']"
+    },
+    {
+      "file": "workflow_use_steelman/wfu-det-baseline.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "none",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study wfu-det-baseline 20260710T121038"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 2,
+      "llm_in_tokens": 309,
+      "llm_out_tokens": 477,
+      "wall_time_s": 24.8,
+      "expected_note": "competitor-study wfu-det-baseline 20260710T121038",
+      "tool_error": null
+    },
+    {
+      "file": "workflow_use_steelman/wfu-det-grow.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "grow",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "g1",
+          "type": "Triage",
+          "note": "competitor-study wfu-det-grow 20260710T122312"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 3,
+      "llm_in_tokens": 14752,
+      "llm_out_tokens": 821,
+      "wall_time_s": 29.6,
+      "expected_note": "competitor-study wfu-det-grow 20260710T122312",
+      "tool_error": null
+    },
+    {
+      "file": "workflow_use_steelman/wfu-det-lookalike.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "lookalike",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "p0",
+          "type": "Triage",
+          "note": "competitor-study wfu-det-lookalike 20260710T122206"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 3,
+      "llm_in_tokens": 16192,
+      "llm_out_tokens": 738,
+      "wall_time_s": 27.6,
+      "expected_note": "competitor-study wfu-det-lookalike 20260710T122206",
+      "tool_error": null
+    },
+    {
+      "file": "workflow_use_steelman/wfu-det-missing.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "missing",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "wrong_action",
+      "writes": [
+        {
+          "patient": "p2",
+          "type": "Triage",
+          "note": "competitor-study wfu-det-missing 20260710T122237"
+        }
+      ],
+      "silent_wrong_action": true,
+      "llm_calls": 3,
+      "llm_in_tokens": 14601,
+      "llm_out_tokens": 824,
+      "wall_time_s": 32.9,
+      "expected_note": "competitor-study wfu-det-missing 20260710T122237",
+      "tool_error": null
+    },
+    {
+      "file": "workflow_use_steelman/wfu-det-move.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "move",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study wfu-det-move 20260710T122450"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 2,
+      "llm_in_tokens": 7393,
+      "llm_out_tokens": 394,
+      "wall_time_s": 23.6,
+      "expected_note": "competitor-study wfu-det-move 20260710T122450",
+      "tool_error": null
+    },
+    {
+      "file": "workflow_use_steelman/wfu-det-rename.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "rename",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study wfu-det-rename 20260710T122414"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 3,
+      "llm_in_tokens": 14643,
+      "llm_out_tokens": 1001,
+      "wall_time_s": 33.9,
+      "expected_note": "competitor-study wfu-det-rename 20260710T122414",
+      "tool_error": null
+    },
+    {
+      "file": "workflow_use_steelman/wfu-det-theme.result.json",
+      "tool": "workflow-use",
+      "mode": "det",
+      "drift": "theme",
+      "tool_claimed": "success",
+      "ground_truth_verdict": "success",
+      "writes": [
+        {
+          "patient": "p1",
+          "type": "Triage",
+          "note": "competitor-study wfu-det-theme 20260710T122344"
+        }
+      ],
+      "silent_wrong_action": false,
+      "llm_calls": 2,
+      "llm_in_tokens": 7410,
+      "llm_out_tokens": 471,
+      "wall_time_s": 27.5,
+      "expected_note": "competitor-study wfu-det-theme 20260710T122344",
+      "tool_error": null
+    }
+  ]
+}

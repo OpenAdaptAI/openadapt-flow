@@ -65,22 +65,32 @@ BEACON_SNIPPET = """<script>
   function snap(final) {
     var st = window.state || {};
     var banner = document.getElementById('saved-banner');
-    var payload = {
-      ts: Date.now(),
+    // Dedup key EXCLUDES the timestamp: a POST fires only when observable app
+    // state actually changes (hash, banner, encounters), not on every poll
+    // tick. This keeps the network genuinely idle between state changes, so a
+    // tool's networkidle wait is not defeated by the beacon. The timestamp is
+    // still recorded in the posted payload for ordering, just not in the key.
+    var key = JSON.stringify({
       hash: location.hash,
       banner: banner ? banner.textContent : null,
       encounters: st.encounters || {},
-      state_banner: st.banner || null,
-      final: !!final
-    };
-    var s = JSON.stringify(payload);
-    if (s !== last || final) {
-      last = s;
+      state_banner: st.banner || null
+    });
+    if (key !== last || final) {
+      last = key;
+      var payload = JSON.stringify({
+        ts: Date.now(),
+        hash: location.hash,
+        banner: banner ? banner.textContent : null,
+        encounters: st.encounters || {},
+        state_banner: st.banner || null,
+        final: !!final
+      });
       try {
-        fetch('/__state', {method: 'POST', body: s, keepalive: true})
+        fetch('/__state', {method: 'POST', body: payload, keepalive: true})
           .catch(function () {});
       } catch (e) {
-        try { navigator.sendBeacon('/__state', s); } catch (e2) {}
+        try { navigator.sendBeacon('/__state', payload); } catch (e2) {}
       }
     }
   }

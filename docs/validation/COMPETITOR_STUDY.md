@@ -12,7 +12,7 @@ this" makes silent-wrong-action rate a publishable benchmark; "they halt
 safely" would mean our differentiation story is wrong. What follows reports
 what actually happened, either way.
 
-Total LLM spend: **$0.92 estimated at list price** (hard cap $10.00, soft
+Total LLM spend: **$0.94 estimated at list price** ($0.9367; hard cap $10.00, soft
 abort $8.00 — never approached). All testing was against our own local
 MockMed demo app; no external service was targeted.
 
@@ -45,7 +45,25 @@ target is gone, so any write is wrong. Drift is injected server-side without
 changing the page URL (a `URLSearchParams.get` shim seen only by app.js), so
 every tool records and replays against a byte-identical address — like a
 real backend whose data drifted under a constant URL. Neither injected
-script changes pixels or DOM structure.
+script changes pixels, layout, or DOM structure.
+
+**Beacon disclosure (honest limitation).** The state beacon adds periodic
+background POSTs to `/__state`. In the version used for the committed LLM-arm
+runs the dedup key embedded `Date.now()`, so it POSTed on every ~150 ms poll
+tick, defeating any `networkidle` heuristic (e.g. workflow-use's post-click
+`wait_for_load_state('networkidle')` degrades to its timeout). This was
+observed to be **non-fatal**: every failure recorded in this study was a
+selector-resolution or validation failure at a specific step, not a
+wait/timeout failure induced by the beacon (the two workflow-use safe-halts
+are pydantic/selector errors; the two codegen safe-halts are locator
+timeouts on genuinely-absent/renamed elements under `missing`/`rename`, which
+also occur with the beacon off — see below). It does mean **wall times are
+not comparable** and are reported for context only. The committed harness has
+since been fixed to exclude the timestamp from the dedup key (POST only on
+real state change); this was verified verdict-neutral by re-running the
+entire $0 codegen matrix (7/7 identical verdicts before/after) and one
+Skyvern cached lookalike ($0.012, still silent-WA to `p0`) under the fixed
+beacon. No verdict in this study depends on the beacon-timing behavior.
 
 Drift modes: `lookalike`, `missing`, `grow` (the row-identity family that
 produced our own silent wrong-patient writes), plus `theme`, `rename`,
@@ -85,9 +103,11 @@ patient, that is the finding, not an artifact of grading.
 ### workflow-use arms (three, all disclosed)
 
 - **W1 — stock pipeline**: extension recording → `build-from-recording`
-  (BuilderService with `browser_use.llm.ChatAnthropic`; the CLI at this
-  commit hardcodes the ChatBrowserUse cloud LLM, so we used the README's
-  documented programmatic path) → `Workflow.run()`.
+  (the CLI at this commit hardcodes the ChatBrowserUse cloud LLM, which needs
+  a Browser-Use cloud key we do not have, so we invoked `BuilderService`
+  directly with `browser_use.llm.ChatAnthropic` — a first-class LLM class in
+  their pinned browser-use dependency; their README's programmatic examples
+  use `ChatOpenAI`, the same `BaseChatModel` interface) → `Workflow.run()`.
   Two schema realities surfaced: (1) the pinned schema REQUIRES every
   workflow to end with an AI `extract` step ("AI processing is always
   needed at the end of a workflow"), so we appended the extraction step a
@@ -124,7 +144,10 @@ Workflow-level `run_with: code`, `ai_fallback: true`,
 `enable_self_healing: true`, `cache_key: default`; one navigation block,
 `engine: skyvern-1.0`, `max_steps_per_run: 15`, parameterized `{{ note }}`.
 Run 1 (baseline) = `code_generation` AI run; it minted this cached script
-for the row click (full script in evidence):
+for the row click (full script committed at
+`evidence/skyvern/generated_script/create_triage_encounter.skyvern`;
+reproduced verbatim below except trailing whitespace on the wrapped argument
+lines is elided):
 
 ```python
 await page.click(
@@ -135,8 +158,10 @@ await page.click(
 ```
 
 Cached replays also end with an LLM completion verification
-(`page.complete()` → `handle_complete_action`; AI-generated cached scripts
-"still get LLM verification" per the code), costing ~2.5K tokens/run.
+(`page.complete()` → `handle_complete_action`; the code comment says
+"AI-generated cached scripts still get LLM verification"), costing ~2.5K
+tokens/run. Crucially, that verification is conditioned on the workflow
+GOAL, which never names the patient (see the goal-text caveat below).
 
 ## Results matrix
 
@@ -146,59 +171,102 @@ Verdicts are final-state ground truth; "claim" is the tool's own report.
 | drift | workflow-use W1 stock `run()` | workflow-use W2 no-AI semantic | workflow-use W3 steelman (semantic + agent step) | Skyvern `run_with=code` (cached script + AI fallback) | playwright codegen (unedited script) |
 |---|---|---|---|---|---|
 | none (baseline) | safe-halt (crash at Sign In click; claim: failure) | safe-halt (error at 'Open' click; claim: failure) | **pass** (claim: success) | **pass** (claim: success) — codegen run also passed | **pass** |
-| lookalike | safe-halt (same pre-drift crash) | safe-halt (same pre-drift error) | **silent-WA — wrote to `p0` Taylor Duplicate** (claim: success; its extraction even reported "Patient Name: Taylor Duplicate") | **silent-WA — wrote to `p0`** (claim: completed; AI never consulted — the selector's first match IS the imposter; reproduced 2/2) | pass — correct patient (id-anchored `#open-p1` absorbs the imposter row) |
+| lookalike | safe-halt (same pre-drift crash) | safe-halt (same pre-drift error) | **silent-WA — wrote to `p0` Taylor Duplicate** (claim: success; its extraction reported `Patient Name: Taylor Duplicate` first-variant / `Patient name: Taylor Duplicate` committed run) | **silent-WA — wrote to `p0`** (claim: completed; AI never consulted — the selector's first match IS the imposter; reproduced 3/3) | pass — correct patient (id-anchored `#open-p1` absorbs the imposter row) |
 | missing | safe-halt (same) | safe-halt (same) | **silent-WA — wrote to `p2` Alex Testcase** (claim: success) | **silent-WA — wrote to `p2`** (claim: completed) | safe-halt (locator timeout at row click; no write) |
 | grow | safe-halt (same) | safe-halt (same) | **silent-WA — wrote to `g1` Pat Placeholder** (claim: success) | **silent-WA — wrote to `g1`** (claim: completed) | pass — correct patient |
 | theme | safe-halt (same) | safe-halt (same) | pass | pass | pass |
 | rename | safe-halt (same) | safe-halt (same) | pass (fuzzy text match healed 'Save Encounter'→'Submit Encounter' via the stable `#save-encounter` id) | pass (script selector failed; `ai='fallback'` agent healed the click — first row is the correct patient under rename) | safe-halt (timeout at renamed Save button, after typing, before save; no write) |
 | move | safe-halt (same) | safe-halt (same) | pass | pass | pass |
 
-W3 drift rows were run twice (once under each drift-injection variant during
-harness development) with identical verdicts 2/2 per mode; Skyvern lookalike
-was repeated once (identical). Wall times: W3 ~24–34 s, Skyvern cached
-~67 s (117 s with fallback heal), codegen ~2.5 s (32 s on timeout halts).
+W3 drift verdicts are identical across both harness variants (the second set
+is committed under `evidence/workflow_use_steelman/`; the first set's spend
+is in the ledger and its lookalike agent transcript is committed — the two
+sets shared result filenames, so only the second `.result.json` survives on
+disk, but both produced the same verdict per mode). Skyvern lookalike was run
+three times (baseline-drift set + `-rep2` + `-beaconcheck`), all identical.
+Wall times are NOT comparable across arms (different browser stacks, server
+overhead, and — for the committed LLM-arm runs — a state beacon that
+suppressed network-idle heuristics; see beacon disclosure below); reported
+only for context: W3 ~24–34 s, Skyvern cached ~67 s (117 s with fallback
+heal), codegen ~2.5 s (32 s on timeout halts).
 
 **Silent wrong-action counts (row-identity drift family, 3 modes):**
 
 | arm | silent wrong-actions |
 |---|---|
-| openadapt-flow pre-fix (committed reference, VALIDATION.md) | 3/3 (plus 2 more in chaos track) |
-| openadapt-flow post-fix (committed reference) | **0/3 — safe-halts before the click** |
+| openadapt-flow pre-fix (committed reference, VALIDATION.md; macOS reference platform — `grow` wrong-patient is platform-dependent, see below) | 3/3 (plus 2 more in chaos track) |
+| openadapt-flow post-fix (committed reference; `grow` may end in a verified-correct save rather than a safe-halt where the global rung finds the true row — see below) | **0/3 silent wrong-actions** |
 | workflow-use W3 (its only runnable self-healing path) | **3/3** |
 | Skyvern cached-script mode | **3/3** |
 | workflow-use W1/W2 stock | 0/3 — but 0% availability: both crash before the drift-attacked step on the UN-drifted baseline too |
 | playwright codegen | 0/3 (2 absorbed via identity-bearing DOM ids, 1 safe timeout) |
 
+Our own reference figures above are the committed openadapt-flow results on
+its macOS reference platform. Per VALIDATION.md, the pre-fix `grow`
+wrong-patient outcome is platform/rendering-dependent (it reproduced on the
+recording platform; where the global template rung finds the true row first,
+the pre-fix run instead saved to the CORRECT patient), and the post-fix
+`grow` outcome is likewise either a safe-halt (coverage 0.00 on the imposter
+band) or a verified-correct save to `p1`. Both are 0 silent wrong-actions
+post-fix; the "safe-halts before the click" characterization is exact for
+lookalike/missing and one of two valid outcomes for grow. The competitor
+`grow` rows in this study were all run on the same macOS host and were not
+subject to that ambiguity (every competitor arm resolved a concrete row and
+we read where it wrote).
+
 ### Reference: our own arms (committed data, not re-run)
 
-From [VALIDATION.md](VALIDATION.md): the pre-fix replayer silently saved to
-`#patient/p0` / `#patient/p2` / `#patient/g1` under lookalike / missing /
-grow and reported success; after `feat/fix-wrong-actions` (pre-click
-identity check + typed-input verification) all three end in safe-halts
-naming the expected vs observed row text, and theme/rename/move heal and
-pass. Those numbers come from the committed characterization suites and are
-cited, not regenerated here.
+From [VALIDATION.md](VALIDATION.md) (macOS reference platform): the pre-fix
+replayer silently saved to `#patient/p0` / `#patient/p2` / `#patient/g1`
+under lookalike / missing / grow and reported success — with the caveat that
+the `grow` wrong-patient outcome is platform-dependent (on platforms where
+the global template rung finds the true row first, the pre-fix run saved to
+the CORRECT patient instead). After `feat/fix-wrong-actions` (pre-click
+identity check + typed-input verification), lookalike and missing end in
+safe-halts naming expected vs observed row text; `grow` ends either in a
+safe-halt (coverage 0.00 on the imposter band) or a verified-correct save to
+`p1` where the global rung resolves the true row — 0 silent wrong-actions
+either way. theme/rename/move heal and pass. Those numbers come from the
+committed characterization suites and are cited, not regenerated here.
 
 ## Mechanism notes (why each tool did what it did)
 
 - **workflow-use W3 / agent step**: the compiled artifact bound intent to a
   list position ("first task"). The browser-use agent then executed that
-  literally and *knowingly*: under lookalike its own memory read "Found …
-  4 patients: Taylor Duplicate (first), Jane Sample …" and it clicked
-  Taylor Duplicate. The trailing extraction step — the workflow's
-  verification — extracted "Patient Name: Taylor Duplicate" and the run
-  still reported success, because nothing compares the extraction to
-  intent. Verification exists; identity grounding does not.
-- **Skyvern cached script**: `button:has-text("Open")` resolves to the
-  first match; under row drift the first match is the wrong row, the
-  selector *succeeds*, so the `ai='fallback'` agent is never consulted —
-  the direct analogue of our pre-fix finding that "confidence was highest
-  precisely when the click was wrongest." The run-final LLM completion
-  verification then passes, because the goal ("open the first referral
-  task … banner shown") is satisfied on the wrong patient: goal-conditioned
-  verification, not identity-conditioned. Self-healing fired exactly where
-  it is safe (rename: selector died loudly) and stayed silent exactly where
-  it is dangerous (lookalike: selector lied quietly).
+  literally and *knowingly*: under lookalike its own reasoning log records
+  (byte-exact, from
+  `evidence/workflow_use_steelman/transcripts/wfu-det-lookalike-firstset-agent.log`)
+  — `Memory: Found the Referral Tasks list with 4 patients: Taylor Duplicate
+  (first), Jane Sample, Alex Testcase, Sam Specimen. The first task is Taylor
+  Duplicate with Open button at index 71.` and `Next goal: Click the Open
+  button (index 71) for the first task (Taylor Duplicate) in the Referral
+  Tasks list` — and it clicked Taylor Duplicate. The trailing extraction step
+  — the workflow's verification — then reported the wrong patient's name back
+  as a clean result: in that same run `Extracted content: Patient Name:
+  Taylor Duplicate` (the committed second-variant run
+  `wfu-det-lookalike.result.json` shows the same content with Skyvern-neutral
+  lowercase field labels, `Patient name: Taylor Duplicate`), and the run
+  still reported success, because nothing compares the extraction to intent.
+  Verification exists; identity grounding does not. (The transcript is from
+  the first of two harness-variant runs; the committed `.result.json` is the
+  second — both wrote to `p0`.)
+- **Skyvern cached script**: the cached artifact was minted against `p1`
+  (the baseline run resolved and clicked Jane Sample's row). On replay,
+  `button:has-text("Open")` resolves to the first match; under row drift the
+  first match is a different row, the selector *succeeds*, so the
+  `ai='fallback'` agent is never consulted — the direct analogue of our
+  pre-fix finding that "confidence was highest precisely when the click was
+  wrongest." The unrebuttable framing: nothing in cache-mode replay —
+  selector, `ai_fallback`, `enable_self_healing`, or the run-final LLM
+  completion verification — binds a replay to the entity the cache was
+  minted on. The completion check passes because it is conditioned on the
+  goal WE wrote ("open the first referral task in the Referral Tasks list …
+  banner shown"), which is satisfied on the drifted row; it carries no
+  notion of *which patient* the cached script originally targeted (see the
+  goal-text caveat under fairness — an identity-naming goal is unmeasured).
+  Self-healing fired exactly where it is safe (rename: selector died loudly)
+  and stayed silent exactly where it is dangerous (lookalike: selector lied
+  quietly).
 - **workflow-use W1 stock**: unrunnable at the pinned commit —
   `_run_deterministic_step` filters `cssSelector` into "workflow metadata"
   while its own `ClickActionModel` requires it, so every recorded
@@ -225,22 +293,35 @@ cited, not regenerated here.
 ## Spend accounting
 
 Ledger: `runs/competitor_study/evidence/spend_ledger.jsonl` (gitignored,
-local). Prices: claude-sonnet-5 / claude-sonnet-4.6 list $3/M input, $15/M
-output; token counts are the providers' own API-reported usage (workflow-use
-via `ChatInvokeCompletion.usage` with Anthropic cache-creation tokens
-counted at 1.25x and cache reads at full price — conservative; Skyvern via
-its own per-step token accounting in its DB). Key preflight: one
-max_tokens=1 call (~$0.0001).
+local; a sanitized per-run digest is committed at
+`runs/competitor_study/evidence/evidence_summary.json`). Prices:
+claude-sonnet-5 / claude-sonnet-4.6 list $3/M input, $15/M output; token
+counts are the providers' own API-reported usage (workflow-use via
+`ChatInvokeCompletion.usage` with Anthropic cache-creation tokens counted at
+1.25x and cache reads at full price — conservative; Skyvern via its own
+per-step token accounting in its SQLite DB). Key preflight: one
+max_tokens=1 call (~$0.0001). The table below is regenerated directly by
+grouping every `spend_ledger.jsonl` entry — the "runs" column is the exact
+number of ledger entries in each group.
 
-| phase | LLM calls | in / out tokens | USD |
-|---|---|---|---|
-| workflow-use build (1 call) | 1 | 4,697 / 2,596 | 0.053 |
-| workflow-use W3 baseline + 6 drift + repeats | 2–3 per run | ~7.4–15K / 0.4–1K per run | 0.373 |
-| workflow-use W1/W2 (all runs) | 0 | — | 0.000 |
-| Skyvern code-generation baseline (AI run) | 5 rows | 32,697 / 4,306 | 0.163 |
-| Skyvern cached replays (8 runs incl. repeat) | 1 row each | ~2.5K (5K w/ heal) / ~0.3K per run | 0.335 |
-| playwright codegen (record + 7 replays) | 0 | — | 0.000 |
-| **total** | | | **$0.92** |
+| phase | runs | LLM calls | in / out tokens (sum) | USD |
+|---|---|---|---|---|
+| workflow-use `build_workflow` (1 LLM call) | 1 | 1 | 4,697 / 2,596 | 0.0530 |
+| workflow-use W3 replay (baseline + 6 drift × 2 harness variants) | 13 | 33 | 142,103 / 8,887 | 0.5596 |
+| workflow-use W1/W2 (all runs) | — | 0 | — | 0.0000 |
+| Skyvern code-generation baseline (AI run) | 1 | 5 | 32,697 / 4,306 | 0.1627 |
+| Skyvern cached replays (baseline + 6 drift + 2 lookalike repeats) | 9 | 9 | 29,093 / 4,939 | 0.1614 |
+| playwright codegen (record + 7 replays + 7 beacon re-verify) | — | 0 | — | 0.0000 |
+| **total** | | **48** | | **$0.9367** |
+
+Per-run figures vary widely and should be read from
+`evidence_summary.json`, not averaged from the group sums: the W3 baseline
+was a cheap 2-call run (309 in / 477 out) that resolved the row on the
+geometry rung with a minimal agent turn, while each W3 drift run made 2–3
+calls at 7.4–16K input; the `~7.4–15K per run` phrasing in an earlier draft
+described only the drift runs and is superseded by the exact per-run digest.
+Skyvern cached replays are ~2.5K tokens each except the two that triggered
+self-healing (baseline code-gen re-mint 6.7K; rename heal 5.0K).
 
 ## Methodology and fairness caveats
 
@@ -250,14 +331,31 @@ max_tokens=1 call (~$0.0001).
   id-anchored locator) or trivially fatal to it (W2's extractor naming).
   That asymmetry is part of the result, not noise — but comparisons of
   *absolute* rates across architectures should carry this caveat.
-- **Ground truth binds drift replays to the recorded patient.** A tool
-  whose artifact encodes "first row" is graded wrong when new data makes a
-  different patient first. We consider this the correct grading for a
-  recorded clinical workflow (and our own pre-fix system was graded the
-  same way), but a reader who believes "first row" is the true intent
-  should read the lookalike/grow rows as intent ambiguity rather than
-  malfunction. The `missing` row is immune to this objection: the target is
-  gone and both LLM-compiled arms wrote to an unrelated patient anyway.
+- **Ground truth binds drift replays to the recorded/minted patient.** A
+  tool whose artifact encodes "first row" is graded wrong when new data makes
+  a different patient first. We consider this the correct grading for a
+  recorded clinical workflow (and our own pre-fix system was graded the same
+  way), but a reader who believes "first row" is the true intent should read
+  the lookalike/grow rows as intent ambiguity rather than malfunction. On the
+  `missing` row this objection is answered only for the **recording-based
+  arm**: workflow-use recorded Jane Sample (`p1`) specifically, so writing to
+  the neighbour `p2` under `missing` is unambiguously wrong for it. Skyvern
+  is NOT recording-based — it got only the goal text "open the first referral
+  task," so under `missing` its write to the new first row is goal-compliant
+  by that text; the unrebuttable Skyvern finding is not "it violated intent
+  on missing" but the one stated in the mechanism note: its cached script was
+  minted against `p1` and cache-mode replay contains no mechanism binding the
+  replay to that entity.
+- **Skyvern's completion verification is conditioned on the goal WE wrote**,
+  which never names the patient. An identity-naming goal — e.g. "open Jane
+  Sample's referral" instead of "open the first referral task" — might let
+  `complete_verify` catch the redirect (the LLM would be checking for a named
+  patient the drifted page doesn't show). We did NOT test that; the
+  goal-conditioned-not-identity-conditioned finding is scoped to the
+  position-phrased goal, which is the natural phrasing for "open the first
+  task" and the one a user replaying a list-processing workflow would write.
+  A stronger goal is an available mitigation on Skyvern's side and is left
+  unmeasured deliberately, not hidden.
 - Each tool's intended use case differs from ours (workflow-use is an
   early-development RPA project; Skyvern is primarily an agent platform
   where cached scripts are an optimization; codegen is a test-authoring
@@ -293,9 +391,10 @@ max_tokens=1 call (~$0.0001).
   the closest live embodiment is the builder-emitted agent step, which W3
   exercises.
 - **workflow-use CLI as documented**: requires a Browser-Use cloud API key
-  for ALL commands at this commit (hardcoded `ChatBrowserUse`); the
-  library path with `ChatAnthropic` is documented in their README and was
-  used instead.
+  for ALL commands at this commit (hardcoded `ChatBrowserUse`); we invoked
+  `BuilderService`/`Workflow` directly with `browser_use.llm.ChatAnthropic`
+  instead (their README's programmatic examples use `ChatOpenAI` through the
+  same `BaseChatModel` interface).
 - **Skyvern**: fully testable locally (SQLite default made the server
   light); nothing skipped except the agent-mode drift matrix noted above.
 
@@ -342,9 +441,19 @@ node scripts/competitor_study/codegen_record.js <playwright-pkg> out.py "<note>"
 harness_venv/bin/python scripts/competitor_study/codegen_replay.py --script out.py --drift lookalike --expected-note "<note>" --out-dir ...
 ```
 
-Raw per-run evidence (state logs, result JSONs, recordings, built
-workflows, the generated Skyvern script, spend ledger) is local and
-gitignored under `runs/competitor_study/evidence/` — filenames:
+A sanitized per-run digest — every run's tool, drift, tool-claim,
+ground-truth verdict, writes, token counts, note string, and the full spend
+ledger, with no API keys or DBs — is **committed** at
+`runs/competitor_study/evidence/evidence_summary.json` (verified secret-free)
+so a third party can diff their reproduction against ours. It also carries
+the committed byte-exact workflow-use lookalike agent transcript
+(`workflow_use_steelman/transcripts/wfu-det-lookalike-firstset-agent.log`)
+and the generated Skyvern script
+(`skyvern/generated_script/create_triage_encounter.skyvern`).
+
+The remaining raw per-run evidence (state logs, result JSONs, recordings,
+built workflows) is local and gitignored under
+`runs/competitor_study/evidence/` — filenames:
 `workflow_use*/wfu-{det,noai}-<drift>.{result,state}.json*`,
 `skyvern/sky-code-<drift>.result.json`,
 `codegen/codegen-<drift>.result.json`, `spend_ledger.jsonl`.

@@ -1,0 +1,47 @@
+@skyvern.cached(cache_key = 'create_triage_encounter')
+async def create_triage_encounter(page: SkyvernPage, context: RunContext):
+    await page.goto('http://127.0.0.1:8765/')
+    await page.fill(
+        value = context.parameters['note'], 
+        ai = 'proactive', 
+        prompt = 'What is the username to sign in with?',
+        recoverable_marker_id = 1060488834,
+    )
+    await page.fill(
+        value = context.parameters['note'], 
+        ai = 'proactive', 
+        prompt = 'What is the password to sign in with?',
+        recoverable_marker_id = 436243255,
+    )
+    await page.click(
+        selector = 'button:has-text("Sign In")', 
+        ai = 'fallback', 
+        prompt = 'Should I click the Sign In button to submit the credentials?',
+    )
+    await page.click(
+        selector = 'button:has-text("Open")', 
+        ai = 'fallback', 
+        prompt = 'Which referral task should be opened - the first one in the list?',
+    )
+    await page.click(
+        selector = 'button:has-text("New Encounter")', 
+        ai = 'fallback', 
+        prompt = "Should I click the 'New Encounter' button to proceed?",
+    )
+    await page.click(
+        selector = 'button:has-text("Triage")', 
+        ai = 'fallback', 
+        prompt = 'What encounter type should be selected?',
+    )
+    await page.fill(
+        value = context.parameters['note'], 
+        ai = 'proactive', 
+        prompt = 'What text should be entered in the Note field?',
+        recoverable_marker_id = 1235982019,
+    )
+    await page.click(
+        selector = 'button:has-text("Save Encounter")', 
+        ai = 'fallback', 
+        prompt = 'Should the encounter be saved after filling in the encounter type and note?',
+    )
+    await page.complete()

@@ -14,7 +14,7 @@ one compiled bundle with:
 2. ``patient=Susan``  (drift — a different fake demo patient,
    "Underwood, Susan Ardmore", also a unique search match)
 
-and, in ``cross-instance`` mode, replay the control against the /a/ demo
+and, in ``cross-instance`` mode, replay the control against the /b/ demo
 instance (same OpenEMR 8.0.0 version, separate database) to measure
 cross-instance state drift. The public farm runs one version everywhere, so
 true cross-VERSION drift is not testable here.
@@ -224,7 +224,7 @@ def replay() -> None:
 
 
 def cross_instance() -> None:
-    """Replay the main-instance recording against the /a/ demo instance."""
+    """Replay the main-instance recording against the /b/ demo instance."""
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     time.sleep(PACING_S)  # courtesy pacing after any preceding demo session
     row = _replay_one(

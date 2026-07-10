@@ -197,6 +197,85 @@ class TestOcr:
         assert strict is None
 
 
+class TestTextPresent:
+    """Segmentation-tolerant presence check (postcondition criterion).
+
+    Regression for the TestMoveDrift CI flake: MockMed's save banner is
+    'Encounter saved — <note>', and the compiled TEXT_PRESENT asserts the
+    stable prefix. rapidocr sometimes returns the banner as ONE box (prefix
+    merged with the note) and sometimes as two; whole-line find_text falls
+    below min_ratio in the merged case, so the postcondition false-failed
+    on a correct screen. text_present must pass regardless of segmentation
+    while a genuinely missing target (modal-drift screen, which shares the
+    words 'Encounter' and 'Save') still fails.
+    """
+
+    def banner_screen(self, banner: str) -> bytes:
+        img = blank()
+        cv2.putText(
+            img,
+            banner,
+            (40, 160),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        return to_png(img)
+
+    def test_target_merged_into_longer_line_passes(self) -> None:
+        from openadapt_flow.vision import text_present
+
+        # One long rendered line: whole-line similarity to the short
+        # target is ~0.46, but the target is plainly contained.
+        screen = self.banner_screen(
+            "Encounter saved - E2E triage booking three months"
+        )
+        merged = any(
+            "saved" in line.text.lower() and "months" in line.text.lower()
+            for line in ocr(screen)
+        )
+        if merged:  # segmentation is the engine's choice; pin the bug
+            assert find_text(screen, "Encounter saved-") is None
+        assert text_present(screen, "Encounter saved-")
+
+    def test_target_alone_on_line_passes(self) -> None:
+        from openadapt_flow.vision import text_present
+
+        screen = self.banner_screen("Encounter saved -")
+        assert text_present(screen, "Encounter saved-")
+
+    def test_shared_words_do_not_fake_presence(self) -> None:
+        from openadapt_flow.vision import text_present
+
+        # The modal-drift screen: 'Encounter'/'Save Encounter' visible,
+        # but 'Encounter saved' never happened — must stay absent (this
+        # is what makes the modal scenario fail honestly).
+        img = blank()
+        cv2.putText(
+            img, "New Encounter", (40, 90),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA,
+        )
+        cv2.putText(
+            img, "Encounter Type", (40, 150),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+        )
+        draw_button(img, 700, 380, 220, 48, "Save Encounter")
+        cv2.putText(
+            img, "Survey: how did we do?", (400, 300),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+        )
+        screen = to_png(img)
+        assert not text_present(screen, "Encounter saved-")
+
+    def test_blank_and_empty_target(self) -> None:
+        from openadapt_flow.vision import text_present
+
+        assert not text_present(to_png(blank()), "Encounter saved-")
+        assert not text_present(self.banner_screen("anything"), "   ")
+
+
 # -- hashing ------------------------------------------------------------------
 
 

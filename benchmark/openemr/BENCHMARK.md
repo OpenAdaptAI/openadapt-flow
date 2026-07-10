@@ -21,7 +21,7 @@ BOTH arms), save.
 | latency p95 | 41.0 s | 82.6 s |
 | model cost / run | $0 | $0.5522 |
 | total model cost | $0 | $5.52 |
-| tokens (in/out, total) | 0 / 0 | 496 / 27,272 |
+| tokens (uncached in / out, total) | 0 / 0 | 496 / 27,272 |
 | cache tokens (write/read, total) | 0 / 0 | 1,317,803 / 563,928 |
 
 Failed runs, reported honestly:
@@ -97,8 +97,12 @@ below.
   $1.50 (list price; the loop stops with `stopped="cost_cap"`
   and the run is recorded as-is), and the whole agent arm is capped at
   $8.00 — if the next run could exceed the ceiling, the arm
-  stops and the truncation is disclosed above. A preflight API call runs
-  before any spend; two consecutive auth/billing failures abort the arm.
+  stops and the truncation is disclosed above. Both checks run after each
+  API call rather than before it, so each bound allows an overshoot of at
+  most one API call's marginal cost. Runs that crash mid-way keep their
+  partial spend on their recorded rows, counted against the ceiling. A
+  preflight API call runs before any spend; two consecutive auth/billing
+  failures abort the arm.
 
 ## Caveats — read before quoting these numbers
 

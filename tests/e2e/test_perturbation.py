@@ -240,6 +240,10 @@ class TestSlowApp:
     def test_4s_render_delay_recovers(
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
+        # Timing margin is thin by design: the 4s delay must fit inside
+        # the ~5.5s postcondition window (pc timeout + one re-settle), so
+        # a slow CI machine adds real risk of a false halt here. If this
+        # test flakes, suspect machine load before suspecting the product.
         report, state = replay_on_page(
             _browser, bundle.dir, drift_url(mockmed_url, "slow"), run_dir,
             params=dict(PARAMS),

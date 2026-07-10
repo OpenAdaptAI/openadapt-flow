@@ -88,7 +88,10 @@ honestly under "Failure modes ranked by severity".
 ## Headline numbers
 
 Initial audit — **wrong-actions: 6**, of which **5 were silent** (wrong
-state written AND the run reported success). After the fix — **0**:
+state written AND the run reported success; 4 of the 5 silent modes
+reproduced on every platform, while the `drift=grow` wrong-patient
+outcome was observed on the recording platform and is
+platform/rendering-dependent — see row 3). After the fix — **0**:
 
 | # | case | before (audit) | after (fix) |
 |---|---|---|---|
@@ -209,7 +212,7 @@ when the PATIENT — a value that changes screen content — is a parameter?
 |---|---|---|
 | `patient=Phil` (control) | pass | 18/18, 39.1s, 0 model calls, note verified on final screen |
 | `patient=Susan` | safe-halt (false abort) | typed "Susan", results showed only "Underwood, Susan Ardmore"; the row click fell to the **geometry rung** (landmarks = column headers) and clicked the demonstrated **position** — which was Susan, the right patient. The chart opened, then the run aborted: step_008 asserts `No treatment intervention preferences recorded.`, a **Phil-dashboard state** baked in as an invariant. Evidence: `runs/validation/track-d/runs/run-susan-drift/` |
-| cross-instance `/a/` | environment | `/a/` rejected its own published admin credentials that day (verified with DOM selectors — not a replay artifact). The replay executed the login correctly and safe-halted with an accurate report |
+| cross-instance `/a/` | environment | `/a/` rejected its own published admin credentials that day (verified with DOM selectors — not a replay artifact). The replay executed the login correctly and safe-halted with an accurate report. Note: this probe was ad hoc — the committed script's `cross-instance` mode targets `/b/` only, so the `/a/` observation is not reproducible from the committed code |
 | cross-instance `/b/` | safe-halt (false abort) | login **succeeded**, but the run halted at the login step's postconditions: `/b/` runs a different module set (no "Inventory" menu entry) and different calendar content, and both the menu-text assertion and the calendar REGION_STABLE were recorded on the main instance. Same version, different instance state → no transfer. Evidence: `runs/validation/track-d/runs/run-cross-instance-b/steps/step_004_after.png` |
 
 Cross-VERSION drift was not testable: all public demo instances run

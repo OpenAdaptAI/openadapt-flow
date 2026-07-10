@@ -70,34 +70,42 @@ Every CI run records a demonstration, compiles it, and checks:
 Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) ·
 [theme-drift run report](docs/showcase/theme-drift-run/REPORT.md).
 
-The same loop has also run against a real third-party app: the official
-OpenEMR public demo (fake patients only, resets daily). An 18-step clinical
-workflow — log in, find a patient, scroll a dense dashboard, add a
-parameterized note — replayed **5/5 in fresh browsers with zero model
-calls**, scrolling closed-loop (each SCROLL step scrolls until the next
-anchor actually resolves, so content growth between runs can't displace the
-targets below it). Full runs, failure analysis, and honest caveats:
-[docs/showcase-openemr/FINDINGS.md](docs/showcase-openemr/FINDINGS.md).
-
 Compiled workflows can also be emitted as Agent Skills or MCP servers
 (`emit-skill` / `emit-mcp`), so other agents can invoke them.
 
 ## Benchmark
 
-![Latency and cost: compiled replay vs computer-use agent](benchmark/latency_cost.png)
+![OpenEMR: compiled replay vs computer-use agent, latency and cost](benchmark/openemr/latency_cost.png)
 
-We ran the same MockMed task both ways on 2026-07-08 with the same OCR
-success check: 100 compiled replays against 20 runs of a claude-sonnet-5
-computer-use agent. Both arms went 100 for 100 and 20 for 20, so on an app
-this simple the story isn't success rate. It's that a compiled replay
-finishes in 4.9s (p50; 5.1s p95) with zero model calls, while the agent
-takes 37.5s (p50; 43.4s p95) at about $0.27 per run at list price, every
-run, forever. Full numbers, methodology, and caveats:
+The lead result is on a real third-party app: the official OpenEMR public
+demo (fake patients only, resets daily). We ran an 18-step add-patient-note
+workflow both ways — log in, find a patient, scroll a dense dashboard, add
+a note — with a distinct note value each run and the same OCR success
+check on both arms: 20 compiled replays against 10 runs of a
+claude-sonnet-5 computer-use agent. Compiled went 20/20 at 39.2s (p50)
+with zero model calls; the agent went 10/10 at 70.4s (p50), about $0.55
+per run at list price ($5.52 total for the 10 runs, with prompt caching
+and hard cost caps enforced in the harness). It's a shared public demo
+that other users mutate and that resets daily — not CI-reproducible, and
+the sample is small. Correctness alone (no agent arm, 5/5 fresh browsers,
+zero model calls, closed-loop scrolling) is in
+[docs/showcase-openemr/FINDINGS.md](docs/showcase-openemr/FINDINGS.md).
+Full numbers, methodology, and caveats:
+[benchmark/openemr/BENCHMARK.md](benchmark/openemr/BENCHMARK.md).
+
+For a controlled, CI-reproducible comparison — the methodology anchor — we
+ran the bundled MockMed task both ways on 2026-07-08 with the same OCR
+success check: 100 compiled replays against 20 runs of the same agent.
+Both arms went 100 for 100 and 20 for 20, so on an app this simple the
+story isn't success rate. It's that a compiled replay finishes in 4.9s
+(p50; 5.1s p95) with zero model calls, while the agent takes 37.5s (p50;
+43.4s p95) at about $0.27 per run at list price, every run, forever. Full
+numbers, methodology, and caveats:
 [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md).
 
 ## Status
 
-v0: 163 tests, drift matrix in CI. Solid for the reference browser backend.
+v0: 204 tests, drift matrix in CI. Solid for the reference browser backend.
 `DESIGN.md` has the module contracts; `docs/L1_INTEGRATION.md` covers feeding
 layered clinical-data platforms.
 

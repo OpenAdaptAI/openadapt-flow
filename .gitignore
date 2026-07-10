@@ -9,3 +9,5 @@ build/
 /runs/
 /recordings/
 dist/
+benchmark/openemr/finals/
+benchmark/openemr/rows.jsonl

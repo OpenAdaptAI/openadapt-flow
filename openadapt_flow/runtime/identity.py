@@ -39,10 +39,14 @@ lazy so unit tests can fake the vision namespace.
 from __future__ import annotations
 
 import difflib
-import re
+from datetime import date
 from typing import Any, Iterable, Optional
 
 from openadapt_flow.ir import IdentityCheck, Point, Region
+from openadapt_flow.volatility import (  # noqa: F401 - TIMESTAMP_RE re-exported
+    TIMESTAMP_RE,
+    is_volatile_line,
+)
 
 # Recorded band text shorter than this (squashed) is too weak to
 # discriminate anything and is not stored — the check must never fire on
@@ -66,14 +70,13 @@ MIN_BLOCK = 3
 # for short values (a full 16-char run cannot exist inside a 5-char name).
 MAX_RUN_REQUIRED = 16
 
-# Lines containing a date or clock time are volatile by construction and
-# never part of the recorded context (the compiler applies the same rule to
-# postconditions; DOB columns on real EMRs hit this too, deliberately).
-TIMESTAMP_RE = re.compile(
-    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"  # 2026-07-08, 2026/7/8
-    r"|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"  # 07/08/2026, 8.7.26
-    r"|\d{1,2}:\d{2}"  # 18:38, 6:05
-)
+# Volatile-line policy lives in openadapt_flow.volatility (shared with the
+# compiler's postcondition mining): clock-bearing lines and lines dated near
+# the recording are dropped from identity context, but a line whose only
+# date is FAR from the recording date — a DOB in an identity banner — is
+# kept intact, dates included: that date is discriminative identity data,
+# not chronology. TIMESTAMP_RE is re-exported from there for backwards
+# compatibility.
 
 
 def squash(text: str) -> str:
@@ -113,20 +116,26 @@ def context_from_lines(
     exclude_region: Region,
     band: Region,
     min_confidence: float = 0.5,
+    reference_date: Optional[date] = None,
 ) -> Optional[str]:
     """Extract the context-band text from full-frame OCR lines.
 
     Keeps confident lines whose vertical center lies inside ``band`` and
     which do NOT intersect ``exclude_region`` (the target's own crop: its
     label is mutable evidence, healed through on rename drift, so it must
-    not participate in identity). Timestamp-bearing lines are dropped as
-    volatile. Kept lines are joined left-to-right.
+    not participate in identity). Volatile lines — clock times, dates near
+    the recording date — are dropped; a line whose only date is FAR from
+    ``reference_date`` (a DOB in an identity banner) is kept whole, date
+    included. Kept lines are joined left-to-right.
 
     Args:
         lines: OCR line objects (``text``/``region``/``confidence``).
         exclude_region: The anchor's template crop region.
         band: The context band (see :func:`band_region`).
         min_confidence: Minimum OCR confidence for a line to count.
+        reference_date: The recording date, enabling the near/far date
+            split; when None every date-bearing line is dropped (heal-time
+            re-extraction has no recording date).
 
     Returns:
         The joined band text, or None when the surviving text is too short
@@ -144,7 +153,7 @@ def context_from_lines(
             continue
         if _intersects(line.region, exclude_region):
             continue
-        if TIMESTAMP_RE.search(text):
+        if is_volatile_line(text, reference_date=reference_date):
             continue
         kept.append((lx, text))
     if not kept:

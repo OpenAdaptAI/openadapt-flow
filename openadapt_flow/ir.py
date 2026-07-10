@@ -95,6 +95,16 @@ class PostconditionKind(str, Enum):
     TEXT_PRESENT = "text_present"
     TEXT_ABSENT = "text_absent"
     REGION_STABLE = "region_stable"  # phash of `region` within tolerance
+    # Structural postconditions — mined as a fallback for steps whose action
+    # changed nothing visible in the single-page frame (new-tab navigation,
+    # SPA route changes off-screen), so such steps are no longer vacuous.
+    # They compare the step's END state against its START state on the live
+    # backend; nothing instance-specific (no literal URL/title) is baked in.
+    # On a backend that cannot observe the property, they pass with the step
+    # honestly still unverified (see docs/LIMITS.md).
+    URL_CHANGED = "url_changed"  # page URL differs from the step's start
+    TITLE_CHANGED = "title_changed"  # page title differs from the step's start
+    NEW_TAB_OPENED = "new_tab_opened"  # browser page count increased
 
 
 class Postcondition(BaseModel):

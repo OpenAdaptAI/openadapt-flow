@@ -8,7 +8,7 @@ deviceScaleFactor=1 so CSS pixels equal screenshot pixels.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:  # pragma: no cover
     from playwright.sync_api import Page
@@ -94,6 +94,33 @@ class PlaywrightBackend:
         if size is None:  # pragma: no cover - viewport always set by launch()
             return VIEWPORT
         return (size["width"], size["height"])
+
+    # -- structural observations (openadapt_flow.backend.StructuralBackend) --
+
+    @property
+    def url(self) -> Optional[str]:
+        """Current page URL, or None if momentarily unobservable."""
+        try:
+            return self.page.url
+        except Exception:
+            return None
+
+    @property
+    def page_title(self) -> Optional[str]:
+        """Current page title, or None if momentarily unobservable."""
+        try:
+            return self.page.title()
+        except Exception:
+            return None
+
+    @property
+    def page_count(self) -> Optional[int]:
+        """Open pages in the browser context (new tabs are visible here even
+        though the single-page screenshot never shows them)."""
+        try:
+            return len(self.page.context.pages)
+        except Exception:
+            return None
 
     def screenshot(self) -> bytes:
         """Return the current full-viewport frame as PNG bytes."""

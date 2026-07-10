@@ -11,12 +11,14 @@ from __future__ import annotations
 import difflib
 import json
 import math
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 
+from openadapt_flow import volatility
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
@@ -28,8 +30,8 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
-from openadapt_flow.runtime.identity import TIMESTAMP_RE, band_region, context_from_lines
-from openadapt_flow.vision.hashing import phash_png
+from openadapt_flow.runtime.identity import band_region, context_from_lines, coverage
+from openadapt_flow.vision.hashing import phash_distance, phash_png
 from openadapt_flow.vision.ocr import OcrLine, normalize_text, ocr
 
 # Template crop size around a click target (clamped to the frame).
@@ -93,14 +95,34 @@ SEEN_BEFORE_RATIO = 0.9
 # abort.
 LABEL_MATCH_RATIO = 0.85
 
-# A TEXT_PRESENT candidate containing a date or clock time is volatile by
-# construction — timestamped content (log rows, message-list entries,
-# "last updated" chrome) names a moment, not an invariant screen state, so
-# it cannot survive replay against live data. Observed on OpenEMR: opening
-# a dialog nudged a timestamped message row into view, the row won the
-# longest-new-text contest, and the compiled bundle then aborted every
-# replay once newer rows displaced it. (Shared with the identity context
-# extractor — TIMESTAMP_RE lives in runtime.identity.)
+# TEXT_PRESENT candidates are classified for volatility (see
+# openadapt_flow.volatility): clock times, dates near the recording date,
+# digit/punctuation-dominated fragments, and low-entropy noise all name a
+# moment or a count, not an invariant screen state, and cannot survive
+# replay against live data. Observed on OpenEMR: a stray ':01' clock-minute
+# fragment was mined and false-halted every later replay. Dates FAR from
+# the recording date (a DOB in an identity banner) are deliberately kept —
+# they are identity data, not chronology.
+
+# Empirical stability: a candidate that appeared in a step's after frame
+# but is already gone (or has changed) by the NEXT step's before frame —
+# two captures of the SAME screen state, moments apart — is volatile by
+# demonstration (fading toasts, spinners, ticking counters). A candidate's
+# squashed text must be covered at this ratio in the next frame's OCR to
+# survive. The same rule drops REGION_STABLE postconditions whose region
+# self-mutates between the two captures (animations, clocks).
+PERSISTENCE_RATIO = 0.8
+
+# Semantic-tie preference: among stable candidates, the one with the most
+# alphabetic content wins, but any candidate within this fraction of the
+# best is competitive — and the competitive candidate CLOSEST to the click
+# target is preferred (text near the action is likelier to describe its
+# effect than a far-away data row).
+PROXIMITY_POOL_RATIO = 0.6
+
+# Excluded (parameterized) values shorter than this (squashed) are not used
+# for exclusion or leak-linting: 1-2 char examples fuzzily match everything.
+MIN_EXCLUDE_CHARS = 3
 
 
 def _load_events(recording_dir: Path) -> list[dict]:
@@ -204,7 +226,12 @@ def _best_crop_text(
 
 
 def _landmarks_for(
-    frame_lines: list[OcrLine], crop_region: Region, click: Point
+    frame_lines: list[OcrLine],
+    crop_region: Region,
+    click: Point,
+    *,
+    exclude_texts: tuple[str, ...] = (),
+    reference_date: Optional[date] = None,
 ) -> list[Landmark]:
     """Derive up to 2 landmarks from OCR lines outside the template crop.
 
@@ -214,12 +241,23 @@ def _landmarks_for(
     Euclidean distance between the two, and ``dx_px``/``dy_px`` carry the
     exact landmark-center -> click-point offsets so the geometry rung can
     reconstruct the target precisely (see ``ir.Landmark``).
+
+    Landmark hygiene: a landmark is *stable geometry evidence*, so lines
+    that embed a demo parameter value (``exclude_texts`` — the value varies
+    per run, silently degrading healing for every real run) or classify as
+    volatile (clock times, near dates, digit-dominated fragments) are never
+    used as landmarks.
     """
     candidates = []
     for line in frame_lines:
         if line.confidence < MIN_OCR_CONFIDENCE or not line.text.strip():
             continue
         if _regions_intersect(line.region, crop_region):
+            continue
+        text = line.text.strip()
+        if _contains_excluded(text, exclude_texts):
+            continue
+        if volatility.classify_text(text, reference_date=reference_date):
             continue
         lx, ly, lw, lh = line.region
         cx, cy = lx + lw // 2, ly + lh // 2
@@ -306,7 +344,7 @@ def _contains_excluded(text: str, excluded: tuple[str, ...]) -> bool:
         return False
     for raw in excluded:
         ex = _squash(raw)
-        if not ex:
+        if len(ex) < MIN_EXCLUDE_CHARS:
             continue
         if ex in hay or hay in ex:
             return True
@@ -337,8 +375,30 @@ def _new_text_postcondition(
     *,
     exclude_texts: tuple[str, ...] = (),
     avoid_labels: tuple[str, ...] = (),
+    next_lines: Optional[list[OcrLine]] = None,
+    reference_date: Optional[date] = None,
+    click_point: Optional[Point] = None,
 ) -> Optional[Postcondition]:
-    """TEXT_PRESENT for the longest OCR text in after but not before.
+    """TEXT_PRESENT for the most STABLE new OCR text after the action.
+
+    Selection is for stability, not novelty ("longest new text" latched
+    onto clock fragments, counters, and other patients' rows — see
+    docs/validation/VALIDATION.md):
+
+    1. Candidates must be new (not in the before frame), confidently read,
+       not a parameterized value, and not a click-target label.
+    2. Volatile candidates are rejected (clock times, dates near the
+       recording date, digit-dominated fragments, low-entropy noise); a
+       date FAR from the recording date — a DOB in an identity banner — is
+       deliberately eligible.
+    3. Candidates must persist into the NEXT step's before frame (two
+       captures of the same screen, moments apart) when one exists: text
+       that already vanished within the demonstration cannot anchor a
+       replay.
+    4. Ranking prefers alphabetic content over raw length, with a
+       proximity tiebreak toward the click target among competitive
+       candidates (text near the action is likelier to describe its
+       effect than a distant data row).
 
     Args:
         before_lines: OCR lines from the before frame.
@@ -349,10 +409,16 @@ def _new_text_postcondition(
         avoid_labels: Click-target label texts (anchor ``ocr_text`` values)
             that must not be asserted: labels are mutable evidence the
             resolution ladder heals through (rename drift), not invariants.
+        next_lines: OCR lines from the NEXT event's before frame (same
+            screen state, captured moments later), or None when this is the
+            recording's last frame.
+        reference_date: The recording date (enables the near/far date
+            split; None treats every date as volatile).
+        click_point: The step's click point, for the proximity tiebreak.
 
     Returns:
-        A TEXT_PRESENT postcondition, or None if there is no suitable new
-        text.
+        A TEXT_PRESENT postcondition, or None if there is no suitable
+        stable new text.
     """
     before_norm = {normalize_text(l.text) for l in before_lines}
     before_squashed = [
@@ -371,7 +437,11 @@ def _new_text_postcondition(
                 return True
         return False
 
-    candidates = []
+    next_hay: Optional[str] = None
+    if next_lines is not None:
+        next_hay = _squash(" ".join(l.text for l in next_lines))
+
+    candidates: list[tuple[OcrLine, int]] = []
     for line in after_lines:
         if line.confidence < MIN_OCR_CONFIDENCE:
             continue
@@ -379,17 +449,38 @@ def _new_text_postcondition(
         norm = normalize_text(text)
         if len(norm) < MIN_TEXT_PRESENT_LEN or seen_before(text, norm):
             continue
-        if TIMESTAMP_RE.search(text):
+        if volatility.classify_text(text, reference_date=reference_date):
             continue
         if _contains_excluded(text, exclude_texts):
             continue
         if _matches_label(text, avoid_labels):
             continue
-        candidates.append(text)
+        if next_hay is not None:
+            if coverage(_squash(text), next_hay) < PERSISTENCE_RATIO:
+                continue  # gone within the demo itself: ephemeral
+        alpha = sum(1 for c in _squash(text) if c.isalpha())
+        candidates.append((line, alpha))
     if not candidates:
         return None
-    longest = max(candidates, key=len)
-    return Postcondition(kind=PostconditionKind.TEXT_PRESENT, text=longest)
+    best_alpha = max(alpha for _, alpha in candidates)
+    pool = [
+        (line, alpha)
+        for line, alpha in candidates
+        if alpha >= PROXIMITY_POOL_RATIO * best_alpha
+    ]
+    if click_point is not None and len(pool) > 1:
+        def dist(line: OcrLine) -> float:
+            lx, ly, lw, lh = line.region
+            return math.hypot(
+                lx + lw / 2 - click_point[0], ly + lh / 2 - click_point[1]
+            )
+
+        chosen = min(pool, key=lambda c: dist(c[0]))[0]
+    else:
+        chosen = max(pool, key=lambda c: c[1])[0]
+    return Postcondition(
+        kind=PostconditionKind.TEXT_PRESENT, text=chosen.text.strip()
+    )
 
 
 def _postconditions(
@@ -401,6 +492,12 @@ def _postconditions(
     bundle: Optional[Path] = None,
     step_id: Optional[str] = None,
     include_region_stable: bool = True,
+    before_lines: Optional[list[OcrLine]] = None,
+    after_lines: Optional[list[OcrLine]] = None,
+    next_lines: Optional[list[OcrLine]] = None,
+    next_before_png: Optional[bytes] = None,
+    reference_date: Optional[date] = None,
+    click_point: Optional[Point] = None,
 ) -> list[Postcondition]:
     """Derive postconditions from a step's before/after frames.
 
@@ -416,9 +513,25 @@ def _postconditions(
     entirely: for parameterized TYPE steps the changed region IS the typed
     value's pixels, and the value varies per run — asserting its rendering
     is the pixel-level equivalent of asserting the excluded text.
+
+    ``next_before_png`` / ``next_lines`` — the NEXT event's before frame
+    (the same screen state captured moments later) and its OCR — arm the
+    empirical stability checks: a REGION_STABLE region that already changed
+    between the two captures (animations, clocks, fading toasts) is
+    self-mutating and is not asserted, and TEXT_PRESENT candidates must
+    persist into the later capture.
+
+    ``before_lines`` / ``after_lines`` let the caller supply cached OCR;
+    when omitted the frames are OCRed here.
     """
     if before_png is None or after_png is None:
         return []
+    if before_lines is None:
+        before_lines = ocr(before_png)
+    if after_lines is None:
+        after_lines = ocr(after_png)
+    if next_lines is None and next_before_png is not None:
+        next_lines = ocr(next_before_png)
     expect: list[Postcondition] = []
     changed = (
         _largest_changed_region(before_png, after_png)
@@ -436,6 +549,15 @@ def _postconditions(
         x1 = min(frame_w, x + w + REGION_STABLE_PAD)
         y1 = min(frame_h, y + h + REGION_STABLE_PAD)
         padded: Region = (x0, y0, x1 - x0, y1 - y0)
+        if next_before_png is not None and phash_distance(
+            phash_png(after_png, region=padded),
+            phash_png(next_before_png, region=padded),
+        ) > REGION_STABLE_TOLERANCE:
+            # The region kept changing with NO action in between — it is
+            # self-mutating (animation, clock, fading toast) and would
+            # false-halt any replay; never assert it.
+            changed = None
+    if changed is not None:
         template_rel: Optional[str] = None
         if bundle is not None and step_id is not None:
             template_rel = f"templates/{step_id}_expect.png"
@@ -450,14 +572,93 @@ def _postconditions(
             )
         )
     text_pc = _new_text_postcondition(
-        ocr(before_png),
-        ocr(after_png),
+        before_lines,
+        after_lines,
         exclude_texts=exclude_texts,
         avoid_labels=avoid_labels,
+        next_lines=next_lines,
+        reference_date=reference_date,
+        click_point=click_point,
     )
     if text_pc is not None:
         expect.append(text_pc)
     return expect
+
+
+def _structural_postconditions(event: dict) -> list[Postcondition]:
+    """Structural fallback postconditions from a recorded event.
+
+    Used only for steps that mined ZERO visual postconditions (identical
+    before/after frames, or every candidate rejected as volatile): when the
+    recorder captured structural observations (see ``Recorder`` /
+    ``StructuralBackend``) and one of them changed across the action, the
+    change itself — never the literal, instance-specific value — is
+    asserted, so the step can actually fail at replay instead of passing
+    vacuously.
+    """
+    pcs: list[Postcondition] = []
+    pages_before, pages_after = event.get("pages_before"), event.get("pages_after")
+    if (
+        isinstance(pages_before, int)
+        and isinstance(pages_after, int)
+        and pages_after > pages_before
+    ):
+        pcs.append(Postcondition(kind=PostconditionKind.NEW_TAB_OPENED))
+    url_before, url_after = event.get("url_before"), event.get("url_after")
+    title_before = event.get("title_before")
+    title_after = event.get("title_after")
+    if url_before and url_after and url_before != url_after:
+        pcs.append(Postcondition(kind=PostconditionKind.URL_CHANGED))
+    elif title_before and title_after and title_before != title_after:
+        pcs.append(Postcondition(kind=PostconditionKind.TITLE_CHANGED))
+    return pcs
+
+
+def lint_param_leakage(
+    workflow: Workflow, param_values: tuple[str, ...]
+) -> list[str]:
+    """Scan a compiled workflow for demo parameter values baked in as
+    literals outside the designated parameter slots.
+
+    A parameter's demonstrated value must never become an invariant: baked
+    into a postcondition it false-halts every run whose value differs from
+    the demo's; baked into a geometry landmark it silently degrades healing
+    the same way. Designated slots where the demo value IS allowed:
+
+    - ``workflow.params`` and ``step.text`` of a parameterized TYPE step
+      (the recorded example/default, substituted per run);
+    - ``anchor.ocr_text`` / ``anchor.context_text`` (resolution and
+      identity evidence: the identity check detects an embedded demo value
+      and re-anchors on the RUN's value at replay — see runtime.identity
+      param mode).
+
+    Values shorter than ``MIN_EXCLUDE_CHARS`` squashed characters are
+    skipped (they fuzzily match everything).
+
+    Returns:
+        Human-readable violation strings (empty when clean).
+    """
+    values = tuple(
+        v for v in param_values if len(_squash(v)) >= MIN_EXCLUDE_CHARS
+    )
+    if not values:
+        return []
+    violations: list[str] = []
+    for step in workflow.steps:
+        for pc in step.expect:
+            if pc.text and _contains_excluded(pc.text, values):
+                violations.append(
+                    f"{step.id}: {pc.kind.value} postcondition "
+                    f"{pc.text!r} embeds a demo parameter value"
+                )
+        if step.anchor is not None:
+            for lm in step.anchor.landmarks:
+                if _contains_excluded(lm.ocr_text, values):
+                    violations.append(
+                        f"{step.id}: geometry landmark {lm.ocr_text!r} "
+                        "embeds a demo parameter value"
+                    )
+    return violations
 
 
 def _text_preview(text: str, limit: int = 24) -> str:
@@ -476,13 +677,18 @@ def compile_recording(
     row text outside the crop, verified before every click at replay time;
     see :mod:`openadapt_flow.runtime.identity`), and derive postconditions
     (REGION_STABLE on the largest changed region plus TEXT_PRESENT for the
-    most distinctive new text). Type/key events carry
+    most STABLE new text — volatile candidates such as clock fragments,
+    near dates and counters are rejected, and candidates must persist into
+    the next frame; see :mod:`openadapt_flow.volatility`). Steps that mined
+    nothing fall back to structural postconditions (URL/title change, new
+    tab) when the recorder captured them. Type/key events carry
     their text/param/key through. Parameterized typed values and click
     target labels are never asserted in any step's postconditions (the
     former vary per run; the latter are mutable evidence the resolution
-    ladder heals through under rename drift). The bundle gets
-    ``workflow.json``, ``templates/*.png`` and a generated readable
-    ``workflow.py``.
+    ladder heals through under rename drift), and a final lint fails
+    compilation if a demo parameter value leaked into any postcondition or
+    geometry landmark. The bundle gets ``workflow.json``,
+    ``templates/*.png`` and a generated readable ``workflow.py``.
 
     Args:
         recording_dir: Recording directory (meta.json, events.jsonl, frames/).
@@ -493,7 +699,9 @@ def compile_recording(
         The compiled :class:`Workflow` (also saved to the bundle).
 
     Raises:
-        ValueError: On an unknown event kind.
+        ValueError: On an unknown event kind, or when the parameter-leakage
+            lint finds a demonstrated parameter value baked into a
+            postcondition or geometry landmark.
         FileNotFoundError: If a click event's before frame is missing.
     """
     from openadapt_flow.compiler.codegen import render_workflow_py
@@ -520,10 +728,29 @@ def compile_recording(
                 param_values.append(text)
     exclude_texts: tuple[str, ...] = tuple(dict.fromkeys(param_values))
 
+    # The recording date arms the near/far date split in the volatility
+    # classifier (a DOB is identity data; "last updated" is chronology).
+    reference_date: Optional[date] = None
+    try:
+        reference_date = datetime.fromisoformat(
+            str(meta.get("created_at") or "")
+        ).date()
+    except ValueError:
+        reference_date = None
+
+    # Each recording frame is OCRed at most once across both passes.
+    ocr_cache: dict[tuple[int, str], list[OcrLine]] = {}
+
+    def cached_lines(i: int, suffix: str, png: bytes) -> list[OcrLine]:
+        key = (i, suffix)
+        if key not in ocr_cache:
+            ocr_cache[key] = ocr(png)
+        return ocr_cache[key]
+
     # Pass 1 builds the steps (anchors, actions); postconditions are derived
     # in pass 2, once every click target's label is known — target labels
     # are mutable evidence (rename drift) and must not be asserted.
-    pending: list[tuple[Step, Optional[bytes], Optional[bytes]]] = []
+    pending: list[tuple[Step, Optional[bytes], Optional[bytes], dict]] = []
     for event in events:
         i = int(event["i"])
         kind = event["kind"]
@@ -548,8 +775,14 @@ def compile_recording(
             ocr_text = _best_crop_text(
                 ocr(before_png, region=crop_region), click_y=click[1]
             )
-            frame_lines = ocr(before_png)
-            landmarks = _landmarks_for(frame_lines, crop_region, click)
+            frame_lines = cached_lines(i, "before", before_png)
+            landmarks = _landmarks_for(
+                frame_lines,
+                crop_region,
+                click,
+                exclude_texts=exclude_texts,
+                reference_date=reference_date,
+            )
             # Identity evidence: the target's row text OUTSIDE its own crop
             # (a table row's discriminative name column sits outside the
             # 160x64 template — see runtime.identity). Verified against the
@@ -561,6 +794,7 @@ def compile_recording(
                     click, crop_region[3], (frame.shape[1], frame.shape[0])
                 ),
                 min_confidence=MIN_OCR_CONFIDENCE,
+                reference_date=reference_date,
             )
             anchor = Anchor(
                 template=template_rel,
@@ -590,6 +824,7 @@ def compile_recording(
                     ),
                     before_png,
                     after_png,
+                    event,
                 )
             )
         elif kind == "type":
@@ -610,6 +845,7 @@ def compile_recording(
                     ),
                     before_png,
                     after_png,
+                    event,
                 )
             )
         elif kind == "key":
@@ -624,17 +860,20 @@ def compile_recording(
                     ),
                     before_png,
                     after_png,
+                    event,
                 )
             )
         elif kind == "scroll":
             dx, dy = int(event.get("dx", 0)), int(event.get("dy", 0))
-            # SCROLL steps get NO postconditions (note the (None, None)
-            # frames): scrolling shifts the whole viewport, so a frame diff
-            # spans nearly the full screen and would assert mutable page
-            # content as an invariant. The scroll's purpose — bringing the
-            # next target into view — is verified by the next anchored
-            # step's resolution ladder, which fails if the scroll did not
-            # land.
+            # SCROLL steps get NO postconditions (pass 2 skips them):
+            # scrolling shifts the whole viewport, so a frame diff spans
+            # nearly the full screen and would assert mutable page content
+            # as an invariant. The scroll's purpose — bringing the next
+            # target into view — is verified by the next anchored step's
+            # resolution ladder, which fails if the scroll did not land.
+            # The frames are still carried: a scroll's BEFORE frame is the
+            # previous step's screen moments later, which the empirical
+            # stability checks use.
             pending.append(
                 (
                     Step(
@@ -644,22 +883,37 @@ def compile_recording(
                         scroll_dx=dx,
                         scroll_dy=dy,
                     ),
-                    None,
-                    None,
+                    before_png,
+                    after_png,
+                    event,
                 )
             )
         else:
             raise ValueError(f"unknown event kind {kind!r} (event {i})")
 
     # Pass 2: derive postconditions, never asserting parameterized values or
-    # any click target's label.
+    # any click target's label, selecting for stability (volatility
+    # classifier + persistence into the next frame), and falling back to
+    # structural postconditions for steps that would otherwise be vacuous.
     anchor_labels: tuple[str, ...] = tuple(
         step.anchor.ocr_text
-        for step, _, _ in pending
+        for step, _, _, _ in pending
         if step.anchor is not None and step.anchor.ocr_text
     )
     steps: list[Step] = []
-    for step, step_before, step_after in pending:
+    for j, (step, step_before, step_after, event) in enumerate(pending):
+        steps.append(step)
+        if step.action is ActionKind.SCROLL:
+            continue  # see the scroll branch in pass 1
+        next_before: Optional[bytes] = None
+        next_lines: Optional[list[OcrLine]] = None
+        if j + 1 < len(pending):
+            next_before = pending[j + 1][1]
+            if next_before is not None:
+                next_lines = cached_lines(
+                    int(pending[j + 1][3]["i"]), "before", next_before
+                )
+        i = int(event["i"])
         step.expect = _postconditions(
             step_before,
             step_after,
@@ -672,8 +926,29 @@ def compile_recording(
             include_region_stable=not (
                 step.action is ActionKind.TYPE and step.param is not None
             ),
+            before_lines=(
+                cached_lines(i, "before", step_before)
+                if step_before is not None
+                else None
+            ),
+            after_lines=(
+                cached_lines(i, "after", step_after)
+                if step_after is not None
+                else None
+            ),
+            next_lines=next_lines,
+            next_before_png=next_before,
+            reference_date=reference_date,
+            click_point=(
+                step.anchor.click_point if step.anchor is not None else None
+            ),
         )
-        steps.append(step)
+        if not step.expect:
+            # Nothing visual survived mining: fall back to structural
+            # postconditions (URL/title change, new tab) so the step is not
+            # a vacuous pass. Steps with no structural change either stay
+            # honestly vacuous (docs/LIMITS.md).
+            step.expect = _structural_postconditions(event)
 
     workflow = Workflow(
         name=name,
@@ -682,6 +957,18 @@ def compile_recording(
         params=params,
         steps=steps,
     )
+
+    # Parameter-hygiene lint: a demo parameter value baked in as a literal
+    # outside the designated slots makes the bundle silently demo-bound —
+    # fail compilation loudly instead of emitting a self-disarming bundle.
+    violations = lint_param_leakage(workflow, exclude_texts)
+    if violations:
+        raise ValueError(
+            "parameter leakage: the compiled bundle embeds demonstrated "
+            "parameter values outside designated parameter slots:\n  "
+            + "\n  ".join(violations)
+        )
+
     workflow.save(bundle)
     (bundle / "workflow.py").write_text(render_workflow_py(workflow))
     return workflow

@@ -11,14 +11,21 @@ change.
 ## The dangerous list: today's silent failure modes
 
 These are the cases where compiled replay does the wrong thing and reports
-success. They are open problems, not caveats. (Two former members of this
-list — wrong-entity clicks in repeated structures, and unverified typed
-input — were fixed on 2026-07-08 and moved to the safe-halt section below.)
+success. They are open problems, not caveats. (Former members of this
+list: wrong-entity clicks in repeated structures and unverified typed
+input were fixed on 2026-07-08; anti-robust postcondition mining — clock
+fragments, "longest new text" grabbing data, DOB banners eaten by the
+timestamp filter, parameter values leaking into landmarks — was fixed on
+2026-07-09. Both moved to the safe-halt section below.)
 
-- **Steps that changed nothing assert nothing.** An action whose recorded
-  before/after frames are identical (a click that opens a new tab the
-  runtime can't see, an inert widget) compiles with zero postconditions
-  and can never fail. There is currently no minimum-verification floor.
+- **Steps with no visual AND no structural effect assert nothing.** Since
+  2026-07-09 an action whose recorded before/after frames are identical
+  falls back to structural postconditions (URL change, title change, new
+  tab opened) when the recording backend can observe them — the new-tab
+  click is now verified. What remains vacuous: actions with no structural
+  effect either (an inert native `<select>`), and bundles recorded on
+  backends without structural observations (native OS, RDP). There is
+  still no minimum-verification floor.
 - **Targets whose only discriminative text is their own label.** The
   identity check deliberately excludes the target's own label (labels are
   mutable evidence the resolution ladder heals through under rename
@@ -60,12 +67,33 @@ actions observed — at the cost of availability:
   Self-healing covers palette changes, moved controls, and renamed labels;
   it does not cover scale or reflow. A purely cosmetic 125% zoom currently
   means 0% replayability.
-- **State the demonstration accidentally froze.** Postconditions are mined
-  from what the demo changed on screen, and they routinely capture data —
-  a neighbouring table row's text, another user's message fragment. A
-  bundle recorded on one OpenEMR demo instance halts at login on a second
-  instance of the *same version* because the module menu and calendar
-  content differ. Per-tenant re-recording is the working assumption.
+- **Volatile screen fragments frozen as assertions** (fixed 2026-07-09;
+  formerly the top availability killer on live apps — a fresh OpenEMR
+  recording mined `text_present ':01'`, a clock-minute OCR fragment, and
+  every later replay false-halted on it). Mining now selects for
+  **stability, not novelty**: clock times, dates near the recording date,
+  digit-dominated counters and low-entropy noise are rejected; candidates
+  must persist across the recording's own frames (fading toasts and
+  self-mutating regions are volatile by demonstration); ranking prefers
+  alphabetic text near the click target over "longest new text". A date
+  FAR from the recording date — a DOB in a patient banner — is
+  deliberately kept: it is identity data, and the old blanket timestamp
+  filter's habit of eating identity banners is gone.
+- **State the demonstration accidentally froze** (narrowed 2026-07-09,
+  still real). Text that is stable within the recording but specific to
+  the instance or dataset — an entry count ("filtered from 56 total
+  entries"), a module menu, a persistent data row — can still be mined as
+  an assertion. A bundle recorded on one OpenEMR demo instance halts at
+  login on a second instance of the *same version* because the module menu
+  and calendar content differ. Per-tenant re-recording is the working
+  assumption.
+- **Identity bands recorded through modal dialogs** (pre-existing, exposed
+  2026-07-09 once the `':01'` halts stopped masking it). A click inside a
+  dialog records a context band that includes background chrome; OCR
+  segmentation/order of that chrome does not reproduce between reads, and
+  the order-sensitive coverage matcher then refuses the click. Observed
+  reproducibly on the OpenEMR note-dialog textarea (control replays cap at
+  14/17 — safe halt, nothing written).
 - **Viewports smaller than demonstrated.** If the target is below the fold
   and no scroll was demonstrated, there is no recorded gesture to extend —
   the run halts (closed-loop scrolling extends recorded scrolls; it does
@@ -90,20 +118,25 @@ resolution degrades to geometry, which clicks where the demonstrated row
 check's param mode requires the **run's** value to appear in the resolved
 row's text before acting — a wrong row halts the run instead of opening
 the wrong chart. Still true and still costly: making a value a parameter
-strips it from every compiled assertion (by design — it varies per run),
-and recorded parameter values leak into geometry landmarks, quietly
-degrading healing for any run whose values differ from the demo (i.e.,
-all of them).
+strips it from every compiled assertion (by design — it varies per run).
+The other half of the cost was fixed on 2026-07-09: recorded parameter
+values no longer leak into geometry landmarks, and a compile-time lint
+fails the build outright if a demonstrated parameter value appears in any
+postcondition or landmark — a bundle can no longer be silently demo-bound.
 
-## Known remaining (deliberately not attempted in the 2026-07-08 fix)
+## Known remaining (deliberately not attempted in the 2026-07-08/09 fixes)
 
 - **Cosmetic global drift** (browser zoom, device scale factor, font-size
   preference) still zeroes availability — false abort at the first step.
-- **Postcondition mining still overfits** to demonstrated/instance state
-  (data rows, other users' content); per-tenant re-recording remains the
-  working assumption.
-- **Vacuous zero-postcondition steps** still exist (no
-  minimum-verification floor or compile-time warning).
+- **Mining still freezes instance-stable state** (entry counts, module
+  menus, persistent data rows — volatile *fragments* are fixed, instance
+  *state* is not); per-tenant re-recording remains the working assumption.
+- **Vacuous steps with no structural effect** still exist (inert native
+  `<select>`; non-structural recording backends) — no minimum-verification
+  floor.
+- **Identity-band order fragility on dialog clicks** (exposed 2026-07-09;
+  see the safe-halt list) — fixing it means re-validating the coverage
+  matcher's measured look-alike margins, not a quick patch.
 - **Unreadable identity bands fall back to the old behavior** (flagged in
   the report, refused only for irreversible steps) — an icon-only repeated
   structure with no OCRable row text is still exposed to wrong-entity

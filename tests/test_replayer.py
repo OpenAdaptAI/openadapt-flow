@@ -963,3 +963,121 @@ def test_type_without_known_field_diffs_full_frame_and_cannot_refocus(
     assert vision.pixels_changed_calls[0] is None  # full-frame diff
     # Retry typed again but never clicked or selected-all.
     assert backend.actions == [("type", "North"), ("type", "North")]
+
+
+# -- structural postconditions (URL/title change, new tab) --------------------
+
+
+class StructuralFakeBackend(FakeBackend):
+    """FakeBackend that exposes StructuralBackend observations and mutates
+    them when scripted actions fire."""
+
+    def __init__(self, *, url="http://app/", title="Inbox", pages=1, **kw):
+        super().__init__(**kw)
+        self._url = url
+        self._title = title
+        self._pages = pages
+        self.on_click = None  # callable(self) fired after each click
+
+    @property
+    def url(self):
+        return self._url
+
+    @property
+    def page_title(self):
+        return self._title
+
+    @property
+    def page_count(self):
+        return self._pages
+
+    def click(self, x, y, *, double=False):
+        super().click(x, y, double=double)
+        if self.on_click is not None:
+            self.on_click(self)
+
+
+def _structural_workflow(kind: PostconditionKind) -> Workflow:
+    return Workflow(
+        name="wf",
+        steps=[click_step(expect=[Postcondition(kind=kind, timeout_s=0.2)])],
+    )
+
+
+def _resolving_vision() -> "FakeVision":
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    ]
+    return vision
+
+
+def test_url_changed_passes_when_url_differs_from_step_start(bundle, run_dir):
+    backend = StructuralFakeBackend()
+    backend.on_click = lambda b: setattr(b, "_url", "http://app/#report")
+    report = Replayer(backend, vision=_resolving_vision(),
+                      poll_interval_s=0.01).run(
+        _structural_workflow(PostconditionKind.URL_CHANGED),
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is True
+    assert report.results[0].postconditions_ok is True
+
+
+def test_url_changed_fails_when_url_static(bundle, run_dir):
+    backend = StructuralFakeBackend()  # click changes nothing
+    report = Replayer(backend, vision=_resolving_vision(),
+                      poll_interval_s=0.01).run(
+        _structural_workflow(PostconditionKind.URL_CHANGED),
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is False
+    assert "url_changed" in (report.results[0].error or "")
+
+
+def test_new_tab_opened_passes_when_page_count_grows(bundle, run_dir):
+    backend = StructuralFakeBackend()
+    backend.on_click = lambda b: setattr(b, "_pages", 2)
+    report = Replayer(backend, vision=_resolving_vision(),
+                      poll_interval_s=0.01).run(
+        _structural_workflow(PostconditionKind.NEW_TAB_OPENED),
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is True
+
+
+def test_new_tab_opened_fails_when_no_tab_appears(bundle, run_dir):
+    backend = StructuralFakeBackend()
+    report = Replayer(backend, vision=_resolving_vision(),
+                      poll_interval_s=0.01).run(
+        _structural_workflow(PostconditionKind.NEW_TAB_OPENED),
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is False
+    assert "new_tab_opened" in (report.results[0].error or "")
+
+
+def test_title_changed_postcondition(bundle, run_dir):
+    backend = StructuralFakeBackend()
+    backend.on_click = lambda b: setattr(b, "_title", "Report")
+    report = Replayer(backend, vision=_resolving_vision(),
+                      poll_interval_s=0.01).run(
+        _structural_workflow(PostconditionKind.TITLE_CHANGED),
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is True
+
+
+def test_structural_postcondition_passes_unverified_on_plain_backend(
+    bundle, run_dir
+):
+    """A backend without structural observations cannot arbitrate a
+    structural postcondition: the step passes, honestly unverified
+    (docs/LIMITS.md) — it must never false-halt a native-backend replay."""
+    backend = FakeBackend()  # no url/page_title/page_count
+    report = Replayer(backend, vision=_resolving_vision(),
+                      poll_interval_s=0.01).run(
+        _structural_workflow(PostconditionKind.URL_CHANGED),
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is True

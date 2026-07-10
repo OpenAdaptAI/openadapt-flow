@@ -23,12 +23,12 @@ Both arms run (a) the hybrid benchmark's exact frozen 20-slot schedule
 (:data:`SCHEDULE`: 14 clean + 6 drifted — ``notice``/``reqfield``/
 ``modal-once``, two each) and (b) the validation suite's perturbation
 drift modes (:data:`PERTURBATIONS`: lookalike, missing, grow, sort, theme,
-rename, move, typelabel). Success is judged for BOTH arms by
-:func:`verify_final_state` — OCR of the final screenshot must show the
-saved-encounter evidence AND the right patient, with wrong-type writes
-flagged — which mirrors ``verify_hybrid_final`` on the hybrid benchmark
-(``feat/hybrid-benchmark``) criterion-for-criterion, so this head-to-head
-is judged by the identical bar. Wrong-action events are recorded per arm:
+rename, move, typelabel). Success is judged for BOTH arms by the hybrid
+benchmark's own arm-independent check
+(:func:`~openadapt_flow.benchmark.hybrid_benchmark.verify_hybrid_final`):
+OCR of the final screenshot must show the saved-encounter evidence AND the
+right patient, with wrong-type writes flagged — so this head-to-head is
+judged by the identical bar. Wrong-action events are recorded per arm:
 DOM scripts have their own wrong-target failure modes (first-row selection
 after sort/grow/lookalike/missing picking a different patient) and this
 benchmark measures them rather than assuming either way.
@@ -39,17 +39,21 @@ Everything here is $0 and deterministic: no model calls in either arm.
 from __future__ import annotations
 
 import argparse
-import difflib
 import json
 import platform
-import statistics
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from pydantic import BaseModel
+from openadapt_flow.benchmark.hybrid_benchmark import (
+    DRIFT_TYPES,
+    SCHEDULE,
+    condition_url,
+    note_for_slot,
+    verify_hybrid_final,
+)
 
 WORKFLOW_NAME = "triage-dom-headtohead"
 #: Note used only to record the demonstration; every run substitutes its own.
@@ -61,24 +65,14 @@ USERNAME = "nurse.demo"
 PASSWORD = "mockmed-demo-pass"
 
 #: The patient the intent-level task targets: the first referral in
-#: MockMed's DEFAULT order, which is how the workflow was demonstrated.
+#: MockMed's DEFAULT order, which is how the workflow was demonstrated
+#: (also ``verify_hybrid_final``'s default identity).
 TARGET_PATIENT = "Jane Sample"
 
-#: The three drift conditions used in the frozen schedule (chosen by the
-#: hybrid benchmark because they make the compiled bundle safe-halt
-#: deterministically while remaining completable at the intent level).
-DRIFT_TYPES = ("notice", "reqfield", "modal-once")
-
-#: The frozen run schedule, copied EXACTLY from the hybrid benchmark
-#: (``feat/hybrid-benchmark``): one condition per slot, 14 clean + 6
-#: drifted (2 of each drift type) = 30% drift. Every arm sees the SAME
-#: condition at the same slot index.
-SCHEDULE: tuple[str, ...] = (
-    "clean", "clean", "notice", "clean", "clean",
-    "reqfield", "clean", "clean", "modal-once", "clean",
-    "clean", "clean", "notice", "clean", "reqfield",
-    "clean", "clean", "modal-once", "clean", "clean",
-)
+# SCHEDULE, DRIFT_TYPES, note_for_slot, and condition_url are imported
+# from the hybrid benchmark so both benchmarks run the IDENTICAL frozen
+# 20-slot schedule (14 clean + 6 drifted, 2 each of notice / reqfield /
+# modal-once) with distinct per-(arm, slot) notes.
 
 #: The perturbation drift modes from the validation suite (PR #12/#13),
 #: plus ``sort`` (a changed default sort order — every referral present,
@@ -88,66 +82,6 @@ PERTURBATIONS: tuple[str, ...] = (
     "lookalike", "missing", "grow", "sort",
     "theme", "rename", "move", "typelabel",
 )
-
-ARM_TAGS = {"compiled": "C", "dom": "S"}  # S = selector script
-
-#: Twenty distinct short clinical phrases; :func:`note_for_slot` appends an
-#: (arm, slot) tag so every run in every arm types a distinct value —
-#: success proves parameter substitution, not replay of a baked-in literal.
-_NOTE_POOL = (
-    "Vitals stable; recheck in two weeks.",
-    "Knee brace fitted; gait steady today.",
-    "Hydration counseling completed.",
-    "Referral letter faxed to cardiology.",
-    "Home BP log reviewed; stable readings.",
-    "Flu shot offered; patient declined.",
-    "Wound dressing changed; healing well.",
-    "Stretching plan issued for knee pain.",
-    "Allergy list updated with pollen.",
-    "Walking program started this week.",
-    "Pharmacy switched to downtown branch.",
-    "Lab panel ordered for next visit.",
-    "Diet handout given and explained.",
-    "Sleep questionnaire returned scored.",
-    "Podiatry exam booked for next month.",
-    "Eye exam reminder sent via portal.",
-    "Crutches returned; steady without aid.",
-    "Ice and elevation advised nightly.",
-    "Follow-up call scheduled for Friday.",
-    "Physio discharge summary attached.",
-)
-
-
-def note_for_slot(arm: str, slot: int) -> str:
-    """Distinct per-(arm, slot) note text.
-
-    Args:
-        arm: Arm key (``compiled``/``dom``).
-        slot: Zero-based slot index (schedule slots 0-19; perturbation runs
-            use indices past the schedule so the pool wraps but the tag
-            keeps every note distinct).
-
-    Returns:
-        A clinically plausible note unique to (arm, slot).
-    """
-    tag = ARM_TAGS.get(arm, arm[:1].upper())
-    return f"{_NOTE_POOL[slot % len(_NOTE_POOL)]} [{tag}{slot:02d}]"
-
-
-def condition_url(base_url: str, condition: str) -> str:
-    """Target URL for a schedule/perturbation condition.
-
-    Args:
-        base_url: MockMed base URL (trailing slash).
-        condition: ``"clean"`` or a MockMed ``?drift=`` flag.
-
-    Returns:
-        The URL to launch the run's browser at.
-    """
-    if condition == "clean":
-        return base_url
-    return f"{base_url.rstrip('/')}/?drift={condition}"
-
 
 # -- the DOM-selector script (the steelman) ------------------------------------
 
@@ -339,126 +273,14 @@ def dom_run(
 
 # -- final-state verification (both arms) ---------------------------------------
 
-
-class FinalStateVerdict(BaseModel):
-    """Final-state verdict shared by both arms.
-
-    Mirrors ``verify_hybrid_final`` (``feat/hybrid-benchmark``)
-    criterion-for-criterion so the DOM head-to-head is judged by the same
-    bar as the hybrid benchmark.
-
-    Attributes:
-        success: Banner + Triage row found, right patient, no wrong-type
-            write.
-        banner_found: ``Encounter saved — <note>`` banner located.
-        note_found: ``Triage — <note>`` encounter row located.
-        right_patient: The expected patient's name is on the final screen.
-        wrong_type_row: This run's note appears in a ``Consult`` encounter
-            row — a wrong-target write.
-        wrong_action: A state mutation landed on the wrong target: either
-            the save evidence is present but on the wrong patient, or a
-            wrong-type row carries this run's note.
-    """
-
-    success: bool
-    banner_found: bool
-    note_found: bool
-    right_patient: bool
-    wrong_type_row: bool
-    wrong_action: bool
-
-
-def _squash(text: str) -> str:
-    """Lowercase and remove all whitespace (OCR-tolerant comparison form)."""
-    return "".join(text.lower().split())
-
-
-def _longest_run(needle: str, hay: str) -> int:
-    """Longest contiguous matched character run between two squashed strings."""
-    if not needle or not hay:
-        return 0
-    blocks = difflib.SequenceMatcher(
-        None, needle, hay, autojunk=False
-    ).get_matching_blocks()
-    return max((block.size for block in blocks), default=0)
-
-
-#: Minimum contiguous squashed-character run for the note inside a single
-#: encounter-row/banner line.
-_NOTE_LINE_RUN = 12
-
-
-def verify_final_state(
-    screen_png: bytes,
-    note_text: str,
-    *,
-    patient_name: str = TARGET_PATIENT,
-) -> FinalStateVerdict:
-    """Arm-independent final-state check with identity verification.
-
-    All evidence is LINE-level contiguous matching on squashed
-    (lowercased, whitespace-stripped) OCR text:
-
-    - ``banner_found``: some OCR line carries a near-complete contiguous
-      match of ``encountersaved`` (MockMed renders the banner only after
-      a successful save).
-    - ``note_found``: some single OCR line carries both ``triage`` and a
-      >=12-character contiguous run of this run's note — the saved
-      encounter row. Requiring both in ONE line rejects the encounter
-      form, where "Triage" (segment button) and the typed note are
-      separate lines.
-    - ``right_patient``: the expected patient's name appears in the
-      frame's OCR text — identity, motivated by the validation suite's
-      silent wrong-action findings (PR #12).
-    - ``wrong_type_row``: some single line carries both ``consult`` and
-      this run's note — a wrong-type write.
-
-    A run whose save evidence is present but on the wrong patient, or
-    whose note landed in a wrong-type row, is a **wrong action**, not a
-    success.
-
-    Args:
-        screen_png: Full-frame screenshot of the final state as PNG bytes.
-        note_text: The note the run was asked to enter.
-        patient_name: The patient the intent-level task targets (the
-            first referral in MockMed's default order).
-
-    Returns:
-        A :class:`FinalStateVerdict`.
-    """
-    from openadapt_flow.vision import ocr
-
-    lines = [_squash(line.text) for line in ocr(screen_png)]
-    hay = "".join(lines)
-    banner_needle = _squash("Encounter saved")
-    banner_found = any(
-        _longest_run(banner_needle, sq) >= len(banner_needle) - 1
-        for sq in lines
-    )
-    needle = _squash(note_text)
-    note_found = any(
-        _longest_run("triage", sq) >= 5
-        and _longest_run(needle, sq) >= _NOTE_LINE_RUN
-        for sq in lines
-    )
-    name = _squash(patient_name)
-    right_patient = name in hay or _longest_run(name, hay) >= len(name) - 1
-    wrong_type_row = any(
-        _longest_run("consult", sq) >= 6
-        and _longest_run(needle, sq) >= _NOTE_LINE_RUN
-        for sq in lines
-    )
-
-    saved = banner_found and note_found
-    wrong_action = (saved and not right_patient) or wrong_type_row
-    return FinalStateVerdict(
-        success=saved and right_patient and not wrong_type_row,
-        banner_found=banner_found,
-        note_found=note_found,
-        right_patient=right_patient,
-        wrong_type_row=wrong_type_row,
-        wrong_action=wrong_action,
-    )
+#: The arm-independent success check, REUSED from the hybrid benchmark so
+#: this head-to-head is judged by the identical bar: OCR of the final
+#: screenshot must show the ``Encounter saved`` banner AND the
+#: ``Triage — <note>`` row AND the right patient (:data:`TARGET_PATIENT`),
+#: and the run's note must not sit in a wrong-type row. A save that landed
+#: on the wrong patient or wrong type is a **wrong action**, not a
+#: success. Neither arm's self-report is ever used.
+verify_final_state = verify_hybrid_final
 
 
 # -- outcome classification -------------------------------------------------------
@@ -1147,8 +969,8 @@ per-condition tables give the data for either choice.
   the final screenshot: OCR must find the `Encounter saved` banner AND a
   `Triage — <note>` row AND the right patient's name
   (`{TARGET_PATIENT}`), and this run's note must not sit in a wrong-type
-  row. Neither arm's self-report is used. This mirrors the hybrid
-  benchmark's check criterion-for-criterion.
+  row. Neither arm's self-report is used. This is the hybrid benchmark's
+  own check (`verify_hybrid_final`), reused — not a reimplementation.
 - **Wrong actions measured for both arms.** The final-state identity
   check flags saves that landed on the wrong patient or wrong encounter
   type, whichever arm produced them.

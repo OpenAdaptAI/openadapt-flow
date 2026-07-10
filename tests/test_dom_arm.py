@@ -361,16 +361,17 @@ def make_screen(*lines: str) -> bytes:
 
 
 class TestVerifyFinalState:
-    def test_saved_state_right_patient_passes(self) -> None:
-        screen = make_screen(
-            "Jane Sample - MRN P1 - DOB 1980-01-01",
-            f"Encounter saved - {NOTE[:40]}",
-            f"Triage - {NOTE[:60]}",
+    """The check itself is verify_hybrid_final, fully covered in
+    test_hybrid_benchmark.py; this pins that the DOM benchmark's exported
+    check is that function and flags the failure mode this benchmark
+    exists to measure."""
+
+    def test_dom_check_is_the_hybrid_check(self) -> None:
+        from openadapt_flow.benchmark.hybrid_benchmark import (
+            verify_hybrid_final,
         )
-        verdict = verify_final_state(screen, NOTE)
-        assert verdict.success
-        assert verdict.right_patient
-        assert not verdict.wrong_action
+
+        assert verify_final_state is verify_hybrid_final
 
     def test_saved_on_wrong_patient_is_wrong_action_not_success(
         self,
@@ -385,11 +386,3 @@ class TestVerifyFinalState:
         assert not verdict.right_patient
         assert verdict.wrong_action
         assert not verdict.success
-
-    def test_halted_form_is_not_success_and_not_wrong_action(self) -> None:
-        # The encounter form shows the typed note before any save; that
-        # must be a plain failure, not a wrong action.
-        screen = make_screen("Note", NOTE[:40], "Save Encounter")
-        verdict = verify_final_state(screen, NOTE)
-        assert not verdict.success
-        assert not verdict.wrong_action

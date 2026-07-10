@@ -75,6 +75,16 @@ if (DRIFT.has('missing')) {
   PATIENTS = PATIENTS.filter(function (p) { return p.id !== 'p1'; });
 }
 if (DRIFT.has('empty')) { PATIENTS = []; }
+// "sort" drift: the referral queue's default sort order changed between
+// runs (say, a server-side switch from arrival order to alphabetical by
+// patient name). Every referral is still present and unmodified; the
+// recorded target is simply no longer the first row, so position-based
+// "first row" automation now points at a different patient.
+if (DRIFT.has('sort')) {
+  PATIENTS = PATIENTS.slice().sort(function (a, b) {
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+}
 
 var state = {
   currentPatientId: null,

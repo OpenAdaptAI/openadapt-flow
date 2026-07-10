@@ -148,6 +148,33 @@ body.drift-move .actions.movable {
 
 #login-card input { width: 100%; }
 
+/* Inline validation error (drift mode "reqfield"). */
+#save-error:not(:empty) {
+  background: #fdecea;
+  border: 1px solid #c0392b;
+  color: #8e2418;
+  padding: 12px;
+  margin-top: 14px;
+  font-size: 16px;
+  max-width: 640px;
+}
+
+body.drift-theme #save-error:not(:empty) {
+  background: #3a1d1a;
+  border-color: #e07a6a;
+  color: #f2b8ae;
+}
+
+/* "What's New" interstitial (drift mode "notice"). */
+#notice-card {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  padding: 24px;
+  width: 520px;
+}
+
+body.drift-theme #notice-card { background: #1f2632; border-color: #3d4a5d; }
+
 textarea#note {
   width: 100%;
   max-width: 640px;

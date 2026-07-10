@@ -22,7 +22,7 @@ import difflib
 
 from pydantic import BaseModel
 
-from openadapt_flow.vision import find_text, ocr
+from openadapt_flow.vision import find_text, ocr, upscale_png
 
 BANNER_PREFIX = "Encounter saved"
 #: MockMed truncation limits (static/app.js): banner shows note[:40], the
@@ -119,21 +119,6 @@ def _squash(text: str) -> str:
     return "".join(text.lower().split())
 
 
-def _upscale_png(screen_png: bytes, factor: int = 2) -> bytes:
-    """Upscale a PNG (cubic) so OCR can read dense small table text."""
-    import cv2
-    import numpy as np
-
-    img = cv2.imdecode(np.frombuffer(screen_png, np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        return screen_png
-    up = cv2.resize(
-        img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC
-    )
-    ok, buf = cv2.imencode(".png", up)
-    return buf.tobytes() if ok else screen_png
-
-
 def _score_note(hay: str, needle: str) -> NoteVerifyResult:
     """Score squashed OCR text against a squashed note."""
     if needle in hay:
@@ -196,7 +181,7 @@ def verify_note_saved(
         return NoteVerifyResult(success=False, matched_ratio=0.0, longest_run=0)
 
     best = NoteVerifyResult(success=False, matched_ratio=0.0, longest_run=0)
-    for png in (screen_png, _upscale_png(screen_png)):
+    for png in (screen_png, upscale_png(screen_png)):
         hay = _squash(" ".join(line.text for line in ocr(png)))
         result = _score_note(hay, needle)
         if result.success or result.longest_run >= min_run:

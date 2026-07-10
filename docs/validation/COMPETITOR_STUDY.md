@@ -89,16 +89,22 @@ Skyvern needs no recording: its workflow is a natural-language goal
 config quoted below), and its first `run_with=code` run is a
 `code_generation` AI run that mints the cached script.
 
-The user-goal text given to both LLM-based compilers is verbatim
-`study_common.USER_GOAL` — the canonical benchmark task statement,
-including "open the first referral task in the Referral Tasks list" and a
-parameterized note. Fairness note on "first": that is how the benchmark
-defines the task, and it is also what our own demonstration encoded
-implicitly; ground truth for drift replays remains the RECORDED patient,
-because data arriving between runs must not silently redirect a recorded
-clinical workflow to a different patient. Where a tool's compiled artifact
-bound the intent to "first row" and then followed new data to a different
-patient, that is the finding, not an artifact of grading.
+Each LLM-based tool received the goal in its own native form, phrasing the
+target identically as the first task in the list: workflow-use's builder got
+`study_common.USER_GOAL` verbatim (committed in
+`scripts/competitor_study/study_common.py`), which includes "open the first
+referral task in the Referral Tasks list"; Skyvern's navigation block got the
+committed YAML `navigation_goal` (`evidence/skyvern_home/mockmed_workflow.yaml`),
+which begins "Open the first referral task in the Referral Tasks list." and
+adds an explicit completion criterion ("The task is complete when the
+encounter-saved confirmation banner is shown on the patient page.") — the two
+strings differ in wording but state the same task. Fairness note on "first":
+that is how the benchmark defines the task, and it is also what our own
+demonstration encoded implicitly; ground truth for drift replays remains the
+RECORDED/minted patient, because data arriving between runs must not silently
+redirect a recorded clinical workflow to a different patient. Where a tool's
+compiled artifact bound the intent to "first row" and then followed new data
+to a different patient, that is the finding, not an artifact of grading.
 
 ### workflow-use arms (three, all disclosed)
 
@@ -135,8 +141,9 @@ patient, that is the finding, not an artifact of grading.
 Notably, the LLM builder **on its own** compiled the drift-attacked row
 click into an `agent` step: *"The Referral Tasks list can change over time,
 so an agentic step is used to reliably locate and open the first task in
-the list regardless of its specific id"* — task: *"find the first task
-listed in the Referral Tasks list and click its 'Open' button"*.
+the list regardless of its specific id."* — task (verbatim substring):
+*"…find the first task listed in the Referral Tasks list and click its
+'Open' button…"*.
 
 ### Skyvern arm
 
@@ -260,10 +267,12 @@ committed characterization suites and are cited, not regenerated here.
   selector, `ai_fallback`, `enable_self_healing`, or the run-final LLM
   completion verification — binds a replay to the entity the cache was
   minted on. The completion check passes because it is conditioned on the
-  goal WE wrote ("open the first referral task in the Referral Tasks list …
-  banner shown"), which is satisfied on the drifted row; it carries no
-  notion of *which patient* the cached script originally targeted (see the
-  goal-text caveat under fairness — an identity-naming goal is unmeasured).
+  goal WE wrote — byte-exact from the committed workflow YAML: `Open the
+  first referral task in the Referral Tasks list.` … `The task is complete
+  when the encounter-saved confirmation banner is shown on the patient page.`
+  — which is satisfied on the drifted row; it carries no notion of *which
+  patient* the cached script originally targeted (see the goal-text caveat
+  under fairness — an identity-naming goal is unmeasured).
   Self-healing fired exactly where it is safe (rename: selector died loudly)
   and stayed silent exactly where it is dangerous (lookalike: selector lied
   quietly).

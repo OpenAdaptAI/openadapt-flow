@@ -144,17 +144,41 @@ TOKEN_SIM_RATIO = 0.7
 CONTRADICTION_SIM = 0.62
 CONTRADICTED_CHARS_CAP = 0
 
-# SUSPECT tokens (2026-07-10 out-of-corpus review, Blocker 1): a
-# name-plausible token (>= MIN_BLOCK chars, no digits or confusion-class
-# symbols on either side) whose ONLY match is confusion-equivalence —
-# canonical-equal but raw-unequal — is a letter-letter collision:
-# 'Neil'/'Nell' (i/l), 'Clay'/'Day' (cl/d), 'Marnie'/'Mamie' (rn/m) are
-# DIFFERENT REAL NAMES that canonicalize identically, so the shape is
-# indistinguishable from a misread of the true row. The epistemically
-# honest outcome is an abort for BOTH readings (wrong sibling: safety;
-# true-row misread: availability), so the budget is zero. Digit/symbol
-# confusions ('Phi1', '5ample', 'c0de') stay clean matches: a human name
-# contains no digits, so no collision with a different name is possible.
+# SUSPECT tokens (2026-07-10 out-of-corpus review): a DISCRIMINATOR token
+# whose ONLY match is confusion-equivalence — canonical-equal but
+# raw-unequal — is charged to this zero budget, because a confusion-only
+# match on a discriminator is indistinguishable at band level from a
+# wrong-row read. Two discriminator classes qualify:
+#
+#   - NAMES (Blocker 1): a name-plausible token (>= MIN_BLOCK chars, no
+#     digits on either side) — 'Neil'/'Nell' (i/l), 'Clay'/'Day' (cl/d),
+#     'Marnie'/'Mamie' (rn/m) are DIFFERENT REAL NAMES that canonicalize
+#     identically. Digit-class noise on a NAME ('Belford'/'Be1ford',
+#     '5ample') stays a clean match — a human name contains no digit, so
+#     the recorded token being all-alpha proves it is a name and the
+#     digit came from OCR, not a rival name.
+#
+#   - IDENTIFIERS (5th reopening, second review): a RECORDED token that
+#     CONTAINS A DIGIT (MRN, account number, chart ref, DOB) whose match
+#     needed a letter/digit confusion (l/1, O/0, S/5, Z/2, B/8, g/9) is
+#     a different identifier, 'A01234'/'AO1234' — and the identifier is
+#     precisely what disambiguates same-name patients. The round-3 rule
+#     missed this because it keyed on name-plausibility (false for any
+#     token with a digit), so the suspect budget was OFF for exactly the
+#     tokens whose confusion equivalence is most dangerous. Scoping on
+#     the RECORDED token (not the observed one) is what keeps
+#     name-with-digit-noise verifying while identifier-with-digit
+#     aborting: the recording carries the ground truth of the token's
+#     type. All-digit differences (748291 vs 748292) are NOT
+#     confusion-equivalent (two digits are never in one class), so they
+#     mismatch via coverage/contradiction, not here.
+#
+# The budget is zero for both. For identifiers this is option A of the
+# review (no corroboration escape): a confusion-differing identifier
+# aborts even when name and DOB raw-match, so two same-name patients
+# distinguished only by an OCR-confusable identifier char never verify —
+# the availability cost (true-row identifier OCR noise now halts) is the
+# cheap direction and is disclosed in docs/LIMITS.md.
 SUSPECT_CHARS_CAP = 0
 
 # Unexplained observed NAME-SHAPED tokens (review Blocker 3): an
@@ -430,10 +454,27 @@ def _name_plausible(token: str) -> bool:
     return not any(ch in _NON_NAME_CHARS for ch in token)
 
 
+def _has_digit(token: str) -> bool:
+    return any(ch.isdigit() for ch in token)
+
+
 def _suspicious_pair(expected: str, observed: str) -> bool:
-    """A canonical-equal, raw-unequal token pair that could be a
-    letter-letter name collision (Neil/Nell) rather than OCR noise:
-    both sides name-plausible and long enough to be a name."""
+    """A canonical-equal, raw-unequal token pair whose match is a
+    confusion-only match on a DISCRIMINATOR — indistinguishable at band
+    level from a wrong-row read. Two qualifying shapes:
+
+    - NAME collision (Neil/Nell): both sides name-plausible and long
+      enough to be a name;
+    - IDENTIFIER collision (A01234/AO1234): the RECORDED token contains a
+      digit (an MRN/account/DOB), so a letter/digit confusion turned it
+      into a DIFFERENT identifier. Scoped on the RECORDED token: a name
+      OCR'd WITH a digit ('Belford' -> 'Be1ford') has an all-alpha
+      recorded token and is NOT suspect (clean OCR noise), while an
+      identifier is suspect regardless of the observed side.
+    """
+    if _has_digit(expected):
+        # Recorded identifier matched only via confusion: a different ID.
+        return True
     return (
         len(expected) >= MIN_BLOCK
         and _name_plausible(expected)

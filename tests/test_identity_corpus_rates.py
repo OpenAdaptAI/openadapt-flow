@@ -3,10 +3,10 @@
 This is the false-negative-RATE guard the sibling reopening demanded
 (third wrong-patient reopening; docs/validation/VALIDATION.md): instead
 of pinning only the adversaries that found the last bug, the matcher is
-held to measured rates on the full held-out corpora — v1 (4360 pairs,
-frozen 2026-07-10 before the rebuild) AND v2 (2240 pairs, frozen
-2026-07-10 before the out-of-corpus redesign; the classes v1 excluded
-by construction — see tests/test_adversary_corpus_v2.py).
+held to measured rates on the full held-out corpora — v1 (4360 pairs),
+v2 (2240 pairs, the classes v1 excluded by construction) and v3 (300
+pairs, identifier letter/digit collisions — the 5th-reopening class v1's
+digit-only mrn_digit_swap could not surface).
 
 If a false-accept assertion fails, a wrong-entity band verifies again:
 that is a P0, not a threshold to renegotiate. If the false-abort budget
@@ -32,23 +32,23 @@ from openadapt_flow.validation.adversary_corpus_v2 import (
     LABEL_INDISTINGUISHABLE,
     generate_corpus_v2,
 )
+from openadapt_flow.validation.adversary_corpus_v3 import generate_corpus_v3
 
-# Measured at the v1+v2 ROC-chosen operating point (IDENTITY_ROC.md):
-# v1 false aborts 21.2% overall after the out-of-corpus redesign —
-# concentrated in occlusion (93%: bands with dropped tokens; in the
-# 2026-07-10 recount ~half of those still had both name tokens readable
-# and aborted on trailing DOB/MRN loss — an availability cost, stated
-# plainly, NOT an epistemic-virtue framing), letter-letter confusion
-# noise (~33%, the indistinguishable class where abort is correct for
-# both readings), compound noise (38%), and capitalized adjacent-row
-# bleed (26%, the price of the unexplained-name budget that closes the
-# observed-superset blocker). Budget set with headroom for genuinely
-# neutral refactors.
-V1_FALSE_ABORT_BUDGET = 0.23
+# Measured at the ROC-chosen operating point (IDENTITY_ROC.md), AFTER the
+# 5th-reopening identifier-suspect fix:
+# v1 false aborts 28.2% — occlusion (93%), and the digit-class noise
+# classes ocr_confusion (66%) and compound_noise (68%) ROSE from 33/38%
+# because digit-class OCR noise that lands on an identifier token (DOB,
+# MRN, phone) now aborts under the identifier-suspect rule (the true-row
+# identifier-noise availability cost, disclosed in LIMITS.md), plus
+# capitalized adjacent-row bleed (26%). Budget set with headroom for
+# genuinely neutral refactors.
+V1_FALSE_ABORT_BUDGET = 0.30
 
-# v2 same_entity classes (digit-class noise, lowercase bleed, hyphenated
-# splits) measure 0.0%; small headroom only.
-V2_FALSE_ABORT_BUDGET = 0.02
+# v2 same_entity: digit_confusion_true_row ROSE from 0% to ~49% — the
+# same identifier-noise cost (half those rows have an MRN the digit noise
+# hit); lowercase bleed and hyphenated splits stay 0%.
+V2_FALSE_ABORT_BUDGET = 0.18
 
 
 def test_zero_false_accepts_on_frozen_corpus_v1():
@@ -80,6 +80,23 @@ def test_zero_false_accepts_on_frozen_corpus_v2():
     assert not offenders, (
         f"{len(offenders)} wrong-entity/indistinguishable bands VERIFIED "
         f"— out-of-corpus P0 reopened. First offenders: {offenders[:5]}"
+    )
+
+
+def test_zero_false_accepts_on_frozen_corpus_v3():
+    """No identifier letter/digit collision (a DIFFERENT patient's
+    MRN/account number one confusable char apart) may EVER verify — the
+    5th wrong-patient reopening. Zero, not a rate."""
+    offenders = [
+        (p.recorded, p.observed)
+        for p in generate_corpus_v3()
+        if p.label == LABEL_DIFFERENT
+        and verify_target_identity(p.recorded, p.observed).status
+        == "verified"
+    ]
+    assert not offenders, (
+        f"{len(offenders)} identifier-collision bands VERIFIED — "
+        f"5th wrong-patient P0 reopened. First offenders: {offenders[:5]}"
     )
 
 

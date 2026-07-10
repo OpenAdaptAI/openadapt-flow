@@ -88,6 +88,7 @@ below.
   reads at 0.1x the input rate). An introductory $2/$10 rate applies
   through 2026-08-31, so billed cost today is about a third lower than
   reported. Compiled replay makes zero model calls.
+- **Identity-protection coverage: not captured in this results.json.** The armed-coverage metric was added to the generator on 2026-07-10; future runs report how many click steps carry the pre-click identity check and list the unarmed steps (which proceed with NO identity verification — see docs/LIMITS.md).
 - **Prompt caching.** The agent loop places `cache_control` breakpoints on
   the tool definition and the newest user message each turn, so each API
   call reuses the cached conversation prefix; screenshot truncation

@@ -1,0 +1,10 @@
+{
+  "seed": 20260712,
+  "n_total": 300,
+  "sha256": "c61c282664ca170559f3c4891f890796a7156dcd7dbe84d4fe3c00663a993828",
+  "counts": {
+    "different_entity": {
+      "id_letter_digit_collision": 300
+    }
+  }
+}

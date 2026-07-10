@@ -94,6 +94,16 @@ def _compiled_run(
         "success": verdict.success,
         "replayer_success": report.success,
         "heal_count": report.heal_count,
+        # Identity-protection coverage of the bundle (constant across
+        # runs of the same bundle; aggregated into the arm summary and
+        # surfaced in BENCHMARK.md methodology): unarmed clicks proceed
+        # with NO identity verification (docs/LIMITS.md).
+        "identity_applicable_steps": report.identity_applicable_steps,
+        "identity_armed_steps": report.identity_armed_steps,
+        "identity_unarmed": [
+            {"step_id": u.step_id, "reason": u.reason}
+            for u in report.identity_unarmed
+        ],
         "actions": len(report.results),
         "first_failure": (
             {"step": failed[0].step_id, "error": failed[0].error}
@@ -250,7 +260,56 @@ def _arm_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "cost_usd_per_run": statistics.fmean(costs) if costs else 0.0,
         "cost_usd_total": sum(costs),
+        **_identity_coverage_aggregate(rows),
     }
+
+
+def _identity_coverage_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Identity-protection coverage summary for a compiled arm.
+
+    The coverage is a property of the BUNDLE (constant across runs), so
+    the first row that carries it speaks for the arm. Agent rows (and
+    results.json files produced before 2026-07-10) carry no coverage
+    fields and yield an empty dict — the markdown renderers then note the
+    metric was not captured.
+    """
+    for r in rows:
+        if "identity_applicable_steps" in r:
+            return {
+                "identity_applicable_steps": r["identity_applicable_steps"],
+                "identity_armed_steps": r["identity_armed_steps"],
+                "identity_unarmed": r.get("identity_unarmed", []),
+            }
+    return {}
+
+
+def identity_coverage_block(compiled_agg: dict[str, Any]) -> str:
+    """Markdown methodology bullet for identity-protection coverage.
+
+    Shared by the MockMed and OpenEMR BENCHMARK.md renderers.
+    """
+    if "identity_applicable_steps" not in compiled_agg:
+        return (
+            "- **Identity-protection coverage: not captured in this "
+            "results.json.** The armed-coverage metric was added to the "
+            "generator on 2026-07-10; future runs report how many click "
+            "steps carry the pre-click identity check and list the "
+            "unarmed steps (which proceed with NO identity verification "
+            "— see docs/LIMITS.md)."
+        )
+    applicable = compiled_agg["identity_applicable_steps"]
+    armed = compiled_agg["identity_armed_steps"]
+    unarmed = compiled_agg.get("identity_unarmed", [])
+    lines = [
+        f"- **Identity-protection coverage (compiled arm): {armed} of "
+        f"{applicable} click steps identity-armed.** Unarmed clicks "
+        "proceed with NO identity verification (docs/LIMITS.md); the "
+        "success rates above therefore measure task completion, not "
+        "wrong-target immunity, on the unarmed steps."
+    ]
+    for u in unarmed:
+        lines.append(f"  - unarmed `{u['step_id']}`: {u['reason']}")
+    return "\n".join(lines)
 
 
 def aggregate_results(
@@ -426,6 +485,7 @@ def render_markdown(results: dict[str, Any]) -> str:
     a = results["arms"]["agent"]
     drift = results["drift_theme"]
     date = results["generated_at"][:10]
+    identity_block = identity_coverage_block(c)
     return f"""# Benchmark: compiled replay vs. computer-use agent
 
 Date: {date}. One task, two ways to automate it, one success check.
@@ -486,6 +546,7 @@ template crop:
   for {results['model']}). An introductory $2/$10 rate applies through
   2026-08-31, so billed cost today is about a third lower than reported.
   Compiled replay makes zero model calls.
+{identity_block}
 
 ## Caveats — read before quoting these numbers
 

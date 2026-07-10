@@ -76,6 +76,7 @@ from openadapt_flow.benchmark.run_benchmark import (
     _agent_run,
     _arm_aggregate,
     _compiled_run,
+    identity_coverage_block,
 )
 from openadapt_flow.ir import Workflow
 
@@ -1129,6 +1130,7 @@ def render_hybrid_markdown(results: dict[str, Any]) -> str:
     a, b = arms["compiled"], arms["agent"]
     c, d = arms["demo_agent"], arms["hybrid"]
     date = results["generated_at"][:10]
+    identity_block = identity_coverage_block(a)
     caps = results["cost_caps_usd"]
     sched = results["schedule"]
     n_drift = sum(1 for x in sched["conditions"] if x != "clean")
@@ -1357,6 +1359,7 @@ ${mean_fb_cost:.4f}), and `a` = the agent-only mean cost per run
   cache writes 1.25x, cache reads 0.1x input). An introductory $2/$10
   rate applies through 2026-08-31, so billed cost today is roughly a
   third lower than reported.
+{identity_block}
 - **Hard cost guardrails.** One shared budget across ALL paid runs (B, C,
   and D's fallbacks): preflight probe before any spend; per-run cap
   ${caps['per_run']:.2f}; total ceiling ${caps['total']:.2f} enforced

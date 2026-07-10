@@ -81,37 +81,52 @@ actions observed — at the cost of availability:
   different segmentation orders), accepts a token ONLY when it is
   OCR-equivalent — identical under the character-confusion classes real
   engines produce (l/1/i, O/0, 5/s, rn/m, cl/d, ...) or a
-  full-consumption token split/join — and the decision holds SIX budgets
-  at once: >= 0.8 coverage; no contiguous uncovered run over 4 squashed
-  characters; zero *contradicted* characters (near-miss siblings —
-  Phil/Philip, John/Joan, an off-by-one DOB or swapped MRN digits, a
-  Jr/Sr suffix on one side, a replaced word or a replaced 1-2 char token
-  such as a middle initial or the SEX column); zero *suspect* characters
-  (a name-plausible token matched only by a LETTER-LETTER confusion —
-  Neil/Nell, Clay/Day, Marnie/Mamie — is indistinguishable from a real
-  sibling and refuses); zero unexplained observed name-shaped tokens (an
+  full-consumption token split/join — and the decision holds several
+  budgets at once: >= 0.8 coverage; no contiguous uncovered run over 4
+  squashed characters; zero *contradicted* characters (near-miss
+  siblings — Phil/Philip, John/Joan, an off-by-one DOB or an all-DIGIT
+  swapped MRN digit, a Jr/Sr suffix on one side, a replaced word or a
+  replaced 1-2 char token such as a middle initial or the SEX column);
+  zero *suspect* characters — a DISCRIMINATOR token matched ONLY by a
+  confusion equivalence, which comes in two kinds: a **name** collision
+  (a name-plausible LETTER-LETTER confusion — Neil/Nell, Clay/Day,
+  Marnie/Mamie — indistinguishable from a real sibling), and an
+  **identifier** collision (a RECORDED token that contains a digit — an
+  MRN, account number, chart ref or DOB — matched only across a
+  letter/DIGIT confusion, l/1, O/0, S/5, Z/2, B/8, g/9, so 'A01234' and
+  'AO1234' are DIFFERENT identifiers, exactly what disambiguates
+  same-name patients); zero unexplained observed name-shaped tokens (an
   appended middle name, a second row OCR-merged into the band, a
   message/cc row that merely MENTIONS the recorded patient); and no
   absent name-like alphabetic token of 4+ characters (a band must not
   verify with its identity token never read). The 2026-07-09 matcher's
   containment and 0.7-similarity tiers measured 53.9% false-accept on
-  frozen corpus v1; the first rebuild measured 0.0% there but the
-  2026-07-10 review showed that zero was partially tautological — v1's
+  frozen corpus v1; the first rebuild measured 0.0% there but the FIRST
+  2026-07-10 review showed that zero was partially tautological (v1's
   labeling rule excluded confusion-collided names, short-token
-  discriminators, observed supersets and absent-name shapes by
-  construction, and 13 out-of-corpus probes in those classes all
-  silently VERIFIED. The redesigned matcher measures **0.000% false
-  accepts on corpus v1+v2 plus the 13-probe set** — scoped exactly to
-  those corpora, not to the world, and the operating point was fit on
-  the same corpora that produce the headline (docs/validation/
-  IDENTITY_ROC.md states this bias plainly). The availability bill is
-  equally plain: **21.2% false aborts on v1's noise classes** (up from
-  10.7% pre-review; 0% on v2's legitimate-noise classes), concentrated
-  in occlusion — where a recount showed ~half the aborted bands still
-  had BOTH name tokens readable and aborted on trailing DOB/MRN loss,
-  an availability cost, not the "correct epistemic refusal" the earlier
-  doc claimed — plus letter-letter confusion noise and capitalized
-  adjacent-row bleed. For a parameterized target (e.g. *which patient*
+  discriminators, observed supersets and absent-name shapes; 13
+  out-of-corpus probes in those classes all silently VERIFIED), and the
+  SECOND 2026-07-10 review then found the suspect budget guarded NAME
+  tokens only — it was OFF for MRNs/account numbers, so a different
+  patient's alphanumeric identifier one letter/digit-confusable char
+  apart silently VERIFIED (the 5th wrong-patient reopening; v1's
+  `mrn_digit_swap` class only ever changed DIGITS, which are never
+  confusion-equivalent, so it could not surface the hole). With the
+  identifier-suspect fix the matcher measures **0.000% false accepts on
+  corpus v1+v2+v3 plus the 18-probe set** — scoped exactly to those
+  corpora, not to the world, and the operating point was fit on the same
+  corpora that produce the headline (docs/validation/IDENTITY_ROC.md
+  states this bias plainly). The availability bill is equally plain:
+  **28.2% false aborts on v1's noise classes** (up from 10.7% pre-review
+  and 21.2% after the first redesign), concentrated in occlusion — where
+  a recount showed ~half the aborted bands still had BOTH name tokens
+  readable and aborted on trailing DOB/MRN loss, an availability cost,
+  not the "correct epistemic refusal" the earlier doc claimed — plus
+  digit-class OCR noise that lands on an identifier token and now aborts
+  (v2's `digit_confusion_true_row` class rose from 0% to ~49%: the
+  true-row identifier-noise cost of the 5th-reopening fix), the
+  letter-letter confusion mechanism, and capitalized adjacent-row bleed.
+  For a parameterized target (e.g. *which patient*
   to open), the run's value is substituted into the recorded band and
   the whole substituted band must match — a row that merely mentions
   the run's value does not verify. Caveats, disclosed: only ARMED steps
@@ -248,23 +263,43 @@ these are what remain):
 - **Names differing only by case or whitespace verify** — comparison is
   case- and whitespace-insensitive by construction ('MacDonald' vs
   'Macdonald' is the same band).
-- **1-2 character letter-letter confusions verify** — the suspect rule
-  needs 3+ chars, so a middle initial 'I' vs 'L' (confusion-equivalent)
-  still passes; a REPLACED initial ('J' vs 'K') is caught, an ADDED
-  short token ('Phil M' vs 'Phil J M') is not (the unexplained-token
-  budget starts at 3 chars).
+- **1-2 character letter-letter name confusions verify** — the name
+  suspect rule needs 3+ chars, so a middle initial 'I' vs 'L'
+  (confusion-equivalent) still passes; a REPLACED initial ('J' vs 'K')
+  is caught, an ADDED short token ('Phil M' vs 'Phil J M') is not (the
+  unexplained-token budget starts at 3 chars).
+- **Short (1-2 char) ALL-ALPHA codes confused with a digit verify** —
+  the identifier suspect rule keys on the RECORDED token carrying a
+  digit; a 2-char alpha code ('AB') that OCRs to 'A8' has an all-alpha
+  recorded token (so the identifier rule does not see it) and is under
+  the 3-char name floor. Full-length alphanumeric identifiers (MRNs,
+  account numbers) are covered; this residual is only the very short
+  all-alpha code.
+- **Identifier letter/DIGIT collision is now CAUGHT** (5th-reopening
+  fix, second review): a different patient's MRN/account number one
+  OCR-confusable char apart ('A01234' vs 'AO1234') aborts, even when the
+  name and DOB raw-match. Cost, disclosed next.
+- **True-row identifier OCR noise now ABORTS** — the price of the line
+  above: when OCR garbles the CORRECT row's own identifier by a
+  letter/digit-confusable char, the run halts rather than gamble on
+  identity (indistinguishable at band level from a different-patient
+  row). Availability cost, the cheap direction. All-DIGIT identifier
+  differences (748291 vs 748292) are unaffected — not
+  confusion-equivalent, still caught as a genuine mismatch.
 - **Indistinguishable-class aborts are permanent** — a true row whose
   name OCR letter-letter-garbles ('Neil' read as 'Nell') aborts every
   time, because the band is textually identical to a real sibling;
   this is the safety direction and it costs availability on noisy rows.
-- **Compiled-only users pay ~21% halts on v1-style noisy rows as the
-  availability price of the redesign** (0% on clean digit-class noise,
-  splits and bleed — see IDENTITY_ROC.md per-class tables); hybrid
-  deployments convert each halt into one ~$0.10 fallback escalation.
+- **Compiled-only users pay ~28% halts on v1-style noisy rows as the
+  availability price of the redesigns** (up from ~21% before the
+  identifier-suspect fix; 0% on clean splits/bleed, ~49% on the
+  digit_confusion_true_row class — see IDENTITY_ROC.md per-class
+  tables); hybrid deployments convert each halt into one ~$0.10 fallback
+  escalation.
 - **The operating point is fit to the frozen corpora that produce the
   headline zero** — freezing prevents tuning the corpus toward the
   matcher, not the matcher's thresholds toward the corpus; every
-  zero-claim on this page is scoped to corpus v1+v2 plus the 13
+  zero-claim on this page is scoped to corpus v1+v2+v3 plus the 18
   out-of-corpus reviewer probes.
 
 Other known-remaining items:

@@ -497,7 +497,7 @@ recount and the realistic-exposure analysis: IDENTITY_ROC.md):
   framing was wrong and is corrected above and in LIMITS.md.
 - realistic exposure: the Blocker-1 probes used IDENTICAL MRNs on
   different patients (unrealistic — MRNs are unique). On realistic
-  collided pairs with differing readable DOB/MRN, the absence/
+  NAME-collided pairs with differing readable DOB/MRN, the absence/
   contradiction budgets alone catch 180/180 even with the suspect rule
   disabled; the TRUE residual-exposure shape is the band where the
   name is the ONLY discriminative token (180/180 caught, but by the
@@ -506,6 +506,51 @@ recount and the realistic-exposure analysis: IDENTITY_ROC.md):
   'Ann Marie'/'Annmarie' token-join equivalence, case/whitespace-only
   name differences, 1-2 char letter-letter confusions (an 'I' vs 'L'
   initial), and an ADDED (not replaced) 1-2 char token.
+  **CAVEAT ADDED BY THE SECOND REVIEW:** the "differing readable DOB/MRN
+  -> caught 180/180 without the suspect rule" claim held only because
+  those pairs differ in the NAME. It did NOT cover a pair differing only
+  in the IDENTITY value by a letter/DIGIT confusion — the 5th reopening
+  below — where the absence/contradiction budgets do NOT fire (the token
+  count and coverage are identical) and the pre-fix suspect rule was OFF
+  for digit-bearing tokens. See the next subsection.
+
+### Fix update (2026-07-10, SECOND review): the 5th wrong-patient reopening — identifier letter/digit collision
+
+The suspect budget above guarded NAME tokens only: ``_name_plausible``
+returns False for any token containing a digit, so the rule was OFF for
+MRNs/account numbers — while the confusion canonicalization (l/1, O/0,
+S/5, Z/2, B/8, g/9) still applied to them. A DIFFERENT patient's
+alphanumeric identifier differing only by one letter/digit-confusable
+character silently VERIFIED as same-entity:
+
+- ``Belford Jane MRN l482913 …`` vs ``… MRN 1482913 …`` -> verified;
+- ``Chen Wei MRN O52133 …`` vs ``… 052133 …`` -> verified;
+- ``Doe John MRN AO1234`` vs ``Doe John MRN A01234`` -> verified (two
+  same-name patients whose ONLY difference is one MRN char — the
+  canonical clinical case); fired in param mode too. All-DIGIT MRN
+  differences (748291 vs 748292) correctly mismatched — the hole was
+  precisely the letter/digit boundary. v1's ``mrn_digit_swap`` class
+  only ever swapped/changed DIGITS, so it never surfaced this.
+
+The five identifier probes are pinned in
+``tests/test_identity_out_of_corpus.py`` (``TestBlocker5*``), committed
+FAILING first. **The fix** (option A of the review, no corroboration
+escape): the suspect rule now also fires on a confusion-only match where
+the RECORDED token contains a digit — an identifier. Scoping on the
+recorded token keeps name-with-digit-noise verifying ('Belford' is
+all-alpha, so 'Be1ford' is clean OCR noise) while an identifier aborts.
+Option B (allow if name+DOB raw-match) was rejected: two real patients
+can share a name and DOB, so it would ALLOW exactly the Doe John
+wrong-patient case. **Corpus v3** (300 pairs, own seed 20260712 and SHA
+manifest, frozen before the fix) is the ``id_letter_digit_collision``
+class; the matcher scores **0/300** false accepts on it, and the full
+ROC re-ran on v1+v2+v3 (IDENTITY_ROC.md). **Availability cost, honest:**
+true-row identifier OCR noise now aborts too (indistinguishable at band
+level from a different patient) — v2 ``digit_confusion_true_row`` rose
+0% -> ~49%, v1 overall false aborts 21.2% -> 28.2%. Residual verify
+classes gain one entry: a short (1-2 char) ALL-ALPHA code confused with
+a digit (recorded token has no digit, under the 3-char name floor);
+full-length identifiers are covered.
 
 ## Outcome vocabulary
 

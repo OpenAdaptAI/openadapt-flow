@@ -1108,14 +1108,17 @@ def test_type_masked_field_accepts_diff_without_new_text(bundle, run_dir):
 
 def test_type_masked_dots_reading_as_noise_still_accepts(bundle, run_dir):
     """FIXED 2026-07-09 (CI regression): on some platform renderers the
-    password dots OCR not as nothing but as punctuation runs or
-    low-confidence glyph noise — a raw text-length comparison then read
-    that as 'new readable text' and false-halted the login. The masked
-    heuristic counts only confident ALPHANUMERIC characters, which is
-    also invariant to OCR re-segmentation between frames."""
+    password dots OCR not as nothing but as punctuation runs,
+    low-confidence glyph noise, or even CONFIDENT homogeneous digit runs
+    (measured on the Linux renderer: 17 bullets -> '0000000000006' at
+    0.81) — a raw text-length comparison then read that as 'new readable
+    text' and false-halted every login. The masked heuristic counts only
+    confident, non-homogeneous ALPHANUMERIC characters, which is also
+    invariant to OCR re-segmentation between frames."""
     vision = _type_vision()
     dots = [
         OcrLine("................."),  # confident punctuation run
+        OcrLine("0000000000006", confidence=0.81),  # verbatim Linux misread
         OcrLine("mockmed demo pass", confidence=0.3),  # sub-threshold noise
     ]
     vision.ocr_results = [dots, dots, dots, []]

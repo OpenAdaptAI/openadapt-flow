@@ -60,11 +60,16 @@ FIELD_REGION_SIZE = (640, 240)
 # dots, which OCR reads as nothing, low-confidence noise, or punctuation
 # runs, while a dialog rendering over the region adds confident words.
 # "Readable" therefore counts alphanumeric characters of lines OCR is
-# confident about (>= MASKED_MIN_CONFIDENCE): alnum counts are invariant
-# to segmentation differences and exclude dot/bullet noise, which varies
-# by platform renderer. The gain may not exceed MASKED_NEW_TEXT_SLACK.
+# confident about (>= MASKED_MIN_CONFIDENCE), EXCLUDING homogeneous glyph
+# runs: a dot row can misread as a confident digit run (measured on the
+# Linux renderer: 17 bullets -> '0000000000006' at 0.81 confidence), and
+# such runs are >= MASKED_REPEAT_FRACTION one repeated character —
+# no real dialog sentence is. Alnum counts are also invariant to
+# segmentation differences between frames. The gain may not exceed
+# MASKED_NEW_TEXT_SLACK.
 MASKED_NEW_TEXT_SLACK = 3
 MASKED_MIN_CONFIDENCE = 0.6
+MASKED_REPEAT_FRACTION = 0.66
 
 # Closed-loop scroll: a SCROLL step keeps scrolling by its recorded delta
 # until the NEXT anchored step's anchor resolves on a settled frame, bounded
@@ -566,17 +571,27 @@ class Replayer:
         """Confidently readable alphanumeric characters in a region.
 
         The masked-acceptance metric (see ``MASKED_NEW_TEXT_SLACK``):
-        password dots OCR as nothing, low-confidence noise, or
-        punctuation runs depending on the platform renderer, while a
-        dialog adds confident words. Counting only alphanumeric
-        characters of confident lines is also invariant to OCR merging
-        or splitting the same text into different boxes between frames.
+        password dots OCR as nothing, low-confidence noise, punctuation
+        runs, or — on some platform renderers — confident homogeneous
+        digit runs, while a dialog adds confident words. Counting only
+        alphanumeric characters of confident, non-homogeneous lines is
+        also invariant to OCR merging or splitting the same text into
+        different boxes between frames.
         """
         total = 0
         for line in self.vision.ocr(png, region=region):
             if getattr(line, "confidence", 1.0) < MASKED_MIN_CONFIDENCE:
                 continue
-            total += sum(ch.isalnum() for ch in line.text)
+            alnum = [ch for ch in line.text if ch.isalnum()]
+            if not alnum:
+                continue
+            most_common = max(alnum.count(ch) for ch in set(alnum))
+            if (
+                len(alnum) >= 4
+                and most_common / len(alnum) >= MASKED_REPEAT_FRACTION
+            ):
+                continue  # homogeneous glyph run: masked-dot misread
+            total += len(alnum)
         return total
 
     def _typed_input_landed(

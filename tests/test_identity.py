@@ -25,6 +25,17 @@ TestFieldLevelSiblings below; the matcher was rebuilt around strict
 OCR-equivalence plus contradiction budgets and its operating point was
 picked from a FROZEN held-out adversarial corpus
 (docs/validation/IDENTITY_ROC.md) — pinned in TestOperatingPoint.
+
+OUT-OF-CORPUS REVIEW (2026-07-10, PR #16): thirteen probes outside
+corpus v1's label rule all VERIFIED (confusion-collided distinct names,
+short-token discriminators, observed-side supersets, absent name
+tokens) — pinned in tests/test_identity_out_of_corpus.py, fixed by the
+suspect / short-token-replacement / unexplained-name / absent-name
+budgets. Two consequences flipped pins HERE: letter-letter confusion
+jitter on the TRUE row now aborts (indistinguishable from a Neil/Nell
+sibling — see TestTruePositives), and the pure-absence boundary at the
+run cap now refuses when the absent token is name-like (see
+TestOperatingPoint).
 """
 
 from __future__ import annotations
@@ -34,12 +45,15 @@ from types import SimpleNamespace
 import pytest
 
 from openadapt_flow.runtime.identity import (
+    ABSENT_NAME_TOKEN_CAP,
     CONTRADICTED_CHARS_CAP,
     CONTRADICTION_SIM,
     COVERAGE_THRESHOLD,
     MIN_CONTEXT_CHARS,
     MIN_PARAM_CHARS,
+    SUSPECT_CHARS_CAP,
     UNCOVERED_RUN_CAP,
+    UNEXPLAINED_NAME_TOKENS_CAP,
     band_match,
     band_region,
     context_from_lines,
@@ -203,14 +217,30 @@ class TestTruePositives:
     def test_true_row_verifies(self):
         assert verify_target_identity(ROW, ROW).status == "verified"
 
-    def test_ocr_jitter_verifies(self):
-        """Per-character OCR noise ('paln' ~ 'pain', '5ample' ~ 'sample')
-        must not abort a correct target."""
+    def test_digit_class_ocr_jitter_verifies(self):
+        """Digit/symbol-class OCR noise ('5ample' ~ 'sample', 'Phi1' ~
+        'Phil') must not abort a correct target: a human name contains
+        no digits, so no collision with a DIFFERENT name is possible."""
         check = verify_target_identity(
             "Jane Sample Knee pain referral High",
-            "Jane 5ample Knee paln referral Hlgh",
+            "Jane 5ample Knee pain referral High",
         )
         assert check.status == "verified"
+
+    def test_letter_letter_jitter_aborts_as_indistinguishable(self):
+        """FLIPPED by the 2026-07-10 out-of-corpus review: 'paln'/'pain'
+        and 'Hlgh'/'High' are letter-letter confusions — the exact
+        mechanism by which 'Nell' passes for 'Neil' (a DIFFERENT
+        patient). Content-agnostically the true-row misread and the
+        collided sibling are the same band, so the honest outcome is an
+        abort for both readings (availability cost, disclosed in
+        docs/LIMITS.md; scored as the indistinguishable class in the
+        v2 corpus)."""
+        check = verify_target_identity(
+            "Jane Sample Knee pain referral High",
+            "Jane Sample Knee paln referral Hlgh",
+        )
+        assert check.status == "mismatch"
 
     def test_token_permutation_verifies(self):
         """Live OpenEMR false abort: page chrome around a modal re-reads in
@@ -277,7 +307,7 @@ class TestWrongEntities:
 
 class TestBandMatch:
     def test_exact_match(self):
-        assert band_match(ROW, ROW) == (1.0, 0, 0)
+        assert band_match(ROW, ROW) == (1.0, 0, 0, 0, 0, 0)
 
     def test_adjacent_unmatched_tokens_merge_into_one_run(self):
         match = band_match(ROW, WRONG_ROW)
@@ -299,17 +329,27 @@ class TestBandMatch:
         # splits/joins are the ONLY sub-token acceptance left — full
         # consumption, no partial containment ('Phil' in 'Philip' is a
         # sibling, not a join; see TestSiblingProbes).
-        assert band_match("ShowActive", "Show Active") == (1.0, 0, 0)
-        assert band_match("Show Active", "ShowActive") == (1.0, 0, 0)
-        # ... and with OCR noise inside the joined form:
-        assert band_match("Comprehensive panel", "Cornprehensive panel") == (
-            1.0, 0, 0,
-        )
+        assert band_match("ShowActive", "Show Active") == (1.0, 0, 0, 0, 0, 0)
+        assert band_match("Show Active", "ShowActive") == (1.0, 0, 0, 0, 0, 0)
+        # ... and with digit-class OCR noise inside the split form:
+        assert band_match("ShowActive", "Sh0w Active") == (1.0, 0, 0, 0, 0, 0)
+
+    def test_letter_letter_confusion_is_suspect_not_clean(self):
+        # 'Cornprehensive' matches 'Comprehensive' canonically (rn/m) but
+        # the pair is digit-free on both sides — the same shape as the
+        # Marnie/Mamie sibling collision, so it is charged to the
+        # suspect budget instead of being a clean match.
+        match = band_match("Comprehensive panel", "Cornprehensive panel")
+        assert match.coverage == 1.0
+        assert match.suspect_chars == len("comprehensive")
 
     def test_empty_inputs(self):
-        assert band_match("", "anything") == (0.0, 0, 0)
+        assert band_match("", "anything") == (0.0, 0, 0, 0, 0, 0)
         match = band_match("abcdef", "")
         assert match.coverage == 0.0 and match.max_uncovered_run == 6
+        # ... and the fully absent alphabetic token registers as an
+        # absent name-like token.
+        assert match.max_absent_alpha_token == 6
 
     def test_tokenize(self):
         assert tokenize("  Jane   Li \n panel ") == ["jane", "li", "panel"]
@@ -326,21 +366,35 @@ class TestOperatingPoint:
         assert UNCOVERED_RUN_CAP == 4
         assert CONTRADICTION_SIM == 0.62
         assert CONTRADICTED_CHARS_CAP == 0
+        assert SUSPECT_CHARS_CAP == 0
+        assert UNEXPLAINED_NAME_TOKENS_CAP == 0
+        assert ABSENT_NAME_TOKEN_CAP == 3
 
-    def test_pure_absence_boundary_at_run_cap(self):
-        """A 4-char token ABSENT (nothing in its place — OCR dropout, the
-        $-cost direction) sits exactly on coverage 0.8 / run 4: verified.
-        A 5-char absence fails the run cap."""
+    def test_pure_absence_boundary_is_class_weighted(self):
+        """FLIPPED by the 2026-07-10 out-of-corpus review (Major 4): a
+        fully absent 4-char ALPHABETIC token used to sit exactly on
+        coverage 0.8 / run 4 and VERIFY — the band's identity token was
+        never read. Absence of a name-like token now refuses; absence of
+        a numeric token at the same coverage/run (trailing DOB/MRN
+        dropout, the $-cost OCR direction) still verifies."""
         match = band_match("abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop")
         assert match.coverage == pytest.approx(0.8)
         assert match.max_uncovered_run == 4
         assert match.contradicted_chars == 0
+        assert match.max_absent_alpha_token == 4  # the flipped signal
         check = verify_target_identity(
             "abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop"
         )
-        assert check.status == "verified"
+        assert check.status == "mismatch"
+        # The same absence with a NUMERIC token (trailing-numerics
+        # dropout) keeps the old tolerance: class-weighted, not blanket.
         check = verify_target_identity(
-            "abcd efgh ijkl mnop qrstu", "abcd efgh ijkl mnop"
+            "abcd efgh ijkl mnop 1234", "abcd efgh ijkl mnop"
+        )
+        assert check.status == "verified"
+        # A 5-char numeric absence still fails the generic run cap.
+        check = verify_target_identity(
+            "abcd efgh ijkl mnop 12345", "abcd efgh ijkl mnop"
         )
         assert check.status == "mismatch"
 

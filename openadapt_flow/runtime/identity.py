@@ -24,6 +24,17 @@ identity). The compiler stores the band text on the anchor
   classes, and an unmatched token whose observed counterpart is a
   near-name ('Phil'/'Philip', 'John'/'Joan', an off-by-one DOB) is
   affirmative wrong-sibling evidence with its own, stricter budget.
+  Since the 2026-07-10 out-of-corpus review, four further budgets close
+  the classes corpus v1 excluded by construction: a name-plausible token
+  matched ONLY by letter-letter confusion equivalence is SUSPECT (a
+  Neil/Nell collision is indistinguishable from a misread — abort, see
+  ``SUSPECT_CHARS_CAP``); a raw-unequal, non-confusion-equivalent 1-2
+  char token is contradiction (middle initials, the SEX column); an
+  observed name-shaped token the recorded band cannot explain is
+  contradiction (appended names, two-row merges, rows that merely
+  MENTION the recorded patient); and an ABSENT name-like alphabetic
+  token >= 4 chars refuses even inside the generic run cap (identity
+  must not verify with its identity token never read).
   Order-insensitivity matters because OCR re-reads the same band in a
   different segmentation order between visits (e.g. page chrome around a
   modal), or
@@ -52,6 +63,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections import Counter
 from datetime import date
 from typing import Any, Iterable, NamedTuple, Optional
 
@@ -132,6 +144,48 @@ TOKEN_SIM_RATIO = 0.7
 CONTRADICTION_SIM = 0.62
 CONTRADICTED_CHARS_CAP = 0
 
+# SUSPECT tokens (2026-07-10 out-of-corpus review, Blocker 1): a
+# name-plausible token (>= MIN_BLOCK chars, no digits or confusion-class
+# symbols on either side) whose ONLY match is confusion-equivalence —
+# canonical-equal but raw-unequal — is a letter-letter collision:
+# 'Neil'/'Nell' (i/l), 'Clay'/'Day' (cl/d), 'Marnie'/'Mamie' (rn/m) are
+# DIFFERENT REAL NAMES that canonicalize identically, so the shape is
+# indistinguishable from a misread of the true row. The epistemically
+# honest outcome is an abort for BOTH readings (wrong sibling: safety;
+# true-row misread: availability), so the budget is zero. Digit/symbol
+# confusions ('Phi1', '5ample', 'c0de') stay clean matches: a human name
+# contains no digits, so no collision with a different name is possible.
+SUSPECT_CHARS_CAP = 0
+
+# Unexplained observed NAME-SHAPED tokens (review Blocker 3): an
+# observed-side superset used to verify unconditionally — context mode
+# had no unexplained-observed-token budget (param mode always had one via
+# its raw run requirement). An observed token that is name-shaped
+# (leading uppercase in the raw band, alphabetic-dominated,
+# name-plausible, >= MIN_BLOCK chars) and that the recorded band cannot
+# explain is affirmative evidence of a different or merged row: an
+# appended middle name, a second row OCR-merged into the band, or a
+# message/cc row that MENTIONS the recorded patient. Budget zero, from
+# the v1+v2 ROC. Lowercase adjacent-row bleed (mid-procedure words) is
+# deliberately exempt — the legitimate spurious-token class.
+UNEXPLAINED_NAME_TOKENS_CAP = 0
+
+# Absent name-like tokens (review Major 4): the generic uncovered-run
+# cap tolerates a 4-char absence, which let a band verify with its
+# 4-char first name never read at all ('Belford, Phil' vs 'Belford,').
+# Absence of a name-like ALPHABETIC token is worse than absence of
+# trailing numerics (DOB/MRN dropout is the common $-cost OCR direction;
+# a missing name is the identity token itself), so unmatched
+# alphabetic-dominated, name-plausible tokens carry their own cap: 3
+# chars — a dropped 'MRN' label or generic 3-char word is tolerated, a
+# >= 4-char name-like token must be read (raw or confusion) to verify.
+ABSENT_NAME_TOKEN_CAP = 3
+
+# Characters that cannot appear in a real person's name but do appear in
+# OCR confusion classes: a raw-unequal token pair involving one of these
+# is genuine OCR noise, not a possible different name.
+_NON_NAME_CHARS = frozenset("0123456789|!")
+
 # Generational suffixes: presence on one side only is identity-bearing
 # ('Belford, Phil' vs 'Belford, Phil Jr' is a different patient).
 # Membership is tested on the OCR-canonical form (a live 'II' commonly
@@ -193,10 +247,19 @@ def band_region(
     return (0, y, vw, min(h, vh - y))
 
 
-def _intersects(a: Region, b: Region) -> bool:
+def regions_intersect(a: Region, b: Region) -> bool:
+    """Whether two (x, y, w, h) regions overlap. Public because the
+    replayer uses it to exclude the resolved target's own crop from the
+    live band (mirroring the compiler's record-time exclusion — the
+    label is mutable evidence and must not participate in identity, and
+    an ASYMMETRIC observed band would trip the unexplained-name budget
+    on the target's own label)."""
     ax, ay, aw, ah = a
     bx, by, bw, bh = b
     return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+
+_intersects = regions_intersect
 
 
 def lines_near_point(lines: Iterable[Any], point_y: int) -> list[Any]:
@@ -360,6 +423,38 @@ def _alpha_dominated(token: str) -> bool:
     return sum(ch.isalpha() for ch in token) * 2 >= len(token)
 
 
+def _name_plausible(token: str) -> bool:
+    """Whether every character of a squashed token could appear in a real
+    name (no digits, no confusion-class symbols): only such tokens can
+    collide with a DIFFERENT real name under letter-letter confusions."""
+    return not any(ch in _NON_NAME_CHARS for ch in token)
+
+
+def _suspicious_pair(expected: str, observed: str) -> bool:
+    """A canonical-equal, raw-unequal token pair that could be a
+    letter-letter name collision (Neil/Nell) rather than OCR noise:
+    both sides name-plausible and long enough to be a name."""
+    return (
+        len(expected) >= MIN_BLOCK
+        and _name_plausible(expected)
+        and _name_plausible(observed)
+    )
+
+
+def _name_shaped(raw_token: str, squashed_token: str) -> bool:
+    """Whether an observed band token looks like part of a person's name:
+    leading uppercase in the RAW band text, alphabetic-dominated,
+    name-plausible, at least MIN_BLOCK squashed chars. Used by the
+    unexplained-observed-token budget — lowercase adjacent-row bleed
+    (mid-procedure words) is deliberately not name-shaped."""
+    return (
+        len(squashed_token) >= MIN_BLOCK
+        and raw_token[:1].isupper()
+        and _alpha_dominated(squashed_token)
+        and _name_plausible(squashed_token)
+    )
+
+
 _GEN_SUFFIX_CANON = frozenset(
     ocr_canonical(s) for s in GENERATIONAL_SUFFIXES
 )
@@ -383,17 +478,32 @@ class BandMatch(NamedTuple):
         contradicted_chars: Total squashed characters of recorded tokens
             with a NEAR-MISS in the observed band — affirmative evidence
             of a different entity (sibling names, edited DOB/MRN fields,
-            generational suffixes, replaced words).
+            generational suffixes, replaced words, changed short tokens
+            like a middle initial or the sex column).
+        suspect_chars: Total squashed characters of recorded
+            name-plausible tokens matched ONLY by letter-letter
+            confusion equivalence — a Neil/Nell-class collision,
+            indistinguishable from a misread of the true row (abort is
+            the correct outcome for both readings).
+        unexplained_name_tokens: Observed name-shaped tokens the
+            recorded band cannot explain — appended names, merged rows,
+            rows that mention the recorded patient.
+        max_absent_alpha_token: Longest unmatched name-like alphabetic
+            recorded token — absence of the identity token itself, worse
+            than trailing-numerics dropout.
     """
 
     coverage: float
     max_uncovered_run: int
     contradicted_chars: int
+    suspect_chars: int = 0
+    unexplained_name_tokens: int = 0
+    max_absent_alpha_token: int = 0
 
 
 def _match_tokens(
     exp: list[str], obs: list[str]
-) -> tuple[list[bool], list[bool]]:
+) -> tuple[list[bool], list[bool], list[bool], list[bool]]:
     """Mark matched recorded tokens and explained observed tokens.
 
     Order-insensitive at token granularity (OCR re-reads the same band in
@@ -412,17 +522,36 @@ def _match_tokens(
     there is deliberately NO similarity-ratio or partial-containment
     acceptance — those tiers verified near-name siblings (Phil/Philip,
     John/Joan), the third wrong-patient reopening.
+
+    For each matched recorded token the match QUALITY is tracked too:
+    ``raw_matched`` marks tokens with a raw-equal (squashed-identical)
+    counterpart, and ``suspect_evidence`` marks tokens whose only
+    evidence is a letter-letter confusion equivalence against a
+    name-plausible observed counterpart (the Neil/Nell collision class —
+    see :data:`SUSPECT_CHARS_CAP`).
+
+    Returns:
+        ``(matched, explained, raw_matched, suspect_evidence)``.
     """
     exp_c = [ocr_canonical(t) for t in exp]
     obs_c = [ocr_canonical(t) for t in obs]
     matched = [False] * len(exp)
     explained = [False] * len(obs)
+    raw_matched = [False] * len(exp)
+    suspect_evidence = [False] * len(exp)
+
+    def mark(i: int, expected_raw: str, observed_raw: str) -> None:
+        matched[i] = True
+        if expected_raw == observed_raw:
+            raw_matched[i] = True
+        elif _suspicious_pair(expected_raw, observed_raw):
+            suspect_evidence[i] = True
 
     # single-token equivalence (mark every equivalent observed copy)
     for i, ec in enumerate(exp_c):
         for j, oc in enumerate(obs_c):
             if ec == oc:
-                matched[i] = True
+                mark(i, exp[i], obs[j])
                 explained[j] = True
 
     # split: consecutive recorded tokens -> one observed token
@@ -432,13 +561,19 @@ def _match_tokens(
                 break
             if all(matched[i : i + size]):
                 continue
-            concat_c = ocr_canonical("".join(exp[i : i + size]))
+            concat_raw = "".join(exp[i : i + size])
+            concat_c = ocr_canonical(concat_raw)
             if len(concat_c) < MIN_BLOCK:
                 continue
             for j, oc in enumerate(obs_c):
                 if oc == concat_c:
+                    rawok = concat_raw == obs[j]
                     for m in range(i, i + size):
                         matched[m] = True
+                        if rawok:
+                            raw_matched[m] = True
+                        elif _suspicious_pair(concat_raw, obs[j]):
+                            suspect_evidence[m] = True
                     explained[j] = True
 
     # join: one recorded token -> consecutive observed tokens
@@ -449,15 +584,15 @@ def _match_tokens(
             for size in (2, 3, 4):
                 if j + size > len(obs):
                     break
-                concat_c = ocr_canonical("".join(obs[j : j + size]))
-                if concat_c == exp_c[i]:
-                    matched[i] = True
+                concat_raw = "".join(obs[j : j + size])
+                if ocr_canonical(concat_raw) == exp_c[i]:
+                    mark(i, token, concat_raw)
                     for m in range(j, j + size):
                         explained[m] = True
                     break
             if matched[i]:
                 break
-    return matched, explained
+    return matched, explained, raw_matched, suspect_evidence
 
 
 def _contradicted(
@@ -471,7 +606,7 @@ def _contradicted(
     """Mark recorded tokens whose absence is a NEAR-MISS, not dropout.
 
     A wrong sibling row does not merely lack the recorded name — it shows
-    a near-name in its place. Four contradiction shapes (rationale on the
+    a near-name in its place. Five contradiction shapes (rationale on the
     constants above):
 
     - near-miss similarity: an observed >=3-char token is canonically
@@ -480,6 +615,12 @@ def _contradicted(
       alphabetic residue ('Phil' in 'Phillipa');
     - replacement: the recorded token is alphabetic and some UNexplained
       alphabetic observed token exists ('Amy' -> 'Kim', similarity 0);
+    - short-token replacement (2026-07-10 review, Blocker 2): a 1-2 char
+      alphabetic recorded token, unmatched, with an unexplained observed
+      alphabetic token of the SAME length that is not
+      confusion-equivalent — a changed middle initial ('J' -> 'K'), the
+      SEX column ('M' -> 'F'), a 2-char name ('Al' -> 'Bo'). These sat
+      below MIN_BLOCK and were invisible to every rule;
     - generational suffix on either side, unmatched.
     """
     exp_c = [ocr_canonical(t) for t in exp]
@@ -500,6 +641,12 @@ def _contradicted(
             contradicted[i] = True
             continue
         if len(token) < MIN_BLOCK:
+            # Short-token replacement (Blocker 2) is handled with
+            # COUNT-based accounting in band_match: a replaced initial
+            # that happens to duplicate another band token (a middle
+            # initial 'F' colliding with the sex column's 'F') would look
+            # "explained" here per-pair while the multiset clearly shows
+            # one copy missing and a foreign copy standing in its place.
             continue
         if unexplained_alpha and _alpha_dominated(token):
             contradicted[i] = True
@@ -571,13 +718,19 @@ def band_match(
 
     Returns:
         A :class:`BandMatch` (coverage, max_uncovered_run,
-        contradicted_chars).
+        contradicted_chars, suspect_chars, unexplained_name_tokens,
+        max_absent_alpha_token).
     """
     exp = tokenize(expected_text)
     if not exp:
         return BandMatch(0.0, 0, 0)
-    obs = tokenize(observed_text)
-    matched, explained = _match_tokens(exp, obs)
+    obs_raw = [tok for tok in observed_text.split() if squash(tok)]
+    obs = [squash(tok) for tok in obs_raw]
+    exp_c = [ocr_canonical(t) for t in exp]
+    obs_c_all = [ocr_canonical(t) for t in obs]
+    matched, explained, raw_matched, suspect_evidence = _match_tokens(
+        exp, obs
+    )
     contradicted = _contradicted(
         exp, obs, matched, explained, contradiction_sim=contradiction_sim
     )
@@ -585,12 +738,18 @@ def band_match(
     matched_chars = 0
     total_chars = 0
     contradicted_chars = 0
+    suspect_chars = 0
+    max_absent_alpha = 0
     uncovered_runs: list[int] = []
     current_run = 0
     for i, token in enumerate(exp):
         total_chars += len(token)
         if matched[i]:
             matched_chars += len(token)
+            if not raw_matched[i] and suspect_evidence[i]:
+                # Matched ONLY by letter-letter confusion equivalence:
+                # the Neil/Nell collision class (Blocker 1).
+                suspect_chars += len(token)
             if current_run:
                 uncovered_runs.append(current_run)
                 current_run = 0
@@ -598,6 +757,10 @@ def band_match(
             current_run += len(token)
             if contradicted[i]:
                 contradicted_chars += len(token)
+            if _alpha_dominated(token) and _name_plausible(token):
+                # Absent name-like token (Major 4): identity must not
+                # verify when its identity token was never read.
+                max_absent_alpha = max(max_absent_alpha, len(token))
     if current_run:
         uncovered_runs.append(current_run)
     if contradicted_chars == 0 and any(
@@ -609,10 +772,49 @@ def band_match(
         contradicted_chars = max(
             (len(o) for o in obs if _is_generational_suffix(o)), default=2
         )
+    # Short-token replacement (Blocker 2), multiset accounting: 'J' -> 'K'
+    # middle initials, the SEX column 'M' -> 'F', 2-char names 'Al' ->
+    # 'Bo'. Count-based on canonical forms, because a replaced initial
+    # can DUPLICATE another band token ('Frank R ... F' -> 'Frank F ...
+    # F' leaves both observed 'F's "explained" per-pair while the
+    # multiset shows one 'R' missing and a foreign 'F' in its place).
+    # Absence alone (OCR dropped a short token) stays tolerated: a
+    # replacement needs a missing copy AND a same-length foreign copy.
+    exp_short = Counter(
+        exp_c[i]
+        for i, t in enumerate(exp)
+        if len(t) < MIN_BLOCK and t.isalpha()
+    )
+    obs_short = Counter(
+        obs_c_all[j]
+        for j, o in enumerate(obs)
+        if len(o) < MIN_BLOCK and o.isalpha()
+    )
+    missing_short = exp_short - obs_short
+    excess_short = obs_short - exp_short
+    replaced = [
+        a
+        for a in missing_short
+        for b in excess_short
+        if len(a) == len(b)
+    ]
+    if replaced:
+        contradicted_chars += max(len(a) for a in replaced)
+    # Observed-side superset (Blocker 3): name-shaped observed tokens the
+    # recorded band cannot explain — appended names, merged second rows,
+    # message/cc rows that merely MENTION the recorded patient.
+    unexplained_names = sum(
+        1
+        for j, raw in enumerate(obs_raw)
+        if not explained[j] and _name_shaped(raw, obs[j])
+    )
     return BandMatch(
         matched_chars / total_chars,
         max(uncovered_runs, default=0),
         contradicted_chars,
+        suspect_chars,
+        unexplained_names,
+        max_absent_alpha,
     )
 
 
@@ -675,11 +877,15 @@ def embedded_params(
 
 def _band_ok(match: BandMatch) -> bool:
     """The pinned operating point (docs/validation/IDENTITY_ROC.md):
-    coverage AND uncovered-run AND contradiction budgets must all hold."""
+    coverage, uncovered-run, contradiction, suspect (letter-letter
+    collision), unexplained-name and absent-name budgets must ALL hold."""
     return (
         match.coverage >= COVERAGE_THRESHOLD
         and match.max_uncovered_run <= UNCOVERED_RUN_CAP
         and match.contradicted_chars <= CONTRADICTED_CHARS_CAP
+        and match.suspect_chars <= SUSPECT_CHARS_CAP
+        and match.unexplained_name_tokens <= UNEXPLAINED_NAME_TOKENS_CAP
+        and match.max_absent_alpha_token <= ABSENT_NAME_TOKEN_CAP
     )
 
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -558,19 +558,48 @@ class Replayer:
             The best :class:`IdentityCheck` across the two attempts.
         """
         assert step.anchor is not None and step.anchor.context_text
+        anchor = step.anchor
         band = identity_mod.band_region(
-            resolution.point, step.anchor.region[3], self.backend.viewport
+            resolution.point, anchor.region[3], self.backend.viewport
         )
+        # The recorded band was extracted EXCLUDING the target's own crop
+        # (labels are mutable evidence the ladder heals through) and
+        # excluding volatile lines. The live band must mirror both, or
+        # the target's own label / a live clock cell shows up as
+        # observed-side tokens the recorded band cannot explain and trips
+        # the unexplained-name budget on every correct row. The exclude
+        # region is the anchor crop translated to the RESOLVED point
+        # (same offset it had from the recorded click point); volatility
+        # is judged against the replay date — chronology near NOW is
+        # volatile, a far date (a DOB) is identity evidence, exactly as
+        # at record time.
+        exclude = (
+            resolution.point[0] + (anchor.region[0] - anchor.click_point[0]),
+            resolution.point[1] + (anchor.region[1] - anchor.click_point[1]),
+            anchor.region[2],
+            anchor.region[3],
+        )
+        today = date.today()
 
         def attempt(
-            png: bytes, region: Optional[Region], point_y: int
+            png: bytes,
+            region: Optional[Region],
+            point_y: int,
+            exclude_region: Region,
         ) -> IdentityCheck:
-            lines = identity_mod.lines_near_point(
-                self.vision.ocr(png, region=region), point_y
-            )
-            observed = " ".join(
-                line.text.strip() for line in lines if line.text.strip()
-            )
+            lines = [
+                line
+                for line in self.vision.ocr(png, region=region)
+                if line.text.strip()
+                and not identity_mod.regions_intersect(
+                    line.region, exclude_region
+                )
+                and not identity_mod.is_volatile_line(
+                    line.text, reference_date=today
+                )
+            ]
+            lines = identity_mod.lines_near_point(lines, point_y)
+            observed = " ".join(line.text.strip() for line in lines)
             return identity_mod.verify_target_identity(
                 step.anchor.context_text,
                 observed,
@@ -578,15 +607,26 @@ class Replayer:
                 param_examples=workflow.params,
             )
 
-        check = attempt(before_png, band, resolution.point[1])
+        check = attempt(before_png, band, resolution.point[1], exclude)
         if check.status == "verified":
             return check
         upscaled = identity_mod.upscale_crop(before_png, band)
         if upscaled is None:
             return check
         # In the upscaled crop's coordinate space the point's y is its
-        # offset from the band origin, times the upscale factor.
-        retry = attempt(upscaled, None, (resolution.point[1] - band[1]) * 2)
+        # offset from the band origin, times the upscale factor (and the
+        # exclude region transforms the same way).
+        retry = attempt(
+            upscaled,
+            None,
+            (resolution.point[1] - band[1]) * 2,
+            (
+                (exclude[0] - band[0]) * 2,
+                (exclude[1] - band[1]) * 2,
+                exclude[2] * 2,
+                exclude[3] * 2,
+            ),
+        )
         rank = {"unreadable": 0, "mismatch": 1, "verified": 2}
         if (rank[retry.status], retry.coverage) > (
             rank[check.status],

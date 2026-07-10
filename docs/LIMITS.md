@@ -67,43 +67,61 @@ actions observed — at the cost of availability:
 
 - **Wrong-entity targets in repeated structures** (fixed 2026-07-08,
   matcher hardened 2026-07-09, matcher REBUILT 2026-07-10 after the
-  near-name sibling reopening — the third reopening of this P0; formerly
-  the top silent failure mode). When data shifts between runs — a row
-  added above the target, the target's row deleted, a look-alike sibling,
-  a re-sorted table — the resolver still finds a pixel-identical target
-  at a plausible position, but the pre-click **identity check** compares
-  the resolved row's text (the OCR lines of the resolved point's own text
-  row, minus the target's own label and timestamp-bearing cells) against
-  the recorded row and refuses to click on mismatch. Matching is
-  order-insensitive per token (OCR re-reads the same band in different
-  segmentation orders), accepts a token ONLY when it is OCR-equivalent —
-  identical under the character-confusion classes real engines produce
-  (l/1/i, O/0, 5/s, rn/m, cl/d, ...) or a full-consumption token
-  split/join — and requires >= 0.8 coverage, no contiguous uncovered run
-  over 4 squashed characters, AND zero *contradicted* characters: an
-  unmatched token whose observed counterpart is a near-miss (Phil/Philip,
-  John/Joan, an off-by-one DOB or swapped MRN digits, a Jr/Sr suffix on
-  one side, a replaced word) is affirmative wrong-sibling evidence, not
-  noise. The 2026-07-09 matcher's containment and 0.7-similarity tiers
-  verified exactly those siblings (measured 53.9% false-accept on the
-  frozen adversarial corpus, 99% on DOB/suffix/single-letter classes);
-  the rebuilt matcher measures **0.0% false accepts / 10.7% false
-  aborts** on the same held-out corpus, operating point picked from the
-  ROC (docs/validation/IDENTITY_ROC.md). For a parameterized target
-  (e.g. *which patient* to open), the run's value is substituted into
-  the recorded band and the whole substituted band must match — a row
-  that merely mentions the run's value does not verify. Caveats,
-  disclosed: only ARMED steps get any of this (see the dangerous list —
-  live bundles armed 4-7 of 12 clicks); when the live band is unreadable
-  even at 2x resolution, reversible steps proceed exactly as before with
-  the step flagged in the run report (`identity: "unreadable"`), and
-  only compile-time-marked irreversible steps refuse; dense-table OCR
-  undercount is real, which is why the 2x retry exists; the OCR-confusion
-  table is finite, so an exotic misread outside it makes the true row
-  ABORT (availability cost, never a wrong action) — on the corpus that
-  shows up as ~90% aborts when the band's name tokens are occluded
-  outright, which is the correct refusal: identity cannot be confirmed
-  from a band whose identity tokens were never read.
+  near-name sibling reopening, then REDESIGNED the same day after the
+  out-of-corpus review found 13 silent-verify probes — the fourth
+  reopening of this P0; formerly the top silent failure mode). When data
+  shifts between runs — a row added above the target, the target's row
+  deleted, a look-alike sibling, a re-sorted table — the resolver still
+  finds a pixel-identical target at a plausible position, but the
+  pre-click **identity check** compares the resolved row's text (the OCR
+  lines of the resolved point's own text row, minus the target's own
+  label and volatile cells, excluded identically at record and replay
+  time) against the recorded row and refuses to click on mismatch.
+  Matching is order-insensitive per token (OCR re-reads the same band in
+  different segmentation orders), accepts a token ONLY when it is
+  OCR-equivalent — identical under the character-confusion classes real
+  engines produce (l/1/i, O/0, 5/s, rn/m, cl/d, ...) or a
+  full-consumption token split/join — and the decision holds SIX budgets
+  at once: >= 0.8 coverage; no contiguous uncovered run over 4 squashed
+  characters; zero *contradicted* characters (near-miss siblings —
+  Phil/Philip, John/Joan, an off-by-one DOB or swapped MRN digits, a
+  Jr/Sr suffix on one side, a replaced word or a replaced 1-2 char token
+  such as a middle initial or the SEX column); zero *suspect* characters
+  (a name-plausible token matched only by a LETTER-LETTER confusion —
+  Neil/Nell, Clay/Day, Marnie/Mamie — is indistinguishable from a real
+  sibling and refuses); zero unexplained observed name-shaped tokens (an
+  appended middle name, a second row OCR-merged into the band, a
+  message/cc row that merely MENTIONS the recorded patient); and no
+  absent name-like alphabetic token of 4+ characters (a band must not
+  verify with its identity token never read). The 2026-07-09 matcher's
+  containment and 0.7-similarity tiers measured 53.9% false-accept on
+  frozen corpus v1; the first rebuild measured 0.0% there but the
+  2026-07-10 review showed that zero was partially tautological — v1's
+  labeling rule excluded confusion-collided names, short-token
+  discriminators, observed supersets and absent-name shapes by
+  construction, and 13 out-of-corpus probes in those classes all
+  silently VERIFIED. The redesigned matcher measures **0.000% false
+  accepts on corpus v1+v2 plus the 13-probe set** — scoped exactly to
+  those corpora, not to the world, and the operating point was fit on
+  the same corpora that produce the headline (docs/validation/
+  IDENTITY_ROC.md states this bias plainly). The availability bill is
+  equally plain: **21.2% false aborts on v1's noise classes** (up from
+  10.7% pre-review; 0% on v2's legitimate-noise classes), concentrated
+  in occlusion — where a recount showed ~half the aborted bands still
+  had BOTH name tokens readable and aborted on trailing DOB/MRN loss,
+  an availability cost, not the "correct epistemic refusal" the earlier
+  doc claimed — plus letter-letter confusion noise and capitalized
+  adjacent-row bleed. For a parameterized target (e.g. *which patient*
+  to open), the run's value is substituted into the recorded band and
+  the whole substituted band must match — a row that merely mentions
+  the run's value does not verify. Caveats, disclosed: only ARMED steps
+  get any of this (see the dangerous list — live bundles armed 4-7 of
+  12 clicks); when the live band is unreadable even at 2x resolution,
+  reversible steps proceed exactly as before with the step flagged in
+  the run report (`identity: "unreadable"`), and only
+  compile-time-marked irreversible steps refuse; dense-table OCR
+  undercount is real, which is why the 2x retry exists. Residual
+  verify/abort classes are listed in "Known remaining" below.
 - **Typed input that cannot be confirmed** (fixed 2026-07-08, verification
   hardened 2026-07-09). After every TYPE action, an OCR-able typed value
   must be READ back from the field region (2x-resolution retry included);
@@ -216,7 +234,40 @@ direction (the region won't match under a different run value and the run
 stops safely); it cannot cause a wrong action, but it is not linted (see
 known remaining).
 
-## Known remaining (deliberately not attempted in the 2026-07-08/09 fixes)
+## Known remaining (deliberately not attempted in the 2026-07-08/09/10 fixes)
+
+Residual identity verify/abort classes, restored and expanded from the
+pre-review disclosure this PR briefly deleted (the old page honestly said
+"names within OCR-jitter distance verify"; that class now ABORTS, and
+these are what remain):
+
+- **'Ann Marie' vs 'Annmarie' verify as the same patient** — the
+  token-join rule (OCR legitimately splits one token into two) is
+  raw-equal after concatenation, so two real patients differing only in
+  name spacing/hyphen-joining are indistinguishable and verify.
+- **Names differing only by case or whitespace verify** — comparison is
+  case- and whitespace-insensitive by construction ('MacDonald' vs
+  'Macdonald' is the same band).
+- **1-2 character letter-letter confusions verify** — the suspect rule
+  needs 3+ chars, so a middle initial 'I' vs 'L' (confusion-equivalent)
+  still passes; a REPLACED initial ('J' vs 'K') is caught, an ADDED
+  short token ('Phil M' vs 'Phil J M') is not (the unexplained-token
+  budget starts at 3 chars).
+- **Indistinguishable-class aborts are permanent** — a true row whose
+  name OCR letter-letter-garbles ('Neil' read as 'Nell') aborts every
+  time, because the band is textually identical to a real sibling;
+  this is the safety direction and it costs availability on noisy rows.
+- **Compiled-only users pay ~21% halts on v1-style noisy rows as the
+  availability price of the redesign** (0% on clean digit-class noise,
+  splits and bleed — see IDENTITY_ROC.md per-class tables); hybrid
+  deployments convert each halt into one ~$0.10 fallback escalation.
+- **The operating point is fit to the frozen corpora that produce the
+  headline zero** — freezing prevents tuning the corpus toward the
+  matcher, not the matcher's thresholds toward the corpus; every
+  zero-claim on this page is scoped to corpus v1+v2 plus the 13
+  out-of-corpus reviewer probes.
+
+Other known-remaining items:
 
 - **Cosmetic global drift** (browser zoom, device scale factor, font-size
   preference) still zeroes availability — false abort at the first step.

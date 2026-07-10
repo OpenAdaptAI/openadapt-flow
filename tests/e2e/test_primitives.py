@@ -154,18 +154,21 @@ class TestDateInput:
         self, mockmed_url, _browser, tmp_path
     ) -> None:
         """PARTIAL / HAZARD, shape changed 2026-07-09. Typing digits into a
-        native date input is segment- and locale-dependent: in this harness
-        '07082026' produced the value 70820-02-06 AT RECORD TIME. Under the
-        original typed-input rule the replay reproduced the same wrong
-        value byte-for-byte (faithful garbage); the hardened verification
-        (an OCR-able typed value must be READ BACK from the field — a mere
-        pixel change with other readable text is the dialog-over-field
-        false-verify shape) cannot read '07082026' out of the widget's
-        transformed rendering, so the replay now SAFE-HALTS at the type
-        step instead of writing the garbage again. A false abort on
-        value-transforming widgets is the disclosed cost (docs/LIMITS.md)
-        of closing the dialog-over-field hole — and the calendar popup
-        alternative remains browser chrome that vision never sees."""
+        native date input is segment-, locale-, and PLATFORM-dependent: on
+        the macOS renderer '07082026' produced the value 70820-02-06 AT
+        RECORD TIME (and the original typed-input rule replayed the same
+        garbage byte-for-byte); on the Linux CI renderer the digits do not
+        register at all and the widget stays empty. Under the hardened
+        verification (an OCR-able typed value must be READ BACK from the
+        field — a mere pixel change with other readable text is the
+        dialog-over-field false-verify shape) BOTH shapes now SAFE-HALT at
+        the type step: the transformed value cannot be read back, and the
+        ignored keystrokes change nothing even after the guarded retry.
+        The pinned invariant is that a native-date TYPE step never
+        false-verifies — a false abort on value-transforming/ignoring
+        widgets is the disclosed cost (docs/LIMITS.md) of closing the
+        dialog-over-field hole — and the calendar popup alternative
+        remains browser chrome that vision never sees."""
         url = f"{mockmed_url}widgets.html?panel=date"
 
         def ops(page, r):
@@ -175,7 +178,10 @@ class TestDateInput:
         _wf, bundle_dir, recorded = record_and_compile(
             _browser, url, ops, tmp_path, "date"
         )
-        assert "70820-02-06" in recorded  # the record-time garbage, pinned
+        # Platform-dependent record-time outcome: transformed garbage
+        # (macOS-shape) or ignored input (Linux-shape) — never the typed
+        # digits verbatim.
+        assert "70820-02-06" in recorded or recorded == "Ready and waiting."
         report, state = replay_on_page(
             _browser, bundle_dir, url, tmp_path / "run", params={}
         )
@@ -183,7 +189,6 @@ class TestDateInput:
         failed = failing_step(report)
         assert failed is not None
         assert "Typed input could not be verified" in (failed.error or "")
-        assert "retyping is unsafe" in (failed.error or "")
 
 
 class TestModalDialog:

@@ -20,12 +20,21 @@ softened.
 ## Headline numbers
 
 - **Wrong-actions: 6**, of which **5 were silent** (wrong state written
-  AND the run reported success):
+  AND the run reported success) — **4 of the silent modes are pinned by
+  the characterization tests on every platform, plus 1 observed on the
+  recording platform** (the `drift=grow` wrong-patient outcome is
+  platform-dependent; see item 3):
   1. `drift=lookalike` — encounter saved to the look-alike patient (MockMed).
   2. `drift=missing` — target gone; encounter saved to the neighbouring
      patient.
   3. `drift=grow` — encounter saved to an unrelated patient whose row
-     landed at the recorded position.
+     landed at the recorded position. *Platform-dependent:* whether the
+     local template rung matches the imposter row (wrong patient, as
+     observed on the recording platform) or the global rung relocates the
+     true row further down varies with rendering, so the pinned test
+     accepts either patient (`#patient/g1` OR `#patient/p1`) and pins the
+     invariant that success is reported **without any identity
+     verification** either way.
   4. chaos `delete-target-row` — row deleted mid-run; encounter saved to
      the patient that slid into its place.
   5. chaos `steal-focus` — focus lost between click and type; encounter
@@ -65,7 +74,7 @@ a time. Automated in `tests/e2e/test_perturbation.py`.
 | device scale factor 2 | safe-halt (false abort) | halts at step_000: screenshots are 2x the coordinate space; template scale ladder tops out at 1.18x; OCR returns frame-pixel coordinates that no longer equal input pixels |
 | CSS zoom 125% (`drift=zoom`) | safe-halt (false abort) | halts at step_000 for the same family of reasons |
 | font size 16px→19px (`drift=font`) | safe-halt (false abort) | halts at step_000: REGION_STABLE phash cannot tolerate reflowed glyph metrics. Theme drift heals (README showcase); font drift yields 0% replayability |
-| data growth (`drift=grow`, 4 rows added above target) | **wrong-action, silent** | local template matched the imposter row at the recorded position (≥0.985 despite different reason/priority text in-crop); encounter saved to `#patient/g1`, run reported success. Evidence: `runs/validation/track-a/run-grow/` |
+| data growth (`drift=grow`, 4 rows added above target) | **wrong-action, silent** (on the recording platform; platform-dependent) | local template matched the imposter row at the recorded position (≥0.985 despite different reason/priority text in-crop); encounter saved to `#patient/g1`, run reported success. On other platforms the global rung may relocate the true row instead, so the pinned test accepts `#patient/g1` OR `#patient/p1` — the pinned invariant is success-without-identity-verification. Evidence: `runs/validation/track-a/run-grow/` |
 | look-alike row (`drift=lookalike`) | **wrong-action, silent** | a row with the same reason/priority directly above the target is pixel-identical inside the 160x64 crop (the NAME column is outside it); template rung confidence 1.0; saved to `#patient/p0`. Evidence: `runs/validation/track-a/run-lookalike/` |
 | target row deleted (`drift=missing`) | **wrong-action, silent** | desired: safe-halt, never click a look-alike. Observed: the neighbouring row occupies the recorded position and every rung that fires resolves to it; saved to `#patient/p2`. Evidence: `runs/validation/track-a/run-missing/` |
 | empty list (`drift=empty`) | safe-halt | halts one step early: the sign-in step's postcondition asserts another data row's text (`Cardiology follow-up`) as an "invariant" — safe here, but the mechanism (mining mutable DATA as postconditions) is what makes the three rows above silent |
@@ -139,7 +148,7 @@ when the PATIENT — a value that changes screen content — is a parameter?
 |---|---|---|
 | `patient=Phil` (control) | pass | 18/18, 39.1s, 0 model calls, note verified on final screen |
 | `patient=Susan` | safe-halt (false abort) | typed "Susan", results showed only "Underwood, Susan Ardmore"; the row click fell to the **geometry rung** (landmarks = column headers) and clicked the demonstrated **position** — which was Susan, the right patient. The chart opened, then the run aborted: step_008 asserts `No treatment intervention preferences recorded.`, a **Phil-dashboard state** baked in as an invariant. Evidence: `runs/validation/track-d/runs/run-susan-drift/` |
-| cross-instance `/a/` | environment | `/a/` rejected its own published admin credentials that day (verified with DOM selectors — not a replay artifact). The replay executed the login correctly and safe-halted with an accurate report |
+| cross-instance `/a/` | environment | `/a/` rejected its own published admin credentials that day (verified with DOM selectors — not a replay artifact). The replay executed the login correctly and safe-halted with an accurate report. Note: this probe was ad hoc — the committed script's `cross-instance` mode targets `/b/` only, so the `/a/` observation is not reproducible from the committed code |
 | cross-instance `/b/` | safe-halt (false abort) | login **succeeded**, but the run halted at the login step's postconditions: `/b/` runs a different module set (no "Inventory" menu entry) and different calendar content, and both the menu-text assertion and the calendar REGION_STABLE were recorded on the main instance. Same version, different instance state → no transfer. Evidence: `runs/validation/track-d/runs/run-cross-instance-b/steps/step_004_after.png` |
 
 Cross-VERSION drift was not testable: all public demo instances run

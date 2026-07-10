@@ -186,7 +186,10 @@ class TestClassification:
         assert classify_outcome({"success": False}) == "halt-or-error"
 
     def test_maintenance_is_dom_loud_break_on_drift_only(self) -> None:
-        loud_dom = {"arm": "dom", "condition": "rename", "success": False}
+        loud_dom = {
+            "arm": "dom", "condition": "rename", "success": False,
+            "failed_step": "open first referral",
+        }
         assert needs_maintenance(loud_dom)
         # Wrong actions are counted separately, not as maintenance.
         silent_dom = {
@@ -200,8 +203,44 @@ class TestClassification:
         }
         assert not needs_maintenance(compiled)
         # A clean-slot DOM failure is a bug, not drift maintenance.
-        clean_dom = {"arm": "dom", "condition": "clean", "success": False}
+        clean_dom = {
+            "arm": "dom", "condition": "clean", "success": False,
+            "failed_step": "confirm saved banner",
+        }
         assert not needs_maintenance(clean_dom)
+        # A completed run the judge failed has nothing to edit.
+        disputed = {
+            "arm": "dom", "condition": "theme", "success": False,
+            "failed_step": None, "error": None,
+        }
+        assert not needs_maintenance(disputed)
+
+    def test_verification_dispute(self) -> None:
+        from openadapt_flow.benchmark.dom_arm import verification_dispute
+
+        # DOM: every step ran, no error, judge said no -> dispute.
+        assert verification_dispute(
+            {"arm": "dom", "condition": "theme", "success": False,
+             "failed_step": None, "error": None}
+        )
+        # Compiled: replayer green, judge said no -> dispute.
+        assert verification_dispute(
+            {"arm": "compiled", "condition": "theme", "success": False,
+             "replayer_success": True}
+        )
+        # A loud break is a real failure, not a dispute.
+        assert not verification_dispute(
+            {"arm": "dom", "condition": "rename", "success": False,
+             "failed_step": "open first referral"}
+        )
+        # Successes and wrong actions are never disputes.
+        assert not verification_dispute(
+            {"arm": "dom", "success": True, "failed_step": None}
+        )
+        assert not verification_dispute(
+            {"arm": "dom", "success": False, "wrong_action": True,
+             "failed_step": None}
+        )
 
 
 # -- fabricated rows -----------------------------------------------------------------
@@ -236,36 +275,56 @@ def make_row(
 
 
 def fabricated_results() -> dict[str, Any]:
+    """Rows shaped like a real run: DOM wrong-actions on the data drifts,
+    a loud DOM break on rename, and one compiled judge-dispute on theme."""
     schedule_runs = {
         "compiled": [
-            make_row("compiled", c, success=(c == "clean"), heal_count=0)
-            for c in SCHEDULE
+            make_row(
+                "compiled", c, success=(c == "clean"), heal_count=0,
+                slot=i, phase="schedule",
+            )
+            for i, c in enumerate(SCHEDULE)
         ],
         "dom": [
             make_row(
                 "dom", c, success=(c == "clean"), wall=1.0,
                 failed_step=None if c == "clean" else "confirm saved banner",
+                slot=i, phase="schedule",
             )
-            for c in SCHEDULE
+            for i, c in enumerate(SCHEDULE)
         ],
     }
     perturbation_runs = {
         "compiled": [
-            make_row("compiled", c, success=True, heal_count=1)
-            for c in PERTURBATIONS
+            make_row(
+                "compiled",
+                c,
+                success=(c != "theme"),
+                heal_count=1,
+                # One completed-but-failed-verification row (dark palette
+                # OCR false negative) to exercise dispute reporting.
+                replayer_success=True,
+                slot=20 + i,
+                phase="perturbation",
+            )
+            for i, c in enumerate(PERTURBATIONS)
         ],
         "dom": [
             make_row(
                 "dom",
                 c,
                 success=(c in ("theme", "move", "typelabel")),
-                wrong_action=(c in ("lookalike", "sort")),
+                wrong_action=(
+                    c in ("lookalike", "missing", "grow", "sort")
+                ),
                 failed_step=(
                     "open first referral" if c == "rename" else None
                 ),
                 final_hash="#patient/p0" if c == "lookalike" else "",
+                slot=20 + i,
+                phase="perturbation",
             )
-            for c in PERTURBATIONS
+            for i, c in enumerate(PERTURBATIONS)
         ],
     }
     return aggregate_dom_results(schedule_runs, perturbation_runs)
@@ -275,7 +334,10 @@ class TestAggregation:
     def test_arm_aggregate_counts(self) -> None:
         rows = [
             make_row("dom", "clean", success=True),
-            make_row("dom", "notice", success=False),
+            make_row(
+                "dom", "notice", success=False,
+                failed_step="open first referral",
+            ),
             make_row("dom", "sort", success=False, wrong_action=True),
         ]
         agg = dom_arm_aggregate(rows)
@@ -308,10 +370,23 @@ class TestAggregation:
         assert matrix["rename"]["dom"][0]["outcome"] == "halt-or-error"
         assert matrix["rename"]["dom"][0]["maintenance"] is True
         assert matrix["rename"]["compiled"][0]["outcome"] == "success"
-        assert results["totals"]["dom"]["wrong_action_count"] == 2
+        # The compiled theme row completed but failed the judge.
+        assert matrix["theme"]["compiled"][0]["outcome"] == "halt-or-error"
+        assert matrix["theme"]["compiled"][0]["dispute"] is True
+        assert results["totals"]["dom"]["wrong_action_count"] == 4
         assert results["totals"]["compiled"]["wrong_action_count"] == 0
-        # Maintenance: rename + missing + grow (loud) + 6 schedule drifts.
-        assert results["totals"]["dom"]["maintenance_count"] == 9
+        # Maintenance: rename (loud) + 6 schedule drifts; wrong actions
+        # and judge disputes are NOT maintenance.
+        assert results["totals"]["dom"]["maintenance_count"] == 7
+        assert results["totals"]["compiled"]["maintenance_count"] == 0
+        assert (
+            results["totals"]["compiled"]["verification_dispute_count"]
+            == 1
+        )
+        disputes = results["verification_disputes"]
+        assert len(disputes) == 1
+        assert disputes[0]["arm"] == "compiled"
+        assert disputes[0]["condition"] == "theme"
 
 
 class TestRenderer:
@@ -329,9 +404,17 @@ class TestRenderer:
 
     def test_markdown_wrong_action_totals(self) -> None:
         md = render_dom_markdown(fabricated_results())
-        assert "Totals: compiled 0, DOM\n2" in md or (
-            "Totals: compiled 0, DOM 2" in md
+        assert "Totals: compiled 0, DOM\n4" in md or (
+            "Totals: compiled 0, DOM 4" in md
         )
+
+    def test_markdown_reports_verification_disputes(self) -> None:
+        md = render_dom_markdown(fabricated_results())
+        assert "## Measurement validity" in md
+        # The fabricated compiled theme row completed but failed the OCR
+        # judge; the section must name it and point at the saved final.
+        assert "compiled on `theme`" in md
+        assert "finals/perturbation_compiled_024.png" in md
 
     def test_write_outputs(self, tmp_path: Path) -> None:
         out = tmp_path / "dom"

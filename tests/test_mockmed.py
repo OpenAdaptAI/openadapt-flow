@@ -359,3 +359,28 @@ def test_drift_typelabel_relabels_and_swaps_but_keeps_type_value(
     row = page.locator("#encounter-list .enc-item").inner_text()
     assert row.startswith("Triage —")
     assert "Assessment" not in row
+
+
+def test_drift_sort_reorders_rows_without_changing_data(
+    page: Page, server_url: str
+) -> None:
+    login(page, server_url + "?drift=sort")
+
+    # Alphabetical by patient name: the recorded target (Jane Sample) is
+    # no longer the first row, but every referral is still present.
+    rows = page.locator("#tasks-table tbody tr")
+    assert rows.count() == 3
+    assert "Alex Testcase" in rows.nth(0).inner_text()
+    assert "Jane Sample" in rows.nth(1).inner_text()
+    assert "Sam Specimen" in rows.nth(2).inner_text()
+
+    # Position-based "first row" automation now opens a different patient.
+    page.locator(".open-btn").first.click()
+    page.wait_for_selector("#patient-banner")
+    assert "Alex Testcase" in page.locator("#patient-banner").inner_text()
+
+
+def test_drift_sort_absent_by_default(page: Page, server_url: str) -> None:
+    login(page, server_url)
+    first = page.locator("#tasks-table tbody tr").first.inner_text()
+    assert "Jane Sample" in first

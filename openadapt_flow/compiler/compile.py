@@ -11,7 +11,6 @@ from __future__ import annotations
 import difflib
 import json
 import math
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +28,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.runtime.identity import TIMESTAMP_RE, band_region, context_from_lines
 from openadapt_flow.vision.hashing import phash_png
 from openadapt_flow.vision.ocr import OcrLine, normalize_text, ocr
 
@@ -99,12 +99,8 @@ LABEL_MATCH_RATIO = 0.85
 # it cannot survive replay against live data. Observed on OpenEMR: opening
 # a dialog nudged a timestamped message row into view, the row won the
 # longest-new-text contest, and the compiled bundle then aborted every
-# replay once newer rows displaced it.
-TIMESTAMP_RE = re.compile(
-    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}"  # 2026-07-08, 2026/7/8
-    r"|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}"  # 07/08/2026, 8.7.26
-    r"|\d{1,2}:\d{2}"  # 18:38, 6:05
-)
+# replay once newer rows displaced it. (Shared with the identity context
+# extractor — TIMESTAMP_RE lives in runtime.identity.)
 
 
 def _load_events(recording_dir: Path) -> list[dict]:
@@ -469,15 +465,22 @@ def _text_preview(text: str, limit: int = 24) -> str:
 
 
 def compile_recording(
-    recording_dir: Path | str, out_bundle_dir: Path | str, *, name: str
+    recording_dir: Path | str,
+    out_bundle_dir: Path | str,
+    *,
+    name: str,
+    risk_overrides: Optional[dict[str, str]] = None,
 ) -> Workflow:
     """Compile a recording directory into a workflow bundle.
 
     For each click (or double_click) event: crop a template (160x64, clamped
     to the frame, centered on the click), OCR the crop for ``ocr_text``,
-    derive up to two landmarks from nearby OCR lines outside the crop, and
-    derive postconditions (REGION_STABLE on the largest changed region plus
-    TEXT_PRESENT for the most distinctive new text). Type/key events carry
+    derive up to two landmarks from nearby OCR lines outside the crop,
+    record the target's identity context band (``anchor.context_text`` —
+    row text outside the crop, verified before every click at replay time;
+    see :mod:`openadapt_flow.runtime.identity`), and derive postconditions
+    (REGION_STABLE on the largest changed region plus TEXT_PRESENT for the
+    most distinctive new text). Type/key events carry
     their text/param/key through. Parameterized typed values and click
     target labels are never asserted in any step's postconditions (the
     former vary per run; the latter are mutable evidence the resolution
@@ -485,16 +488,26 @@ def compile_recording(
     ``workflow.json``, ``templates/*.png`` and a generated readable
     ``workflow.py``.
 
+    Risk is opt-in: every step compiles as ``risk="reversible"`` unless
+    ``risk_overrides`` marks it ``"irreversible"`` — there is no automatic
+    risk classification. Irreversible steps refuse to act when they only
+    resolve below the OCR rung or when their identity band is unreadable
+    (see :class:`~openadapt_flow.runtime.Replayer`).
+
     Args:
         recording_dir: Recording directory (meta.json, events.jsonl, frames/).
         out_bundle_dir: Output bundle directory (created if missing).
         name: Workflow name.
+        risk_overrides: Optional ``{step_id: risk}`` map (step ids are
+            positional: ``step_000`` is the first recorded event). Values
+            must be ``"reversible"`` or ``"irreversible"``.
 
     Returns:
         The compiled :class:`Workflow` (also saved to the bundle).
 
     Raises:
-        ValueError: On an unknown event kind.
+        ValueError: On an unknown event kind, an unknown ``risk_overrides``
+            step id, or an invalid risk value.
         FileNotFoundError: If a click event's before frame is missing.
     """
     from openadapt_flow.compiler.codegen import render_workflow_py
@@ -551,11 +564,28 @@ def compile_recording(
             )
             frame_lines = ocr(before_png)
             landmarks = _landmarks_for(frame_lines, crop_region, click)
+            # Identity evidence: the target's row text OUTSIDE its own crop
+            # (a table row's discriminative name column sits outside the
+            # 160x64 template — see runtime.identity). Verified against the
+            # live band before every click at replay time.
+            context_text = context_from_lines(
+                frame_lines,
+                exclude_region=crop_region,
+                band=band_region(
+                    click, crop_region[3], (frame.shape[1], frame.shape[0])
+                ),
+                # Row refinement: record only the click point's OWN text
+                # row, matching what replay-time verification reads (the
+                # 64px band spans 2-3 rows of a dense table).
+                point=click,
+                min_confidence=MIN_OCR_CONFIDENCE,
+            )
             anchor = Anchor(
                 template=template_rel,
                 region=crop_region,
                 click_point=click,
                 ocr_text=ocr_text,
+                context_text=context_text,
                 landmarks=landmarks,
             )
             verb = "double-click" if kind == "double_click" else "click"
@@ -662,6 +692,21 @@ def compile_recording(
             ),
         )
         steps.append(step)
+
+    if risk_overrides:
+        by_id = {step.id: step for step in steps}
+        for step_id, risk in risk_overrides.items():
+            if step_id not in by_id:
+                raise ValueError(
+                    f"risk_overrides names unknown step {step_id!r} "
+                    f"(steps: {', '.join(by_id)})"
+                )
+            if risk not in ("reversible", "irreversible"):
+                raise ValueError(
+                    f"invalid risk {risk!r} for {step_id!r} (use "
+                    "'reversible' or 'irreversible')"
+                )
+            by_id[step_id].risk = risk
 
     workflow = Workflow(
         name=name,

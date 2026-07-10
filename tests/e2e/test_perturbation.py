@@ -2,10 +2,12 @@
 
 Replays the SAME compiled bundle (recorded at 1280x800, default MockMed)
 under one perturbation at a time and pins down what actually happens. These
-are CHARACTERIZATION tests: several of them assert on known failure modes —
-including silent wrong-patient writes — so that any change in behavior
-(fix or regression) is caught loudly. The experiment matrix, severity
-ranking, and evidence pointers live in ``docs/validation/VALIDATION.md``.
+are CHARACTERIZATION tests: several assert on known failure modes so that
+any change in behavior (fix or regression) is caught loudly. The silent
+wrong-patient writes originally found here were FIXED on 2026-07-08 by the
+pre-click identity check (runtime.identity); the data-drift tests now pin
+the safe-halt behavior. The experiment matrix, severity ranking, and
+evidence pointers live in ``docs/validation/VALIDATION.md``.
 
 Outcome vocabulary used in comments below (see VALIDATION.md):
 
@@ -130,72 +132,86 @@ class TestFontDrift:
 
 
 class TestDataDrift:
-    """Rows added/removed between recording and replay — the dangerous
-    quadrant. The discriminative evidence for a table row's button (the
-    patient's NAME) sits outside the 160x64 template crop, and the
-    compiler's timestamp filter drops the patient banner from the click
-    step's postconditions (the DOB reads as a date), leaving only the
-    patient-AGNOSTIC 'No encounters yet.' — so a wrong row click sails
-    through every check and the encounter is SAVED TO THE WRONG PATIENT
-    with a green report."""
+    """Rows added/removed between recording and replay — the previously
+    dangerous quadrant. The discriminative evidence for a table row's
+    button (the patient's NAME) sits outside the 160x64 template crop, so
+    until 2026-07-08 all three cases below SAVED THE ENCOUNTER TO THE
+    WRONG PATIENT with a green report (see VALIDATION.md history). The
+    pre-click identity check (runtime.identity: the recorded row's context
+    band must match the live band around the resolved point) now turns
+    every wrong-row resolution into a safe halt BEFORE the click."""
 
-    def test_lookalike_row_above_target_saves_to_wrong_patient(
+    def test_lookalike_row_above_target_safe_halts(
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
-        """WRONG-ACTION, SILENT. A new referral with the same reason and
-        priority as the target lands directly above it: its Open-button
-        crop is pixel-identical to the recorded template, at exactly the
-        recorded position. The template rung matches it with confidence
-        ~1.0, the encounter is saved to the imposter, and the run reports
-        success. If this test ever fails, the failure mode was FIXED —
-        update docs/validation/VALIDATION.md and invert the assertions."""
+        """FIXED (was: wrong-action, silent — saved to '#patient/p0'). A
+        new referral with the same reason and priority as the target lands
+        directly above it: its Open-button crop is pixel-identical to the
+        recorded template at exactly the recorded position, so the template
+        rung still matches it at confidence ~1.0 — but the identity band
+        reads 'Taylor Duplicate ...' where 'Jane Sample ...' was recorded
+        (coverage ~0.67 from the shared reason/priority columns, below the
+        0.8 bar) and the run halts without clicking anything."""
         report, state = replay_on_page(
             _browser, bundle.dir, drift_url(mockmed_url, "lookalike"), run_dir,
             params=dict(PARAMS),
         )
-        assert report.success is True, describe(report, state)
-        assert state["hash"] == "#patient/p0", describe(report, state)  # imposter
-        assert state["banner"] is not None  # encounter really was saved
+        assert report.success is False, describe(report, state)
+        assert state["hash"] == "#tasks", describe(report, state)  # no click
+        assert state["banner"] is None  # nothing was saved
+        failed = failing_step(report)
+        assert failed is not None and failed.step_id == "step_005"
+        assert "Identity check failed" in (failed.error or "")
+        assert failed.identity is not None
+        assert failed.identity.status == "mismatch"
 
-    def test_missing_target_row_saves_to_wrong_patient(
+    def test_missing_target_row_safe_halts(
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
-        """WRONG-ACTION, SILENT. The target referral is GONE. The desired
-        behavior is a safe halt ('never click a lookalike'); instead the
-        neighbouring patient's row now occupies the recorded position,
-        every rung that fires resolves to it (template: near-identical
-        button crop; ocr: first 'Open' on screen; geometry: header landmark
-        offset), and the encounter is saved to that patient with a green
-        report."""
+        """FIXED (was: wrong-action, silent — saved to the neighbouring
+        patient '#patient/p2'). The target referral is GONE and Alex
+        Testcase's row occupies the recorded position; every rung that
+        fires resolves to it, but the identity band ('Alex Testcase
+        Cardiology follow-up Medium') shares nothing with the recorded row
+        (coverage 0.0) — safe halt, never click a look-alike."""
         report, state = replay_on_page(
             _browser, bundle.dir, drift_url(mockmed_url, "missing"), run_dir,
             params=dict(PARAMS),
         )
-        assert report.success is True, describe(report, state)
-        assert state["hash"] == "#patient/p2", describe(report, state)  # Alex, not Jane
-        assert state["banner"] is not None
+        assert report.success is False, describe(report, state)
+        assert state["hash"] == "#tasks", describe(report, state)
+        assert state["banner"] is None
+        failed = failing_step(report)
+        assert failed is not None and failed.step_id == "step_005"
+        assert "Identity check failed" in (failed.error or "")
+        assert failed.identity is not None
+        assert failed.identity.status == "mismatch"
 
-    def test_data_growth_reports_success_without_verifying_patient(
+    def test_data_growth_never_saves_to_the_wrong_patient(
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
-        """Four unrelated referrals arrive above the target, shifting it
-        ~228px down (outside the local search pad). The run reports success
-        either way, but NOTHING in the bundle verifies which patient
-        received the encounter: on the recording platform the local
-        template rung matched the FIRST imposter row (>=0.985 despite
-        different reason/priority text in the crop) and saved to the wrong
-        patient. Whether the click lands on the imposter (local rung) or
-        the true target (global rung finds the identical crop lower down)
-        is platform/rendering-dependent — which is exactly the problem."""
+        """FIXED (was: wrong-action, silent — saved to '#patient/g1', the
+        imposter row at the recorded position). Four unrelated referrals
+        arrive above the target. Which rung fires first is
+        platform/rendering-dependent (local template on the imposter vs
+        global template on the true row lower down), so BOTH safe outcomes
+        are pinned: an identity halt with nothing saved (imposter resolved
+        first — observed on macOS), or a success that saved to the TRUE
+        patient '#patient/p1' (true row resolved first). A save to any
+        other patient is the fixed failure mode."""
         report, state = replay_on_page(
             _browser, bundle.dir, drift_url(mockmed_url, "grow"), run_dir,
             params=dict(PARAMS),
         )
-        assert report.success is True, describe(report, state)
-        assert state["banner"] is not None
-        assert state["hash"] in ("#patient/g1", "#patient/p1"), describe(
-            report, state
-        )
+        if report.success:
+            assert state["hash"] == "#patient/p1", describe(report, state)
+            assert state["banner"] is not None
+        else:
+            assert state["hash"] == "#tasks", describe(report, state)
+            assert state["banner"] is None
+            failed = failing_step(report)
+            assert failed is not None and failed.step_id == "step_005"
+            assert "Identity check failed" in (failed.error or "")
 
     def test_empty_state_halts_before_reaching_the_table(
         self, bundle, mockmed_url, _browser, run_dir

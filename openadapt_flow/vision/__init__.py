@@ -6,11 +6,12 @@ Public API (see DESIGN.md "Vision API"):
 - :class:`OcrLine`, :func:`ocr`, :func:`find_text`, :func:`text_present`,
   :func:`upscale_png`
 - :func:`phash_png`, :func:`phash_distance`
+- :func:`pixels_changed`
 - :func:`wait_settled`
 """
 
 from openadapt_flow.vision.hashing import phash_distance, phash_png
-from openadapt_flow.vision.match import Match, find_template
+from openadapt_flow.vision.match import Match, find_template, pixels_changed
 from openadapt_flow.vision.ocr import (
     OcrLine,
     find_text,
@@ -28,6 +29,7 @@ __all__ = [
     "ocr",
     "phash_distance",
     "phash_png",
+    "pixels_changed",
     "text_present",
     "upscale_png",
     "wait_settled",

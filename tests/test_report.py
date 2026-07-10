@@ -140,7 +140,10 @@ def test_run_report_success(tmp_path: Path) -> None:
     assert "## Parameters" in md
     assert "`note`" in md and "Follow-up in 2 weeks" in md
     # Per-step table columns and rows.
-    assert "| # | Step | Intent | Rung | Confidence | ms | Healed | OK |" in md
+    assert (
+        "| # | Step | Intent | Rung | Confidence | Verified | ms "
+        "| Healed | OK |"
+    ) in md
     assert "`step_login`" in md and "template" in md and "0.97" in md
     assert "`step_save`" in md and "ocr" in md
     # Pipe in intent must be escaped, not break the table.

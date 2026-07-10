@@ -155,3 +155,53 @@ def find_template(
     region: Region = (rx, ry, mw, mh)
     point: Point = (rx + mw // 2, ry + mh // 2)
     return Match(point=point, region=region, confidence=score)
+
+
+# pixels_changed: threshold below which a per-pixel grayscale difference is
+# attributed to encoder noise, and the minimum count of above-threshold
+# pixels for the region to count as visibly changed. Headless screenshots of
+# a static screen are byte-identical, so both bars are deliberately low —
+# the check answers "did ANYTHING render?", not "what changed?".
+CHANGE_THRESHOLD = 20
+CHANGE_MIN_PIXELS = 4
+
+
+def pixels_changed(
+    before_png: bytes,
+    after_png: bytes,
+    *,
+    region: Region | None = None,
+    threshold: int = CHANGE_THRESHOLD,
+    min_pixels: int = CHANGE_MIN_PIXELS,
+) -> bool:
+    """True when two frames differ visibly (optionally within ``region``).
+
+    Used by the replayer's typed-input verification: any visible change in
+    the field region distinguishes "keystrokes landed somewhere visible"
+    from "keystrokes fell on a non-rendering target" (e.g. ``<body>`` after
+    focus theft).
+
+    Args:
+        before_png: Frame before the action, PNG bytes.
+        after_png: Frame after the action, PNG bytes.
+        region: Optional (x, y, w, h) to restrict the comparison to.
+        threshold: Per-pixel grayscale delta above which a pixel counts.
+        min_pixels: How many counting pixels make the frames "changed".
+
+    Returns:
+        True when the frames differ visibly (mismatched dimensions count as
+        changed).
+    """
+    before = _decode_gray(before_png)
+    after = _decode_gray(after_png)
+    if before.shape != after.shape:
+        return True
+    if region is not None:
+        clamped = _clamp_region(region, before.shape[1], before.shape[0])
+        if clamped is None:
+            return False
+        x, y, w, h = clamped
+        before = before[y : y + h, x : x + w]
+        after = after[y : y + h, x : x + w]
+    diff = cv2.absdiff(before, after)
+    return int(np.count_nonzero(diff > threshold)) >= min_pixels

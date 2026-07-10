@@ -11,8 +11,9 @@ test here — lives in ``docs/validation/VALIDATION.md`` and
 
 Several tests are characterizations of weak behavior (vacuous successes on
 steps that compiled with zero postconditions; position-based resolution of
-parameterized typeahead; wrong-row clicks under reorder). Comments state
-the desired behavior where it differs from the observed one.
+parameterized typeahead). The wrong-row click under reorder was FIXED on
+2026-07-08 (pre-click identity check) — its test now pins the safe-halt.
+Comments state the desired behavior where it differs from the observed one.
 """
 
 from __future__ import annotations
@@ -149,15 +150,27 @@ class TestCheckboxRadio:
 
 
 class TestDateInput:
-    def test_typed_date_is_replayed_faithfully_garbage_included(
+    def test_typed_date_halts_when_readback_cannot_verify(
         self, mockmed_url, _browser, tmp_path
     ) -> None:
-        """PARTIAL / HAZARD. Typing digits into a native date input is
-        segment- and locale-dependent: in this harness '07082026' produced
-        the value 70820-02-06 AT RECORD TIME, and the replay reproduced the
-        same wrong value byte-for-byte. Faithful replay of a bad recording
-        is still bad data — and the calendar popup alternative is browser
-        chrome that vision never sees."""
+        """PARTIAL / HAZARD, shape changed 2026-07-09. Typing digits into a
+        native date input is segment-, locale-, and PLATFORM-dependent: on
+        the macOS renderer '07082026' produced the value 70820-02-06 AT
+        RECORD TIME (and the original typed-input rule replayed the same
+        garbage byte-for-byte); on the Linux CI renderer the digits do not
+        register at all and the widget stays empty. Under the hardened
+        verification (an OCR-able typed value must be READ BACK from the
+        field — a mere pixel change with other readable text is the
+        dialog-over-field false-verify shape) the transformed-value shape
+        SAFE-HALTS at the type step, while the ignored-input shape — a
+        recording that was itself a no-op — replays as a no-op that
+        verifies vacuously through the masked acceptance (focus rendering
+        changes, no readable text). The pinned invariant is that no wrong
+        DATE VALUE is ever written at replay in any shape; the false
+        abort (transforming widgets) and the vacuous verify (masked
+        residue) are both disclosed in docs/LIMITS.md — and the calendar
+        popup alternative remains browser chrome that vision never
+        sees."""
         url = f"{mockmed_url}widgets.html?panel=date"
 
         def ops(page, r):
@@ -167,13 +180,32 @@ class TestDateInput:
         _wf, bundle_dir, recorded = record_and_compile(
             _browser, url, ops, tmp_path, "date"
         )
+        # Platform-dependent record-time outcome: transformed garbage
+        # (macOS-shape) or ignored input (Linux-shape) — never the typed
+        # digits verbatim.
+        assert "70820-02-06" in recorded or recorded == "Ready and waiting."
         report, state = replay_on_page(
             _browser, bundle_dir, url, tmp_path / "run", params={}
         )
-        assert report.success is True, describe(report, state)
-        # Whatever the recording produced (correct or garbage), the replay
-        # reproduces it exactly.
-        assert state["status"] == recorded, describe(report, state)
+        if "70820-02-06" in recorded:
+            # Transformed-value shape: read-back cannot find the typed
+            # digits in the widget's rendering — safe-halt, garbage is
+            # NOT written a second time.
+            assert report.success is False, describe(report, state)
+            failed = failing_step(report)
+            assert failed is not None
+            assert "Typed input could not be verified" in (failed.error or "")
+        else:
+            # Ignored-input shape: the recording itself was a no-op (the
+            # widget swallowed the digits), and the replay reproduces the
+            # no-op. The refocus retry's click changes only the widget's
+            # focus rendering — pixels changed, no readable text — which
+            # is exactly the masked acceptance shape, so the step
+            # verifies VACUOUSLY. Nothing was written at record or
+            # replay; the vacuous verify is the disclosed masked residue
+            # (docs/LIMITS.md).
+            assert report.success is True, describe(report, state)
+            assert state["status"] == "Ready and waiting."
 
 
 class TestModalDialog:
@@ -289,17 +321,18 @@ class TestTablePagination:
 
 
 class TestSortReorder:
-    def test_reordered_rows_never_pick_the_recorded_order(
+    def test_reordered_rows_halt_before_any_click(
         self, mockmed_url, _browser, tmp_path
     ) -> None:
-        """WRONG-ACTION then halt (characterization). Record picking the
+        """FIXED (was: wrong-action then halt — the replay CLICKED the
+        wrong row, writing 'Order picked: Echocardiogram.' into app state
+        before the postcondition stopped the run). Record picking the
         second row (ascending order), replay against ?presort=desc where
-        every row moved. Identical 'Pick' buttons defeat the template rung's
-        discrimination (row text sits mostly outside the crop): observed on
-        macOS, the replay CLICKED the wrong row (writing 'Order picked:
-        Echocardiogram.' into app state) before the postcondition halted
-        the run. The pinned invariants: the run never succeeds, and the
-        recorded order is never the one picked."""
+        every row moved. Identical 'Pick' buttons still defeat the template
+        rung's discrimination (row text sits mostly outside the crop), but
+        the pre-click identity check compares the resolved row's band text
+        against the recorded row and halts BEFORE anything is clicked — no
+        state is written at all."""
         url = f"{mockmed_url}widgets.html?panel=table"
 
         def ops(page, r):
@@ -314,14 +347,13 @@ class TestSortReorder:
             params={},
         )
         assert report.success is False, describe(report, state)
-        assert state["status"] != recorded, describe(report, state)
+        # No click fired: app state untouched.
+        assert state["status"] == "Ready and waiting.", describe(report, state)
         failed = failing_step(report)
         assert failed is not None and failed.step_id == "step_000"
-        if state["status"] != "Ready and waiting.":
-            # A wrong-row click actually executed before the halt.
-            assert state["status"].startswith("Order picked: "), describe(
-                report, state
-            )
+        assert "Identity check failed" in (failed.error or ""), describe(
+            report, state
+        )
 
 
 class TestKeyboardFlow:

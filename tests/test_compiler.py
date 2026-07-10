@@ -536,3 +536,109 @@ class TestCompileRecording:
         )
         with pytest.raises(ValueError, match="hover"):
             compile_recording(recording, tmp_path / "bundle", name="x")
+
+
+class TestIdentityContext:
+    def test_row_click_captures_context_outside_crop(
+        self, tmp_path: Path
+    ) -> None:
+        """A click on a button inside a table-like row records the row's
+        OTHER text (the discriminative name column) as identity context —
+        excluding the button's own crop (mutable label) and any
+        timestamp-bearing cell (volatile)."""
+        recording = tmp_path / "rec"
+        (recording / "frames").mkdir(parents=True)
+
+        before = blank()
+        # A row: name | clock time | priority | [Open] button (click target).
+        draw_text(before, 40, 430, "Jane Sample")
+        draw_text(before, 280, 430, "12:45")
+        draw_text(before, 400, 430, "High")
+        draw_button(before, 560, 400, 160, 48, "Open")
+        # Text on ANOTHER row must stay out of the band.
+        draw_text(before, 40, 560, "Alex Testcase")
+        after = before.copy()
+        draw_text(after, 420, 244, BANNER_TASKS)
+
+        write_frame(recording, 0, "before", before)
+        write_frame(recording, 0, "after", after)
+        (recording / "events.jsonl").write_text(
+            json.dumps({"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0})
+            + "\n"
+        )
+        (recording / "meta.json").write_text(
+            json.dumps(
+                {
+                    "id": "rec-row",
+                    "created_at": "2026-07-06T00:00:00+00:00",
+                    "viewport": list(VIEWPORT),
+                    "app_url": "http://localhost:0/",
+                    "params": {},
+                }
+            )
+        )
+        workflow = compile_recording(recording, tmp_path / "bundle", name="row")
+        anchor = workflow.steps[0].anchor
+        assert anchor is not None
+        assert anchor.context_text is not None
+        context = normalize_text(anchor.context_text)
+        assert "jane" in context and "sample" in context
+        assert "high" in context
+        assert "12:45" not in context  # timestamps are volatile
+        assert "open" not in context  # the target's own (mutable) label
+        assert "alex" not in context  # other rows are outside the band
+
+    def test_click_with_no_row_text_has_no_context(self, compiled) -> None:
+        """The synthetic Sign In button sits alone on its row: nothing
+        outside the crop shares the band, so no context is recorded and the
+        identity check is not armed for the step."""
+        for step in compiled["workflow"].steps:
+            if step.anchor is not None:
+                assert step.anchor.context_text is None, step.id
+
+
+class TestRiskOverrides:
+    """Risk is opt-in at compile time — never auto-assigned. Without an
+    override every step is reversible, which means the irreversible
+    safeguards (below-OCR-rung refusal, unreadable-identity-band refusal)
+    are UNREACHABLE from a default compile; this is disclosed in
+    docs/LIMITS.md. The override is the supported way to arm them."""
+
+    def test_default_compile_marks_every_step_reversible(self, compiled):
+        assert all(s.risk == "reversible" for s in compiled["workflow"].steps)
+
+    def test_override_marks_step_irreversible(self, compiled, tmp_path):
+        workflow = compile_recording(
+            compiled["recording"],
+            tmp_path / "bundle",
+            name="risky",
+            risk_overrides={"step_003": "irreversible"},
+        )
+        by_id = {s.id: s for s in workflow.steps}
+        assert by_id["step_003"].risk == "irreversible"
+        assert all(
+            s.risk == "reversible" for s in workflow.steps if s.id != "step_003"
+        )
+        # The risk survives the bundle round-trip.
+        reloaded = Workflow.load(tmp_path / "bundle")
+        assert {s.id: s.risk for s in reloaded.steps} == {
+            s.id: s.risk for s in workflow.steps
+        }
+
+    def test_unknown_step_id_rejected(self, compiled, tmp_path):
+        with pytest.raises(ValueError, match="unknown step"):
+            compile_recording(
+                compiled["recording"],
+                tmp_path / "bundle",
+                name="risky",
+                risk_overrides={"step_999": "irreversible"},
+            )
+
+    def test_invalid_risk_value_rejected(self, compiled, tmp_path):
+        with pytest.raises(ValueError, match="invalid risk"):
+            compile_recording(
+                compiled["recording"],
+                tmp_path / "bundle",
+                name="risky",
+                risk_overrides={"step_000": "dangerous"},
+            )

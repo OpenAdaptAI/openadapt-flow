@@ -1,9 +1,11 @@
 """Track B — mid-run fault injection (adversarial validation).
 
 Sabotages MockMed state BETWEEN steps of a live replay via ``ChaosBackend``
-and pins down halt-vs-improvise behavior. Several tests characterize known
-failure modes (silent wrong-patient save, silent empty-note save); see
-``docs/validation/VALIDATION.md`` for the ranked matrix.
+and pins down halt-vs-improvise behavior. The silent wrong-patient save and
+the silent empty-note save originally found here were FIXED on 2026-07-08
+(pre-click identity check + typed-input verification); their tests now pin
+the safe-halt / recovery behavior. See ``docs/validation/VALIDATION.md``
+for the ranked matrix.
 
 Click order in the canonical demo: 1=username 2=password 3=sign-in 4=Open
 5=New Encounter 6=Triage 7=note field 8=Save. Type order: 1=username
@@ -43,16 +45,17 @@ def run(bundle, mockmed_url, _browser, tmp_path: Path, factory):
 
 
 class TestEntityDeletedMidRun:
-    def test_target_row_deleted_after_login_saves_to_wrong_patient(
+    def test_target_row_deleted_after_login_safe_halts(
         self, bundle, mockmed_url, _browser, tmp_path
     ) -> None:
-        """WRONG-ACTION, SILENT. Between signing in and clicking 'Open',
-        the target patient's referral row is deleted (as if another user
-        claimed it). Desired: safe halt. Observed: the next patient's row
-        slides into the recorded position, resolves, and the encounter is
-        saved to THAT patient with a green report — the mid-run twin of the
-        drift=missing perturbation. If this test fails, the failure mode
-        was fixed: update docs/validation/VALIDATION.md and invert it."""
+        """FIXED (was: wrong-action, silent — saved to '#patient/p2').
+        Between signing in and clicking 'Open', the target patient's
+        referral row is deleted (as if another user claimed it). The next
+        patient's row slides into the recorded position and every rung
+        resolves to it — but the pre-click identity check reads 'Alex
+        Testcase Cardiology follow-up Medium' where 'Jane Sample Knee pain
+        referral High' was recorded and halts the run without clicking:
+        the mid-run twin of the drift=missing perturbation."""
 
         def inject(page):
             page.wait_for_selector("#open-p1", timeout=5000)
@@ -64,9 +67,14 @@ class TestEntityDeletedMidRun:
             bundle, mockmed_url, _browser, tmp_path,
             chaos(inject, after_click=3),
         )
-        assert report.success is True, describe(report, state)
-        assert state["hash"] == "#patient/p2", describe(report, state)
-        assert state["banner"] is not None
+        assert report.success is False, describe(report, state)
+        assert state["hash"] == "#tasks", describe(report, state)  # no click
+        assert state["banner"] is None  # nothing saved
+        failed = failing_step(report)
+        assert failed is not None and failed.step_id == "step_005"
+        assert "Identity check failed" in (failed.error or "")
+        assert failed.identity is not None
+        assert failed.identity.status == "mismatch"
 
 
 class TestBlockingModalMidRun:
@@ -162,18 +170,63 @@ class TestLayoutSwapMidRun:
         assert state["enc_item"].startswith("Triage"), describe(report, state)
 
 
-class TestFocusStolenBeforeTyping:
-    def test_blur_between_click_and_type_saves_empty_note_silently(
+class TestDialogOverFieldWhileTyping:
+    def test_dialog_over_note_field_halts_instead_of_false_verifying(
         self, bundle, mockmed_url, _browser, tmp_path
     ) -> None:
-        """WRONG-ACTION (wrong state written), SILENT. Focus is stolen
-        between clicking the note field and typing — a one-line stand-in
-        for any app that re-renders or pops a late dialog at the wrong
-        moment. The keystrokes fall on <body>, the note is lost, the
-        encounter is saved EMPTY, and the run reports success: TYPE steps
-        never verify the field content, and parameterized values are (by
-        design) excluded from every postcondition, so nothing checks the
-        note arrived. If this fails, the failure mode was fixed — invert."""
+        """ADDED 2026-07-09 (review P2a). A survey dialog renders over the
+        note field between the keystrokes and their verification. The
+        field region visibly changes, so under the old diff-alone rule the
+        typed input verified on ANY pixel change — including when the
+        keystrokes had actually fallen elsewhere (that stolen-keystroke
+        variant is pinned as a unit test:
+        test_replayer.test_type_dialog_over_field_halts_without_retyping).
+        The runtime cannot distinguish 'typed, then covered' from 'dialog
+        swallowed the keystrokes', so it must halt rather than trust the
+        diff: the typed value is not readable in the changed region, and
+        the run stops WITHOUT the select-all retype (which could destroy
+        field content). Nothing is saved."""
+
+        def inject(page):
+            page.evaluate(
+                "var d = document.createElement('div');"
+                "d.id = 'chaos-dialog';"
+                "d.setAttribute('tabindex', '-1');"
+                "d.style.cssText = 'position:fixed;left:30px;top:190px;"
+                "width:560px;padding:28px;background:#fff;"
+                "border:3px solid #333;z-index:9999;font-size:20px';"
+                "d.textContent = "
+                "'Quick survey: how is MockMed working for you today?';"
+                "document.body.appendChild(d);"
+                "d.focus();"
+            )
+
+        report, state = run(
+            bundle, mockmed_url, _browser, tmp_path,
+            chaos(inject, after_type=3),
+        )
+        assert report.success is False, describe(report, state)
+        assert state["banner"] is None  # nothing was saved
+        failed = failing_step(report)
+        assert failed is not None
+        assert failed.step_id == "step_009", describe(report, state)
+        assert "Typed input could not be verified" in (failed.error or "")
+        assert "retyping is unsafe" in (failed.error or "")
+
+
+class TestFocusStolenBeforeTyping:
+    def test_blur_between_click_and_type_recovers_and_saves_the_note(
+        self, bundle, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """FIXED (was: wrong-action, silent — the encounter was saved with
+        an EMPTY note and a green report). Focus is stolen between clicking
+        the note field and typing — a one-line stand-in for any app that
+        re-renders or pops a late dialog at the wrong moment. The
+        keystrokes fall on <body>; typed-input verification sees the field
+        region unchanged, refocuses (re-clicks the field), retypes once,
+        confirms the text landed, and the run completes with the CORRECT
+        note. (Were the retry also to fail, the run would safe-halt — see
+        test_replayer.test_type_verification_failure_halts_run.)"""
 
         def inject(page):
             page.evaluate(
@@ -186,11 +239,16 @@ class TestFocusStolenBeforeTyping:
         )
         assert report.success is True, describe(report, state)
         assert state["hash"] == "#patient/p1"
-        # The banner proves the save; its bare text proves the note is gone.
+        # The banner proves the save; its text proves the note ARRIVED.
         assert state["banner"] is not None
-        assert state["banner"].strip() == "Encounter saved —", describe(
-            report, state
+        assert state["banner"].strip() == (
+            f"Encounter saved — {PARAMS['note'][:40]}"
+        ), describe(report, state)
+        type_result = next(
+            r for r in report.results if r.step_id == "step_009"
         )
+        assert type_result.input_retried is True
+        assert type_result.input_verified is True
 
 
 class TestNavigationHijackMidRun:

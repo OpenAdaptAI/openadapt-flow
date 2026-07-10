@@ -16,8 +16,23 @@ list: wrong-entity clicks in repeated structures and unverified typed
 input were fixed on 2026-07-08; anti-robust postcondition mining — clock
 fragments, "longest new text" grabbing data, DOB banners eaten by the
 timestamp filter, parameter values leaking into landmarks — was fixed on
-2026-07-09. Both moved to the safe-halt section below.)
+2026-07-09; near-name sibling rows sailing through the identity matcher
+were fixed on 2026-07-10. All moved to the safe-halt section below.)
 
+- **Identity verification covers ONLY armed steps — and real bundles arm
+  a minority of clicks.** The most recent live OpenEMR check (2026-07-09)
+  armed **4 of 12** click steps; the earlier fresh bundle armed 7 of 12.
+  The rest compile with no identity context at all (no readable row text
+  outside the target's own crop: login buttons, icon-only pencils,
+  too-generic bands) and an UNARMED click proceeds with **no identity
+  check whatsoever** — every guarantee in the wrong-entity section below
+  is scoped to armed steps only. As of this PR the coverage is a
+  first-class, auditable metric: `workflow.json` carries per-step
+  `identity_armed` / `identity_unarmed_reason` (auditable BEFORE running),
+  every run's REPORT.md states "N of M click steps identity-armed" and
+  lists the unarmed steps by id with the reason, and the benchmark
+  methodology sections report the same number. Disclosure does not close
+  the gap: a wrong-entity click on an unarmed step is still silent.
 - **Steps with no visual AND no structural effect assert nothing.** Since
   2026-07-09 an action whose recorded before/after frames are identical
   falls back to structural postconditions (URL change, title change, new
@@ -51,29 +66,44 @@ Failures below stop the run with an accurate per-step report — no wrong
 actions observed — at the cost of availability:
 
 - **Wrong-entity targets in repeated structures** (fixed 2026-07-08,
-  matcher hardened 2026-07-09 after adversarial review; formerly the top
-  silent failure mode). When data shifts between runs — a row added above
-  the target, the target's row deleted, a look-alike sibling, a re-sorted
-  table — the resolver still finds a pixel-identical target at a
-  plausible position, but the pre-click **identity check** compares the
-  resolved row's text (the OCR lines of the resolved point's own text
+  matcher hardened 2026-07-09, matcher REBUILT 2026-07-10 after the
+  near-name sibling reopening — the third reopening of this P0; formerly
+  the top silent failure mode). When data shifts between runs — a row
+  added above the target, the target's row deleted, a look-alike sibling,
+  a re-sorted table — the resolver still finds a pixel-identical target
+  at a plausible position, but the pre-click **identity check** compares
+  the resolved row's text (the OCR lines of the resolved point's own text
   row, minus the target's own label and timestamp-bearing cells) against
   the recorded row and refuses to click on mismatch. Matching is
   order-insensitive per token (OCR re-reads the same band in different
-  segmentation orders) and requires BOTH >= 0.8 coverage of the recorded
-  band AND no contiguous uncovered run longer than 4 squashed characters
-  — a wrong name is a contiguous mismatch, so long shared row text cannot
-  buy it a pass. For a parameterized target (e.g. *which patient* to
-  open), the run's value is substituted into the recorded band and the
-  whole substituted band must match — a row that merely mentions the
-  run's value does not verify. Caveats, disclosed: when the live band is
-  unreadable even at 2x resolution, reversible steps proceed exactly as
-  before with the step flagged in the run report (`identity:
-  "unreadable"`), and only compile-time-marked irreversible steps refuse
-  (see the dangerous list); dense-table OCR undercount is real, which is
-  why the 2x retry exists; names within OCR-jitter distance of each other
-  (whole-token similarity >= 0.7, e.g. "Jane"/"Janet") are
-  indistinguishable from misreads and verify.
+  segmentation orders), accepts a token ONLY when it is OCR-equivalent —
+  identical under the character-confusion classes real engines produce
+  (l/1/i, O/0, 5/s, rn/m, cl/d, ...) or a full-consumption token
+  split/join — and requires >= 0.8 coverage, no contiguous uncovered run
+  over 4 squashed characters, AND zero *contradicted* characters: an
+  unmatched token whose observed counterpart is a near-miss (Phil/Philip,
+  John/Joan, an off-by-one DOB or swapped MRN digits, a Jr/Sr suffix on
+  one side, a replaced word) is affirmative wrong-sibling evidence, not
+  noise. The 2026-07-09 matcher's containment and 0.7-similarity tiers
+  verified exactly those siblings (measured 53.9% false-accept on the
+  frozen adversarial corpus, 99% on DOB/suffix/single-letter classes);
+  the rebuilt matcher measures **0.0% false accepts / 10.7% false
+  aborts** on the same held-out corpus, operating point picked from the
+  ROC (docs/validation/IDENTITY_ROC.md). For a parameterized target
+  (e.g. *which patient* to open), the run's value is substituted into
+  the recorded band and the whole substituted band must match — a row
+  that merely mentions the run's value does not verify. Caveats,
+  disclosed: only ARMED steps get any of this (see the dangerous list —
+  live bundles armed 4-7 of 12 clicks); when the live band is unreadable
+  even at 2x resolution, reversible steps proceed exactly as before with
+  the step flagged in the run report (`identity: "unreadable"`), and
+  only compile-time-marked irreversible steps refuse; dense-table OCR
+  undercount is real, which is why the 2x retry exists; the OCR-confusion
+  table is finite, so an exotic misread outside it makes the true row
+  ABORT (availability cost, never a wrong action) — on the corpus that
+  shows up as ~90% aborts when the band's name tokens are occluded
+  outright, which is the correct refusal: identity cannot be confirmed
+  from a band whose identity tokens were never read.
 - **Typed input that cannot be confirmed** (fixed 2026-07-08, verification
   hardened 2026-07-09). After every TYPE action, an OCR-able typed value
   must be READ back from the field region (2x-resolution retry included);

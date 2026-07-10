@@ -436,7 +436,25 @@ class TestCliSmoke:
         assert (run_dir / "report.json").is_file()
         report_md = run_dir / "REPORT.md"
         assert report_md.is_file()
-        assert "cli-smoke" in report_md.read_text()
+        md = report_md.read_text()
+        assert "cli-smoke" in md
+        # Protection coverage is first-class in every run report: N of M
+        # armed, and any unarmed click listed with its compile-time reason.
+        assert "## Identity protection coverage" in md
+        assert "click steps identity-armed" in md
+        # The bundle itself carries the audit fields for click steps.
+        wf = json.loads((bundle / "workflow.json").read_text())
+        clicks = [
+            s for s in wf["steps"]
+            if s["action"] in ("click", "double_click")
+        ]
+        assert clicks and all(
+            s["identity_armed"] is not None for s in clicks
+        )
+        assert all(
+            s["identity_armed"] or s["identity_unarmed_reason"]
+            for s in clicks
+        )
 
         proc = cli("emit-skill", str(bundle), "--out", str(skills))
         assert proc.returncode == 0, proc.stderr

@@ -137,6 +137,30 @@ class Step(BaseModel):
     expect: list[Postcondition] = Field(default_factory=list)
     risk: Literal["reversible", "irreversible"] = "reversible"
     timeout_s: float = 10.0
+    # Identity-protection audit trail (clicks and anchored TYPE steps):
+    # whether this step's click is guarded by the pre-click identity check
+    # (anchor.context_text present). Written by the compiler so an
+    # operator can audit a bundle's protection coverage BEFORE running it;
+    # None on non-click steps and on bundles compiled before this field
+    # existed. An UNARMED click proceeds with NO identity verification
+    # (see docs/LIMITS.md).
+    identity_armed: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Clicks/anchored TYPE only: True when the pre-click identity"
+            " check is armed (context band recorded); False when the step"
+            " will click WITHOUT identity verification; None for steps"
+            " the check does not apply to (or pre-metric bundles)."
+        ),
+    )
+    identity_unarmed_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why an applicable step compiled unarmed (no readable band"
+            " text, band too generic, ...); None when armed or not"
+            " applicable."
+        ),
+    )
 
 
 class Workflow(BaseModel):
@@ -238,6 +262,14 @@ class StepResult(BaseModel):
     elapsed_ms: float = 0.0
 
 
+class UnarmedStep(BaseModel):
+    """A click step that will proceed with NO identity verification."""
+
+    step_id: str
+    intent: str = ""
+    reason: str = ""
+
+
 class RunReport(BaseModel):
     workflow_name: str
     started_at: str
@@ -249,6 +281,13 @@ class RunReport(BaseModel):
     model_calls: int = 0
     est_model_cost_usd: float = 0.0
     total_ms: float = 0.0
+    # Identity-protection coverage of the WHOLE workflow (computed at run
+    # start from the bundle, not just from executed steps): how many of
+    # the identity-applicable steps (clicks / anchored TYPE) carry an
+    # armed pre-click identity check, and which proceed unguarded.
+    identity_applicable_steps: int = 0
+    identity_armed_steps: int = 0
+    identity_unarmed: list[UnarmedStep] = Field(default_factory=list)
 
     def save(self, run_dir: Path | str) -> Path:
         run = Path(run_dir)

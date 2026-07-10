@@ -1272,3 +1272,57 @@ def test_structural_postcondition_passes_unverified_on_plain_backend(
         bundle_dir=bundle, run_dir=run_dir,
     )
     assert report.success is True
+
+
+# -- identity-protection coverage audit (run start) ---------------------------
+
+
+def _coverage_workflow() -> Workflow:
+    armed = click_step("s_armed")
+    armed.anchor.context_text = "Belford, Phil 1985-03-12 M"
+    armed.identity_armed = True
+    unarmed = click_step("s_unarmed", ocr_text="")
+    unarmed.identity_armed = False
+    unarmed.identity_unarmed_reason = (
+        "no readable text in the target's row band at compile time "
+        "(icon-only or unlabeled row)"
+    )
+    legacy_unarmed = click_step("s_legacy")  # pre-metric bundle: fields None
+    keyboard = Step(id="s_key", intent="press Enter", action=ActionKind.KEY,
+                    key="Enter")
+    return Workflow(
+        name="coverage", steps=[armed, unarmed, legacy_unarmed, keyboard]
+    )
+
+
+def test_identity_coverage_recorded_on_report():
+    """The report states N of M applicable steps armed and lists every
+    unarmed click by id with its reason — computed from the whole bundle
+    at run start, before any step executes."""
+    report = RunReport(workflow_name="coverage", started_at="t")
+    Replayer._record_identity_coverage(_coverage_workflow(), report)
+    assert report.identity_applicable_steps == 3  # keyboard step excluded
+    assert report.identity_armed_steps == 1
+    ids = [u.step_id for u in report.identity_unarmed]
+    assert ids == ["s_unarmed", "s_legacy"]
+    assert "icon-only" in report.identity_unarmed[0].reason
+    # A pre-metric bundle still lists the step, with an honest reason.
+    assert "predates" in report.identity_unarmed[1].reason
+
+
+def test_identity_coverage_counts_anchored_type_steps():
+    type_step = Step(
+        id="s_type", intent="type note", action=ActionKind.TYPE,
+        text="hello",
+        anchor=Anchor(
+            template="templates/btn.png", region=(0, 0, 10, 10),
+            click_point=(5, 5), context_text="Notes field row text here",
+        ),
+    )
+    report = RunReport(workflow_name="coverage", started_at="t")
+    Replayer._record_identity_coverage(
+        Workflow(name="w", steps=[type_step]), report
+    )
+    assert report.identity_applicable_steps == 1
+    assert report.identity_armed_steps == 1
+    assert report.identity_unarmed == []

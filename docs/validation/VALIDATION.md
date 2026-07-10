@@ -1,7 +1,10 @@
 # Adversarial validation — failure-mode matrix
 
 Date: 2026-07-08 (initial audit and same-day fix); updated 2026-07-09
-(postcondition-mining fix + live re-run). This document is the
+(postcondition-mining fix + live re-run); updated 2026-07-10 (identity
+matcher rebuilt after the THIRD wrong-patient reopening — near-name
+siblings — with a frozen held-out adversarial corpus and a published
+ROC; see the 2026-07-10 fix update). This document is the
 result of deliberately trying to break compiled replay before anyone else
 does. Every experiment ran with **zero model calls and $0 of API spend**:
 compiled-replay only, no grounder, no agent arm. Failures found here are
@@ -27,7 +30,9 @@ columns and the characterization tests pin the new behavior.
    recorded characters may exceed 4 — a wrong entity is a contiguous
    mismatch (a replaced name), so long shared row text cannot buy it a
    pass. Measured: true row 1.0 (still 1.0 under injected per-character
-   OCR jitter, via a 0.7 whole-token similarity tier); look-alike row
+   OCR jitter, via a 0.7 whole-token similarity tier — REMOVED
+   2026-07-10: that tier verified near-name siblings, the third
+   wrong-patient reopening; see that fix update below); look-alike row
    sharing all non-name columns ~0.67 coverage with a 10-char uncovered
    name run. When a workflow parameter's demonstrated value is embedded
    in the recorded band (a parameterized *target*, e.g. the patient row),
@@ -297,6 +302,101 @@ Known remaining, documented here deliberately (not attempted):
 - **REGION_STABLE templates can embed rendered parameter pixels** (see the
   lint scope note above) — false-halt direction only.
 
+## Fix update (2026-07-10, `feat/identity-roc`): the THIRD wrong-patient reopening
+
+Said plainly: the wrong-patient P0 reopened a **third** time. History:
+pixel-lookalike rows (fixed 2026-07-08 by the context bands) → residue-
+blind coverage + short-param disarm (fixed 2026-07-09 by the token
+matcher + residue cap) → **near-name siblings** (this fix). The
+2026-07-09 matcher returned `(coverage=1.0, residue=0)` — VERIFIED — for
+all four of these reproduced probes:
+
+- recorded `Belford, Phil 1985-03-12 M` vs observed
+  `Belford, Philip 1985-03-12 M` (containment tier: 'Phil' ⊂ 'Philip');
+- the reverse direction (similarity tier: ratio 0.8);
+- `Smith, John 1985-03-12 M` vs `Smith, Joan 1985-03-12 M` (similarity
+  tier: SequenceMatcher('John','Joan') = 0.75 >= 0.7);
+- `Belford, Phil ...` vs `Belford, Phillipa ...` (containment tier).
+
+Real EMR rows are full of near-name siblings — family members sharing a
+surname, Jr/Sr, John/Joan — and downstream note verification does NOT
+catch a wrong-patient write: the note really is saved, in the wrong
+chart. All four probes are pinned as permanent mismatches in
+`tests/test_identity.py`.
+
+**Methodology change — held-out corpus BEFORE the fix.** The recurring
+failure mode of this document is fixing against exactly the adversaries
+that found the last bug (a fixed point, not a false-negative rate). This
+fix broke the cycle: a deterministic, seeded adversarial corpus
+(`openadapt_flow/validation/adversary_corpus.py`, seed 20260710, 4360
+pairs — 2200 `different_entity` across 10 generator categories, 2160
+`same_entity` OCR-noise pairs across 9) was generated and **frozen
+first** — its sha256 manifest is committed
+(`adversary_corpus_manifest.json`) and pinned by tests, so post-hoc
+tuning of the corpus toward the matcher is detectable in git history —
+and only then was the matcher evaluated and rebuilt. No generator bugs
+were found or fixed after first evaluation (the generator is byte-
+identical to the pre-evaluation commit).
+
+**Measured, before → after** (full tables and the ROC chart:
+[IDENTITY_ROC.md](IDENTITY_ROC.md), `identity_roc.png`):
+
+| corpus category (`different_entity`) | old matcher false-accept | new |
+|---|---|---|
+| DOB off by one field | 99.1% | 0.0% |
+| generational suffix (Jr/Sr/II) | 99.1% | 0.0% |
+| single-letter edit (John/Joan) | 98.2% | 0.0% |
+| transposition | 95.5% | 0.0% |
+| prefix extension (Phil/Philip) | 72.3% | 0.0% |
+| MRN digit swap | 50.0% | 0.0% |
+| same surname, different first | 15.5% | 0.0% |
+| **overall (2200 pairs)** | **53.9%** | **0.0%** |
+
+False aborts on the `same_entity` side: 12.1% → 10.7% (i.e. the fix also
+*reduced* the availability cost slightly; the remainder is ~90%
+concentrated in the occlusion category — bands whose identity tokens
+were never read, where refusing is the correct epistemic outcome).
+
+**The rebuild** (`runtime/identity.py`): token matching accepts ONLY
+OCR-equivalence — identity under the character-confusion classes real
+engines produce (l/1/i, O/0, 5/s, 2/z, 8/b, 9/g, rn/m, cl/d, vv/w) —
+plus full-consumption token splits/joins; the containment and raw-
+similarity tiers are gone. Unmatched tokens are split into *absence*
+(uncovered runs, budgeted as before — OCR dropout, the cheap direction)
+and *contradiction* (near-miss similarity >= 0.62 on canonical forms,
+semantic containment with alphabetic residue, replacement by an
+unexplained observed token, generational suffix on one side), which has
+its own budget of ZERO characters. The modal-band permutation class, OCR
+jitter, splits/joins and the MockMed/OpenEMR true-row shapes all still
+verify (pinned).
+
+**Operating point, chosen from the ROC with the weighting said out
+loud** (a wrong-patient write is catastrophic; a false abort is a ~$0.10
+hybrid fallback — we price that at 4+ orders of magnitude): coverage
+0.8, uncovered-run cap 4, contradiction_sim 0.62, contradiction cap 0.
+NOT the on-corpus Pareto-minimal false-abort corner (coverage 0.7 / run
+cap 8, FAbort 7.96%): that corner's zero false accepts rests entirely on
+the contradiction rule (evade it and FA is 60.8%), while at 0.8/4 the
+older coverage/run budgets independently stop 79.5% of the corpus even
+with contradiction disabled — defense in depth bought with 2.7pp of
+false aborts concentrated in unreadable-name occlusion shapes.
+Regression nets: the operating point is pinned by boundary tests, and a
+corpus-wide test asserts **zero** false accepts (a rate, not a probe
+list) plus a 12% false-abort budget.
+
+**Protection coverage became a first-class metric in the same change**
+(it was previously a buried sentence in a live-check note): the live
+2026-07-09 OpenEMR check armed only **4 of 12** click steps — every
+identity guarantee above applies to armed steps ONLY, and an unarmed
+click proceeds with no identity check at all. Now: `workflow.json`
+carries per-step `identity_armed` / `identity_unarmed_reason` (bundle
+auditable before running), every REPORT.md states "N of M click steps
+identity-armed" and lists unarmed steps by id with the compile-time
+reason, benchmark BENCHMARK.md methodology sections carry the metric
+(historical results.json files lack the per-run data; the generators now
+record it and the committed files note that), and docs/LIMITS.md leads
+the dangerous list with it.
+
 ## Outcome vocabulary
 
 - **pass** — the run succeeded and did what the demonstration did.
@@ -548,9 +648,12 @@ that refusal branch never runs (docs/LIMITS.md states this in the
 dangerous list); (b) targets whose only discriminative text is their own
 label (parameterized typeahead suggestions), and bands under 12 squashed
 characters (too generic to discriminate), compile with no context band
-and stay unverified; (c) names within OCR-jitter similarity (>= 0.7
+and stay unverified; (c) ~~names within OCR-jitter similarity (>= 0.7
 whole-token ratio, e.g. "Jane"/"Janet") are indistinguishable from
-misreads and verify; (d) typed-input read-back can false-abort on widgets
+misreads and verify~~ — this gap was the mechanism of the THIRD
+wrong-patient reopening and was FIXED 2026-07-10 (see that fix update:
+near-name siblings now mismatch; only characteristic OCR char-class
+confusions are treated as misreads); (d) typed-input read-back can false-abort on widgets
 that transform the value while typing (the native-date row in Track C),
 and the refocus re-click / select-all retry assumptions are disclosed in
 docs/LIMITS.md.

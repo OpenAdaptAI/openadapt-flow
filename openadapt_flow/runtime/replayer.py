@@ -34,6 +34,7 @@ from openadapt_flow.ir import (
     RunReport,
     Step,
     StepResult,
+    UnarmedStep,
     Workflow,
 )
 from openadapt_flow.runtime import heal as heal_mod
@@ -157,6 +158,7 @@ class Replayer:
             started_at=datetime.now(timezone.utc).isoformat(),
             params=params,
         )
+        self._record_identity_coverage(workflow, report)
         new_crops: dict[str, bytes] = {}
         self._last_click_point: Optional[Point] = None
         t_run = time.monotonic()
@@ -194,6 +196,44 @@ class Replayer:
 
         report.save(run_dir)
         return report
+
+    @staticmethod
+    def _record_identity_coverage(
+        workflow: Workflow, report: RunReport
+    ) -> None:
+        """Record the bundle's identity-protection coverage on the report.
+
+        Computed over the WHOLE workflow at run start (not just executed
+        steps): every anchored click / double-click / TYPE step is
+        identity-applicable; it is ARMED when the pre-click identity gate
+        will actually run (``anchor.context_text`` present — the ground
+        truth the gate itself keys on). Unarmed steps proceed with NO
+        identity verification (docs/LIMITS.md), so each one is listed by
+        id with the compile-time reason for the operator.
+        """
+        for step in workflow.steps:
+            if step.anchor is None or step.action not in (
+                ActionKind.CLICK,
+                ActionKind.DOUBLE_CLICK,
+                ActionKind.TYPE,
+            ):
+                continue
+            report.identity_applicable_steps += 1
+            if step.anchor.context_text:
+                report.identity_armed_steps += 1
+            else:
+                report.identity_unarmed.append(
+                    UnarmedStep(
+                        step_id=step.id,
+                        intent=step.intent,
+                        reason=step.identity_unarmed_reason
+                        or (
+                            "no identity context recorded at compile time"
+                            " (bundle predates the armed-coverage audit"
+                            " field)"
+                        ),
+                    )
+                )
 
     # -- per-step execution ---------------------------------------------------
 

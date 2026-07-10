@@ -18,6 +18,7 @@ from openadapt_flow.ir import (
     RunReport,
     Step,
     StepResult,
+    UnarmedStep,
     Workflow,
 )
 from openadapt_flow.report import render_bench_report, render_run_report
@@ -118,6 +119,15 @@ def _make_run_dir(tmp_path: Path, *, success: bool) -> Path:
         model_calls=2,
         est_model_cost_usd=0.0135,
         total_ms=1580.0,
+        identity_applicable_steps=3,
+        identity_armed_steps=2,
+        identity_unarmed=[
+            UnarmedStep(
+                step_id="step_save",
+                intent="click 'Save Encounter'",
+                reason="no readable text in the target's row band",
+            )
+        ],
     )
     report.save(run_dir)
     return run_dir
@@ -139,6 +149,13 @@ def test_run_report_success(tmp_path: Path) -> None:
     # Params.
     assert "## Parameters" in md
     assert "`note`" in md and "Follow-up in 2 weeks" in md
+    # Identity-protection coverage: armed count + unarmed steps by id
+    # with the reason — an unarmed click proceeds with NO identity check.
+    assert "## Identity protection coverage" in md
+    assert "**2 of 3 click steps identity-armed.**" in md
+    assert "no identity verification" in md
+    assert "| `step_save` " in md
+    assert "no readable text in the target's row band" in md
     # Per-step table columns and rows.
     assert (
         "| # | Step | Intent | Rung | Confidence | Verified | ms "

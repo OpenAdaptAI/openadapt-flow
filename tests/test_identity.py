@@ -16,6 +16,26 @@ first identity implementation, and must never come back:
 
 Plus the modal-overlay false abort (order-sensitive matching scored a
 token permutation of the same band at ~0.66 < 0.8 on live OpenEMR).
+
+THIRD REOPENING (2026-07-10, near-name siblings): the containment and
+similarity tiers of the second fix verified sibling rows — 'Phil' inside
+'Philip' (containment 1.0), 'John' vs 'Joan' (ratio 0.75), Jr/Sr rows,
+off-by-one DOBs, swapped MRN digits. All pinned in TestSiblingProbes /
+TestFieldLevelSiblings below; the matcher was rebuilt around strict
+OCR-equivalence plus contradiction budgets and its operating point was
+picked from a FROZEN held-out adversarial corpus
+(docs/validation/IDENTITY_ROC.md) — pinned in TestOperatingPoint.
+
+OUT-OF-CORPUS REVIEW (2026-07-10, PR #16): thirteen probes outside
+corpus v1's label rule all VERIFIED (confusion-collided distinct names,
+short-token discriminators, observed-side supersets, absent name
+tokens) — pinned in tests/test_identity_out_of_corpus.py, fixed by the
+suspect / short-token-replacement / unexplained-name / absent-name
+budgets. Two consequences flipped pins HERE: letter-letter confusion
+jitter on the TRUE row now aborts (indistinguishable from a Neil/Nell
+sibling — see TestTruePositives), and the pure-absence boundary at the
+run cap now refuses when the absent token is name-like (see
+TestOperatingPoint).
 """
 
 from __future__ import annotations
@@ -25,10 +45,15 @@ from types import SimpleNamespace
 import pytest
 
 from openadapt_flow.runtime.identity import (
+    ABSENT_NAME_TOKEN_CAP,
+    CONTRADICTED_CHARS_CAP,
+    CONTRADICTION_SIM,
     COVERAGE_THRESHOLD,
     MIN_CONTEXT_CHARS,
     MIN_PARAM_CHARS,
+    SUSPECT_CHARS_CAP,
     UNCOVERED_RUN_CAP,
+    UNEXPLAINED_NAME_TOKENS_CAP,
     band_match,
     band_region,
     context_from_lines,
@@ -36,6 +61,7 @@ from openadapt_flow.runtime.identity import (
     embedded_params,
     lines_near_point,
     longest_run,
+    ocr_canonical,
     required_run,
     squash,
     substitute_param,
@@ -61,9 +87,12 @@ class TestReviewerProbes:
         though raw coverage is ~0.89."""
         check = verify_target_identity(ROW, WRONG_ROW)
         assert check.status == "mismatch"
-        cov, uncovered = band_match(ROW, WRONG_ROW)
-        assert cov >= COVERAGE_THRESHOLD  # coverage alone WOULD pass
-        assert uncovered > UNCOVERED_RUN_CAP  # the residue cap catches it
+        match = band_match(ROW, WRONG_ROW)
+        assert match.coverage >= COVERAGE_THRESHOLD  # coverage alone WOULD pass
+        assert match.max_uncovered_run > UNCOVERED_RUN_CAP  # the run cap catches it
+        # ... and 'Ann Wu' is a REPLACEMENT of 'Jane Li', so the 2026-07-10
+        # contradiction budget catches it independently of the run cap:
+        assert match.contradicted_chars > CONTRADICTED_CHARS_CAP
 
     def test_b1_generic_band_never_arms(self):
         """'Active High 3' (11 squashed chars) is generic — any sibling row
@@ -99,6 +128,88 @@ class TestReviewerProbes:
         assert check.param == "patient"
 
 
+# -- the third-reopening probes, verbatim (2026-07-10) -----------------------
+
+
+class TestSiblingProbes:
+    """The four confirmed near-name sibling probes: each returned
+    (coverage=1.0, residue=0) — VERIFIED — under the pre-2026-07-10
+    matcher (containment tier for Phil⊂Philip; similarity tier at 0.7 for
+    John/Joan at 0.75). Real EMR rows are full of near-name siblings
+    (family members, Jr/Sr, John/Joan) and a wrong-patient write is NOT
+    caught downstream (the note really is saved — in the wrong chart).
+    These are permanent mismatches."""
+
+    def test_prefix_extension_phil_philip(self):
+        check = verify_target_identity(
+            "Belford, Phil 1985-03-12 M", "Belford, Philip 1985-03-12 M"
+        )
+        assert check.status == "mismatch"
+
+    def test_prefix_extension_reverse_direction(self):
+        check = verify_target_identity(
+            "Belford, Philip 1985-03-12 M", "Belford, Phil 1985-03-12 M"
+        )
+        assert check.status == "mismatch"
+
+    def test_single_letter_edit_john_joan(self):
+        check = verify_target_identity(
+            "Smith, John 1985-03-12 M", "Smith, Joan 1985-03-12 M"
+        )
+        assert check.status == "mismatch"
+
+    def test_prefix_extension_phil_phillipa(self):
+        # similarity('phil','phillipa') = 0.67 — BELOW the old 0.7 tier,
+        # yet the old containment tier still verified it; the semantic-
+        # extension contradiction rule catches it now.
+        check = verify_target_identity(
+            "Belford, Phil 1985-03-12 M", "Belford, Phillipa 1985-03-12 M"
+        )
+        assert check.status == "mismatch"
+
+
+class TestFieldLevelSiblings:
+    """Sibling classes beyond names, from the frozen adversarial corpus
+    (all >=50% verified under the legacy matcher; 0% now)."""
+
+    def test_generational_suffix_mismatches_both_directions(self):
+        base = "Belford, Phil 1985-03-12 M"
+        with_jr = "Belford, Phil Jr 1985-03-12 M"
+        assert verify_target_identity(base, with_jr).status == "mismatch"
+        assert verify_target_identity(with_jr, base).status == "mismatch"
+
+    def test_generational_suffix_with_ocr_noise_still_mismatches(self):
+        # A live 'II' commonly OCRs as 'lI'; suffix detection must be
+        # confusion-canonical, not literal.
+        check = verify_target_identity(
+            "Ramirez, Stephanie 1985-06-02 F",
+            "Ramire2, Stephanie lI 1985-06-02 F",
+        )
+        assert check.status == "mismatch"
+
+    def test_dob_off_by_one_field_mismatches(self):
+        check = verify_target_identity(
+            "Belford, Phil 1985-03-12 M", "Belford, Phil 1985-03-13 M"
+        )
+        assert check.status == "mismatch"
+
+    def test_mrn_digit_swap_mismatches(self):
+        check = verify_target_identity(
+            "Belford, Phil 1985-03-12 M MRN A123456",
+            "Belford, Phil 1985-03-12 M MRN A123465",
+        )
+        assert check.status == "mismatch"
+
+    def test_same_surname_dissimilar_short_first_name_mismatches(self):
+        # 'Amy' -> 'Kim': similarity 0.0 and only a 3-char absence run —
+        # under every workable run cap — but the replacement rule sees an
+        # unexplained alphabetic observed token where ours is missing.
+        check = verify_target_identity(
+            "Smith, Amy 1985-03-12 M", "Smith, Kim 1985-03-12 M"
+        )
+        assert check.status == "mismatch"
+
+
 # -- true-positive behavior around the probes --------------------------------
 
 
@@ -106,14 +217,30 @@ class TestTruePositives:
     def test_true_row_verifies(self):
         assert verify_target_identity(ROW, ROW).status == "verified"
 
-    def test_ocr_jitter_verifies(self):
-        """Per-character OCR noise ('paln' ~ 'pain', '5ample' ~ 'sample')
-        must not abort a correct target."""
+    def test_digit_class_ocr_jitter_verifies(self):
+        """Digit/symbol-class OCR noise ('5ample' ~ 'sample', 'Phi1' ~
+        'Phil') must not abort a correct target: a human name contains
+        no digits, so no collision with a DIFFERENT name is possible."""
         check = verify_target_identity(
             "Jane Sample Knee pain referral High",
-            "Jane 5ample Knee paln referral Hlgh",
+            "Jane 5ample Knee pain referral High",
         )
         assert check.status == "verified"
+
+    def test_letter_letter_jitter_aborts_as_indistinguishable(self):
+        """FLIPPED by the 2026-07-10 out-of-corpus review: 'paln'/'pain'
+        and 'Hlgh'/'High' are letter-letter confusions — the exact
+        mechanism by which 'Nell' passes for 'Neil' (a DIFFERENT
+        patient). Content-agnostically the true-row misread and the
+        collided sibling are the same band, so the honest outcome is an
+        abort for both readings (availability cost, disclosed in
+        docs/LIMITS.md; scored as the indistinguishable class in the
+        v2 corpus)."""
+        check = verify_target_identity(
+            "Jane Sample Knee pain referral High",
+            "Jane Sample Knee paln referral Hlgh",
+        )
+        assert check.status == "mismatch"
 
     def test_token_permutation_verifies(self):
         """Live OpenEMR false abort: page chrome around a modal re-reads in
@@ -180,57 +307,138 @@ class TestWrongEntities:
 
 class TestBandMatch:
     def test_exact_match(self):
-        assert band_match(ROW, ROW) == (1.0, 0)
+        assert band_match(ROW, ROW) == (1.0, 0, 0, 0, 0, 0)
 
     def test_adjacent_unmatched_tokens_merge_into_one_run(self):
-        cov, uncovered = band_match(ROW, WRONG_ROW)
-        assert uncovered == len("janeli")
+        match = band_match(ROW, WRONG_ROW)
+        assert match.max_uncovered_run == len("janeli")
 
     def test_separated_unmatched_tokens_do_not_merge(self):
-        cov, uncovered = band_match(
+        match = band_match(
             "alpha beta gamma delta", "alpha WRONG gamma NOPE"
         )
-        assert uncovered == max(len("beta"), len("delta"))
+        assert match.max_uncovered_run == max(len("beta"), len("delta"))
 
     def test_short_tokens_match_only_verbatim(self):
         # 'li' must not match inside 'lipid'.
-        cov, _ = band_match("li", "lipid screening")
-        assert cov == 0.0
-        cov, _ = band_match("li", "jane li")
-        assert cov == 1.0
+        assert band_match("li", "lipid screening").coverage == 0.0
+        assert band_match("li", "jane li").coverage == 1.0
 
-    def test_containment_tolerates_merged_tokens(self):
-        # Recorded 'ShowActive' vs observed 'Show Active' (and vice versa).
-        cov, uncovered = band_match("ShowActive", "Show Active")
-        assert cov == 1.0 and uncovered == 0
+    def test_split_and_join_tolerated(self):
+        # Recorded 'ShowActive' vs observed 'Show Active' (and vice versa):
+        # splits/joins are the ONLY sub-token acceptance left — full
+        # consumption, no partial containment ('Phil' in 'Philip' is a
+        # sibling, not a join; see TestSiblingProbes).
+        assert band_match("ShowActive", "Show Active") == (1.0, 0, 0, 0, 0, 0)
+        assert band_match("Show Active", "ShowActive") == (1.0, 0, 0, 0, 0, 0)
+        # ... and with digit-class OCR noise inside the split form:
+        assert band_match("ShowActive", "Sh0w Active") == (1.0, 0, 0, 0, 0, 0)
+
+    def test_letter_letter_confusion_is_suspect_not_clean(self):
+        # 'Cornprehensive' matches 'Comprehensive' canonically (rn/m) but
+        # the pair is digit-free on both sides — the same shape as the
+        # Marnie/Mamie sibling collision, so it is charged to the
+        # suspect budget instead of being a clean match.
+        match = band_match("Comprehensive panel", "Cornprehensive panel")
+        assert match.coverage == 1.0
+        assert match.suspect_chars == len("comprehensive")
 
     def test_empty_inputs(self):
-        assert band_match("", "anything") == (0.0, 0)
-        cov, uncovered = band_match("abcdef", "")
-        assert cov == 0.0 and uncovered == 6
-
-    def test_coverage_boundary_at_threshold(self):
-        """Exactly one 4-char token uncovered out of 20 chars: coverage
-        0.8 == threshold and residue 4 == cap pass; a 5-char uncovered
-        token fails the cap."""
-        cov, uncovered = band_match(
-            "abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop XXXX"
-        )
-        assert cov == pytest.approx(0.8)
-        assert uncovered == 4
-        # ok at the boundary:
-        expected = "abcd efgh ijkl mnop qrst"
-        check = verify_target_identity(expected, "abcd efgh ijkl mnop XXXX")
-        assert check.status == "verified"
-        # one char more of contiguous residue fails:
-        check = verify_target_identity(
-            "abcd efgh ijkl mnop qrstu", "abcd efgh ijkl mnop XXXXX"
-        )
-        assert check.status == "mismatch"
+        assert band_match("", "anything") == (0.0, 0, 0, 0, 0, 0)
+        match = band_match("abcdef", "")
+        assert match.coverage == 0.0 and match.max_uncovered_run == 6
+        # ... and the fully absent alphabetic token registers as an
+        # absent name-like token.
+        assert match.max_absent_alpha_token == 6
 
     def test_tokenize(self):
         assert tokenize("  Jane   Li \n panel ") == ["jane", "li", "panel"]
         assert tokenize("") == []
+
+
+class TestOperatingPoint:
+    """Pin the ROC-chosen decision parameters and their boundaries
+    (docs/validation/IDENTITY_ROC.md). Moving any of these constants
+    invalidates the committed ROC — regenerate it in the same change."""
+
+    def test_pinned_constants(self):
+        assert COVERAGE_THRESHOLD == 0.8
+        assert UNCOVERED_RUN_CAP == 4
+        assert CONTRADICTION_SIM == 0.62
+        assert CONTRADICTED_CHARS_CAP == 0
+        assert SUSPECT_CHARS_CAP == 0
+        assert UNEXPLAINED_NAME_TOKENS_CAP == 0
+        assert ABSENT_NAME_TOKEN_CAP == 3
+
+    def test_pure_absence_boundary_is_class_weighted(self):
+        """FLIPPED by the 2026-07-10 out-of-corpus review (Major 4): a
+        fully absent 4-char ALPHABETIC token used to sit exactly on
+        coverage 0.8 / run 4 and VERIFY — the band's identity token was
+        never read. Absence of a name-like token now refuses; absence of
+        a numeric token at the same coverage/run (trailing DOB/MRN
+        dropout, the $-cost OCR direction) still verifies."""
+        match = band_match("abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop")
+        assert match.coverage == pytest.approx(0.8)
+        assert match.max_uncovered_run == 4
+        assert match.contradicted_chars == 0
+        assert match.max_absent_alpha_token == 4  # the flipped signal
+        check = verify_target_identity(
+            "abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop"
+        )
+        assert check.status == "mismatch"
+        # The same absence with a NUMERIC token (trailing-numerics
+        # dropout) keeps the old tolerance: class-weighted, not blanket.
+        check = verify_target_identity(
+            "abcd efgh ijkl mnop 1234", "abcd efgh ijkl mnop"
+        )
+        assert check.status == "verified"
+        # A 5-char numeric absence still fails the generic run cap.
+        check = verify_target_identity(
+            "abcd efgh ijkl mnop 12345", "abcd efgh ijkl mnop"
+        )
+        assert check.status == "mismatch"
+
+    def test_replacement_at_same_coverage_mismatches(self):
+        """The same 4-char gap with a foreign token IN ITS PLACE is a
+        replacement — contradiction budget (0) fails it even though
+        coverage and run cap alone would pass."""
+        match = band_match(
+            "abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop wxyz"
+        )
+        assert match.coverage == pytest.approx(0.8)
+        assert match.max_uncovered_run == 4
+        assert match.contradicted_chars > 0
+        check = verify_target_identity(
+            "abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop wxyz"
+        )
+        assert check.status == "mismatch"
+
+    def test_near_miss_similarity_boundary(self):
+        """3-char single-edit names sit at ratio 0.67 — the 0.62
+        near-miss threshold must catch them ('Ted'/'Tad')."""
+        check = verify_target_identity(
+            "Smith, Ted 1985-03-12 M", "Smith, Tad 1985-03-12 M"
+        )
+        assert check.status == "mismatch"
+
+
+class TestOcrCanonical:
+    """Only characteristic OCR char-class confusions are equivalences;
+    semantic letter substitutions are not."""
+
+    def test_confusion_classes_are_equivalent(self):
+        assert ocr_canonical("paln") == ocr_canonical("pain")  # l/i
+        assert ocr_canonical("hlgh") == ocr_canonical("high")
+        assert ocr_canonical("5ample") == ocr_canonical("sample")  # 5/s
+        assert ocr_canonical("c0de") == ocr_canonical("code")  # 0/o
+        assert ocr_canonical("cornpre") == ocr_canonical("compre")  # rn/m
+        assert ocr_canonical("clinic") == ocr_canonical("dinic")  # cl/d
+
+    def test_semantic_edits_are_not_equivalent(self):
+        assert ocr_canonical("john") != ocr_canonical("joan")  # a/o mid-token
+        assert ocr_canonical("phil") != ocr_canonical("philip")  # extension
+        assert ocr_canonical("mark") != ocr_canonical("marc")
+        assert ocr_canonical("1985-03-12") != ocr_canonical("1985-03-13")
 
 
 # -- helpers ---------------------------------------------------------------

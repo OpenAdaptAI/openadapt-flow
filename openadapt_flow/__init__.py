@@ -13,5 +13,6 @@ from openadapt_flow.ir import (  # noqa: F401
     RunReport,
     Step,
     StepResult,
+    UnarmedStep,
     Workflow,
 )

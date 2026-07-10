@@ -59,6 +59,7 @@ template crop:
   for claude-sonnet-5). An introductory $2/$10 rate applies through
   2026-08-31, so billed cost today is about a third lower than reported.
   Compiled replay makes zero model calls.
+- **Identity-protection coverage: not captured in this results.json.** The armed-coverage metric was added to the generator on 2026-07-10; future runs report how many click steps carry the pre-click identity check and list the unarmed steps (which proceed with NO identity verification — see docs/LIMITS.md).
 
 ## Caveats — read before quoting these numbers
 

@@ -66,6 +66,7 @@ from openadapt_flow.benchmark.run_benchmark import (
     _agent_run,
     _arm_aggregate,
     _compiled_run,
+    identity_coverage_block,
     render_chart,
 )
 from openadapt_flow.benchmark.verify import verify_note_saved
@@ -221,6 +222,7 @@ def render_openemr_markdown(results: dict[str, Any]) -> str:
     c = results["arms"]["compiled"]
     a = results["arms"]["agent"]
     date = results["generated_at"][:10]
+    identity_block = identity_coverage_block(c)
     caps = results.get("cost_caps_usd", {})
     per_run_cap = caps.get("per_run", agent_baseline.MAX_COST_USD)
     total_cap = caps.get("total", MAX_TOTAL_COST_USD)
@@ -364,6 +366,7 @@ below.
   reads at 0.1x the input rate). An introductory $2/$10 rate applies
   through 2026-08-31, so billed cost today is about a third lower than
   reported. Compiled replay makes zero model calls.
+{identity_block}
 - **Prompt caching.** The agent loop places `cache_control` breakpoints on
   the tool definition and the newest user message each turn, so each API
   call reuses the cached conversation prefix; screenshot truncation

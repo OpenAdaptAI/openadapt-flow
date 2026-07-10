@@ -150,6 +150,7 @@ $0.0967), and `a` = the agent-only mean cost per run
   cache writes 1.25x, cache reads 0.1x input). An introductory $2/$10
   rate applies through 2026-08-31, so billed cost today is roughly a
   third lower than reported.
+- **Identity-protection coverage: not captured in this results.json.** The armed-coverage metric was added to the generator on 2026-07-10; future runs report how many click steps carry the pre-click identity check and list the unarmed steps (which proceed with NO identity verification — see docs/LIMITS.md).
 - **Hard cost guardrails.** One shared budget across ALL paid runs (B, C,
   and D's fallbacks): preflight probe before any spend; per-run cap
   $1.50; total ceiling $8.00 enforced

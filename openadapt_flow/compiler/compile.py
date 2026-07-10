@@ -665,6 +665,54 @@ def _text_preview(text: str, limit: int = 24) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _identity_unarmed_reason(
+    frame_lines: list[OcrLine],
+    *,
+    band,
+    exclude_region,
+) -> str:
+    """Human-readable reason a click step compiled with NO identity band.
+
+    Mirrors the filters of ``context_from_lines`` to name which one left
+    the band empty — surfaced in the bundle (``Step.identity_unarmed_
+    reason``) and in every run report so unguarded clicks are auditable.
+    """
+    _, band_y, _, band_h = band
+    in_band = []
+    for line in frame_lines:
+        text = (getattr(line, "text", "") or "").strip()
+        if not text or line.confidence < MIN_OCR_CONFIDENCE:
+            continue
+        _, ly, _, lh = line.region
+        if band_y <= ly + lh // 2 < band_y + band_h:
+            in_band.append(line)
+    if not in_band:
+        return (
+            "no readable text in the target's row band at compile time "
+            "(icon-only or unlabeled row)"
+        )
+    ex_x, ex_y, ex_w, ex_h = exclude_region
+    outside_crop = [
+        line
+        for line in in_band
+        if not (
+            line.region[0] < ex_x + ex_w
+            and ex_x < line.region[0] + line.region[2]
+            and line.region[1] < ex_y + ex_h
+            and ex_y < line.region[1] + line.region[3]
+        )
+    ]
+    if not outside_crop:
+        return (
+            "the only readable row text is the target's own label "
+            "(mutable evidence, excluded from identity)"
+        )
+    return (
+        "row text outside the target's label is too generic "
+        "(< 12 squashed chars after volatile-line filtering)"
+    )
+
+
 def compile_recording(
     recording_dir: Path | str,
     out_bundle_dir: Path | str,
@@ -822,6 +870,22 @@ def compile_recording(
                 context_text=context_text,
                 landmarks=landmarks,
             )
+            # Identity-protection audit trail: an UNARMED click proceeds
+            # with NO identity verification at replay (docs/LIMITS.md), so
+            # the bundle records armed/unarmed per step — with the reason
+            # — for operator review BEFORE the workflow ever runs.
+            identity_armed = context_text is not None
+            unarmed_reason: Optional[str] = None
+            if not identity_armed:
+                unarmed_reason = _identity_unarmed_reason(
+                    frame_lines,
+                    band=band_region(
+                        click,
+                        crop_region[3],
+                        (frame.shape[1], frame.shape[0]),
+                    ),
+                    exclude_region=crop_region,
+                )
             verb = "double-click" if kind == "double_click" else "click"
             intent = (
                 f"{verb} '{ocr_text}'"
@@ -839,6 +903,8 @@ def compile_recording(
                             else ActionKind.CLICK
                         ),
                         anchor=anchor,
+                        identity_armed=identity_armed,
+                        identity_unarmed_reason=unarmed_reason,
                     ),
                     before_png,
                     after_png,

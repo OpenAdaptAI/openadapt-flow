@@ -84,6 +84,37 @@ def render_run_report(run_dir: Path | str) -> Path:
         lines.append("_No parameters._")
     lines.append("")
 
+    # -- Identity-protection coverage ------------------------------------
+    # Stated on every report: identity verification covers ONLY armed
+    # steps; an unarmed click proceeds with no identity check at all
+    # (docs/LIMITS.md). Computed over the whole bundle at run start, so
+    # the numbers cover steps the run never reached.
+    lines.append("## Identity protection coverage")
+    lines.append("")
+    if report.identity_applicable_steps:
+        lines.append(
+            f"**{report.identity_armed_steps} of "
+            f"{report.identity_applicable_steps} click steps "
+            "identity-armed.** Unarmed clicks proceed with **no identity "
+            "verification** (see docs/LIMITS.md)."
+        )
+        if report.identity_unarmed:
+            lines.append("")
+            lines.append("| Unarmed step | Intent | Reason |")
+            lines.append("| --- | --- | --- |")
+            for unarmed in report.identity_unarmed:
+                lines.append(
+                    f"| `{_md_escape(unarmed.step_id)}` "
+                    f"| {_md_escape(unarmed.intent)} "
+                    f"| {_md_escape(unarmed.reason)} |"
+                )
+    else:
+        lines.append(
+            "_No identity-applicable (anchored click/type) steps in this "
+            "workflow._"
+        )
+    lines.append("")
+
     # -- Per-step table ---------------------------------------------------
     lines.append("## Steps")
     lines.append("")

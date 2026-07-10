@@ -1,0 +1,27 @@
+{
+  "seed": 20260711,
+  "n_total": 2240,
+  "sha256": "d75e60ceb044d8cc75754b5b528bd3353f930e909b71c981464163db307160ed",
+  "counts": {
+    "different_entity": {
+      "confusion_collision_name_only": 180,
+      "confusion_collision_ids_differ": 180,
+      "confusion_collision_ids_same": 180,
+      "middle_initial": 150,
+      "sex_column": 150,
+      "two_char_name": 150,
+      "superset_appended_name": 150,
+      "superset_merged_row": 150,
+      "superset_title_mention": 150,
+      "absent_name_token": 150
+    },
+    "indistinguishable": {
+      "confusion_misread_true_row": 200
+    },
+    "same_entity": {
+      "digit_confusion_true_row": 150,
+      "adjacent_bleed_lowercase": 150,
+      "hyphenated_split": 150
+    }
+  }
+}

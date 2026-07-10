@@ -11,3 +11,5 @@ build/
 dist/
 benchmark/openemr/finals/
 benchmark/openemr/rows.jsonl
+benchmark/hybrid/finals/
+benchmark/hybrid/rows.jsonl

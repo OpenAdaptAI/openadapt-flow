@@ -150,7 +150,7 @@ class TestDataDrift:
         recorded template at exactly the recorded position, so the template
         rung still matches it at confidence ~1.0 — but the identity band
         reads 'Taylor Duplicate ...' where 'Jane Sample ...' was recorded
-        (coverage ~0.70 from the shared reason/priority columns, below the
+        (coverage ~0.67 from the shared reason/priority columns, below the
         0.8 bar) and the run halts without clicking anything."""
         report, state = replay_on_page(
             _browser, bundle.dir, drift_url(mockmed_url, "lookalike"), run_dir,
@@ -240,6 +240,10 @@ class TestSlowApp:
     def test_4s_render_delay_recovers(
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
+        # Timing margin is thin by design: the 4s delay must fit inside
+        # the ~5.5s postcondition window (pc timeout + one re-settle), so
+        # a slow CI machine adds real risk of a false halt here. If this
+        # test flakes, suspect machine load before suspecting the product.
         report, state = replay_on_page(
             _browser, bundle.dir, drift_url(mockmed_url, "slow"), run_dir,
             params=dict(PARAMS),

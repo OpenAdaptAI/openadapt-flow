@@ -31,37 +31,72 @@ timestamp filter, parameter values leaking into landmarks — was fixed on
   mutable evidence the resolution ladder heals through under rename
   drift), so a control with no OTHER text on its row — e.g. a typeahead
   suggestion for a *parameterized* prefix — compiles with no identity
-  context and is still clicked by position, unverified.
+  context and is still clicked by position, unverified. Bands whose
+  surviving text is shorter than 12 squashed characters are treated the
+  same way (a generic fragment like "Active High 3" matches every sibling
+  row — recording it would arm false confidence, so it is not recorded).
+- **Risk classification is opt-in and never auto-assigned.** Every step
+  compiles as `risk="reversible"` unless the compile caller passes
+  `risk_overrides` naming the step; nothing in the compiler infers
+  irreversibility. Concretely: in a default-compiled bundle, an
+  unreadable identity band on a chart-open click **proceeds** (flagged
+  `identity: "unreadable"` in the report), and the wrong-patient-write
+  tail behind that click **remains reachable with a green report** — the
+  "irreversible steps refuse on unreadable band" branch never runs unless
+  a human marked the step at compile time.
 
 ## What it halts on (safely, but it halts)
 
 Failures below stop the run with an accurate per-step report — no wrong
 actions observed — at the cost of availability:
 
-- **Wrong-entity targets in repeated structures** (fixed 2026-07-08;
-  formerly the top silent failure mode). When data shifts between runs —
-  a row added above the target, the target's row deleted, a look-alike
-  sibling, a re-sorted table — the resolver still finds a pixel-identical
-  target at a plausible position, but the pre-click **identity check**
-  compares the resolved row's text (full-width OCR band, minus the
-  target's own label and timestamp-bearing cells) against the recorded
-  row and refuses to click on mismatch. For a parameterized target (e.g.
-  *which patient* to open), the live band must name the **run's**
-  parameter value instead. Caveats, disclosed: when the live band is
+- **Wrong-entity targets in repeated structures** (fixed 2026-07-08,
+  matcher hardened 2026-07-09 after adversarial review; formerly the top
+  silent failure mode). When data shifts between runs — a row added above
+  the target, the target's row deleted, a look-alike sibling, a re-sorted
+  table — the resolver still finds a pixel-identical target at a
+  plausible position, but the pre-click **identity check** compares the
+  resolved row's text (the OCR lines of the resolved point's own text
+  row, minus the target's own label and timestamp-bearing cells) against
+  the recorded row and refuses to click on mismatch. Matching is
+  order-insensitive per token (OCR re-reads the same band in different
+  segmentation orders) and requires BOTH >= 0.8 coverage of the recorded
+  band AND no contiguous uncovered run longer than 4 squashed characters
+  — a wrong name is a contiguous mismatch, so long shared row text cannot
+  buy it a pass. For a parameterized target (e.g. *which patient* to
+  open), the run's value is substituted into the recorded band and the
+  whole substituted band must match — a row that merely mentions the
+  run's value does not verify. Caveats, disclosed: when the live band is
   unreadable even at 2x resolution, reversible steps proceed exactly as
   before with the step flagged in the run report (`identity:
-  "unreadable"`), and irreversible steps refuse; dense-table OCR
-  undercount is real, which is why the 2x retry exists.
-- **Typed input that cannot be confirmed** (fixed 2026-07-08). After every
-  TYPE action the field region is screenshot-diffed and (where legible)
-  OCRed for the typed value; if nothing landed — e.g. focus stolen by a
-  late re-render, keystrokes falling on `<body>` — the replayer re-clicks
-  the field, selects-all, retypes once, and halts if the input still
-  cannot be confirmed. In the focus-theft reproduction the retry recovers
-  and the run completes with the correct text. Caveat: the diff layer
-  detects "keystrokes rendered nothing", not "keystrokes rendered in the
-  wrong visible field"; the OCR layer covers legible values, masked
-  (password) values rely on the diff alone.
+  "unreadable"`), and only compile-time-marked irreversible steps refuse
+  (see the dangerous list); dense-table OCR undercount is real, which is
+  why the 2x retry exists; names within OCR-jitter distance of each other
+  (whole-token similarity >= 0.7, e.g. "Jane"/"Janet") are
+  indistinguishable from misreads and verify.
+- **Typed input that cannot be confirmed** (fixed 2026-07-08, verification
+  hardened 2026-07-09). After every TYPE action, an OCR-able typed value
+  must be READ back from the field region (2x-resolution retry included);
+  a pixel change alone is accepted only when the region gained no other
+  readable text — the masked-field (password dots) shape, where
+  "readable" counts confident alphanumeric characters (dot glyphs OCR as
+  nothing, punctuation runs, or low-confidence noise depending on the
+  platform renderer) — so a dialog painting over the field no longer
+  false-verifies while keystrokes fell elsewhere. If nothing changed at all (focus stolen, keystrokes on
+  `<body>`), the replayer re-clicks the field, selects-all, retypes once,
+  and halts if the input still cannot be confirmed; if the region changed
+  but the value is unreadable, it halts immediately WITHOUT retyping
+  (select-all could destroy pre-existing field content, and the refocus
+  re-click could re-fire whatever now sits at that point). Remaining
+  caveats, disclosed: the refocus re-click targets the last click point —
+  if a stateful control now occupies it, the retry itself can act on it;
+  select-all-retype on a false-negative first attempt replaces whatever
+  the field held, which destroys pre-existing content when the field was
+  not empty (recorded flows type into fields they just focused, but this
+  is an assumption, not a check); a value the app visibly transforms
+  while typing (auto-formatting) can fail read-back and halt a correct
+  run; and OCR-illegible-but-rendered text in a changed region halts as
+  unverifiable (availability cost, not a wrong action).
 - **Anything that rescales or reflows the screen.** Browser zoom, display
   scale factor, or a font-size preference bump aborts at the first step.
   Self-healing covers palette changes, moved controls, and renamed labels;
@@ -96,13 +131,16 @@ actions observed — at the cost of availability:
   a second instance of the *same version* because the module menu and
   calendar content differ. Per-tenant re-recording is the working
   assumption.
-- **Identity bands recorded through modal dialogs** (pre-existing, exposed
-  2026-07-09 once the `':01'` halts stopped masking it). A click inside a
-  dialog records a context band that includes background chrome; OCR
-  segmentation/order of that chrome does not reproduce between reads, and
-  the order-sensitive coverage matcher then refuses the click. Observed
-  reproducibly on the OpenEMR note-dialog textarea (control replays cap at
-  14/17 — safe halt, nothing written).
+- **Identity bands recorded through modal dialogs** (exposed 2026-07-09
+  once the `':01'` halts stopped masking it; FIXED the same day by the
+  matcher rework). A click inside a dialog records a context band that
+  includes background chrome, and OCR segmentation/order of that chrome
+  does not reproduce between reads; the earlier order-sensitive coverage
+  matcher scored the permuted re-read at ~0.66 and refused the click
+  (observed reproducibly on the OpenEMR note-dialog textarea — control
+  replays capped at 14/17, safe halt, nothing written). The token-wise
+  order-insensitive matcher scores that same permuted band at 1.0; the
+  shape is pinned verified in `tests/test_identity.py`.
 - **Viewports smaller than demonstrated.** If the target is below the fold
   and no scroll was demonstrated, there is no recorded gesture to extend —
   the run halts (closed-loop scrolling extends recorded scrolls; it does
@@ -123,11 +161,20 @@ verification since 2026-07-08). Parameterizing a value that **changes what
 appears on screen** — which patient to open — is still position-bound:
 anchors recorded on "Belford, Phil" cannot match "Underwood, Susan", so
 resolution degrades to geometry, which clicks where the demonstrated row
-*was*. Since 2026-07-08 that click is no longer blind: the identity
-check's param mode requires the **run's** value to appear in the resolved
-row's text before acting — a wrong row halts the run instead of opening
-the wrong chart. Still true and still costly: making a value a parameter
-strips it from every compiled assertion (by design — it varies per run).
+*was*. Since 2026-07-08 that click is no longer blind, and since
+2026-07-09 the check is strict both ways: the identity check's param mode
+substitutes the **run's** value into the recorded band and requires the
+WHOLE substituted band to match the resolved row — a wrong row halts the
+run, and a row that merely *mentions* the run's value (a message about
+"Susan" is not Susan's row) halts too. The strictness has a disclosed
+availability cost: when the entity's own row text varies with the entity
+(a patient search result carries the surname, which the recorded band
+baked in as "Belford,"), the substituted band cannot match and the run
+halts even on the CORRECT row — re-anchoring only verifies when the
+band's non-param residue is stable across entities. Clicking by position
+is what caused the wrong-patient writes; we take the halt. Still true and
+still costly: making a value a parameter strips it from every compiled
+assertion (by design — it varies per run).
 The other half of the cost was fixed on 2026-07-09: recorded parameter
 values no longer leak into geometry landmarks, and a compile-time lint
 fails the build outright if a demonstrated parameter value appears in any
@@ -149,23 +196,32 @@ known remaining).
 - **Vacuous steps with no structural effect** still exist (inert native
   `<select>`; non-structural recording backends) — no minimum-verification
   floor.
-- **Identity-band order fragility on dialog clicks** (exposed 2026-07-09;
-  see the safe-halt list) — fixing it means re-validating the coverage
-  matcher's measured look-alike margins, not a quick patch.
 - **Unreadable identity bands fall back to the old behavior** (flagged in
-  the report, refused only for irreversible steps) — an icon-only repeated
-  structure with no OCRable row text is still exposed to wrong-entity
-  clicks.
-- **Label-only targets** (see the dangerous list) compile with no identity
-  context at all.
+  the report, refused only for compile-time-marked irreversible steps) —
+  an icon-only repeated structure with no OCRable row text is still
+  exposed to wrong-entity clicks.
+- **Label-only and too-generic-band targets** (see the dangerous list)
+  compile with no identity context at all.
+- **Automatic risk classification does not exist** — `risk_overrides` at
+  compile time is the only way a step becomes irreversible (see the
+  dangerous list for what that means by default).
+- **Param targets whose row text varies with the entity** halt on the
+  correct row (see the parameters section) — a re-anchoring strategy that
+  can verify such rows without falling back to position is future work.
 - **REGION_STABLE templates can embed rendered parameter pixels.** The
   parameter-leakage lint scans text postconditions and landmark OCR text
   only; a later step's stable-region crop may contain the demo value as
   pixels. False-halt direction only (safe), but unlinted.
-- **Long-line anchors are OCR-segmentation-fragile.** `find_text` does no
-  multi-line joining, and candidate ranking prefers long lines — the same
-  mechanism behind the disclosed step_014 band failure. A mined long line
-  that OCR re-segments differently at replay false-halts.
+- **Long-line anchors are OCR-segmentation-fragile at the resolution
+  rung.** `find_text` fuzzy-matches whole OCR lines with no multi-line
+  joining, so a long anchor `ocr_text` the engine re-segments differently
+  at replay can miss the OCR rung and degrade resolution to geometry.
+  The *postcondition* side of this fragility was fixed on 2026-07-09:
+  TEXT_PRESENT/ABSENT checks go through `vision.text_present`, which also
+  accepts a contiguous >=0.8-of-target run across the concatenated OCR
+  lines (merged-box and split-box re-reads pass — exercised against the
+  real engine in `tests/test_vision.py`), so a mined line that OCR
+  re-segments at replay no longer false-halts the presence check.
 - **Fuzzy text matching cannot see one-digit count differences.** A line
   differing from the recorded one by a single digit scores above the 0.8
   per-line fuzzy threshold. Mitigated by rejecting count-bearing lines at
@@ -198,8 +254,10 @@ Structural limits of the current IR, not bugs:
   file choosers, print dialogs: invisible to screenshots, unreachable by
   page-coordinate clicks. Keyboard fallbacks work where the widget supports
   them (type-prefix + Enter drives a native `<select>`); native date inputs
-  accepted typed digits but produced a wrong value in our harness — and
-  replay faithfully reproduced the wrong value.
+  accepted typed digits but produced a wrong value in our harness — the
+  replay now safe-halts on such value-transforming widgets (typed-input
+  read-back cannot verify the transformed rendering) instead of faithfully
+  reproducing the wrong value.
 - **No drag-and-drop** (no such action in the IR or recorder).
 
 ## What held up under attack

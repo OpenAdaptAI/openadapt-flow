@@ -341,20 +341,28 @@ class TestModalDrift:
 
 class TestIrreversibleRiskGate:
     def test_irreversible_step_refuses_below_ocr_resolution(
-        self, bundle, mockmed_url, replay, tmp_path: Path
+        self, recording_dir, mockmed_url, replay, tmp_path: Path
     ) -> None:
-        """v0 policy end-to-end: an irreversible step whose anchor only
-        resolves below the ocr rung must NOT act. The save step is marked
-        irreversible in a copy of the bundle; under rename drift its
-        template no longer matches, and with ocr_text cleared the geometry
-        rung (landmarks are unchanged by rename) is the only evidence left
-        — the gate must refuse and fail the run."""
+        """v0 policy end-to-end, through the supported plumbing: risk is
+        opt-in at compile time (``risk_overrides`` — never auto-assigned),
+        and an irreversible step whose anchor only resolves below the ocr
+        rung must NOT act. The save step is marked irreversible at compile
+        time; under rename drift its template no longer matches, and with
+        ocr_text cleared the geometry rung (landmarks are unchanged by
+        rename) is the only evidence left — the gate must refuse and fail
+        the run."""
+        from openadapt_flow.compiler import compile_recording
+
         gated = tmp_path / "gated-bundle"
-        shutil.copytree(bundle.dir, gated)
-        wf = Workflow.load(gated)
+        wf = compile_recording(
+            recording_dir,
+            gated,
+            name="triage-demo",
+            risk_overrides={STEP_SAVE: "irreversible"},
+        )
         save = wf.steps[-1]
         assert save.id == STEP_SAVE and save.anchor is not None
-        save.risk = "irreversible"
+        assert save.risk == "irreversible"
         # Force a deterministic below-ocr resolution: without ocr evidence,
         # rename drift leaves only the geometry rung for this anchor.
         save.anchor.ocr_text = None

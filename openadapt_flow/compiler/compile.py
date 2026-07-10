@@ -666,7 +666,11 @@ def _text_preview(text: str, limit: int = 24) -> str:
 
 
 def compile_recording(
-    recording_dir: Path | str, out_bundle_dir: Path | str, *, name: str
+    recording_dir: Path | str,
+    out_bundle_dir: Path | str,
+    *,
+    name: str,
+    risk_overrides: Optional[dict[str, str]] = None,
 ) -> Workflow:
     """Compile a recording directory into a workflow bundle.
 
@@ -690,16 +694,26 @@ def compile_recording(
     geometry landmark. The bundle gets ``workflow.json``,
     ``templates/*.png`` and a generated readable ``workflow.py``.
 
+    Risk is opt-in: every step compiles as ``risk="reversible"`` unless
+    ``risk_overrides`` marks it ``"irreversible"`` — there is no automatic
+    risk classification. Irreversible steps refuse to act when they only
+    resolve below the OCR rung or when their identity band is unreadable
+    (see :class:`~openadapt_flow.runtime.Replayer`).
+
     Args:
         recording_dir: Recording directory (meta.json, events.jsonl, frames/).
         out_bundle_dir: Output bundle directory (created if missing).
         name: Workflow name.
+        risk_overrides: Optional ``{step_id: risk}`` map (step ids are
+            positional: ``step_000`` is the first recorded event). Values
+            must be ``"reversible"`` or ``"irreversible"``.
 
     Returns:
         The compiled :class:`Workflow` (also saved to the bundle).
 
     Raises:
-        ValueError: On an unknown event kind, or when the parameter-leakage
+        ValueError: On an unknown event kind, an unknown ``risk_overrides``
+            step id, an invalid risk value, or when the parameter-leakage
             lint finds a demonstrated parameter value baked into a
             postcondition or geometry landmark.
         FileNotFoundError: If a click event's before frame is missing.
@@ -793,6 +807,10 @@ def compile_recording(
                 band=band_region(
                     click, crop_region[3], (frame.shape[1], frame.shape[0])
                 ),
+                # Row refinement: record only the click point's OWN text
+                # row, matching what replay-time verification reads (the
+                # 64px band spans 2-3 rows of a dense table).
+                point=click,
                 min_confidence=MIN_OCR_CONFIDENCE,
                 reference_date=reference_date,
             )
@@ -949,6 +967,21 @@ def compile_recording(
             # a vacuous pass. Steps with no structural change either stay
             # honestly vacuous (docs/LIMITS.md).
             step.expect = _structural_postconditions(event)
+
+    if risk_overrides:
+        by_id = {step.id: step for step in steps}
+        for step_id, risk in risk_overrides.items():
+            if step_id not in by_id:
+                raise ValueError(
+                    f"risk_overrides names unknown step {step_id!r} "
+                    f"(steps: {', '.join(by_id)})"
+                )
+            if risk not in ("reversible", "irreversible"):
+                raise ValueError(
+                    f"invalid risk {risk!r} for {step_id!r} (use "
+                    "'reversible' or 'irreversible')"
+                )
+            by_id[step_id].risk = risk
 
     workflow = Workflow(
         name=name,

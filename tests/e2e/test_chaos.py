@@ -170,6 +170,50 @@ class TestLayoutSwapMidRun:
         assert state["enc_item"].startswith("Triage"), describe(report, state)
 
 
+class TestDialogOverFieldWhileTyping:
+    def test_dialog_over_note_field_halts_instead_of_false_verifying(
+        self, bundle, mockmed_url, _browser, tmp_path
+    ) -> None:
+        """ADDED 2026-07-09 (review P2a). A survey dialog renders over the
+        note field between the keystrokes and their verification. The
+        field region visibly changes, so under the old diff-alone rule the
+        typed input verified on ANY pixel change — including when the
+        keystrokes had actually fallen elsewhere (that stolen-keystroke
+        variant is pinned as a unit test:
+        test_replayer.test_type_dialog_over_field_halts_without_retyping).
+        The runtime cannot distinguish 'typed, then covered' from 'dialog
+        swallowed the keystrokes', so it must halt rather than trust the
+        diff: the typed value is not readable in the changed region, and
+        the run stops WITHOUT the select-all retype (which could destroy
+        field content). Nothing is saved."""
+
+        def inject(page):
+            page.evaluate(
+                "var d = document.createElement('div');"
+                "d.id = 'chaos-dialog';"
+                "d.setAttribute('tabindex', '-1');"
+                "d.style.cssText = 'position:fixed;left:30px;top:190px;"
+                "width:560px;padding:28px;background:#fff;"
+                "border:3px solid #333;z-index:9999;font-size:20px';"
+                "d.textContent = "
+                "'Quick survey: how is MockMed working for you today?';"
+                "document.body.appendChild(d);"
+                "d.focus();"
+            )
+
+        report, state = run(
+            bundle, mockmed_url, _browser, tmp_path,
+            chaos(inject, after_type=3),
+        )
+        assert report.success is False, describe(report, state)
+        assert state["banner"] is None  # nothing was saved
+        failed = failing_step(report)
+        assert failed is not None
+        assert failed.step_id == "step_009", describe(report, state)
+        assert "Typed input could not be verified" in (failed.error or "")
+        assert "retyping is unsafe" in (failed.error or "")
+
+
 class TestFocusStolenBeforeTyping:
     def test_blur_between_click_and_type_recovers_and_saves_the_note(
         self, bundle, mockmed_url, _browser, tmp_path

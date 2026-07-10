@@ -14,41 +14,95 @@ columns and the characterization tests pin the new behavior.
 
 1. **Identity-blind target resolution** → **pre-click identity check**
    (`openadapt_flow/runtime/identity.py`). The compiler now records each
-   click target's *context band* — the full-width strip of OCR text on the
-   target's row, excluding the target's own crop (labels stay mutable/
-   healable) and timestamp-bearing lines (volatile). Before every click the
-   replayer re-reads the band around the *resolved* point and requires a
-   lenient squashed-text coverage match (contiguous runs >= 3 chars must
-   cover >= 0.8 of the recorded band; measured: true row ~1.0, look-alike
-   row sharing all non-name columns ~0.70). When a workflow parameter's
-   demonstrated value is embedded in the recorded band (a parameterized
-   *target*, e.g. the patient row), the check re-anchors on the **run's**
-   value instead — the recorded row text describes the demo's entity, not
-   the run's. On mismatch: safe-halt *before* the click, with the expected
-   and observed band text in the error. On an unreadable band (OCR found
-   nothing, retried at 2x resolution first): reversible steps proceed with
-   the step flagged (`StepResult.identity.status == "unreadable"`);
-   irreversible steps refuse. This is a pre-action check against runtime
-   values — the commit-8421d51 rule (never bake a parameterized value's
-   rendering into compiled *postconditions*) still holds untouched.
+   click target's *context band* — the OCR text of the click point's own
+   text row, excluding the target's own crop (labels stay mutable/
+   healable) and timestamp-bearing lines (volatile); bands shorter than
+   12 squashed characters are too generic to discriminate and are not
+   recorded. Before every click (including an anchored TYPE step's
+   focusing click) the replayer re-reads the resolved point's own row and
+   matches it token-wise, order-insensitively (OCR re-reads the same band
+   in different segmentation orders between visits): matched tokens must
+   cover >= 0.8 of the recorded band AND no contiguous run of uncovered
+   recorded characters may exceed 4 — a wrong entity is a contiguous
+   mismatch (a replaced name), so long shared row text cannot buy it a
+   pass. Measured: true row 1.0 (still 1.0 under injected per-character
+   OCR jitter, via a 0.7 whole-token similarity tier); look-alike row
+   sharing all non-name columns ~0.67 coverage with a 10-char uncovered
+   name run. When a workflow parameter's demonstrated value is embedded
+   in the recorded band (a parameterized *target*, e.g. the patient row),
+   the run's value is substituted into the recorded band and the WHOLE
+   substituted band must match — a row that merely mentions the run's
+   value does not verify. On mismatch: safe-halt *before* the click, with
+   the expected and observed band text in the error. On an unreadable
+   band (OCR found nothing, retried at 2x resolution first): reversible
+   steps proceed with the step flagged (`StepResult.identity.status ==
+   "unreadable"`); steps marked irreversible at compile time refuse (risk
+   is opt-in via `compile_recording(risk_overrides=...)` — never
+   auto-assigned; see docs/LIMITS.md for what that means by default).
+   This is a pre-action check against runtime values — the commit-8421d51
+   rule (never bake a parameterized value's rendering into compiled
+   *postconditions*) still holds untouched.
 2. **Unverified typed input** → **typed-input verification**
-   (`Replayer._verify_typed_input`). After every TYPE action the field
-   region (around the focusing click; whole frame when focus was moved by
-   keyboard) is screenshot-diffed against a pre-type baseline — any visible
-   change separates "keystrokes rendered" from "fell on `<body>`" — with a
-   lenient OCR check for the typed value as the second layer (2x-resolution
-   retry; masked fields rely on the diff alone). On failure: ONE
-   refocus-and-retype retry (re-click the field, select-all so a
+   (`Replayer._verify_typed_input`). After every TYPE action, an OCR-able
+   typed value must be READ back from the field region (around the
+   focusing click; whole frame when focus was moved by keyboard;
+   2x-resolution retry). A pixel change alone is accepted only when the
+   region gained no other readable text — the masked-field (password
+   dots) shape — so a dialog rendering over the field cannot
+   false-verify while keystrokes fell elsewhere. When nothing changed at
+   all: ONE refocus-and-retype retry (re-click the field, select-all so a
    false-negative first attempt is replaced rather than duplicated,
-   retype), then safe-halt. The typed value is verified at *runtime*;
-   nothing is baked into the bundle.
+   retype), then safe-halt. When the region changed but the value is
+   unreadable: immediate safe-halt WITHOUT retyping (retyping into an
+   unknown render state could destroy pre-existing field content). The
+   typed value is verified at *runtime*; nothing is baked into the
+   bundle.
 
-**After the fix: 0 wrong-actions across the entire suite.** Every
-previously-silent case now ends in a safe-halt before the wrong action, or
-(steal-focus) recovers and completes correctly. Residual gaps are listed
-honestly under "Failure modes ranked by severity".
+The identity matcher and typed-input verifier above describe their
+**2026-07-09 hardened form** (adversarial review of the initial fix):
+the initial char-coverage matcher verified a wrong entity when shared
+row text dominated the band (coverage 0.89), verified generic bands
+("Active High 3" vs "Active High 7" at 0.91), let ANY short embedded
+param value disarm the band check entirely (wrong patient at 1.0 with
+`priority="High"`), verified any row containing the run's value, spanned
+2-3 table rows (one-row-off text bleed), and its order-sensitive scoring
+false-aborted a correct OpenEMR modal target at 0.66 when page chrome
+re-read in a different order. All six are pinned in
+`tests/test_identity.py` / `tests/test_replayer.py`.
 
-**False-abort cost of the fix: none measured.**
+**After the fix: 0 wrong-actions across every case the suites pin** — the
+six audit reproductions (tables below), the six review probes above, and
+the perturbation/chaos/primitive matrices. Every previously-silent case
+now ends in a safe-halt before the wrong action, or (steal-focus)
+recovers and completes correctly. The claim is scoped to exactly those
+pinned cases: the dangerous list in docs/LIMITS.md (zero-postcondition
+steps, label-only and too-generic-band targets, unreadable bands on
+default-compiled — reversible — steps) remains open and is NOT covered
+by it. Residual gaps are listed honestly under "Failure modes ranked by
+severity".
+
+**False-abort cost of the fix: none measured** (initial fix; the
+2026-07-09 hardening additionally FIXED a measured false abort — the
+OpenEMR modal-band order-sensitivity above).
+
+**Live false-abort re-check of the hardened thresholds (2026-07-09,
+OpenEMR public demo, fake patients, $0, 0 model calls; public-demo
+courtesy: 4 sessions total — 1 fresh record+compile, 3 paced replays).**
+The fresh bundle armed **4 of 12** click steps with (row-refined)
+identity context. Across 3 replays: **6/6 identity evaluations verified
+at coverage 1.0** (the top-menu band and the patient-search-result row) —
+**zero identity false-aborts from the tightened thresholds** — and **9/9
+typed inputs verified** (username, masked password, parameterized note),
+zero retries. All 3 replays then safe-halted at the SAME pre-existing,
+identity-unrelated point: the Messages-card pencil click (step_013, an
+UNARMED step — a tiny generic icon anchor with no row text). The
+closed-loop scroll's anchor probe accepted a look-alike pencil above the
+fold (the dashboard has one per card), the dashboard never scrolled, the
+geometry click missed, and the step's postconditions caught it — an
+honest halt in the documented P2 anchor/instance-state class (that day's
+post-reset dashboard content differed from the 2026-07-08 regression,
+where the same flow reached the note dialog 3/3). Nothing was written on
+any run.
 
 - MockMed local benchmark, compiled arm end-to-end (fresh recording,
   arm-independent OCR verification of the final screen): **30/30 clean
@@ -59,14 +113,19 @@ honestly under "Failure modes ranked by severity".
   green — the identity gate and typed-input verification changed no
   happy-path outcome.
 - OpenEMR live regression (public demo, fake patients, 1 fresh recording +
-  3 replays paced >= 35 s, $0): the fresh bundle armed **7 of 12** click
-  steps with identity context (the rest have no out-of-crop row text —
-  login button, patient-chart link, pencil icon). Across 3 replays, **all
-  18 identity evaluations verified** at coverage 0.95–1.00 on real dense
-  EMR rows (patient-result row, menu bar, dialog chrome) — **zero identity
-  false-aborts** — and **9/9 typed inputs verified** (username, masked
-  password, parameterized note) with zero retries needed. All 3 replays
-  later aborted at the note-dialog step on a PRE-EXISTING, already
+  3 replays paced >= 35 s, $0; measured with the INITIAL matcher): the
+  fresh bundle armed **7 of 12** click steps with identity context (the
+  rest have no out-of-crop row text — login button, patient-chart link,
+  pencil icon). Across 3 replays, **all 18 identity evaluations verified**
+  at coverage 0.95–1.00 on real dense EMR rows (patient-result row, menu
+  bar, dialog chrome) — **zero identity false-aborts** — and **9/9 typed
+  inputs verified** (username, masked password, parameterized note) with
+  zero retries needed. (Separately, live runs by the postcondition-mining
+  work later reproduced an identity FALSE ABORT on the note-dialog
+  textarea band under the initial ORDER-SENSITIVE matcher — 2/2 control
+  replays, score ~0.66 — which the 2026-07-09 order-insensitive matcher
+  fixes; that band shape is pinned in `tests/test_identity.py`.) All 3
+  replays later aborted at the note-dialog step on a PRE-EXISTING, already
   documented defect: the mined `text_present ':01'` postcondition (the
   Track D "stray `:01` that slipped past the timestamp filter" —
   postcondition mining fragility, P2 below, deliberately out of scope of
@@ -95,7 +154,7 @@ platform/rendering-dependent — see row 3). After the fix — **0**:
 
 | # | case | before (audit) | after (fix) |
 |---|---|---|---|
-| 1 | `drift=lookalike` | **silent wrong-action** — saved to the look-alike patient | safe-halt before the click (identity coverage 0.70 < 0.8) |
+| 1 | `drift=lookalike` | **silent wrong-action** — saved to the look-alike patient | safe-halt before the click (identity coverage ~0.67 < 0.8, 10-char uncovered name run) |
 | 2 | `drift=missing` | **silent wrong-action** — saved to the neighbouring patient | safe-halt before the click (coverage 0.00) |
 | 3 | `drift=grow` | **silent wrong-action** — saved to the imposter at the recorded position | safe-halt before the click (coverage 0.00); on platforms where the global rung finds the true row first, a verified save to the CORRECT patient |
 | 4 | chaos `delete-target-row` | **silent wrong-action** — saved to the patient that slid into place | safe-halt before the click (coverage 0.00) |
@@ -136,7 +195,7 @@ a time. Automated in `tests/e2e/test_perturbation.py`.
 | CSS zoom 125% (`drift=zoom`) | safe-halt (false abort) | halts at step_000 for the same family of reasons |
 | font size 16px→19px (`drift=font`) | safe-halt (false abort) | halts at step_000: REGION_STABLE phash cannot tolerate reflowed glyph metrics. Theme drift heals (README showcase); font drift yields 0% replayability |
 | data growth (`drift=grow`, 4 rows added above target) | **wrong-action, silent → safe-halt** | before: local template matched the imposter row at the recorded position (≥0.985 despite different reason/priority text in-crop); encounter saved to `#patient/g1`, run reported success. After: identity band reads `Pat Placeholder Orthopedics intake Low` where `Jane Sample Knee pain referral High` was recorded (coverage 0.00) — halt before the click, nothing saved. Where the global rung finds the true row first (platform-dependent), the run instead saves to the CORRECT patient with identity verified. Audit evidence: `runs/validation/track-a/run-grow/` |
-| look-alike row (`drift=lookalike`) | **wrong-action, silent → safe-halt** | before: a row with the same reason/priority directly above the target is pixel-identical inside the 160x64 crop (the NAME column is outside it); template rung confidence 1.0; saved to `#patient/p0`. After: the band's NAME text disagrees (`Taylor Duplicate ...`, coverage 0.70 from the shared columns, below the 0.8 bar) — halt before the click. Audit evidence: `runs/validation/track-a/run-lookalike/` |
+| look-alike row (`drift=lookalike`) | **wrong-action, silent → safe-halt** | before: a row with the same reason/priority directly above the target is pixel-identical inside the 160x64 crop (the NAME column is outside it); template rung confidence 1.0; saved to `#patient/p0`. After: the band's NAME text disagrees (`Taylor Duplicate ...`, coverage ~0.67 from the shared columns, below the 0.8 bar, with the replaced name a 10-char contiguous uncovered run) — halt before the click. Audit evidence: `runs/validation/track-a/run-lookalike/` |
 | target row deleted (`drift=missing`) | **wrong-action, silent → safe-halt** | before: the neighbouring row occupies the recorded position and every rung that fires resolves to it; saved to `#patient/p2`. After: band reads `Alex Testcase Cardiology follow-up Medium` (coverage 0.00) — halt before the click, never click a look-alike. Audit evidence: `runs/validation/track-a/run-missing/` |
 | empty list (`drift=empty`) | safe-halt | halts one step early: the sign-in step's postcondition asserts another data row's text (`Cardiology follow-up`) as an "invariant" — safe here, but the mechanism (mining mutable DATA as postconditions) is what makes the three rows above silent |
 | slow renders 4s (`drift=slow`) | pass | postcondition polling + ladder retry absorb it (~20s run) |
@@ -193,7 +252,7 @@ Automated in `tests/e2e/test_primitives.py`. Exploration evidence:
 | native `<select>`, mouse | unsupported | the dropdown popup is browser chrome — it never appears in page screenshots (predicted in FINDINGS.md, confirmed) |
 | native `<select>`, arrow keys | **hazard** | inert in this harness (macOS headless): recording changed nothing, steps compiled with **zero postconditions**, replay was a **vacuous success** |
 | native `<select>`, type-prefix + Enter | supported (workaround) | `Species set to Dog.` replays — the keyboard fallback FINDINGS.md predicted |
-| native date input, typed digits | **partial / hazard** | typing `07082026` produced value `70820-02-06` *at record time*; replay reproduced the same garbage byte-for-byte. Faithful replay of a bad recording is still bad data; the calendar popup is invisible browser chrome |
+| native date input, typed digits | **partial / hazard → safe-halt (false abort)** | typing `07082026` produced value `70820-02-06` *at record time*; the initial fix replayed the same garbage byte-for-byte, and since 2026-07-09 the replay SAFE-HALTS at the type step instead: typed-input read-back cannot find `07082026` in the widget's transformed rendering, and a pixel change with other readable text is the dialog-over-field false-verify shape. Disclosed cost: value-transforming widgets false-abort (docs/LIMITS.md); the calendar popup is invisible browser chrome |
 | iframe-heavy pages | supported | OpenEMR: 6+ nested iframes, modal-in-iframe-in-modal — vision-only replay never noticed (docs/showcase-openemr/FINDINGS.md) |
 | new tab / `target=_blank` | **unsupported / silent** | the single-page backend never sees the new tab; before/after frames identical → **zero postconditions** → vacuous success with the side effect entirely unobserved |
 | file upload | unsupported (structural) | the native file chooser is OS chrome; neither recordable nor drivable vision-only |
@@ -258,25 +317,41 @@ input; all mechanisms ended in a green report. Confidence was highest
 (template rung, ~1.0) precisely when the click was wrongest, and the
 irreversible-step risk gate never engaged because it keyed on *resolution
 rung*, not on *target identity*. Fixed by the pre-click identity check
-(target's row-band text must match the recorded band or the run's
-parameter value) and by typed-input verification (field-region diff + OCR,
-one refocus-and-retype retry, then halt). **Residual gaps, disclosed:**
+(the resolved point's own row text must match the recorded band —
+order-insensitive token matching with an uncovered-residue cap — or, for
+a parameterized target, the run-value-substituted band) and by typed-input
+verification (read-back OCR of the typed value; diff-only acceptance
+reserved for the masked no-new-text shape; one guarded refocus-and-retype
+retry only when nothing changed, then halt). **Residual gaps, disclosed:**
 (a) when the live band is *unreadable* (OCR finds nothing even at 2x —
 e.g. an icon-only row), reversible steps proceed exactly as before with
-the step flagged in the report (`identity: unreadable`), and irreversible
-steps refuse; (b) targets whose only discriminative text is their own
-label (parameterized typeahead suggestions) compile with no context band
-and stay unverified; (c) the typed-input diff layer detects "keystrokes
-rendered nothing", not "keystrokes rendered in the wrong visible field" —
-the OCR layer covers legible values, masked values rely on the diff alone.
+the step flagged in the report (`identity: unreadable`), and only
+compile-time-marked irreversible steps refuse — risk is opt-in via
+`risk_overrides` and never auto-assigned, so in a default-compiled bundle
+that refusal branch never runs (docs/LIMITS.md states this in the
+dangerous list); (b) targets whose only discriminative text is their own
+label (parameterized typeahead suggestions), and bands under 12 squashed
+characters (too generic to discriminate), compile with no context band
+and stay unverified; (c) names within OCR-jitter similarity (>= 0.7
+whole-token ratio, e.g. "Jane"/"Janet") are indistinguishable from
+misreads and verify; (d) typed-input read-back can false-abort on widgets
+that transform the value while typing (the native-date row in Track C),
+and the refocus re-click / select-all retry assumptions are disclosed in
+docs/LIMITS.md.
 
 **P1 — parameterization is position-bound and self-disarming (Track D).
 PARTIALLY ADDRESSED.** Changing a content-bearing parameter still removes
 its own assertions and falls back to position resolution; but the click is
-no longer blind — the identity check's param mode requires the RUN's value
-in the live band before acting (the MockMed wrong-patient scenario on a
-real EMR now halts instead of clicking). Landmark leakage of recorded
-parameter values (healing-quality degradation) remains open.
+no longer blind — the identity check's param mode substitutes the RUN's
+value into the recorded band and requires the WHOLE substituted band to
+match before acting (the MockMed wrong-patient scenario on a real EMR now
+halts instead of clicking, and since 2026-07-09 a row that merely mentions
+the run's value no longer passes). Strictness cost, disclosed: when the
+entity's own row text varies with the entity (a search result carries the
+surname), the substituted band cannot match and the run halts even on the
+correct row — verified re-anchoring for such rows is future work
+(docs/LIMITS.md). Landmark leakage of recorded parameter values
+(healing-quality degradation) remains open.
 
 **P2 — cosmetic global drift zeroes availability (still open; out of scope of the 2026-07-08 fix).** Font +3px, 125% zoom,
 or dsf 2 → false abort at step 000. Healing covers theme/move/rename but

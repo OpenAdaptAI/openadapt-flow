@@ -54,8 +54,9 @@ class Replayer:
     Args:
         backend: The Backend to act through (screenshot/click/type/press).
         vision: Namespace-like object exposing ``find_template``,
-            ``find_text``, ``ocr``, ``phash_png``, ``phash_distance``, and
-            ``wait_settled``. Defaults to the real ``openadapt_flow.vision``
+            ``find_text``, ``text_present``, ``ocr``, ``phash_png``,
+            ``phash_distance``, and ``wait_settled``. Defaults to the
+            real ``openadapt_flow.vision``
             module, imported lazily so unit tests can inject a fake without
             the OCR stack ever loading.
         grounder: Optional Grounder used as the last resolution rung.
@@ -532,14 +533,15 @@ class Replayer:
         """Evaluate a single postcondition against a frame."""
         kind = pc.kind.value if hasattr(pc.kind, "value") else pc.kind
         if kind == "text_present":
-            return (
-                pc.text is not None
-                and self.vision.find_text(frame_png, pc.text) is not None
+            # text_present (not find_text): presence must not depend on
+            # whether the OCR engine merged the target into a longer box
+            # or split it across boxes — see vision.ocr.text_present.
+            return pc.text is not None and self.vision.text_present(
+                frame_png, pc.text
             )
         if kind == "text_absent":
-            return (
-                pc.text is None
-                or self.vision.find_text(frame_png, pc.text) is None
+            return pc.text is None or not self.vision.text_present(
+                frame_png, pc.text
             )
         if kind == "region_stable":
             if pc.region is None or pc.phash is None:

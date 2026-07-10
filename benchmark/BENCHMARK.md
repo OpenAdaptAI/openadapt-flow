@@ -16,7 +16,7 @@ Triage, enter a note, save.
 | latency p95 | 5.1 s | 43.4 s |
 | model cost / run | $0 | $0.2716 |
 | total model cost | $0 | $5.43 |
-| tokens (in/out, total) | 0 / 0 | 1,684,942 / 25,085 |
+| tokens (uncached in / out, total) | 0 / 0 | 1,684,942 / 25,085 |
 
 ## Drift (`?drift=theme`, one run per arm)
 

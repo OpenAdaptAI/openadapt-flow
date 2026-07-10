@@ -20,20 +20,29 @@ as data points rather than retried against the shared instance.
 Hard cost guardrails (the agent arm spends real money; the compiled arm is
 free):
 
-- **Preflight**: one minimal API call before any run. If it fails with an
-  auth/billing error, the compiled arm still runs and the agent arm is
-  recorded as skipped — a dead key is a reportable outcome, not a crash.
+- **Preflight**: one minimal API call before any run (one retry on errors
+  that look transient rather than auth/billing). If it fails, the compiled
+  arm still runs and the agent arm is recorded as skipped — a dead key is
+  a reportable outcome, not a crash.
 - **Per-run cap**: each agent run is passed ``max_cost_per_run_usd``
   (default $1.50 at list price); the loop stops with ``stopped="cost_cap"``.
+  The cap is checked after each API call, so a run can overshoot it by at
+  most one call's marginal cost.
 - **Total cap**: before each agent run, if cumulative agent-arm cost plus
   the per-run cap could exceed ``max_total_cost_usd`` (default $8.00), the
   arm stops and the truncation is disclosed in results and markdown.
+  Because the per-run cap itself has bounded overshoot, the ceiling shares
+  the same bound: at most one API call's marginal cost past the ceiling.
+  Crashed runs' partial spend is recorded on their rows and counts against
+  the ceiling.
 - **Billing-error abort**: two consecutive agent runs failing with what
   looks like an auth/billing/credit error abort the arm — no point burning
   pace time on a dead key.
 - **Incremental persistence**: every finished run (both arms) is appended
   as one JSON line to ``out_dir/rows.jsonl``, so a stop or crash never
-  loses completed-run data.
+  loses completed-run data. The file is append-only across invocations:
+  re-running with the same ``out_dir`` extends it (each invocation's rows
+  in order) rather than truncating it.
 
 Outputs written to ``out_dir``: ``rows.jsonl`` (incremental),
 ``results.json``, ``BENCHMARK.md``, and ``latency_cost.png`` (same chart
@@ -44,7 +53,6 @@ from __future__ import annotations
 
 import json
 import platform
-import re
 import shutil
 import tempfile
 import time
@@ -53,6 +61,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from openadapt_flow.benchmark import agent_baseline
+from openadapt_flow.benchmark.agent_baseline import _looks_like_billing_error
 from openadapt_flow.benchmark.run_benchmark import (
     _agent_run,
     _arm_aggregate,
@@ -72,25 +81,6 @@ AGENT_MAX_ACTIONS = 40
 MAX_TOTAL_COST_USD = 8.00
 #: Consecutive auth/billing-looking failures that abort the agent arm.
 BILLING_ABORT_AFTER = 2
-
-#: Auth/billing/credit failure fingerprints: HTTP 400-403 as standalone
-#: numbers, or credit/billing wording anywhere in the error string.
-_BILLING_ERROR_RE = re.compile(
-    r"\b40[0-3]\b|credit|billing|authentication|permission", re.IGNORECASE
-)
-
-
-def _looks_like_billing_error(message: str) -> bool:
-    """True when an error string looks like an auth/billing/credit failure.
-
-    Args:
-        message: The recorded row ``error`` string.
-
-    Returns:
-        Whether the error suggests the API key cannot spend (as opposed to
-        a transient network/demo failure worth continuing past).
-    """
-    return bool(_BILLING_ERROR_RE.search(message))
 
 # One unique sentence per run across BOTH arms. Deliberately mutually
 # dissimilar: several runs' notes are visible in the same message list at
@@ -137,15 +127,27 @@ _AGENT_NOTES = [
 def note_for(arm: str, i: int) -> str:
     """Distinct per-run note text (unique across BOTH arms).
 
+    The pairwise-distinctness invariant (no two notes share a 16-character
+    squashed substring; unit-tested) only holds while every run gets its
+    own list entry, so an index past the end of the arm's list is a hard
+    error rather than a silent wrap-around that would let one run's note
+    satisfy another run's check. :func:`run_openemr_benchmark` validates
+    its Ns against the list lengths up front for the same reason.
+
     Args:
         arm: ``"compiled"`` or ``"agent"``.
-        i: Zero-based run index within the arm.
+        i: Zero-based run index within the arm. Must be smaller than the
+            arm's note-list length.
 
     Returns:
         A clinically-plausible note string unique to (arm, i).
     """
     notes = _COMPILED_NOTES if arm == "compiled" else _AGENT_NOTES
-    return notes[i % len(notes)]
+    assert 0 <= i < len(notes), (
+        f"run index {i} out of range for the {len(notes)} unique {arm} "
+        "notes; reusing a note would break pairwise distinctness"
+    )
+    return notes[i]
 
 
 def aggregate_openemr_results(
@@ -300,7 +302,7 @@ BOTH arms), save.
 | latency p95 | {c['wall_s_p95']:.1f} s | {a['wall_s_p95']:.1f} s |
 | model cost / run | $0 | ${a['cost_usd_per_run']:.4f} |
 | total model cost | $0 | ${a['cost_usd_total']:.2f} |
-| tokens (in/out, total) | 0 / 0 | {a['input_tokens_total']:,} / \
+| tokens (uncached in / out, total) | 0 / 0 | {a['input_tokens_total']:,} / \
 {a['output_tokens_total']:,} |
 | cache tokens (write/read, total) | 0 / 0 | \
 {a['cache_creation_input_tokens_total']:,} / \
@@ -371,8 +373,12 @@ below.
   ${per_run_cap:.2f} (list price; the loop stops with `stopped="cost_cap"`
   and the run is recorded as-is), and the whole agent arm is capped at
   ${total_cap:.2f} — if the next run could exceed the ceiling, the arm
-  stops and the truncation is disclosed above. A preflight API call runs
-  before any spend; two consecutive auth/billing failures abort the arm.
+  stops and the truncation is disclosed above. Both checks run after each
+  API call rather than before it, so each bound allows an overshoot of at
+  most one API call's marginal cost. Runs that crash mid-way keep their
+  partial spend on their recorded rows, counted against the ceiling. A
+  preflight API call runs before any spend; two consecutive auth/billing
+  failures abort the arm.
 
 ## Caveats — read before quoting these numbers
 
@@ -429,7 +435,9 @@ def write_openemr_outputs(results: dict[str, Any], out_dir: Path) -> None:
         out_dir: Output directory (created if needed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(json.dumps(results, indent=2))
+    (out_dir / "results.json").write_text(
+        json.dumps(results, indent=2) + "\n"
+    )
     render_chart(results, out_dir / "latency_cost.png")
     (out_dir / "BENCHMARK.md").write_text(render_openemr_markdown(results))
 
@@ -486,12 +494,30 @@ def run_openemr_benchmark(
 
     Returns:
         The results dict (also written to ``results.json``).
+
+    Raises:
+        ValueError: When ``n_compiled`` / ``n_agent`` exceed the unique
+            note lists (reusing a note would break the pairwise
+            distinctness the verifier depends on).
     """
+    if n_compiled > len(_COMPILED_NOTES):
+        raise ValueError(
+            f"n_compiled={n_compiled} exceeds the {len(_COMPILED_NOTES)} "
+            "unique compiled notes; add notes to _COMPILED_NOTES (keeping "
+            "pairwise distinctness) before raising N"
+        )
+    if n_agent > len(_AGENT_NOTES):
+        raise ValueError(
+            f"n_agent={n_agent} exceeds the {len(_AGENT_NOTES)} unique "
+            "agent notes; add notes to _AGENT_NOTES (keeping pairwise "
+            "distinctness) before raising N"
+        )
     out = Path(out_dir)
     bundle = Path(bundle_dir)
     out.mkdir(parents=True, exist_ok=True)
     # Incremental per-run persistence: one JSON line per finished run, so
-    # a stop or crash never loses completed-run data.
+    # a stop or crash never loses completed-run data. Append-only across
+    # invocations: re-running with the same out_dir extends the file.
     rows_path = out / "rows.jsonl"
 
     def persist(row: dict[str, Any]) -> None:

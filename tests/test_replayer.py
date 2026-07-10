@@ -68,6 +68,16 @@ class FakeVision:
             return result.pop(0) if result else None
         return result
 
+    def text_present(self, screen_png, text, *, region=None, min_ratio=0.8):
+        # Same script as find_text (postconditions use the tolerant
+        # presence check; tests script both through text_results).
+        return (
+            self.find_text(
+                screen_png, text, region=region, min_ratio=min_ratio
+            )
+            is not None
+        )
+
     def ocr(self, screen_png, *, region=None):
         return self.ocr_lines
 

@@ -104,6 +104,108 @@ def normalize_text(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+def upscale_png(screen_png: bytes, factor: int = 2) -> bytes:
+    """Upscale a PNG (cubic) so OCR can read dense or small text.
+
+    Args:
+        screen_png: PNG bytes.
+        factor: Integer upscale factor.
+
+    Returns:
+        The upscaled PNG bytes (the input unchanged if decoding fails).
+    """
+    img = cv2.imdecode(np.frombuffer(screen_png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return screen_png
+    up = cv2.resize(
+        img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC
+    )
+    ok, buf = cv2.imencode(".png", up)
+    return buf.tobytes() if ok else screen_png
+
+
+def text_present(
+    screen_png: bytes,
+    text: str,
+    *,
+    region: Region | None = None,
+    min_ratio: float = 0.8,
+) -> bool:
+    """OCR-segmentation-tolerant presence check for a text snippet.
+
+    :func:`find_text` fuzzy-matches whole OCR lines, which makes a bare
+    presence check segmentation-dependent: the engine sometimes merges a
+    short target into one long box together with neighboring text (the
+    whole-line similarity then falls below ``min_ratio`` even though the
+    text is plainly on screen) and sometimes splits one rendered line into
+    several boxes. Presence must not depend on that coin flip, so this
+    check passes when EITHER
+
+    - some OCR line whole-line fuzzy-matches ``text`` at ``min_ratio``
+      (exactly :func:`find_text`'s criterion), or
+    - a contiguous run of at least ``min_ratio * len(target)`` squashed
+      (lowercased, whitespace-stripped) target characters appears in the
+      squashed concatenation of all OCR lines in engine reading order —
+      tolerant of the target being embedded in a longer box or split
+      across boxes, while scattered per-character coincidences (which
+      accumulate on dense screens) still fail because the matched run
+      must be contiguous.
+
+    When the raw frame misses, the frame is retried once at 2x resolution
+    (rapidocr drops dense lines at common screen resolutions).
+
+    Args:
+        screen_png: Full-frame screenshot as PNG bytes.
+        text: Target text snippet.
+        region: Optional ``(x, y, w, h)`` sub-region to search within.
+        min_ratio: Minimum whole-line similarity ratio / contiguous-run
+            fraction of the target to accept.
+
+    Returns:
+        Whether the text is considered present.
+    """
+    target = normalize_text(text)
+    squashed_target = "".join(target.split())
+    if not squashed_target:
+        return False
+    for factor in (1, 2):
+        png = screen_png if factor == 1 else upscale_png(screen_png, factor)
+        scaled_region = (
+            None
+            if region is None
+            else (
+                region[0] * factor,
+                region[1] * factor,
+                region[2] * factor,
+                region[3] * factor,
+            )
+        )
+        lines = ocr(png, region=scaled_region)
+        if not lines:
+            continue
+        for line in lines:
+            ratio = difflib.SequenceMatcher(
+                None, normalize_text(line.text), target
+            ).ratio()
+            if ratio >= min_ratio:
+                return True
+        hay = "".join(
+            normalize_text(" ".join(line.text for line in lines)).split()
+        )
+        # autojunk=False: the default heuristic marks frequent characters
+        # of a long OCR haystack as junk, silently dropping real matches.
+        matcher = difflib.SequenceMatcher(
+            None, squashed_target, hay, autojunk=False
+        )
+        longest = max(
+            (block.size for block in matcher.get_matching_blocks()),
+            default=0,
+        )
+        if longest >= min_ratio * len(squashed_target):
+            return True
+    return False
+
+
 def find_text(
     screen_png: bytes,
     text: str,

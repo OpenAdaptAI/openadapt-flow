@@ -684,6 +684,143 @@ class TestBillingErrorAbort:
         assert not looks("replayed 14000 steps")  # 400 as a substring only
 
 
+class CrashingClient(FakeClient):
+    """Serves its script, then raises on every further API call.
+
+    Models a mid-run API failure (429/500/529) after N paid calls: the
+    paid usage must still reach the recorded row and the cost ceiling.
+    """
+
+    def __init__(self, script: list[Any], error: Exception) -> None:
+        super().__init__(script)
+        self.error = error
+
+    def _create(self, **kwargs: Any) -> Any:
+        if not self.script:
+            raise self.error
+        return super()._create(**kwargs)
+
+
+def _fake_launch(monkeypatch: Any, backend: FakeBackend) -> None:
+    """Patch PlaywrightBackend.launch to return ``backend`` (no browser)."""
+    from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+
+    monkeypatch.setattr(
+        PlaywrightBackend,
+        "launch",
+        classmethod(
+            lambda cls, url, headless=True: (backend, lambda: None)
+        ),
+    )
+
+
+class TestCrashedRunSpendAccounting:
+    """F1: a mid-run crash must not zero out the run's real spend."""
+
+    CLICK = {"action": "left_click", "coordinate": [10, 10]}
+
+    def crashing_client(self) -> CrashingClient:
+        # Two paid calls at 200K uncached input tokens each ($0.60/call at
+        # list), then the third call raises mid-run.
+        return CrashingClient(
+            [
+                response(
+                    [tool_use(self.CLICK)], "tool_use", input_tokens=200_000
+                ),
+                response(
+                    [tool_use(self.CLICK)], "tool_use", input_tokens=200_000
+                ),
+            ],
+            RuntimeError("Error code: 529 - overloaded_error"),
+        )
+
+    def test_mid_run_crash_row_carries_partial_cost(
+        self, monkeypatch: Any
+    ) -> None:
+        from openadapt_flow.benchmark.run_benchmark import _agent_run
+
+        _fake_launch(monkeypatch, FakeBackend())
+        row = _agent_run(
+            "http://x", NOTE, client=self.crashing_client(), task="task"
+        )
+        assert row["error"] == "RuntimeError: Error code: 529 - overloaded_error"
+        assert row["stopped"] == "error"
+        assert not row["success"]
+        # The two paid calls' usage reached the row despite the crash.
+        assert row["api_calls"] == 2
+        assert row["input_tokens"] == 400_000
+        assert row["output_tokens"] == 100
+        expected = agent_baseline.compute_cost(400_000, 100)
+        assert row["cost_usd"] == expected
+        assert row["cost_usd"] > 1.0
+
+    def test_crashed_run_spend_counts_against_ceiling(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        # End to end through the orchestrator: run 1 crashes after ~$1.20
+        # of paid calls; the $2.00 ceiling must see that spend and truncate
+        # the arm before run 2 (1.20 + 1.50 > 2.00).
+        _fake_launch(monkeypatch, FakeBackend())
+        results = run_openemr_benchmark(
+            tmp_path,
+            tmp_path / "bundle",
+            n_compiled=0,
+            n_agent=3,
+            pace_s=0.0,
+            max_cost_per_run_usd=1.50,
+            max_total_cost_usd=2.00,
+            agent_client=self.crashing_client(),
+            preflight=lambda: (True, None),
+            sleep=lambda _s: None,
+            log=lambda _msg: None,
+        )
+        rows = results["runs"]["agent"]
+        assert len(rows) == 1
+        assert rows[0]["error"] is not None
+        assert rows[0]["cost_usd"] > 1.0  # crashed run's spend recorded
+        note = results["agent_arm_note"]
+        assert "truncated by $2.00 cost ceiling after 1 of 3 runs" in note
+        assert "$1.20 spent" in note
+        # The crashed spend is in the aggregate totals too.
+        assert results["arms"]["agent"]["cost_usd_total"] == rows[0]["cost_usd"]
+
+
+class TestNoteForBounds:
+    def test_index_past_note_list_asserts(self) -> None:
+        import pytest
+
+        with pytest.raises(AssertionError, match="pairwise distinctness"):
+            note_for("agent", len(openemr_benchmark._AGENT_NOTES))
+        with pytest.raises(AssertionError, match="pairwise distinctness"):
+            note_for("compiled", len(openemr_benchmark._COMPILED_NOTES))
+
+    def test_orchestrator_rejects_n_beyond_notes(
+        self, tmp_path: Path
+    ) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="n_agent"):
+            run_openemr_benchmark(
+                tmp_path,
+                tmp_path / "bundle",
+                n_compiled=0,
+                n_agent=len(openemr_benchmark._AGENT_NOTES) + 1,
+                preflight=lambda: (True, None),
+                sleep=lambda _s: None,
+                log=lambda _msg: None,
+            )
+        with pytest.raises(ValueError, match="n_compiled"):
+            run_openemr_benchmark(
+                tmp_path,
+                tmp_path / "bundle",
+                n_compiled=len(openemr_benchmark._COMPILED_NOTES) + 1,
+                n_agent=0,
+                preflight=lambda: (True, None),
+                sleep=lambda _s: None,
+                log=lambda _msg: None,
+            )
+
+
 class TestPreflight:
     def test_failed_preflight_skips_agent_arm_keeps_compiled(
         self, tmp_path: Path, monkeypatch: Any
@@ -739,3 +876,59 @@ class TestPreflight:
         assert ok and err is None
         assert seen["max_tokens"] == 1
         assert seen["model"] == agent_baseline.MODEL
+
+    def test_transient_error_retried_once_then_passes(self) -> None:
+        # A 529/overload blip must not declare the key dead: one retry.
+        calls = {"n": 0}
+        sleeps: list[float] = []
+
+        class Flaky:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise RuntimeError("Error code: 529 - overloaded")
+                    return SimpleNamespace()
+
+        ok, err = agent_baseline.preflight_check(
+            client=Flaky(), sleep=sleeps.append
+        )
+        assert ok and err is None
+        assert calls["n"] == 2
+        assert sleeps == [2.0]
+
+    def test_transient_error_twice_fails_with_last_error(self) -> None:
+        calls = {"n": 0}
+
+        class Down:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    calls["n"] += 1
+                    raise RuntimeError("Error code: 500 - server error")
+
+        ok, err = agent_baseline.preflight_check(
+            client=Down(), sleep=lambda _s: None
+        )
+        assert not ok
+        assert "500" in err
+        assert calls["n"] == 2  # exactly one retry, then declared dead
+
+    def test_billing_error_not_retried(self) -> None:
+        # An auth/billing failure cannot succeed on retry; fail fast.
+        calls = {"n": 0}
+
+        class Dead:
+            class messages:
+                @staticmethod
+                def create(**kwargs):
+                    calls["n"] += 1
+                    raise RuntimeError("Error code: 401 - invalid x-api-key")
+
+        ok, err = agent_baseline.preflight_check(
+            client=Dead(), sleep=lambda _s: None
+        )
+        assert not ok
+        assert "401" in err
+        assert calls["n"] == 1

@@ -15,3 +15,5 @@ benchmark/hybrid/finals/
 benchmark/hybrid/rows.jsonl
 benchmark/dom/finals/
 benchmark/dom/rows.jsonl
+benchmark/desktop/finals/
+benchmark/desktop/_work/

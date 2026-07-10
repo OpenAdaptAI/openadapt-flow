@@ -29,8 +29,12 @@ dev = [
     # Benchmark harness: agent baseline (anthropic) + chart rendering.
     "anthropic>=0.40",
     "matplotlib>=3.8",
+    # WindowsBackend tests (mock WAA server).
+    "requests>=2.31",
 ]
 grounder = ["anthropic>=0.40"]
+# WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
+windows = ["requests>=2.31"]
 
 [project.scripts]
 openadapt-flow = "openadapt_flow.__main__:main"

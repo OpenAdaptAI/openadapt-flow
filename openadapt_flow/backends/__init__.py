@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+    from openadapt_flow.backends.windows_backend import WindowsBackend
 
-__all__ = ["PlaywrightBackend"]
+__all__ = ["PlaywrightBackend", "WindowsBackend"]
 
 
 def __getattr__(name: str) -> object:
@@ -21,4 +22,8 @@ def __getattr__(name: str) -> object:
         )
 
         return PlaywrightBackend
+    if name == "WindowsBackend":
+        from openadapt_flow.backends.windows_backend import WindowsBackend
+
+        return WindowsBackend
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -71,9 +71,11 @@ actions observed — at the cost of availability:
   hardened 2026-07-09). After every TYPE action, an OCR-able typed value
   must be READ back from the field region (2x-resolution retry included);
   a pixel change alone is accepted only when the region gained no other
-  readable text — the masked-field (password dots) shape — so a dialog
-  painting over the field no longer false-verifies while keystrokes fell
-  elsewhere. If nothing changed at all (focus stolen, keystrokes on
+  readable text — the masked-field (password dots) shape, where
+  "readable" counts confident alphanumeric characters (dot glyphs OCR as
+  nothing, punctuation runs, or low-confidence noise depending on the
+  platform renderer) — so a dialog painting over the field no longer
+  false-verifies while keystrokes fell elsewhere. If nothing changed at all (focus stolen, keystrokes on
   `<body>`), the replayer re-clicks the field, selects-all, retypes once,
   and halts if the input still cannot be confirmed; if the region changed
   but the value is unreadable, it halts immediately WITHOUT retyping

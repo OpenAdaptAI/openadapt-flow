@@ -1071,8 +1071,9 @@ def test_type_dialog_over_field_halts_without_retyping(bundle, run_dir):
     select-all retype, which could destroy pre-existing field content."""
     vision = _type_vision()
     dialog = [OcrLine("Are you sure you want to discard this draft?")]
-    # attempt 1: after-OCR (1x), after-OCR (2x upscale), baseline-OCR.
-    vision.ocr_results = [dialog, dialog, []]
+    # attempt 1: after-OCR (1x), after-OCR (2x upscale), then the masked
+    # heuristic re-reads the after and baseline regions.
+    vision.ocr_results = [dialog, dialog, dialog, []]
     vision.pixels_changed_results = [True]
     backend = FakeBackend()
     report = Replayer(backend, vision=vision).run(
@@ -1093,11 +1094,35 @@ def test_type_masked_field_accepts_diff_without_new_text(bundle, run_dir):
     """Masked fields (password dots) render pixels but no readable text:
     the diff plus an unchanged-OCR region is the accepted masked shape."""
     vision = _type_vision()
-    vision.ocr_results = [[], [], []]  # nothing readable before or after
+    vision.ocr_results = [[], [], [], []]  # nothing readable before/after
     vision.pixels_changed_results = [True]
     backend = FakeBackend()
     report = Replayer(backend, vision=vision).run(
         _type_workflow(), params={"note": "hunter2secret"},
+        bundle_dir=bundle, run_dir=run_dir,
+    )
+    assert report.success is True
+    assert report.results[1].input_verified is True
+    assert report.results[1].input_retried is False
+
+
+def test_type_masked_dots_reading_as_noise_still_accepts(bundle, run_dir):
+    """FIXED 2026-07-09 (CI regression): on some platform renderers the
+    password dots OCR not as nothing but as punctuation runs or
+    low-confidence glyph noise — a raw text-length comparison then read
+    that as 'new readable text' and false-halted the login. The masked
+    heuristic counts only confident ALPHANUMERIC characters, which is
+    also invariant to OCR re-segmentation between frames."""
+    vision = _type_vision()
+    dots = [
+        OcrLine("................."),  # confident punctuation run
+        OcrLine("mockmed demo pass", confidence=0.3),  # sub-threshold noise
+    ]
+    vision.ocr_results = [dots, dots, dots, []]
+    vision.pixels_changed_results = [True]
+    backend = FakeBackend()
+    report = Replayer(backend, vision=vision).run(
+        _type_workflow(), params={"note": "mockmed-demo-pass"},
         bundle_dir=bundle, run_dir=run_dir,
     )
     assert report.success is True

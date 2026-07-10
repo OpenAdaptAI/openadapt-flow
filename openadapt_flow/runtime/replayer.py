@@ -56,11 +56,15 @@ FIELD_REGION_SIZE = (640, 240)
 
 # Typed-input verification, diff-only acceptance: when the typed value is
 # OCR-able but OCR cannot find it, a pixel change alone is accepted only if
-# the field region gained no other readable text (masked fields render
-# dots, which OCR reads as nothing or a couple of stray glyphs). A dialog
-# rendering over the region changes pixels AND adds readable text — that
-# must never count as "input landed".
+# the field region gained no other READABLE text — masked fields render
+# dots, which OCR reads as nothing, low-confidence noise, or punctuation
+# runs, while a dialog rendering over the region adds confident words.
+# "Readable" therefore counts alphanumeric characters of lines OCR is
+# confident about (>= MASKED_MIN_CONFIDENCE): alnum counts are invariant
+# to segmentation differences and exclude dot/bullet noise, which varies
+# by platform renderer. The gain may not exceed MASKED_NEW_TEXT_SLACK.
 MASKED_NEW_TEXT_SLACK = 3
+MASKED_MIN_CONFIDENCE = 0.6
 
 # Closed-loop scroll: a SCROLL step keeps scrolling by its recorded delta
 # until the NEXT anchored step's anchor resolves on a settled frame, bounded
@@ -558,6 +562,23 @@ class Replayer:
         lines = self.vision.ocr(png, region=region)
         return identity_mod.squash(" ".join(line.text for line in lines))
 
+    def _readable_chars(self, png: bytes, region: Optional[Region]) -> int:
+        """Confidently readable alphanumeric characters in a region.
+
+        The masked-acceptance metric (see ``MASKED_NEW_TEXT_SLACK``):
+        password dots OCR as nothing, low-confidence noise, or
+        punctuation runs depending on the platform renderer, while a
+        dialog adds confident words. Counting only alphanumeric
+        characters of confident lines is also invariant to OCR merging
+        or splitting the same text into different boxes between frames.
+        """
+        total = 0
+        for line in self.vision.ocr(png, region=region):
+            if getattr(line, "confidence", 1.0) < MASKED_MIN_CONFIDENCE:
+                continue
+            total += sum(ch.isalnum() for ch in line.text)
+        return total
+
     def _typed_input_landed(
         self, text: str, field_point: Optional[Point], baseline_png: bytes
     ) -> tuple[bool, bool]:
@@ -600,10 +621,15 @@ class Replayer:
             return False, False
         # Pixels changed but the value is unreadable: masked rendering is
         # the only acceptable explanation, and masked rendering adds no
-        # readable text. Anything else (a dialog over the field, another
-        # widget's text) must fail the verdict.
-        baseline_hay = self._ocr_squashed(baseline_png, region)
-        landed = len(after_hay) <= len(baseline_hay) + MASKED_NEW_TEXT_SLACK
+        # confidently readable alphanumeric text (dot glyphs OCR as
+        # nothing, noise, or punctuation — platform-dependent). Anything
+        # else (a dialog over the field, another widget's text) must fail
+        # the verdict.
+        landed = (
+            self._readable_chars(after_png, region)
+            <= self._readable_chars(baseline_png, region)
+            + MASKED_NEW_TEXT_SLACK
+        )
         return landed, changed
 
     def _verify_typed_input(

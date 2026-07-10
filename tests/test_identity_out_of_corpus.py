@@ -35,6 +35,18 @@ and before corpus v2, so the acceptance criteria are on record first.
 At the commit that introduces this file, the thirteen probe tests FAIL
 (they reproduce the review); the safe-direction pins below PASS and
 must keep passing.
+
+SECOND REVIEW (2026-07-10, 5th wrong-patient reopening — TestBlocker5
+below): the round-3 suspect budget guards NAME tokens only
+(``_name_plausible`` is False for any token with a digit), so the rule
+was OFF for MRNs/account numbers while the confusion canonicalization
+(l/1, O/0, S/5, Z/2, B/8, g/9) still applied to them — an alphanumeric
+identifier differing only by a letter/digit-confusable character
+silently VERIFIED as same-entity, defeating MRN-based disambiguation of
+same-name patients. These probes are committed FAILING (they reproduce
+the review) before the identifier-suspect fix and corpus v3; the
+identifier-noise "stays-verify" cases below are my chosen design's
+documented true-row availability boundary.
 """
 
 from __future__ import annotations
@@ -230,6 +242,101 @@ class TestSafeDirectionPins:
         )
         assert check.status == "mismatch"
         assert check.mode == "param"
+
+
+class TestBlocker5IdentifierLetterDigitCollision:
+    """5th wrong-patient reopening (second review): an alphanumeric
+    identifier differing only by a letter/digit-confusable character
+    (l/1, O/0, S/5, Z/2, B/8, g/9) canonicalizes equal, so a DIFFERENT
+    patient's MRN/account number verified as same-entity. The chosen
+    fix (identifier-suspect: a confusion-only match on a RECORDED token
+    that contains a digit is suspect -> abort) makes all four abort.
+
+    Design note: the fix is scoped to tokens the RECORDING shows as
+    identifiers (recorded token contains a digit). It is NOT a blanket
+    "any digit in the observed token" rule — that would abort names
+    OCR'd with a digit-class confusion ('Belford' -> 'Be1ford'), which
+    must stay verified (TestSafeDirectionPins). There is no wrong-patient
+    residual: unlike a corroboration-escape design, a confusion-differing
+    identifier aborts even when name and DOB raw-match, so two same-name
+    patients distinguished only by an OCR-confusable MRN char never
+    verify."""
+
+    def test_probe_14_mrn_l_vs_1(self):
+        assert _status(
+            "Belford Jane MRN l482913 Cardiology",
+            "Belford Jane MRN 1482913 Cardiology",
+        ) == "mismatch"
+
+    def test_probe_15_mrn_O_vs_0(self):
+        assert _status(
+            "Chen Wei MRN O52133 Neurology",
+            "Chen Wei MRN 052133 Neurology",
+        ) == "mismatch"
+
+    def test_probe_16_acct_S_vs_5(self):
+        assert _status(
+            "Ramirez Ana Acct S5821 Billing",
+            "Ramirez Ana Acct 55821 Billing",
+        ) == "mismatch"
+
+    def test_probe_17_same_name_mrn_sole_discriminator(self):
+        # The canonical clinical case: two same-name patients whose ONLY
+        # difference is one OCR-confusable MRN char. Name raw-matches;
+        # the MRN is the sole discriminator; it must abort regardless
+        # (this is exactly the case a corroboration-escape design would
+        # wrongly allow).
+        assert _status(
+            "Doe John MRN AO1234",
+            "Doe John MRN A01234",
+        ) == "mismatch"
+
+    def test_probe_18_fires_in_param_mode(self):
+        # MRN as a parameter: the param-mode raw longest_run tolerated a
+        # single confusable char in a long identifier, then band_match
+        # verified the substituted band. The identifier-suspect rule in
+        # band_match closes it in param mode too.
+        check = verify_target_identity(
+            "Belford Jane MRN l482913 Cardiology",
+            "Belford Jane MRN 1482913 Cardiology",
+            params={"mrn": "l482913"},
+            param_examples={"mrn": "l482913"},
+        )
+        assert check.status == "mismatch"
+
+
+class TestBlocker5Controls:
+    """The letter/digit boundary is precise: all-digit differences and
+    identifier-side noise boundaries must behave as designed."""
+
+    def test_all_digit_mrn_difference_still_mismatches(self):
+        # Control: 748291 vs 748292 is NOT a confusion equivalence (2 and
+        # 1 are not in one confusion class), so it mismatches via
+        # coverage/contradiction, NOT the suspect rule.
+        assert _status(
+            "Doe John MRN 748291",
+            "Doe John MRN 748292",
+        ) == "mismatch"
+
+    def test_raw_equal_identifier_still_verifies(self):
+        # A raw-identical MRN with only name-side digit-class noise: the
+        # identifier is not confusion-differing, so it verifies.
+        assert _status(
+            "Belford, Phil 1985-03-12 M MRN A123456",
+            "Be1ford, Phi1 1985-03-12 M MRN A123456",
+        ) == "verified"
+
+    def test_true_row_identifier_noise_aborts_availability_cost(self):
+        # DOCUMENTED AVAILABILITY COST of the chosen (safety-first)
+        # design: when the TRUE row's own MRN is OCR-garbled by a
+        # letter/digit-confusable char, we abort rather than gamble on
+        # identity. Indistinguishable from a different-patient row at
+        # band level; the halt is the cheap direction. Disclosed in
+        # docs/LIMITS.md.
+        assert _status(
+            "Belford, Phil 1985-03-12 M MRN A01234",
+            "Belford, Phil 1985-03-12 M MRN AO1234",
+        ) == "mismatch"
 
 
 class TestDisclosedResidualEdges:

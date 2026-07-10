@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import shutil
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,13 @@ def _recontext(
     derived from — exactly what a re-record at this position would capture.
     Returns None (disabling the identity check for the step, honestly) when
     the band yields no usable text.
+
+    The volatility reference date is *today*: the band is being re-recorded
+    NOW, so near/far date discrimination anchors on heal time exactly as it
+    anchors on the recording date at compile time. Without it every
+    date-bearing line is conservatively dropped — a healed anchor in a
+    patient banner would silently lose its DOB line, the band's most
+    discriminative identity evidence.
     """
     try:
         lines = vision.ocr(frame_png)
@@ -124,6 +132,7 @@ def _recontext(
         lines,
         exclude_region=region,
         band=identity_mod.band_region(click_point, region[3], frame),
+        reference_date=date.today(),
     )
 
 

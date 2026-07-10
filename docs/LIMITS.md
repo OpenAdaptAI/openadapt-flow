@@ -71,21 +71,30 @@ actions observed — at the cost of availability:
   formerly the top availability killer on live apps — a fresh OpenEMR
   recording mined `text_present ':01'`, a clock-minute OCR fragment, and
   every later replay false-halted on it). Mining now selects for
-  **stability, not novelty**: clock times, dates near the recording date,
-  digit-dominated counters and low-entropy noise are rejected; candidates
-  must persist across the recording's own frames (fading toasts and
-  self-mutating regions are volatile by demonstration); ranking prefers
-  alphabetic text near the click target over "longest new text". A date
-  FAR from the recording date — a DOB in a patient banner — is
+  **stability, not novelty**: clock times (colon and unambiguous
+  European dot forms — `18.38`), month-name dates (`Jul 8, 2026`,
+  `July 2026` — OpenEMR's post-login calendar header alone would
+  false-halt every replay the next month), relative-time phrases
+  (`3 min ago`, `just now`, a standalone `Yesterday`), dates near the
+  recording date, counts and pagination position (`56 total entries`,
+  `1 to 1 of 1`, `Page 2 of 9` — navigation/volume state, not identity),
+  parenthesized badge counters (`Inbox (2)`), digit-dominated fragments
+  and low-entropy noise are all rejected; candidates must persist across
+  the recording's own frames (fading toasts and self-mutating regions are
+  volatile by demonstration); ranking prefers alphabetic text near the
+  click target over "longest new text". A date FAR from the recording
+  date — a DOB in a patient banner, numeric or month-name form — is
   deliberately kept: it is identity data, and the old blanket timestamp
   filter's habit of eating identity banners is gone.
 - **State the demonstration accidentally froze** (narrowed 2026-07-09,
   still real). Text that is stable within the recording but specific to
-  the instance or dataset — an entry count ("filtered from 56 total
-  entries"), a module menu, a persistent data row — can still be mined as
-  an assertion. A bundle recorded on one OpenEMR demo instance halts at
-  login on a second instance of the *same version* because the module menu
-  and calendar content differ. Per-tenant re-recording is the working
+  the instance or dataset — a module menu, a persistent data row — can
+  still be mined as an assertion. (Entry counts like "filtered from 56
+  total entries" were in this class until the same-day review hardening;
+  count phrases now classify as volatile and are rejected at compile
+  time.) A bundle recorded on one OpenEMR demo instance halts at login on
+  a second instance of the *same version* because the module menu and
+  calendar content differ. Per-tenant re-recording is the working
   assumption.
 - **Identity bands recorded through modal dialogs** (pre-existing, exposed
   2026-07-09 once the `':01'` halts stopped masking it). A click inside a
@@ -122,7 +131,13 @@ strips it from every compiled assertion (by design — it varies per run).
 The other half of the cost was fixed on 2026-07-09: recorded parameter
 values no longer leak into geometry landmarks, and a compile-time lint
 fails the build outright if a demonstrated parameter value appears in any
-postcondition or landmark — a bundle can no longer be silently demo-bound.
+**text** postcondition or in any landmark's OCR text. Scoped precisely:
+the lint reads text evidence only — a later step's REGION_STABLE template
+can still embed the demo value's rendered *pixels* (e.g. a saved note
+visible in a subsequent screen region). That failure is in the false-halt
+direction (the region won't match under a different run value and the run
+stops safely); it cannot cause a wrong action, but it is not linted (see
+known remaining).
 
 ## Known remaining (deliberately not attempted in the 2026-07-08/09 fixes)
 
@@ -143,6 +158,31 @@ postcondition or landmark — a bundle can no longer be silently demo-bound.
   clicks.
 - **Label-only targets** (see the dangerous list) compile with no identity
   context at all.
+- **REGION_STABLE templates can embed rendered parameter pixels.** The
+  parameter-leakage lint scans text postconditions and landmark OCR text
+  only; a later step's stable-region crop may contain the demo value as
+  pixels. False-halt direction only (safe), but unlinted.
+- **Long-line anchors are OCR-segmentation-fragile.** `find_text` does no
+  multi-line joining, and candidate ranking prefers long lines — the same
+  mechanism behind the disclosed step_014 band failure. A mined long line
+  that OCR re-segments differently at replay false-halts.
+- **Fuzzy text matching cannot see one-digit count differences.** A line
+  differing from the recorded one by a single digit scores above the 0.8
+  per-line fuzzy threshold. Mitigated by rejecting count-bearing lines at
+  compile time (they no longer become assertions); the matcher itself was
+  not redesigned.
+- **Structural checks pass as unverified on a transient None.** When a
+  structural observation (URL/title/page count) reads None on either side
+  — even on a backend that normally provides it — the postcondition
+  passes honestly-unverified rather than halting.
+- **NEW_TAB_OPENED false-halts on named-window reuse.** A link that
+  re-targets an existing named window navigates it instead of increasing
+  the page count; the mined page-count postcondition then fails a
+  successful action (safe direction, costs availability).
+- **The persistence check has no coverage on the recording's final step.**
+  There is no next-step before-frame to test persistence against, so a
+  toast that appears on the last demonstrated action can still be mined
+  as an assertion.
 
 ## What a demonstration cannot express
 

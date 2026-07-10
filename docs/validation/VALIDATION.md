@@ -116,10 +116,14 @@ OpenEMR regression replays — are addressed by making postcondition mining
 5. **Parameter hygiene.** Demo parameter values are excluded from geometry
    landmarks (on OpenEMR the save step's landmark used to be the recorded
    note text itself), and a compile-time lint fails compilation loudly if a
-   demonstrated parameter value appears anywhere in the emitted bundle
-   outside the designated slots (`workflow.params`, a parameterized TYPE
-   step's recorded example, anchor resolution/identity evidence — which
-   re-anchors on the run's value at replay).
+   demonstrated parameter value appears in any **text** postcondition or
+   any landmark's OCR text outside the designated slots (`workflow.params`,
+   a parameterized TYPE step's recorded example, anchor resolution/identity
+   evidence — which re-anchors on the run's value at replay). Scoped
+   precisely: the lint reads text evidence only. A later step's
+   REGION_STABLE template can still embed the demo value's rendered
+   *pixels*; that is a false-halt-direction gap (safe, costs availability),
+   listed under known remaining.
 
 Concrete before → after, same recordings:
 
@@ -133,9 +137,10 @@ Concrete before → after, same recordings:
   old miner grabbed a message row's timestamp), `Showing 1 to 1 of 1
   entries…`. No timestamps, no `':01'` fragments, no note text, no other
   patients' rows. Per-step list below under Track D.
-- Verification: full unit + e2e matrix green (290 tests, including the
-  perturbation/chaos/primitives characterization suites, re-run whole);
-  OpenEMR live check under Track D below (2026-07-09 re-run).
+- Verification: full unit + e2e matrix green (330 tests after the review
+  hardening below, including the perturbation/chaos/primitives
+  characterization suites, re-run whole); OpenEMR live check under Track D
+  below (2026-07-09 re-run).
 
 **False-abort cost of this fix: none measured** — the MockMed baseline,
 params, viewport, healing and slow-render scenarios all stayed green, and
@@ -156,6 +161,69 @@ postcondition mining; it was previously unmeasurable because every replay
 aborted earlier on `':01'`. Left un-touched here deliberately: the
 coverage semantics carry measured safety margins (look-alike row = 0.70,
 threshold 0.8) that an order-insensitive rewrite would need to re-validate.
+
+### Review hardening (2026-07-09, same branch)
+
+Review of this fix produced verified classifier evasions — all fixed, all
+pinned as unit tests in both directions (`tests/test_volatility.py`):
+
+- **Month-name dates** classified as stable: `Jul 8, 2026`, `08 Jul 2026`,
+  `Updated Jul 8`, `July 2026`, `Wednesday July 8` all evaded the
+  numeric-only date pattern. Concrete risk: OpenEMR's post-login screen is
+  a calendar — a mined `July 2026` header false-halts every replay the
+  next month. Month-name fragments now feed the same near/far split as
+  numeric dates; a month-day with no year (`Updated Jul 8`) recurs
+  annually and is always volatile; a month-name DOB (`Jan 1, 1980`) is
+  kept as identity data, exactly like the numeric form.
+- **Relative-time phrases**: `3 min ago`, `2 hours ago`, `just now`, and a
+  standalone `Yesterday`/`Today`/`Tomorrow` (message-list group headers)
+  are volatile; embedded day-words in stable chrome ("Today's
+  Appointments") are kept.
+- **Counts and pagination**: `56 total entries`, `1 to 1 of 1`,
+  `5 new messages` — and `Page 2 of 9`, previously pinned as *stable* by a
+  unit test, reclassified: pagination position is navigation state that
+  changes with data volume on shared instances, not identity.
+- **Badge counters**: `Inbox (2)`, `Messages (14)` — a parenthesized bare
+  integer is a live counter decorating an otherwise-stable label
+  (strip-and-test: if removing it leaves the classification unchanged, the
+  composite is rejected; the label alone remains minable).
+- **European dot-clocks**: `Last updated 18.38`. Only unambiguous forms
+  count (two-digit hour in valid range, an am/pm suffix, or a time-context
+  word) so version/section numbers survive: `v2.0`, `v2.10 changelog` and
+  `Version 2.10 release notes` are pinned stable.
+- **Heal-time band refresh dropped DOB lines**: `_recontext` passed no
+  reference date, so every date-bearing line was conservatively dropped
+  from a healed anchor's refreshed band — including the DOB, the band's
+  most discriminative identity evidence. It now anchors the near/far split
+  on the heal date (`date.today()`), the exact analogue of the recording
+  date at compile time.
+
+The `Showing 1 to 1 of 1 entries (filtered from 56 total entries)` banner
+the 2026-07-09 fresh bundle mined (step_007 below) is a case study in why
+counts had to go: reviewer-measured, the per-line fuzzy matcher (0.8)
+scores `0 to 0 of 0 entries` at **0.95** against it — the exact
+empty-result state the assertion should catch PASSES — while a missing
+`(filtered from …)` suffix scores 0.62 and false-halts. **Fuzzy matching
+on digit-differing lines is a known remaining weakness: a one-digit count
+difference scores above the 0.8 threshold**, beneath the matcher's
+resolution. The fix here is upstream, not a matcher redesign: that banner
+now classifies as `count` (pinned by test, spaced and OCR-squashed forms
+both) and can never become an assertion.
+
+Known remaining, documented here deliberately (not attempted):
+
+- **Long-line anchors are OCR-segmentation-fragile**: `find_text` does no
+  multi-line joining and ranking prefers long lines — the same mechanism
+  as the disclosed step_014 band failure, on the assertion side.
+- **Structural checks pass as honestly-unverified on a transient None**
+  (URL/title/page-count read None on either side), even on backends that
+  are normally structural.
+- **NEW_TAB_OPENED false-halts on named-window reuse**: re-targeting an
+  existing named window navigates it without increasing the page count.
+- **The persistence check has no coverage on the recording's final step**
+  (no next before-frame exists): a final-step toast can still be asserted.
+- **REGION_STABLE templates can embed rendered parameter pixels** (see the
+  lint scope note above) — false-halt direction only.
 
 ## Outcome vocabulary
 
@@ -329,8 +397,10 @@ longer click-blind, they must name the run's entity or the run halts):
    (stability-selected mining; see the fresh-bundle table below): no
    timestamp/counter fragments, no other patients' content, and card/menu
    chrome preferred over data rows. Instance-stable state can still be
-   mined (an entry count like `filtered from 56 total entries`, a module
-   menu), so cross-instance transfer remains out of reach.
+   mined (a module menu, a persistent data row; entry counts like
+   `filtered from 56 total entries` were in this class until the review
+   hardening rejected count phrases outright), so cross-instance transfer
+   remains out of reach.
 
 Also observed on the real app: the save step's geometry landmark is the
 **recorded note text itself** — parameterized values leak into landmark
@@ -338,7 +408,9 @@ evidence, so healing quality silently degrades for any run whose parameter
 differs from the demonstration (i.e., all of them). → **Fixed 2026-07-09**:
 landmarks never embed a demo parameter value (or any volatile text), and a
 compile-time lint fails the build if a demonstrated parameter value appears
-in any postcondition or landmark.
+in any text postcondition or any landmark's OCR text (REGION_STABLE
+templates can still embed the value's rendered pixels — false-halt
+direction; see the review-hardening known-remaining list).
 
 ### Track D re-run (2026-07-09, `feat/fix-postcondition-mining`)
 
@@ -351,7 +423,7 @@ the fresh 17-step bundle, verbatim:
 |---|---|---|
 | step_001 | type 'admin' | `admin` (the fixed login user — not a parameter) |
 | step_004 | click 'Login' | `Calendar Finder Flow Recalls Messages Patient Fees Modules Procedures Admin Reports Miscellaneous Popups` (main menu chrome) |
-| step_007 | press Enter (search) | `Showing1to1of1entries(filteredfrom56totalentries)` (results banner; the instance count is the known remaining overfit) |
+| step_007 | press Enter (search) | `Showing1to1of1entries(filteredfrom56totalentries)` (results banner — historical: since the review hardening this string classifies as `count` and is rejected at compile time; a fresh compile mines a different candidate here) |
 | step_008 | click 'Belford, Phil' | `TreatmentInterventionPreferences` (chart card title — the old miner asserted this card's Phil-specific *body* text) |
 | step_012 | click pencil icon | `Last update` (column header — the old miner grabbed a message row's timestamp here; this is where `':01'` came from) |
 | step_013 | click '+ Add' | `Calendar Finder Flow Recalls` (menu chrome) |
@@ -415,11 +487,13 @@ is structurally excluded — verified live), candidates must persist across
 the recording's own frames, ranking prefers semantically-near alphabetic
 text, and a DOB-class far date in an identity banner is deliberately KEPT
 as identity evidence instead of being eaten by the old blanket timestamp
-filter. **Still open within this item:** text that is stable *within the
-recording* but instance-specific (an entry count, a module menu, a
-persistent data row like MockMed's `Sam Specimen`) can still be mined —
-bundles still do not transfer between same-version instances, and
-per-tenant re-recording remains the working assumption.
+filter. The review hardening extended the reject set to month-name dates,
+relative-time phrases, counts/pagination, badge counters and dot-clocks
+(all reviewer-verified evasions; see above). **Still open within this
+item:** text that is stable *within the recording* but instance-specific
+(a module menu, a persistent data row like MockMed's `Sam Specimen`) can
+still be mined — bundles still do not transfer between same-version
+instances, and per-tenant re-recording remains the working assumption.
 
 **P2 — identity band order-fragility on dialog clicks (newly exposed
 2026-07-09, pre-existing).** See "Exposed by this fix" above: the recorded

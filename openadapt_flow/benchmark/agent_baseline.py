@@ -23,7 +23,8 @@ Loop mechanics:
 - screenshot -> model -> execute tool actions -> repeat, until the model
   stops requesting actions, the ``max_actions`` budget (default 25) is hit,
   or the run's list-price cost exceeds ``max_cost_usd`` (default $1.50 —
-  a hard per-run cost cap, checked after every API call).
+  a hard per-run cost cap, checked after every API call, so a run can
+  overshoot the cap by at most one call's marginal cost).
 - Every executed action returns a settled screenshot in its ``tool_result``
   (the same settle logic the replayer uses), so the model always sees the
   post-action state without spending an extra action on it.
@@ -54,6 +55,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,11 +67,16 @@ COMPUTER_TOOL_TYPE = "computer_20251124"
 #: List price, USD per million tokens (see module docstring re: intro rate).
 INPUT_USD_PER_MTOK = 3.00
 OUTPUT_USD_PER_MTOK = 15.00
-#: 5-minute-TTL cache writes bill at 1.25x input list price.
-CACHE_WRITE_USD_PER_MTOK = INPUT_USD_PER_MTOK * 1.25
-#: Cache reads bill at 0.1x input list price.
-CACHE_READ_USD_PER_MTOK = INPUT_USD_PER_MTOK * 0.10
-#: Hard per-run cost cap at list price (checked after every API call).
+#: 5-minute-TTL cache writes bill at 1.25x input list price. Written as an
+#: exact decimal literal (not ``INPUT * 1.25``) so serialized pricing has no
+#: binary-float noise.
+CACHE_WRITE_USD_PER_MTOK = 3.75
+#: Cache reads bill at 0.1x input list price (exact decimal literal, same
+#: reasoning as above).
+CACHE_READ_USD_PER_MTOK = 0.30
+#: Hard per-run cost cap at list price. Checked after every API call, so a
+#: run can overshoot the cap by at most one call's marginal cost before it
+#: stops.
 MAX_COST_USD = 1.50
 MAX_ACTIONS = 25
 KEEP_SCREENSHOTS = 3
@@ -81,6 +88,27 @@ _SUPPORTED_ACTIONS = (
 )
 #: Pixels dispatched per computer-use ``scroll_amount`` unit (wheel click).
 SCROLL_PX_PER_UNIT = 120
+
+
+#: Auth/billing/credit failure fingerprints: HTTP 400-403 as standalone
+#: numbers, or credit/billing wording anywhere in the error string.
+_BILLING_ERROR_RE = re.compile(
+    r"\b40[0-3]\b|credit|billing|authentication|permission", re.IGNORECASE
+)
+
+
+def _looks_like_billing_error(message: str) -> bool:
+    """True when an error string looks like an auth/billing/credit failure.
+
+    Args:
+        message: An error string (``"<ExceptionType>: <message>"``).
+
+    Returns:
+        Whether the error suggests the API key cannot spend (as opposed to
+        a transient network/server failure worth retrying or continuing
+        past).
+    """
+    return bool(_BILLING_ERROR_RE.search(message))
 
 
 def load_api_key() -> str:
@@ -200,7 +228,11 @@ def compute_cost(
 
 
 def preflight_check(
-    client: Any = None, model: str = MODEL
+    client: Any = None,
+    model: str = MODEL,
+    *,
+    retry_wait_s: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[bool, str | None]:
     """Make one minimal API call to verify the key has usable credit.
 
@@ -209,28 +241,97 @@ def preflight_check(
     starting any paid runs, so a dead key skips the agent arm cleanly
     instead of burning pace time on doomed runs.
 
+    A failure that does NOT look like an auth/billing error (a transient
+    429/5xx or network blip) is retried once after ``retry_wait_s`` before
+    the key is declared dead; auth/billing-looking failures are not
+    retried (a second identical call cannot succeed).
+
     Args:
         client: Anthropic client; when None, one is constructed with the
             key from ``ANTHROPIC_API_KEY`` or ``~/.anthropic/api_key``.
         model: Model ID to probe.
+        retry_wait_s: Pause before the single transient-error retry.
+        sleep: Sleep function (injectable for tests).
 
     Returns:
-        ``(True, None)`` when the call succeeds, else
-        ``(False, "<ExceptionType>: <message>")``.
+        ``(True, None)`` when a call succeeds, else
+        ``(False, "<ExceptionType>: <message>")`` with the last error.
     """
     try:
         if client is None:
             import anthropic
 
             client = anthropic.Anthropic(api_key=load_api_key())
-        client.messages.create(
-            model=model,
-            max_tokens=1,
-            messages=[{"role": "user", "content": "ping"}],
-        )
     except Exception as exc:  # noqa: BLE001 - any failure means "don't spend"
         return False, f"{type(exc).__name__}: {exc}"
-    return True, None
+    error: str | None = None
+    for attempt in range(2):
+        try:
+            client.messages.create(
+                model=model,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "ping"}],
+            )
+        except Exception as exc:  # noqa: BLE001 - any failure means "don't spend"
+            error = f"{type(exc).__name__}: {exc}"
+            if attempt == 0 and not _looks_like_billing_error(error):
+                sleep(retry_wait_s)
+                continue
+            return False, error
+        return True, None
+    return False, error
+
+
+@dataclass
+class UsageLedger:
+    """Running API usage totals, updated after every paid call.
+
+    :func:`run_agent` records into this object the moment each API response
+    arrives, BEFORE any further work that could fail. A caller that passes
+    its own ledger therefore still holds the run's paid usage when the loop
+    dies mid-run (an API error after N paid calls, a screenshot failure,
+    ...) — crashed runs' real spend must reach the recorded row and any
+    arm-level cost ceiling, never be dropped with the exception.
+
+    Attributes:
+        api_calls: Messages API calls whose usage was recorded.
+        input_tokens: Total uncached input tokens.
+        output_tokens: Total output tokens.
+        cache_creation_input_tokens: Total prompt-cache write tokens.
+        cache_read_input_tokens: Total prompt-cache read tokens.
+    """
+
+    api_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+    @property
+    def cost_usd(self) -> float:
+        """Cost of the recorded usage at list pricing (all four buckets)."""
+        return compute_cost(
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_creation_input_tokens,
+            self.cache_read_input_tokens,
+        )
+
+    def record(self, usage: Any) -> None:
+        """Accumulate one API response's ``usage`` block.
+
+        Args:
+            usage: The ``usage`` object of a Messages API response.
+        """
+        self.api_calls += 1
+        self.input_tokens += usage.input_tokens
+        self.output_tokens += usage.output_tokens
+        self.cache_creation_input_tokens += (
+            getattr(usage, "cache_creation_input_tokens", 0) or 0
+        )
+        self.cache_read_input_tokens += (
+            getattr(usage, "cache_read_input_tokens", 0) or 0
+        )
 
 
 @dataclass
@@ -437,6 +538,7 @@ def run_agent(
     max_tokens: int = MAX_TOKENS,
     max_cost_usd: float = MAX_COST_USD,
     log: Callable[[str], None] | None = None,
+    ledger: UsageLedger | None = None,
 ) -> AgentRunResult:
     """Run the computer-use agent loop against a backend until done.
 
@@ -451,11 +553,16 @@ def run_agent(
         keep_screenshots: How many recent screenshots to keep in history.
         max_tokens: Per-response output token cap.
         max_cost_usd: Hard per-run cost cap at list price. Checked after
-            every API call; when exceeded, the loop stops with
+            every API call — so a run can overshoot the cap by at most one
+            call's marginal cost; when exceeded, the loop stops with
             ``stopped="cost_cap"`` and returns normally (a capped run is
             a recorded data point, not an exception).
         log: Per-API-call usage logger (cache hit rate visibility); None
             disables per-call logging.
+        ledger: Optional :class:`UsageLedger` to record usage into. Pass
+            one to keep the run's paid usage observable even when this
+            function raises mid-run (see :class:`UsageLedger`); when None
+            a private ledger is used.
 
     Returns:
         An :class:`AgentRunResult` with counters, cost, and the final
@@ -480,13 +587,9 @@ def run_agent(
     ]
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
 
+    if ledger is None:
+        ledger = UsageLedger()
     actions = 0
-    api_calls = 0
-    input_tokens = 0
-    output_tokens = 0
-    cache_creation = 0
-    cache_read = 0
-    cost_usd = 0.0
     stopped = "model_done"
     model_stop_reason: str | None = None
     action_log: list[str] = []
@@ -501,25 +604,19 @@ def run_agent(
             betas=[COMPUTER_USE_BETA],
             messages=messages,
         )
-        api_calls += 1
+        # Recorded FIRST, before anything below can fail: a mid-run crash
+        # must never lose paid usage (the caller's ledger keeps it).
         usage = response.usage
-        call_in = usage.input_tokens
-        call_out = usage.output_tokens
-        call_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        call_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-        input_tokens += call_in
-        output_tokens += call_out
-        cache_creation += call_write
-        cache_read += call_read
-        cost_usd = compute_cost(
-            input_tokens, output_tokens, cache_creation, cache_read
-        )
+        ledger.record(usage)
+        cost_usd = ledger.cost_usd
         model_stop_reason = response.stop_reason
         if log is not None:
+            call_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            call_read = getattr(usage, "cache_read_input_tokens", 0) or 0
             log(
-                f"  api call {api_calls}: in={call_in} "
+                f"  api call {ledger.api_calls}: in={usage.input_tokens} "
                 f"cache_write={call_write} cache_read={call_read} "
-                f"out={call_out} run_cost=${cost_usd:.4f}"
+                f"out={usage.output_tokens} run_cost=${cost_usd:.4f}"
             )
 
         if cost_usd > max_cost_usd:
@@ -527,7 +624,7 @@ def run_agent(
             if log is not None:
                 log(
                     f"  cost cap tripped: ${cost_usd:.4f} > "
-                    f"${max_cost_usd:.2f} after {api_calls} calls"
+                    f"${max_cost_usd:.2f} after {ledger.api_calls} calls"
                 )
             break
 
@@ -565,12 +662,12 @@ def run_agent(
     wall_s = time.monotonic() - start
     return AgentRunResult(
         actions=actions,
-        api_calls=api_calls,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_creation_input_tokens=cache_creation,
-        cache_read_input_tokens=cache_read,
-        cost_usd=cost_usd,
+        api_calls=ledger.api_calls,
+        input_tokens=ledger.input_tokens,
+        output_tokens=ledger.output_tokens,
+        cache_creation_input_tokens=ledger.cache_creation_input_tokens,
+        cache_read_input_tokens=ledger.cache_read_input_tokens,
+        cost_usd=ledger.cost_usd,
         wall_s=wall_s,
         stopped=stopped,
         model_stop_reason=model_stop_reason,

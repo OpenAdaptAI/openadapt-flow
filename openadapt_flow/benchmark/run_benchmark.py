@@ -144,12 +144,18 @@ def _agent_run(
 
     Returns:
         A per-run row dict. API failures are recorded as failed rows with
-        ``error`` set, never raised.
+        ``error`` set, never raised; a failed row still carries whatever
+        usage/cost the run paid for before crashing (via
+        :class:`~openadapt_flow.benchmark.agent_baseline.UsageLedger`), so
+        crashed runs' real spend counts in aggregates and cost ceilings.
     """
     from openadapt_flow.backends.playwright_backend import PlaywrightBackend
 
     if task is None:
         task = agent_baseline.triage_task_prompt(note_text)
+    # The ledger is updated by run_agent after every paid API call, so the
+    # except branch below can still account for a crashed run's spend.
+    ledger = agent_baseline.UsageLedger()
     backend, close = PlaywrightBackend.launch(url, headless=not headed)
     try:
         try:
@@ -160,29 +166,37 @@ def _agent_run(
                 max_actions=max_actions,
                 max_cost_usd=max_cost_usd,
                 log=log,
+                ledger=ledger,
             )
+            verdict = verify_fn(result.final_screenshot, note_text)
+            if save_final_to is not None:
+                save_final_to.parent.mkdir(parents=True, exist_ok=True)
+                save_final_to.write_bytes(result.final_screenshot)
         except Exception as exc:  # noqa: BLE001 - a failed run is a data point
             return {
                 "arm": "agent",
                 "wall_s": 0.0,
                 "success": False,
                 "actions": 0,
-                "api_calls": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "cost_usd": 0.0,
+                "api_calls": ledger.api_calls,
+                "input_tokens": ledger.input_tokens,
+                "output_tokens": ledger.output_tokens,
+                "cache_creation_input_tokens": (
+                    ledger.cache_creation_input_tokens
+                ),
+                "cache_read_input_tokens": ledger.cache_read_input_tokens,
+                "cost_usd": ledger.cost_usd,
                 "stopped": "error",
                 "model_stop_reason": None,
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        verdict = verify_fn(result.final_screenshot, note_text)
-        if save_final_to is not None:
-            save_final_to.parent.mkdir(parents=True, exist_ok=True)
-            save_final_to.write_bytes(result.final_screenshot)
     finally:
-        close()
+        try:
+            close()
+        except Exception:  # noqa: BLE001, S110
+            # Teardown failure must not discard the row (and with it the
+            # run's recorded spend) by replacing the return with a raise.
+            pass
     row = {
         "arm": "agent",
         "wall_s": result.wall_s,
@@ -431,7 +445,7 @@ Triage, enter a note, save.
 | latency p95 | {c['wall_s_p95']:.1f} s | {a['wall_s_p95']:.1f} s |
 | model cost / run | $0 | ${a['cost_usd_per_run']:.4f} |
 | total model cost | $0 | ${a['cost_usd_total']:.2f} |
-| tokens (in/out, total) | 0 / 0 | {a['input_tokens_total']:,} / \
+| tokens (uncached in / out, total) | 0 / 0 | {a['input_tokens_total']:,} / \
 {a['output_tokens_total']:,} |
 
 ## Drift (`?drift=theme`, one run per arm)
@@ -513,7 +527,9 @@ def write_outputs(results: dict[str, Any], out_dir: Path) -> None:
         out_dir: Output directory (created if needed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(json.dumps(results, indent=2))
+    (out_dir / "results.json").write_text(
+        json.dumps(results, indent=2) + "\n"
+    )
     render_chart(results, out_dir / "latency_cost.png")
     (out_dir / "BENCHMARK.md").write_text(render_markdown(results))
 

@@ -7,17 +7,21 @@ agent — it is a DOM-selector script (Playwright/Selenium): also $0 per run,
 also fast, and it sidesteps OCR entirely on a browser backend. This module
 runs that experiment instead of arguing about it.
 
-Two arms, one frozen schedule, one arm-independent success check:
+Three arms, one frozen schedule, one arm-independent success check:
 
 - **compiled**: the existing vision-anchored compiled replay
   (:func:`openadapt_flow.benchmark.run_benchmark._compiled_run`), healing
   enabled as always.
-- **dom**: :func:`dom_script` — a Playwright script written the way a
-  competent practitioner writes one (this is a STEELMAN, not a strawman):
-  resilient user-facing selectors in Playwright's documented priority
-  order (``get_by_role``/``get_by_label``/``get_by_text``), no retries
-  beyond Playwright's own auto-waiting, standard timeouts, and an explicit
-  final outcome assertion. Every selector choice is documented inline.
+- **dom** (positional) and **dom_named** (name-filtered):
+  :func:`dom_script` — a Playwright script written the way a competent
+  practitioner writes one (this is a STEELMAN, not a strawman): resilient
+  user-facing selectors in Playwright's documented priority order
+  (``get_by_role``/``get_by_label``/``get_by_text``), no retries beyond
+  Playwright's own auto-waiting, standard timeouts, and an explicit final
+  outcome assertion. The task spec underdetermines exactly one selector
+  (which referral row to open), so BOTH readings run as arms: the
+  positional first-row reading and the identity reading keyed to the
+  demonstrated patient. Every selector choice is documented inline.
 
 Both arms run (a) the hybrid benchmark's exact frozen 20-slot schedule
 (:data:`SCHEDULE`: 14 clean + 6 drifted — ``notice``/``reqfield``/
@@ -48,10 +52,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from openadapt_flow.benchmark.hybrid_benchmark import (
+    _NOTE_POOL,
     DRIFT_TYPES,
     SCHEDULE,
     condition_url,
-    note_for_slot,
     verify_hybrid_final,
 )
 
@@ -69,10 +73,30 @@ PASSWORD = "mockmed-demo-pass"
 #: (also ``verify_hybrid_final``'s default identity).
 TARGET_PATIENT = "Jane Sample"
 
-# SCHEDULE, DRIFT_TYPES, note_for_slot, and condition_url are imported
+# SCHEDULE, DRIFT_TYPES, the note pool, and condition_url are imported
 # from the hybrid benchmark so both benchmarks run the IDENTICAL frozen
 # 20-slot schedule (14 clean + 6 drifted, 2 each of notice / reqfield /
 # modal-once) with distinct per-(arm, slot) notes.
+
+#: This benchmark's arms and their note tags (hybrid's tags would give
+#: both DOM arms the same letter).
+ARMS: tuple[str, ...] = ("compiled", "dom", "dom_named")
+_ARM_TAGS = {"compiled": "A", "dom": "P", "dom_named": "N"}
+
+
+def note_for_slot(arm: str, slot: int) -> str:
+    """Distinct per-(arm, slot) note text (hybrid's pool, this arm set).
+
+    Args:
+        arm: One of :data:`ARMS`.
+        slot: Zero-based slot index (the pool wraps past 20; the tag
+            keeps every note distinct).
+
+    Returns:
+        A clinically plausible note unique to (arm, slot).
+    """
+    tag = _ARM_TAGS.get(arm, arm[:1].upper())
+    return f"{_NOTE_POOL[slot % len(_NOTE_POOL)]} [{tag}{slot:02d}]"
 
 #: The perturbation drift modes from the validation suite (PR #12/#13),
 #: plus ``sort`` (a changed default sort order — every referral present,
@@ -87,7 +111,7 @@ PERTURBATIONS: tuple[str, ...] = (
 
 
 def dom_script(
-    page: Any, note_text: str
+    page: Any, note_text: str, *, target_patient: Optional[str] = None
 ) -> list[tuple[str, Callable[[], None]]]:
     """The selector script, as named steps in execution order.
 
@@ -111,6 +135,20 @@ def dom_script(
        DATABASE id into the automation (see the BENCHMARK.md variant
        analysis for what an id-keyed script would change).
 
+    Two variants of the ONE ambiguous step, both benchmarked as separate
+    arms — the referral-opening step is where the task spec
+    underdetermines the selector:
+
+    - ``target_patient=None`` (arm ``dom``, positional): the first row's
+      Open button — the literal reading of the position-phrased spec
+      ("open the FIRST referral task in the list").
+    - ``target_patient="Jane Sample"`` (arm ``dom_named``,
+      name-filtered): the Open button inside the row whose accessible
+      name carries the demonstrated patient — the identity reading. This
+      hardcodes the patient into the script exactly as the compiled
+      arm's recorded identity band does; the two arms differ in failure
+      semantics, not in whether they encode the patient.
+
     No retries beyond Playwright's built-in auto-waiting; standard
     (default, 30 s) timeouts; one explicit outcome assertion at the end —
     a competent script never assumes the final click worked.
@@ -119,11 +157,39 @@ def dom_script(
         page: A Playwright ``Page`` (or a test double with the same
             ``get_by_role``/``get_by_label``/``get_by_text`` surface).
         note_text: This run's parameterized note.
+        target_patient: None for positional first-row selection; a
+            patient name for the name-filtered row selection.
 
     Returns:
         ``(step_name, thunk)`` pairs; executing the thunks in order
         performs the workflow.
     """
+    if target_patient is None:
+        # Positional reading of the spec: the first row's Open button.
+        # ``.first`` is required (three rows -> three "Open" buttons ->
+        # strict-mode violation without it) and is exactly where
+        # wrong-target risk concentrates: if the queue reorders or grows
+        # (sort/grow/lookalike drift) or the target row is gone
+        # (missing), "first" is a DIFFERENT PATIENT and the script
+        # cannot tell. Measured, not assumed.
+        open_step = (
+            "open first referral",
+            lambda: page.get_by_role(
+                "button", name="Open").first.click(),
+        )
+    else:
+        # Identity reading: scope the Open button to the row whose
+        # accessible name (the row's concatenated cell text) carries the
+        # demonstrated patient. Survives reordering and inserted rows;
+        # FAILS CLOSED (timeout, nothing clicked) when the patient's row
+        # is gone. The name is a hardcoded constant — the same constant
+        # the compiled arm's recorded identity band carries.
+        open_step = (
+            "open referral by patient name",
+            lambda: page.get_by_role("row", name=target_patient)
+            .get_by_role("button", name="Open")
+            .click(),
+        )
     return [
         # Form fields by their explicit <label for=...> — Playwright's
         # first recommendation for inputs. fill() auto-waits for the
@@ -135,17 +201,8 @@ def dom_script(
         # Buttons by role + accessible name: the user-facing contract.
         ("click Sign In", lambda: page.get_by_role(
             "button", name="Sign In").click()),
-        # The workflow spec — as demonstrated and as given to every other
-        # arm — is "open the FIRST referral task in the list". A selector
-        # script encodes that literally: the first row's Open button.
-        # ``.first`` is required (three rows -> three "Open" buttons ->
-        # strict-mode violation without it) and is exactly where
-        # wrong-target risk concentrates: if the queue reorders or grows
-        # (sort/grow/lookalike drift) or the target row is gone (missing),
-        # "first" is a DIFFERENT PATIENT and the script cannot tell. This
-        # benchmark measures that instead of assuming it.
-        ("open first referral", lambda: page.get_by_role(
-            "button", name="Open").first.click()),
+        # The arm-defining step: positional or name-filtered (see above).
+        open_step,
         ("click New Encounter", lambda: page.get_by_role(
             "button", name="New Encounter").click()),
         # Accessible-name matching is case-insensitive substring by
@@ -173,7 +230,7 @@ def dom_script(
 
 
 def run_dom_script(
-    page: Any, note_text: str
+    page: Any, note_text: str, *, target_patient: Optional[str] = None
 ) -> tuple[int, Optional[str], Optional[str]]:
     """Execute :func:`dom_script` step by step, capturing the first failure.
 
@@ -184,12 +241,14 @@ def run_dom_script(
     Args:
         page: A Playwright ``Page`` (or test double).
         note_text: This run's parameterized note.
+        target_patient: Forwarded to :func:`dom_script` (None =
+            positional arm; a name = name-filtered arm).
 
     Returns:
         ``(steps_completed, failed_step, error)`` — ``failed_step`` and
         ``error`` are None when every step completed.
     """
-    steps = dom_script(page, note_text)
+    steps = dom_script(page, note_text, target_patient=target_patient)
     for i, (name, thunk) in enumerate(steps):
         try:
             thunk()
@@ -202,6 +261,7 @@ def dom_run(
     url: str,
     note_text: str,
     *,
+    target_patient: Optional[str] = None,
     verify_fn: Callable[[bytes, str], Any] | None = None,
     save_final_to: Optional[Path] = None,
     headed: bool = False,
@@ -217,6 +277,8 @@ def dom_run(
     Args:
         url: Target app URL (may carry a drift query).
         note_text: Note parameter value for this run.
+        target_patient: None runs the positional arm (``dom``); a
+            patient name runs the name-filtered arm (``dom_named``).
         verify_fn: Arm-independent success check applied to the final
             screenshot; defaults to :func:`verify_final_state`. Extra
             fields of its result (beyond ``success``) are merged into the
@@ -236,10 +298,12 @@ def dom_run(
         verify_fn = verify_final_state
     backend, close = PlaywrightBackend.launch(url, headless=not headed)
     try:
-        steps_total = len(dom_script(backend.page, note_text))
+        steps_total = len(
+            dom_script(backend.page, note_text, target_patient=target_patient)
+        )
         start = time.monotonic()
         steps_completed, failed_step, error = run_dom_script(
-            backend.page, note_text
+            backend.page, note_text, target_patient=target_patient
         )
         wall_s = time.monotonic() - start
         final_png = backend.screenshot()
@@ -252,7 +316,7 @@ def dom_run(
     finally:
         close()
     row = {
-        "arm": "dom",
+        "arm": "dom" if target_patient is None else "dom_named",
         "wall_s": wall_s,
         "success": verdict.success,
         "actions": steps_completed,
@@ -327,7 +391,7 @@ def verification_dispute(row: dict[str, Any]) -> bool:
     """
     if classify_outcome(row) != "halt-or-error" or row.get("error"):
         return False
-    if row.get("arm") == "dom":
+    if str(row.get("arm", "")).startswith("dom"):
         return row.get("failed_step") is None
     return row.get("replayer_success") is True
 
@@ -357,7 +421,7 @@ def needs_maintenance(row: dict[str, Any]) -> bool:
         True for a DOM-arm loud failure on a drifted condition.
     """
     return (
-        row.get("arm") == "dom"
+        str(row.get("arm", "")).startswith("dom")
         and row.get("condition", "clean") != "clean"
         and classify_outcome(row) == "halt-or-error"
         and (
@@ -452,7 +516,8 @@ def aggregate_dom_results(
             ]
     all_rows = {
         arm: schedule_runs.get(arm, []) + perturbation_runs.get(arm, [])
-        for arm in ("compiled", "dom")
+        for arm in ARMS
+        if arm in schedule_runs or arm in perturbation_runs
     }
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -517,7 +582,22 @@ def aggregate_dom_results(
 #: Categorical arm colors (compiled matches every other benchmark chart in
 #: this repo); validated for CVD separation / lightness / chroma / contrast
 #: against the chart surface (#fcfcfb).
-ARM_COLORS = {"compiled": "#2a78d6", "dom": "#c2571f"}
+ARM_COLORS = {
+    "compiled": "#2a78d6",
+    "dom": "#c2571f",
+    "dom_named": "#8a5cd6",
+}
+ARM_LABELS = {
+    "compiled": "compiled\nreplay",
+    "dom": "DOM\n(positional)",
+    "dom_named": "DOM\n(name-filtered)",
+}
+#: Arm labels for markdown tables (single-line).
+_MD_ARM_LABELS = {
+    "compiled": "compiled replay",
+    "dom": "DOM (positional)",
+    "dom_named": "DOM (name-filtered)",
+}
 #: Outcome cell fills (light tints) + ink; every cell also carries a text
 #: label, so color is never the only encoding.
 _OUTCOME_STYLE = {
@@ -552,16 +632,16 @@ def render_dom_chart(results: dict[str, Any], out_png: Path) -> Path:
     ink = "#0b0b0b"
     ink2 = "#52514e"
 
-    arms = [a for a in ("compiled", "dom") if a in results["arms"]]
+    arms = [a for a in ARMS if a in results["arms"]]
     fig, (ax_sr, ax_mx) = plt.subplots(
         1,
         2,
-        figsize=(10.4, 4.6),
+        figsize=(11.6, 4.8),
         facecolor=surface,
-        gridspec_kw={"width_ratios": [1, 1.35]},
+        gridspec_kw={"width_ratios": [1, 1.6]},
     )
     fig.suptitle(
-        "Compiled vision replay vs. DOM-selector script — same task, "
+        "Compiled vision replay vs. DOM-selector scripts — same task, "
         "same drift, same check",
         color=ink,
         fontsize=12,
@@ -569,7 +649,7 @@ def render_dom_chart(results: dict[str, Any], out_png: Path) -> Path:
 
     # Panel 1: success rate on the frozen schedule.
     ax_sr.set_facecolor(surface)
-    labels = {"compiled": "compiled\nreplay", "dom": "DOM-selector\nscript"}
+    labels = ARM_LABELS
     rates = [results["arms"][a]["success_rate"] for a in arms]
     bars = ax_sr.bar(
         [labels[a] for a in arms],
@@ -623,6 +703,7 @@ def render_dom_chart(results: dict[str, Any], out_png: Path) -> Path:
     ax_mx.tick_params(length=0)
     for spine in ax_mx.spines.values():
         spine.set_visible(False)
+    any_dispute = False
     for yi, condition in enumerate(conditions):
         for xi, arm in enumerate(arms):
             cells = matrix[condition].get(arm, [])
@@ -636,6 +717,10 @@ def render_dom_chart(results: dict[str, Any], out_png: Path) -> Path:
                 fill, cell_ink, text = "#e8e7e2", ink, "mixed"
             else:
                 fill, cell_ink, text = "#e8e7e2", ink2, "n/a"
+            if any(c.get("dispute") for c in cells):
+                # Judge-disputed run in this cell (see the footnote).
+                text += "*"
+                any_dispute = True
             # 2px-equivalent surface gap between cells.
             ax_mx.add_patch(
                 Rectangle(
@@ -658,7 +743,21 @@ def render_dom_chart(results: dict[str, Any], out_png: Path) -> Path:
                 zorder=3,
             )
 
-    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    bottom = 0.0
+    if any_dispute:
+        fig.text(
+            0.985,
+            0.015,
+            "* contains a run that completed but failed the OCR judge "
+            "(judge false negative; see BENCHMARK.md, measurement "
+            "validity)",
+            ha="right",
+            va="bottom",
+            fontsize=7.5,
+            color=ink2,
+        )
+        bottom = 0.05
+    fig.tight_layout(rect=(0, bottom, 1, 0.90))
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=160, facecolor=surface)
     plt.close(fig)
@@ -753,20 +852,20 @@ def _dispute_sentence(results: dict[str, Any]) -> str:
 
 
 def _dom_verdict(results: dict[str, Any]) -> str:
-    """Honest verdict paragraph, computed from the data either way.
+    """Honest verdict, computed from the data either way.
 
-    Decision rule, stated so readers can re-derive it: compare the arms on
-    (1) wrong-action events anywhere, (2) success under the frozen
-    schedule, (3) success across the perturbation modes, (4) wall-clock.
-    Whichever way the data falls, the paragraph states what it implies
-    for the vision ladder's positioning.
+    Decision rule, stated so readers can re-derive it: compare the three
+    arms on (1) wrong-action events anywhere, (2) success under the
+    frozen schedule, (3) per-mode outcomes across the perturbations,
+    (4) wall-clock. The write-up separates what the data attributes to
+    SPEC PHRASING (positional vs identity reading of "open the first
+    referral") from what it attributes to the DOM-vs-vision substrate,
+    and states what each finding implies for the vision ladder's
+    positioning — whichever way it falls.
     """
-    c = results["arms"]["compiled"]
-    d = results["arms"]["dom"]
+    arms_present = [a for a in ARMS if a in results["arms"]]
+    aggs = {a: results["arms"][a] for a in arms_present}
     totals = results["totals"]
-    dom_wrong = totals["dom"]["wrong_action_count"]
-    compiled_wrong = totals["compiled"]["wrong_action_count"]
-    dom_maint = totals["dom"]["maintenance_count"]
     matrix = results["perturbation_matrix"]
 
     def perturbation_outcomes(arm: str) -> dict[str, set[str]]:
@@ -775,23 +874,26 @@ def _dom_verdict(results: dict[str, Any]) -> str:
             for cond, cells in matrix.items()
         }
 
-    dom_p = perturbation_outcomes("dom")
-    compiled_p = perturbation_outcomes("compiled")
-    dom_absorbed = sorted(
-        cond for cond, o in dom_p.items() if o == {"success"}
-    )
-    dom_broke_loud = sorted(
-        cond for cond, o in dom_p.items() if o == {"halt-or-error"}
-    )
-    dom_broke_silent = sorted(
-        cond for cond, o in dom_p.items() if "wrong-action" in o
-    )
-    compiled_absorbed = sorted(
-        cond for cond, o in compiled_p.items() if o == {"success"}
-    )
-    compiled_wrong_conds = sorted(
-        cond for cond, o in compiled_p.items() if "wrong-action" in o
-    )
+    def absorbed(arm: str) -> list[str]:
+        return sorted(
+            cond
+            for cond, o in perturbation_outcomes(arm).items()
+            if o == {"success"}
+        )
+
+    def broke_loud(arm: str) -> list[str]:
+        return sorted(
+            cond
+            for cond, o in perturbation_outcomes(arm).items()
+            if o == {"halt-or-error"}
+        )
+
+    def broke_silent(arm: str) -> list[str]:
+        return sorted(
+            cond
+            for cond, o in perturbation_outcomes(arm).items()
+            if "wrong-action" in o
+        )
 
     def clean_p50(arm: str) -> float:
         walls = sorted(
@@ -801,67 +903,138 @@ def _dom_verdict(results: dict[str, Any]) -> str:
         )
         return walls[len(walls) // 2] if walls else 0.0
 
-    speed = ""
-    c_p50, d_p50 = clean_p50("compiled"), clean_p50("dom")
-    if c_p50 and d_p50:
-        speed = (
-            f"On wall-clock the DOM script is ~"
-            f"{c_p50 / d_p50:.0f}x faster per clean run "
-            f"(p50 {d_p50:.1f}s vs {c_p50:.1f}s). "
+    wrong = {a: totals[a]["wrong_action_count"] for a in arms_present}
+    schedule_line = "; ".join(
+        f"{a} {aggs[a]['success_count']}/{aggs[a]['n']}"
+        for a in arms_present
+    )
+    c_p50 = clean_p50("compiled")
+    dom_p50s = [
+        p for a in arms_present if a != "compiled"
+        for p in [clean_p50(a)] if p > 0
+    ]
+    ratio = (c_p50 / max(dom_p50s)) if (c_p50 and dom_p50s) else 0.0
+    speed = (
+        f"Both DOM scripts are ~{ratio:.0f}x faster per clean run "
+        f"(p50 {max(dom_p50s):.1f}s vs {c_p50:.1f}s). "
+        if ratio
+        else ""
+    )
+
+    pos_silent = broke_silent("dom") if "dom" in aggs else []
+    pos_wrong_runs = sum(
+        1
+        for key in ("schedule", "perturbation")
+        for r in results["runs"][key].get("dom", [])
+        if classify_outcome(r) == "wrong-action"
+    )
+    named_wrong = wrong.get("dom_named", 0)
+    named_absorbed = absorbed("dom_named") if "dom_named" in aggs else []
+    named_loud = broke_loud("dom_named") if "dom_named" in aggs else []
+    compiled_healed_data_drift = any(
+        cell.get("heal_count")
+        for cond in pos_silent
+        for cell in matrix.get(cond, {}).get("compiled", [])
+        if cell["outcome"] == "success"
+    )
+
+    # Paragraph (headline + a/b/c), every clause guarded by the data.
+    parts: list[str] = [
+        f"**The wrong-action vector is spec underspecification, not "
+        f'"Playwright".** On the frozen schedule all arms tie '
+        f"({schedule_line}): the drift that halts the compiled replay "
+        f"(notice/reqfield/modal-once) stops both DOM scripts too. "
+        f"{speed}The perturbation matrix is where the arms separate, "
+        f"and they separate by HOW EACH ARM NAMES ITS TARGET, not by "
+        f"DOM vs vision."
+    ]
+
+    if pos_silent:
+        parts.append(
+            f"(a) **Positional selectors silently retarget under data "
+            f'drift.** The positional script ("first row" — the literal '
+            f"reading of the task spec) wrote to the WRONG PATIENT on "
+            f"{len(pos_silent)} of {len(matrix)} modes "
+            f"({', '.join(pos_silent)}; {pos_wrong_runs} runs, every "
+            f"one with a healthy-looking final screen). A "
+            f"position-phrased spec cannot notice that the row's "
+            f"identity changed."
+        )
+    else:
+        parts.append(
+            "(a) The positional script produced no wrong actions on "
+            "this matrix — contrary to expectation; see the "
+            "per-condition table before generalizing."
         )
 
-    if dom_wrong == 0 and compiled_wrong == 0 and dom_maint == 0 and (
-        d["success_rate"] >= c["success_rate"]
-    ):
-        return (
-            "**The DOM script wins on this evidence.** It matched or beat "
-            "the compiled replay everywhere it ran, with no wrong actions "
-            f"and no maintenance events. {speed}On a browser backend, a "
-            "selector script is the better incumbent, exactly as the "
-            "criticism predicted — the vision ladder's value proposition "
-            "therefore rests on substrates where no DOM exists "
-            "(desktop apps, VDI/Citrix, remote frames) and on workflows "
-            "that cross app boundaries."
-        )
-    if dom_wrong > compiled_wrong:
-        return (
-            f"**Neither a straight win nor a loss — the arms fail "
-            f"differently, and the difference is the finding.** On the "
-            f"frozen schedule the arms tie ({c['success_count']}/{c['n']} "
-            f"vs {d['success_count']}/{d['n']}): the drift conditions that "
-            f"halt the compiled replay (notice/reqfield/modal-once) stop "
-            f"the DOM script too. {speed}On the perturbation modes they "
-            f"diverge: the DOM script silently wrote to the WRONG PATIENT "
-            f"on {len(dom_broke_silent)} of {len(matrix)} modes "
-            f"({', '.join(dom_broke_silent)}) — its 'first row' selector "
-            f"cannot tell that the row's identity changed — while the "
-            f"compiled arm's pre-click identity check turned "
-            f"{'all of those' if not compiled_wrong_conds else 'most of those'} "
-            f"into safe halts or healed to the correct row "
-            f"(compiled wrong actions: {compiled_wrong}). The DOM script "
-            f"absorbed cosmetic drift for free "
-            f"({', '.join(dom_absorbed) or 'none'}) and broke loudly, "
-            f"needing a human edit, on {', '.join(dom_broke_loud) or 'none'}"
-            f" ({dom_maint} maintenance events overall, schedule + "
-            f"perturbations); the compiled arm absorbed "
-            f"{', '.join(compiled_absorbed) or 'none'} by healing and "
-            f"safe-halted on the data drifts with zero hand edits."
-            f"{_dispute_sentence(results)} Honest "
-            f"positioning, both directions: this DOM arm exists ONLY on "
-            f"browser backends — on desktop/VDI/Citrix substrates the "
-            f"comparison is unavailable, which is the criticism's own "
-            f"point — and where a DOM does exist, a selector script is "
-            f"faster and equally free, but under data drift it is the "
-            f"arm that writes to the wrong patient without telling anyone."
-        )
-    return (
-        f"**Mixed result.** Schedule: compiled {c['success_count']}/"
-        f"{c['n']} vs DOM {d['success_count']}/{d['n']}; wrong actions "
-        f"compiled={compiled_wrong} vs dom={dom_wrong}; DOM maintenance "
-        f"events={dom_maint}. {speed}See the per-condition tables — "
-        f"neither arm dominates, and the per-condition rows say exactly "
-        f"where each breaks."
+    if "dom_named" in aggs:
+        if named_wrong == 0:
+            compiled_clause = (
+                "The compiled arm was equally safe (wrong actions: "
+                f"{wrong.get('compiled', 0)}) and healed to the true "
+                "row on some data-drift runs — see the per-condition "
+                "table for which."
+                if compiled_healed_data_drift
+                else "The compiled arm was equally safe (wrong actions: "
+                f"{wrong.get('compiled', 0)}) but never healed to the "
+                "true row on these modes — every data-drift outcome was "
+                "a halt: on data drift the name-filtered DOM arm "
+                "finished the work the compiled arm safely declined."
+            )
+            headline = (
+                "**The identity reading fixes it.**"
+                if compiled_healed_data_drift
+                else "**The identity reading fixes it — and where a "
+                "stable DOM exists, it also out-completes the compiled "
+                "arm.**"
+            )
+            parts.append(
+                f"(b) {headline} The name-filtered script (same code, "
+                f"one selector keyed to the demonstrated patient) "
+                f"completed CORRECTLY on "
+                f"{', '.join(named_absorbed) or 'none'} "
+                f"and failed closed on "
+                f"{', '.join(named_loud) or 'nothing'}, with zero wrong "
+                f"actions. {compiled_clause}"
+            )
+        else:
+            parts.append(
+                f"(b) The name-filtered script recorded {named_wrong} "
+                f"wrong action(s) — the identity reading did NOT fully "
+                f"fix wrong-targeting here; see the per-condition table."
+            )
+
+    slower = f"~{ratio:.0f}x slower per run" if ratio else "slower per run"
+    rename_healed = "rename" in absorbed("compiled")
+    rename_clause = (
+        "heal-through of label drift (`rename` broke both DOM scripts' "
+        "Open selector — a human edit each — while the ladder healed "
+        "through it)"
+        if rename_healed
+        else "heal-through of label drift (NOT shown in this run — see "
+        "the `rename` row)"
     )
+    parts.append(
+        f"(c) **What demonstration buys: the identity came for free.** "
+        f"Nobody had to DECIDE that \"first referral\" really means "
+        f"Jane Sample — the demonstration captured the target's "
+        f"identity as a matter of course, while the DOM arms needed "
+        f"that judgment hand-written into a selector (and the "
+        f"positional variant shows what happens when it is not). The "
+        f"compiled arm's remaining browser-side edges on this data: "
+        f"demo-derived identity with no spec authoring, {rename_clause}, "
+        f"and fail-closed halts with an accurate report. Its costs are "
+        f"equally plain: {slower}, and an OCR judge with failure modes "
+        f"of its own.{_dispute_sentence(results)} Boundary, stated "
+        f"plainly: this comparison exists ONLY on browser backends. On "
+        f"desktop, VDI/Citrix, or any pixels-without-DOM substrate "
+        f"there is no selector script to write — the criticism's own "
+        f"point — and wherever a stable, accessible DOM exists, an "
+        f"identity-keyed selector script is the honest incumbent to "
+        f"beat: as fast as the positional one and, on this matrix, as "
+        f"safe as the compiled arm."
+    )
+    return " ".join(parts)
 
 
 def render_dom_markdown(results: dict[str, Any]) -> str:
@@ -873,34 +1046,73 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
     Returns:
         The markdown document as a string.
     """
-    c = results["arms"]["compiled"]
-    d = results["arms"]["dom"]
+    arms = [a for a in ARMS if a in results["arms"]]
+    aggs = {a: results["arms"][a] for a in arms}
     totals = results["totals"]
     date = results["generated_at"][:10]
     sched = results["schedule"]
     n_drift = sum(1 for x in sched["conditions"] if x != "clean")
 
+    empty_bucket = {"success": 0, "halt-or-error": 0, "wrong-action": 0}
     sched_conditions = ["clean", *sched["drift_types"]]
-    c_buckets = _slot_group_outcomes(results, "compiled")
-    d_buckets = _slot_group_outcomes(results, "dom")
+    buckets = {a: _slot_group_outcomes(results, a) for a in arms}
     schedule_table = "".join(
         f"| `{cond}` | "
-        f"{_fmt_bucket(c_buckets.get(cond, {'success': 0, 'halt-or-error': 0, 'wrong-action': 0}))} | "
-        f"{_fmt_bucket(d_buckets.get(cond, {'success': 0, 'halt-or-error': 0, 'wrong-action': 0}))} |\n"
+        + " | ".join(
+            _fmt_bucket(buckets[a].get(cond, empty_bucket)) for a in arms
+        )
+        + " |\n"
         for cond in sched_conditions
-        if cond in c_buckets or cond in d_buckets
+        if any(cond in buckets[a] for a in arms)
     )
 
     perturbation_table = "".join(
         f"| `{cond}` | "
-        f"{_condition_outcome(results, 'perturbation', 'compiled', cond)} | "
-        f"{_condition_outcome(results, 'perturbation', 'dom', cond)} |\n"
+        + " | ".join(
+            _condition_outcome(results, "perturbation", a, cond)
+            for a in arms
+        )
+        + " |\n"
         for cond in results["perturbations"]
+    )
+
+    def stat_row(label: str, fmt: Callable[[dict[str, Any]], str]) -> str:
+        return f"| {label} | " + " | ".join(
+            fmt(aggs[a]) for a in arms
+        ) + " |\n"
+
+    headline_table = (
+        "| | " + " | ".join(_MD_ARM_LABELS[a] for a in arms) + " |\n"
+        + "|---" * (len(arms) + 1) + "|\n"
+        + stat_row("runs", lambda a: f"{a['n']}")
+        + stat_row(
+            "success rate",
+            lambda a: f"{a['success_rate']:.0%} "
+            f"({a['success_count']}/{a['n']})",
+        )
+        + stat_row(
+            "success on clean slots",
+            lambda a: f"{a['clean']['success_count']}/{a['clean']['n']}",
+        )
+        + stat_row(
+            "success on drifted slots",
+            lambda a: f"{a['drift']['success_count']}/{a['drift']['n']}",
+        )
+        + stat_row("wall-clock p50", lambda a: f"{a['wall_s_p50']:.1f} s")
+        + stat_row("wall-clock p95", lambda a: f"{a['wall_s_p95']:.1f} s")
+        + stat_row(
+            "wrong-action events", lambda a: f"{a['wrong_action_count']}"
+        )
+        + stat_row(
+            "maintenance events (needs human edit)",
+            lambda a: f"{a['maintenance_count']}",
+        )
+        + stat_row("model cost", lambda a: "$0")
     )
 
     wrong_rows = [
         (arm, r)
-        for arm in ("compiled", "dom")
+        for arm in arms
         for key in ("schedule", "perturbation")
         for r in results["runs"][key].get(arm, [])
         if classify_outcome(r) == "wrong-action"
@@ -931,15 +1143,18 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
         (
             "The shared judge is OCR on a screenshot, and OCR can miss "
             "low-contrast text (the dark `theme` palette is the known "
-            "offender). The following runs REPORTED FULL COMPLETION — "
-            "every step executed, structural audit trail consistent with "
-            "success — yet failed the OCR verification, with no wrong "
-            "action detected. They are counted as failures in every "
-            "number above (the judge's verdict stands, identically for "
-            "both arms), but check the saved final screenshot in "
-            "`finals/` before quoting any of them as an automation "
-            "failure — on audit these are judge false negatives, not "
-            "automation failures:\n\n"
+            "offender; whether a given dark banner is read is "
+            "deterministic per frame but depends on the note's glyphs — "
+            "which is why two runs of the same condition can split). "
+            "The following runs REPORTED FULL COMPLETION — every step "
+            "executed, structural audit trail consistent with success — "
+            "yet failed the OCR verification, with no wrong action "
+            "detected. They are counted as failures in every number "
+            "above (the judge's verdict stands, identically for every "
+            "arm), but check the saved final screenshot (the disputed "
+            "finals are committed alongside this report) before quoting "
+            "any of them as an automation failure — on audit these are "
+            "judge false negatives, not automation failures:\n\n"
             + "\n".join(
                 f"- {d['arm']} on `{d['condition']}` "
                 f"({d['phase']} slot {d['slot']}"
@@ -966,26 +1181,32 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
         )
     )
 
-    return f"""# Benchmark: compiled vision replay vs. DOM-selector script
+    return f"""# Benchmark: compiled vision replay vs. DOM-selector scripts
 
 Date: {date}. The incumbent comparison. For "run the same browser workflow
 N times", the incumbent is not a computer-use agent — it is a
 Playwright/Selenium script: also $0 per run, also fast, no OCR anywhere.
-This benchmark runs that script head-to-head against the compiled vision
-replay on the same task, the same frozen drift schedule, and the same
-arm-independent success check, and reports whichever way it comes out.
+This benchmark runs that incumbent head-to-head against the compiled
+vision replay on the same task, the same frozen drift schedule, and the
+same arm-independent success check, and reports whichever way it comes
+out.
 
 **Task** (MockMed, the bundled demo clinic app; fake data only): sign in as
 `nurse.demo`, open the first referral task, create a New Encounter of type
 Triage, enter a parameterized note (distinct per arm and slot), save.
 
-**The DOM arm is a steelman.** It uses Playwright's documented best
-practices — `get_by_label` for fields, `get_by_role` + accessible name for
-buttons, an explicit final outcome assertion, auto-waiting, standard
-timeouts, no retries, no sleeps, no brittle CSS/XPath (the app exposes no
-`data-testid` contract; its DOM `id`s were deliberately not used — see the
-variant analysis). Every selector choice is documented in
-`openadapt_flow/benchmark/dom_arm.py`.
+**The DOM arms are steelmen — both of them.** Playwright's documented
+best practices throughout: `get_by_label` for fields, `get_by_role` +
+accessible name for buttons, an explicit final outcome assertion,
+auto-waiting, standard timeouts, no retries, no sleeps, no brittle
+CSS/XPath (the app exposes no `data-testid` contract). The task spec
+("open the FIRST referral task") underdetermines one selector, so both
+readings run as separate arms: **DOM (positional)** clicks the first
+row's Open button — the literal reading — and **DOM (name-filtered)**
+clicks the Open button in the row named `{TARGET_PATIENT}` — the
+identity reading, hardcoding the demonstrated patient exactly as the
+compiled arm's recorded identity band does. Every selector choice is
+documented in `openadapt_flow/benchmark/dom_arm.py`.
 
 ## Verdict
 
@@ -997,25 +1218,20 @@ variant analysis). Every selector choice is documented in
 
 The hybrid benchmark's exact schedule: {len(sched['conditions'])} slots,
 {n_drift} drifted ({sched['drift_fraction']:.0%} — two each of `notice`,
-`reqfield`, `modal-once`), identical condition per slot index for both
-arms.
+`reqfield`, `modal-once`), identical condition per slot index for every
+arm.
 
-| | compiled replay | DOM-selector script |
-|---|---|---|
-| runs | {c['n']} | {d['n']} |
-| success rate | {c['success_rate']:.0%} ({c['success_count']}/{c['n']}) | {d['success_rate']:.0%} ({d['success_count']}/{d['n']}) |
-| success on clean slots | {c['clean']['success_count']}/{c['clean']['n']} | {d['clean']['success_count']}/{d['clean']['n']} |
-| success on drifted slots | {c['drift']['success_count']}/{c['drift']['n']} | {d['drift']['success_count']}/{d['drift']['n']} |
-| wall-clock p50 | {c['wall_s_p50']:.1f} s | {d['wall_s_p50']:.1f} s |
-| wall-clock p95 | {c['wall_s_p95']:.1f} s | {d['wall_s_p95']:.1f} s |
-| wrong-action events | {c['wrong_action_count']} | {d['wrong_action_count']} |
-| maintenance events (needs human edit) | {c['maintenance_count']} | {d['maintenance_count']} |
-| model cost | $0 | $0 |
+{headline_table}
+Read the maintenance row with its asymmetry in view (details in the
+section below): a DOM maintenance event means a human edits the script;
+a compiled drift halt is not counted there but is not free either — it
+takes a fresh one-minute demonstration or an agent fallback. Neither
+number is "zero cost"; they are different currencies.
 
 Per-condition outcomes on the schedule:
 
-| condition | compiled replay | DOM-selector script |
-|---|---|---|
+| condition | {' | '.join(_MD_ARM_LABELS[a] for a in arms)} |
+|---{'|---' * len(arms)}|
 {schedule_table}
 ## Head-to-head on the perturbation drift modes
 
@@ -1023,15 +1239,16 @@ The validation suite's drift matrix (PR #12/#13) plus `sort` and
 `typelabel`; every mode is flag-gated in the MockMed app and deterministic.
 One fresh browser per run.
 
-| drift mode | compiled replay | DOM-selector script |
-|---|---|---|
+| drift mode | {' | '.join(_MD_ARM_LABELS[a] for a in arms)} |
+|---{'|---' * len(arms)}|
 {perturbation_table}
-## Wrong-action events, both arms
+## Wrong-action events, all arms
 
 {wrong_block}
 
-Totals: compiled {totals['compiled']['wrong_action_count']}, DOM
-{totals['dom']['wrong_action_count']} (schedule + perturbation runs).
+Totals: {', '.join(
+    f"{_MD_ARM_LABELS[a]} {totals[a]['wrong_action_count']}" for a in arms
+)} (schedule + perturbation runs).
 
 ## Measurement validity — where the judge itself is the weak link
 
@@ -1054,43 +1271,50 @@ halting bundle needs a fresh one-minute demonstration, or an agent
 fallback (see the hybrid benchmark) — but it fails closed, and the
 recovery path does not involve reading someone else's selector code.
 
-## Variant analysis — could a different DOM script dodge these failures?
+## Variant analysis — the selector variants, measured and unmeasured
 
-Yes, partially, and it is only honest to say so:
+The one genuinely ambiguous step is opening the referral, and the two
+readings of it are both benchmarked as arms above ("first row" vs "the
+row named `{TARGET_PATIENT}`"). On hardcoding: an earlier draft of this
+report dismissed the name-filtered variant because "the patient becomes
+a hardcoded constant" — that framing was asymmetric and is retracted.
+**The compiled arm hardcodes the same constant**: its recorded identity
+band embeds "{TARGET_PATIENT} Knee pain referral High" and every replay
+checks the live row against it before clicking. Both identity-keyed
+approaches encode the demonstrated patient; they differ in HOW the
+identity got captured (demonstration vs hand-authored selector) and in
+failure semantics (fail-closed halt vs fail-closed timeout), not in
+whether the patient is encoded. The positional variant is the one that
+encodes no identity at all — and the wrong-action column shows what
+that costs.
 
-- Keying the row selector to the app's DOM id (`#open-p1`) would survive
-  `sort`/`grow`/`lookalike` and fail closed on `missing` — but `p1` is a
-  DATABASE id: the script stops encoding "process the first referral in
-  the queue" and starts encoding "always open patient p1", which is a
-  different workflow, and id-in-selector is exactly what Playwright's
-  own guidance tells practitioners not to rely on.
-- Filtering the row by patient name (`get_by_role("row",
-  name="Jane Sample")`) fixes the same modes at the same cost: the
-  patient becomes a hardcoded constant, so the script no longer
-  automates the demonstrated queue-processing task.
+Unmeasured variants, for completeness:
+
+- Keying to the app's DOM id (`#open-p1`) would behave like the
+  name-filtered arm on this matrix (`p1` IS the patient identity, as a
+  database key instead of a display name) — id-in-selector is what
+  Playwright's guidance steers away from, and display names are the
+  more maintainable spelling of the same choice.
 - Nothing in the selector toolbox fixes `notice`, `reqfield`, or
   `modal-once` without a human adding new steps — the same conditions
   that halt the compiled replay.
-
-The steelman above therefore encodes the task as demonstrated ("first
-referral"), which is also precisely what the compiled arm was recorded
-doing. Where the DOM variant trade-offs land is a judgment call; the
-per-condition tables give the data for either choice.
 
 ## Methodology
 
 - **Record + compile once** (compiled arm only): the demo is recorded via
   the Playwright demo driver and compiled into a vision-anchored bundle;
   one-time, excluded from per-run latency, same as every other benchmark
-  here. The DOM arm needs no demonstration — a human wrote it from the
+  here. The DOM arms need no demonstration — a human wrote them from the
   task spec instead (~the same one-off effort, different skill).
-- **Identical environments.** Every run of both arms gets a fresh
+- **Identical environments.** Every run of every arm gets a fresh
   chromium (1280x800, deviceScaleFactor=1) against the same locally
   served MockMed app; drift is injected via `?drift=` query flags, so
   conditions are exactly reproducible.
 - **Different interfaces, deliberately.** The compiled arm is
-  vision-only (screenshots in, pixel clicks out). The DOM arm drives the
-  page through selectors — that IS the comparison.
+  vision-only (screenshots in, pixel clicks out). The DOM arms drive the
+  page through selectors — that IS the comparison. The two DOM arms
+  differ in exactly ONE selector (positional vs name-filtered referral
+  row), isolating spec phrasing from everything else.
 - **Same success criterion, implemented once.** `verify_final_state` on
   the final screenshot: OCR must find the `Encounter saved` banner AND a
   `Triage — <note>` row AND the right patient's name
@@ -1136,10 +1360,11 @@ per-condition tables give the data for either choice.
 ## Reproduce
 
 ```
-.venv/bin/python -m openadapt_flow.benchmark.dom_arm --out benchmark/dom
+.venv/bin/python -m openadapt_flow.benchmark.dom_arm --out benchmark/dom --n-per-perturbation 2
 ```
 
-No API key needed; nothing here spends money.
+(`--n-per-perturbation 2` matches the committed results.) No API key
+needed; nothing here spends money.
 """
 
 
@@ -1204,13 +1429,9 @@ def run_dom_benchmark(
         with rows_path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
 
-    schedule_runs: dict[str, list[dict[str, Any]]] = {
-        "compiled": [],
-        "dom": [],
-    }
+    schedule_runs: dict[str, list[dict[str, Any]]] = {a: [] for a in ARMS}
     perturbation_runs: dict[str, list[dict[str, Any]]] = {
-        "compiled": [],
-        "dom": [],
+        a: [] for a in ARMS
     }
 
     url, stop = serve(port=0)
@@ -1249,6 +1470,11 @@ def run_dom_benchmark(
                         row = dom_run(
                             target,
                             note,
+                            target_patient=(
+                                TARGET_PATIENT
+                                if arm == "dom_named"
+                                else None
+                            ),
                             save_final_to=final_png,
                             headed=headed,
                         )
@@ -1279,7 +1505,7 @@ def run_dom_benchmark(
                 return row
 
             for slot, condition in enumerate(schedule):
-                for arm in ("compiled", "dom"):
+                for arm in ARMS:
                     schedule_runs[arm].append(
                         one_run(arm, condition, slot, "schedule")
                     )
@@ -1287,7 +1513,7 @@ def run_dom_benchmark(
             slot = len(schedule)
             for condition in perturbations:
                 for _ in range(n_per_perturbation):
-                    for arm in ("compiled", "dom"):
+                    for arm in ARMS:
                         perturbation_runs[arm].append(
                             one_run(arm, condition, slot, "perturbation")
                         )

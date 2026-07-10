@@ -48,6 +48,9 @@ class FakeLocator:
     def first(self) -> "FakeLocator":
         return FakeLocator(self.page, (*self.desc, "first"))
 
+    def get_by_role(self, role: str, *, name: str) -> "FakeLocator":
+        return FakeLocator(self.page, (*self.desc, "role", role, name))
+
     def _act(self, action: str, *args: Any) -> None:
         call = (*self.desc, action, *args)
         self.page.calls.append(call)
@@ -118,6 +121,32 @@ class TestDomScript:
             "confirm saved banner",
         ]
 
+    def test_named_variant_differs_in_exactly_one_step(self) -> None:
+        positional = [n for n, _ in dom_script(FakePage(), NOTE)]
+        named = [
+            n
+            for n, _ in dom_script(
+                FakePage(), NOTE, target_patient="Jane Sample"
+            )
+        ]
+        assert positional[3] == "open first referral"
+        assert named[3] == "open referral by patient name"
+        assert positional[:3] == named[:3]
+        assert positional[4:] == named[4:]
+
+    def test_named_variant_scopes_open_to_the_patient_row(self) -> None:
+        page = FakePage()
+        done, failed, error = run_dom_script(
+            page, NOTE, target_patient="Jane Sample"
+        )
+        assert (done, failed, error) == (9, None, None)
+        # Row filtered by the demonstrated patient's accessible name,
+        # then the Open button inside it — no .first anywhere.
+        assert page.calls[3] == (
+            "role", "row", "Jane Sample", "role", "button", "Open",
+            "click",
+        )
+
     def test_failure_stops_the_run_and_is_captured_not_raised(self) -> None:
         # A renamed Save button times out; nothing after it may execute.
         def fail(call: tuple[Any, ...]) -> bool:
@@ -156,12 +185,16 @@ class TestScheduleAndNotes:
         )
 
     def test_notes_distinct_per_arm_and_slot(self) -> None:
+        from openadapt_flow.benchmark.dom_arm import ARMS
+
         notes = {
             note_for_slot(arm, slot)
-            for arm in ("compiled", "dom")
+            for arm in ARMS
             for slot in range(len(SCHEDULE) + len(PERTURBATIONS))
         }
-        assert len(notes) == 2 * (len(SCHEDULE) + len(PERTURBATIONS))
+        assert len(notes) == len(ARMS) * (
+            len(SCHEDULE) + len(PERTURBATIONS)
+        )
 
     def test_condition_url(self) -> None:
         assert condition_url("http://x/", "clean") == "http://x/"
@@ -275,8 +308,20 @@ def make_row(
 
 
 def fabricated_results() -> dict[str, Any]:
-    """Rows shaped like a real run: DOM wrong-actions on the data drifts,
-    a loud DOM break on rename, and one compiled judge-dispute on theme."""
+    """Rows shaped like a real run: positional-DOM wrong-actions on the
+    data drifts, name-filtered DOM absorbing them / failing closed, a
+    loud DOM break on rename, and one compiled judge-dispute on theme."""
+
+    def dom_schedule(arm: str) -> list[dict[str, Any]]:
+        return [
+            make_row(
+                arm, c, success=(c == "clean"), wall=1.0,
+                failed_step=None if c == "clean" else "confirm saved banner",
+                slot=i, phase="schedule",
+            )
+            for i, c in enumerate(SCHEDULE)
+        ]
+
     schedule_runs = {
         "compiled": [
             make_row(
@@ -285,14 +330,8 @@ def fabricated_results() -> dict[str, Any]:
             )
             for i, c in enumerate(SCHEDULE)
         ],
-        "dom": [
-            make_row(
-                "dom", c, success=(c == "clean"), wall=1.0,
-                failed_step=None if c == "clean" else "confirm saved banner",
-                slot=i, phase="schedule",
-            )
-            for i, c in enumerate(SCHEDULE)
-        ],
+        "dom": dom_schedule("dom"),
+        "dom_named": dom_schedule("dom_named"),
     }
     perturbation_runs = {
         "compiled": [
@@ -321,6 +360,24 @@ def fabricated_results() -> dict[str, Any]:
                     "open first referral" if c == "rename" else None
                 ),
                 final_hash="#patient/p0" if c == "lookalike" else "",
+                slot=20 + i,
+                phase="perturbation",
+            )
+            for i, c in enumerate(PERTURBATIONS)
+        ],
+        "dom_named": [
+            make_row(
+                "dom_named",
+                c,
+                success=(c not in ("missing", "rename")),
+                failed_step=(
+                    "open referral by patient name"
+                    if c in ("missing", "rename")
+                    else None
+                ),
+                final_hash=(
+                    "" if c in ("missing", "rename") else "#patient/p1"
+                ),
                 slot=20 + i,
                 phase="perturbation",
             )
@@ -361,7 +418,7 @@ class TestAggregation:
 
     def test_results_document_structure(self) -> None:
         results = fabricated_results()
-        assert set(results["arms"]) == {"compiled", "dom"}
+        assert set(results["arms"]) == {"compiled", "dom", "dom_named"}
         assert results["schedule"]["conditions"] == list(SCHEDULE)
         assert results["schedule"]["drift_fraction"] == pytest.approx(0.3)
         matrix = results["perturbation_matrix"]
@@ -375,9 +432,21 @@ class TestAggregation:
         assert matrix["theme"]["compiled"][0]["dispute"] is True
         assert results["totals"]["dom"]["wrong_action_count"] == 4
         assert results["totals"]["compiled"]["wrong_action_count"] == 0
+        # The identity reading of the same script: zero wrong actions,
+        # fail-closed on missing/rename.
+        assert results["totals"]["dom_named"]["wrong_action_count"] == 0
+        assert (
+            matrix["sort"]["dom_named"][0]["outcome"] == "success"
+        )
+        assert (
+            matrix["missing"]["dom_named"][0]["outcome"]
+            == "halt-or-error"
+        )
         # Maintenance: rename (loud) + 6 schedule drifts; wrong actions
         # and judge disputes are NOT maintenance.
         assert results["totals"]["dom"]["maintenance_count"] == 7
+        # Name-filtered: 6 schedule + missing + rename.
+        assert results["totals"]["dom_named"]["maintenance_count"] == 8
         assert results["totals"]["compiled"]["maintenance_count"] == 0
         assert (
             results["totals"]["compiled"]["verification_dispute_count"]
@@ -404,8 +473,9 @@ class TestRenderer:
 
     def test_markdown_wrong_action_totals(self) -> None:
         md = render_dom_markdown(fabricated_results())
-        assert "Totals: compiled 0, DOM\n4" in md or (
-            "Totals: compiled 0, DOM 4" in md
+        assert (
+            "Totals: compiled replay 0, DOM (positional) 4, "
+            "DOM (name-filtered) 0" in md
         )
 
     def test_markdown_reports_verification_disputes(self) -> None:

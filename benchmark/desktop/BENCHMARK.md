@@ -1,6 +1,6 @@
 # Desktop Benchmark (Phase 2) — compiled vision replay vs UIA incumbent
 
-_Generated 2026-07-10T21:48:06.669583+00:00_
+_Generated 2026-07-10T22:28:31.896919+00:00_
 
 **Task.** Patient Notes (WinForms) search -> select -> note -> save; DB-ground-truth judge; $0 (no model calls)
 
@@ -12,7 +12,7 @@ _Generated 2026-07-10T21:48:06.669583+00:00_
 
 | Arm | n | success | wrong-action | safe-halt | false-abort | success rate | wrong-action rate |
 |---|--:|--:|--:|--:|--:|--:|--:|
-| `compiled` | 21 | 6 | 3 | 12 | 9 | 29% | 14% |
+| `compiled` | 21 | 6 | 0 | 15 | 9 | 29% | 0% |
 | `uia_identity` | 21 | 21 | 0 | 0 | 0 | 100% | 0% |
 | `uia_positional` | 21 | 15 | 6 | 0 | 0 | 71% | 29% |
 
@@ -25,7 +25,7 @@ _Generated 2026-07-10T21:48:06.669583+00:00_
 
 | Arm | clean | render_125 | render_150 | theme_dark | data_reorder | data_decoy | data_siblings |
 |---|---|---|---|---|---|---|---|
-| `compiled` | 3/3✓ | 0/3✓ 3⚠abort | 0/3✓ 3⚠abort | 0/3✓ 3⚠abort | 3/3✓ | 0/3✓ | 0/3✓ 3✗wrong |
+| `compiled` | 3/3✓ | 0/3✓ 3⚠abort | 0/3✓ 3⚠abort | 0/3✓ 3⚠abort | 3/3✓ | 0/3✓ | 0/3✓ |
 | `uia_identity` | 3/3✓ | 3/3✓ | 3/3✓ | 3/3✓ | 3/3✓ | 3/3✓ | 3/3✓ |
 | `uia_positional` | 3/3✓ | 3/3✓ | 3/3✓ | 3/3✓ | 3/3✓ | 0/3✓ 3✗wrong | 0/3✓ 3✗wrong |
 
@@ -39,4 +39,4 @@ _Generated 2026-07-10T21:48:06.669583+00:00_
 1. **The mechanism exists on desktop.** Record → compile → replay of a real WinForms workflow runs deterministically over the vision-only `WindowsBackend`, judged by DB ground truth — on a pixel substrate with no browser DOM. Identity bands are extracted and verified on **desktop-rendered** text.
 2. **Vision replay is defeated by render-scale and theme drift** (render_125/150 and theme_dark → 0% success, all safe-halts / false-aborts). This is the pre-committed 'DPI is ugly' result and the roadmap justification for multi-scale / appearance-invariant matching. It **never mis-wrote** under cosmetic drift — it halted.
 3. **The positional UIA incumbent silently mis-writes** under *any* name-collision drift (decoy and siblings) — the exact wrong-action the identity work targets, measured on the incumbent.
-4. **Identity verification catches a *discriminable* decoy** (distinct surname/DOB → compiled safe-halts) **but false-verifies a *near-lexical* sibling** (Sorenson≈Sorensen, adjacent DOB → compiled wrong-action): the browser-tuned matcher's OCR-jitter similarity tier (`TOKEN_SIM_RATIO`) treats a 1-char surname / 1-digit DOB difference as noise. This is the **desktop analogue of the open browser wrong-action findings** — the safety claim does **not** yet fully transfer to desktop; a stricter/desktop-tuned matcher (or an exact-field key for high-collision fields) is required. UIA-identity distinguishes the same sibling only because it does exact cell-text equality — an option that vanishes on a broken-a11y or pixel-only substrate, where the vision matcher is the only lever.
+4. **Identity verification transfers to desktop-rendered text.** On the current identity matcher (ROC operating point of #16/#19: coverage + contradicted-char / suspect / unexplained-name / absent-name budgets, all judged together) the compiled arm **safe-halts on both** the discriminable decoy (distinct surname/DOB → 3/3 halted) **and** the near-lexical sibling (Sorenson≈Sorensen, adjacent DOB → 3/3 halted) — **0 identity wrong-actions**. The same budgets that close the browser wrong-patient reopenings fire on OCR'd desktop text: a 1-char surname / multi-digit DOB difference registers as *contradicted characters* (affirmative evidence of a different entity), not OCR jitter, so the band is judged a MISMATCH and no note is written. The browser identity fixes **do transfer** to the pixel substrate. UIA-identity distinguishes the same sibling only by exact cell-text equality — a lever that vanishes on a broken-a11y or pixel-only substrate, where the vision matcher is the only one available. (An earlier draft of this benchmark ran the compiled arm against a *pre-#16* matcher and recorded 3 sibling wrong-actions; that was a stale-code artifact and is corrected here.)

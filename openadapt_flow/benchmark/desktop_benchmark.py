@@ -646,21 +646,64 @@ def render_markdown(results: dict) -> str:
         "3. **The positional UIA incumbent silently mis-writes** under *any* "
         "name-collision drift (decoy and siblings) — the exact wrong-action "
         "the identity work targets, measured on the incumbent.",
-        "4. **Identity verification catches a *discriminable* decoy** "
-        "(distinct surname/DOB → compiled safe-halts) **but false-verifies a "
-        "*near-lexical* sibling** (Sorenson≈Sorensen, adjacent DOB → compiled "
-        "wrong-action): the browser-tuned matcher's OCR-jitter similarity tier "
-        "(`TOKEN_SIM_RATIO`) treats a 1-char surname / 1-digit DOB difference "
-        "as noise. This is the **desktop analogue of the open browser "
-        "wrong-action findings** — the safety claim does **not** yet fully "
-        "transfer to desktop; a stricter/desktop-tuned matcher (or an "
-        "exact-field key for high-collision fields) is required. UIA-identity "
-        "distinguishes the same sibling only because it does exact cell-text "
-        "equality — an option that vanishes on a broken-a11y or pixel-only "
-        "substrate, where the vision matcher is the only lever.",
+        _identity_transfer_verdict(results),
         "",
     ]
     return "\n".join(lines)
+
+
+def _identity_transfer_verdict(results: dict) -> str:
+    """Verdict item 4, driven by the measured compiled-arm matrix.
+
+    The decoy and sibling data-drift cells are the identity test: the
+    compiled arm should safe-halt both (0 identity wrong-actions) on the
+    post-#16 matcher. If a wrong-action survives on the current matcher,
+    say so prominently — that is a real finding, not a stale-code artifact.
+    """
+    comp = results.get("matrix", {}).get("compiled", {})
+    sib = comp.get("data_siblings", {})
+    dec = comp.get("data_decoy", {})
+    id_wrong = sib.get("wrong_action", 0) + dec.get("wrong_action", 0)
+    if id_wrong == 0:
+        return (
+            "4. **Identity verification transfers to desktop-rendered text.** "
+            "On the current identity matcher (ROC operating point of #16/#19: "
+            "coverage + contradicted-char / suspect / unexplained-name / "
+            "absent-name budgets, all judged together) the compiled arm "
+            "**safe-halts on both** the discriminable decoy (distinct "
+            "surname/DOB → "
+            f"{dec.get('safe_halt', 0)}/{dec.get('n', 0)} halted) **and** the "
+            "near-lexical sibling (Sorenson≈Sorensen, adjacent DOB → "
+            f"{sib.get('safe_halt', 0)}/{sib.get('n', 0)} halted) — "
+            "**0 identity wrong-actions**. The same budgets that close the "
+            "browser wrong-patient reopenings fire on OCR'd desktop text: a "
+            "1-char surname / multi-digit DOB difference registers as "
+            "*contradicted characters* (affirmative evidence of a different "
+            "entity), not OCR jitter, so the band is judged a MISMATCH and no "
+            "note is written. The browser identity fixes **do transfer** to "
+            "the pixel substrate. UIA-identity distinguishes the same sibling "
+            "only by exact cell-text equality — a lever that vanishes on a "
+            "broken-a11y or pixel-only substrate, where the vision matcher is "
+            "the only one available. (An earlier draft of this benchmark ran "
+            "the compiled arm against a *pre-#16* matcher and recorded 3 "
+            "sibling wrong-actions; that was a stale-code artifact and is "
+            "corrected here.)"
+        )
+    return (
+        "4. **Residual identity wrong-action on the current matcher.** Even on "
+        "the post-#16 identity matcher the compiled arm mis-wrote on "
+        f"{'the near-lexical sibling ' if sib.get('wrong_action') else ''}"
+        f"{'and the decoy ' if sib.get('wrong_action') and dec.get('wrong_action') else ''}"
+        f"{'the decoy ' if dec.get('wrong_action') and not sib.get('wrong_action') else ''}"
+        f"({id_wrong} wrong-action(s): sibling "
+        f"{sib.get('wrong_action', 0)}/{sib.get('n', 0)}, decoy "
+        f"{dec.get('wrong_action', 0)}/{dec.get('n', 0)}). This is a **real "
+        "desktop finding**, not a stale-code artifact: the OCR'd band on this "
+        "rendering substrate does not carry enough contradiction evidence to "
+        "cross the pinned operating point. It must be reconciled before any "
+        "desktop safety claim — see the failing run telemetry in "
+        "`results.json`."
+    )
 
 
 def render_chart(results: dict, path: Path) -> None:

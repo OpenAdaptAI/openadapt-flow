@@ -620,6 +620,14 @@ a time. Automated in `tests/e2e/test_perturbation.py`.
 | slow renders 4s (`drift=slow`) | pass | postcondition polling + ladder retry absorb it (~20s run) |
 | slow renders 12s (`drift=slow&slowms=12000`) | safe-halt | accurate report at the sign-in step (~5.5s postcondition window exceeded) |
 
+The three scale-drift rows above (dsf, zoom, font size) are mapped out in
+full — every zoom 80–200%, DPI 1–3x, font-size, and font-family point, plus
+the realistic combinations — in [`benchmark/cosmetic_drift/COSMETIC_DRIFT.md`](../../benchmark/cosmetic_drift/COSMETIC_DRIFT.md)
+(harness: `benchmark/cosmetic_drift/sweep.py`; pinned by
+`tests/e2e/test_cosmetic_drift.py`). Headline: the envelope is "recorded render
+only" for scale, font-family substitution is absorbed, and the whole sweep
+fails **safe** — 0 wrong-actions in 21 points.
+
 Why the silent wrong-patient saves got through, end to end (audit analysis
 — items 1 and 2 still describe the template/postcondition layers; item 3
 is where the fix landed):
@@ -836,7 +844,13 @@ hygiene plus the compile-time parameter-leakage lint.
 **P2 — cosmetic global drift zeroes availability (still open; out of scope of the 2026-07-08 fix).** Font +3px, 125% zoom,
 or dsf 2 → false abort at step 000. Healing covers theme/move/rename but
 nothing that rescales or reflows. Multi-scale matching stops at 1.18x, and
-REGION_STABLE phashes break on reflow.
+REGION_STABLE phashes break on reflow. Now bounded end to end in
+[`benchmark/cosmetic_drift/COSMETIC_DRIFT.md`](../../benchmark/cosmetic_drift/COSMETIC_DRIFT.md):
+the break is a hair-trigger at the FIRST scale deviation (the step_000
+`region_stable` postcondition, not the resolver), font-FAMILY substitution to
+a proportional face is fully absorbed, and — critically — the entire zoom /
+DPI / font sweep fails safe (0 wrong-actions / 21 points). Candidate fixes
+(DPI-aware coordinates; a scale-tolerant `region_stable`) are noted there.
 
 **P2 — assertions overfit to instance/day state. LARGELY FIXED 2026-07-09.**
 Mining now selects for stability instead of novelty: clock/near-date

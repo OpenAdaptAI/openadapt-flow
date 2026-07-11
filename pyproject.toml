@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openadapt-flow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Demonstration compiler: record a desktop workflow once, compile it into a deterministic, self-healing, locally-run script."
 readme = "README.md"
 license = { text = "MIT" }

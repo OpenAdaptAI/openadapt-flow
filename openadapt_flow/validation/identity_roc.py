@@ -585,6 +585,29 @@ def render_markdown(
         "collision the 5th reopening exploited). v3 exists because of "
         "that second review; the same criticism could apply again.",
         "",
+        "**SIXTH reopening — the 0.000% false accept is scoped to STRINGS, "
+        "not to real OCR (`benchmark/dense_surface/DENSE_SURFACE.md`).** "
+        "Every corpus here (v3 included) injects the letter/digit collision "
+        "as a TEXT edit, so the two identifiers reach the matcher as "
+        "DIFFERENT strings and the identifier-suspect rule fires — which is "
+        "why v3 reads FA 0.000%. On a real dense record LIST rendered to "
+        "pixels and read by the repo's own OCR (RapidOCR), two same-name "
+        "patients whose MRNs differ by one letter/digit near-homoglyph "
+        "(target `C0X3834` digit-ZERO vs sibling `COX3834` letter-O) are "
+        "read as the SAME string BEFORE the matcher sees them: the bands "
+        "are RAW-IDENTICAL, the match is a clean raw match, the suspect "
+        "rule never triggers, and the sibling VERIFIED. The dense-surface "
+        "study measured **7.22% false accept (26/360)** on that surface "
+        "(60% on the O/0 class) — so the 0.000% above held on the synthetic "
+        "corpora + probes but did NOT hold on real dense OCR. The fix "
+        "(`GLYPH_AMBIGUOUS_ID_CHARS_CAP`) HALTS on a raw match to a "
+        "glyph-ambiguous identifier (an MRN carrying an O/0 or l/1/I "
+        "near-homoglyph), which returns the dense-surface false accept to "
+        "**0/360** at a false-abort cost stated in that study; the caps "
+        "below are UNCHANGED because no corpus pair here exercises the new "
+        "budget. This ROC's zero is therefore a STRING-level zero; the "
+        "real-OCR zero lives in DENSE_SURFACE.md.",
+        "",
         "- **false accept** = a `different_entity` OR `indistinguishable` "
         "pair VERIFIED — a wrong-patient click, catastrophic in an EMR.",
         "- **false abort** = a `same_entity` pair refused — one hybrid "

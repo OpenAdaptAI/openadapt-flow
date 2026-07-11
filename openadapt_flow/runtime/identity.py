@@ -205,6 +205,56 @@ UNEXPLAINED_NAME_TOKENS_CAP = 0
 # >= 4-char name-like token must be read (raw or confusion) to verify.
 ABSENT_NAME_TOKEN_CAP = 3
 
+# Glyph-ambiguous identifiers (6th wrong-patient reopening — the dense
+# sibling-surface study, benchmark/dense_surface/DENSE_SURFACE.md). The
+# identifier-suspect rule (SUSPECT_CHARS_CAP) assumes the two identifiers
+# reach the matcher as DIFFERENT strings — a letter/digit confusion turned
+# 'A01234' into 'AO1234' as a TEXT edit, so `_suspicious_pair` fires. On a
+# real rendered surface the confusion happens INSIDE OCR: RapidOCR reads
+# the target MRN 'C0X3834' (digit ZERO) and the one-glyph-apart sibling
+# 'COX3834' (letter O) as the SAME string BEFORE the matcher sees them, so
+# the recorded and observed bands are RAW-IDENTICAL, the match is a clean
+# RAW match, and no string-level rule downstream of OCR can recover the
+# destroyed distinction (measured 7.2% false accept on the dense surface,
+# 60% on the O/0 class). The honest principle: a RAW match on an identifier
+# whose glyphs OCR cannot reliably disambiguate is NOT evidence of
+# same-identity, so identity must HALT (unverifiable) rather than verify.
+#
+# A recorded token is a glyph-ambiguous identifier when it is
+# IDENTIFIER-LIKE (mixes letters and digits — an MRN/account/chart ref,
+# where glyph identity is load-bearing and, unlike a name, carries no
+# linguistic redundancy) AND contains a LETTER/DIGIT NEAR-HOMOGLYPH: the
+# letters O, l, I (or the |/! OCR emits for them) that are visually
+# identical to the digits 0/1. Only the O/0 and l/1/I near-homoglyph
+# classes qualify — they are the only ASCII confusions where a letter and a
+# digit render as (near-)identical glyphs, the exact condition under which
+# OCR cannot disambiguate. The weaker OCR confusions (S/5, Z/2, B/8, g/9)
+# are visually distinct and are deliberately excluded, so a numeric-body
+# MRN with a stable alpha prefix ('MG483726', 'RC719284') is NOT flagged
+# and still verifies normally (over-halting a clean name+DOB/plain-numeric
+# identity is the failure this cap must avoid — see
+# test_raw_equal_identifier_still_verifies, 'A123456' has no homoglyph
+# letter and must pass). A matched glyph-ambiguous identifier is charged to
+# this zero budget whether it matched RAW (the glyph-collapse case this cap
+# adds) or by confusion (already SUSPECT), so identity resting on such an
+# identifier always halts. This is option A (no corroboration escape): the
+# identifier aborts even when name and DOB raw-match, because on the dense
+# surface the name and DOB are shared between same-name siblings and only
+# the identifier discriminates — the availability cost (true-row identifier
+# OCR noise now halts) is the cheap direction and is disclosed in
+# docs/LIMITS.md. A glyph-disambiguating OCR pass over identifier regions
+# is the noted future alternative that could recover availability.
+GLYPH_AMBIGUOUS_ID_CHARS_CAP = 0
+
+# The letter/digit NEAR-HOMOGLYPHS: characters visually (near-)identical
+# across the letter/digit boundary — the O/0 and l/1/I classes. Detected on
+# the LETTER side (O, l, I and the |/! OCR emits for them): a homoglyph
+# LETTER inside an otherwise numeric identifier is the OCR output when a
+# letter/digit-ambiguous glyph is present. Bare digits 0/1 are deliberately
+# NOT triggers — a numeric MRN body OCR read as all-digits carries no
+# letter/digit ambiguity and must keep verifying.
+_ID_HOMOGLYPH_LETTERS = frozenset("oli|!")
+
 # Characters that cannot appear in a real person's name but do appear in
 # OCR confusion classes: a raw-unequal token pair involving one of these
 # is genuine OCR noise, not a possible different name.
@@ -458,6 +508,26 @@ def _has_digit(token: str) -> bool:
     return any(ch.isdigit() for ch in token)
 
 
+def _is_glyph_ambiguous_identifier(token: str) -> bool:
+    """Whether a squashed token is an identifier OCR cannot be trusted to
+    have read correctly (see GLYPH_AMBIGUOUS_ID_CHARS_CAP).
+
+    True iff the token is IDENTIFIER-LIKE (mixes at least one letter and
+    one digit — an MRN/account/chart ref) AND carries a LETTER/DIGIT
+    near-homoglyph (a letter O, l or I, or the |/! OCR emits for them),
+    which is visually identical to a digit 0/1 and so could be a collapsed
+    reading of a DIFFERENT identifier. A plain-numeric MRN body with a
+    stable alpha prefix ('mg483726') has no homoglyph letter and is not
+    flagged; a bare name or DOB (no letter+digit mix) is not an identifier
+    and is not flagged.
+    """
+    return (
+        _has_digit(token)
+        and any(ch.isalpha() for ch in token)
+        and any(ch in _ID_HOMOGLYPH_LETTERS for ch in token)
+    )
+
+
 def _suspicious_pair(expected: str, observed: str) -> bool:
     """A canonical-equal, raw-unequal token pair whose match is a
     confusion-only match on a DISCRIMINATOR — indistinguishable at band
@@ -532,6 +602,12 @@ class BandMatch(NamedTuple):
         max_absent_alpha_token: Longest unmatched name-like alphabetic
             recorded token — absence of the identity token itself, worse
             than trailing-numerics dropout.
+        glyph_ambiguous_id_chars: Total squashed characters of MATCHED
+            recorded identifier tokens that carry a letter/digit
+            near-homoglyph (O/0, l/1/I) — a RAW match here may be an OCR
+            glyph-collapse of a DIFFERENT identifier, not same-identity
+            evidence, so it is charged to a zero budget (the 6th
+            wrong-patient reopening; see GLYPH_AMBIGUOUS_ID_CHARS_CAP).
     """
 
     coverage: float
@@ -540,11 +616,12 @@ class BandMatch(NamedTuple):
     suspect_chars: int = 0
     unexplained_name_tokens: int = 0
     max_absent_alpha_token: int = 0
+    glyph_ambiguous_id_chars: int = 0
 
 
 def _match_tokens(
     exp: list[str], obs: list[str]
-) -> tuple[list[bool], list[bool], list[bool], list[bool]]:
+) -> tuple[list[bool], list[bool], list[bool], list[bool], list[bool]]:
     """Mark matched recorded tokens and explained observed tokens.
 
     Order-insensitive at token granularity (OCR re-reads the same band in
@@ -571,8 +648,15 @@ def _match_tokens(
     name-plausible observed counterpart (the Neil/Nell collision class —
     see :data:`SUSPECT_CHARS_CAP`).
 
+    A further quality flag, ``glyph_ambiguous_id``, marks identifier
+    tokens (letter+digit mix) that carry a letter/digit near-homoglyph
+    (O/0, l/1/I) and matched RAW — the raw equality may be an OCR
+    glyph-collapse of a DIFFERENT identifier (see
+    :data:`GLYPH_AMBIGUOUS_ID_CHARS_CAP`).
+
     Returns:
-        ``(matched, explained, raw_matched, suspect_evidence)``.
+        ``(matched, explained, raw_matched, suspect_evidence,
+        glyph_ambiguous_id)``.
     """
     exp_c = [ocr_canonical(t) for t in exp]
     obs_c = [ocr_canonical(t) for t in obs]
@@ -580,11 +664,18 @@ def _match_tokens(
     explained = [False] * len(obs)
     raw_matched = [False] * len(exp)
     suspect_evidence = [False] * len(exp)
+    glyph_ambiguous_id = [False] * len(exp)
 
     def mark(i: int, expected_raw: str, observed_raw: str) -> None:
         matched[i] = True
         if expected_raw == observed_raw:
             raw_matched[i] = True
+            if _is_glyph_ambiguous_identifier(expected_raw):
+                # Raw-equal, but the identifier carries a letter/digit
+                # near-homoglyph: OCR may have collapsed a differing glyph
+                # into this string. The raw match is not same-identity
+                # evidence — charge it to the zero glyph budget (halt).
+                glyph_ambiguous_id[i] = True
         elif _suspicious_pair(expected_raw, observed_raw):
             suspect_evidence[i] = True
 
@@ -609,6 +700,13 @@ def _match_tokens(
             for j, oc in enumerate(obs_c):
                 if oc == concat_c:
                     rawok = concat_raw == obs[j]
+                    # NB: no glyph-ambiguous-identifier flag here. This is
+                    # the split path (consecutive RECORDED tokens OCR-glued
+                    # into one observed token); the concatenation is not a
+                    # single identifier — a name adjacent to a numeric field
+                    # ('Evelyn'+'A743380') would look letter+digit+homoglyph
+                    # and false-halt. The flag is set only for a SINGLE
+                    # recorded identifier token (single / join paths).
                     for m in range(i, i + size):
                         matched[m] = True
                         if rawok:
@@ -633,7 +731,13 @@ def _match_tokens(
                     break
             if matched[i]:
                 break
-    return matched, explained, raw_matched, suspect_evidence
+    return (
+        matched,
+        explained,
+        raw_matched,
+        suspect_evidence,
+        glyph_ambiguous_id,
+    )
 
 
 def _contradicted(
@@ -760,7 +864,7 @@ def band_match(
     Returns:
         A :class:`BandMatch` (coverage, max_uncovered_run,
         contradicted_chars, suspect_chars, unexplained_name_tokens,
-        max_absent_alpha_token).
+        max_absent_alpha_token, glyph_ambiguous_id_chars).
     """
     exp = tokenize(expected_text)
     if not exp:
@@ -769,9 +873,13 @@ def band_match(
     obs = [squash(tok) for tok in obs_raw]
     exp_c = [ocr_canonical(t) for t in exp]
     obs_c_all = [ocr_canonical(t) for t in obs]
-    matched, explained, raw_matched, suspect_evidence = _match_tokens(
-        exp, obs
-    )
+    (
+        matched,
+        explained,
+        raw_matched,
+        suspect_evidence,
+        glyph_ambiguous_id,
+    ) = _match_tokens(exp, obs)
     contradicted = _contradicted(
         exp, obs, matched, explained, contradiction_sim=contradiction_sim
     )
@@ -780,6 +888,7 @@ def band_match(
     total_chars = 0
     contradicted_chars = 0
     suspect_chars = 0
+    glyph_ambiguous_id_chars = 0
     max_absent_alpha = 0
     uncovered_runs: list[int] = []
     current_run = 0
@@ -791,6 +900,12 @@ def band_match(
                 # Matched ONLY by letter-letter confusion equivalence:
                 # the Neil/Nell collision class (Blocker 1).
                 suspect_chars += len(token)
+            if glyph_ambiguous_id[i]:
+                # RAW-matched identifier carrying a letter/digit
+                # near-homoglyph (O/0, l/1/I): the raw equality may be an
+                # OCR glyph-collapse of a DIFFERENT identifier, so it is
+                # not same-identity evidence (6th wrong-patient reopening).
+                glyph_ambiguous_id_chars += len(token)
             if current_run:
                 uncovered_runs.append(current_run)
                 current_run = 0
@@ -856,6 +971,7 @@ def band_match(
         suspect_chars,
         unexplained_names,
         max_absent_alpha,
+        glyph_ambiguous_id_chars,
     )
 
 
@@ -919,7 +1035,8 @@ def embedded_params(
 def _band_ok(match: BandMatch) -> bool:
     """The pinned operating point (docs/validation/IDENTITY_ROC.md):
     coverage, uncovered-run, contradiction, suspect (letter-letter
-    collision), unexplained-name and absent-name budgets must ALL hold."""
+    collision), unexplained-name, absent-name and glyph-ambiguous-identifier
+    budgets must ALL hold."""
     return (
         match.coverage >= COVERAGE_THRESHOLD
         and match.max_uncovered_run <= UNCOVERED_RUN_CAP
@@ -927,6 +1044,7 @@ def _band_ok(match: BandMatch) -> bool:
         and match.suspect_chars <= SUSPECT_CHARS_CAP
         and match.unexplained_name_tokens <= UNEXPLAINED_NAME_TOKENS_CAP
         and match.max_absent_alpha_token <= ABSENT_NAME_TOKEN_CAP
+        and match.glyph_ambiguous_id_chars <= GLYPH_AMBIGUOUS_ID_CHARS_CAP
     )
 
 

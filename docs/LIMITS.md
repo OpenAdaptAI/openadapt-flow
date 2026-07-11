@@ -114,9 +114,31 @@ actions observed — at the cost of availability:
   confusion-equivalent, so it could not surface the hole). With the
   identifier-suspect fix the matcher measures **0.000% false accepts on
   corpus v1+v2+v3 plus the 18-probe set** — scoped exactly to those
-  corpora, not to the world, and the operating point was fit on the same
-  corpora that produce the headline (docs/validation/IDENTITY_ROC.md
-  states this bias plainly). The availability bill is equally plain:
+  corpora (STRING pairs with hand-injected OCR noise), not to the world,
+  and the operating point was fit on the same corpora that produce the
+  headline (docs/validation/IDENTITY_ROC.md states this bias plainly).
+  That string-level zero did **NOT** hold on real dense OCR (the SIXTH
+  wrong-patient reopening): a dense sibling record LIST rendered to pixels
+  and read by the repo's own RapidOCR
+  (`benchmark/dense_surface/DENSE_SURFACE.md`) measured **7.22% false
+  accept (26/360)** — two same-name patients whose MRNs differ by a single
+  letter/digit near-homoglyph (`C0X3834` digit-ZERO vs `COX3834` letter-O)
+  are read as the SAME string BEFORE band matching, so the bands are
+  RAW-IDENTICAL, the identifier-suspect rule (which needs two DIFFERENT
+  strings) never fires, and the sibling verified at coverage 1.0 (60% on
+  the O/0 class). The corpora could not surface this because they inject
+  the collision as a text edit that keeps the two variants textually
+  distinct — the exact condition the suspect rule was built for; the
+  collapse happens INSIDE OCR, upstream of any string-level rule. The fix
+  now HALTS whenever identity rests on a glyph-ambiguous identifier (a raw
+  match to an MRN carrying an O/0 or l/1/I near-homoglyph is not evidence
+  of same-identity), which returns the dense-surface false accept to
+  **0/360 at an 18.89% (68/360) per-click false-abort cost confined to the
+  two ambiguous-identifier classes** (`id_confusion_l1` 0→100%,
+  `id_confusion_O0` 55→70%; all seven other classes unchanged at 0% false
+  abort — see DENSE_SURFACE.md and the identifier limit below); a numeric
+  MRN with a stable alpha prefix and a clean name+DOB identity still
+  verify. The availability bill is equally plain:
   **28.2% false aborts on v1's noise classes** (up from 10.7% pre-review
   and 21.2% after the first redesign), concentrated in occlusion — where
   a recount showed ~half the aborted bands still had BOTH name tokens
@@ -286,6 +308,36 @@ these are what remain):
   row). Availability cost, the cheap direction. All-DIGIT identifier
   differences (748291 vs 748292) are unaffected — not
   confusion-equivalent, still caught as a genuine mismatch.
+- **A RAW match to a glyph-ambiguous identifier now HALTS** (6th-reopening
+  fix, `benchmark/dense_surface/DENSE_SURFACE.md`): the line above only
+  catches the collision when the two identifiers reach the matcher as
+  DIFFERENT strings. On real dense OCR the confusion happens INSIDE the
+  engine — a target MRN `C0X3834` (digit ZERO) and a sibling `COX3834`
+  (letter O) are read as the SAME string, so the recorded and observed
+  bands are RAW-IDENTICAL and the suspect rule never fires. The matcher
+  now treats a raw match to an IDENTIFIER-LIKE token (letter+digit mix)
+  carrying an O/0 or l/1/I near-homoglyph as NOT same-identity evidence and
+  HALTS. This converts the 7.22% (26/360) dense-surface false accept to
+  0/360. The cost: a TRUE row whose recorded MRN carries such a homoglyph
+  now aborts too (`id_confusion_l1` 0→100%, `id_confusion_O0` 55→70% false
+  abort; overall 6.11%→18.89% per-click, all of it on those two classes —
+  see DENSE_SURFACE.md); the cheap direction. Deliberately NARROW
+  so it does not over-halt: only the O/0 and l/1/I near-homoglyph classes
+  qualify (they are the only ASCII letter/digit pairs that render as
+  near-identical glyphs), so a numeric MRN with a stable alpha prefix
+  ('MG483726', even with 0/1 digits in the body) and any identity carried
+  by a clean name+DOB verify normally.
+- **RESIDUAL (disclosed, not fixed): the halt keys on the LETTER side of
+  the homoglyph.** It fires when OCR emits the homoglyph as a LETTER
+  (O, l, I) in the identifier — which is how RapidOCR rendered every
+  collapse the dense-surface study surfaced. If OCR instead emitted the
+  DIGIT form on the recorded side (`A01234` with a real digit 0 whose
+  sibling is `AO1234` letter-O), a raw match would not be flagged, because
+  flagging bare digits 0/1 would over-halt ordinary numeric MRNs. The
+  complete upstream fix is a glyph-disambiguating OCR pass over identifier
+  regions (resolve letter-vs-digit before matching); the halt is the safe,
+  shippable measure now and the residual is bounded to identifiers whose
+  discriminating homoglyph OCR happens to read as a digit.
 - **Indistinguishable-class aborts are permanent** — a true row whose
   name OCR letter-letter-garbles ('Neil' read as 'Nell') aborts every
   time, because the band is textually identical to a real sibling;

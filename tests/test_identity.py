@@ -307,7 +307,7 @@ class TestWrongEntities:
 
 class TestBandMatch:
     def test_exact_match(self):
-        assert band_match(ROW, ROW) == (1.0, 0, 0, 0, 0, 0)
+        assert band_match(ROW, ROW) == (1.0, 0, 0, 0, 0, 0, 0)
 
     def test_adjacent_unmatched_tokens_merge_into_one_run(self):
         match = band_match(ROW, WRONG_ROW)
@@ -329,10 +329,10 @@ class TestBandMatch:
         # splits/joins are the ONLY sub-token acceptance left — full
         # consumption, no partial containment ('Phil' in 'Philip' is a
         # sibling, not a join; see TestSiblingProbes).
-        assert band_match("ShowActive", "Show Active") == (1.0, 0, 0, 0, 0, 0)
-        assert band_match("Show Active", "ShowActive") == (1.0, 0, 0, 0, 0, 0)
+        assert band_match("ShowActive", "Show Active") == (1.0, 0, 0, 0, 0, 0, 0)
+        assert band_match("Show Active", "ShowActive") == (1.0, 0, 0, 0, 0, 0, 0)
         # ... and with digit-class OCR noise inside the split form:
-        assert band_match("ShowActive", "Sh0w Active") == (1.0, 0, 0, 0, 0, 0)
+        assert band_match("ShowActive", "Sh0w Active") == (1.0, 0, 0, 0, 0, 0, 0)
 
     def test_letter_letter_confusion_is_suspect_not_clean(self):
         # 'Cornprehensive' matches 'Comprehensive' canonically (rn/m) but
@@ -344,7 +344,7 @@ class TestBandMatch:
         assert match.suspect_chars == len("comprehensive")
 
     def test_empty_inputs(self):
-        assert band_match("", "anything") == (0.0, 0, 0, 0, 0, 0)
+        assert band_match("", "anything") == (0.0, 0, 0, 0, 0, 0, 0)
         match = band_match("abcdef", "")
         assert match.coverage == 0.0 and match.max_uncovered_run == 6
         # ... and the fully absent alphabetic token registers as an

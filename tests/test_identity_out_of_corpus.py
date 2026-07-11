@@ -351,3 +351,71 @@ class TestDisclosedResidualEdges:
             "Annmarie Cox 1985-03-12 F",
             "Ann marie Cox 1985-03-12 F",
         ) == "verified"
+
+
+class TestBlocker6GlyphCollapse:
+    """6th wrong-patient reopening — the dense sibling-surface study
+    (benchmark/dense_surface/DENSE_SURFACE.md).
+
+    Below the matcher, at the OCR layer: two same-name patients whose
+    MRNs differ only by a letter/digit near-homoglyph (target 'C0X3834'
+    with a digit ZERO vs sibling 'COX3834' with a letter O) are read by
+    RapidOCR as the SAME string. The recorded band and the observed
+    sibling band are therefore RAW-IDENTICAL before band_match sees them,
+    so the identifier-suspect rule (which needs two DIFFERENT strings)
+    never fires and the sibling verified at coverage 1.0 — measured 7.2%
+    false accept (26/360) on the dense surface, 60% on the O/0 class.
+
+    The bands below are the exact recorded/observed strings RapidOCR
+    produced in the study (DENSE_SURFACE.md false-accept table): a
+    faithful reconstruction of the rendered+OCR'd probe. Post-fix a RAW
+    match on a glyph-ambiguous identifier HALTS
+    (GLYPH_AMBIGUOUS_ID_CHARS_CAP), converting the false accept into a
+    safe false abort. The name/DOB-clean controls must still verify —
+    the halt is confined to identity resting on a glyph-ambiguous
+    identifier."""
+
+    def test_o0_collapse_click_name_halts(self):
+        # click_name: the NAME is excluded, so the glyph-ambiguous MRN is
+        # the sole discriminator. The sibling's collapsed band is
+        # byte-identical to the recorded target band.
+        assert _status(
+            "COX3834 1944-08-08 F Pending Open",
+            "COX3834 1944-08-08 F Pending Open",
+        ) == "mismatch"
+
+    def test_o0_collapse_click_action_halts_despite_name_and_dob(self):
+        # click_action: the NAME and DOB are present and raw-match, yet
+        # they are SHARED between the same-name siblings, so they are not
+        # discriminators. Option A (no corroboration escape): the
+        # glyph-ambiguous MRN halts even when name+DOB raw-match.
+        assert _status(
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+        ) == "mismatch"
+
+    def test_l1_collapse_halts(self):
+        # The l/1 class the serif-drift condition surfaced: 'PL16078'
+        # (digit 1) vs 'PLl6078' (letter l) collapse to one string.
+        assert _status(
+            "PL16078 1940-10-22 F Active Open",
+            "PL16078 1940-10-22 F Active Open",
+        ) == "mismatch"
+
+    def test_clean_name_dob_target_still_verifies(self):
+        # No glyph-ambiguous identifier in the discriminating position:
+        # identity carried by a clean name + DOB must verify normally.
+        assert _status(
+            "Petrov, Robert 1944-08-08 F Pending Open",
+            "Petrov, Robert 1944-08-08 F Pending Open",
+        ) == "verified"
+
+    def test_plain_numeric_mrn_target_still_verifies(self):
+        # A numeric MRN body with a stable alpha prefix ('MG483726')
+        # carries no letter/digit near-homoglyph — it is NOT flagged and
+        # the true row verifies (over-halting this is the failure the cap
+        # must avoid), even when the numeric body contains 0/1 digits.
+        assert _status(
+            "MG480312 1975-03-14 M Active Open",
+            "MG480312 1975-03-14 M Active Open",
+        ) == "verified"

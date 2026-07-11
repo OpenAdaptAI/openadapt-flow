@@ -15,6 +15,12 @@ Left: the UI the demo was recorded on. Right: a theme it had never seen — each
 step re-resolves through OCR or geometry, and each fix is written back to the
 script as a reviewable diff. Zero model calls on either side.*
 
+**Safety, stated honestly.** It halts instead of guessing, and we measure how
+often it could still resolve the wrong target under UI drift — then publish it.
+Read [what it doesn't do yet](docs/LIMITS.md) and
+[how we test it](docs/validation/VALIDATION.md), including five adversarial
+rounds against our own wrong-target check.
+
 ## Try it
 
 ```bash

@@ -33,6 +33,14 @@ dev = [
     "requests>=2.31",
 ]
 grounder = ["anthropic>=0.40"]
+# Open GUI-grounding rung (GUI-Owl-1.5, MIT). Two serving backends:
+#   grounder-mlx  — local Apple-Silicon serving via mlx-vlm (on-prem, no API).
+#   grounder-http — OpenAI-compatible endpoint (vLLM/SGLang, the GPU deploy
+#                   path for the 8B checkpoint).
+# Neither is exercised by the unit suite; the composition is measured with an
+# injected transport / faithful mock (docs/grounding_rung.md).
+grounder-mlx = ["mlx-vlm>=0.6"]
+grounder-http = ["requests>=2.31"]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31"]
 

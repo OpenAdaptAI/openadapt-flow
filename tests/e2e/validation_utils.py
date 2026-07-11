@@ -75,6 +75,7 @@ def replay_on_page(
     viewport: tuple[int, int] = (1280, 800),
     device_scale_factor: int = 1,
     backend_factory: Optional[Callable[[object], PlaywrightBackend]] = None,
+    grounder: Optional[object] = None,
 ) -> tuple[RunReport, dict]:
     """Replay ``bundle_dir`` on a fresh page and observe final app state.
 
@@ -100,7 +101,7 @@ def replay_on_page(
             backend_factory(page) if backend_factory else PlaywrightBackend(page)
         )
         workflow = Workflow.load(bundle_dir)
-        report = Replayer(backend).run(
+        report = Replayer(backend, grounder=grounder).run(
             workflow,
             params=params,
             bundle_dir=Path(bundle_dir),

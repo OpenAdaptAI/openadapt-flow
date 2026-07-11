@@ -587,14 +587,21 @@ class TestIdentityContext:
         assert "12:45" not in context  # timestamps are volatile
         assert "open" not in context  # the target's own (mutable) label
         assert "alex" not in context  # other rows are outside the band
+        # Armed-coverage audit trail in the bundle:
+        assert workflow.steps[0].identity_armed is True
+        assert workflow.steps[0].identity_unarmed_reason is None
 
     def test_click_with_no_row_text_has_no_context(self, compiled) -> None:
         """The synthetic Sign In button sits alone on its row: nothing
         outside the crop shares the band, so no context is recorded and the
-        identity check is not armed for the step."""
+        identity check is not armed for the step — and the bundle says so
+        (identity_armed=False plus a reason), so an operator can audit
+        protection coverage before running."""
         for step in compiled["workflow"].steps:
             if step.anchor is not None:
                 assert step.anchor.context_text is None, step.id
+                assert step.identity_armed is False, step.id
+                assert step.identity_unarmed_reason, step.id
 
 
 def _write_recording(

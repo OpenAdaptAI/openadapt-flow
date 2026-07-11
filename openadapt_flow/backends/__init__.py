@@ -1,7 +1,8 @@
 """Backend implementations of the `openadapt_flow.backend.Backend` protocol.
 
-`PlaywrightBackend` is re-exported lazily so that importing this package does
-not require playwright unless the backend is actually used.
+Backends are re-exported lazily so that importing this package does not
+require their dependencies (playwright, requests) unless a backend is
+actually used.
 """
 
 from __future__ import annotations
@@ -10,8 +11,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+    from openadapt_flow.backends.windows_backend import WindowsBackend
 
-__all__ = ["PlaywrightBackend"]
+__all__ = ["PlaywrightBackend", "WindowsBackend"]
 
 
 def __getattr__(name: str) -> object:
@@ -21,4 +23,8 @@ def __getattr__(name: str) -> object:
         )
 
         return PlaywrightBackend
+    if name == "WindowsBackend":
+        from openadapt_flow.backends.windows_backend import WindowsBackend
+
+        return WindowsBackend
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

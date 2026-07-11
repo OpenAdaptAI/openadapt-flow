@@ -254,3 +254,133 @@ def test_drift_combined_modes(page: Page, server_url: str) -> None:
     login(page, server_url + "?drift=theme,rename")
     assert page.evaluate("document.body.classList.contains('drift-theme')")
     assert page.locator(".open-btn").first.inner_text() == "View"
+
+
+def _sign_in(page: Page, url: str) -> None:
+    """Fill credentials and click Sign In (no tasks-screen wait)."""
+    page.goto(url)
+    page.fill("#username", "nurse.demo")
+    page.fill("#password", "mockmed-demo-pass")
+    page.click("#signin")
+
+
+def test_drift_notice_interstitial_until_dismissed(
+    page: Page, server_url: str
+) -> None:
+    _sign_in(page, server_url + "?drift=notice")
+
+    # The tasks screen is replaced by the interstitial...
+    page.wait_for_selector("#notice-continue")
+    assert page.locator("#tasks-table").count() == 0
+    assert "What's New" in page.locator("h1").inner_text()
+
+    # ...until dismissed, after which tasks render normally.
+    page.click("#notice-continue")
+    page.wait_for_selector("#tasks-table")
+    assert page.locator("#notice-continue").count() == 0
+
+
+def test_drift_modal_once_blocks_first_save_only(
+    page: Page, server_url: str
+) -> None:
+    login(page, server_url + "?drift=modal-once")
+    open_first_patient(page)
+    goto_encounter(page)
+    page.click("#type-triage")
+    page.fill("#note", NOTE)
+
+    # First save attempt: intercepted, nothing saved.
+    page.click("#save-encounter")
+    page.wait_for_selector("#survey-modal")
+    assert page.locator("#saved-banner").count() == 0
+    assert page.evaluate("location.hash") == "#encounter"
+
+    # Dismiss and save again: the encounter saves normally.
+    page.click("#survey-dismiss")
+    page.click("#save-encounter")
+    page.wait_for_selector("#saved-banner")
+    assert "Encounter saved" in page.locator("#saved-banner").inner_text()
+    assert "Triage" in page.locator("#encounter-list").inner_text()
+
+
+def test_drift_reqfield_requires_acuity_before_save(
+    page: Page, server_url: str
+) -> None:
+    login(page, server_url + "?drift=reqfield")
+    open_first_patient(page)
+    goto_encounter(page)
+    page.click("#type-triage")
+    page.fill("#note", NOTE)
+
+    # Saving without an acuity shows an inline error; nothing saved.
+    page.click("#save-encounter")
+    assert (
+        page.locator("#save-error").inner_text()
+        == "Select an acuity level before saving."
+    )
+    assert page.locator("#saved-banner").count() == 0
+    assert page.evaluate("location.hash") == "#encounter"
+
+    # Selecting an acuity clears the error and lets the save through.
+    page.click("#acuity-routine")
+    assert page.locator("#save-error").inner_text() == ""
+    page.click("#save-encounter")
+    page.wait_for_selector("#saved-banner")
+    assert "Triage" in page.locator("#encounter-list").inner_text()
+
+
+def test_drift_reqfield_absent_by_default(page: Page, server_url: str) -> None:
+    login(page, server_url)
+    open_first_patient(page)
+    goto_encounter(page)
+    assert page.locator("#acuity-seg").count() == 0
+
+
+def test_drift_typelabel_relabels_and_swaps_but_keeps_type_value(
+    page: Page, server_url: str
+) -> None:
+    login(page, server_url + "?drift=typelabel")
+    open_first_patient(page)
+    goto_encounter(page)
+
+    triage = page.locator("#type-triage")
+    consult = page.locator("#type-consult")
+    assert triage.inner_text() == "Triage Assessment"
+    # Order swapped: Consult now sits where Triage used to be.
+    t_box, c_box = triage.bounding_box(), consult.bounding_box()
+    assert t_box is not None and c_box is not None
+    assert c_box["x"] < t_box["x"]
+
+    # Internal type value is unchanged: the saved row still says Triage.
+    triage.click()
+    page.fill("#note", NOTE)
+    page.click("#save-encounter")
+    page.wait_for_selector("#saved-banner")
+    row = page.locator("#encounter-list .enc-item").inner_text()
+    assert row.startswith("Triage —")
+    assert "Assessment" not in row
+
+
+def test_drift_sort_reorders_rows_without_changing_data(
+    page: Page, server_url: str
+) -> None:
+    login(page, server_url + "?drift=sort")
+
+    # Alphabetical by patient name: the recorded target (Jane Sample) is
+    # no longer the first row, but every referral is still present.
+    rows = page.locator("#tasks-table tbody tr")
+    assert rows.count() == 3
+    assert "Alex Testcase" in rows.nth(0).inner_text()
+    assert "Jane Sample" in rows.nth(1).inner_text()
+    assert "Sam Specimen" in rows.nth(2).inner_text()
+
+    # Position-based "first row" automation now opens a different patient.
+    page.locator(".open-btn").first.click()
+    page.wait_for_selector("#patient-banner")
+    assert "Alex Testcase" in page.locator("#patient-banner").inner_text()
+
+
+def test_drift_sort_absent_by_default(page: Page, server_url: str) -> None:
+    login(page, server_url)
+    first = page.locator("#tasks-table tbody tr").first.inner_text()
+    assert "Jane Sample" in first

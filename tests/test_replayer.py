@@ -718,8 +718,11 @@ class OcrLine:
     # Default region sits on the resolved point's row (resolving_vision
     # resolves to (110, 105)): identity verification reads only the lines
     # of the point's OWN text row (identity.lines_near_point), so fakes
-    # must place their lines there to be seen.
-    def __init__(self, text, region=(0, 95, 400, 20), confidence=0.9):
+    # must place their lines there to be seen — and OUTSIDE the target's
+    # own crop (the anchor region (100, 100, 50, 20) translated to the
+    # resolved point), which the replayer excludes from the live band
+    # exactly as the compiler excluded it from the recorded band.
+    def __init__(self, text, region=(160, 95, 240, 20), confidence=0.9):
         self.text = text
         self.region = region
         self.confidence = confidence
@@ -832,9 +835,11 @@ def test_identity_one_row_off_resolution_mismatches(bundle, run_dir):
     sits one row up (y~75) and the resolved row is a different entity."""
     vision = resolving_vision()
     vision.ocr_lines = [
-        OcrLine("Jane Sample Knee pain referral High", region=(0, 65, 400, 20)),
+        OcrLine(
+            "Jane Sample Knee pain referral High", region=(160, 65, 240, 20)
+        ),
         OcrLine("Taylor Duplicate Knee pain referral High",
-                region=(0, 95, 400, 20)),
+                region=(160, 95, 240, 20)),
     ]
     backend = FakeBackend()
     step = context_click_step("Jane Sample Knee pain referral High")
@@ -900,6 +905,52 @@ def test_identity_unreadable_proceeds_flagged_when_reversible(bundle, run_dir):
     assert report.success is True
     assert ("click", 110, 105, False) in backend.actions
     assert report.results[0].identity.status == "unreadable"
+
+
+def test_identity_band_excludes_targets_own_label(bundle, run_dir):
+    """The live band must be extracted like the recorded band: the
+    target's own label (a line inside the anchor crop translated to the
+    resolved point) is excluded, so it neither verifies by itself nor
+    trips the unexplained-name budget as an observed-side extra."""
+    vision = resolving_vision()
+    vision.ocr_lines = [
+        # The label itself: inside the anchor crop (100, 100, 50, 20)
+        # at the resolved point — must be excluded from the band.
+        OcrLine("Belford,", region=(102, 98, 46, 16)),
+        OcrLine("Jane Sample Knee pain referral High"),
+    ]
+    backend = FakeBackend()
+    step = context_click_step("Jane Sample Knee pain referral High")
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert report.results[0].identity.status == "verified"
+
+
+def test_identity_band_excludes_volatile_lines_at_replay(bundle, run_dir):
+    """A live clock/date cell on the resolved row (volatile relative to
+    the replay date) is dropped from the observed band, mirroring the
+    compiler's record-time volatility filter — it must not register as
+    unexplained observed tokens ('Jul' is name-shaped to OCR)."""
+    from datetime import date
+
+    today = date.today()
+    vision = resolving_vision()
+    vision.ocr_lines = [
+        OcrLine("Jane Sample Knee pain referral High"),
+        OcrLine(
+            f"{today.strftime('%b')} {today.day}, {today.year} 3:01",
+            region=(160, 96, 100, 18),
+        ),
+    ]
+    backend = FakeBackend()
+    step = context_click_step("Jane Sample Knee pain referral High")
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert report.results[0].identity.status == "verified"
 
 
 def test_identity_unreadable_blocks_irreversible_step(bundle, run_dir):
@@ -1272,3 +1323,57 @@ def test_structural_postcondition_passes_unverified_on_plain_backend(
         bundle_dir=bundle, run_dir=run_dir,
     )
     assert report.success is True
+
+
+# -- identity-protection coverage audit (run start) ---------------------------
+
+
+def _coverage_workflow() -> Workflow:
+    armed = click_step("s_armed")
+    armed.anchor.context_text = "Belford, Phil 1985-03-12 M"
+    armed.identity_armed = True
+    unarmed = click_step("s_unarmed", ocr_text="")
+    unarmed.identity_armed = False
+    unarmed.identity_unarmed_reason = (
+        "no readable text in the target's row band at compile time "
+        "(icon-only or unlabeled row)"
+    )
+    legacy_unarmed = click_step("s_legacy")  # pre-metric bundle: fields None
+    keyboard = Step(id="s_key", intent="press Enter", action=ActionKind.KEY,
+                    key="Enter")
+    return Workflow(
+        name="coverage", steps=[armed, unarmed, legacy_unarmed, keyboard]
+    )
+
+
+def test_identity_coverage_recorded_on_report():
+    """The report states N of M applicable steps armed and lists every
+    unarmed click by id with its reason — computed from the whole bundle
+    at run start, before any step executes."""
+    report = RunReport(workflow_name="coverage", started_at="t")
+    Replayer._record_identity_coverage(_coverage_workflow(), report)
+    assert report.identity_applicable_steps == 3  # keyboard step excluded
+    assert report.identity_armed_steps == 1
+    ids = [u.step_id for u in report.identity_unarmed]
+    assert ids == ["s_unarmed", "s_legacy"]
+    assert "icon-only" in report.identity_unarmed[0].reason
+    # A pre-metric bundle still lists the step, with an honest reason.
+    assert "predates" in report.identity_unarmed[1].reason
+
+
+def test_identity_coverage_counts_anchored_type_steps():
+    type_step = Step(
+        id="s_type", intent="type note", action=ActionKind.TYPE,
+        text="hello",
+        anchor=Anchor(
+            template="templates/btn.png", region=(0, 0, 10, 10),
+            click_point=(5, 5), context_text="Notes field row text here",
+        ),
+    )
+    report = RunReport(workflow_name="coverage", started_at="t")
+    Replayer._record_identity_coverage(
+        Workflow(name="w", steps=[type_step]), report
+    )
+    assert report.identity_applicable_steps == 1
+    assert report.identity_armed_steps == 1
+    assert report.identity_unarmed == []

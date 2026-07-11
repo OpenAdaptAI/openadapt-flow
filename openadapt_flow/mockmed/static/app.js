@@ -29,6 +29,11 @@ var SLOW_MS = DRIFT.has('slow')
 
 var LABEL_SAVE = DRIFT.has('rename') ? 'Submit Encounter' : 'Save Encounter';
 var LABEL_OPEN = DRIFT.has('rename') ? 'View' : 'Open';
+// "typelabel" drift: the Triage segment is relabeled (semantically findable
+// — an agent can still identify it) AND the segment order is swapped, so
+// the old Triage position now holds Consult. Internal encounter type values
+// are unchanged; only presentation drifts.
+var LABEL_TRIAGE = DRIFT.has('typelabel') ? 'Triage Assessment' : 'Triage';
 
 var PATIENTS = [
   { id: 'p1', name: 'Jane Sample', dob: '1980-01-01',
@@ -70,12 +75,25 @@ if (DRIFT.has('missing')) {
   PATIENTS = PATIENTS.filter(function (p) { return p.id !== 'p1'; });
 }
 if (DRIFT.has('empty')) { PATIENTS = []; }
+// "sort" drift: the referral queue's default sort order changed between
+// runs (say, a server-side switch from arrival order to alphabetical by
+// patient name). Every referral is still present and unmodified; the
+// recorded target is simply no longer the first row, so position-based
+// "first row" automation now points at a different patient.
+if (DRIFT.has('sort')) {
+  PATIENTS = PATIENTS.slice().sort(function (a, b) {
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+}
 
 var state = {
   currentPatientId: null,
   encounterType: null,
+  acuity: null,        // "reqfield" drift: required acuity selection
   banner: null,        // { patientId, text }
-  encounters: {}       // patientId -> [{ type, note }]
+  encounters: {},      // patientId -> [{ type, note }]
+  noticeDismissed: false,  // "notice" drift: interstitial dismissed?
+  surveyShown: false       // "modal-once" drift: modal already shown?
 };
 
 function esc(s) {
@@ -104,7 +122,29 @@ function renderLogin() {
   });
 }
 
+function renderNotice() {
+  app.innerHTML =
+    '<h1>What\'s New in MockMed</h1>' +
+    '<div id="notice-card">' +
+    '<p>MockMed 2.4 adds faster charting, improved referral routing, and ' +
+    'a refreshed encounter workflow. Review the release notes with your ' +
+    'administrator for details.</p>' +
+    '<div class="actions"><button id="notice-continue">Continue to tasks' +
+    '</button></div></div>';
+  document.getElementById('notice-continue')
+    .addEventListener('click', function () {
+      state.noticeDismissed = true;
+      renderTasks();
+    });
+}
+
 function renderTasks() {
+  // "notice" drift: an interstitial replaces the tasks screen once per
+  // page load until it is dismissed.
+  if (DRIFT.has('notice') && !state.noticeDismissed) {
+    renderNotice();
+    return;
+  }
   state.banner = null;
   var rows = PATIENTS.map(function (p) {
     return '<tr>' +
@@ -184,24 +224,54 @@ function renderEncounter() {
   state.banner = null;
   if (!state.currentPatientId) { state.currentPatientId = PATIENTS[0].id; }
   state.encounterType = null;
+  state.acuity = null;
 
+  // "reqfield" drift: the form gains a required Acuity field between the
+  // note and the save button; saving without a selection shows an inline
+  // validation error instead of saving.
+  var acuityHtml = DRIFT.has('reqfield')
+    ? '<label id="acuity-label">Acuity (required)</label>' +
+      '<div class="segmented" id="acuity-seg">' +
+      '<button id="acuity-routine" class="seg-btn">Routine</button>' +
+      '<button id="acuity-urgent" class="seg-btn">Urgent</button>' +
+      '</div>'
+    : '';
+
+  var triageBtn = '<button id="type-triage" class="seg-btn">' +
+    LABEL_TRIAGE + '</button>';
+  var consultBtn = '<button id="type-consult" class="seg-btn">Consult</button>';
+  var segButtons = DRIFT.has('typelabel')
+    ? consultBtn + triageBtn   // swapped order under "typelabel" drift
+    : triageBtn + consultBtn;
   app.innerHTML =
     '<h1>New Encounter</h1>' +
     '<label id="type-label">Encounter Type</label>' +
-    '<div class="segmented" id="type-seg">' +
-    '<button id="type-triage" class="seg-btn">Triage</button>' +
-    '<button id="type-consult" class="seg-btn">Consult</button>' +
-    '</div>' +
+    '<div class="segmented" id="type-seg">' + segButtons + '</div>' +
     '<label for="note" id="note-label">Note</label>' +
     '<textarea id="note" rows="6"></textarea>' +
+    acuityHtml +
+    '<div id="save-error"></div>' +
     '<div class="actions movable">' +
     '<button id="save-encounter">' + LABEL_SAVE + '</button></div>';
+
+  if (DRIFT.has('reqfield')) {
+    ['routine', 'urgent'].forEach(function (level) {
+      document.getElementById('acuity-' + level)
+        .addEventListener('click', function () {
+          state.acuity = level === 'routine' ? 'Routine' : 'Urgent';
+          document.querySelectorAll('#acuity-seg .seg-btn')
+            .forEach(function (b) { b.classList.remove('selected'); });
+          this.classList.add('selected');
+          document.getElementById('save-error').textContent = '';
+        });
+    });
+  }
 
   ['triage', 'consult'].forEach(function (t) {
     document.getElementById('type-' + t)
       .addEventListener('click', function () {
         state.encounterType = t === 'triage' ? 'Triage' : 'Consult';
-        document.querySelectorAll('.seg-btn').forEach(function (b) {
+        document.querySelectorAll('#type-seg .seg-btn').forEach(function (b) {
           b.classList.remove('selected');
         });
         this.classList.add('selected');
@@ -215,6 +285,18 @@ function renderEncounter() {
         // Semantic drift: a blocking modal appears INSTEAD of the saved
         // banner; the encounter is not saved.
         showSurveyModal();
+        return;
+      }
+      if (DRIFT.has('modal-once') && !state.surveyShown) {
+        // Recoverable variant: the modal intercepts only the FIRST save
+        // attempt per page load; after dismissing it, saving works.
+        state.surveyShown = true;
+        showSurveyModal();
+        return;
+      }
+      if (DRIFT.has('reqfield') && !state.acuity) {
+        document.getElementById('save-error').textContent =
+          'Select an acuity level before saving.';
         return;
       }
       var pid = state.currentPatientId;

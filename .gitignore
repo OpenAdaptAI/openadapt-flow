@@ -17,3 +17,4 @@ benchmark/dom/finals/
 benchmark/dom/rows.jsonl
 benchmark/desktop/finals/
 benchmark/desktop/_work/
+benchmark/reliability/artifacts/

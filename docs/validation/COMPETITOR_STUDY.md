@@ -1,20 +1,79 @@
-# Competitor drift study — do other self-healing replay tools silently write wrong state?
+# Silent wrong-action under UI drift: a measurement harness, our own engine first
 
-Date: 2026-07-10. Companion to [VALIDATION.md](VALIDATION.md), which found
-(and fixed) 5 silent wrong-write modes in openadapt-flow's own compiled
-replayer under UI drift. This study asks whether that failure class is an
-implementation bug of ours or a property of the architecture class — by
-running the same task, on the same local MockMed app, under the same drift
-modes, with OTHER self-healing / deterministic-replay browser automation
-tools, and reading final app state with an arm-independent ground-truth
-check. Both possible outcomes were committed to in advance: "everyone does
-this" makes silent-wrong-action rate a publishable benchmark; "they halt
-safely" would mean our differentiation story is wrong. What follows reports
-what actually happened, either way.
+Date: 2026-07-10. This is a report on an instrument, not an indictment. We
+built a harness that measures one thing — the rate at which a self-healing /
+deterministic-replay tool, under UI drift, resolves the WRONG on-screen
+target, writes to it, and reports success (a *silent wrong-action*) — and we
+point it at our own engine before anyone else's. Companion to
+[VALIDATION.md](VALIDATION.md), which found (and fixed) 5 silent wrong-write
+modes in openadapt-flow's own compiled replayer under UI drift, across five
+adversarial reopenings that are all in our git history. This study then asks
+whether that failure class is an implementation bug of ours specifically or a
+property of the architecture class — by running the same task, on the same
+local MockMed app, under the same drift modes, with OTHER self-healing /
+deterministic-replay browser automation tools, and reading final app state
+with an arm-independent ground-truth check. Both possible outcomes were
+committed to in advance: "everyone does this" makes silent-wrong-action rate a
+publishable benchmark; "they halt safely" would mean our differentiation story
+is wrong. What follows reports what actually happened, either way — leading
+with our own failures, then the competitor results as additional data points
+the same instrument surfaced.
 
 Total LLM spend: **$0.94 estimated at list price** ($0.9367; hard cap $10.00, soft
 abort $8.00 — never approached). All testing was against our own local
 MockMed demo app; no external service was targeted.
+
+## Our own engine first: five adversarial reopenings (the glass house)
+
+Before pointing this harness at anyone else, we pointed it at ourselves —
+repeatedly. The single most dangerous thing a GUI replayer can do is the wrong
+write, silently, so we tried to make ours do exactly that. It reopened **five
+times**, each by an out-of-distribution adversary we did not anticipate, each
+fixed, and each pinned as a permanent test on a **frozen, SHA-manifested
+held-out corpus committed BEFORE the fix it evaluates** (the full found-fixed-
+reopened arc is in [VALIDATION.md](VALIDATION.md); the ROC, operating point
+and per-class tables are in [IDENTITY_ROC.md](IDENTITY_ROC.md)):
+
+1. **Pixel-lookalike rows** — template confidence is pixel similarity, not
+   identity; a crop of the wrong row matches beautifully.
+2. **Residue-blind coverage and short parameters** — the first identity fix
+   could be disarmed when shared row text dominated the band, or by a short
+   parameter value.
+3. **Near-name siblings** — "Belford, Phil" vs "Belford, Philip", "John" vs
+   "Joan": a fuzzy tier added to survive OCR jitter happily verified the
+   sibling.
+4. **A corpus/matcher shared blind spot** — our own held-out corpus's
+   labeling rule excluded whole classes of collision by construction, so its
+   zero was partly tautological.
+5. **MRN letter/digit confusion** — the safety budget guarded name tokens
+   only, so a *different* patient's identifier one confusable character apart
+   ("A01234" vs "AO1234") silently verified.
+
+Where it lands now, across the whole frozen corpus (v1+v2+v3, ~6,900 pairs)
+plus 18 out-of-corpus reviewer probes: **false-accept — a wrong-patient verify
+— 0.000%**, bought with a **false-abort rate of about 26% overall (28% on the
+noisiest identifier rows)**, each one a *safe halt* — a fallback or a human
+retry, never a wrong write. And under the same three row-identity drift modes
+this study runs against competitors, our own **pre-fix** replayer silently
+wrote a Triage encounter to the wrong patient **3/3** and reported success —
+the exact class measured here — while our **post-fix** identity gate converts
+those to safe-halts (**0/3**). Our engine is a row in the same results matrix
+below as everyone else's; it is not exempt from its own instrument.
+
+### Why we're publishing our own failures alongside theirs
+
+The obvious objection to a study like this is "physician, heal thyself": a
+repo whose own VALIDATION.md documents five wrong-patient reopenings has no
+standing to point at anyone. We think the five reopenings *are* the standing.
+The failure mode is structural to self-healing replay as a category —
+verification that confirms *something* saved, not *whose* record it landed in
+— and we found it in our own engine first, wrote it down, fixed it, and pinned
+it on a frozen corpus before running a single competitor. Leading this
+document with our own five rounds is not a hedge against that counter; it is
+the evidence that what we are reporting is a category property, not a
+competitor weakness we are marketing. With only the competitor results, this
+would be an attack. With our own failures in front of them — in the same
+matrix, graded by the same ground truth — it is a measurement.
 
 ## The question, precisely
 
@@ -426,9 +485,12 @@ accidental identity check — the strategy stops being available the moment
 ids are positional or unstable, and its label-drift availability is poor
 (safe timeouts). Silent wrong-action rate under row-identity drift is
 therefore a real, discriminating, and to our knowledge unmeasured benchmark
-across this tool class — and "we safe-halt where others silently write to
-the wrong patient" survives its first adversarial test against shipping
-competitors.
+across this tool class — a structural property of the architecture, our own
+pre-fix engine included, that the instrument exists to surface. The finding
+is not "they are unsafe and we are safe"; it is that identity-blind
+verification is a category-wide failure mode, we exhibited it too, and the
+discriminator is whether a tool converts it to a safe-halt — which ours does
+only after the five reopenings on the record above.
 
 ## Reproduce
 

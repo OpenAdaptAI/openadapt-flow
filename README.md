@@ -111,7 +111,7 @@ numbers, methodology, and caveats:
 
 ## Status
 
-v0: 431 tests, drift matrix in CI. Solid for the reference browser backend.
+v0: 580 tests, drift matrix in CI. Solid for the reference browser backend.
 `DESIGN.md` has the module contracts; `docs/L1_INTEGRATION.md` covers feeding
 layered clinical-data platforms.
 

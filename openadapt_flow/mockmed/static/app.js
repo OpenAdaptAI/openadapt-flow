@@ -35,6 +35,16 @@ var LABEL_OPEN = DRIFT.has('rename') ? 'View' : 'Open';
 // are unchanged; only presentation drifts.
 var LABEL_TRIAGE = DRIFT.has('typelabel') ? 'Triage Assessment' : 'Triage';
 
+// Transactional fault-injection hook (flag-gated, exactly like ?drift=).
+// When the page is loaded with ?fault=<mode> the Save handler routes the
+// write through a REAL backend API (openadapt_flow/mockmed/fault_server.py)
+// so the fault-model study can judge a replay against DB ground truth rather
+// than the on-screen banner. With no ?fault query this is inert and Save
+// behaves byte-for-byte as before (the normal benchmark is unaffected).
+var FAULT = (new URLSearchParams(location.search).get('fault') || '').trim();
+// A stable idempotency key for this page load; only sent in ?fault=idempotent.
+var FAULT_KEY = 'enc-' + Math.random().toString(36).slice(2);
+
 var PATIENTS = [
   { id: 'p1', name: 'Jane Sample', dob: '1980-01-01',
     reason: 'Knee pain referral', priority: 'High' },
@@ -220,6 +230,84 @@ function showSurveyModal() {
     });
 }
 
+// -- Transactional fault path (only reached when ?fault=<mode> is set) -----
+
+// Apply the LOCAL, optimistic UI update — identical to the non-fault save
+// path — so the recorded postconditions (saved banner + patient screen) hold
+// unchanged. The backend DB, not this in-page state, is the study's truth.
+function commitLocalAndShow(pid, note) {
+  if (!state.encounters[pid]) { state.encounters[pid] = []; }
+  state.encounters[pid].push({
+    type: state.encounterType || 'Triage', note: note
+  });
+  state.banner = {
+    patientId: pid, text: 'Encounter saved — ' + note.slice(0, 40)
+  };
+  location.hash = '#patient/' + pid;
+}
+
+function showSaveError(msg) {
+  var el = document.getElementById('save-error');
+  if (el) { el.textContent = msg; }
+}
+
+// Route the Save write through the fault backend and reflect the outcome in
+// the UI the way a real app would under each fault. What actually persists is
+// decided server-side by ?fault=<mode>; this only shapes what the SCREEN says.
+function saveViaBackend(pid, note) {
+  var payload = { patient_id: pid, type: state.encounterType || 'Triage',
+    note: note };
+  if (FAULT === 'idempotent') { payload.key = FAULT_KEY; }
+  var url = '/api/encounter?fault=' + encodeURIComponent(FAULT);
+
+  function post(withTimeout) {
+    var opts = { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload) };
+    if (withTimeout && typeof AbortController !== 'undefined') {
+      var ctrl = new AbortController();
+      opts.signal = ctrl.signal;
+      setTimeout(function () { ctrl.abort(); }, 1200);
+    }
+    return fetch(url, opts);
+  }
+
+  if (FAULT === 'optimistic') {
+    // Optimistic UI: paint success NOW, fire the write, ignore its result.
+    commitLocalAndShow(pid, note);
+    post(false).catch(function () {});
+    return;
+  }
+  if (FAULT === 'timeout') {
+    // Commit-then-hang: the client aborts and surfaces an error; no banner.
+    post(true)
+      .then(function () { commitLocalAndShow(pid, note); })
+      .catch(function () {
+        showSaveError('Save timed out — the encounter may or may not '
+          + 'have been saved.');
+      });
+    return;
+  }
+  if (FAULT === 'duplicate' || FAULT === 'double' || FAULT === 'idempotent') {
+    // Double-submit / double-delivered click: the write is sent twice. Under
+    // ?fault=idempotent the payload carries a key the server de-duplicates
+    // on; otherwise TWO rows land. The banner is shown exactly once.
+    post(false).catch(function () {});
+    post(false)
+      .then(function () { commitLocalAndShow(pid, note); })
+      .catch(function () {});
+    return;
+  }
+  // ok / partial / session / stale: a single write; banner only on success.
+  post(false).then(function (res) {
+    if (res.status === 401) { location.hash = '#login'; return; }
+    if (res.ok) { commitLocalAndShow(pid, note); }
+    else { showSaveError('Save was rejected by the server.'); }
+  }).catch(function () {
+    showSaveError('Save failed to reach the server.');
+  });
+}
+
 function renderEncounter() {
   state.banner = null;
   if (!state.currentPatientId) { state.currentPatientId = PATIENTS[0].id; }
@@ -281,6 +369,12 @@ function renderEncounter() {
   document.getElementById('save-encounter')
     .addEventListener('click', function () {
       var note = document.getElementById('note').value;
+      // Flag-gated fault path: route the write through the backend so the
+      // study can verify the DB effect. Inert unless ?fault=<mode> is set.
+      if (FAULT) {
+        saveViaBackend(state.currentPatientId, note);
+        return;
+      }
       if (DRIFT.has('modal')) {
         // Semantic drift: a blocking modal appears INSTEAD of the saved
         // banner; the encounter is not saved.

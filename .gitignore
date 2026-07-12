@@ -21,3 +21,6 @@ benchmark/reliability/artifacts/
 benchmark/cosmetic_drift/runs/
 benchmark/cosmetic_drift/_bundle/
 benchmark/cosmetic_drift/_recording/
+benchmark/fault_model/runs/
+benchmark/fault_model/_bundle/
+benchmark/fault_model/_recording/

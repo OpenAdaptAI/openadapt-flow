@@ -44,6 +44,12 @@ dev = [
 grounder = ["anthropic>=0.40"]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31"]
+# PHI/PII scrubbing on persist/log paths (Presidio-backed). Optional: the
+# runtime imports openadapt_flow.privacy unconditionally, but it degrades to a
+# no-op when this extra is absent (OPENADAPT_FLOW_SCRUB=auto). A regulated
+# deployment installs this and sets OPENADAPT_FLOW_SCRUB=on to fail closed.
+# After install: python -m spacy download en_core_web_trf
+privacy = ["openadapt-privacy[presidio]>=0.1.0"]
 # On-prem VLM inference service (the GPU-box appliance side).
 service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 # Apple-Silicon dev backend for the VLM service (local model, no GPU box).

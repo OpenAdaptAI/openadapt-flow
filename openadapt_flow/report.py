@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 from openadapt_flow.ir import RunReport, StepResult
+from openadapt_flow.privacy import scrub_text as _scrub_phi
 
 # Ladder order for the rung histogram (cheapest first).
 _RUNG_ORDER = ("template", "template_global", "ocr", "geometry", "grounder")
@@ -25,6 +26,17 @@ _RUNG_ORDER = ("template", "template_global", "ocr", "geometry", "grounder")
 def _md_escape(text: str) -> str:
     """Escape characters that would break a Markdown table cell."""
     return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _md_phi(text: str) -> str:
+    """Scrub PII/PHI (per the run's scrub posture) then Markdown-escape.
+
+    Used for every FREE-TEXT field rendered into the shareable ``REPORT.md``
+    (workflow name, param values, step intents, errors, unarmed reasons) —
+    these carry patient identifiers (name / DOB / MRN) recorded from the app.
+    A no-op when scrubbing is off/unavailable (see openadapt_flow.privacy).
+    """
+    return _md_escape(_scrub_phi(text) or "")
 
 
 def _img(rel_path: str | None, alt: str) -> str:
@@ -65,7 +77,7 @@ def render_run_report(run_dir: Path | str) -> Path:
     outcome = "success" if report.success else "FAILED"
 
     lines: list[str] = []
-    lines.append(f"# {icon} {_md_escape(report.workflow_name)} — {outcome}")
+    lines.append(f"# {icon} {_md_phi(report.workflow_name)} — {outcome}")
     lines.append("")
     lines.append(f"- **Started:** {report.started_at}")
     lines.append(f"- **Steps:** {ok_count}/{len(report.results)} ok")
@@ -79,7 +91,7 @@ def render_run_report(run_dir: Path | str) -> Path:
         lines.append("| Param | Value |")
         lines.append("| --- | --- |")
         for key, value in report.params.items():
-            lines.append(f"| `{_md_escape(key)}` | {_md_escape(value)} |")
+            lines.append(f"| `{_md_escape(key)}` | {_md_phi(value)} |")
     else:
         lines.append("_No parameters._")
     lines.append("")
@@ -105,8 +117,8 @@ def render_run_report(run_dir: Path | str) -> Path:
             for unarmed in report.identity_unarmed:
                 lines.append(
                     f"| `{_md_escape(unarmed.step_id)}` "
-                    f"| {_md_escape(unarmed.intent)} "
-                    f"| {_md_escape(unarmed.reason)} |"
+                    f"| {_md_phi(unarmed.intent)} "
+                    f"| {_md_phi(unarmed.reason)} |"
                 )
     else:
         lines.append(
@@ -150,7 +162,7 @@ def render_run_report(run_dir: Path | str) -> Path:
         verified = ", ".join(verified_parts) or "&mdash;"
         lines.append(
             f"| {i} | `{_md_escape(result.step_id)}` "
-            f"| {_md_escape(result.intent)} | {rung} | {conf} "
+            f"| {_md_phi(result.intent)} | {rung} | {conf} "
             f"| {verified} | {result.elapsed_ms:.0f} | {healed} | {status} |"
         )
     lines.append("")
@@ -175,11 +187,11 @@ def render_run_report(run_dir: Path | str) -> Path:
         for reason, result in shown:
             lines.append(
                 f"### `{_md_escape(result.step_id)}` — "
-                f"{_md_escape(result.intent)} ({reason})"
+                f"{_md_phi(result.intent)} ({reason})"
             )
             lines.append("")
             if result.error:
-                lines.append(f"> ❌ **Error:** {_md_escape(result.error)}")
+                lines.append(f"> ❌ **Error:** {_md_phi(result.error)}")
                 lines.append("")
             lines.extend(_before_after_table(result))
             lines.append("")
@@ -253,7 +265,7 @@ def render_bench_report(bench_json_path: Path | str, out_path: Path | str) -> Pa
 
     lines: list[str] = []
     lines.append(
-        f"# {icon} Bench — {_md_escape(str(bench.get('workflow_name', '')))}"
+        f"# {icon} Bench — {_md_phi(str(bench.get('workflow_name', '')))}"
     )
     lines.append("")
     lines.append(f"- **Bundle:** `{bench.get('bundle', '')}`")

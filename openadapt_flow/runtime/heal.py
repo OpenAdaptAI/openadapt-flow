@@ -26,6 +26,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.privacy import scrub_image_bytes as _scrub_png
 from openadapt_flow.runtime import identity as identity_mod
 
 _HEAL_TEMPLATE_NAME = "template.png"
@@ -248,8 +249,11 @@ def persist_heal(
     """
     heal_dir = Path(run_dir) / "heals" / event.step_id
     heal_dir.mkdir(parents=True, exist_ok=True)
-    (heal_dir / _HEAL_TEMPLATE_NAME).write_bytes(crop_png)
-    (heal_dir / _HEAL_SCREEN_NAME).write_bytes(frame_png)
+    # Heal artifacts (crop + full frame) are embedded by relative path into the
+    # shareable REPORT.md. Redact PII/PHI when opt-in image redaction is on
+    # (OPENADAPT_FLOW_SCRUB_IMAGES=1); no-op otherwise (see openadapt_flow.privacy).
+    (heal_dir / _HEAL_TEMPLATE_NAME).write_bytes(_scrub_png(crop_png))
+    (heal_dir / _HEAL_SCREEN_NAME).write_bytes(_scrub_png(frame_png))
     event.screenshot = f"heals/{event.step_id}/{_HEAL_SCREEN_NAME}"
     (heal_dir / _HEAL_JSON_NAME).write_text(event.model_dump_json(indent=2))
     return heal_dir

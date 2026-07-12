@@ -104,15 +104,24 @@ class MLXBackend:
         self._model = None
         self._processor = None
         self._config = None
-        self._tmp = Path(tmp_dir) if tmp_dir else Path("/tmp/openadapt_vlm_service")
+        # PHI no-retention: mlx-vlm requires image FILE paths, so crop/screenshot
+        # bytes must transit disk. Use a PRIVATE, per-instance scratch dir (mode
+        # 0700, not a world-readable shared /tmp path) and delete every file the
+        # instant inference returns (try/finally below). See docs/deployment/
+        # ON_PREM_VLM.md ("No retention of crops or VLM payloads").
+        self._tmp = Path(tmp_dir) if tmp_dir else None
 
     def load(self) -> "MLXBackend":
+        import tempfile
+
         from mlx_vlm import load
         from mlx_vlm.utils import load_config
 
         self._model, self._processor = load(self.model)
         self._config = load_config(self.model)
-        self._tmp.mkdir(parents=True, exist_ok=True)
+        if self._tmp is None:
+            self._tmp = Path(tempfile.mkdtemp(prefix="openadapt_vlm_service_"))
+        self._tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
         return self
 
     def is_ready(self) -> bool:
@@ -123,28 +132,33 @@ class MLXBackend:
         from mlx_vlm.prompt_utils import apply_chat_template
 
         paths: list[str] = []
-        for i, png in enumerate(images):
-            p = self._tmp / f"_img_{i}_{time.time_ns()}.png"
-            p.write_bytes(png)
-            paths.append(str(p))
-        formatted = apply_chat_template(
-            self._processor, self._config, prompt, num_images=len(paths)
-        )
-        res = generate(
-            self._model,
-            self._processor,
-            formatted,
-            image=paths,
-            max_tokens=max_tokens,
-            temperature=0.0,
-            verbose=False,
-        )
-        for p in paths:
-            try:
-                Path(p).unlink()
-            except OSError:
-                pass
-        return res.text if hasattr(res, "text") else str(res)
+        try:
+            for i, png in enumerate(images):
+                p = self._tmp / f"_img_{i}_{time.time_ns()}.png"
+                p.write_bytes(png)
+                p.chmod(0o600)
+                paths.append(str(p))
+            formatted = apply_chat_template(
+                self._processor, self._config, prompt, num_images=len(paths)
+            )
+            res = generate(
+                self._model,
+                self._processor,
+                formatted,
+                image=paths,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                verbose=False,
+            )
+            return res.text if hasattr(res, "text") else str(res)
+        finally:
+            # No-retention: delete the PHI-bearing crops even if inference
+            # raised (the pre-fix code skipped cleanup on any error).
+            for p in paths:
+                try:
+                    Path(p).unlink()
+                except OSError:
+                    pass
 
 
 class VLLMBackend:

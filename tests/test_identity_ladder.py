@@ -108,18 +108,39 @@ def test_pixel_abstains_when_crop_missing() -> None:
 # false-accept), and the decision must be SCALE-INVARIANT.
 # ---------------------------------------------------------------------------
 
+def _scalable_font(size: int):
+    """A real scalable TrueType font that exists on every platform the suite
+    runs on. macOS ships Arial; Linux CI does not, so we fall back to the
+    DejaVuSans that matplotlib (a dev dependency, always installed in CI)
+    bundles. ``ImageFont.load_default()`` is a tiny bitmap font whose render is
+    too degenerate for the pixel comparisons below, so it is a last resort only.
+    """
+    from PIL import ImageFont
+    candidates = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",       # macOS
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",    # Debian/Ubuntu
+    ]
+    try:  # matplotlib bundles DejaVuSans and is present in the dev/CI env
+        import matplotlib.font_manager as fm
+        candidates.append(fm.findfont("DejaVu Sans"))
+    except Exception:
+        pass
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
 def _mrn_cell(text: str, *, width: int, jitter: int = 0) -> bytes:
     """A realistic MRN CELL crop: the MRN drawn small in a wide padded cell
     (PIL, so no browser). ``width`` varies the cell scale; ``jitter`` shifts
     the text a sub-pixel-equivalent amount (a cross-render artifact)."""
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
     img = Image.new("L", (width, 40), 255)
     draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype(
-            "/System/Library/Fonts/Supplemental/Arial.ttf", 22)
-    except Exception:
-        font = ImageFont.load_default()
+    font = _scalable_font(22)
     draw.text((8 + jitter, 8), text, fill=20, font=font)
     return _png(np.array(img))
 
@@ -369,6 +390,7 @@ def test_replayer_vlm_tier_off_by_default_no_crop_falls_through(tmp_path) -> Non
 # Integrated harness (browser) -- guarded
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(900)  # heavy browser+OCR integration; ~350s local, slower CI
 def test_harness_zero_false_accept_all_configs(tmp_path) -> None:
     pytest.importorskip("playwright")
     from openadapt_flow.validation import identity_ladder as H

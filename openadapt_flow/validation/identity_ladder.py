@@ -147,23 +147,24 @@ def _filler(i: int) -> Row:
                f"ZZ{1000 + i}", "M", "Active")
 
 
-def _render(name: str, dob: str, mrn: str, cond: RenderCond) -> Rendered:
+def _render(browser, name: str, dob: str, mrn: str, cond: RenderCond) -> Rendered:
     """Render a dense table with the patient (name/dob/mrn) at _TARGET_ROW and
     return the frame PNG plus the Open-button click point, the DOM row text at
     that point (structured identity), and the MRN cell region -- everything the
-    real ladder's four tiers consume, from ONE render."""
-    from playwright.sync_api import sync_playwright
+    real ladder's four tiers consume, from ONE render.
 
+    ``browser`` is a shared, already-launched Chromium (opened once by ``run``);
+    each render only opens a cheap new page, not a new browser process.
+    """
     rows = [_filler(0), _filler(1),
             Row(name, dob, mrn, "M", "Active"), _filler(3)]
     table = DenseTable(rows=rows, pairs=[], n_rows=len(rows))
     html = render_table_html(table, font_family=cond.font_family,
                              font_px=cond.font_px, row_pad_px=6, top_offset_px=0)
     dsf = cond.dsf
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1120, "height": 1600},
-                                device_scale_factor=dsf)
+    page = browser.new_page(viewport={"width": 1120, "height": 1600},
+                            device_scale_factor=dsf)
+    try:
         page.set_content(html, wait_until="networkidle")
         if cond.dark:
             page.add_style_tag(content=(
@@ -202,7 +203,8 @@ def _render(name: str, dob: str, mrn: str, cond: RenderCond) -> Rendered:
             [open_bb[0] + open_bb[2] / 2, open_bb[1] + open_bb[3] / 2])
         mrn_region = (int(mrn_bb[0] * dsf), int(mrn_bb[1] * dsf),
                       int(mrn_bb[2] * dsf), int(mrn_bb[3] * dsf))
-        browser.close()
+    finally:
+        page.close()
     return Rendered(png=png, viewport=(vw, vh), open_point=open_point,
                     click_struct=struct, mrn_region=mrn_region)
 
@@ -332,13 +334,19 @@ def run(out_dir: Path) -> dict:
     stable_s: dict[str, Rendered] = {}
     drift_t: dict[tuple[str, str], Rendered] = {}
     drift_s: dict[tuple[str, str], Rendered] = {}
-    for p, (name, dob) in pairs:
-        rec[p.label] = _render(name, dob, p.target, RECORD)
-        stable_t[p.label] = _render(name, dob, p.target, STABLE)
-        stable_s[p.label] = _render(name, dob, p.sibling, STABLE)
-        for d in DRIFTS:
-            drift_t[(p.label, d.name)] = _render(name, dob, p.target, d)
-            drift_s[(p.label, d.name)] = _render(name, dob, p.sibling, d)
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            for p, (name, dob) in pairs:
+                rec[p.label] = _render(browser, name, dob, p.target, RECORD)
+                stable_t[p.label] = _render(browser, name, dob, p.target, STABLE)
+                stable_s[p.label] = _render(browser, name, dob, p.sibling, STABLE)
+                for d in DRIFTS:
+                    drift_t[(p.label, d.name)] = _render(browser, name, dob, p.target, d)
+                    drift_s[(p.label, d.name)] = _render(browser, name, dob, p.sibling, d)
+        finally:
+            browser.close()
 
     results: dict[str, dict] = {}
     tmp = Path(tempfile.mkdtemp(prefix="idladder_"))

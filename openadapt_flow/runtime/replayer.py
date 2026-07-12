@@ -38,6 +38,8 @@ from openadapt_flow.ir import (
     UnarmedStep,
     Workflow,
 )
+from openadapt_flow.privacy import scrub_image_bytes as _scrub_png
+from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import identity as identity_mod
 from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
@@ -392,10 +394,16 @@ class Replayer:
                 )
                 result.postconditions_ok = postconditions_ok
                 if result.postcondition_drift_rescues:
+                    # The rescue descriptions embed OCR'd on-screen text
+                    # (postcondition literals) — scrub PHI before it hits the
+                    # console log (see openadapt_flow.privacy).
+                    rescued = "; ".join(
+                        _scrub_phi(r) for r in result.postcondition_drift_rescues
+                    )
                     print(
                         f"  drift-oracle: {len(result.postcondition_drift_rescues)}"
                         " postcondition(s) confirmed by VLM under render drift — "
-                        + "; ".join(result.postcondition_drift_rescues)
+                        + rescued
                     )
                 if not postconditions_ok:
                     detail = "; ".join(failed) or "unknown postcondition"
@@ -1349,7 +1357,14 @@ class Replayer:
     def _save_step_png(
         run_dir: Path, step_id: str, suffix: str, png: bytes
     ) -> str:
-        """Save a per-step screenshot; return its run-dir-relative path."""
+        """Save a per-step screenshot; return its run-dir-relative path.
+
+        These frames are embedded by relative path into the shareable
+        ``REPORT.md``. When opt-in image redaction is enabled
+        (``OPENADAPT_FLOW_SCRUB_IMAGES=1``), PII/PHI regions are burned out
+        before the frame is written to disk; otherwise the raw frame is saved
+        (see openadapt_flow.privacy and docs/PRIVACY.md).
+        """
         rel = f"steps/{step_id}_{suffix}.png"
-        (Path(run_dir) / rel).write_bytes(png)
+        (Path(run_dir) / rel).write_bytes(_scrub_png(png))
         return rel

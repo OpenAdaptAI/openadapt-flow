@@ -115,6 +115,23 @@ v0: 580 tests, drift matrix in CI. Solid for the reference browser backend.
 `DESIGN.md` has the module contracts; `docs/L1_INTEGRATION.md` covers feeding
 layered clinical-data platforms.
 
+## Privacy (PHI)
+
+For regulated deployments, PHI scrubbing on the persist/log paths is provided by
+the optional `privacy` extra (Presidio-backed
+[openadapt-privacy](https://github.com/OpenAdaptAI/openadapt-privacy)):
+
+```bash
+pip install 'openadapt-flow[privacy]' && python -m spacy download en_core_web_trf
+export OPENADAPT_FLOW_SCRUB=on          # scrub REPORT.md + logs, fail closed
+```
+
+The shareable `REPORT.md` and console logs are scrubbed; the compiled bundle and
+`report.json` keep literal identifiers on purpose (identity check + audit trail)
+and are protected by a documented boundary. Identity crops sent to the on-prem
+VLM appliance are deliberately not scrubbed — the control there is
+on-prem-only + no-retention. Full map: [docs/PRIVACY.md](docs/PRIVACY.md).
+
 ## Development
 
 ```bash

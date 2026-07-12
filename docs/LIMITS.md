@@ -207,7 +207,12 @@ FINAL:
    **ANY identifier-position token carrying an O/0 or l/1/I, numeric or
    alphanumeric** (the 9th reopening removed the earlier alphanumeric-only
    scoping: a purely-numeric `100512` vs a homonym's `1OO512` is exactly as
-   collapsible, and the letter+digit-mix predicate missed it). It can neither
+   collapsible, and the letter+digit-mix predicate missed it). The 10th
+   reopening extended "ANY" to **separator-formatted** MRNs: the gate used to
+   exempt `MG-4408` because `token.isalnum()` is false for a dashed token, so a
+   homonym `MG-44O8` verified — it now strips intra-identifier separators
+   (excluding only date-shaped tokens, so a DOB never becomes a gated
+   identifier). It can neither
    certify SAME nor assert DIFFERENT — and on a pure-pixel substrate with no
    structured/pixel/VLM verifier the ladder then HALTs. A different-NAME
    sibling is still an affirmative MISMATCH; a clean name+DOB with a

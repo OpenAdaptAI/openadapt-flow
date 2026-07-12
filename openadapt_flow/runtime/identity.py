@@ -546,6 +546,56 @@ def _has_digit(token: str) -> bool:
     return any(ch.isdigit() for ch in token)
 
 
+# Intra-identifier separators. Real MRNs / account refs are sometimes formatted
+# with these (``MG-4408``, ``123-45-6789``); we strip them before judging an
+# identifier so a separator does not smuggle a collapsible MRN past the
+# glyph-abstain gate (the P0 separator-bypass reopening). DATES also carry these
+# separators, so ``_is_identifier_shaped`` excludes date-shaped tokens FIRST.
+_ID_SEP_RE = re.compile(r"[-/.]")
+
+# A 3-segment date (``01/15/1980``, ``1980-01-15``, ``15.01.1980``), matched on
+# the OCR-homoglyph-canonical form so an OCR'd DOB (``0l/l5/l980``) is still
+# caught. Range-validated across the common segment orders so a genuinely
+# date-SHAPED value is excluded but a non-date separator token (``123-45-6789``,
+# ``MG-4408``) is NOT — it stays an identifier and remains glyph-gated.
+_DATE_SEG_RE = re.compile(r"^(\d{1,4})[-/.](\d{1,2})[-/.](\d{1,4})$")
+
+
+def _is_date_like(token: str) -> bool:
+    """True iff ``token`` plausibly parses as a 3-segment calendar date.
+
+    Dates are deliberately NOT treated as glyph-collapsible identifiers: a DOB
+    sits in every patient band, so gating on it would abstain on every band
+    (the DOB's identity role is chronology, handled elsewhere). Matched on the
+    homoglyph-canonical form (O->0, l/I/|/!->1) so an OCR-degraded DOB is caught
+    too, and range-validated so a non-date separator token (an MRN like
+    ``MG-4408`` or a ``123-45-6789``) is not mistaken for a date and therefore
+    stays glyph-gated."""
+    canon = token
+    for ch in "oO":
+        canon = canon.replace(ch, "0")
+    for ch in "lI|!":
+        canon = canon.replace(ch, "1")
+    m = _DATE_SEG_RE.match(canon)
+    if m is None:
+        return False
+    a, b, c = (int(g) for g in m.groups())
+
+    def _plausible(year: int, month: int, day: int) -> bool:
+        return 1 <= month <= 12 and 1 <= day <= 31 and (
+            1900 <= year <= 2100 or 0 <= year <= 99
+        )
+
+    # Accept if it reads as a real date under any common segment order
+    # (Y/M/D, M/D/Y, or D/M/Y). A separator token that fits none is an
+    # identifier, not a date.
+    return (
+        _plausible(a, b, c)  # Y/M/D
+        or _plausible(c, a, b)  # M/D/Y
+        or _plausible(c, b, a)  # D/M/Y
+    )
+
+
 def _is_identifier_shaped(token: str) -> bool:
     """Whether a squashed token occupies an IDENTIFIER position (an MRN /
     account / chart ref) rather than a name, date, or column word.
@@ -564,12 +614,23 @@ def _is_identifier_shaped(token: str) -> bool:
       NOT by the glyph-collapse gate. A run WITH a digit is an identifier:
       purely numeric (``100512``), alphanumeric (``AC50061``), any casing.
 
+    Separators are STRIPPED before the run test, so a hyphen/slash-formatted
+    MRN (``MG-4408``, ``123-45-6789``) is still an identifier — the P0
+    separator-bypass reopening, where ``token.isalnum()`` silently exempted any
+    separator-bearing MRN from the glyph gate and a same-name/same-DOB homonym
+    with a dashed collapsible MRN VERIFIED. DATES (which also carry separators)
+    are excluded FIRST via :func:`_is_date_like`, so stripping separators cannot
+    turn a DOB into a gated identifier and over-halt every band.
+
     This is deliberately over-inclusive on the identifier side: a bare numeric
-    run that is really an un-separated date, say, is treated AS an identifier
-    (→ the glyph gate can force ABSTAIN), the SAFE over-halting direction. Only
-    clearly non-identifier shapes (too short, separator-bearing, purely
-    alphabetic) are excluded."""
-    return len(token) >= _ID_MIN_LEN and token.isalnum() and _has_digit(token)
+    run that is really an un-separated date is treated AS an identifier (→ the
+    glyph gate can force ABSTAIN), the SAFE over-halting direction. Only clearly
+    non-identifier shapes (too short, date-shaped, purely alphabetic) are
+    excluded."""
+    if _is_date_like(token):
+        return False
+    core = _ID_SEP_RE.sub("", token)
+    return len(core) >= _ID_MIN_LEN and core.isalnum() and _has_digit(core)
 
 
 def _is_glyph_vulnerable_identifier(token: str) -> bool:

@@ -65,9 +65,10 @@ were fixed on 2026-07-10. All moved to the safe-halt section below.)
 The wrong-entity story above is an OCR story, and OCR has a proven ceiling.
 An adversarial review established an **impossibility result**: two DIFFERENT
 patients with the same NAME and same DOB whose only distinguishing field is a
-collapsible identifier — an MRN differing by a single O/0 or l/1 glyph
-(`MG4408` vs `MG44O8`, `AC50061` vs `AC5OO61`) — render to a **byte-identical
-OCR band**. That band is literally the same input a legitimate re-read of the
+collapsible identifier — an MRN differing by a single O/0 or l/1 glyph, whether
+ALPHANUMERIC (`MG4408` vs `MG44O8`, `AC50061` vs `AC5OO61`) or PURELY NUMERIC
+(`100512` vs `1OO512`, `417063` vs `4l7063` — the 9th reopening) — render to a
+**byte-identical OCR band**. That band is literally the same input a legitimate re-read of the
 true row produces, so *no function downstream of OCR* can separate the two
 (same input, no distinguishing output). Measured on the real render→OCR→match
 pipeline this WAS **~43.8% false accept** on the digit-flanked shape in the
@@ -152,12 +153,17 @@ FINAL:
    and did not block — the adversarial review of PR #31 proved that unsound: a
    same-name/same-DOB HOMONYM (`AC50061` vs `AC5OO61`) collapses to a
    byte-identical band, so a matched name+DOB CANNOT rule it out. The OCR tier
-   now **ABSTAINS** whenever the band rests on a glyph-confusable identifier
-   (an MRN/account token carrying an O/0 or l/1/I) — it can neither certify
-   SAME nor assert DIFFERENT — and on a pure-pixel substrate with no
+   now **ABSTAINS** whenever the band rests on a glyph-confusable identifier —
+   **ANY identifier-position token carrying an O/0 or l/1/I, numeric or
+   alphanumeric** (the 9th reopening removed the earlier alphanumeric-only
+   scoping: a purely-numeric `100512` vs a homonym's `1OO512` is exactly as
+   collapsible, and the letter+digit-mix predicate missed it). It can neither
+   certify SAME nor assert DIFFERENT — and on a pure-pixel substrate with no
    structured/pixel/VLM verifier the ladder then HALTs. A different-NAME
    sibling is still an affirmative MISMATCH; a clean name+DOB with a
-   NON-confusable identifier still verifies. The glyph-disambiguating /
+   NON-confusable identifier (one bearing NONE of `{0,1,O,l,I}`, e.g. `RC79284`)
+   still verifies. An OCR-split identifier is covered too: a confusable glyph in
+   any numeric/alnum FRAGMENT abstains. The glyph-disambiguating /
    high-resolution identifier OCR pass is the roadmapped mitigation.
 
 Net — the ladder is fail-safe, and its safety number is measured on the REAL
@@ -292,8 +298,10 @@ actions observed — at the cost of availability:
   `AC5OO61`, both OCR to `AC50061`; name+DOB carried → verified at coverage
   1.0 through the real replayer). The name-carry suppression of the
   confusable-identifier halt is REMOVED: the OCR tier now **ABSTAINS**
-  whenever the discriminative band contains a glyph-confusable identifier
-  (an alphanumeric MRN/account token with an O/0 or l/1/I), REGARDLESS of a
+  whenever the discriminative band contains a glyph-confusable identifier —
+  **any identifier-position token with an O/0 or l/1/I, numeric OR
+  alphanumeric** (see the 9th-reopening note below; the earlier
+  "alphanumeric MRN/account token" scoping is WITHDRAWN), REGARDLESS of a
   matched name+DOB — it can neither certify SAME nor assert DIFFERENT, so on
   a pure-pixel substrate the ladder HALTs. A different-NAME sibling still
   MISMATCHES; a clean name+DOB with a NON-confusable identifier still
@@ -301,9 +309,11 @@ actions observed — at the cost of availability:
   identifier OCR, or the structured-text tier) is what lets such a target
   VERIFY rather than HALT. The availability bill is the honest cost of this
   refusal — the OCR tier now aborts EVERY same-entity band that carries a
-  confusable identifier: **48.2% false aborts on frozen corpus v1** and
-  **43.6% on v2** (from 28.2% / lower before the 8th fix), the jump being
-  exactly the collapsible-identifier abstains; on real browser/desktop the
+  confusable identifier: **49.3% false aborts on frozen corpus v1** and
+  **43.6% on v2** (from 28.2% / lower before the 8th fix; up from 48.2% after
+  the 9th-reopening change flagged the numeric identifiers the frozen corpora
+  already contained), the jump being exactly the collapsible-identifier
+  abstains; on real browser/desktop the
   structured-text tier verifies these with no OCR ambiguity, so this cost
   bites only on pure-pixel substrates. Earlier availability history:
   **28.2% pre-8th on v1's noise classes** (10.7% pre-review, 21.2% after the
@@ -326,6 +336,28 @@ actions observed — at the cost of availability:
   compile-time-marked irreversible steps refuse; dense-table OCR
   undercount is real, which is why the 2x retry exists. Residual
   verify/abort classes are listed in "Known remaining" below.
+  **NINTH reopening (purely-numeric MRN) — CLOSED:** the 8th fix's predicate
+  required an identifier to contain BOTH a letter and a digit, so it flagged
+  only ALPHANUMERIC MRNs. A real MRN can be all digits, and a numeric MRN is
+  just as glyph-collapsible: `100512` (recorded) and a DIFFERENT same-name/DOB
+  patient's `1OO512` (letter O's) OCR to the byte-identical `100512`, so the
+  letter+digit predicate never flagged `100512` and the homonym VERIFIED on the
+  real replayer (also `400761`/`4OO761`, `417063`/`4l7063`). The rule is now
+  STRUCTURAL and conservative: the OCR tier VERIFIES same-identity only when
+  there is provably NO collapsible glyph in ANY identifier-position token — a
+  bare alphanumeric run ≥ 3 chars carrying a digit (numeric, alphanumeric, or
+  lowercase; a separator-bearing date and a digit-free name are excluded) that
+  bears one of `{0,1,O,l,I}` forces ABSTAIN, and when uncertain whether a token
+  is an identifier it is treated AS one (→ abstain, the safe over-halting
+  direction). Split identifiers are covered — the flag is a property of the
+  recorded token charged on any match path, so a confusable glyph in a numeric
+  FRAGMENT of an OCR-split MRN still abstains. The numeric hole was hidden
+  because BOTH the ROC corpora and the dense/ladder collapse corpus were
+  alpha-prefixed; purely-numeric and split homonyms were added and re-measured
+  on the real replayer at **0 false accept** (`benchmark/identity_ladder`,
+  `benchmark/dense_surface`). Cost: a higher OCR-path over-halt, disclosed
+  above and in those studies; a clean identifier bearing none of `{0,1,O,l,I}`
+  (e.g. `RC79284`) still verifies.
 - **Typed input that cannot be confirmed** (fixed 2026-07-08, verification
   hardened 2026-07-09). After every TYPE action, an OCR-able typed value
   must be READ back from the field region (2x-resolution retry included);
@@ -461,8 +493,9 @@ these are what remain):
   the identifier suspect rule keys on the RECORDED token carrying a
   digit; a 2-char alpha code ('AB') that OCRs to 'A8' has an all-alpha
   recorded token (so the identifier rule does not see it) and is under
-  the 3-char name floor. Full-length alphanumeric identifiers (MRNs,
-  account numbers) are covered; this residual is only the very short
+  the 3-char name floor. Full-length identifiers — numeric OR alphanumeric
+  MRNs, account numbers — are covered (the 9th reopening extended the glyph
+  gate to purely-numeric tokens); this residual is only the very short
   all-alpha code.
 - **Identifier letter/DIGIT collision is now CAUGHT** (5th-reopening
   fix, second review): a different patient's MRN/account number one
@@ -504,24 +537,26 @@ these are what remain):
   `click_name`; `click_action` stays 18.89%) — the cheap direction. **What
   is GUARANTEED:** name+DOB-discriminated identity. **What HALTS:** identity
   that would turn on a look-alike-character identifier alone.
-- **RESIDUAL (disclosed): a same-name/DOB collision with the NAME
-  displayed — on PIXEL-ONLY substrates.** A genuinely DIFFERENT patient who
-  shares the target's full NAME and DOB, whose digit-body MRN OCR-collapses
-  to the target's, and whose name is IN the identity band (opening the chart
-  via an Open button rather than the name cell) is band-identical to a
-  legitimate same-patient re-read — name+DOB carry, so the OCR tier VERIFIES.
-  This is a property of the OCR substrate, not the matcher: the two rows reach
-  the matcher as the same bytes. **On browser (DOM) and native desktop
-  (UIA/AX) this is CLOSED** by the structured-text tier above — the two MRNs
-  are different strings in the DOM/a11y tree, so the sibling mismatches (0
-  false accept on the real dense surface, digit-flanked attack included). The
-  residual is now scoped to PURE-PIXEL substrates (Citrix/RDP/VDI, broken
-  a11y) where no structured text exists; there the mitigations are the
-  pixel/perceptual identifier-crop tier (roadmapped, the next layer) and
-  glyph-disambiguating / high-resolution identifier OCR (also roadmapped).
-  Flagging every digit MRN instead would over-halt catastrophically (~3 of 4
-  real MRNs). Bounded to the astronomically rare same-full-name + same-DOB +
-  one-glyph-MRN coincidence with the name shown, on a pixel-only substrate.
+- **A same-name/DOB collision with the NAME displayed — now HALTS on
+  pixel-only substrates too (8th + 9th reopenings).** A genuinely DIFFERENT
+  patient who shares the target's full NAME and DOB, whose collapsible MRN
+  OCR-collapses to the target's, and whose name is IN the identity band
+  (opening the chart via an Open button rather than the name cell) is
+  band-identical to a legitimate same-patient re-read. #27 let name+DOB CARRY
+  identity here, so the OCR tier VERIFIED it — the adversarial review of PR #31
+  proved that a live wrong-patient VERIFY. It is now CLOSED in every substrate:
+  the OCR tier ABSTAINS on ANY collapsible-glyph identifier (numeric or
+  alphanumeric, the 9th reopening) REGARDLESS of a matched name+DOB, so on a
+  pure-pixel substrate the ladder HALTs rather than verifies. **On browser
+  (DOM) and native desktop (UIA/AX) it VERIFIES the correct row and mismatches
+  the sibling** via the structured-text tier — the two MRNs are different
+  strings in the DOM/a11y tree (0 false accept on the real dense surface,
+  digit-flanked and numeric attacks included), with no OCR-availability cost.
+  On pure-pixel substrates the roadmapped path to VERIFY (rather than HALT) is
+  the pixel/perceptual identifier-crop tier and glyph-disambiguating /
+  high-resolution identifier OCR. The cost of the refusal is a higher OCR-path
+  over-halt (every same-entity band carrying a collapsible identifier now
+  abstains), disclosed in the 8th/9th notes above and the render studies.
 - **Indistinguishable-class aborts are permanent** — a true row whose
   name OCR letter-letter-garbles ('Neil' read as 'Nell') aborts every
   time, because the band is textually identical to a real sibling;

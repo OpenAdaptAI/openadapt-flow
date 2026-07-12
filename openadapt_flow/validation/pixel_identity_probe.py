@@ -79,13 +79,16 @@ class IdPair:
     target: str
     sibling: str
     glyph_class: str   # "O0" or "l1"
-    flank: str         # "digit" or "alpha"
+    flank: str         # "digit", "alpha", or "numeric" (all-digit body)
     note: str
 
 
 # The digit-flanked O/0 (``MG4408`` / ``MG44O8``), the alpha-flanked
 # (``C0X3834`` / ``COX3834`` -- the exact dense_surface id_confusion_O0
-# class), and the l/1 analogues. Siblings are realistic distinct patients.
+# class), the l/1 analogues, and -- the 9th wrong-patient reopening -- the
+# PURELY NUMERIC MRNs the earlier alpha-prefixed corpus hid (``100512`` vs a
+# different patient's ``1OO512``, letter O's, which OCR reads byte-identically).
+# Siblings are realistic distinct patients.
 COLLAPSE_PAIRS: list[IdPair] = [
     IdPair("O0_digit_1", "MG4408", "MG44O8", "O0", "digit",
            "digit-flanked: target zero vs sibling letter-O (MG4408/MG44O8)"),
@@ -105,6 +108,17 @@ COLLAPSE_PAIRS: list[IdPair] = [
            "alpha-flanked 1 vs l (PL1X904/PLlX904)"),
     IdPair("l1_alpha_2", "RX1T552", "RXlT552", "l1", "alpha",
            "alpha-flanked 1 vs l (RX1T552/RXlT552)"),
+    # --- 9th reopening: PURELY NUMERIC MRNs (no letter prefix) ---------------
+    IdPair("O0_numeric_1", "100512", "1OO512", "O0", "numeric",
+           "purely-numeric MRN, two 0 vs two O (100512/1OO512)"),
+    IdPair("O0_numeric_2", "400761", "4OO761", "O0", "numeric",
+           "purely-numeric MRN, two 0 vs two O (400761/4OO761)"),
+    IdPair("O0_numeric_3", "501900", "5O19OO", "O0", "numeric",
+           "purely-numeric MRN, three 0 vs three O (501900/5O19OO)"),
+    IdPair("l1_numeric_1", "417063", "4l7063", "l1", "numeric",
+           "purely-numeric MRN, digit 1 vs letter l (417063/4l7063)"),
+    IdPair("l1_numeric_2", "110234", "ll0234", "l1", "numeric",
+           "purely-numeric MRN, leading 1s vs ls (110234/ll0234)"),
 ]
 
 

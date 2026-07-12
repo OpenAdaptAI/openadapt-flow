@@ -1,6 +1,6 @@
 # Dense sibling-surface false-abort / false-accept study
 
-The identity band matcher's headline numbers (`docs/validation/IDENTITY_ROC.md`: **false accept 0.000%, false abort 47.36%**) are measured on SYNTHETIC corpora (string pairs with hand-injected OCR noise) and, at the product level, on CLEAN OpenEMR identity banners. This study measures the SAME matcher on the surface where a wrong-patient write actually does damage: a dense, sibling-heavy record LIST, rendered as HTML, screenshotted, and read by the repo's own OCR (RapidOCR). Every band string below came out of OCR reading a rendered PNG — nothing is a fabricated string.
+The identity band matcher's headline numbers (`docs/validation/IDENTITY_ROC.md`: **false accept 0.000%, false abort 48.31%**) are measured on SYNTHETIC corpora (string pairs with hand-injected OCR noise) and, at the product level, on CLEAN OpenEMR identity banners. This study measures the SAME matcher on the surface where a wrong-patient write actually does damage: a dense, sibling-heavy record LIST, rendered as HTML, screenshotted, and read by the repo's own OCR (RapidOCR). Every band string below came out of OCR reading a rendered PNG — nothing is a fabricated string.
 
 ## Method (faithful to record + replay)
 
@@ -15,18 +15,18 @@ Operating point (pinned, from the ROC): {'coverage_threshold': 0.8, 'uncovered_r
 
 ## Headline (dense surface, armed clicks)
 
-- **per-click false abort: 71.11%** (256/360) — of which 25 readable-but-mismatch and 0 unreadable.
-- **per-click false accept: 0.00%** (0/360).
+- **per-click false abort: 78.33%** (376/480) — of which 36 readable-but-mismatch and 0 unreadable.
+- **per-click false accept: 0.00%** (0/480).
 - unarmed clicks (no band recorded, identity gate never runs): 0.
 
-**Versus the synthetic baseline** (false abort 47.36%, false accept 0.00%): the real dense-surface false abort is **71.11%**, i.e. **HIGHER** than the synthetic 47.36% by 23.75%. False accept STAYED 0 on real dense OCR.
+**Versus the synthetic baseline** (false abort 48.31%, false accept 0.00%): the real dense-surface false abort is **78.33%**, i.e. **HIGHER** than the synthetic 48.31% by 30.02%. False accept STAYED 0 on real dense OCR.
 
 ## Structured-text (DOM) identity path (the headline)
 
 Identity here is verified against STRUCTURED text -- the DOM row text under the click point (`backend.structured_text_at`, the same signal a native desktop backend gets from the UIA/AX tree) -- NOT OCR. The recorded target's DOM identity string is compared to the live DOM string at the resolved row by exact/normalized match, in which `0` and `O`, `1` and `l` are DISTINCT characters. This runs on the browser backend, where the dense table's DOM is available; on a pure-pixel substrate it is unavailable and identity falls back to the OCR path measured below.
 
-- **structured-path false accept: 0.00%** (0/360).
-- **structured-path false abort (over-halt): 0.00%** (0/360).
+- **structured-path false accept: 0.00%** (0/480).
+- **structured-path false abort (over-halt): 0.00%** (0/480).
 
 The digit-flanked glyph-collapse (`MG4408` vs `MG44O8`, `AC50061` vs `AC5OO61`) that produces false accepts on the OCR path in `click_action` -- and over-halts on the OCR path in `click_name` (identity resting solely on the collapsible MRN) -- does NOT occur here: the two MRNs are different strings in the DOM, so the sibling MISMATCHES and the true row VERIFIES. Because the DOM text is invariant across replay font/resolution, the structured path carries NO OCR-availability cost: it closes the class without #27's over-halt.
 
@@ -37,6 +37,9 @@ The digit-flanked glyph-collapse (`MG4408` vs `MG44O8`, `AC50061` vs `AC5OO61`) 
 | `generational_suffix` | 40 | 0.00% (0) | 0.00% (0) |
 | `id_confusion_O0` | 40 | 0.00% (0) | 0.00% (0) |
 | `id_confusion_l1` | 40 | 0.00% (0) | 0.00% (0) |
+| `id_numeric_O0` | 40 | 0.00% (0) | 0.00% (0) |
+| `id_numeric_l1` | 40 | 0.00% (0) | 0.00% (0) |
+| `id_split_numeric_O0` | 40 | 0.00% (0) | 0.00% (0) |
 | `letterletter_name` | 40 | 0.00% (0) | 0.00% (0) |
 | `mrn_transposition` | 40 | 0.00% (0) | 0.00% (0) |
 | `near_surname` | 40 | 0.00% (0) | 0.00% (0) |
@@ -48,8 +51,8 @@ The digit-flanked glyph-collapse (`MG4408` vs `MG44O8`, `AC50061` vs `AC5OO61`) 
 
 | group | n | false-abort (over-halt) | false-accept |
 | --- | --- | --- | --- |
-| `click_action` | 180 | 0.00% (0) | 0.00% (0) |
-| `click_name` | 180 | 0.00% (0) | 0.00% (0) |
+| `click_action` | 240 | 0.00% (0) | 0.00% (0) |
+| `click_name` | 240 | 0.00% (0) | 0.00% (0) |
 
 The OCR band path (the pixel-substrate FALLBACK) is measured below. UPDATED for the 8th wrong-patient reopening: #27's "disclosed digit-flanked residual" -- a same-name/same-DOB homonym whose collapsible MRN OCR-collapses to the target's, name shown -- was a LIVE wrong-patient VERIFY (proved on the real replayer in PR #31). The OCR tier now ABSTAINS on ANY band resting on a glyph-confusable identifier, REGARDLESS of a matched name+DOB, so that residual is closed (0 false accept) at the cost of a higher halt rate on the OCR path; a different-NAME sibling still MISMATCHES and a clean name+DOB with a NON-confusable identifier still VERIFIES. The structured tier never lets the OCR fallback override a structured mismatch.
 
@@ -57,25 +60,28 @@ The OCR band path (the pixel-substrate FALLBACK) is measured below. UPDATED for 
 
 | group | n | false-abort | (mismatch / unreadable) | false-accept |
 | --- | --- | --- | --- | --- |
-| `hi_res_arial` | 90 | 71.11% (64) | 6 / 0 | 0.00% (0) |
-| `native_arial` | 90 | 71.11% (64) | 8 / 0 | 0.00% (0) |
-| `serif_drift` | 90 | 71.11% (64) | 4 / 0 | 0.00% (0) |
-| `small_dense` | 90 | 71.11% (64) | 7 / 0 | 0.00% (0) |
+| `hi_res_arial` | 120 | 78.33% (94) | 10 / 0 | 0.00% (0) |
+| `native_arial` | 120 | 78.33% (94) | 13 / 0 | 0.00% (0) |
+| `serif_drift` | 120 | 78.33% (94) | 1 / 0 | 0.00% (0) |
+| `small_dense` | 120 | 78.33% (94) | 12 / 0 | 0.00% (0) |
 
 ### By click config
 
 | group | n | false-abort | (mismatch / unreadable) | false-accept |
 | --- | --- | --- | --- | --- |
-| `click_action` | 180 | 71.11% (128) | 14 / 0 | 0.00% (0) |
-| `click_name` | 180 | 71.11% (128) | 11 / 0 | 0.00% (0) |
+| `click_action` | 240 | 78.33% (188) | 21 / 0 | 0.00% (0) |
+| `click_name` | 240 | 78.33% (188) | 15 / 0 | 0.00% (0) |
 
 ### By collision class
 
 | group | n | false-abort | (mismatch / unreadable) | false-accept |
 | --- | --- | --- | --- | --- |
 | `generational_suffix` | 40 | 20.00% (8) | 0 / 0 | 0.00% (0) |
-| `id_confusion_O0` | 40 | 100.00% (40) | 22 / 0 | 0.00% (0) |
+| `id_confusion_O0` | 40 | 100.00% (40) | 30 / 0 | 0.00% (0) |
 | `id_confusion_l1` | 40 | 100.00% (40) | 2 / 0 | 0.00% (0) |
+| `id_numeric_O0` | 40 | 100.00% (40) | 0 / 0 | 0.00% (0) |
+| `id_numeric_l1` | 40 | 100.00% (40) | 3 / 0 | 0.00% (0) |
+| `id_split_numeric_O0` | 40 | 100.00% (40) | 0 / 0 | 0.00% (0) |
 | `letterletter_name` | 40 | 80.00% (32) | 0 / 0 | 0.00% (0) |
 | `mrn_transposition` | 40 | 40.00% (16) | 1 / 0 | 0.00% (0) |
 | `near_surname` | 40 | 60.00% (24) | 0 / 0 | 0.00% (0) |
@@ -89,10 +95,16 @@ The OCR band path (the pixel-substrate FALLBACK) is measured below. UPDATED for 
 | --- | --- | --- | --- | --- |
 | `generational_suffix::click_action` | 20 | 20.00% (4) | 0 / 0 | 0.00% (0) |
 | `generational_suffix::click_name` | 20 | 20.00% (4) | 0 / 0 | 0.00% (0) |
-| `id_confusion_O0::click_action` | 20 | 100.00% (20) | 11 / 0 | 0.00% (0) |
-| `id_confusion_O0::click_name` | 20 | 100.00% (20) | 11 / 0 | 0.00% (0) |
+| `id_confusion_O0::click_action` | 20 | 100.00% (20) | 15 / 0 | 0.00% (0) |
+| `id_confusion_O0::click_name` | 20 | 100.00% (20) | 15 / 0 | 0.00% (0) |
 | `id_confusion_l1::click_action` | 20 | 100.00% (20) | 2 / 0 | 0.00% (0) |
 | `id_confusion_l1::click_name` | 20 | 100.00% (20) | 0 / 0 | 0.00% (0) |
+| `id_numeric_O0::click_action` | 20 | 100.00% (20) | 0 / 0 | 0.00% (0) |
+| `id_numeric_O0::click_name` | 20 | 100.00% (20) | 0 / 0 | 0.00% (0) |
+| `id_numeric_l1::click_action` | 20 | 100.00% (20) | 3 / 0 | 0.00% (0) |
+| `id_numeric_l1::click_name` | 20 | 100.00% (20) | 0 / 0 | 0.00% (0) |
+| `id_split_numeric_O0::click_action` | 20 | 100.00% (20) | 0 / 0 | 0.00% (0) |
+| `id_split_numeric_O0::click_name` | 20 | 100.00% (20) | 0 / 0 | 0.00% (0) |
 | `letterletter_name::click_action` | 20 | 80.00% (16) | 0 / 0 | 0.00% (0) |
 | `letterletter_name::click_name` | 20 | 80.00% (16) | 0 / 0 | 0.00% (0) |
 | `mrn_transposition::click_action` | 20 | 40.00% (8) | 1 / 0 | 0.00% (0) |
@@ -112,9 +124,9 @@ Highest false-abort collision class: **`id_confusion_O0`** at 100.00% (40/40).
 
 ## Adjacent-row bleed
 
-- Bands whose raw OCR lines included a token from a NEIGHBOUR row (above/below the resolved row): 145/360 (40.28%).
+- Bands whose raw OCR lines included a token from a NEIGHBOUR row (above/below the resolved row): 199/480 (41.46%).
 - Neighbour tokens that SURVIVED the `lines_near_point` row filter into the identity band: 0.
-- Trials where the row filter CHANGED the false-abort verdict (i.e. bleed would have changed the decision without it): 76.
+- Trials where the row filter CHANGED the false-abort verdict (i.e. bleed would have changed the decision without it): 99.
 
 **Finding:** the `lines_near_point` row refinement absorbs adjacent-row bleed — neighbour tokens are picked up in the coarse 64px band but filtered out before the verdict, and removing the filter would change decisions in the count above.
 
@@ -124,6 +136,6 @@ Highest false-abort collision class: **`id_confusion_O0`** at 100.00% (40/40).
 
 ## Honest verdict (does the product clear the flagship bar?)
 
-On the dense sibling surface the TRUE per-click false abort is **71.11%**, above the synthetic 47.36%. False accept stayed at 0 — the catastrophic wrong-patient direction held on real dense OCR, which is the number that gates the regulated-clinic buyer.
+On the dense sibling surface the TRUE per-click false abort is **78.33%**, above the synthetic 48.31%. False accept stayed at 0 — the catastrophic wrong-patient direction held on real dense OCR, which is the number that gates the regulated-clinic buyer.
 
 The availability cost (false abort) is a per-click hybrid-fallback escalation (~$0.10) or a human retry; it is the cheap direction and is the price paid for the zero-false-accept posture. Selection-bias disclosure: this is measured on THIS rendered fixture + RapidOCR, not 'in the world' — a different renderer, font stack, or OCR engine would shift the false-abort rate (and could, in principle, surface a false accept the frozen confusion table does not model).

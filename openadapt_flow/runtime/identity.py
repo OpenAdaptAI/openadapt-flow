@@ -270,29 +270,28 @@ _GENERIC_IDENTITY_WORDS = frozenset(
     )
 )
 
-# The letter/digit NEAR-HOMOGLYPHS, split by side of the O/0 and l/1/I
-# classes, because the two sides carry DIFFERENT evidence:
-#
-#   - LETTER side (O, l, I, and the |/! OCR emits for them): a homoglyph
-#     LETTER standing inside an otherwise-numeric identifier is AFFIRMATIVE
-#     evidence OCR sat on an ambiguous glyph — it read a letter where a
-#     digit almost certainly belongs. This is #26's signal, KEPT as a HARD
-#     halt: it fires even when name+DOB raw-match, because a letter-in-MRN
-#     is a positive ambiguity flag, not merely "an MRN is present". This is
-#     what keeps the same-name/DOB letter-collapse (COX3834) a HALT and
-#     preserves the 6th-reopening closure with no regression.
-#   - DIGIT side (0, 1): a digit is the NORMAL content of an MRN body; ~3
-#     of every 4 real MRNs carry a 0 or 1. Flagging it as a blanket halt
-#     would over-halt catastrophically (the failure #26's digit-blindness
-#     avoided and the digit-flanked review exploited). So a digit-only
-#     glyph-vulnerable identifier (no homoglyph letter — 'AC50061',
-#     'MG4408') halts ONLY when identity rests SOLELY on it: when a
-#     discriminative name+DOB does NOT independently carry the identity.
-#     This is the name+DOB-primary half of the fix and what closes the
-#     digit-flanked collapse in the config where the name is excluded.
+# The letter/digit NEAR-HOMOGLYPHS of the O/0 and l/1/I classes — the glyphs
+# RapidOCR collapses onto one another. BOTH sides now carry the SAME evidence
+# and are flagged identically (the 9th wrong-patient reopening): a confusable
+# glyph in an identifier-position token means OCR cannot be trusted to have read
+# that token glyph-for-glyph, whether the surviving glyph is a LETTER (O/l/I —
+# OCR read a letter where a digit likely belongs) or a DIGIT (0/1 — a
+# same-identity re-read AND a homonym whose distinguishing letter-O collapsed to
+# a digit-0 both produce this exact digit form). Earlier fixes (#26/#27) tried
+# to treat the digit side more leniently — flag only when a homoglyph LETTER
+# survived, or let a matched name+DOB "carry" a digit-body MRN — and each left a
+# live wrong-patient VERIFY (the 8th reopening on alphanumeric MRNs, the 9th on
+# PURELY NUMERIC ones: 100512 vs 1OO512 OCR byte-identically). There is no safe
+# asymmetry: any identifier-position token bearing one of these glyphs forces
+# the OCR tier to ABSTAIN. (| and ! are the shapes OCR emits for l/I.)
 _ID_HOMOGLYPH_LETTERS = frozenset("oli|!")
 _ID_HOMOGLYPH_DIGITS = frozenset("01")
 _ID_HOMOGLYPH_CHARS = _ID_HOMOGLYPH_LETTERS | _ID_HOMOGLYPH_DIGITS
+
+# Minimum length of a bare alphanumeric run for it to occupy an IDENTIFIER
+# position (an MRN / account / chart ref). Below this a run is too short to be a
+# discriminating identifier (a 1-2 char code, a sex-column letter).
+_ID_MIN_LEN = 3
 
 # Characters that cannot appear in a real person's name but do appear in
 # OCR confusion classes: a raw-unequal token pair involving one of these
@@ -547,26 +546,55 @@ def _has_digit(token: str) -> bool:
     return any(ch.isdigit() for ch in token)
 
 
+def _is_identifier_shaped(token: str) -> bool:
+    """Whether a squashed token occupies an IDENTIFIER position (an MRN /
+    account / chart ref) rather than a name, date, or column word.
+
+    Conservative by construction (the 9th wrong-patient reopening). An
+    identifier is a contiguous ALPHANUMERIC run of at least ``_ID_MIN_LEN``
+    chars that CARRIES A DIGIT:
+
+    - the alphanumeric-RUN requirement excludes dates/DOBs, which carry a `/`
+      or `-` separator (``01/15/1980`` is not a bare run) — a date is judged as
+      chronology/identity elsewhere, never as a collapsible identifier;
+    - the DIGIT requirement is what distinguishes an identifier from a NAME: a
+      real person's name carries no digit, so a purely-alphabetic run is a name
+      or a low-entropy column word (``Active``), handled by the
+      name/coverage/contradiction budgets and the letter-letter suspect rule —
+      NOT by the glyph-collapse gate. A run WITH a digit is an identifier:
+      purely numeric (``100512``), alphanumeric (``AC50061``), any casing.
+
+    This is deliberately over-inclusive on the identifier side: a bare numeric
+    run that is really an un-separated date, say, is treated AS an identifier
+    (→ the glyph gate can force ABSTAIN), the SAFE over-halting direction. Only
+    clearly non-identifier shapes (too short, separator-bearing, purely
+    alphabetic) are excluded."""
+    return len(token) >= _ID_MIN_LEN and token.isalnum() and _has_digit(token)
+
+
 def _is_glyph_vulnerable_identifier(token: str) -> bool:
-    """Whether a squashed token is an identifier whose glyphs OCR cannot be
+    """Whether a squashed token is an IDENTIFIER whose glyphs OCR cannot be
     trusted to have read glyph-for-glyph (see GLYPH_AMBIGUOUS_ID_CHARS_CAP).
 
-    True iff the token is IDENTIFIER-LIKE (mixes at least one letter and one
-    digit — an MRN/account/chart ref, where glyph identity is load-bearing
-    and, unlike a name, carries no linguistic redundancy) AND carries a
-    character in the O/0 or l/1/I near-homoglyph classes on EITHER side (a
-    letter O/l/I or a digit 0/1). Detecting the DIGIT side too is what lets
-    the name+DOB-primary check recognise the digit-flanked collapse
-    ('AC50061', 'MG480312') as untrustworthy-as-a-sole-discriminator — the
-    exact shape #26's letter-only rule missed. A bare name or DOB (no
-    letter+digit mix) is not an identifier and is never flagged; this
-    predicate only gates whether a SOLE-discriminator identity may verify,
-    so a plain numeric MRN with a clean name+DOB still verifies via the
-    name+DOB carrier."""
-    return (
-        _has_digit(token)
-        and any(ch.isalpha() for ch in token)
-        and any(ch in _ID_HOMOGLYPH_CHARS for ch in token)
+    True iff the token is IDENTIFIER-SHAPED (:func:`_is_identifier_shaped`) AND
+    carries at least one character in the O/0 or l/1/I near-homoglyph classes
+    (:data:`_ID_HOMOGLYPH_CHARS`), on EITHER side — a letter O/l/I OR a digit
+    0/1.
+
+    The 9th wrong-patient reopening DROPPED the earlier `letter AND digit`
+    (alphanumeric-mix) requirement. A real MRN can be PURELY NUMERIC, and a
+    numeric MRN is exactly as glyph-collapsible as an alphanumeric one:
+    ``100512`` (recorded) and a DIFFERENT patient's ``1OO512`` (letter O's) OCR
+    to the byte-identical string ``100512``, so a matcher keyed on a
+    letter+digit mix never flagged ``100512`` and the homonym VERIFIED. The
+    rule is now structural and symmetric: ANY identifier-position token bearing
+    a confusable glyph — numeric, alphanumeric, or lowercase — makes the OCR
+    tier ABSTAIN. A name or a separator-bearing date is not identifier-shaped
+    and is never flagged here; a clean identifier bearing NONE of {0,1,O,l,I}
+    (e.g. ``RC79284``) is identifier-shaped but not glyph-vulnerable, so it
+    still verifies."""
+    return _is_identifier_shaped(token) and any(
+        ch in _ID_HOMOGLYPH_CHARS for ch in token
     )
 
 
@@ -671,8 +699,9 @@ class BandMatch(NamedTuple):
             recorded token — absence of the identity token itself, worse
             than trailing-numerics dropout.
         glyph_ambiguous_id_chars: Squashed characters of MATCHED recorded
-            glyph-vulnerable identifier tokens (an identifier-like
-            alphanumeric carrying an O/0 or l/1/I near-homoglyph; see
+            glyph-vulnerable identifier tokens (an identifier-position
+            token -- numeric or alphanumeric -- carrying an O/0 or l/1/I
+            near-homoglyph; see
             GLYPH_AMBIGUOUS_ID_CHARS_CAP). Charged in FULL on EITHER side and
             REGARDLESS of a matched name/DOB (the 8th wrong-patient
             reopening): a RAW match here may be an OCR glyph-collapse of a
@@ -721,7 +750,8 @@ def _match_tokens(
     see :data:`SUSPECT_CHARS_CAP`).
 
     A further quality flag, ``glyph_ambiguous_id``, marks glyph-vulnerable
-    identifier tokens (letter+digit mix carrying an O/0 or l/1/I char, on
+    identifier tokens (an identifier-position token -- numeric or
+    alphanumeric -- carrying an O/0 or l/1/I char, on
     either side) that matched RAW — the raw equality may be an OCR
     glyph-collapse of a DIFFERENT identifier. Whether such a token halts
     depends on the name+DOB-primary gate in :func:`band_match` (see
@@ -743,13 +773,6 @@ def _match_tokens(
         matched[i] = True
         if expected_raw == observed_raw:
             raw_matched[i] = True
-            if _is_glyph_vulnerable_identifier(expected_raw):
-                # Raw-equal, but the identifier carries an O/0 or l/1/I
-                # near-homoglyph (either side): OCR may have collapsed a
-                # differing glyph into this string, so the raw match is not
-                # same-identity evidence on its own. Whether it halts is
-                # decided by the name+DOB-primary gate in band_match.
-                glyph_ambiguous_id[i] = True
         elif _suspicious_pair(expected_raw, observed_raw):
             suspect_evidence[i] = True
 
@@ -774,17 +797,17 @@ def _match_tokens(
             for j, oc in enumerate(obs_c):
                 if oc == concat_c:
                     rawok = concat_raw == obs[j]
-                    # NB: no glyph-vulnerable-identifier flag here. This is
-                    # the split path (consecutive RECORDED tokens OCR-glued
-                    # into one observed token); the concatenation is not a
-                    # single identifier — a name adjacent to a numeric field
-                    # ('Evelyn'+'A743380') would look letter+digit+homoglyph
-                    # and false-halt. The flag is set only for a SINGLE
-                    # recorded identifier token (single / join paths). This
-                    # split path stays a latent, fixture-unreachable hole
-                    # (docs/LIMITS.md); under name+DOB-primary a real
-                    # name+MRN glue still verifies on the discriminative
-                    # NAME carrier and mismatches a wrong sibling on it.
+                    # SPLIT path: consecutive RECORDED tokens OCR-glued into
+                    # one observed token. The glyph-vulnerable-identifier flag
+                    # is NOT set on the whole concatenation (a name adjacent to
+                    # a numeric field, 'Evelyn'+'A743380', would look like one
+                    # letter+digit+homoglyph identifier). Instead each recorded
+                    # FRAGMENT is flagged individually in the unified post-pass
+                    # below, on its raw-matched status — so a confusable-glyph
+                    # NUMERIC/alnum fragment ('0061') of a split identifier
+                    # triggers ABSTAIN (the 9th reopening's split case) while
+                    # the adjacent pure-alpha name fragment does not. No latent
+                    # split hole remains.
                     for m in range(i, i + size):
                         matched[m] = True
                         if rawok:
@@ -809,6 +832,22 @@ def _match_tokens(
                     break
             if matched[i]:
                 break
+
+    # Unified glyph-vulnerable-identifier flag (the 9th wrong-patient
+    # reopening): a property of the RECORDED token, charged on ANY match path
+    # (single / split / join). A recorded identifier-position token that
+    # matched RAW (byte-identically after squashing) AND carries a confusable
+    # O/0 or l/1/I glyph is flagged — the raw equality may be an OCR
+    # glyph-collapse of a DIFFERENT patient's identifier. Keying it here, on
+    # ``raw_matched`` alone, closes the split hole: a fragment of an
+    # OCR-split identifier ('0061') is a recorded token in its own right, so
+    # it is flagged exactly like an unsplit one. A CONFUSION-only match
+    # (raw-unequal) is NOT flagged here — the strings differ, which is
+    # affirmative different-identifier evidence handled by the suspect rule
+    # (→ mismatch), not the abstain gate.
+    for i in range(len(exp)):
+        if raw_matched[i] and _is_glyph_vulnerable_identifier(exp[i]):
+            glyph_ambiguous_id[i] = True
     return (
         matched,
         explained,
@@ -967,7 +1006,8 @@ def band_match(
     contradicted_chars = 0
     suspect_chars = 0
     # Squashed chars of RAW-matched glyph-vulnerable identifier tokens (an
-    # identifier-like alphanumeric carrying an O/0 or l/1/I near-homoglyph;
+    # identifier-position token, numeric or alphanumeric, carrying an O/0 or
+    # l/1/I near-homoglyph;
     # see _is_glyph_vulnerable_identifier). ALWAYS charged, on either the
     # letter (O/l/I) or the digit (0/1) side -- the 8th wrong-patient
     # reopening: a matched name+DOB does NOT license a collapsible MRN,

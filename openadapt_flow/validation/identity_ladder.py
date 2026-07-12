@@ -1,4 +1,8 @@
-"""Integrated identity-ladder measurement on the dense O/0-collapse surface.
+"""Integrated identity-ladder measurement on the dense glyph-collapse surface.
+
+Homonym pairs span BOTH the O/0 and l/1 classes and BOTH alphanumeric and
+PURELY NUMERIC MRNs (the 9th wrong-patient reopening: 100512 vs a homonym's
+1OO512, which the earlier alpha-prefixed corpus hid).
 
 Every number here comes from the PRODUCTION tier stack: this harness drives
 the REAL ``Replayer._verify_identity`` (structured-text -> pixel-compare ->
@@ -89,13 +93,16 @@ from openadapt_flow.validation.dense_surface import render_table_html
 from openadapt_flow.validation.dense_surface import DenseTable, Row
 from openadapt_flow.validation.pixel_identity_probe import COLLAPSE_PAIRS
 
-# O/0 collapse pairs only (the surface OCR provably collapses). Each becomes a
-# same-NAME/same-DOB HOMONYM pair: two DIFFERENT patients sharing name+DOB,
-# differing only in the one-glyph MRN (target digit-0 vs sibling letter-O).
-_O0_PAIRS = [p for p in COLLAPSE_PAIRS if p.glyph_class == "O0"]
+# Glyph-collapse pairs OCR provably collapses -- BOTH the O/0 and l/1 classes,
+# and (the 9th wrong-patient reopening) the PURELY NUMERIC MRNs the earlier
+# alpha-prefixed corpus hid. Each becomes a same-NAME/same-DOB HOMONYM pair:
+# two DIFFERENT patients sharing name+DOB, differing only in the one-glyph MRN
+# (target digit vs sibling letter). Every pair is measured; a shared name+DOB is
+# assigned round-robin from the pool below (so adding pairs never truncates).
+_COLLAPSE_PAIRS = list(COLLAPSE_PAIRS)
 
-# A shared name+DOB per pair (so the ONLY discriminator is the collapsible
-# MRN -- the exact wrong-patient shape). Names are fake.
+# A shared name+DOB pool (so the ONLY discriminator is the collapsible MRN --
+# the exact wrong-patient shape). Names are fake.
 _SHARED = [
     ("Smith, John", "01/15/1980"),
     ("Okafor, Philip", "1966-01-17"),
@@ -317,7 +324,8 @@ def _measure(name: str, cases: list[dict]) -> dict:
 
 
 def run(out_dir: Path) -> dict:
-    pairs = list(zip(_O0_PAIRS, _SHARED))
+    pairs = [(p, _SHARED[i % len(_SHARED)])
+             for i, p in enumerate(_COLLAPSE_PAIRS)]
     # Pre-render every (pair, condition) frame once.
     rec: dict[str, Rendered] = {}
     stable_t: dict[str, Rendered] = {}
@@ -391,8 +399,9 @@ def run(out_dir: Path) -> dict:
            with_crop=False, vlm_on=False)
 
     summary = {
-        "surface": "dense O/0-glyph-collapse same-name/same-DOB homonyms "
-                   "(different patients one MRN glyph apart)",
+        "surface": "dense glyph-collapse same-name/same-DOB homonyms -- O/0 and "
+                   "l/1, alphanumeric AND purely-numeric MRNs (different "
+                   "patients one MRN glyph apart; 9th reopening added numerics)",
         "n_pairs": len(pairs),
         "measured_via": "the REAL Replayer._verify_identity production tier "
                         "stack (structured -> pixel -> vlm -> OCR -> halt); no "
@@ -414,7 +423,8 @@ def run(out_dir: Path) -> dict:
 
 def _markdown(summary: dict) -> str:
     lines = [
-        "# Integrated identity ladder — measured on the dense O/0-collapse surface",
+        "# Integrated identity ladder — measured on the dense glyph-collapse "
+        "surface (O/0 + l/1, alphanumeric AND purely-numeric MRNs)",
         "",
         "Every number below comes from the **production tier stack**: this "
         "harness drives the REAL `Replayer._verify_identity` "
@@ -448,8 +458,9 @@ def _markdown(summary: dict) -> str:
         f"the real replayer stack: {'HOLDS' if inv else 'VIOLATED'}.**",
         "",
         "- **OCR alone cannot verify a collapsible MRN.** On a pure-pixel "
-        "substrate, a band whose identity rests on a glyph-confusable MRN (an "
-        "MRN/account token carrying an O/0 or l/1/I) is NOT safely verifiable "
+        "substrate, a band whose identity rests on a glyph-confusable MRN (ANY "
+        "identifier-position token carrying an O/0 or l/1/I — numeric OR "
+        "alphanumeric, the 9th reopening) is NOT safely verifiable "
         "by OCR: a same-name/same-DOB homonym whose distinguishing glyph OCR "
         "collapsed is indistinguishable. The OCR tier ABSTAINS → HALT (the "
         "`ocr_only_confusable` and `pixel_drift_*` over-halt). Safe "

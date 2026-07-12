@@ -25,8 +25,35 @@ def test_collision_pairs_cover_every_class() -> None:
         "same_surname_diff_first", "letterletter_name",
         "same_name_diff_dob", "mrn_transposition",
         "id_confusion_l1", "id_confusion_O0",
+        # 9th reopening: purely-numeric + split-numeric homonyms must be in the
+        # corpus so the numeric hole can never be hidden by measurement again.
+        "id_numeric_O0", "id_numeric_l1", "id_split_numeric_O0",
     }
     assert expected <= classes
+
+
+def test_numeric_id_classes_are_same_name_dob_all_digit_and_collapsible() -> None:
+    # The 9th-reopening additions: same name + DOB, a PURELY NUMERIC MRN
+    # (no letter in the target) one O/0 or l/1 glyph-class apart -- the shape
+    # the alpha-prefixed corpus hid.
+    pairs = {p.collision_class: p for p in ds.build_collision_pairs(seed=2)}
+    for cls in ("id_numeric_O0", "id_numeric_l1"):
+        p = pairs[cls]
+        assert p.target.name == p.sibling.name
+        assert p.target.dob == p.sibling.dob
+        assert p.target.mrn != p.sibling.mrn
+        assert p.target.mrn.isdigit()          # target MRN is PURELY NUMERIC
+        # the sibling swaps a confusable digit for its look-alike letter
+        assert any(c in "Ol" for c in p.sibling.mrn)
+
+
+def test_split_numeric_id_class_has_fragmented_confusable_mrn() -> None:
+    p = {p.collision_class: p
+         for p in ds.build_collision_pairs(seed=2)}["id_split_numeric_O0"]
+    assert p.target.name == p.sibling.name and p.target.dob == p.sibling.dob
+    assert " " in p.target.mrn                  # a SPLIT (fragmented) MRN
+    # each numeric fragment carries a confusable 0 the sibling renders as O
+    assert "0" in p.target.mrn and "O" in p.sibling.mrn
 
 
 def test_siblings_are_distinct_patients() -> None:
@@ -146,7 +173,10 @@ def test_markdown_zero_false_accept_states_held() -> None:
     agg = ds.aggregate(_result([_trial()]))
     md = ds.render_markdown(_result([_trial()]), agg)
     assert "Zero." in md
-    assert "47.36%" in md  # synthetic baseline cited (8th-reopening abstain cost)
+    # synthetic ROC baseline cited; tracks SYNTHETIC_FALSE_ABORT (9th reopening:
+    # numeric MRNs now abstain, raising it to 48.31%).
+    assert f"{ds.SYNTHETIC_FALSE_ABORT * 100:.2f}%" in md
+    assert "48.31%" in md
 
 
 def test_bleed_aggregation() -> None:

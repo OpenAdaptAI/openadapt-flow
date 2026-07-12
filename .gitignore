@@ -3,6 +3,7 @@
 .venv-glyph/
 .venv-dom/
 .venv-homonym/
+.venv9th/
 __pycache__/
 *.pyc
 *.egg-info/

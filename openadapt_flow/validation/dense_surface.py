@@ -203,6 +203,47 @@ def build_collision_pairs(seed: int) -> list[CollisionPair]:
             f"identical name+DOB, MRN one OCR-confusable char apart "
             f"({mrn} vs {smrn})"))
 
+    # -- PURELY NUMERIC MRN confusion (9th reopening): same name+DOB, an
+    # all-digit MRN one O/0 or l/1 glyph apart. The earlier corpus was all
+    # ALPHA-PREFIXED (PL1.../C0X...), which hid the numeric hole -- a numeric
+    # MRN was flagged by NEITHER the letter-only (#26) NOR the alphanumeric-mix
+    # (#27/#32) predicate, so a numeric homonym VERIFIED the wrong patient.
+    for label in ("id_numeric_O0", "id_numeric_l1"):
+        dob = _dob(rng)
+        name = f"{rng.choice(_SURNAMES)}, {rng.choice(_FIRSTS)}"
+        if label == "id_numeric_O0":
+            # a 6-digit MRN with 0s the sibling renders as letter O.
+            mrn = f"{rng.randint(1, 5)}00{rng.randint(100, 999)}"
+            smrn = mrn.replace("0", "O")
+        else:
+            # a 6-digit MRN with 1s the sibling renders as letter l.
+            mrn = f"{rng.randint(2, 5)}1{rng.randint(200, 999)}1"
+            smrn = mrn.replace("1", "l")
+        t = Row(name, dob, mrn, rng.choice("MF"), rng.choice(_STATUSES))
+        s = Row(name, dob, smrn, t.sex, t.status)
+        pairs.append(CollisionPair(
+            label, t, s,
+            f"identical name+DOB, PURELY NUMERIC MRN one OCR-confusable glyph "
+            f"apart ({mrn} vs {smrn}) -- the 9th-reopening numeric hole"))
+
+    # -- SPLIT numeric identifier (9th reopening): the target's numeric MRN, and
+    # a sibling one glyph apart, but the recorded/observed MRN is stored with an
+    # embedded space so OCR (or the fixture) presents it as FRAGMENTS. A
+    # confusable glyph in any numeric fragment must still trigger abstain.
+    for label in ("id_split_numeric_O0",):
+        dob = _dob(rng)
+        name = f"{rng.choice(_SURNAMES)}, {rng.choice(_FIRSTS)}"
+        head = f"{rng.randint(1, 9)}0{rng.randint(1, 9)}"
+        tail = f"0{rng.randint(10, 99)}"
+        mrn = f"{head} {tail}"           # split into two numeric fragments
+        smrn = mrn.replace("0", "O")     # sibling: letter O in both fragments
+        t = Row(name, dob, mrn, rng.choice("MF"), rng.choice(_STATUSES))
+        s = Row(name, dob, smrn, t.sex, t.status)
+        pairs.append(CollisionPair(
+            label, t, s,
+            f"identical name+DOB, SPLIT numeric MRN ({mrn!r} vs {smrn!r}) -- a "
+            f"confusable glyph in a numeric FRAGMENT must still abstain"))
+
     return pairs
 
 
@@ -891,7 +932,7 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
 # Markdown report
 # ---------------------------------------------------------------------------
 
-SYNTHETIC_FALSE_ABORT = 0.4736   # docs/validation/IDENTITY_ROC.md, v1+v2+v3 (8th reopening)
+SYNTHETIC_FALSE_ABORT = 0.4831   # docs/validation/IDENTITY_ROC.md, v1+v2+v3 (9th reopening)
 SYNTHETIC_FALSE_ACCEPT = 0.0
 
 

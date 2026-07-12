@@ -308,6 +308,11 @@ class StepResult(BaseModel):
     input_verified: Optional[bool] = None  # TYPE steps: typed input landed
     input_retried: bool = False  # TYPE steps: refocus-and-retype fired
     postconditions_ok: Optional[bool] = None
+    # Drift-oracle: postconditions that deterministically FAILED but were
+    # confirmed by the optional on-prem VLM state-verifier under render drift
+    # (recorded for audit; empty unless an appliance is configured).
+    postcondition_drift_rescues: list[str] = Field(default_factory=list)
+    drift_oracle_calls: int = 0  # VLM state-verifier calls this step
     heal: Optional[HealEvent] = None
     error: Optional[str] = None
     before_png: Optional[str] = None  # run-dir-relative paths

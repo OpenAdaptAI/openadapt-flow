@@ -59,6 +59,38 @@ were fixed on 2026-07-10. All moved to the safe-halt section below.)
   tail behind that click **remains reachable with a green report** — the
   "irreversible steps refuse on unreadable band" branch never runs unless
   a human marked the step at compile time.
+- **Postconditions read the SCREEN, not the system of record — so
+  transactional write faults are silent.** A 2026-07-12 fault-model study
+  (`benchmark/fault_model/`) drove 90 replays through a real persistence
+  boundary and found the vision postconditions (`text_present` /
+  `region_stable` / `url_changed`) silently mishandle **5 of 7** transactional
+  fault classes: a duplicate submission or double-click writes a SECOND record
+  behind a clean success; an optimistic-UI update the backend later rejects
+  reports success over an empty database; a partial save drops a field; a
+  stale/concurrent edit overwrites another user's change. None is render drift
+  — the recorded pixels match perfectly, so self-healing cannot catch them —
+  and none is caught, because the screen showed success. Closing this needs
+  verification against the system of record (an app-specific effect check or
+  API/DB read) and an at-most-once guard (idempotency keys); neither is
+  generically expressible in a vision-only replay. Full taxonomy:
+  `benchmark/fault_model/FAULT_MODEL.md`.
+
+### The optional drift-oracle can turn a halt into a pass (opt-in tradeoff)
+
+When an on-prem VLM appliance is configured (`OPENADAPT_FLOW_VLM_URL`, off by
+default), a postcondition that deterministically FAILED gets one confirmation
+pass through the VLM state-verifier — the same heal-under-drift the resolution
+ladder does for click targets. It is deliberately narrow and veto-safe: only
+`text_present` / `region_stable` are eligible (never structural or
+`text_absent`, where a failure is real, not render drift), and only a confident
+`"yes"` rescues — `"no"`, `"uncertain"`, and any appliance outage keep the
+halt. Every rescue is recorded in the run report and counted as a model call.
+
+The honest residual risk: a screen-reading VLM confirms what is *on screen*, so
+a genuine failure whose screen ambiguously reads as success could be rescued.
+This trades a little safety for availability and is why it is opt-in and
+audited. It does **not** address the transactional class above — that screen
+already showed success, so both the deterministic check and the VLM would.
 
 ## Identity is verified against STRUCTURED text where the backend provides it
 

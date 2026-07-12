@@ -108,6 +108,7 @@ class Replayer:
         vision: Optional[Any] = None,
         grounder: Optional[Any] = None,
         identity_vlm: Optional[Any] = None,
+        state_verifier: Optional[Any] = None,
         poll_interval_s: float = 0.05,
     ) -> None:
         if vision is None:
@@ -121,6 +122,13 @@ class Replayer:
         # When None the ladder runs structured-text + pixel-compare + OCR +
         # halt with no model dependency.
         self.identity_vlm = identity_vlm
+        # Optional VLM drift-oracle (state-verifier), OFF by default. When set,
+        # it may CONFIRM a render-drift-sensitive postcondition that
+        # deterministically false-failed (the same heal-under-drift the
+        # resolution ladder does for click targets). VETO-SAFE: it only ever
+        # rescues on a confident "yes"; "no"/"uncertain"/outage keep the halt,
+        # and it never touches structural or text_absent postconditions.
+        self.state_verifier = state_verifier
         self.poll_interval_s = poll_interval_s
         # Point of the most recent successful click (the focusing click for
         # a following TYPE step); reset per run.
@@ -190,6 +198,9 @@ class Replayer:
                 report.rung_counts[rung] = report.rung_counts.get(rung, 0) + 1
                 if rung == "grounder":
                     report.model_calls += 1
+            # Drift-oracle state-verifier calls are model calls too (honest
+            # accounting: a rescued run is not a zero-model run).
+            report.model_calls += result.drift_oracle_calls
             if result.heal is not None:
                 report.heal_count += 1
             if not result.ok:
@@ -376,10 +387,16 @@ class Replayer:
                 last_frame = after_png
                 postconditions_ok, last_frame, failed = (
                     self._check_postconditions(
-                        step, after_png, bundle_dir, start_state
+                        step, after_png, bundle_dir, start_state, result
                     )
                 )
                 result.postconditions_ok = postconditions_ok
+                if result.postcondition_drift_rescues:
+                    print(
+                        f"  drift-oracle: {len(result.postcondition_drift_rescues)}"
+                        " postcondition(s) confirmed by VLM under render drift — "
+                        + "; ".join(result.postcondition_drift_rescues)
+                    )
                 if not postconditions_ok:
                     detail = "; ".join(failed) or "unknown postcondition"
                     error = (
@@ -1108,12 +1125,15 @@ class Replayer:
         frame_png: bytes,
         bundle_dir: Path,
         start_state: dict[str, Any],
+        result: Optional[StepResult] = None,
     ) -> tuple[bool, bytes, list[str]]:
         """Poll postconditions until each passes or times out.
 
         Each postcondition is polled (fresh screenshots) up to its own
         ``timeout_s``. If any fails, the screen is re-settled once and all
-        postconditions are re-checked a single time.
+        postconditions are re-checked a single time. If a VLM state-verifier
+        is configured, a render-drift-sensitive postcondition that still failed
+        gets one last drift-oracle pass (see :meth:`_drift_oracle_rescue`).
 
         Returns:
             (ok, last_frame, failed) — the frame the final verdict was based
@@ -1127,14 +1147,71 @@ class Replayer:
             return True, frame_png, []
         # One re-settle retry.
         frame_png = self.vision.wait_settled(self.backend)
-        failed = [
-            self._describe_postcondition(pc)
+        failed_pcs = [
+            pc
             for pc in step.expect
             if not self._postcondition_passes(
                 pc, frame_png, bundle_dir, start_state
             )
         ]
-        return not failed, frame_png, failed
+        if failed_pcs and self.state_verifier is not None:
+            failed_pcs = self._drift_oracle_rescue(failed_pcs, frame_png, result)
+        failed = [self._describe_postcondition(pc) for pc in failed_pcs]
+        return not failed_pcs, frame_png, failed
+
+    def _drift_oracle_rescue(
+        self,
+        failed_pcs: list[Any],
+        frame_png: bytes,
+        result: Optional[StepResult],
+    ) -> list[Any]:
+        """Give each deterministically-failed, render-drift-sensitive
+        postcondition one confirmation pass through the VLM state-verifier.
+
+        VETO-SAFE by construction:
+
+        * Only ``text_present`` and ``region_stable`` are eligible — the kinds
+          a theme/scale/font re-render can legitimately break. Structural
+          postconditions (``url_changed`` etc.) and ``text_absent`` are NEVER
+          rescued: those failures are real, not render drift.
+        * A postcondition is rescued ONLY on a confident ``"yes"``; ``"no"``,
+          ``"uncertain"``, and any appliance outage keep it failed (halt).
+        * Every call and every rescue is recorded on ``result`` for the report
+          (and counted as a model call), so a rescue is auditable, never silent.
+
+        Returns the postconditions that remain failed after the pass.
+        """
+        survivors: list[Any] = []
+        for pc in failed_pcs:
+            expected = self._expected_state_text(pc)
+            if expected is None:  # not a drift-rescuable kind
+                survivors.append(pc)
+                continue
+            if result is not None:
+                result.drift_oracle_calls += 1
+            try:
+                confirmed = self.state_verifier.holds(frame_png, expected)
+            except Exception:
+                confirmed = False  # fail-safe: any error keeps the halt
+            if confirmed:
+                if result is not None:
+                    result.postcondition_drift_rescues.append(
+                        self._describe_postcondition(pc)
+                    )
+            else:
+                survivors.append(pc)
+        return survivors
+
+    @staticmethod
+    def _expected_state_text(pc: Any) -> Optional[str]:
+        """A natural-language expected-state for the drift-oracle, or None if
+        the postcondition kind is not render-drift-rescuable."""
+        kind = pc.kind.value if hasattr(pc.kind, "value") else pc.kind
+        if kind == "text_present" and pc.text:
+            return f"the text {pc.text!r} is visible on the screen"
+        if kind == "region_stable":
+            return "the content recorded in the highlighted region is present"
+        return None
 
     @staticmethod
     def _describe_postcondition(pc: Any) -> str:

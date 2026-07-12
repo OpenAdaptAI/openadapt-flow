@@ -68,9 +68,16 @@ than silently dropping an untranslatable action.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Optional
 
 from openadapt_flow import ir
+
+# A parameterized-TYPE placeholder Action.text of exactly ``{name}`` (emitted by
+# ``step_to_action`` for a Step with a ``param`` and no literal text). Matched on
+# the reverse so it round-trips back to ``Step.param`` instead of becoming
+# literal characters a consumer would type verbatim.
+_PARAM_PLACEHOLDER_RE = re.compile(r"^\{(\w+)\}$")
 
 if TYPE_CHECKING:  # import-light: only for type checkers, never at runtime import
     from openadapt_types import Action, ActionResult
@@ -202,13 +209,22 @@ def result_to_action_result(step_result: ir.StepResult) -> "ActionResult":
     if step_result.elapsed_ms:
         duration_ms = int(round(step_result.elapsed_ms))
 
+    # error_type is a coarse, best-effort classification into the canonical
+    # vocabulary; it is diagnostic, not a strict field. NOTE the vocabulary has
+    # no distinct term for an identity (wrong-entity) mismatch vs a
+    # postcondition (expected-end-state) miss — BOTH surface as
+    # ``state_mismatch``, so a consumer must read ``error`` (or flow's own
+    # StepResult.identity) to separate them, not error_type alone.
     error_type = None
     if not step_result.ok:
         identity = step_result.identity
-        if identity is not None and identity.status == "mismatch":
-            error_type = "state_mismatch"
+        err = (step_result.error or "").lower()
+        if "timeout" in err or "timed out" in err:
+            error_type = "timeout"
+        elif identity is not None and identity.status == "mismatch":
+            error_type = "state_mismatch"  # wrong-entity (see NOTE above)
         elif step_result.postconditions_ok is False:
-            error_type = "state_mismatch"
+            error_type = "state_mismatch"  # postcondition miss (see NOTE above)
         elif step_result.resolution is None:
             error_type = "grounding_error"
         else:
@@ -261,11 +277,25 @@ def action_to_step(action: "Action", *, step_id: str = "ingested") -> ir.Step:
         action.scroll_direction, action.scroll_amount
     )
 
+    # Reverse the parameterized-TYPE placeholder: an Action.text of exactly
+    # "{name}" originated from Step.param (step_to_action), NOT from literal
+    # typing. Restore it to param so a consumer substitutes the value at run
+    # time rather than typing the characters "{name}" verbatim (the
+    # placeholder round-trip corruption finding). A genuine literal that happens
+    # to be "{name}" on a non-TYPE action is left as text.
+    text: Optional[str] = action.text
+    param: Optional[str] = None
+    if kind is ir.ActionKind.TYPE and text is not None:
+        m = _PARAM_PLACEHOLDER_RE.match(text)
+        if m is not None:
+            text, param = None, m.group(1)
+
     return ir.Step(
         id=step_id,
         intent=action.reasoning or "",
         action=kind,
-        text=action.text,
+        text=text,
+        param=param,
         key=action.key,
         scroll_dx=scroll_dx,
         scroll_dy=scroll_dy,

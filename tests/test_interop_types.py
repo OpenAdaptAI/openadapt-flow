@@ -285,3 +285,36 @@ def test_importing_shim_does_not_import_openadapt_types() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert "OK" in proc.stdout
+
+
+# --- adversarial-review fixes: param round-trip + timeout error_type ----------
+
+def test_param_placeholder_round_trips_back_to_param():
+    import pytest
+    pytest.importorskip("openadapt_types")
+    from openadapt_flow import ir
+    from openadapt_flow.interop.types import step_to_action, action_to_step
+    s = ir.Step(id="s1", intent="type mrn", action=ir.ActionKind.TYPE,
+                param="mrn", text=None)
+    back = action_to_step(step_to_action(s))
+    assert back.param == "mrn" and back.text is None  # not literal "{mrn}"
+
+
+def test_literal_braced_text_on_non_type_stays_literal():
+    import pytest
+    pytest.importorskip("openadapt_types")
+    from openadapt_flow import ir
+    from openadapt_flow.interop.types import action_to_step
+    from openadapt_types import Action, ActionType
+    a = Action(type=ActionType.KEY, key="{enter}")
+    assert action_to_step(a).key == "{enter}"  # untouched (not a TYPE param)
+
+
+def test_timeout_error_maps_to_timeout_error_type():
+    import pytest
+    pytest.importorskip("openadapt_types")
+    from openadapt_flow import ir
+    from openadapt_flow.interop.types import result_to_action_result
+    r = ir.StepResult(step_id="s1", intent="x", ok=False,
+                      error="Timeout (>600.0s) waiting for postcondition")
+    assert result_to_action_result(r).error_type == "timeout"

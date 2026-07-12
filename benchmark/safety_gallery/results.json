@@ -14,7 +14,7 @@
     {
       "id": "O0_alphanumeric",
       "kind": "danger",
-      "glyph_class": "O / 0 (alphanumeric MRN)",
+      "glyph_class": "Letter O vs digit 0",
       "recorded_mrn": "MG4408",
       "live_mrn": "MG44O8",
       "recorded_name": "Sorensen, Philip",
@@ -29,7 +29,7 @@
     {
       "id": "l1_alphanumeric",
       "kind": "danger",
-      "glyph_class": "l / 1 (alphanumeric MRN)",
+      "glyph_class": "Lowercase l vs digit 1",
       "recorded_mrn": "MG4118",
       "live_mrn": "MG41l8",
       "recorded_name": "Okafor, Daniel",
@@ -44,7 +44,7 @@
     {
       "id": "numeric",
       "kind": "danger",
-      "glyph_class": "O / 0 (PURELY NUMERIC MRN)",
+      "glyph_class": "All-digits ID, letter O for zero",
       "recorded_mrn": "100512",
       "live_mrn": "1OO512",
       "recorded_name": "Delgado, Maria",
@@ -59,7 +59,7 @@
     {
       "id": "separator",
       "kind": "danger",
-      "glyph_class": "O / 0 (SEPARATOR-formatted MRN)",
+      "glyph_class": "Dashed ID, letter O for zero",
       "recorded_mrn": "MG-4408",
       "live_mrn": "MG-44O8",
       "recorded_name": "Bianchi, Robert",
@@ -74,7 +74,7 @@
     {
       "id": "sibling",
       "kind": "danger",
-      "glyph_class": "same-name / same-DOB sibling",
+      "glyph_class": "Two people, same name and birth date",
       "recorded_mrn": "MG5439",
       "live_mrn": "MG7263",
       "recorded_name": "Halloran, Susan",
@@ -89,7 +89,7 @@
     {
       "id": "clean_control",
       "kind": "control_verify",
-      "glyph_class": "control \u2014 non-confusable MRN",
+      "glyph_class": "Control \u2014 the genuinely correct patient",
       "recorded_mrn": "RC79284",
       "live_mrn": "RC79284",
       "recorded_name": "Montgomery, James",
@@ -104,7 +104,7 @@
     {
       "id": "different_patient",
       "kind": "control_mismatch",
-      "glyph_class": "control \u2014 different patient",
+      "glyph_class": "Control \u2014 a plainly different patient",
       "recorded_mrn": "RC44823",
       "live_mrn": "RC77235",
       "recorded_name": "Castellano, Angela",

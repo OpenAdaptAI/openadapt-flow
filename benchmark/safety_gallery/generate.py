@@ -104,12 +104,13 @@ GALLERY_CASES: list[CaseSpec] = [
     CaseSpec(
         id="O0_alphanumeric",
         kind=DANGER,
-        glyph_class="O / 0 (alphanumeric MRN)",
-        title="Letter-O vs digit-zero in an alphanumeric MRN",
+        glyph_class="Letter O vs digit 0",
+        title="A patient ID where a letter O stands in for a zero",
         summary=(
-            "Two DIFFERENT patients share a name and DOB; their MRNs differ by a "
-            "single letter-O / digit-zero glyph (MG4408 vs MG44O8). OCR reads both "
-            "as the same string."
+            "Two different patients who happen to share a name and date of birth. "
+            "Their patient IDs look identical on screen — MG4408 and MG44O8 — "
+            "because one uses the digit 0 where the other uses the letter O. Reading "
+            "the screen, the computer sees the same text for both."
         ),
         recorded=_row("Sorensen, Philip", "1975-03-12", "MG4408"),
         live=_row("Sorensen, Philip", "1975-03-12", "MG44O8"),
@@ -117,11 +118,12 @@ GALLERY_CASES: list[CaseSpec] = [
     CaseSpec(
         id="l1_alphanumeric",
         kind=DANGER,
-        glyph_class="l / 1 (alphanumeric MRN)",
-        title="Lowercase-L vs digit-one in an alphanumeric MRN",
+        glyph_class="Lowercase l vs digit 1",
+        title="A patient ID where a lowercase L stands in for a one",
         summary=(
-            "Same name and DOB; MRNs differ by a single lowercase-l / digit-one "
-            "glyph (MG4118 vs MG41l8). OCR collapses them."
+            "Same name, same date of birth, two different people. One ID is MG4118, "
+            "the other MG41l8 — a digit 1 versus a lowercase L. On screen the two "
+            "IDs are indistinguishable."
         ),
         recorded=_row("Okafor, Daniel", "1968-11-04", "MG4118"),
         live=_row("Okafor, Daniel", "1968-11-04", "MG41l8"),
@@ -129,12 +131,12 @@ GALLERY_CASES: list[CaseSpec] = [
     CaseSpec(
         id="numeric",
         kind=DANGER,
-        glyph_class="O / 0 (PURELY NUMERIC MRN)",
-        title="A purely-numeric MRN with letter-O in place of zero",
+        glyph_class="All-digits ID, letter O for zero",
+        title="An all-numbers ID with letter O's swapped for zeros",
         summary=(
-            "The 9th reopening: a purely-numeric MRN (no letter prefix) is just as "
-            "collapsible. 100512 vs a homonym's 1OO512 (letter O's) read "
-            "byte-identically."
+            "Some patient IDs are all numbers, with no letters to anchor them — "
+            "and they collapse too. 100512 (with digit zeros) and 1OO512 (with letter "
+            "O's) read as the exact same text off the screen."
         ),
         recorded=_row("Delgado, Maria", "1982-07-22", "100512", sex="F"),
         live=_row("Delgado, Maria", "1982-07-22", "1OO512", sex="F"),
@@ -142,12 +144,13 @@ GALLERY_CASES: list[CaseSpec] = [
     CaseSpec(
         id="separator",
         kind=DANGER,
-        glyph_class="O / 0 (SEPARATOR-formatted MRN)",
-        title="A dash-formatted MRN that used to bypass the glyph gate",
+        glyph_class="Dashed ID, letter O for zero",
+        title="A dashed ID that an earlier version of the check let through",
         summary=(
-            "The 10th reopening: a hyphenated MRN (MG-4408 vs MG-44O8). The gate "
-            "used to exempt it because a dashed token is not alphanumeric; it now "
-            "strips intra-identifier separators before judging."
+            "Patient IDs with a dash in them used to slip past an earlier version of "
+            "this check. MG-4408 versus MG-44O8 — again a digit 0 versus a letter "
+            "O. The system now ignores dashes and other separators before comparing, "
+            "so this no longer gets through."
         ),
         recorded=_row("Bianchi, Robert", "1959-02-18", "MG-4408"),
         live=_row("Bianchi, Robert", "1959-02-18", "MG-44O8"),
@@ -155,12 +158,13 @@ GALLERY_CASES: list[CaseSpec] = [
     CaseSpec(
         id="sibling",
         kind=DANGER,
-        glyph_class="same-name / same-DOB sibling",
-        title="A same-name, same-DOB sibling with a readable, different MRN",
+        glyph_class="Two people, same name and birth date",
+        title="Two different patients who share a name and date of birth",
         summary=(
-            "Two different patients share a name and DOB but carry genuinely "
-            "different, OCR-readable MRNs (MG5439 vs MG7263). Even when OCR CAN "
-            "read the difference, the differing identifier is caught."
+            "Here the computer CAN read the two IDs apart — MG5439 versus MG7263 "
+            "— but the two patients share a name and date of birth, so matching on "
+            "name and birth date alone would treat them as the same person. Comparing "
+            "the patient ID catches that they are different people."
         ),
         recorded=_row("Halloran, Susan", "1975-03-12", "MG5439", sex="F"),
         live=_row("Halloran, Susan", "1975-03-12", "MG7263", sex="F"),
@@ -168,12 +172,13 @@ GALLERY_CASES: list[CaseSpec] = [
     CaseSpec(
         id="clean_control",
         kind=CONTROL_VERIFY,
-        glyph_class="control — non-confusable MRN",
-        title="The correct patient, re-read (a non-confusable MRN)",
+        glyph_class="Control — the genuinely correct patient",
+        title="The correct patient, shown again (an ID with no look-alike characters)",
         summary=(
-            "The same patient at replay, with an MRN that bears none of "
-            "{0,1,O,l,I} (RC79284). This MUST verify — proof the gate is not "
-            "trivially abstaining on every band."
+            "The genuinely correct patient, shown again at replay. Their ID (RC79284) "
+            "contains none of the look-alike characters, so there is nothing "
+            "ambiguous. The system should proceed here — and does. This proves it "
+            "is not simply refusing everything."
         ),
         recorded=_row("Montgomery, James", "1990-09-30", "RC79284"),
         live=_row("Montgomery, James", "1990-09-30", "RC79284"),
@@ -181,12 +186,13 @@ GALLERY_CASES: list[CaseSpec] = [
     CaseSpec(
         id="different_patient",
         kind=CONTROL_MISMATCH,
-        glyph_class="control — different patient",
-        title="A genuinely different patient",
+        glyph_class="Control — a plainly different patient",
+        title="A completely different patient",
         summary=(
-            "A plainly different patient stands where the target was "
-            "(Castellano, Angela vs Nakamura, Thomas). This MUST mismatch — proof "
-            "the gate is not trivially verifying."
+            "A completely different patient is sitting where the recorded one was "
+            "(Castellano, Angela was recorded; Nakamura, Thomas appears at replay). "
+            "The system should catch that these are different people — and does. "
+            "This proves it is not simply approving everything."
         ),
         recorded=_row("Castellano, Angela", "1977-05-14", "RC44823", sex="F"),
         live=_row("Nakamura, Thomas", "1963-08-08", "RC77235"),
@@ -238,11 +244,58 @@ def verdict_oneliner(kind: str, status: str) -> str:
     if status == "verified":
         if kind == CONTROL_VERIFY:
             return (
-                "proceeds — a clean name + DOB with a non-confusable identifier "
-                "genuinely matches the recorded target."
+                "proceeds — a clear name, date of birth, and an unambiguous ID all "
+                "match the patient the workflow was recorded on."
             )
-        return "PROCEEDS — the gate accepted this row."
+        return "proceeds — the check accepted this row."
     return status
+
+
+# ---------------------------------------------------------------------------
+# Plain-language labels (copy only; the underlying verdict is unchanged)
+# ---------------------------------------------------------------------------
+
+# Each verdict maps to a plain-language headline plus the original technical
+# term (kept small, in parentheses, so the record stays traceable).
+_VERDICT_PLAIN = {
+    "abstain": (
+        "HALTED — refuses to click (can't safely tell the patients apart)",
+        "abstain",
+    ),
+    "mismatch": ("STOPPED — caught the mismatch", "mismatch"),
+    "unreadable": ("HALTED — could not read the ID off the screen", "unreadable"),
+    "verified": ("PROCEEDS — safe to act", "verified"),
+}
+
+# Human names for the confusable characters, for the per-card difference callout.
+_GLYPH_NAMES = {
+    "O": "the letter O", "o": "a lowercase o", "0": "the digit 0",
+    "l": "a lowercase L", "I": "a capital I", "1": "the digit 1",
+    "|": "a pipe", "!": "an exclamation mark",
+}
+
+
+def _glyph_name(ch: str) -> str:
+    return _GLYPH_NAMES.get(ch, f"the character {ch!r}")
+
+
+def glyph_diff(recorded: str, live: str) -> list[tuple[int, str, str]]:
+    """Positions (and characters) where two equal-length IDs differ.
+
+    Used only to point the reader at the one look-alike character that makes two
+    different patients read the same; it does not feed the gate.
+    """
+    return [
+        (i, a, b) for i, (a, b) in enumerate(zip(recorded, live)) if a != b
+    ]
+
+
+def _mark_id(mrn: str, positions: set[int]) -> str:
+    """The ID as HTML with the differing character(s) highlighted."""
+    return "".join(
+        f'<mark class="gd">{_e(ch)}</mark>' if i in positions else _e(ch)
+        for i, ch in enumerate(mrn)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -449,15 +502,98 @@ def _e(text: str) -> str:
     return html.escape(text, quote=True)
 
 
+def _column_labels(kind: str) -> tuple[str, str]:
+    """Plain-language left/right column headings for a case ``kind``.
+
+    Left is always the patient the workflow was recorded on; the right heading
+    tells the reader what is actually standing there at replay.
+    """
+    left = "The patient you recorded"
+    if kind == DANGER:
+        return left, "A DIFFERENT patient — same-looking row"
+    if kind == CONTROL_VERIFY:
+        return left, "The same patient at replay"
+    if kind == CONTROL_MISMATCH:
+        return left, "A different patient"
+    return left, "The row present at replay"
+
+
+def _difference_callout(r: CaseResult) -> str:
+    """A plain-language pointer at the one character that separates the two
+    patients — for the dangerous look-alike cards only.
+
+    For a same-name/same-DOB sibling (a genuinely different, readable ID) it
+    says the IDs differ outright; controls get no callout.
+    """
+    if r.spec.kind != DANGER:
+        return ""
+
+    rec, liv = r.spec.recorded.mrn, r.spec.live.mrn
+
+    # Sibling: the two IDs are genuinely different and the computer CAN read
+    # them apart — not one look-alike character. Say so plainly.
+    if not r.ocr_collapsed:
+        return (
+            '<div class="diff">'
+            f"<p><strong>These are two different patients.</strong> Their IDs are "
+            f"genuinely different and the computer can read them apart — "
+            f'<code class="idmark">{_e(rec)}</code> vs '
+            f'<code class="idmark">{_e(liv)}</code>. Matching on name and date of '
+            f"birth alone would treat them as the same person; comparing the ID "
+            f"catches the difference.</p></div>"
+        )
+
+    diffs = glyph_diff(rec, liv)
+    positions = {i for i, _, _ in diffs}
+    if not diffs:
+        return ""
+
+    # De-duplicate identical substitutions (e.g. the all-digits ID swaps O for
+    # 0 twice) so the sentence names the confusion once.
+    seen: list[tuple[str, str]] = []
+    for _, a, b in diffs:
+        if (a, b) not in seen:
+            seen.append((a, b))
+    pairs = ", ".join(
+        f"<strong class=\"glyph\">{_e(a)}</strong> vs "
+        f"<strong class=\"glyph\">{_e(b)}</strong> ({_glyph_name(a)} vs "
+        f"{_glyph_name(b)})"
+        for a, b in seen
+    )
+    count = (
+        "a single character"
+        if len(diffs) == 1
+        else f"{len(diffs)} look-alike characters"
+    )
+    return (
+        '<div class="diff">'
+        f"<p><strong>These are two different patients.</strong> Their IDs differ "
+        f"by {count} — {pairs} — which the computer cannot tell apart when it "
+        f"reads the screen.</p>"
+        '<div class="idcmp">'
+        f'<span class="idcmp-lbl">recorded</span>'
+        f'<code class="idmark">{_mark_id(rec, positions)}</code>'
+        f'<span class="idcmp-lbl">replay</span>'
+        f'<code class="idmark">{_mark_id(liv, positions)}</code>'
+        "</div></div>"
+    )
+
+
 def _case_card(r: CaseResult) -> str:
-    label, kind = _VERDICT_STYLE.get(r.status, (r.status.upper(), "halt"))
+    _, kind = _VERDICT_STYLE.get(r.status, (r.status.upper(), "halt"))
+    plain_label, tech = _VERDICT_PLAIN.get(
+        r.status, (r.status.upper(), r.status)
+    )
     safe_cls = "safe" if r.safe else "unsafe"
     safe_txt = "SAFE" if r.safe else "UNSAFE — P0"
     safe_mark = "&#10003;" if r.safe else "&#10007;"
+    left_label, right_label = _column_labels(r.spec.kind)
     collapse_badge = (
-        '<span class="badge collapse">OCR reads BYTE-IDENTICALLY</span>'
+        '<span class="badge collapse">The computer reads both IDs as the SAME '
+        "text</span>"
         if r.ocr_collapsed
-        else '<span class="badge distinct">OCR strings differ</span>'
+        else '<span class="badge distinct">The computer reads the two IDs '
+        "differently</span>"
     )
     return f"""
     <section class="card {safe_cls}">
@@ -466,32 +602,34 @@ def _case_card(r: CaseResult) -> str:
           <span class="gclass">{_e(r.spec.glyph_class)}</span>
           <h3>{_e(r.spec.title)}</h3>
         </div>
-        <div class="mark {safe_cls}"><span class="tick">{safe_mark}</span>{safe_txt}</div>
+        <div class="mark {safe_cls}" title="the correct, expected outcome">
+          <span class="tick">{safe_mark}</span>{safe_txt}</div>
       </header>
       <p class="summary">{_e(r.spec.summary)}</p>
+      {_difference_callout(r)}
       <div class="cols">
         <div class="col">
-          <div class="col-label">RECORDED target</div>
+          <div class="col-label">{_e(left_label)}</div>
           {_img(r.recorded_crops.row_png, "row")}
-          <div class="mrn-wrap"><span class="mrn-tag">identifier, magnified</span>
+          <div class="mrn-wrap"><span class="mrn-tag">patient ID, magnified</span>
             {_img(r.recorded_crops.mrn_png, "mrn")}</div>
-          <div class="ocr-label">OCR reads</div>
+          <div class="ocr-label">What the computer sees (OCR)</div>
           <code class="ocr">{_e(squash(r.ocr_recorded))}</code>
         </div>
         <div class="col">
-          <div class="col-label">LIVE row at replay</div>
+          <div class="col-label">{_e(right_label)}</div>
           {_img(r.live_crops.row_png, "row")}
-          <div class="mrn-wrap"><span class="mrn-tag">identifier, magnified</span>
+          <div class="mrn-wrap"><span class="mrn-tag">patient ID, magnified</span>
             {_img(r.live_crops.mrn_png, "mrn")}</div>
-          <div class="ocr-label">OCR reads</div>
+          <div class="ocr-label">What the computer sees (OCR)</div>
           <code class="ocr">{_e(squash(r.ocr_live))}</code>
         </div>
       </div>
       <div class="collapse-row">{collapse_badge}</div>
-      <div class="verdict {kind}">
-        <span class="vlabel">{label}</span>
+      <div class="verdict {kind}" title="coverage {r.coverage:.2f}">
+        <span class="vlabel">{_e(plain_label)}</span>
+        <span class="vterm">({_e(tech)})</span>
         <span class="vtext">{_e(r.oneliner)}</span>
-        <span class="vcov">coverage {r.coverage:.2f}</span>
       </div>
     </section>
     """
@@ -549,9 +687,9 @@ def render_html(results: list[CaseResult]) -> str:
     banner_cls = "ok" if all_safe else "alarm"
     if all_safe:
         headline_txt = (
-            f"{hd['danger_safe']}/{hd['danger_total']} dangerous cases correctly "
-            f"refused &middot; {hd['controls_correct']}/{hd['controls_total']} controls "
-            f"correctly handled"
+            f"{hd['danger_safe']}/{hd['danger_total']} dangerous look-alikes refused "
+            f"&middot; {hd['controls_correct']}/{hd['controls_total']} safe cases "
+            f"handled correctly"
         )
     else:
         headline_txt = (
@@ -567,7 +705,7 @@ def render_html(results: list[CaseResult]) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wrong-Patient Safety Gallery &mdash; openadapt-flow</title>
+<title>Wrong-Patient Safety &mdash; openadapt-flow</title>
 <style>
 {_CSS}
 </style>
@@ -575,32 +713,76 @@ def render_html(results: list[CaseResult]) -> str:
 <body>
 <main>
   <header class="page-head">
-    <h1>Wrong-Patient Safety Gallery</h1>
-    <p class="sub">Case-by-case proof of the identity defense &mdash; generated from
-      REAL renders, the REAL OCR, and the REAL production identity check
-      (<code>verify_target_identity</code>). No model, no network, deterministic.</p>
+    <h1>Wrong-Patient Safety</h1>
+    <p class="sub">The look-alike-patient problem, and how the system refuses to
+      guess.</p>
     <div class="headline {banner_cls}">{headline_txt}</div>
-    <p class="method">Each pair below is rendered with the same fixture the identity
-      studies use, read with the repo's own RapidOCR, and judged by the shipping gate.
-      A dangerous case is <em>safe</em> iff the gate does not VERIFY (any halt is safe);
-      the two controls prove the gate is neither trivially abstaining nor trivially
-      verifying. Reproduce with <code>python -m benchmark.safety_gallery.generate</code>.</p>
   </header>
+
+  <section class="explainer">
+    <h2>What you're looking at</h2>
+    <p class="stakes">Automating an EMR means a computer clicks a patient's row and
+      writes to their chart. The catastrophic failure is picking the <strong>wrong
+      patient</strong>. This page shows that failure mode &mdash; and proves the
+      system stops before it happens.</p>
+
+    <div class="ex-grid">
+      <div class="ex-item">
+        <h3>Why it's hard</h3>
+        <p>On legacy, Citrix, and RDP EMRs the software reads the <strong>screen</strong>
+          with OCR &mdash; pixels, not the database. Some patient IDs differ by a
+          single look-alike character: a letter <code>O</code> vs the digit
+          <code>0</code>, a lowercase <code>l</code> vs the digit <code>1</code>. OCR
+          reads those two <strong>different</strong> patients as the <strong>same</strong>
+          text &mdash; so the computer literally cannot tell them apart from the
+          screen.</p>
+      </div>
+      <div class="ex-item">
+        <h3>The defense</h3>
+        <p>When an identifier is that ambiguous, openadapt-flow <strong>halts</strong>
+          instead of guessing. Below, every dangerous look-alike &rarr; it stops; a
+          genuinely clean patient &rarr; it proceeds normally; a different patient
+          &rarr; it catches the mismatch. It stops exactly when it should, and acts
+          when it's safe.</p>
+      </div>
+    </div>
+
+    <div class="legend">
+      <h3>How to read each card</h3>
+      <ul>
+        <li><strong>Left</strong> &mdash; the patient the workflow was recorded on.</li>
+        <li><strong>Right</strong> &mdash; the row present at replay. For the
+          dangerous cards this is a <strong>different</strong> patient whose row looks
+          the same; for the clean control it's the same patient re-rendered.</li>
+        <li><strong>The magnified strip</strong> &mdash; the patient ID, the only real
+          difference between the two.</li>
+        <li><strong>&ldquo;What the computer sees (OCR)&rdquo;</strong> &mdash; the text
+          read from the pixels. When it's <strong>identical</strong> on both sides,
+          that's the danger.</li>
+        <li><strong>The verdict</strong> &mdash; what the system actually did.</li>
+      </ul>
+    </div>
+
+    <p class="method">Every pair below is a real screenshot, read with the repo's own
+      OCR and judged by the exact check that ships in production
+      (<code>verify_target_identity</code>). No AI model, no network, fully
+      reproducible: <code>python -m benchmark.safety_gallery.generate</code>.</p>
+  </section>
 
   <div class="gallery">
     {cards}
   </div>
 
   <section class="limits">
-    <h2>What still slips</h2>
-    <p>This gallery would be dishonest without the failures it does <em>not</em> fix.
+    <h2>What this does NOT protect against</h2>
+    <p>This page would be dishonest without the failures it does <em>not</em> fix.
       Pulled straight from <code>docs/LIMITS.md</code> and the fault-model study:</p>
     <ul>
       {limits}
     </ul>
-    <p class="foot">The gate turns a wrong-patient VERIFY into a HALT; it does not make
-      the surrounding replay omniscient. The limits above are open problems, disclosed on
-      purpose.</p>
+    <p class="foot">The check turns a wrong-patient approval into a stop; it does not
+      make the rest of the automation all-seeing. The limits above are open problems,
+      disclosed on purpose.</p>
   </section>
 </main>
 </body>
@@ -650,6 +832,35 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   border-radius:8px;margin:6px 0 16px;}
 .headline.ok{background:var(--safe-bg);color:var(--safe);border:1px solid var(--safe);}
 .headline.alarm{background:var(--unsafe-bg);color:var(--unsafe);border:1px solid var(--unsafe);}
+.explainer{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:20px 22px;margin:8px 0 6px;}
+.explainer h2{font-size:20px;margin:0 0 10px;letter-spacing:-0.01em;}
+.explainer h3{font-size:14px;margin:0 0 6px;letter-spacing:0.01em;}
+.explainer .stakes{font-size:16px;margin:0 0 16px;max-width:82ch;}
+.explainer p{max-width:82ch;}
+.ex-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:6px 0 4px;}
+@media (max-width:680px){.ex-grid{grid-template-columns:1fr;}}
+.ex-item p{color:var(--muted);font-size:14px;margin:0;}
+.legend{margin-top:18px;border-top:1px solid var(--line);padding-top:14px;}
+.legend ul{list-style:none;padding:0;margin:8px 0 0;display:flex;flex-direction:column;
+  gap:6px;}
+.legend li{font-size:13.5px;color:var(--muted);max-width:88ch;}
+.legend li strong{color:var(--fg);}
+.explainer .method{color:var(--muted);font-size:13px;margin:16px 0 0;
+  border-top:1px solid var(--line);padding-top:12px;}
+.diff{margin:2px 0 14px;padding:11px 14px;border-radius:8px;background:var(--code-bg);
+  border:1px solid var(--line);border-left:4px solid var(--accent);}
+.diff p{margin:0;font-size:14px;max-width:84ch;}
+.diff .glyph{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:1.05em;
+  padding:0 3px;border-radius:3px;background:var(--halt-bg);color:var(--halt);}
+.idcmp{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;align-items:center;
+  margin-top:10px;}
+.idcmp-lbl{font-size:11px;text-transform:uppercase;letter-spacing:0.05em;
+  color:var(--muted);}
+.idmark{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:0.12em;
+  font-size:15px;}
+mark.gd{background:var(--halt-bg);color:var(--halt);font-weight:800;padding:0 2px;
+  border-radius:3px;text-decoration:underline;}
 .gallery{display:flex;flex-direction:column;gap:22px;margin-top:14px;}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
   padding:18px 18px 16px;box-shadow:0 1px 2px rgba(0,0,0,0.04);}
@@ -691,8 +902,8 @@ code.ocr{display:block;white-space:pre-wrap;word-break:break-all;padding:8px 10p
 .vlabel{font-weight:800;font-size:14px;letter-spacing:0.03em;}
 .verdict.halt .vlabel{color:var(--halt);}
 .verdict.verify .vlabel{color:var(--verify);}
+.vterm{font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;}
 .vtext{flex:1;min-width:220px;font-size:14px;}
-.vcov{font-size:12px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;}
 .limits{margin-top:40px;border-top:2px solid var(--line);padding-top:22px;}
 .limits h2{font-size:22px;margin:0 0 8px;}
 .limits > p{color:var(--muted);max-width:80ch;}

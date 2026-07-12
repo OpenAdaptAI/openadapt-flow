@@ -117,7 +117,29 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             page.goto(url)
             try:
                 backend = PlaywrightBackend(page)
-                report = Replayer(backend).run(
+                import os
+
+                from openadapt_flow.runtime.remote_vlm import (
+                    appliance_from_env,
+                )
+
+                # An on-prem VLM appliance is opt-in (OPENADAPT_FLOW_VLM_URL).
+                # Unset -> both slots stay None -> the run is fully local and
+                # model-free, exactly as before. Configured -> the grounding
+                # rung and the identity veto tier come online, both fail-safe
+                # (an appliance outage halts the run, never mis-clicks).
+                appliance = appliance_from_env()
+                if appliance is not None:
+                    print(
+                        "Using on-prem VLM appliance at "
+                        f"{os.environ.get('OPENADAPT_FLOW_VLM_URL')} "
+                        "(grounding rung + identity veto tier; fail-safe to halt)"
+                    )
+                report = Replayer(
+                    backend,
+                    grounder=appliance.grounder if appliance else None,
+                    identity_vlm=appliance.identity_vlm if appliance else None,
+                ).run(
                     workflow,
                     params=params,
                     bundle_dir=bundle,

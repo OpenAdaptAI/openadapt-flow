@@ -139,6 +139,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     backend,
                     grounder=appliance.grounder if appliance else None,
                     identity_vlm=appliance.identity_vlm if appliance else None,
+                    state_verifier=(
+                        appliance.state_verifier if appliance else None
+                    ),
                 ).run(
                     workflow,
                     params=params,

@@ -37,3 +37,46 @@ class ServiceConfig:
             ground_max_tokens=int(os.environ.get("VLM_GROUND_MAX_TOKENS", "64")),
             vllm_url=os.environ.get("VLM_VLLM_URL", "http://localhost:8000/v1"),
         )
+
+
+# Hosts that keep the service off the network (loopback / unspecified).
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "", None})
+
+
+def insecure_exposure_warnings(host: str, token: str) -> list[str]:
+    """Loud warnings for an insecure appliance exposure, or ``[]`` when safe.
+
+    The VLM service serves **unauthenticated PHI inference** when no token is
+    configured, and binds every network interface over cleartext HTTP when the
+    host is non-loopback. Neither is wrong for a locked-down deployment, but it
+    must never happen *unknowingly*. This returns human-readable WARNING lines
+    (named exposure + remedy) for the caller (``__main__``) to log at startup.
+
+    Pure and side-effect-free so it is directly unit-testable.
+    """
+    no_auth = not (token or "").strip()
+    loopback = (host or "").strip().lower() in _LOOPBACK_HOSTS
+    messages: list[str] = []
+    if no_auth and not loopback:
+        messages.append(
+            f"UNAUTHENTICATED PHI ENDPOINT ON THE NETWORK: VLM_SERVICE_TOKEN is "
+            f"empty (auth DISABLED) and --host={host!r} binds non-loopback "
+            "interfaces over cleartext HTTP. Any host that can reach this port "
+            "can submit patient screenshots/crops for inference. Set "
+            "VLM_SERVICE_TOKEN and terminate TLS at a reverse proxy, or bind "
+            "--host 127.0.0.1."
+        )
+    elif no_auth:
+        messages.append(
+            "AUTH DISABLED: VLM_SERVICE_TOKEN is empty, so every inference "
+            "endpoint is unauthenticated. Safe only because --host is loopback. "
+            "Set VLM_SERVICE_TOKEN before binding a non-loopback --host."
+        )
+    elif not loopback:
+        messages.append(
+            f"CLEARTEXT PHI OVER THE NETWORK: --host={host!r} binds non-loopback "
+            "interfaces and traffic is plain HTTP. Requests are authenticated "
+            "but the PHI payload is unencrypted in transit — terminate TLS at a "
+            "reverse proxy on the trusted network."
+        )
+    return messages

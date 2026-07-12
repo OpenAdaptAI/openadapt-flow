@@ -22,16 +22,39 @@ pip install 'openadapt-flow[privacy]'
 python -m spacy download en_core_web_trf
 ```
 
-Two environment variables control the posture (safe by default):
+Two environment variables control the posture. The default is **predictable,
+not maximally private**: `auto` writes plaintext when the extra is absent (so
+the local demo works with no NER model), but it is not silent about it — see
+the plaintext warning below. Pin `on` for a regulated deployment.
 
 | Variable | Values | Default | Meaning |
 |---|---|---|---|
-| `OPENADAPT_FLOW_SCRUB` | `auto` / `on` / `off` | `auto` | `auto`: scrub text whenever the capability is installed; write plaintext when it is not. `on`: scrub and **fail closed** — raise if openadapt-privacy is missing (pin this for a clinical deployment). `off`: never scrub. |
-| `OPENADAPT_FLOW_SCRUB_IMAGES` | `0` / `1` | `0` | Opt-in Presidio **image** redaction of persisted screenshots/crops. Off by default (destructive + slow). |
+| `OPENADAPT_FLOW_SCRUB` | `auto` / `on` / `off` | `auto` | `auto`: scrub text whenever the capability is installed; write plaintext (with a one-time WARNING) when it is not. `on`: scrub and **fail closed** — raise if openadapt-privacy is missing (pin this for a clinical deployment). `off`: never scrub. |
+| `OPENADAPT_FLOW_SCRUB_IMAGES` | `0` / `1` | `0` | Presidio **image** redaction of persisted screenshots/crops. Under `auto` it is opt-in (off by default: destructive + slow). **Under `SCRUB=on` it is implied regardless of this flag** — a compliance-pinned run must not leave full-frame PHI screenshots unredacted in the shareable `REPORT.md`. |
 
 Recommended clinical setting: `OPENADAPT_FLOW_SCRUB=on` (plus the extra
 installed) so any missing capability fails the run instead of silently writing
-PHI, and `OPENADAPT_FLOW_SCRUB_IMAGES=1` if run artifacts will be shared.
+PHI. Under `on`, persisted step/heal frames are redacted automatically; you do
+**not** need to also set `OPENADAPT_FLOW_SCRUB_IMAGES=1` (it is implied).
+
+### Plaintext-PHI warning (no silent leak under `auto`)
+
+When `REPORT.md` is about to be written with identity-like free text (params /
+intents) and **no scrubber is active** (default `auto` with the `privacy` extra
+absent), the writer emits a one-time `PlaintextPHIWarning`. This is a warning,
+not a behavior change — the report still renders — so an operator can never
+believe a run is de-identified when it is not. `SCRUB=off` is a deliberate
+opt-out and stays silent; `on` fails closed before writing.
+
+### Appliance exposure (VLM service) — loud by default
+
+The on-prem VLM service (`python -m openadapt_flow.services.vlm_service`) now
+binds `--host 127.0.0.1` by default (was `0.0.0.0`), so it does not land on the
+network without an explicit `--host 0.0.0.0`. On startup it logs a loud
+**WARNING** when the token is empty (`VLM_SERVICE_TOKEN` unset ⇒ auth disabled)
+and/or the bind is non-loopback, naming the exposure (an unauthenticated PHI
+inference endpoint reachable over cleartext HTTP). Set `VLM_SERVICE_TOKEN` and
+terminate TLS at a reverse proxy before binding a non-loopback host.
 
 ## PHI touchpoint map
 
@@ -45,9 +68,9 @@ what protects it.
 | 1 | `recorder.py` recording dir | `frames/*.png` (full screenshots), `events.jsonl` (literal typed `text` incl. param values, `structured_identity` DOM text), `meta.json` (`params` example values) | **Documented boundary** — raw capture, operator's machine. Not scrubbed (the recording is the training/compile input; scrubbing it would corrupt the demo). Filesystem controls + retention policy. |
 | 2 | `compiler/compile.py` → `ir.Workflow.save` → `workflow.json` | `anchor.ocr_text`, `anchor.context_text`, `anchor.structured_identity` (identity band = name/DOB/MRN), `step.text` (literal TYPE), `params`, `step.intent`; plus `templates/*.png` and `identifier_crop` PNGs (rendered PHI) | **Documented boundary** — the compiled bundle *must* carry the recorded identity evidence to verify identity on replay; scrubbing it would defeat the wrong-patient safety check. Filesystem controls + retention policy. |
 | 3 | `runtime/replayer.py` → `RunReport.save` → `report.json` | `params`, `workflow_name`, per-step `intent`, `error`, `IdentityCheck.expected`/`observed` (recorded vs live band text — raw PHI), `UnarmedStep.*` | **Documented boundary** — machine artifact and identity **audit trail**; the literal expected/observed text is what lets an operator prove a wrong-patient halt fired. Filesystem controls + retention policy. The shareable derivative (`REPORT.md`) IS scrubbed — see below. |
-| 4 | `runtime/replayer.py:_save_step_png` → `steps/*.png` | full before/after frames | **Scrubbed (opt-in)** — routed through `scrub_image_bytes`; redacted when `OPENADAPT_FLOW_SCRUB_IMAGES=1`. |
-| 5 | `runtime/heal.py:persist_heal` → `heals/<step>/{template,screen}.png`, `heal.json` | heal crop, full frame, Anchor text | **Scrubbed (opt-in)** for the PNGs; `heal.json` text is a documented boundary (audit trail, same as #3). |
-| 6 | `report.py:render_run_report` → **`REPORT.md`** | `workflow_name`, `params` values, per-step `intent`, `error`, `UnarmedStep.intent`/`reason` | **Scrubbed** — every free-text field passes through `_md_phi` (scrub → escape). This is the artifact that gets committed to repos / shared with stakeholders, so it is scrubbed by default (auto) whenever the capability is present. Embedded frames follow #4. |
+| 4 | `runtime/replayer.py:_save_step_png` → `steps/*.png` | full before/after frames | **Scrubbed** — routed through `scrub_image_bytes`; redacted when `OPENADAPT_FLOW_SCRUB_IMAGES=1` (opt-in under `auto`) **or implied under `SCRUB=on`** (a pinned run redacts frames without the extra flag). |
+| 5 | `runtime/heal.py:persist_heal` → `heals/<step>/{template,screen}.png`, `heal.json` | heal crop, full frame, Anchor text | **Scrubbed** for the PNGs (same gate as #4); `heal.json` text is a documented boundary (audit trail, same as #3). |
+| 6 | `report.py:render_run_report` → **`REPORT.md`** | `workflow_name`, `params` values, per-step `intent`, `error`, `UnarmedStep.intent`/`reason` | **Scrubbed** — every free-text field passes through `_md_phi` (scrub → escape). This is the artifact that gets committed to repos / shared with stakeholders, so it is scrubbed by default (auto) whenever the capability is present; when it is **not** present, a one-time `PlaintextPHIWarning` fires (see above). Embedded frames follow #4. |
 
 ### Logged / printed to console
 
@@ -87,10 +110,10 @@ through. The control is therefore a **data-flow boundary**, stated in full in
   identifiers. These artifacts are PHI-at-rest protected by filesystem controls
   and the operator's retention policy, not by scrubbing. Do not commit real
   bundles or run dirs to a public repo.
-- **Image redaction is opt-in and best-effort.** Presidio image redaction is
-  OCR+NER over the frame; it can miss non-textual PHI or unusual layouts, and it
-  is off by default. Treat persisted frames as PHI unless you have verified
-  redaction on your app.
+- **Image redaction is best-effort.** Presidio image redaction is OCR+NER over
+  the frame; it can miss non-textual PHI or unusual layouts. It is opt-in under
+  `auto` (off by default) and implied under `SCRUB=on`. Treat persisted frames
+  as PHI unless you have verified redaction on your app.
 - **Console paths** (`__main__.py`) print run-dir paths and the appliance URL;
   these are not identifiers but avoid pasting them into shared channels for a
   patient-specific run dir.

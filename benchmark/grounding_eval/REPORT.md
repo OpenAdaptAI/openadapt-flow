@@ -170,3 +170,24 @@ resolver. Concretely:
   top of the library OCR -- not a shipped component. Productionising it means
   moving that thin row-anchor into the grounding tier; the OCR itself is the
   library's.
+- **The ~3 px median is a renderer artifact; "88 % @ 40 px" is an upper bound.**
+  Method C's proposal is the OCR **text-token centre**; the ground truth is the
+  **DOM button centre**. On this synthetic surface the button is a bare "Open"
+  token, so text-centre and click-centre coincide and the residual collapses to
+  ~2-3 px. A real EMR button (padding, an icon, a wider hit-box) puts the text
+  centre tens of px off the click centre, so on a live surface the hit rate at a
+  fixed 40 px tolerance can only be **lower** than measured here. Read 88 % @
+  40 px as an upper bound conditional on text-centre approximate click-centre,
+  not a portable field number.
+- **The VLM baseline (0/6, 472 px) is a hardcoded imported constant, not a
+  head-to-head re-run in this harness.** Those figures are lifted verbatim from
+  the separate appliance_validation run (PR #38); this harness did not re-serve
+  the model and re-measure it side-by-side with method C. The surfaces and
+  target selection are identical by construction, but the VLM number carries
+  that provenance caveat -- it is a cited prior result, not a fresh arm.
+- **Method C is handed the ground-truth patient identity as its query.** The
+  row scorer receives the target's own name + MRN and finds the matching row.
+  That is fair for the task framing ("click the control in the row for *this*
+  patient"), but it measures "given the correct identity, can OCR find the
+  row," **not** end-to-end grounding from a raw intent -- identity resolution
+  is assumed upstream, not evaluated here.

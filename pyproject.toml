@@ -58,6 +58,10 @@ privacy = ["openadapt-privacy[presidio]>=0.1.0"]
 service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 # Apple-Silicon dev backend for the VLM service (local model, no GPU box).
 service-mlx = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "mlx-vlm>=0.1"]
+# Canonical action-vocabulary interop (openadapt_flow.interop.types). Boundary
+# only (emit / benchmark round-trip); never on the replay hot path. The shim
+# imports openadapt-types lazily, so the core stays importable without it.
+interop = ["openadapt-types>=0.1.0"]
 
 [project.scripts]
 openadapt-flow = "openadapt_flow.__main__:main"

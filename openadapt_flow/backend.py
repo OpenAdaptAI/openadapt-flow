@@ -45,6 +45,57 @@ class StructuralBackend(Protocol):
 
 
 @runtime_checkable
+class IdentityBackend(Protocol):
+    """Optional STRUCTURED-TEXT identity capability a backend MAY expose.
+
+    The runtime resolves targets by VISION alone (screenshot in, clicks out);
+    that never changes. But *identity verification* -- proving the resolved
+    target is the recorded entity, not a look-alike sibling -- does not have
+    to be OCR-based when the backend can hand back the real, structured
+    characters under a point.
+
+    An adversarial review proved the OCR-only identity path cannot close the
+    same-name / same-DOB glyph-collapse case: two DIFFERENT patients whose MRN
+    differs only by an O/0 or l/1 glyph ("MG4408" vs "MG44O8") render to a
+    byte-identical OCR band -- the same input a legit re-read produces -- so
+    no function downstream of OCR can distinguish them (see docs/LIMITS.md and
+    benchmark/dense_surface/DENSE_SURFACE.md). The escape is to stop relying
+    on OCR for identity where a higher-fidelity signal exists.
+
+    ``structured_text_at`` returns that higher-fidelity signal: the accessible
+    / DOM text at (or around) a coordinate, in the REAL characters --
+    "MG4408" with a genuine digit 0, not an OCR guess. Backends implement it
+    from whatever structured layer they own:
+
+    - a browser backend (Playwright) reads the DOM element under the point
+      (``elementFromPoint`` -> row/cell ``textContent`` + ``aria-label``);
+    - a native desktop backend reads the accessibility tree -- Windows UI
+      Automation ``Name``/``Value``/text, or macOS AX attributes. Crucially,
+      an element lacking a stable ``AutomationId`` usually STILL exposes
+      Name/Value text, so UIA/AX identity is viable on most native apps even
+      where an AutomationId-keyed selector is not.
+
+    The identity ladder treats DOM and UIA/AX text identically -- both are
+    "structured text". A pure-pixel substrate (Citrix/RDP/VDI, or a backend
+    with no a11y tree) returns None from every point, and identity falls back
+    to the OCR name+DOB-primary tier (docs/LIMITS.md). This is an ADDITIVE
+    identity capability: the 4-method vision resolution protocol
+    (:class:`Backend`) is unchanged.
+    """
+
+    def structured_text_at(self, x: int, y: int) -> Optional[str]:
+        """Return the structured (DOM / a11y) text at/around pixel (x, y).
+
+        The coordinate space matches :meth:`Backend.click` -- the same pixels
+        the resolver emits. Returns the target's row/element text in its REAL
+        characters, or None when the backend cannot observe structured text at
+        that point (pixel-only substrate, no a11y node, or a momentary
+        failure -- never raises).
+        """
+        ...
+
+
+@runtime_checkable
 class Backend(Protocol):
     @property
     def viewport(self) -> tuple[int, int]:

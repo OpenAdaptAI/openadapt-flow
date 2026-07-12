@@ -53,6 +53,7 @@ from openadapt_flow.runtime.identity import (
     CONTRADICTED_CHARS_CAP,
     CONTRADICTION_SIM,
     COVERAGE_THRESHOLD,
+    GLYPH_AMBIGUOUS_ID_CHARS_CAP,
     MIN_BLOCK,
     SUSPECT_CHARS_CAP,
     UNCOVERED_RUN_CAP,
@@ -218,6 +219,13 @@ def _decide(
     name_cap: int = BIG,
     alpha_cap: int = BIG,
 ) -> bool:
+    # A pair is VERIFIED iff every production budget holds -- INCLUDING the
+    # glyph-ambiguous-identifier budget (GLYPH_AMBIGUOUS_ID_CHARS_CAP, fixed at
+    # 0, not swept). Omitting it here measured a matcher DIFFERENT from the one
+    # that ships (verify_target_identity / band_verdict), so a same-entity band
+    # resting on a glyph-confusable identifier -- which production ABSTAINS on
+    # (8th reopening) -- was scored as VERIFIED, understating the false-abort
+    # cost. Including it makes this ROC characterize the production verdict.
     return (
         m.coverage >= coverage
         and m.max_uncovered_run <= run_cap
@@ -225,6 +233,7 @@ def _decide(
         and m.suspect_chars <= suspect_cap
         and m.unexplained_name_tokens <= name_cap
         and m.max_absent_alpha_token <= alpha_cap
+        and m.glyph_ambiguous_id_chars <= GLYPH_AMBIGUOUS_ID_CHARS_CAP
     )
 
 
@@ -585,6 +594,113 @@ def render_markdown(
         "collision the 5th reopening exploited). v3 exists because of "
         "that second review; the same criticism could apply again.",
         "",
+        "**SIXTH reopening — the 0.000% false accept is scoped to STRINGS, "
+        "not to real OCR (`benchmark/dense_surface/DENSE_SURFACE.md`).** "
+        "Every corpus here (v3 included) injects the letter/digit collision "
+        "as a TEXT edit, so the two identifiers reach the matcher as "
+        "DIFFERENT strings and the identifier-suspect rule fires — which is "
+        "why v3 reads FA 0.000%. On a real dense record LIST rendered to "
+        "pixels and read by the repo's own OCR (RapidOCR), two same-name "
+        "patients whose MRNs differ by one letter/digit near-homoglyph "
+        "(target `C0X3834` digit-ZERO vs sibling `COX3834` letter-O) are "
+        "read as the SAME string BEFORE the matcher sees them: the bands "
+        "are RAW-IDENTICAL, the match is a clean raw match, the suspect "
+        "rule never triggers, and the sibling VERIFIED. The dense-surface "
+        "study measured **7.22% false accept (26/360)** on that surface "
+        "(60% on the O/0 class) — so the 0.000% above held on the synthetic "
+        "corpora + probes but did NOT hold on real dense OCR. The fix "
+        "(`GLYPH_AMBIGUOUS_ID_CHARS_CAP`) HALTS on a raw match to a "
+        "glyph-ambiguous identifier (an MRN carrying an O/0 or l/1/I "
+        "near-homoglyph), which returns the dense-surface false accept to "
+        "**0/360** at a false-abort cost stated in that study; the caps "
+        "below are UNCHANGED because no corpus pair here exercises the new "
+        "budget. This ROC's zero is therefore a STRING-level zero; the "
+        "real-OCR zero lives in DENSE_SURFACE.md.",
+        "",
+        "**SEVENTH reopening — the DIGIT-FLANKED collapse defeats the "
+        "letter-only flag, and identity is moved onto name+DOB "
+        "(`benchmark/dense_surface/DENSE_SURFACE.md`).** The sixth fix "
+        "flagged an identifier only when a homoglyph LETTER (O/l/I) "
+        "survived OCR. A real MRN is `<alpha prefix><digit body>`; when the "
+        "confusable glyph is DIGIT-FLANKED, RapidOCR reads the DIGIT form "
+        "on BOTH a patient (`AC50061`) and a DIFFERENT same-name/DOB "
+        "patient (`AC5OO61`, letter O) — both collapse to `AC50061`, NO "
+        "homoglyph letter survives, the flag misses it, and the sibling "
+        "verified (measured **~87% false accept on the digit-flanked shape** "
+        "through the real render->OCR->match pipeline). No string flag on "
+        "the identifier can recover a distinction OCR destroyed at the "
+        "pixel level, and flagging the digit side (any 0/1 in an MRN) would "
+        "halt ~3 of 4 real MRNs. The fix changes WHAT identity trusts: it "
+        "is verified on the OCR-reliable, redundant NAME + DOB, and a "
+        "confusable-glyph identifier is CORROBORATION only. When a "
+        "discriminative name carries identity a confusable MRN does NOT "
+        "block (the common case — a wrong sibling differs in name/DOB and "
+        "is caught by coverage/contradiction); when identity would rest "
+        "SOLELY on a glyph-vulnerable identifier (no discriminative name — "
+        "the clicked NAME cell excluded) it HALTS. A homoglyph LETTER "
+        "stays a hard halt (affirmative OCR ambiguity), so the sixth-"
+        "reopening closure is preserved with no regression. DISCLOSED "
+        "RESIDUAL: a same-name/DOB different patient whose digit-body MRN "
+        "collapses to the target's, WITH the name displayed and matching, "
+        "is band-identical to a legitimate same-patient re-read and "
+        "verifies; closing it needs glyph-disambiguating OCR on identifier "
+        "regions (roadmapped). The caps below are UNCHANGED.",
+        "",
+        "**EIGHTH reopening — the same-name/same-DOB homonym, and the "
+        "name-carry rule REVERSED (this branch).** #27's \"disclosed "
+        "residual\" above was a LIVE, production-reachable wrong-patient "
+        "VERIFY: an adversarial review of PR #31 drove `AC50061` (recorded) "
+        "vs a DIFFERENT same-name/same-DOB patient `AC5OO61` (letter O) "
+        "through the REAL replayer — both OCR to `AC50061`, name+DOB "
+        "carried, and the OCR tier VERIFIED the wrong patient at coverage "
+        "1.0. A matched name+DOB CANNOT rule out a same-name/same-DOB "
+        "homonym whose distinguishing MRN glyph OCR collapsed, so the "
+        "name-carry suppression of the confusable-identifier halt is "
+        "REMOVED. `band_verdict` now returns **`abstain`** whenever the "
+        "band rests on a glyph-confusable identifier (an alphanumeric "
+        "MRN/account token with an O/0 or l/1/I), REGARDLESS of a matched "
+        "name+DOB — the OCR tier can neither certify SAME nor assert "
+        "DIFFERENT, so on a pure-pixel substrate the ladder HALTs. A "
+        "different-NAME sibling is still an affirmative MISMATCH; a clean "
+        "name+DOB with a NON-confusable identifier still VERIFIES. The "
+        "availability cost is the honest price of the refusal, paid as a "
+        "higher same-entity false-abort rate on this string corpus (the "
+        "current per-corpus figures are in the reference points below) — "
+        "recovered on real browser/desktop by the structured-text tier, "
+        "which verifies these with no OCR ambiguity. The caps below are "
+        "UNCHANGED (the glyph-ambiguous-identifier budget stays 0; the change "
+        "is that a positive budget now reads as ABSTAIN, not verify).",
+        "",
+        "**NINTH reopening — the PURELY NUMERIC MRN, and the identifier rule "
+        "made structural (this branch).** The 8th fix's predicate keyed on a "
+        "letter+digit MIX (an identifier had to contain BOTH an alpha and a "
+        "digit char), so it scoped the abstain to ALPHANUMERIC MRNs/account "
+        "tokens. A real MRN can be PURELY NUMERIC, and a numeric MRN is "
+        "exactly as glyph-collapsible: `100512` (recorded) and a DIFFERENT "
+        "same-name/same-DOB patient's `1OO512` (letter O's) OCR to the "
+        "byte-identical string `100512` — the letter+digit predicate never "
+        "flagged the all-digit `100512`, so the homonym VERIFIED the wrong "
+        "patient on the REAL replayer (also reproduced with `400761`/`4OO761` "
+        "and `417063`/`4l7063`). The scoping to \"alphanumeric MRN/account "
+        "token\" is therefore REMOVED: `_is_glyph_vulnerable_identifier` now "
+        "flags ANY identifier-shaped token (a bare alphanumeric run ≥ 3 chars "
+        "carrying a digit — numeric, alphanumeric, or lowercase; a date/DOB "
+        "carries a separator and is excluded, a name carries no digit and is "
+        "excluded) that bears a confusable glyph {0,1,O,l,I}, on EITHER side. "
+        "Split identifiers are covered too: the flag is a property of the "
+        "recorded token charged on any match path, so a confusable glyph in a "
+        "numeric FRAGMENT of an OCR-split MRN still abstains. When UNCERTAIN "
+        "whether a token is an identifier the matcher treats it AS one (→ "
+        "abstain), the SAFE over-halting direction. The numeric hole was "
+        "hidden because both the ROC corpora AND the dense/ladder collapse "
+        "corpus were ALPHA-PREFIXED; purely-numeric and split homonyms were "
+        "added to the render corpora (`benchmark/identity_ladder`, "
+        "`benchmark/dense_surface`) and re-measured on the real replayer at "
+        "0 false-accept. On these FROZEN string corpora the change flags the "
+        "numeric identifiers they already contained, so the same-entity "
+        "false-abort rises slightly (the tables below are the true figures); "
+        "false accept stays 0.000% across v1+v2+v3. The caps are UNCHANGED.",
+        "",
         "- **false accept** = a `different_entity` OR `indistinguishable` "
         "pair VERIFIED — a wrong-patient click, catastrophic in an EMR.",
         "- **false abort** = a `same_entity` pair refused — one hybrid "
@@ -641,15 +757,18 @@ def render_markdown(
         "strict (defense in depth) rather than taking the minimum-false-"
         "abort zero-FA corner. The availability price is real and stated "
         "in the tables below: the v1 false-abort rate rose from 10.7% "
-        "(pre-review matcher) through 21.2% (first redesign) to "
-        f"{corpus_rates['v1']['fabort']:.1%} after the identifier-suspect "
-        "fix — concentrated in occlusion, digit-class OCR noise that "
-        "lands on an identifier token (DOB/MRN/phone) and now aborts "
-        "(the true-row identifier-noise cost, see below), the "
-        "indistinguishable letter-letter mechanism, and capitalized "
-        "adjacent-row bleed — because each review showed the cheaper "
-        "operating point was buying availability with silent "
-        "wrong-patient classes.",
+        "(pre-review matcher) through 21.2% (first redesign) and 28.2% "
+        "(identifier-suspect fix) to "
+        f"{corpus_rates['v1']['fabort']:.1%} after the 8th-reopening "
+        "abstain fix — the last jump is the OCR tier now ABSTAINING on "
+        "EVERY same-entity band that carries a glyph-confusable identifier "
+        "(it cannot rule out a same-name/same-DOB homonym); the rest is "
+        "occlusion, digit-class OCR noise on an identifier token "
+        "(DOB/MRN/phone), the indistinguishable letter-letter mechanism, "
+        "and capitalized adjacent-row bleed. On real browser/desktop the "
+        "structured-text tier verifies the collapsible-identifier bands "
+        "with no OCR ambiguity, so this cost bites only on pure-pixel "
+        "substrates.",
         "",
         _corner_paragraph(points),
         "",

@@ -21,12 +21,26 @@ text** — the DOM row text under the click point on a browser backend
 (`backend.structured_text_at` → `elementFromPoint` → row `textContent`), or the
 UI-Automation / AX text on a native desktop backend — compared to the recorded
 target's structured text by exact/normalized match, in which `0` and `O`, `1`
-and `l` are DISTINCT characters; **tier 2 = a pixel/perceptual identifier-crop
-compare** (roadmapped — the next layer for pure-pixel Citrix/RDP/VDI substrates
-with no a11y text; OCR collapses O/0, the pixels do not); **tier N = the OCR
+and `l` are DISTINCT characters; **tier 2 = a pixel-compare of the identifier
+crop** (`verify_pixel_identity`) for pure-pixel Citrix/RDP/VDI substrates with
+no a11y text — OCR collapses O/0, the pixels do not, so a localized crop
+compare separates the collapse pairs at AUC 1.0 on a stable render and abstains
+under drift (validated in `benchmark/pixel_identity`); **tier 3 = an OPTIONAL
+local-VLM veto** (`verify_vlm_identity`) for drifted pixel substrates the pixel
+tier can't judge — a local open model, veto-only, 0% false-accept + 100%
+detection on the collapse surface, **off by default so the default install
+needs no model** (validated in `benchmark/vlm_identity`); **tier N = the OCR
 name+DOB-primary band** below, the pixel-substrate fallback with the disclosed
-same-name/DOB residual. A higher tier's verdict is final — the OCR fallback
-never overrides a structured-text mismatch.
+same-name/DOB residual. A higher tier's verdict is final — no lower tier
+overrides it — and every tier is fail-safe (unsure → abstain to the next; if
+nothing verifies → HALT). The integrated ladder is SUBSTRATE-COMPLETE
+(**structured text → pixel-compare → optional VLM veto → OCR name+DOB → halt**)
+and measures **0 false-accept across every substrate config**
+(`openadapt_flow.validation.identity_ladder`, artifacts in
+`benchmark/identity_ladder`). The one irreducible floor — a font rendering
+`O`/`0` or `l`/`1` pixel-identical — was not found among 14 common UI fonts
+(`benchmark/pixel_identity`); on such a font the sub-OCR tiers abstain and the
+run HALTS, never wrong-writes.
 
 **Measured on this exact render→pipeline surface**
 (`benchmark/dense_surface/dom_identity_probe.py`, seeds 1–2; raw output in

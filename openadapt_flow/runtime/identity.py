@@ -65,7 +65,7 @@ import difflib
 import re
 from collections import Counter
 from datetime import date
-from typing import Any, Iterable, NamedTuple, Optional
+from typing import Any, Iterable, NamedTuple, Optional, Protocol, runtime_checkable
 
 from openadapt_flow.ir import IdentityCheck, Point, Region
 from openadapt_flow.volatility import (  # noqa: F401 - TIMESTAMP_RE re-exported
@@ -1298,23 +1298,30 @@ def verify_target_identity(
 # this substrate -- fall through to the next):
 #
 #   tier 1  structured text (DOM / UIA / AX)   -- verify_structured_identity
-#   tier 2  [SEAM, next layer] pixel/perceptual identifier-crop compare
+#   tier 2  pixel-compare identifier crop      -- verify_pixel_identity
 #           -- for pure-pixel substrates (Citrix/RDP/VDI, broken a11y) that
-#           expose NO structured text. Rationale: OCR collapses O/0 and l/1,
-#           but the PIXELS do not -- a different patient's MRN renders to
-#           different pixels even when OCR reads them identically -- so a
-#           pixel-level comparison of the recorded vs live identifier crop is
-#           the vision-native way to catch the glyph-collapse where there is
-#           no DOM/a11y text at all. Not built yet; the ladder is shaped
-#           (a list of tier callables) so it drops in between here and the
-#           OCR tier with no structural change.
+#           expose NO structured text. OCR collapses O/0 and l/1, but the
+#           PIXELS do not -- a different patient's MRN renders to different
+#           pixels even when OCR reads them identically -- so a localized
+#           pixel comparison of the recorded vs live identifier crop catches
+#           the glyph-collapse where there is no DOM/a11y text. VERIFIES on a
+#           matching render, MISMATCHES on a localized glyph change, ABSTAINS
+#           under drift (validated: benchmark/pixel_identity).
+#   tier 3  local-VLM veto (OPTIONAL)           -- verify_vlm_identity
+#           -- injected, OFF by default. Only when identity rests on a
+#           glyph-confusable identifier AND the cheaper tiers abstained (drift
+#           the pixel tier can't judge): a local open VLM answers same/
+#           different, VETO-ONLY (different/unsure -> halt; never grants a
+#           pass, never overrides an earlier mismatch). Validated:
+#           benchmark/vlm_identity.
 #   tier N  OCR name+DOB-primary band (#27)    -- the pixel-substrate fallback,
 #           with its proven-irreducible same-name/same-DOB residual that HALTS
 #           on the sole-ambiguous-identifier case (docs/LIMITS.md).
 #
-# A higher tier's verdict is FINAL: the OCR fallback must never OVERRIDE a
-# structured-text mismatch (that would re-admit the very ambiguity the
-# structured tier removed).
+# A higher tier's verdict is FINAL: a lower tier must never OVERRIDE it (that
+# would re-admit the very ambiguity the higher tier removed). Every tier is
+# FAIL-SAFE: unsure -> abstain to the next; if all abstain -> HALT. No tier
+# can turn a wrong patient into a verified one.
 
 
 def normalize_structured(text: str) -> str:
@@ -1398,6 +1405,255 @@ def run_identity_ladder(
         if verdict is not None:
             return verdict
     return IdentityCheck(status="unreadable")
+
+
+# ---------------------------------------------------------------------------
+# Pixel-compare identity tier (tier 2) + optional local-VLM veto (tier 3)
+# ---------------------------------------------------------------------------
+#
+# These two tiers close the ladder's SEAM between structured text and OCR for
+# PURE-PIXEL substrates (Citrix/RDP/VDI, broken a11y) that expose no
+# DOM/a11y string. Both were validated as standalone probes before promotion:
+#
+#   tier 2  PIXEL COMPARE   (benchmark/pixel_identity, PR #29) -- the rendered
+#           pixels retain the O/0 and l/1 distinction OCR collapses, so a
+#           localized max abs-diff of the recorded vs live identifier crop
+#           separates the glyph-collapse wrong-patient pairs at AUC 1.0 on a
+#           STABLE render (same_max 0.0 vs diff_min ~0.097; threshold ~0.049).
+#           It BREAKS under render drift (dark theme / zoom / font), where a
+#           SAME-value crop's distance climbs above the threshold too. So it is
+#           promoted FAIL-SAFE: it VERIFIES only when the render matches (a
+#           near-zero localized distance -- structurally impossible for a
+#           different identifier, whose min stable distance is ~0.097),
+#           MISMATCHES only when the difference is LOCALIZED on an otherwise
+#           matching render (a single differing glyph), and ABSTAINS (returns
+#           None -> next tier) the moment a WHOLE-crop change signals drift.
+#           It can never false-accept: VERIFY requires a distance no different
+#           identifier ever produces. Free, no model.
+#
+#   tier 3  VLM VETO         (benchmark/vlm_identity, PR #28) -- a LOCAL open
+#           VLM (Qwen3-VL-4B via MLX, ~0.8s/call, ZERO API calls) asked
+#           "same identifier or different?". VETO-ONLY: it can only REJECT
+#           (different/unsure -> halt), never grant a pass a cheaper tier
+#           refused, and it never overrides an earlier tier's mismatch (the
+#           ladder order guarantees it runs only after the cheaper tiers
+#           ABSTAINED). OPTIONAL and config-gated like the grounder: injected
+#           via an ``IdentityVLM`` verifier, ``None`` by default, so the
+#           default install needs no model. On the digit-flanked O/0 collapse
+#           surface it scored 0% false-accept + 100% detection and 0%
+#           over-halt under theme drift (where pixel-compare breaks); it
+#           over-halts (safely) on zoom/font.
+#
+# When both pixel and VLM abstain, the ladder falls to the OCR name+DOB tier
+# (#27) and then HALT -- the disclosed residual. No tier can ever turn a
+# wrong patient into a verified one; the worst any drift can force is a HALT.
+
+# Localized max abs-diff parameters, pinned to the validated probe
+# (benchmark/pixel_identity/pixel_identity.json, method "local_maxdiff").
+PIXEL_CANON = (48, 240)             # (H, W) canonical grayscale canvas
+PIXEL_LOCALMAX_WIN = 24            # sliding-window width (columns)
+PIXEL_SAME_THRESHOLD = 0.0487     # same_max 0.0 vs diff_min ~0.097 -> AUC 1.0
+# Mismatch-vs-abstain split (measured across stable/dark/zoom/font renders):
+# a STABLE different-identifier crop is a LOCALIZED change (global L1 <= ~0.025,
+# active-column spread <= ~0.18); render DRIFT is a WHOLE-crop change (global
+# L1 >= ~0.037, spread >= ~0.30). Caps sit in the gap; either one exceeded =>
+# drift suspected => abstain (fail-safe: prefer fall-through over a halt).
+PIXEL_MISMATCH_GLOBAL_CAP = 0.030
+PIXEL_MISMATCH_SPREAD_CAP = 0.24
+PIXEL_SPREAD_EPS = 0.06           # per-column mean-diff over which a column is "active"
+
+
+def _pixel_canon(png: bytes) -> Optional[Any]:
+    """Decode PNG bytes to the canonical grayscale crop (size-normalized).
+
+    Returns None when the bytes cannot be decoded. cv2/numpy are imported
+    lazily to keep this module import-light for unit tests.
+    """
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    return cv2.resize(
+        gray, (PIXEL_CANON[1], PIXEL_CANON[0]), interpolation=cv2.INTER_AREA
+    )
+
+
+def pixel_distances(recorded_gray: Any, live_gray: Any) -> tuple[float, float, float]:
+    """(localized max, global mean, active-column spread) of |recorded-live|.
+
+    All on the canonical grayscale crops, normalized to [0, 1]:
+
+    - **localized max** -- the max over sliding ``PIXEL_LOCALMAX_WIN``-wide
+      windows of the window's mean abs-diff (segmentation-free localization of
+      a single differing glyph; the validated ``local_maxdiff`` metric).
+    - **global mean** -- the whole-crop mean abs-diff (a drift detector: a
+      single glyph barely moves it, a theme/zoom/font change dominates it).
+    - **spread** -- fraction of columns whose mean abs-diff exceeds
+      ``PIXEL_SPREAD_EPS`` (localized change -> small; drift -> near 1.0).
+    """
+    import numpy as np
+
+    a = recorded_gray.astype(np.float32)
+    b = live_gray.astype(np.float32)
+    d = np.abs(a - b) / 255.0
+    w = d.shape[1]
+    win = PIXEL_LOCALMAX_WIN
+    local = 0.0
+    for x0 in range(0, max(1, w - win + 1), max(1, win // 3)):
+        local = max(local, float(d[:, x0:x0 + win].mean()))
+    glob = float(d.mean())
+    col = d.mean(axis=0)
+    spread = float((col > PIXEL_SPREAD_EPS).mean())
+    return local, glob, spread
+
+
+def verify_pixel_identity(
+    recorded_png: Optional[bytes], live_png: Optional[bytes]
+) -> Optional[IdentityCheck]:
+    """Pixel-compare identity tier (tier 2 of the ladder).
+
+    Compares the recorded identifier crop's pixels to the live one's for a
+    pure-pixel substrate. Three-way, FAIL-SAFE:
+
+    - **verify** -- the render matches AND the identifier is the same: the
+      localized max abs-diff is below :data:`PIXEL_SAME_THRESHOLD`. On a
+      stable render a *different* identifier's min distance is ~0.097 and any
+      render drift only raises a same-value distance, so VERIFY is
+      structurally unreachable for a wrong patient -- the tier cannot
+      false-accept.
+    - **mismatch** -- the difference is LOCALIZED on an otherwise matching
+      render (global mean and spread both below their caps): a single
+      differing glyph -> a different identifier -> halt.
+    - **abstain** (``None``) -- a WHOLE-crop change (global mean or spread
+      above its cap): render drift is suspected, the pixel compare cannot be
+      trusted, fall through to the next tier (VLM veto, then OCR).
+
+    Returns None (abstain) when either crop is missing or undecodable, so a
+    bundle without a recorded identifier crop simply falls through.
+    """
+    if not recorded_png or not live_png:
+        return None
+    ra = _pixel_canon(recorded_png)
+    la = _pixel_canon(live_png)
+    if ra is None or la is None:
+        return None
+    local, glob, spread = pixel_distances(ra, la)
+    if local < PIXEL_SAME_THRESHOLD:
+        return IdentityCheck(
+            status="verified",
+            mode="pixel",
+            coverage=1.0,
+            expected="recorded identifier crop",
+            observed=f"live identifier crop matches (max-diff {local:.3f})",
+        )
+    if glob <= PIXEL_MISMATCH_GLOBAL_CAP and spread <= PIXEL_MISMATCH_SPREAD_CAP:
+        return IdentityCheck(
+            status="mismatch",
+            mode="pixel",
+            coverage=0.0,
+            expected="recorded identifier crop",
+            observed=(
+                f"identifier pixels differ locally (max-diff {local:.3f}, "
+                f"global {glob:.3f}, spread {spread:.2f})"
+            ),
+        )
+    return None  # whole-crop drift -> abstain to the next tier
+
+
+@runtime_checkable
+class IdentityVLM(Protocol):
+    """Protocol for the optional local-VLM same/different identity comparator.
+
+    Implementations answer whether two identifier crops show the SAME
+    characters. VETO-ONLY by contract: an implementation must fold any
+    non-confident answer to ``"different"`` (the memo's rule -- the model may
+    only reject, never grant a pass). See
+    :class:`openadapt_flow.runtime.identity_vlm.MLXIdentityVLM`.
+    """
+
+    def same_or_different(self, recorded_png: bytes, live_png: bytes) -> str:
+        """Return ``"same"`` or ``"different"`` for the two identifier crops."""
+        ...
+
+
+def identity_rests_on_confusable_identifier(text: Optional[str]) -> bool:
+    """Whether identity here rests on a GLYPH-CONFUSABLE identifier.
+
+    True iff any token in ``text`` is an identifier-like string carrying an
+    O/0 or l/1/I near-homoglyph (see :func:`_is_glyph_vulnerable_identifier`)
+    -- the only case where the expensive VLM veto earns its cost, because a
+    plain name+DOB is already discriminated by the cheaper tiers.
+    """
+    if not text:
+        return False
+    return any(
+        _is_glyph_vulnerable_identifier(squash(tok)) for tok in tokenize(text)
+    )
+
+
+def verify_vlm_identity(
+    recorded_png: Optional[bytes],
+    live_png: Optional[bytes],
+    *,
+    verifier: Optional[IdentityVLM],
+    glyph_confusable: bool,
+) -> Optional[IdentityCheck]:
+    """Optional local-VLM veto tier (tier 3 of the ladder).
+
+    Gated three ways -- returns None (abstain) unless ALL hold: a ``verifier``
+    is injected (the tier is OFF by default), identity rests on a
+    ``glyph_confusable`` identifier (else the cheaper tiers suffice), and both
+    crops are present.
+
+    VETO-ONLY: the verifier can only return ``"same"`` (allow) or
+    ``"different"`` (halt); anything else, and any error from a
+    broken/missing model, folds to ``"different"`` so an unsure model HALTS
+    rather than waves a wrong patient through. It never overrides an earlier
+    tier -- the ladder only reaches it after the cheaper tiers abstained.
+    """
+    if verifier is None or not glyph_confusable:
+        return None
+    if not recorded_png or not live_png:
+        return None
+    try:
+        verdict = verifier.same_or_different(recorded_png, live_png)
+    except Exception:
+        verdict = "different"  # veto-only: a broken model halts, never passes
+    same = str(verdict).strip().lower() == "same"
+    return IdentityCheck(
+        status="verified" if same else "mismatch",
+        mode="vlm",
+        coverage=1.0 if same else 0.0,
+        expected="recorded identifier crop",
+        observed=f"local-VLM verdict: {'same' if same else 'different'}",
+    )
+
+
+def crop_region(frame_png: bytes, region: Region) -> Optional[bytes]:
+    """Crop ``region`` (x, y, w, h) from a PNG frame; return it as PNG bytes.
+
+    Feeds the pixel/VLM identity tiers with the live identifier crop re-cut at
+    the resolved point. Returns None when the frame cannot be decoded or the
+    clamped region is empty (so the tiers abstain). cv2/numpy are lazy to keep
+    this module import-light.
+    """
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(frame_png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    x0, y0 = max(0, int(region[0])), max(0, int(region[1]))
+    x1 = min(w, int(region[0]) + int(region[2]))
+    y1 = min(h, int(region[1]) + int(region[3]))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    ok, buf = cv2.imencode(".png", img[y0:y1, x0:x1])
+    return buf.tobytes() if ok else None
 
 
 def upscale_crop(frame_png: bytes, region: Region, factor: int = 2) -> Optional[bytes]:

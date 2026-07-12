@@ -27,6 +27,7 @@ from typing import Any, Optional
 from openadapt_flow.backend import Backend
 from openadapt_flow.ir import (
     ActionKind,
+    Anchor,
     IdentityCheck,
     Point,
     Region,
@@ -93,6 +94,10 @@ class Replayer:
             module, imported lazily so unit tests can inject a fake without
             the OCR stack ever loading.
         grounder: Optional Grounder used as the last resolution rung.
+        identity_vlm: Optional IdentityVLM (see runtime.identity) used as the
+            optional local-VLM veto tier of the pre-click identity ladder;
+            None (default) disables that tier -- the ladder still runs
+            structured-text, pixel-compare, OCR, and halt with no model.
         poll_interval_s: Postcondition polling interval in seconds.
     """
 
@@ -102,6 +107,7 @@ class Replayer:
         *,
         vision: Optional[Any] = None,
         grounder: Optional[Any] = None,
+        identity_vlm: Optional[Any] = None,
         poll_interval_s: float = 0.05,
     ) -> None:
         if vision is None:
@@ -110,6 +116,11 @@ class Replayer:
         self.backend = backend
         self.vision = vision
         self.grounder = grounder
+        # Optional local-VLM identity veto (tier 3 of the identity ladder),
+        # OFF by default like the grounder: an IdentityVLM verifier or None.
+        # When None the ladder runs structured-text + pixel-compare + OCR +
+        # halt with no model dependency.
+        self.identity_vlm = identity_vlm
         self.poll_interval_s = poll_interval_s
         # Point of the most recent successful click (the focusing click for
         # a following TYPE step); reset per run.
@@ -296,6 +307,7 @@ class Replayer:
                 and (
                     step.anchor.context_text
                     or step.anchor.structured_identity
+                    or step.anchor.identifier_crop
                 )
             ):
                 # Identity gate: the ladder proves the resolved target LOOKS
@@ -311,7 +323,7 @@ class Replayer:
                 # hand-built workflows; the guard is cheap and closes the
                 # gap either way).
                 check = self._verify_identity(
-                    step, resolution, before_png, params, workflow
+                    step, resolution, before_png, params, workflow, bundle_dir
                 )
                 result.identity = check
                 if check.status == "mismatch":
@@ -542,6 +554,7 @@ class Replayer:
         before_png: bytes,
         params: dict[str, str],
         workflow: Workflow,
+        bundle_dir: Optional[Path] = None,
     ) -> IdentityCheck:
         """Verify the resolved target's identity via the identity LADDER.
 
@@ -558,13 +571,20 @@ class Replayer:
           structured text at the resolved point -- O and 0 are distinct
           characters, so the same-name/same-DOB glyph-collapse that defeats
           OCR cannot occur, and the class closes with no OCR-availability
-          cost. A mismatch here is authoritative: the OCR tier never overrides
-          it.
-        - **tier 2 [SEAM, next layer] -- pixel/perceptual identifier crop.**
-          For pure-pixel substrates (Citrix/RDP/VDI, broken a11y) that expose
-          no structured text: compare the recorded identifier crop's pixels to
-          the live one's. OCR collapses O/0 and l/1, the pixels do not. Not
-          built yet; the ladder is shaped so it slots in here.
+          cost. A mismatch here is authoritative: no lower tier overrides it.
+        - **tier 2 -- pixel-compare identifier crop.** For pure-pixel
+          substrates (Citrix/RDP/VDI, broken a11y) that carry a recorded
+          identifier crop (``anchor.identifier_crop`` / ``identifier_region``)
+          but no structured text: compare the recorded identifier crop's
+          pixels to the live crop re-cut at the resolved point. OCR collapses
+          O/0 and l/1, the pixels do not. VERIFIES on a matching render,
+          MISMATCHES on a localized glyph change, ABSTAINS under render drift
+          (see :func:`identity.verify_pixel_identity`).
+        - **tier 3 -- local-VLM veto (OPTIONAL, off by default).** Only when a
+          verifier is injected (``self.identity_vlm``), identity rests on a
+          glyph-confusable identifier, AND the cheaper tiers abstained: a
+          local open VLM answers same/different, VETO-ONLY (different/unsure
+          -> halt). See :func:`identity.verify_vlm_identity`.
         - **tier N -- OCR name+DOB-primary band (#27).** The pixel-substrate
           fallback: :meth:`_verify_identity_ocr`, with its proven-irreducible
           same-name/same-DOB residual that HALTS on the sole-ambiguous-
@@ -591,10 +611,36 @@ class Replayer:
                 live = None
             return identity_mod.verify_structured_identity(recorded, live)
 
-        # tier 2 [SEAM]: pixel/perceptual identifier-crop comparison for
-        # pure-pixel substrates goes HERE, between structured text and OCR --
-        # see run_identity_ladder / docs/LIMITS.md. Intentionally omitted for
-        # now; adding it is a one-line insertion into the tier list below.
+        # Recorded + live identifier crops, shared by the pixel and VLM tiers.
+        # Cut lazily and cached: unavailable (no recorded crop, or the live
+        # frame can't be cut) => both tiers abstain and the ladder falls to
+        # OCR. Cost is paid once even though two tiers may read it.
+        _crops: dict[str, Optional[bytes]] = {}
+
+        def identifier_crops() -> tuple[Optional[bytes], Optional[bytes]]:
+            if "rec" not in _crops:
+                _crops["rec"], _crops["live"] = self._identifier_crops(
+                    anchor, resolution, before_png, bundle_dir
+                )
+            return _crops["rec"], _crops["live"]
+
+        def pixel_tier() -> Optional[IdentityCheck]:
+            recorded_png, live_png = identifier_crops()
+            return identity_mod.verify_pixel_identity(recorded_png, live_png)
+
+        def vlm_tier() -> Optional[IdentityCheck]:
+            recorded_png, live_png = identifier_crops()
+            # Only spend the VLM where identity rests on a glyph-confusable
+            # identifier -- read from whatever identity text the bundle has.
+            confusable = identity_mod.identity_rests_on_confusable_identifier(
+                anchor.structured_identity or anchor.context_text
+            )
+            return identity_mod.verify_vlm_identity(
+                recorded_png,
+                live_png,
+                verifier=self.identity_vlm,
+                glyph_confusable=confusable,
+            )
 
         def ocr_tier() -> Optional[IdentityCheck]:
             if not anchor.context_text:
@@ -603,7 +649,46 @@ class Replayer:
                 step, resolution, before_png, params, workflow
             )
 
-        return identity_mod.run_identity_ladder([structured_tier, ocr_tier])
+        return identity_mod.run_identity_ladder(
+            [structured_tier, pixel_tier, vlm_tier, ocr_tier]
+        )
+
+    def _identifier_crops(
+        self,
+        anchor: Anchor,
+        resolution: Resolution,
+        before_png: bytes,
+        bundle_dir: Optional[Path],
+    ) -> tuple[Optional[bytes], Optional[bytes]]:
+        """(recorded, live) identifier-crop PNGs for the pixel/VLM tiers.
+
+        The recorded crop is ``anchor.identifier_crop`` from the bundle; the
+        live crop is the same-sized box re-cut from ``before_png`` at
+        ``anchor.identifier_region`` translated to the RESOLVED point (the
+        same offset the region had from the recorded click point -- the OCR
+        exclude region is translated identically). Returns (None, None) when
+        the bundle carries no identifier crop/region or the frame can't be
+        cut, so the tiers abstain.
+        """
+        if (
+            bundle_dir is None
+            or not anchor.identifier_crop
+            or anchor.identifier_region is None
+        ):
+            return None, None
+        crop_path = Path(bundle_dir) / anchor.identifier_crop
+        if not crop_path.is_file():
+            return None, None
+        recorded_png = crop_path.read_bytes()
+        rx, ry, rw, rh = anchor.identifier_region
+        live_region = (
+            resolution.point[0] + (rx - anchor.click_point[0]),
+            resolution.point[1] + (ry - anchor.click_point[1]),
+            rw,
+            rh,
+        )
+        live_png = identity_mod.crop_region(before_png, live_region)
+        return recorded_png, live_png
 
     def _verify_identity_ocr(
         self,

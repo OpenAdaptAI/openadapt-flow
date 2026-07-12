@@ -152,3 +152,79 @@ def test_micro_batching_groups_concurrent_requests():
     assert all(r.status_code == 200 for r in resps)
     assert all(r.json()["verdict"] == "different" for r in resps)
     assert max_batch >= 2, f"expected batching, max batch was {max_batch}"
+
+
+# -- insecure-exposure startup warnings (empty token / non-loopback bind) -----
+
+
+def test_no_warning_on_loopback_with_token():
+    from openadapt_flow.services.vlm_service.config import insecure_exposure_warnings
+
+    assert insecure_exposure_warnings("127.0.0.1", "secret") == []
+    assert insecure_exposure_warnings("localhost", "secret") == []
+
+
+def test_warns_unauthenticated_phi_on_network():
+    from openadapt_flow.services.vlm_service.config import insecure_exposure_warnings
+
+    msgs = insecure_exposure_warnings("0.0.0.0", "")
+    assert len(msgs) == 1
+    text = msgs[0]
+    assert "UNAUTHENTICATED PHI ENDPOINT ON THE NETWORK" in text
+    assert "VLM_SERVICE_TOKEN" in text
+
+
+def test_warns_auth_disabled_on_loopback():
+    from openadapt_flow.services.vlm_service.config import insecure_exposure_warnings
+
+    msgs = insecure_exposure_warnings("127.0.0.1", "")
+    assert len(msgs) == 1
+    assert "AUTH DISABLED" in msgs[0]
+
+
+def test_warns_cleartext_phi_when_authed_but_non_loopback():
+    from openadapt_flow.services.vlm_service.config import insecure_exposure_warnings
+
+    msgs = insecure_exposure_warnings("0.0.0.0", "secret")
+    assert len(msgs) == 1
+    assert "CLEARTEXT PHI OVER THE NETWORK" in msgs[0]
+
+
+def test_cli_host_defaults_to_loopback(monkeypatch):
+    """The serve entrypoint must not land on the network without explicit --host."""
+    from openadapt_flow.services.vlm_service import __main__ as service_main
+
+    captured = {}
+
+    class _FakeUvicorn:
+        @staticmethod
+        def run(app, host, port):
+            captured["host"] = host
+            captured["port"] = port
+
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", _FakeUvicorn)
+    monkeypatch.setenv("VLM_BACKEND", "stub")
+    service_main.main([])  # no --host
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_cli_warns_when_bound_to_all_interfaces_without_token(monkeypatch, caplog):
+    """--host 0.0.0.0 with no token logs the unauthenticated-PHI warning."""
+    import logging
+
+    from openadapt_flow.services.vlm_service import __main__ as service_main
+
+    class _FakeUvicorn:
+        @staticmethod
+        def run(app, host, port):
+            pass
+
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", _FakeUvicorn)
+    monkeypatch.setenv("VLM_BACKEND", "stub")
+    monkeypatch.delenv("VLM_SERVICE_TOKEN", raising=False)
+    with caplog.at_level(logging.WARNING):
+        service_main.main(["--host", "0.0.0.0"])
+    assert any(
+        "UNAUTHENTICATED PHI ENDPOINT ON THE NETWORK" in rec.message
+        for rec in caplog.records
+    )

@@ -201,10 +201,12 @@ Concrete before → after, same recordings:
   old miner grabbed a message row's timestamp), `Showing 1 to 1 of 1
   entries…`. No timestamps, no `':01'` fragments, no note text, no other
   patients' rows. Per-step list below under Track D.
-- Verification: full unit + e2e matrix green (387 tests after the review
-  hardening below and the merge with the `feat/fix-wrong-actions` review
-  hardening, including the perturbation/chaos/primitives characterization
-  suites, re-run whole); OpenEMR live check under Track D below
+- Verification: full unit + e2e matrix green (387 tests as of the 2026-07-09
+  validation snapshot, after the review hardening below and the merge with the
+  `feat/fix-wrong-actions` review hardening, including the
+  perturbation/chaos/primitives characterization suites, re-run whole; the
+  suite has since grown to 864 collected — see README "Status"); OpenEMR live
+  check under Track D below
   (2026-07-09 re-run).
 
 **False-abort cost of this fix: none measured** — the MockMed baseline,
@@ -895,8 +897,14 @@ date pickers, file choosers) is invisible to screenshots.
 Reported with equal honesty:
 
 - **No crashes, anywhere.** Every failure was a reported, per-step halt.
-- **No false success without a wrong action first.** When the replay acted
-  on the *right* targets, postconditions never green-lit a failed outcome.
+- **No false success without a wrong action first — scoped to UI drift.**
+  Across the render/UI-drift matrix, when the replay acted on the *right*
+  targets, postconditions never green-lit a failed outcome. This does **not**
+  hold for the transactional-write class: the 2026-07-12 fault-model study
+  (`benchmark/fault_model/`, and the dangerous list in docs/LIMITS.md) found
+  phantom/partial-save successes on the *correct* action for 5 of 7
+  transactional fault classes, where the screen reads success while the
+  system of record is wrong. Vision postconditions cannot see that boundary.
 - The halt machinery is sound when evidence dies loudly: opaque overlays,
   navigation hijacks, empty states, and 12s stalls all stopped the run at
   the right step with an accurate, named reason.

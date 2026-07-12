@@ -1,8 +1,9 @@
 {
  "summary": {
-  "surface": "dense O/0-glyph-collapse (different-patient siblings)",
+  "surface": "dense O/0-glyph-collapse same-name/same-DOB homonyms (different patients one MRN glyph apart)",
   "n_pairs": 5,
-  "vlm_source": "ProbeFaithfulVLM reproducing benchmark/vlm_identity (PR #28): 100% detection / 0% false-accept on the OCR-collapse surface; same-value-drift over-halt dark 0%, zoom 33%, font 67%",
+  "measured_via": "the REAL Replayer._verify_identity production tier stack (structured -> pixel -> vlm -> OCR -> halt); no hand-built tier subset",
+  "vlm_source": "ProbeFaithfulVLM reproducing benchmark/vlm_identity (PR #28): 100% detection / 0% false-accept; veto-only (a 'same' answer abstains, never grants a pass)",
   "configs": {
    "structured": {
     "config": "structured",
@@ -19,8 +20,8 @@
     "n_wrong": 5,
     "false_accept": 0,
     "false_accept_rate": 0.0,
-    "over_halt": 0,
-    "over_halt_rate": 0.0
+    "over_halt": 5,
+    "over_halt_rate": 1.0
    },
    "pixel_drift_vlm_on": {
     "config": "pixel_drift_vlm_on",
@@ -28,11 +29,20 @@
     "n_wrong": 15,
     "false_accept": 0,
     "false_accept_rate": 0.0,
-    "over_halt": 7,
-    "over_halt_rate": 0.4666666666666667
+    "over_halt": 15,
+    "over_halt_rate": 1.0
    },
    "pixel_drift_vlm_off": {
     "config": "pixel_drift_vlm_off",
+    "n_correct": 15,
+    "n_wrong": 15,
+    "false_accept": 0,
+    "false_accept_rate": 0.0,
+    "over_halt": 15,
+    "over_halt_rate": 1.0
+   },
+   "ocr_only_confusable": {
+    "config": "ocr_only_confusable",
     "n_correct": 15,
     "n_wrong": 15,
     "false_accept": 0,
@@ -55,63 +65,83 @@
    "cases": [
     {
      "pair": "O0_digit_1",
+     "cond": "stable",
      "scenario": "correct",
      "outcome": "click",
-     "status": "verified"
+     "status": "verified",
+     "mode": "structured"
     },
     {
      "pair": "O0_digit_1",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "structured"
     },
     {
      "pair": "O0_digit_2",
+     "cond": "stable",
      "scenario": "correct",
      "outcome": "click",
-     "status": "verified"
+     "status": "verified",
+     "mode": "structured"
     },
     {
      "pair": "O0_digit_2",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "structured"
     },
     {
      "pair": "O0_digit_3",
+     "cond": "stable",
      "scenario": "correct",
      "outcome": "click",
-     "status": "verified"
+     "status": "verified",
+     "mode": "structured"
     },
     {
      "pair": "O0_digit_3",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "structured"
     },
     {
      "pair": "O0_alpha_1",
+     "cond": "stable",
      "scenario": "correct",
      "outcome": "click",
-     "status": "verified"
+     "status": "verified",
+     "mode": "structured"
     },
     {
      "pair": "O0_alpha_1",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "structured"
     },
     {
      "pair": "O0_alpha_2",
+     "cond": "stable",
      "scenario": "correct",
      "outcome": "click",
-     "status": "verified"
+     "status": "verified",
+     "mode": "structured"
     },
     {
      "pair": "O0_alpha_2",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "structured"
     }
    ]
   },
@@ -121,68 +151,88 @@
    "n_wrong": 5,
    "false_accept": 0,
    "false_accept_rate": 0.0,
-   "over_halt": 0,
-   "over_halt_rate": 0.0,
+   "over_halt": 5,
+   "over_halt_rate": 1.0,
    "cases": [
     {
      "pair": "O0_digit_1",
+     "cond": "stable",
      "scenario": "correct",
-     "outcome": "click",
-     "status": "verified"
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
     },
     {
      "pair": "O0_digit_1",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
      "pair": "O0_digit_2",
+     "cond": "stable",
      "scenario": "correct",
-     "outcome": "click",
-     "status": "verified"
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
     },
     {
      "pair": "O0_digit_2",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
      "pair": "O0_digit_3",
+     "cond": "stable",
      "scenario": "correct",
-     "outcome": "click",
-     "status": "verified"
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
     },
     {
      "pair": "O0_digit_3",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
      "pair": "O0_alpha_1",
+     "cond": "stable",
      "scenario": "correct",
-     "outcome": "click",
-     "status": "verified"
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
     },
     {
      "pair": "O0_alpha_1",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
      "pair": "O0_alpha_2",
+     "cond": "stable",
      "scenario": "correct",
-     "outcome": "click",
-     "status": "verified"
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
     },
     {
      "pair": "O0_alpha_2",
+     "cond": "stable",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
     }
    ]
   },
@@ -192,248 +242,248 @@
    "n_wrong": 15,
    "false_accept": 0,
    "false_accept_rate": 0.0,
-   "over_halt": 7,
-   "over_halt_rate": 0.4666666666666667,
+   "over_halt": 15,
+   "over_halt_rate": 1.0,
    "cases": [
     {
-     "cond": "dark",
      "pair": "O0_digit_1",
+     "cond": "dark",
      "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
     },
     {
-     "cond": "dark",
      "pair": "O0_digit_1",
+     "cond": "dark",
      "scenario": "wrong",
      "outcome": "halt",
      "status": "mismatch",
      "mode": "vlm"
     },
     {
-     "cond": "dark",
-     "pair": "O0_digit_2",
-     "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_digit_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_digit_3",
-     "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_digit_3",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_1",
-     "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_1",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_2",
-     "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
      "pair": "O0_digit_1",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
      "cond": "zoom",
-     "pair": "O0_digit_1",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_digit_2",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_digit_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_digit_3",
-     "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_digit_3",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_1",
-     "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_1",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_2",
-     "scenario": "correct",
-     "outcome": "click",
-     "status": "verified",
-     "mode": "vlm"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "font",
-     "pair": "O0_digit_1",
      "scenario": "correct",
      "outcome": "halt",
      "status": "mismatch",
      "mode": "pixel"
     },
     {
-     "cond": "font",
      "pair": "O0_digit_1",
+     "cond": "zoom",
      "scenario": "wrong",
      "outcome": "halt",
      "status": "mismatch",
-     "mode": "vlm"
+     "mode": "pixel"
     },
     {
+     "pair": "O0_digit_1",
      "cond": "font",
-     "pair": "O0_digit_2",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "font",
-     "pair": "O0_digit_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "font",
-     "pair": "O0_digit_3",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "font",
-     "pair": "O0_digit_3",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "font",
-     "pair": "O0_alpha_1",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "font",
-     "pair": "O0_alpha_1",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "mismatch",
-     "mode": "vlm"
-    },
-    {
-     "cond": "font",
-     "pair": "O0_alpha_2",
      "scenario": "correct",
      "outcome": "halt",
      "status": "mismatch",
      "mode": "pixel"
     },
     {
+     "pair": "O0_digit_1",
      "cond": "font",
-     "pair": "O0_alpha_2",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "dark",
      "scenario": "wrong",
      "outcome": "halt",
      "status": "mismatch",
      "mode": "vlm"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "vlm"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "vlm"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "vlm"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
     }
    ]
   },
@@ -447,214 +497,495 @@
    "over_halt_rate": 1.0,
    "cases": [
     {
-     "cond": "dark",
      "pair": "O0_digit_1",
+     "cond": "dark",
      "scenario": "correct",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "abstain",
+     "mode": "context"
     },
     {
-     "cond": "dark",
      "pair": "O0_digit_1",
+     "cond": "dark",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "abstain",
+     "mode": "context"
     },
     {
-     "cond": "dark",
-     "pair": "O0_digit_2",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_digit_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_digit_3",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_digit_3",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_1",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_1",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_2",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "dark",
-     "pair": "O0_alpha_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
      "pair": "O0_digit_1",
+     "cond": "zoom",
      "scenario": "correct",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
-     "cond": "zoom",
      "pair": "O0_digit_1",
+     "cond": "zoom",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
-     "cond": "zoom",
-     "pair": "O0_digit_2",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_digit_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_digit_3",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_digit_3",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_1",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_1",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_2",
-     "scenario": "correct",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "zoom",
-     "pair": "O0_alpha_2",
-     "scenario": "wrong",
-     "outcome": "halt",
-     "status": "unreadable"
-    },
-    {
-     "cond": "font",
      "pair": "O0_digit_1",
+     "cond": "font",
      "scenario": "correct",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
-     "cond": "font",
      "pair": "O0_digit_1",
+     "cond": "font",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
-     "cond": "font",
      "pair": "O0_digit_2",
+     "cond": "dark",
      "scenario": "correct",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "abstain",
+     "mode": "context"
     },
     {
-     "cond": "font",
      "pair": "O0_digit_2",
+     "cond": "dark",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "abstain",
+     "mode": "context"
     },
     {
+     "pair": "O0_digit_2",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_2",
      "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
      "pair": "O0_digit_3",
+     "cond": "dark",
      "scenario": "correct",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "abstain",
+     "mode": "context"
     },
     {
-     "cond": "font",
      "pair": "O0_digit_3",
+     "cond": "dark",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "abstain",
+     "mode": "context"
     },
     {
-     "cond": "font",
-     "pair": "O0_alpha_1",
+     "pair": "O0_digit_3",
+     "cond": "zoom",
      "scenario": "correct",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
-     "cond": "font",
-     "pair": "O0_alpha_1",
+     "pair": "O0_digit_3",
+     "cond": "zoom",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
+     "pair": "O0_digit_3",
      "cond": "font",
-     "pair": "O0_alpha_2",
      "scenario": "correct",
      "outcome": "halt",
-     "status": "mismatch"
+     "status": "mismatch",
+     "mode": "pixel"
     },
     {
+     "pair": "O0_digit_3",
      "cond": "font",
-     "pair": "O0_alpha_2",
      "scenario": "wrong",
      "outcome": "halt",
-     "status": "unreadable"
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "pixel"
+    }
+   ]
+  },
+  "ocr_only_confusable": {
+   "config": "ocr_only_confusable",
+   "n_correct": 15,
+   "n_wrong": 15,
+   "false_accept": 0,
+   "false_accept_rate": 0.0,
+   "over_halt": 15,
+   "over_halt_rate": 1.0,
+   "cases": [
+    {
+     "pair": "O0_digit_1",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_1",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_1",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_1",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_1",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_1",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_2",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_digit_3",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_1",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "dark",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "dark",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "zoom",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "zoom",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "font",
+     "scenario": "correct",
+     "outcome": "halt",
+     "status": "abstain",
+     "mode": "context"
+    },
+    {
+     "pair": "O0_alpha_2",
+     "cond": "font",
+     "scenario": "wrong",
+     "outcome": "halt",
+     "status": "mismatch",
+     "mode": "context"
     }
    ]
   }

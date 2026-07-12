@@ -59,12 +59,14 @@ def _with_bar(cols: int, x0: int = 100, val: int = 0) -> np.ndarray:
 # pixel tier: verify / mismatch / abstain
 # ---------------------------------------------------------------------------
 
-def test_pixel_verifies_identical_crop() -> None:
+def test_pixel_verify_is_hard_gated_identical_crop_abstains() -> None:
+    # Blocker 2: the VERIFY path is HARD-GATED (PIXEL_VERIFY_ENABLED False)
+    # because cross-render jitter defeats a same/different threshold. Even a
+    # byte-identical crop ABSTAINS (None) rather than verify -- the tier can
+    # only MISMATCH or ABSTAIN, never grant a pass, so it cannot false-accept.
+    assert I.PIXEL_VERIFY_ENABLED is False
     png = _png(_with_bar(6))
-    check = I.verify_pixel_identity(png, png)
-    assert check is not None
-    assert check.status == "verified"
-    assert check.mode == "pixel"
+    assert I.verify_pixel_identity(png, png) is None
 
 
 def test_pixel_mismatch_on_localized_glyph_change_same_render() -> None:
@@ -101,6 +103,56 @@ def test_pixel_abstains_when_crop_missing() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Blocker 2: crop-scale sensitivity — a one-glyph-different MRN at a REALISTIC
+# cell crop size must MISMATCH (not dilute below an absolute threshold and
+# false-accept), and the decision must be SCALE-INVARIANT.
+# ---------------------------------------------------------------------------
+
+def _mrn_cell(text: str, *, width: int, jitter: int = 0) -> bytes:
+    """A realistic MRN CELL crop: the MRN drawn small in a wide padded cell
+    (PIL, so no browser). ``width`` varies the cell scale; ``jitter`` shifts
+    the text a sub-pixel-equivalent amount (a cross-render artifact)."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("L", (width, 40), 255)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(
+            "/System/Library/Fonts/Supplemental/Arial.ttf", 22)
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((8 + jitter, 8), text, fill=20, font=font)
+    return _png(np.array(img))
+
+
+def test_blocker2_wide_cell_different_mrn_does_not_false_accept() -> None:
+    # The exact Blocker-2 shape: a WIDE cell where a one-digit-different MRN's
+    # diff dilutes below the OLD absolute threshold. It must NOT verify.
+    rec = _mrn_cell("AC50061", width=420)
+    diff = _mrn_cell("AC58061", width=420)      # one digit different
+    check = I.verify_pixel_identity(rec, diff)
+    assert check is None or check.status != "verified"   # never a false-accept
+    assert check is not None and check.status == "mismatch"  # affirmatively caught
+
+
+def test_blocker2_mismatch_is_scale_invariant() -> None:
+    # A one-glyph-different MRN MISMATCHES at every realistic cell width.
+    for width in (120, 240, 420, 840):
+        rec = _mrn_cell("AC50061", width=width)
+        diff = _mrn_cell("AC5OO61", width=width)  # the O/0 homonym glyph
+        check = I.verify_pixel_identity(rec, diff)
+        assert check is not None and check.status == "mismatch", width
+
+
+def test_blocker2_verify_gated_even_for_same_value() -> None:
+    # A same-value re-render (with jitter) does NOT verify (gate) -- it either
+    # abstains or safely mismatches, never grants a pass.
+    rec = _mrn_cell("AC50061", width=420)
+    same = _mrn_cell("AC50061", width=420, jitter=1)
+    check = I.verify_pixel_identity(rec, same)
+    assert check is None or check.status != "verified"
+
+
+# ---------------------------------------------------------------------------
 # VLM veto tier: optional, gated, veto-only
 # ---------------------------------------------------------------------------
 
@@ -130,13 +182,30 @@ def test_vlm_tier_only_runs_on_confusable_identifier() -> None:
     assert vlm.calls == 0  # not even consulted for a non-confusable id
 
 
-def test_vlm_same_allows_different_vetoes() -> None:
+def test_vlm_is_veto_only_same_abstains_different_vetoes() -> None:
+    # TRULY veto-only (secondary fix, 8th reopening review): a "same" answer
+    # must NOT grant a pass -- it ABSTAINS (returns None), leaving the
+    # decision to prior/other evidence (and, absent any, HALT). Only
+    # "different" produces a verdict, and it is always a mismatch (veto).
     same = I.verify_vlm_identity(
         b"a", b"b", verifier=_FakeVLM("same"), glyph_confusable=True)
     diff = I.verify_vlm_identity(
         b"a", b"b", verifier=_FakeVLM("different"), glyph_confusable=True)
-    assert same.status == "verified" and same.mode == "vlm"
+    assert same is None  # cannot by itself certify identity
     assert diff.status == "mismatch" and diff.mode == "vlm"
+
+
+def test_vlm_same_cannot_upgrade_unverified_target_to_verified() -> None:
+    # In the pixel-abstain path the VLM is the only remaining signal; a
+    # "same" answer must NOT upgrade the target -> the ladder HALTs (unreadable),
+    # never a VLM-granted pass.
+    out = I.run_identity_ladder([
+        lambda: None,  # pixel abstains (drift)
+        lambda: I.verify_vlm_identity(
+            b"a", b"b", verifier=_FakeVLM("same"), glyph_confusable=True),
+    ])
+    assert out.status != "verified"
+    assert out.status == "unreadable"
 
 
 def test_vlm_unsure_or_broken_model_vetoes_never_passes() -> None:
@@ -256,13 +325,16 @@ def _bundle_with_crop(tmp_path, crop_arr) -> tuple:
     return step, res
 
 
-def test_replayer_pixel_tier_verifies_matching_identifier_crop(tmp_path) -> None:
-    # Recorded crop == the live frame crop -> pixel tier VERIFIES (mode pixel).
+def test_replayer_pixel_tier_matching_crop_abstains_verify_gated(tmp_path) -> None:
+    # Blocker 2: the pixel VERIFY path is HARD-GATED, so even a matching crop
+    # ABSTAINS rather than verify; with no context_text the OCR tier also
+    # abstains -> unreadable HALT. The pixel tier can never grant a pass.
     step, res = _bundle_with_crop(tmp_path, _blank())
     rp = Replayer(_Backend(), vision=object(), poll_interval_s=0.01)
     check = rp._verify_identity(step, res, _png(_blank()), {},
                                 Workflow(name="wf"), tmp_path)
-    assert check.status == "verified" and check.mode == "pixel"
+    assert check.status != "verified"
+    assert check.status == "unreadable"
 
 
 def test_replayer_pixel_tier_mismatch_halts_wrong_identifier(tmp_path) -> None:
@@ -301,10 +373,15 @@ def test_harness_zero_false_accept_all_configs(tmp_path) -> None:
     pytest.importorskip("playwright")
     from openadapt_flow.validation import identity_ladder as H
     summary = H.run(tmp_path)
+    # THE safety invariant, measured on the REAL Replayer._verify_identity
+    # production tier stack (the OCR tier the replayer always appends is in the
+    # stack for every config): 0 false-accept everywhere, incl. the homonym.
     assert summary["safety_invariant_false_accept_zero_all_configs"] is True
     cfgs = summary["configs"]
-    # clean substrates verify (no catastrophic over-halt)
-    assert cfgs["structured"]["over_halt"] == 0
-    assert cfgs["pixel_stable"]["over_halt"] == 0
-    # every config: 0 false-accept
     assert all(c["false_accept"] == 0 for c in cfgs.values())
+    # the structured-text substrate still verifies the correct patient (O/0
+    # distinct in the DOM): no over-halt there.
+    assert cfgs["structured"]["over_halt"] == 0
+    # the OCR-only-confusable config the flawed harness never measured now
+    # shows HIGH over-halt (OCR alone cannot verify a collapsible MRN).
+    assert cfgs["ocr_only_confusable"]["over_halt_rate"] == 1.0

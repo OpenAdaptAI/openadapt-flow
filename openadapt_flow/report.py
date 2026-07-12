@@ -138,7 +138,8 @@ def render_run_report(run_dir: Path | str) -> Path:
         verified_parts = []
         if result.identity is not None:
             marker = {
-                "verified": "id ✓", "mismatch": "id ✗", "unreadable": "id ⚠"
+                "verified": "id ✓", "mismatch": "id ✗",
+                "abstain": "id ⚠", "unreadable": "id ⚠",
             }[result.identity.status]
             verified_parts.append(marker)
         if result.input_verified is not None:

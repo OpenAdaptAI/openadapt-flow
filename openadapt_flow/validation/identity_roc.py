@@ -53,6 +53,7 @@ from openadapt_flow.runtime.identity import (
     CONTRADICTED_CHARS_CAP,
     CONTRADICTION_SIM,
     COVERAGE_THRESHOLD,
+    GLYPH_AMBIGUOUS_ID_CHARS_CAP,
     MIN_BLOCK,
     SUSPECT_CHARS_CAP,
     UNCOVERED_RUN_CAP,
@@ -218,6 +219,13 @@ def _decide(
     name_cap: int = BIG,
     alpha_cap: int = BIG,
 ) -> bool:
+    # A pair is VERIFIED iff every production budget holds -- INCLUDING the
+    # glyph-ambiguous-identifier budget (GLYPH_AMBIGUOUS_ID_CHARS_CAP, fixed at
+    # 0, not swept). Omitting it here measured a matcher DIFFERENT from the one
+    # that ships (verify_target_identity / band_verdict), so a same-entity band
+    # resting on a glyph-confusable identifier -- which production ABSTAINS on
+    # (8th reopening) -- was scored as VERIFIED, understating the false-abort
+    # cost. Including it makes this ROC characterize the production verdict.
     return (
         m.coverage >= coverage
         and m.max_uncovered_run <= run_cap
@@ -225,6 +233,7 @@ def _decide(
         and m.suspect_chars <= suspect_cap
         and m.unexplained_name_tokens <= name_cap
         and m.max_absent_alpha_token <= alpha_cap
+        and m.glyph_ambiguous_id_chars <= GLYPH_AMBIGUOUS_ID_CHARS_CAP
     )
 
 
@@ -637,6 +646,32 @@ def render_markdown(
         "verifies; closing it needs glyph-disambiguating OCR on identifier "
         "regions (roadmapped). The caps below are UNCHANGED.",
         "",
+        "**EIGHTH reopening — the same-name/same-DOB homonym, and the "
+        "name-carry rule REVERSED (this branch).** #27's \"disclosed "
+        "residual\" above was a LIVE, production-reachable wrong-patient "
+        "VERIFY: an adversarial review of PR #31 drove `AC50061` (recorded) "
+        "vs a DIFFERENT same-name/same-DOB patient `AC5OO61` (letter O) "
+        "through the REAL replayer — both OCR to `AC50061`, name+DOB "
+        "carried, and the OCR tier VERIFIED the wrong patient at coverage "
+        "1.0. A matched name+DOB CANNOT rule out a same-name/same-DOB "
+        "homonym whose distinguishing MRN glyph OCR collapsed, so the "
+        "name-carry suppression of the confusable-identifier halt is "
+        "REMOVED. `band_verdict` now returns **`abstain`** whenever the "
+        "band rests on a glyph-confusable identifier (an alphanumeric "
+        "MRN/account token with an O/0 or l/1/I), REGARDLESS of a matched "
+        "name+DOB — the OCR tier can neither certify SAME nor assert "
+        "DIFFERENT, so on a pure-pixel substrate the ladder HALTs. A "
+        "different-NAME sibling is still an affirmative MISMATCH; a clean "
+        "name+DOB with a NON-confusable identifier still VERIFIES. The "
+        "availability cost is the honest price of the refusal: the "
+        "same-entity false-abort rate on this string corpus rises to "
+        "**v1 48.2% / v2 43.6%** (below), all of the jump being "
+        "collapsible-identifier abstains — recovered on real "
+        "browser/desktop by the structured-text tier, which verifies these "
+        "with no OCR ambiguity. The caps below are UNCHANGED (the "
+        "glyph-ambiguous-identifier budget stays 0; the change is that a "
+        "positive budget now reads as ABSTAIN, not verify).",
+        "",
         "- **false accept** = a `different_entity` OR `indistinguishable` "
         "pair VERIFIED — a wrong-patient click, catastrophic in an EMR.",
         "- **false abort** = a `same_entity` pair refused — one hybrid "
@@ -693,15 +728,18 @@ def render_markdown(
         "strict (defense in depth) rather than taking the minimum-false-"
         "abort zero-FA corner. The availability price is real and stated "
         "in the tables below: the v1 false-abort rate rose from 10.7% "
-        "(pre-review matcher) through 21.2% (first redesign) to "
-        f"{corpus_rates['v1']['fabort']:.1%} after the identifier-suspect "
-        "fix — concentrated in occlusion, digit-class OCR noise that "
-        "lands on an identifier token (DOB/MRN/phone) and now aborts "
-        "(the true-row identifier-noise cost, see below), the "
-        "indistinguishable letter-letter mechanism, and capitalized "
-        "adjacent-row bleed — because each review showed the cheaper "
-        "operating point was buying availability with silent "
-        "wrong-patient classes.",
+        "(pre-review matcher) through 21.2% (first redesign) and 28.2% "
+        "(identifier-suspect fix) to "
+        f"{corpus_rates['v1']['fabort']:.1%} after the 8th-reopening "
+        "abstain fix — the last jump is the OCR tier now ABSTAINING on "
+        "EVERY same-entity band that carries a glyph-confusable identifier "
+        "(it cannot rule out a same-name/same-DOB homonym); the rest is "
+        "occlusion, digit-class OCR noise on an identifier token "
+        "(DOB/MRN/phone), the indistinguishable letter-letter mechanism, "
+        "and capitalized adjacent-row bleed. On real browser/desktop the "
+        "structured-text tier verifies the collapsible-identifier bands "
+        "with no OCR ambiguity, so this cost bites only on pure-pixel "
+        "substrates.",
         "",
         _corner_paragraph(points),
         "",

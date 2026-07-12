@@ -70,9 +70,14 @@ collapsible identifier — an MRN differing by a single O/0 or l/1 glyph
 OCR band**. That band is literally the same input a legitimate re-read of the
 true row produces, so *no function downstream of OCR* can separate the two
 (same input, no distinguishing output). Measured on the real render→OCR→match
-pipeline this is **~43.8% false accept** on the digit-flanked shape in the
-name-in-band config, and the name-excluded config pays the flip side as
-over-halt. It is not a tuning gap; it is the limit of OCR-based identity.
+pipeline this WAS **~43.8% false accept** on the digit-flanked shape in the
+name-in-band config (#27 trusted a matched name+DOB and let the collapsible
+MRN "corroborate"). The **8th wrong-patient reopening** proved that unsound: a
+matched name+DOB cannot rule out a same-name/same-DOB homonym whose MRN glyph
+OCR collapsed, so the OCR tier now **ABSTAINS** on any collapsible identifier
+instead of verifying — turning that ~43.8% false accept into a safe HALT (0
+false-accept, high over-halt). It is not a tuning gap; it is the limit of
+OCR-based identity, and the honest response is to refuse rather than guess.
 
 The fix is architectural: **stop relying on OCR for identity when a
 higher-fidelity signal exists.** Identity is now an ordered LADDER of verifier
@@ -99,59 +104,89 @@ FINAL:
    because DOM text is invariant across replay font/resolution: it closes the
    class **with no OCR-availability cost.** A structured-text mismatch is
    authoritative; the OCR fallback never overrides it.
-2. **Pixel-compare of the identifier crop (`verify_pixel_identity`).**
-   Citrix/RDP/VDI sessions and apps with a broken a11y tree expose NO
-   structured text. There, the recorded target's rendered identifier CROP is
-   compared against the live resolved identifier crop at the pixel level: OCR
-   collapses `O`/`0` and `l`/`1`, but the PIXELS do not — a different patient's
-   MRN renders to different pixels even when OCR reads them identically. On a
-   STABLE render a localized max abs-diff of the crop separates the collapse
-   pairs at **AUC 1.0** (threshold ~0.049; validated in
-   `benchmark/pixel_identity`). It BREAKS under render drift (dark theme /
-   zoom / font), so it is wired FAIL-SAFE: it VERIFIES only when the render
-   matches (a near-zero distance no *different* identifier can produce —
-   structurally unable to false-accept), MISMATCHES only when the difference
-   is a LOCALIZED single glyph on an otherwise-matching render, and ABSTAINS
-   (falls through) the moment a whole-crop change signals drift. Free, no
-   model.
-3. **Local-VLM veto (`verify_vlm_identity`) — OPTIONAL, off by default.** Only
-   when a verifier is injected, identity rests on a glyph-confusable
-   identifier, AND the cheaper tiers abstained (render drift the pixel tier
-   can't judge): a LOCAL open VLM (Qwen3-VL-4B via MLX, ~0.8s/call, ZERO cloud
-   calls) answers same/different, **VETO-ONLY** — a `DIFFERENT` or unsure
-   answer HALTS; it can never grant a pass a cheaper tier refused, and never
-   overrides an earlier mismatch. On the digit-flanked O/0 collapse surface it
-   scored **0% false-accept + 100% detection**, robust to theme drift where
-   pixel-compare breaks (0% over-halt), over-halting (safely) on zoom/font
-   (validated in `benchmark/vlm_identity`). It is OPTIONAL like the grounder:
-   the **default install pulls no model** — structured-text + pixel-compare +
-   OCR + halt run dependency-free. Enable it by passing an
+2. **Pixel-compare of the identifier crop (`verify_pixel_identity`) — VERIFY
+   HARD-GATED (Blocker 2).** Citrix/RDP/VDI sessions and apps with a broken
+   a11y tree expose NO structured text. There, the recorded target's rendered
+   identifier CROP is compared against the live resolved identifier crop at the
+   pixel level: OCR collapses `O`/`0` and `l`/`1`, but the PIXELS do not.
+   **The adversarial review of PR #31 found the promoted metric was
+   crop-scale-SENSITIVE**: `PIXEL_SAME_THRESHOLD` was an absolute whole-crop
+   mean-abs-diff on a crop force-resized to a fixed WIDTH, so on a realistic
+   wide identifier CELL a one-glyph-different MRN's diff DILUTES below the
+   threshold and **VERIFIES a different patient** (measured: a 420px cell,
+   `AC50061` vs `AC58061`, scores 0.016 < 0.049 → false-accept; a same-value
+   1px cross-render JITTER scores 0.087 → false-abort — the metric is
+   inverted at realistic scale). The distance is now **scale-invariant**
+   (canonicalize to a fixed HEIGHT preserving aspect; a one-glyph change is a
+   consistent localized SPIKE above the per-window drift floor at any crop
+   width), so a DIFFERENT MRN MISMATCHES at every cell scale. But sub-pixel
+   cross-render JITTER of the SAME value spikes LARGER than a one-glyph change,
+   so no threshold makes VERIFY safe. The **VERIFY path is therefore HARD-GATED
+   (`PIXEL_VERIFY_ENABLED=False`)**: the tier may only MISMATCH (a scale-
+   invariant localized spike → safe HALT) or ABSTAIN, never grant a pass, until
+   (a) the compiler captures a FIXED-SIZE identifier crop at record time and
+   (b) a jitter-robust distance is validated end to end. The pixel tier is not
+   production-reachable today (the compiler does not populate `identifier_crop`),
+   so the gate has no production impact — it prevents a latent false-accept from
+   ever shipping. Free, no model.
+3. **Local-VLM veto (`verify_vlm_identity`) — OPTIONAL, off by default, TRULY
+   VETO-ONLY.** Only when a verifier is injected, identity rests on a
+   glyph-confusable identifier, AND the cheaper tiers abstained (render drift
+   the pixel tier can't judge): a LOCAL open VLM (Qwen3-VL-4B via MLX,
+   ~0.8s/call, ZERO cloud calls) answers same/different. **Veto-only** now
+   means what it says: a `DIFFERENT` or unsure answer HALTS, and a `SAME`
+   answer does **NOT** grant a pass — it ABSTAINS (returns None), leaving the
+   decision to prior/other evidence. A local VLM reading a glyph-confusable
+   identifier is trustworthy to REJECT a wrong patient (100% detection on the
+   collapse surface) but not to CERTIFY a right one, so when the VLM is the
+   sole remaining signal a `SAME` answer → abstain → the ladder HALTs. (The
+   earlier code returned `verified` on `SAME`, so in the pixel-abstain path it
+   acted as a full verifier — fixed in this PR.) It is OPTIONAL like the
+   grounder: the **default install pulls no model**. Enable it by passing an
    `openadapt_flow.runtime.identity_vlm.MLXIdentityVLM` (or any `IdentityVLM`)
    into `Replayer(identity_vlm=...)`.
-4. **OCR name+DOB-primary band (#27) — the pixel-substrate fallback.** When no
-   structured text is available and the pixel/VLM tiers abstained, identity
-   falls back to the OCR matcher below, with its proven-irreducible
-   same-name/same-DOB residual (it HALTS on the sole-ambiguous-identifier
-   case; the same-name/DOB + collapsible-MRN + name-shown case is the
-   disclosed residual). The glyph-disambiguating / high-resolution identifier
-   OCR pass is the roadmapped mitigation for THIS tier.
+4. **OCR name+DOB band — ABSTAINS on any collapsible identifier (8th
+   reopening).** When no structured text is available and the pixel/VLM tiers
+   abstained, identity falls back to the OCR matcher below. #27 let a matched
+   NAME "carry" identity so a digit-body confusable MRN only "corroborated"
+   and did not block — the adversarial review of PR #31 proved that unsound: a
+   same-name/same-DOB HOMONYM (`AC50061` vs `AC5OO61`) collapses to a
+   byte-identical band, so a matched name+DOB CANNOT rule it out. The OCR tier
+   now **ABSTAINS** whenever the band rests on a glyph-confusable identifier
+   (an MRN/account token carrying an O/0 or l/1/I) — it can neither certify
+   SAME nor assert DIFFERENT — and on a pure-pixel substrate with no
+   structured/pixel/VLM verifier the ladder then HALTs. A different-NAME
+   sibling is still an affirmative MISMATCH; a clean name+DOB with a
+   NON-confusable identifier still verifies. The glyph-disambiguating /
+   high-resolution identifier OCR pass is the roadmapped mitigation.
 
-Net — the ladder is now SUBSTRATE-COMPLETE and fail-safe:
-**structured text (browser DOM + desktop UIA/AX) → pixel-compare (stable pixel
-substrates) → optional local-VLM veto (drifted / Citrix pixel substrates) →
-OCR name+DOB fallback → HALT.** On browser/desktop the glyph-collapse class is
-CLOSED at no availability cost; on pure-pixel substrates it is closed on stable
-renders by pixel-compare and, under drift, by the optional VLM veto; with the
-VLM off, a drifted pure-pixel run degrades to the OCR fallback and HALTS on a
-sole confusable identifier (the disclosed residual below). Every tier is
-fail-safe — unsure abstains to the next, and if nothing verifies the run HALTS.
-The integrated ladder measures **0 false-accept across ALL substrate configs**
-(`openadapt_flow.validation.identity_ladder`, artifacts in
-`benchmark/identity_ladder`); no tier can turn a wrong patient into a verified
-one. The one irreducible floor no vision method can cross is a font that
-renders `O` and `0` (or `l` and `1`) **pixel-identical** — none was found among
-14 common UI fonts (`benchmark/pixel_identity`), and on such a font every tier
-below OCR abstains and the run HALTS, never wrong-writes.
+Net — the ladder is fail-safe, and its safety number is measured on the REAL
+production tier stack. **On browser/desktop substrates the structured-text
+tier CLOSES the glyph-collapse class at no availability cost** (O and 0 are
+distinct in the DOM/a11y tree). **On a PURE-PIXEL substrate a collapsible MRN
+is NOT safely verifiable and HALTS today**: the pixel-compare VERIFY path is
+hard-gated (Blocker 2, above), the VLM is veto-only, and the OCR name+DOB tier
+ABSTAINS on any confusable identifier (8th reopening). In other words —
+**OCR alone cannot verify a collapsible MRN; a pixel-only substrate needs the
+structured-text tier (or, once Blocker 2's crop capture + jitter-robust
+distance land, the pixel-crop tier) to VERIFY, and otherwise HALTS.** Every
+tier is fail-safe — unsure abstains to the next, and if nothing verifies the
+run HALTS.
+
+The integrated ladder, driven through the REAL `Replayer._verify_identity`
+(no hand-built tier subset), measures **0 false-accept across ALL substrate
+configs — including the same-name/same-DOB homonym**
+(`openadapt_flow.validation.identity_ladder`,
+`benchmark/identity_ladder/IDENTITY_LADDER.md`): `structured` 0 FA / 0
+over-halt; every pure-pixel config 0 FA / 100% over-halt (the honest cost of
+"OCR cannot verify a collapsible MRN"). An EARLIER version of that harness
+measured the pixel-only configs against a `[pixel]`-only tier subset, omitting
+the OCR tier the replayer always appends — so its "0 false-accept" was measured
+against a NON-production stack and never exercised the OCR tier where the
+homonym actually false-accepts; the harness now drives the real method. The one
+irreducible floor no vision method can cross is a font that renders `O` and `0`
+(or `l` and `1`) **pixel-identical** — none was found among 14 common UI fonts
+(`benchmark/pixel_identity`).
 
 ## What it halts on (safely, but it halts)
 
@@ -249,17 +284,30 @@ actions observed — at the cost of availability:
   excluded hole raises that study's per-click false abort 18.89%→45.00%
   (all of it the digit-side sole-discriminator halt in `click_name`;
   `click_action`, where the name carries, stays at 18.89%) — the cheap
-  direction. What is now GUARANTEED is name+DOB-discriminated identity;
-  what HALTS is identity that would turn on a look-alike-character
-  identifier alone. **Disclosed residual:** a same-name/DOB
-  DIFFERENT patient whose digit-body MRN collapses to the target's, WITH
-  the name displayed and matching, is band-identical to a legitimate
-  same-patient re-read and verifies — this is a known OCR-substrate limit,
-  not a matcher bug; the complete upstream fix is glyph-disambiguating /
-  high-resolution OCR on identifier regions (roadmapped). The availability
-  bill is equally plain:
-  **28.2% false aborts on v1's noise classes** (up from 10.7% pre-review
-  and 21.2% after the first redesign), concentrated in occlusion — where
+  direction. **EIGHTH reopening (same-name/same-DOB homonym) — CLOSED:**
+  #27 disclosed a residual — a same-name/DOB DIFFERENT patient whose
+  digit-body MRN collapses to the target's, WITH the name displayed and
+  matching — as a "known OCR-substrate limit". An adversarial review of PR #31
+  proved it a LIVE, production-reachable wrong-patient VERIFY (`AC50061` vs
+  `AC5OO61`, both OCR to `AC50061`; name+DOB carried → verified at coverage
+  1.0 through the real replayer). The name-carry suppression of the
+  confusable-identifier halt is REMOVED: the OCR tier now **ABSTAINS**
+  whenever the discriminative band contains a glyph-confusable identifier
+  (an alphanumeric MRN/account token with an O/0 or l/1/I), REGARDLESS of a
+  matched name+DOB — it can neither certify SAME nor assert DIFFERENT, so on
+  a pure-pixel substrate the ladder HALTs. A different-NAME sibling still
+  MISMATCHES; a clean name+DOB with a NON-confusable identifier still
+  verifies. The complete upstream fix (glyph-disambiguating / high-resolution
+  identifier OCR, or the structured-text tier) is what lets such a target
+  VERIFY rather than HALT. The availability bill is the honest cost of this
+  refusal — the OCR tier now aborts EVERY same-entity band that carries a
+  confusable identifier: **48.2% false aborts on frozen corpus v1** and
+  **43.6% on v2** (from 28.2% / lower before the 8th fix), the jump being
+  exactly the collapsible-identifier abstains; on real browser/desktop the
+  structured-text tier verifies these with no OCR ambiguity, so this cost
+  bites only on pure-pixel substrates. Earlier availability history:
+  **28.2% pre-8th on v1's noise classes** (10.7% pre-review, 21.2% after the
+  first redesign), concentrated in occlusion — where
   a recount showed ~half the aborted bands still had BOTH name tokens
   readable and aborted on trailing DOB/MRN loss, an availability cost,
   not the "correct epistemic refusal" the earlier doc claimed — plus

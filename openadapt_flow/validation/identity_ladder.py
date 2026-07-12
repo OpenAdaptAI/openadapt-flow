@@ -1,41 +1,65 @@
 """Integrated identity-ladder measurement on the dense O/0-collapse surface.
 
-Wires the FULL, substrate-complete identity ladder end to end and measures its
-two safety numbers per substrate config:
+Every number here comes from the PRODUCTION tier stack: this harness drives
+the REAL ``Replayer._verify_identity`` (structured-text -> pixel-compare ->
+optional VLM veto -> OCR name+DOB -> HALT), NOT a hand-built tier subset.
 
-- **false-accept** -- a WRONG patient (a different-patient sibling whose MRN is
-  one glyph -- O/0 -- from the target, which OCR collapses to the same string)
-  is VERIFIED. This must be **0 in every config**: the ladder's safety
-  invariant.
+WHY THIS MATTERS (the measurement flaw the 8th reopening exposed): an earlier
+version of this harness measured the pixel-only configs with ``[pixel]`` only,
+omitting the OCR tier that ``Replayer._verify_identity`` ALWAYS appends
+(replayer.py). Its "0 false-accept" table was therefore measured against a
+NON-production tier stack -- it never exercised the OCR name+DOB tier where a
+same-name/same-DOB homonym with a collapsible MRN actually false-accepts. This
+harness closes that gap: it constructs the anchor + backend + resolution for
+each substrate and calls the real method, so the OCR tier is in the stack for
+every config, and the numbers are the TRUE production numbers.
+
+Two safety numbers per config:
+
+- **false-accept** -- a WRONG patient (a different-patient sibling sharing NAME
+  and DOB, whose MRN is one glyph -- O/0 -- from the target so OCR collapses it
+  to the same string) is VERIFIED. Must be **0 in every config**.
 - **over-halt** -- the CORRECT patient (the recorded target, re-resolved) is
   halted instead of verified. Safe but costly; reported per config.
 
-The ladder tiers are the REAL runtime functions
-(``openadapt_flow.runtime.identity``): structured-text, pixel-compare, the
-optional local-VLM veto, and the OCR name+DOB fallback / halt. Crops come from
-the pixel probe's renderer (``render_value_crops``), reused unchanged.
+Configs (strongest available substrate first):
 
-Configs measured (strongest available substrate first):
+1. ``structured``           -- browser/DOM: the structured-text tier compares
+   the REAL MRN strings (O and 0 distinct). 0 false-accept, 0 over-halt.
+2. ``pixel_stable``         -- pure pixel, stable render, an identifier crop
+   captured. The pixel-compare tier's VERIFY path is HARD-GATED (Blocker 2:
+   cross-render jitter defeats a safe same/different threshold at realistic
+   crop scale), so it ABSTAINS on the correct patient and MISMATCHES the
+   wrong one; the OCR tier then abstains on the collapsible MRN. 0 FA;
+   over-halt = all correct rows (the gated-pixel-tier cost).
+3. ``pixel_drift_vlm_on``   -- pure pixel, DRIFTED render, optional VLM veto
+   ON: pixel-compare ABSTAINS under drift; the VLM is VETO-ONLY (a "same"
+   answer cannot grant a pass -> it abstains), so a wrong patient is vetoed
+   (HALT) and a correct patient falls to the OCR tier, which also abstains on
+   the collapsible MRN -> HALT. 0 FA; over-halt = all correct rows.
+4. ``pixel_drift_vlm_off``  -- pure pixel, DRIFTED render, VLM OFF: pixel
+   abstains, OCR tier abstains on the collapsible MRN. 0 FA; OH = all correct.
+5. ``ocr_only_confusable``  -- pure pixel, NO identifier crop captured and no
+   VLM: ONLY the OCR name+DOB tier can speak, and the band rests on a
+   glyph-confusable MRN -> it ABSTAINS -> HALT. 0 FA; OH = all correct. This is
+   the config the flawed harness never measured; it is the honest "OCR alone
+   cannot verify a collapsible MRN" outcome.
 
-1. ``structured``            -- browser/DOM: the structured-text tier compares
-   the REAL MRN strings (O and 0 distinct). Expect 0 false-accept, 0 over-halt.
-2. ``pixel_stable``          -- pure pixel, stable render: the pixel-compare
-   tier. Expect 0 false-accept, low over-halt.
-3. ``pixel_drift_vlm_on``    -- pure pixel, drifted render (dark/zoom/font),
-   optional VLM veto ON: pixel-compare ABSTAINS under drift, the VLM vetoes.
-   Expect 0 false-accept; over-halt at the VLM's known per-condition cost.
-4. ``pixel_drift_vlm_off``   -- pure pixel, drifted render, VLM OFF: pixel
-   abstains, no VLM, and a crop bearing ONLY a glyph-confusable identifier has
-   no name+DOB carrier, so the OCR fallback (#27) HALTS. Expect 0 false-accept;
-   over-halt = all correct rows (the disclosed residual, docs/LIMITS.md).
+NB the pixel VERIFY path is currently GATED (Blocker 2) and the compiler does
+not yet capture an identifier crop, so on EVERY pure-pixel config today the
+only tier that can VERIFY is structured text; a collapsible MRN on a pixel-only
+substrate HALTs. The pixel/VLM tiers still fail-safe (mismatch / abstain), so
+the safety invariant holds; the cost is availability, disclosed in LIMITS.md.
 
-The VLM tier here is driven by a ``ProbeFaithfulVLM`` whose verdicts reproduce
-the VALIDATED local-VLM probe (benchmark/vlm_identity, PR #28) -- 100%
-detection / 0% false-accept on the OCR-collapse surface, and the measured
-same-value-drift over-halt (dark 0%, zoom 33%, font 67%). This keeps the
-integrated measurement reproducible in CI without downloading the 4B model;
-the real model plugs in via ``openadapt_flow.runtime.identity_vlm.MLXIdentityVLM``
-and was separately measured to those same numbers.
+PRODUCT IMPLICATION (docs/LIMITS.md): on a pure-pixel substrate a band whose
+identity rests on a glyph-confusable MRN is NOT safely verifiable by OCR alone;
+it needs the pixel-crop tier (on a stable render) or the structured-text tier.
+Under render drift with no structured text the honest outcome is HALT.
+
+The VLM tier is driven by a ``ProbeFaithfulVLM`` reproducing the validated
+local-VLM probe (benchmark/vlm_identity, PR #28): 100% detection / 0%
+false-accept on the OCR-collapse surface. The real model plugs in via
+``openadapt_flow.runtime.identity_vlm.MLXIdentityVLM``.
 
 Run:
     python -m openadapt_flow.validation.identity_ladder \\
@@ -46,217 +70,341 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 
-from openadapt_flow.runtime import identity as I
-from openadapt_flow.validation.pixel_identity_probe import (
-    COLLAPSE_PAIRS,
-    RenderSpec,
-    all_values,
-    render_value_crops,
+from openadapt_flow.compiler.compile import (
+    MIN_OCR_CONFIDENCE,
+    _discriminative_crop_region,
 )
+from openadapt_flow.ir import Anchor, Resolution, Step, Workflow
+from openadapt_flow.runtime import identity as I
+from openadapt_flow.runtime.replayer import Replayer
+from openadapt_flow.validation.dense_surface import render_table_html
+from openadapt_flow.validation.dense_surface import DenseTable, Row
+from openadapt_flow.validation.pixel_identity_probe import COLLAPSE_PAIRS
 
-# O/0 collapse pairs only (the surface OCR provably collapses).
-PAIRS = [p for p in COLLAPSE_PAIRS if p.glyph_class == "O0"]
+# O/0 collapse pairs only (the surface OCR provably collapses). Each becomes a
+# same-NAME/same-DOB HOMONYM pair: two DIFFERENT patients sharing name+DOB,
+# differing only in the one-glyph MRN (target digit-0 vs sibling letter-O).
+_O0_PAIRS = [p for p in COLLAPSE_PAIRS if p.glyph_class == "O0"]
 
-# Drift conditions and their VALIDATED same-value-drift over-halt rates from
-# the VLM probe (benchmark/vlm_identity/vlm_identity.json -> same_drift).
-DRIFT_SPECS = {
-    "dark": (RenderSpec(name="dark", dark=True), 0.0),
-    "zoom": (RenderSpec(name="zoom", zoom=1.20), 1.0 / 3.0),
-    "font": (RenderSpec(name="font", font_family="Georgia"), 2.0 / 3.0),
-}
+# A shared name+DOB per pair (so the ONLY discriminator is the collapsible
+# MRN -- the exact wrong-patient shape). Names are fake.
+_SHARED = [
+    ("Smith, John", "01/15/1980"),
+    ("Okafor, Philip", "1966-01-17"),
+    ("Petrov, Robert", "1944-08-08"),
+    ("Nakamura, Karen", "1947-11-05"),
+    ("Fitzgerald, Susan", "1958-09-30"),
+]
 
 
-def _png(bgr: np.ndarray) -> bytes:
-    ok, buf = cv2.imencode(".png", bgr)
-    if not ok:
-        raise RuntimeError("PNG encode failed")
-    return buf.tobytes()
+@dataclass
+class RenderCond:
+    name: str
+    font_family: str = "Arial"
+    font_px: int = 15
+    dsf: int = 2
+    dark: bool = False
+    zoom: float = 1.0
+
+
+RECORD = RenderCond("record")
+STABLE = RenderCond("stable")
+DRIFTS = [
+    RenderCond("dark", dark=True),
+    RenderCond("zoom", zoom=1.20),
+    RenderCond("font", font_family="Georgia"),
+]
+
+_TARGET_ROW = 2  # two filler rows precede the patient row
+
+
+@dataclass
+class Rendered:
+    png: bytes
+    viewport: tuple[int, int]
+    open_point: tuple[int, int]
+    click_struct: Optional[str]     # DOM row text EXCLUDING the Open cell
+    mrn_region: tuple[int, int, int, int]
+
+
+def _filler(i: int) -> Row:
+    return Row(f"Filler{i}, Pat", "1971-02-0%d" % (i % 9 + 1),
+               f"ZZ{1000 + i}", "M", "Active")
+
+
+def _render(name: str, dob: str, mrn: str, cond: RenderCond) -> Rendered:
+    """Render a dense table with the patient (name/dob/mrn) at _TARGET_ROW and
+    return the frame PNG plus the Open-button click point, the DOM row text at
+    that point (structured identity), and the MRN cell region -- everything the
+    real ladder's four tiers consume, from ONE render."""
+    from playwright.sync_api import sync_playwright
+
+    rows = [_filler(0), _filler(1),
+            Row(name, dob, mrn, "M", "Active"), _filler(3)]
+    table = DenseTable(rows=rows, pairs=[], n_rows=len(rows))
+    html = render_table_html(table, font_family=cond.font_family,
+                             font_px=cond.font_px, row_pad_px=6, top_offset_px=0)
+    dsf = cond.dsf
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1120, "height": 1600},
+                                device_scale_factor=dsf)
+        page.set_content(html, wait_until="networkidle")
+        if cond.dark:
+            page.add_style_tag(content=(
+                "body{background:#0f1720 !important;color:#e6edf3 !important;}"
+                "tbody td{color:#e6edf3 !important;}"
+                "thead th{background:#1b2530 !important;color:#dfe6ee !important;}"
+            ))
+        if cond.zoom != 1.0:
+            page.add_style_tag(content=f"body{{zoom:{cond.zoom};}}")
+        full_h = page.evaluate("document.body.scrollHeight")
+        page.set_viewport_size({"width": 1120, "height": int(full_h) + 20})
+        png = page.screenshot(full_page=True)
+        vw, vh = 1120 * dsf, (int(full_h) + 20) * dsf
+        k = _TARGET_ROW
+        open_bb = page.eval_on_selector(
+            f'[data-open="{k}"]',
+            "el => { const r = el.getBoundingClientRect();"
+            " return [r.x, r.y, r.width, r.height]; }")
+        mrn_bb = page.eval_on_selector(
+            f'[data-row="{k}"] .mrn',
+            "el => { const r = el.getBoundingClientRect();"
+            " return [r.x, r.y, r.width, r.height]; }")
+        open_point = (int((open_bb[0] + open_bb[2] / 2) * dsf),
+                      int((open_bb[1] + open_bb[3] / 2) * dsf))
+        struct = page.evaluate(
+            "([px, py]) => {"
+            " const el = document.elementFromPoint(px, py);"
+            " if (!el) return null;"
+            " const row = el.closest('tr'); if (!row) return null;"
+            " const own = el.closest('td') || el;"
+            " own.setAttribute('data-o','1');"
+            " const clone = row.cloneNode(true);"
+            " const m = clone.querySelector('[data-o=\"1\"]'); if (m) m.remove();"
+            " own.removeAttribute('data-o');"
+            " return (clone.textContent||'').replace(/\\s+/g,' ').trim()||null; }",
+            [open_bb[0] + open_bb[2] / 2, open_bb[1] + open_bb[3] / 2])
+        mrn_region = (int(mrn_bb[0] * dsf), int(mrn_bb[1] * dsf),
+                      int(mrn_bb[2] * dsf), int(mrn_bb[3] * dsf))
+        browser.close()
+    return Rendered(png=png, viewport=(vw, vh), open_point=open_point,
+                    click_struct=struct, mrn_region=mrn_region)
 
 
 class ProbeFaithfulVLM:
-    """Veto-only VLM stub reproducing the validated probe's verdicts.
+    """Veto-only VLM stub reproducing the validated probe (benchmark/vlm_identity,
+    PR #28): different-patient (collapse) pairs -> "different" (100% detection);
+    same-value pairs -> "same". Under the VETO-ONLY contract a "same" answer no
+    longer grants a pass (verify_vlm_identity folds it to abstain)."""
 
-    Different-patient (collapse) pairs -> ``different`` (100% detection, the
-    measured OCR-collapse-surface rate). Same-value pairs -> ``same`` unless
-    this drift condition's measured over-halt rate says otherwise, applied
-    deterministically across the pairs so a run is reproducible.
-    """
+    def __init__(self, is_same: bool) -> None:
+        self._is_same = is_same
 
-    def __init__(self, over_halt_rate: float) -> None:
-        self.over_halt_rate = over_halt_rate
-        self._same_seen = 0
+    def same_or_different(self, recorded_png: bytes, live_png: bytes) -> str:
+        return "same" if self._is_same else "different"
 
-    def same_or_different(self, recorded_png: bytes, live_png: bytes,
-                          *, is_same_value: bool) -> str:
-        if not is_same_value:
-            return "different"  # detection = 1.0 on the collapse surface
-        # Deterministic over-halt pattern at the measured rate.
-        i = self._same_seen
-        self._same_seen += 1
-        n = len(PAIRS)
-        halts = round(self.over_halt_rate * n)
-        return "different" if i < halts else "same"
+
+class _Backend:
+    def __init__(self, viewport, live_png, structured_at=None):
+        self.viewport = viewport
+        self._live = live_png
+        self._structured_at = structured_at
+
+    def screenshot(self):
+        return self._live
+
+    # Present ONLY on the structured (browser/DOM) substrate.
+    def structured_text_at(self, x, y):
+        if self._structured_at is None:
+            raise AttributeError("pixel-only substrate has no structured text")
+        return self._structured_at
+
+
+def _make_backend(viewport, live_png, structured_live):
+    b = _Backend(viewport, live_png)
+    if structured_live is None:
+        # pixel-only: remove structured_text_at so the tier is UNAVAILABLE.
+        b.structured_text_at = None  # type: ignore[assignment]
+    else:
+        b._structured_at = structured_live
+    return b
+
+
+def _anchor(rec: Rendered, *, with_structured: bool, with_crop: bool,
+            bundle_dir: Optional[Path]) -> Anchor:
+    """Build the recorded anchor exactly as the compiler would for a click on
+    the Open button: OCR context band (name+DOB+MRN), optional DOM structured
+    identity, optional identifier crop (the MRN cell)."""
+    import openadapt_flow.vision as vision
+    from openadapt_flow.runtime.identity import band_region, context_from_lines
+
+    frame_bgr = cv2.imdecode(np.frombuffer(rec.png, np.uint8), cv2.IMREAD_COLOR)
+    click = rec.open_point
+    crop_region = _discriminative_crop_region(frame_bgr, click)
+    lines = vision.ocr(rec.png)
+    from datetime import date
+    context_text = context_from_lines(
+        lines, exclude_region=crop_region,
+        band=band_region(click, crop_region[3], rec.viewport),
+        point=click, min_confidence=MIN_OCR_CONFIDENCE,
+        reference_date=date.today())
+
+    identifier_crop = None
+    identifier_region = None
+    if with_crop and bundle_dir is not None:
+        x, y, w, h = rec.mrn_region
+        crop = frame_bgr[y:y + h, x:x + w]
+        ok, buf = cv2.imencode(".png", crop)
+        assert ok
+        (bundle_dir / "idcrop.png").write_bytes(buf.tobytes())
+        identifier_crop = "idcrop.png"
+        identifier_region = rec.mrn_region
+
+    return Anchor(
+        template="t.png", region=crop_region, click_point=click,
+        context_text=context_text,
+        structured_identity=rec.click_struct if with_structured else None,
+        identifier_crop=identifier_crop, identifier_region=identifier_region,
+    )
+
+
+def _verdict(rec: Rendered, live: Rendered, *, with_structured: bool,
+             with_crop: bool, vlm, bundle_dir: Optional[Path]) -> I.IdentityCheck:
+    """Drive the REAL Replayer._verify_identity for this substrate config."""
+    import openadapt_flow.vision as vision
+
+    anchor = _anchor(rec, with_structured=with_structured,
+                     with_crop=with_crop, bundle_dir=bundle_dir)
+    step = Step(id="open", intent="open patient chart", action="click",
+                anchor=anchor, risk="irreversible")
+    wf = Workflow(name="ladder", params={}, steps=[step])
+    # target/sibling rendered at the SAME table index -> same geometry, so the
+    # resolved point equals the recorded click point (crop/band line up).
+    res = Resolution(rung="ocr", point=live.open_point, confidence=0.9,
+                     elapsed_ms=1.0)
+    backend = _make_backend(
+        live.viewport, live.png,
+        structured_live=live.click_struct if with_structured else None)
+    replayer = Replayer(backend, vision=vision, identity_vlm=vlm)
+    return replayer._verify_identity(step, res, live.png, {}, wf, bundle_dir)
 
 
 def _outcome(check: I.IdentityCheck) -> str:
-    """click (proceed) iff verified; otherwise the run halts."""
+    """click (proceed) iff verified; every other verdict HALTs."""
     return "click" if check.status == "verified" else "halt"
 
 
-def _structured_tiers(recorded_mrn: str, live_mrn: str):
-    def structured():
-        return I.verify_structured_identity(recorded_mrn, live_mrn)
-
-    return [structured]
-
-
-def _pixel_tiers(rec_png: bytes, live_png: bytes):
-    def pixel():
-        return I.verify_pixel_identity(rec_png, live_png)
-
-    return [pixel]
-
-
-def _pixel_vlm_tiers(rec_png: bytes, live_png: bytes, vlm: ProbeFaithfulVLM,
-                     is_same_value: bool):
-    def pixel():
-        return I.verify_pixel_identity(rec_png, live_png)
-
-    def vlm_tier():
-        # Identity here rests on a glyph-confusable MRN by construction.
-        verdict = vlm.same_or_different(rec_png, live_png,
-                                        is_same_value=is_same_value)
-        same = verdict == "same"
-        return I.IdentityCheck(
-            status="verified" if same else "mismatch",
-            mode="vlm",
-            coverage=1.0 if same else 0.0,
-            expected="recorded identifier crop",
-            observed=f"local-VLM verdict: {verdict}",
-        )
-
-    return [pixel, vlm_tier]
-
-
-def _pixel_only_tiers(rec_png: bytes, live_png: bytes):
-    # VLM off, and a pure-MRN crop has no name+DOB carrier for the OCR tier,
-    # so only the pixel tier can speak; when it abstains the ladder returns
-    # unreadable -> HALT (the #27 sole-confusable-identifier residual).
-    def pixel():
-        return I.verify_pixel_identity(rec_png, live_png)
-
-    return [pixel]
-
-
-def _measure_config(name: str, cases: list[dict]) -> dict:
+def _measure(name: str, cases: list[dict]) -> dict:
     fa = sum(1 for c in cases if c["scenario"] == "wrong" and c["outcome"] == "click")
-    n_wrong = sum(1 for c in cases if c["scenario"] == "wrong")
+    nw = sum(1 for c in cases if c["scenario"] == "wrong")
     oh = sum(1 for c in cases if c["scenario"] == "correct" and c["outcome"] == "halt")
-    n_correct = sum(1 for c in cases if c["scenario"] == "correct")
+    nc = sum(1 for c in cases if c["scenario"] == "correct")
     return {
-        "config": name,
-        "n_correct": n_correct,
-        "n_wrong": n_wrong,
-        "false_accept": fa,
-        "false_accept_rate": (fa / n_wrong) if n_wrong else 0.0,
-        "over_halt": oh,
-        "over_halt_rate": (oh / n_correct) if n_correct else 0.0,
+        "config": name, "n_correct": nc, "n_wrong": nw,
+        "false_accept": fa, "false_accept_rate": (fa / nw) if nw else 0.0,
+        "over_halt": oh, "over_halt_rate": (oh / nc) if nc else 0.0,
         "cases": cases,
     }
 
 
 def run(out_dir: Path) -> dict:
-    values = all_values(PAIRS)
-    stable = render_value_crops(values, RenderSpec(name="stable"))
-    stable_png = {v: _png(stable[v]) for v in values}
+    pairs = list(zip(_O0_PAIRS, _SHARED))
+    # Pre-render every (pair, condition) frame once.
+    rec: dict[str, Rendered] = {}
+    stable_t: dict[str, Rendered] = {}
+    stable_s: dict[str, Rendered] = {}
+    drift_t: dict[tuple[str, str], Rendered] = {}
+    drift_s: dict[tuple[str, str], Rendered] = {}
+    for p, (name, dob) in pairs:
+        rec[p.label] = _render(name, dob, p.target, RECORD)
+        stable_t[p.label] = _render(name, dob, p.target, STABLE)
+        stable_s[p.label] = _render(name, dob, p.sibling, STABLE)
+        for d in DRIFTS:
+            drift_t[(p.label, d.name)] = _render(name, dob, p.target, d)
+            drift_s[(p.label, d.name)] = _render(name, dob, p.sibling, d)
 
     results: dict[str, dict] = {}
+    tmp = Path(tempfile.mkdtemp(prefix="idladder_"))
 
-    # --- Config 1: structured text (browser/DOM) ---------------------------
-    cases = []
-    for p in PAIRS:
-        # correct: recorded target vs live target string
-        chk = I.run_identity_ladder(_structured_tiers(p.target, p.target))
-        cases.append({"pair": p.label, "scenario": "correct",
-                      "outcome": _outcome(chk), "status": chk.status})
-        # wrong: recorded target vs live sibling string (O vs 0 distinct)
-        chk = I.run_identity_ladder(_structured_tiers(p.target, p.sibling))
-        cases.append({"pair": p.label, "scenario": "wrong",
-                      "outcome": _outcome(chk), "status": chk.status})
-    results["structured"] = _measure_config("structured", cases)
+    def config(name, *, cond_kind, with_structured, with_crop, vlm_on):
+        cases = []
+        for p, _ in pairs:
+            bd = tmp if with_crop else None
+            if cond_kind == "stable":
+                live_c, live_w = stable_t[p.label], stable_s[p.label]
+                chk_c = _verdict(rec[p.label], live_c,
+                                 with_structured=with_structured,
+                                 with_crop=with_crop,
+                                 vlm=(ProbeFaithfulVLM(True) if vlm_on else None),
+                                 bundle_dir=bd)
+                chk_w = _verdict(rec[p.label], live_w,
+                                 with_structured=with_structured,
+                                 with_crop=with_crop,
+                                 vlm=(ProbeFaithfulVLM(False) if vlm_on else None),
+                                 bundle_dir=bd)
+                cases.append({"pair": p.label, "cond": "stable",
+                              "scenario": "correct", "outcome": _outcome(chk_c),
+                              "status": chk_c.status, "mode": chk_c.mode})
+                cases.append({"pair": p.label, "cond": "stable",
+                              "scenario": "wrong", "outcome": _outcome(chk_w),
+                              "status": chk_w.status, "mode": chk_w.mode})
+            else:  # drift: measure each drift condition
+                for d in DRIFTS:
+                    live_c = drift_t[(p.label, d.name)]
+                    live_w = drift_s[(p.label, d.name)]
+                    chk_c = _verdict(rec[p.label], live_c,
+                                     with_structured=with_structured,
+                                     with_crop=with_crop,
+                                     vlm=(ProbeFaithfulVLM(True) if vlm_on else None),
+                                     bundle_dir=bd)
+                    chk_w = _verdict(rec[p.label], live_w,
+                                     with_structured=with_structured,
+                                     with_crop=with_crop,
+                                     vlm=(ProbeFaithfulVLM(False) if vlm_on else None),
+                                     bundle_dir=bd)
+                    cases.append({"pair": p.label, "cond": d.name,
+                                  "scenario": "correct", "outcome": _outcome(chk_c),
+                                  "status": chk_c.status, "mode": chk_c.mode})
+                    cases.append({"pair": p.label, "cond": d.name,
+                                  "scenario": "wrong", "outcome": _outcome(chk_w),
+                                  "status": chk_w.status, "mode": chk_w.mode})
+        results[name] = _measure(name, cases)
 
-    # --- Config 2: pixel-only, stable render -------------------------------
-    cases = []
-    for p in PAIRS:
-        chk = I.run_identity_ladder(
-            _pixel_tiers(stable_png[p.target], stable_png[p.target]))
-        cases.append({"pair": p.label, "scenario": "correct",
-                      "outcome": _outcome(chk), "status": chk.status})
-        chk = I.run_identity_ladder(
-            _pixel_tiers(stable_png[p.target], stable_png[p.sibling]))
-        cases.append({"pair": p.label, "scenario": "wrong",
-                      "outcome": _outcome(chk), "status": chk.status})
-    results["pixel_stable"] = _measure_config("pixel_stable", cases)
-
-    # --- Configs 3 & 4: pixel-only, DRIFTED render -------------------------
-    on_cases, off_cases = [], []
-    for cond, (spec, oh_rate) in DRIFT_SPECS.items():
-        drift = render_value_crops(values, spec)
-        drift_png = {v: _png(drift[v]) for v in values}
-        vlm = ProbeFaithfulVLM(oh_rate)
-        for p in PAIRS:
-            rec = stable_png[p.target]  # recorded on a stable render
-            # correct: recorded target vs live target under drift
-            live_c = drift_png[p.target]
-            # wrong: recorded target vs live sibling under drift
-            live_w = drift_png[p.sibling]
-
-            # VLM ON
-            chk = I.run_identity_ladder(
-                _pixel_vlm_tiers(rec, live_c, vlm, is_same_value=True))
-            on_cases.append({"cond": cond, "pair": p.label,
-                             "scenario": "correct", "outcome": _outcome(chk),
-                             "status": chk.status, "mode": chk.mode})
-            chk = I.run_identity_ladder(
-                _pixel_vlm_tiers(rec, live_w, vlm, is_same_value=False))
-            on_cases.append({"cond": cond, "pair": p.label,
-                             "scenario": "wrong", "outcome": _outcome(chk),
-                             "status": chk.status, "mode": chk.mode})
-
-            # VLM OFF (pixel abstains under drift -> HALT)
-            chk = I.run_identity_ladder(_pixel_only_tiers(rec, live_c))
-            off_cases.append({"cond": cond, "pair": p.label,
-                              "scenario": "correct", "outcome": _outcome(chk),
-                              "status": chk.status})
-            chk = I.run_identity_ladder(_pixel_only_tiers(rec, live_w))
-            off_cases.append({"cond": cond, "pair": p.label,
-                              "scenario": "wrong", "outcome": _outcome(chk),
-                              "status": chk.status})
-    results["pixel_drift_vlm_on"] = _measure_config(
-        "pixel_drift_vlm_on", on_cases)
-    results["pixel_drift_vlm_off"] = _measure_config(
-        "pixel_drift_vlm_off", off_cases)
+    config("structured", cond_kind="stable", with_structured=True,
+           with_crop=False, vlm_on=False)
+    config("pixel_stable", cond_kind="stable", with_structured=False,
+           with_crop=True, vlm_on=False)
+    config("pixel_drift_vlm_on", cond_kind="drift", with_structured=False,
+           with_crop=True, vlm_on=True)
+    config("pixel_drift_vlm_off", cond_kind="drift", with_structured=False,
+           with_crop=True, vlm_on=False)
+    config("ocr_only_confusable", cond_kind="drift", with_structured=False,
+           with_crop=False, vlm_on=False)
 
     summary = {
-        "surface": "dense O/0-glyph-collapse (different-patient siblings)",
-        "n_pairs": len(PAIRS),
-        "vlm_source": (
-            "ProbeFaithfulVLM reproducing benchmark/vlm_identity (PR #28): "
-            "100% detection / 0% false-accept on the OCR-collapse surface; "
-            "same-value-drift over-halt dark 0%, zoom 33%, font 67%"
-        ),
+        "surface": "dense O/0-glyph-collapse same-name/same-DOB homonyms "
+                   "(different patients one MRN glyph apart)",
+        "n_pairs": len(pairs),
+        "measured_via": "the REAL Replayer._verify_identity production tier "
+                        "stack (structured -> pixel -> vlm -> OCR -> halt); no "
+                        "hand-built tier subset",
+        "vlm_source": "ProbeFaithfulVLM reproducing benchmark/vlm_identity "
+                      "(PR #28): 100% detection / 0% false-accept; veto-only "
+                      "(a 'same' answer abstains, never grants a pass)",
         "configs": {k: {kk: vv for kk, vv in v.items() if kk != "cases"}
                     for k, v in results.items()},
         "safety_invariant_false_accept_zero_all_configs": all(
             v["false_accept"] == 0 for v in results.values()),
     }
-
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "identity_ladder.json").write_text(
         json.dumps({"summary": summary, "results": results}, indent=1))
@@ -268,11 +416,15 @@ def _markdown(summary: dict) -> str:
     lines = [
         "# Integrated identity ladder — measured on the dense O/0-collapse surface",
         "",
-        "The full substrate-complete ladder, end to end: **structured text "
-        "→ pixel-compare → optional VLM veto → OCR name+DOB → halt**, "
-        "fail-safe (any tier unsure → fall through; nothing verifies → HALT).",
+        "Every number below comes from the **production tier stack**: this "
+        "harness drives the REAL `Replayer._verify_identity` "
+        "(**structured text → pixel-compare → optional VLM veto → OCR "
+        "name+DOB → halt**), never a hand-built tier subset. The OCR tier the "
+        "replayer ALWAYS appends is therefore in the stack for every config — "
+        "closing the measurement flaw that hid the 8th wrong-patient "
+        "reopening.",
         "",
-        f"Surface: {summary['surface']} ({summary['n_pairs']} pairs, "
+        f"Surface: {summary['surface']} ({summary['n_pairs']} homonym pairs, "
         "each measured CORRECT-resolution and WRONG-resolution).",
         "",
         "| Config | substrate | false-accept | over-halt |",
@@ -280,9 +432,10 @@ def _markdown(summary: dict) -> str:
     ]
     labels = {
         "structured": "browser/DOM (structured text)",
-        "pixel_stable": "pixel-only, stable render",
-        "pixel_drift_vlm_on": "pixel-only, drifted render, VLM ON",
+        "pixel_stable": "pixel-only, stable render, crop (pixel VERIFY gated)",
+        "pixel_drift_vlm_on": "pixel-only, drifted render, VLM ON (veto-only)",
         "pixel_drift_vlm_off": "pixel-only, drifted render, VLM OFF",
+        "ocr_only_confusable": "pixel-only, NO crop / NO VLM → OCR tier only",
     }
     for key, cfg in summary["configs"].items():
         fa = f"{cfg['false_accept']}/{cfg['n_wrong']} ({cfg['false_accept_rate']:.0%})"
@@ -291,16 +444,35 @@ def _markdown(summary: dict) -> str:
     inv = summary["safety_invariant_false_accept_zero_all_configs"]
     lines += [
         "",
-        f"**Safety invariant — 0 false-accept across ALL configs: "
-        f"{'HOLDS' if inv else 'VIOLATED'}.**",
+        f"**Safety invariant — 0 false-accept across ALL configs, measured on "
+        f"the real replayer stack: {'HOLDS' if inv else 'VIOLATED'}.**",
         "",
-        "- The VLM tier is OPTIONAL: the default install runs "
-        "structured-text + pixel-compare + OCR + halt with no model.",
+        "- **OCR alone cannot verify a collapsible MRN.** On a pure-pixel "
+        "substrate, a band whose identity rests on a glyph-confusable MRN (an "
+        "MRN/account token carrying an O/0 or l/1/I) is NOT safely verifiable "
+        "by OCR: a same-name/same-DOB homonym whose distinguishing glyph OCR "
+        "collapsed is indistinguishable. The OCR tier ABSTAINS → HALT (the "
+        "`ocr_only_confusable` and `pixel_drift_*` over-halt). Safe "
+        "verification needs the **structured-text tier** (DOM/a11y) — and, "
+        "once Blocker 2's crop capture + jitter-robust distance land, the "
+        "**pixel-crop tier** on a stable render. The OCR name+DOB tier alone "
+        "is NOT a safe identity check on a collapsible MRN; on a pure-pixel "
+        "substrate without structured text the honest outcome is HALT.",
+        "- The VLM tier is **veto-only**: a `\"same\"` answer never grants a "
+        "pass (it abstains), so under drift a correct patient falls through to "
+        "the OCR tier and HALTs; the VLM can only REJECT a wrong patient. This "
+        "is why `pixel_drift_vlm_on` over-halts on all correct rows.",
+        "- The VLM tier is OPTIONAL and OFF by default: the default install "
+        "runs structured-text + pixel-compare + OCR + halt with no model.",
+        "- **Blocker 2**: the pixel-compare VERIFY path is HARD-GATED "
+        "(cross-render sub-pixel jitter defeats a safe same/different "
+        "threshold at realistic crop scale, and an absolute whole-crop "
+        "threshold false-accepts a diluted one-glyph difference). The pixel "
+        "tier may only MISMATCH (scale-invariant localized spike → safe HALT) "
+        "or ABSTAIN until a fixed-size crop capture + jitter-robust distance "
+        "land — so on a pure-pixel substrate the only tier that VERIFIES today "
+        "is structured text.",
         f"- VLM verdicts: {summary['vlm_source']}.",
-        "- `pixel_drift_vlm_off` over-halt is the disclosed residual "
-        "(docs/LIMITS.md): under render drift with no VLM and no name+DOB "
-        "carrier, a sole glyph-confusable identifier HALTS rather than risk a "
-        "wrong-patient click.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -311,7 +483,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = ap.parse_args(argv)
     summary = run(args.out)
     print(json.dumps(summary["configs"], indent=1))
-    print("0 false-accept all configs:",
+    print("0 false-accept all configs (real stack):",
           summary["safety_invariant_false_accept_zero_all_configs"])
     return 0
 

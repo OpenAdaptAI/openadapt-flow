@@ -343,14 +343,21 @@ class Replayer:
                         + " — refusing to act; run aborted"
                     )
                 elif (
-                    check.status == "unreadable"
+                    check.status in ("unreadable", "abstain")
                     and step.risk == "irreversible"
                 ):
+                    reason = (
+                        "rests on a glyph-confusable identifier OCR may have "
+                        "collapsed (a same-name/same-DOB homonym cannot be "
+                        "ruled out)"
+                        if check.status == "abstain"
+                        else "could not be read from the live screen "
+                        "(context band OCR found no usable text)"
+                    )
                     error = (
                         f"Step '{step.id}' ({step.intent}) is irreversible "
-                        "and its target identity could not be read from the "
-                        "live screen (context band OCR found no usable "
-                        "text) — needs human confirmation; refusing to act"
+                        f"and its target identity {reason} — needs human "
+                        "confirmation; refusing to act"
                     )
             if error is None:
                 error = self._act(
@@ -787,7 +794,10 @@ class Replayer:
                 exclude[3] * 2,
             ),
         )
-        rank = {"unreadable": 0, "mismatch": 1, "verified": 2}
+        # verified beats everything; between the two "cannot certify"
+        # outcomes an AFFIRMATIVE mismatch outranks an abstain, and abstain
+        # outranks a blank unreadable.
+        rank = {"unreadable": 0, "abstain": 1, "mismatch": 2, "verified": 3}
         if (rank[retry.status], retry.coverage) > (
             rank[check.status],
             check.coverage,

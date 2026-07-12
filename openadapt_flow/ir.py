@@ -252,11 +252,17 @@ class IdentityCheck(BaseModel):
     """Outcome of the pre-click target-identity check (runtime.identity).
 
     Attributes:
-        status: ``verified`` (band matched), ``mismatch`` (band readable but
-            wrong — the run must halt, never click), or ``unreadable`` (OCR
+        status: ``verified`` (band matched), ``mismatch`` (band readable and
+            AFFIRMATIVELY wrong — a different entity; the run must halt, never
+            click), ``abstain`` (the band is readable and its name/DOB match,
+            but it rests on a GLYPH-CONFUSABLE identifier OCR may have
+            collapsed — a same-name/same-DOB homonym cannot be ruled out, so
+            OCR cannot honestly certify SAME *or* assert DIFFERENT; the OCR
+            tier defers and the ladder HALTs if no higher-fidelity tier
+            verifies — the 8th wrong-patient reopening), or ``unreadable`` (OCR
             found no usable text in the live band; identity could not be
-            judged — the step proceeds flagged, and irreversible steps
-            refuse).
+            judged). ``abstain`` and ``unreadable`` both mean "could not
+            certify": the step proceeds flagged, and irreversible steps refuse.
         mode: ``structured`` compares the recorded DOM/a11y identity text
             against the live structured text at the resolved point (the
             highest-fidelity tier -- no OCR ambiguity); ``pixel`` compares the
@@ -275,7 +281,7 @@ class IdentityCheck(BaseModel):
         param: The parameter that drove a param-mode check, if any.
     """
 
-    status: Literal["verified", "mismatch", "unreadable"]
+    status: Literal["verified", "mismatch", "abstain", "unreadable"]
     mode: Literal["context", "param", "structured", "pixel", "vlm"] = "context"
     coverage: float = 0.0
     expected: str = ""

@@ -146,7 +146,7 @@ def test_markdown_zero_false_accept_states_held() -> None:
     agg = ds.aggregate(_result([_trial()]))
     md = ds.render_markdown(_result([_trial()]), agg)
     assert "Zero." in md
-    assert "26.17%" in md  # synthetic baseline cited
+    assert "47.36%" in md  # synthetic baseline cited (8th-reopening abstain cost)
 
 
 def test_bleed_aggregation() -> None:

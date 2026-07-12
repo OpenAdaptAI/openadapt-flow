@@ -601,7 +601,7 @@ def replay_observe(frame: RenderedFrame, resolved_point: Point,
                 ),
                 context_text,
             )
-            rank = {"unreadable": 0, "mismatch": 1, "verified": 2}
+            rank = {"unreadable": 0, "abstain": 1, "mismatch": 2, "verified": 3}
             if (rank[retry.status], retry.coverage) > (
                 rank[check.status], check.coverage
             ):
@@ -815,12 +815,18 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
             t["is_false_abort"] and t["fa_status"] == "unreadable" for t in rows)
         mism = sum(
             t["is_false_abort"] and t["fa_status"] == "mismatch" for t in rows)
+        # 8th reopening: a band resting on a glyph-confusable identifier now
+        # ABSTAINS (the honest "OCR cannot certify" verdict) rather than
+        # mismatch/verify -- its own false-abort bucket.
+        abst = sum(
+            t["is_false_abort"] and t["fa_status"] == "abstain" for t in rows)
         return {
             "n": len(rows),
             "false_abort": fa,
             "false_abort_rate": _rate(fa, len(rows)),
             "false_abort_mismatch": mism,
             "false_abort_unreadable": unread,
+            "false_abort_abstain": abst,
             "false_accept": acc,
             "false_accept_rate": _rate(acc, len(rows)),
         }
@@ -885,7 +891,7 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
 # Markdown report
 # ---------------------------------------------------------------------------
 
-SYNTHETIC_FALSE_ABORT = 0.2617   # docs/validation/IDENTITY_ROC.md, v1+v2+v3
+SYNTHETIC_FALSE_ABORT = 0.4736   # docs/validation/IDENTITY_ROC.md, v1+v2+v3 (8th reopening)
 SYNTHETIC_FALSE_ACCEPT = 0.0
 
 
@@ -1044,11 +1050,18 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         lines += _struct_rate_table("Structured path -- by click config",
                                     sp["by_click_config"])
         lines += [
-            "The OCR name+DOB-primary path (the pixel-substrate FALLBACK) is "
-            "measured below; on this same surface it retains its safe posture "
-            "(0 false accept on the original corpus, the disclosed "
-            "digit-flanked residual, and the halt cost). The structured tier "
-            "never lets the OCR fallback override a structured mismatch.",
+            "The OCR band path (the pixel-substrate FALLBACK) is measured "
+            "below. UPDATED for the 8th wrong-patient reopening: #27's "
+            "\"disclosed digit-flanked residual\" -- a same-name/same-DOB "
+            "homonym whose collapsible MRN OCR-collapses to the target's, "
+            "name shown -- was a LIVE wrong-patient VERIFY (proved on the "
+            "real replayer in PR #31). The OCR tier now ABSTAINS on ANY "
+            "band resting on a glyph-confusable identifier, REGARDLESS of a "
+            "matched name+DOB, so that residual is closed (0 false accept) "
+            "at the cost of a higher halt rate on the OCR path; a "
+            "different-NAME sibling still MISMATCHES and a clean name+DOB "
+            "with a NON-confusable identifier still VERIFIES. The structured "
+            "tier never lets the OCR fallback override a structured mismatch.",
             "",
         ]
 

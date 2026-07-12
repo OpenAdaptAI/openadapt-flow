@@ -151,15 +151,34 @@ identity = RemoteIdentityVLM(client)       # verify / mismatch / abstain
 state    = RemoteStateVerifier(client)     # yes / no / uncertain
 ```
 
-## Integration (lands after PR #33)
+## Integration
+
+Wired into the `replay` CLI. An appliance is **opt-in** — set three env vars on
+the runner and the grounding rung and identity veto tier come online; leave them
+unset (the default) and the run stays fully local and model-free.
+
+```bash
+export OPENADAPT_FLOW_VLM_URL="https://gpu-box.lan:8077"   # unset => dormant
+export OPENADAPT_FLOW_VLM_TOKEN="$(cat /etc/openadapt/vlm_token)"
+export OPENADAPT_FLOW_VLM_TIMEOUT=2.0                       # optional, seconds
+openadapt-flow replay bundle
+```
+
+`appliance_from_env()` (`runtime/remote_vlm.py`) reads these and returns a
+`RemoteAppliance` (or `None`); the CLI passes its handles into
+`Replayer(grounder=..., identity_vlm=...)`.
 
 - **Grounder slot:** `RemoteGrounder` satisfies the `Grounder` protocol
-  (`runtime/grounder.py`); it drops into the resolution ladder's grounder slot
-  in place of `NullGrounder` — no other change.
-- **Identity ladder VLM tier:** the tier calls
-  `RemoteIdentityVLM.compare(crop_a, crop_b)` and maps
-  `VERIFY → pass-through`, `MISMATCH → halt`, `ABSTAIN → halt`. `ABSTAIN` is the
-  default on any uncertainty or appliance outage, so the tier can only veto.
-- **Drift-oracle postcondition:** the replayer calls
-  `RemoteStateVerifier.verify(...)` only when the deterministic postcondition
-  fails under render drift; `"uncertain"` keeps the failure a halt.
+  (`runtime/grounder.py`) and drops into the resolution ladder's grounder slot
+  in place of `NullGrounder` — no other change. It only ever *proposes* a point;
+  the deterministic identity band still disposes before any click, and an outage
+  yields no proposal (availability down, not safety).
+- **Identity ladder VLM tier:** `RemoteIdentityVLM.same_or_different(...)` adapts
+  the service's verdict onto the tier's veto-only contract —
+  `VERIFY → "same"` (fail-to-veto), and `MISMATCH`/`ABSTAIN` (the latter the
+  default on any uncertainty or appliance outage) → `"different"` (halt). The
+  tier can only veto; a down appliance means more halts, never a wrong click.
+- **Drift-oracle postcondition** (`RemoteStateVerifier`): *not yet wired.* It
+  needs a postcondition-failure hook in the replayer (call the verifier only
+  when a deterministic postcondition false-fails under render drift; `"uncertain"`
+  keeps it a halt). Tracked as a follow-up.

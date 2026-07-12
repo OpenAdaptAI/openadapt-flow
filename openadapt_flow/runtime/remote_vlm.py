@@ -18,6 +18,8 @@ appliance is down. Nothing here can turn an outage into a click.
 from __future__ import annotations
 
 import base64
+import os
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -146,6 +148,25 @@ class RemoteIdentityVLM:
         """Convenience: True iff the tier vetoes (anything but a confident SAME)."""
         return self.compare(crop_a, crop_b) is not IdentityVerdict.VERIFY
 
+    def same_or_different(self, recorded_png: bytes, live_png: bytes) -> str:
+        """Adapt to the identity ladder's veto-only ``IdentityVLM`` interface
+        (``runtime.identity.verify_vlm_identity``), so an instance drops
+        straight into ``Replayer(identity_vlm=...)``.
+
+        The tier reads ``"same"`` as fail-to-veto (abstain) and *anything else*
+        as a veto (HALT). So only a confident ``VERIFY`` returns ``"same"``;
+        ``MISMATCH`` and ``ABSTAIN`` — the latter being the default on any
+        uncertainty, timeout, or appliance outage — both return ``"different"``,
+        exactly this client's documented fail-safe contract: the tier can only
+        veto, never grant a pass, and an outage lowers availability (more halts),
+        never safety.
+        """
+        return (
+            "same"
+            if self.compare(recorded_png, live_png) is IdentityVerdict.VERIFY
+            else "different"
+        )
+
 
 class RemoteGrounder:
     """:class:`~openadapt_flow.runtime.grounder.Grounder` backed by the service.
@@ -211,3 +232,52 @@ class RemoteStateVerifier:
     def holds(self, screenshot: bytes, expected_state: str) -> bool:
         """Convenience: True ONLY on a confident 'yes' (uncertain/no => False)."""
         return self.verify(screenshot, expected_state) == "yes"
+
+
+@dataclass
+class RemoteAppliance:
+    """Runner-side handles for a configured on-prem VLM appliance.
+
+    ``identity_vlm`` and ``grounder`` drop straight into
+    ``Replayer(identity_vlm=..., grounder=...)``; ``state_verifier`` backs the
+    drift-oracle postcondition.
+    """
+
+    client: RemoteVLMClient
+    identity_vlm: RemoteIdentityVLM
+    grounder: RemoteGrounder
+    state_verifier: RemoteStateVerifier
+
+
+def appliance_from_env(env: Optional[dict] = None) -> Optional[RemoteAppliance]:
+    """Build the runner-side remote-VLM handles from the environment, or return
+    ``None`` when no appliance is configured -- the default, so the runtime
+    stays fully local and model-free unless a GPU box is pointed to.
+
+    Reads:
+
+    * ``OPENADAPT_FLOW_VLM_URL``     -- appliance base URL; unset => ``None`` (dormant)
+    * ``OPENADAPT_FLOW_VLM_TOKEN``   -- bearer token (matches the service's
+      ``VLM_SERVICE_TOKEN``); optional
+    * ``OPENADAPT_FLOW_VLM_TIMEOUT`` -- per-call timeout in seconds (default 2.0)
+
+    Configuring an appliance never lowers safety: every returned client is
+    fail-safe (outage => halt). It only *adds* the grounding rung and the VLM
+    identity veto tier when the box is reachable.
+    """
+    src = os.environ if env is None else env
+    url = (src.get("OPENADAPT_FLOW_VLM_URL") or "").strip()
+    if not url:
+        return None
+    token = (src.get("OPENADAPT_FLOW_VLM_TOKEN") or "").strip()
+    try:
+        timeout = float(src.get("OPENADAPT_FLOW_VLM_TIMEOUT", "2.0"))
+    except (TypeError, ValueError):
+        timeout = 2.0
+    client = RemoteVLMClient(url, token=token, timeout=timeout)
+    return RemoteAppliance(
+        client=client,
+        identity_vlm=RemoteIdentityVLM(client),
+        grounder=RemoteGrounder(client),
+        state_verifier=RemoteStateVerifier(client),
+    )

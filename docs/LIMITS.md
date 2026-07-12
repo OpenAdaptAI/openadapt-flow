@@ -86,11 +86,29 @@ ladder does for click targets. It is deliberately narrow and veto-safe: only
 `"yes"` rescues — `"no"`, `"uncertain"`, and any appliance outage keep the
 halt. Every rescue is recorded in the run report and counted as a model call.
 
-The honest residual risk: a screen-reading VLM confirms what is *on screen*, so
-a genuine failure whose screen ambiguously reads as success could be rescued.
-This trades a little safety for availability and is why it is opt-in and
-audited. It does **not** address the transactional class above — that screen
-already showed success, so both the deterministic check and the VLM would.
+The honest residual risk, now **measured** end-to-end against a real served
+model (Qwen3-VL-4B-4bit, MLX; `benchmark/appliance_validation`): a screen-reading
+VLM confirms what is *on screen*, so a genuine failure whose screen ambiguously
+reads as success can be rescued. On a labelled trap set the state-verifier
+**correctly refused 7 of 8** should-halt screens (error banner, blank form,
+cancelled, wrong-patient, logout, validation error, stale dashboard) and
+**false-rescued 1 of 8 (~12.5%)** — an in-progress `"Saving…"` screen read as
+saved — while correctly confirming 6/6 drift-obscured real successes. So the
+rescue is real but imperfect: it trades ~1-in-8 on genuinely-ambiguous
+in-progress states for availability, which is why it is opt-in and audited.
+It does **not** address the transactional class above — that screen already
+showed success, so both the deterministic check and the VLM would.
+
+Two more measured caveats from the same run: (1) the served 4-bit model emits
+degenerate output on native-Retina (~1800px+) screenshots, so full frames are
+downscaled below ~1024px before the state-verifier / grounder see them (identity
+crops are small and unaffected); un-downscaled, both tiers silently went inert
+(safe-halt, but useless). (2) The **grounder does not resolve dense lists** at
+this model/scale: on a dense patient table it found the correct *column* but not
+the *row* (0/6 hits, ~470px median error). It fails safe (a bad proposal still
+faces the deterministic identity band before any click), but it is not yet a
+dependable rung for list-dense UIs — a stronger grounding model is the open
+item.
 
 ## Identity is verified against STRUCTURED text where the backend provides it
 

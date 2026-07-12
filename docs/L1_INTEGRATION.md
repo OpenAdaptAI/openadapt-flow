@@ -46,10 +46,31 @@ ref = emit_l1_artifact(
 
 ## Honest gaps (the roadmap, in order)
 
-1. **RDP/native backends.** The `Backend` protocol (screenshot / click /
-   type / press) is designed for it, but only the Playwright reference
-   backend exists. An RDP backend (FreeRDP) and a native macOS backend are
-   the next adapters; the compiled bundles and the runtime do not change.
+1. **Native (macOS/Windows-local) backend.** The `Backend` protocol
+   (screenshot / click / type / press) is designed for it; a native
+   macOS backend is a remaining adapter. The compiled bundles and the
+   runtime do not change. *(The RDP backend below has landed as a spike;
+   the WAA/Windows backend already covers native Windows over HTTP.)*
+
+   **RDP backend — spike landed** (`openadapt_flow/backends/rdp_backend.py`,
+   `docs/backends/RDP.md`). The load-bearing L1/Retinology case reaches a
+   legacy ophthalmology EMR over **RDP**, read **pixel-only** (no
+   accessibility tree) — exactly the vision-only substrate the runtime was
+   built for, so RDP is *an adapter, not a rewrite*. `FreeRDPBackend`
+   implements the `Backend` protocol on top of a minimal, swappable
+   `RDPTransport` (`connect` / `disconnect` / `framebuffer` / `pointer` /
+   `key` / `wheel`); a real `AardwolfTransport` (pure-Python async RDP client,
+   bridged to sync, behind the optional `rdp` extra) and a `FakeRDPTransport`
+   sit under it. The unmodified Recorder → compiler → Replayer stack drives it
+   end-to-end in the mock-tested conformance test — **zero compiler/replayer
+   changes**. Status: adapter shape proven (mock-tested in CI + a gated live
+   smoke test); the real transport installs, imports lazily and constructs
+   valid connections, but **validation against a real clinic EMR over RDP is
+   pending a screen recording** — OCR/grounding quality under RDP compression
+   is the open question, and the VLM fallback is expected to matter there.
+   RDP is pixel-only, so the backend deliberately does **not** claim the
+   optional `IdentityBackend` / `StructuralBackend` capabilities; identity
+   falls back to the OCR name+DOB-primary tier (docs/LIMITS.md).
 2. **Tier-0 per-workflow detector.** The current ladder is template → OCR →
    geometry → optional VLM grounder. Distilling a per-workflow YOLO-class
    detector from recordings (clicks auto-label crops) is planned as the

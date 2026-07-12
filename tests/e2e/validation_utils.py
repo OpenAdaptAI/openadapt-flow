@@ -126,6 +126,118 @@ def replay_on_page(
     return report, state
 
 
+# Base font-size (px) of the MockMed elements a font-size perturbation scales
+# (read from mockmed/static/styles.css). Used by ``replay_cosmetic`` to reflow
+# text the way a user-side font-size preference would.
+_BASE_FONT_PX = {
+    "html, body": 16,
+    "p": 16,
+    "button": 16,
+    "input": 16,
+    "textarea": 16,
+    "label": 16,
+    "td, th": 15,
+    ".seg-btn": 16,
+    "h1": 24,
+    "h2": 20,
+    "#topbar": 20,
+    "#patient-banner": 16,
+    "#saved-banner": 17,
+}
+
+_FONT_FAMILY_SELECTORS = (
+    "html, body, button, input, textarea, p, label, td, th, h1, h2, "
+    "#topbar, #patient-banner, #saved-banner, .seg-btn"
+)
+
+
+def cosmetic_css(
+    *,
+    zoom: Optional[float] = None,
+    font_scale: Optional[float] = None,
+    font_family: Optional[str] = None,
+) -> str:
+    """Build a ``<head>`` stylesheet realizing a cosmetic-only perturbation.
+
+    Injected after navigation, these selector rules survive MockMed's
+    hash-router re-renders (they are not inline styles). ``zoom`` uses the
+    CSS ``zoom`` property — the same model MockMed's bundled ``drift=zoom``
+    mode uses. Nothing here changes the DOM's text or structure, so the
+    target stays present and semantically identical: only rendering drifts.
+    """
+    parts: list[str] = []
+    if zoom is not None and abs(zoom - 1.0) > 1e-9:
+        parts.append(f"body {{ zoom: {zoom}; }}")
+    if font_scale is not None and abs(font_scale - 1.0) > 1e-9:
+        parts.append(
+            "\n".join(
+                f"{sel} {{ font-size: {round(base * font_scale)}px"
+                f" !important; }}"
+                for sel, base in _BASE_FONT_PX.items()
+            )
+        )
+    if font_family:
+        parts.append(
+            f"{_FONT_FAMILY_SELECTORS} {{ font-family: {font_family}"
+            " !important; }"
+        )
+    return "\n".join(parts)
+
+
+def replay_cosmetic(
+    browser,
+    bundle_dir: Path,
+    url: str,
+    run_dir: Path,
+    *,
+    params: dict[str, str],
+    viewport: tuple[int, int] = (1280, 800),
+    device_scale_factor: float = 1,
+    zoom: Optional[float] = None,
+    font_scale: Optional[float] = None,
+    font_family: Optional[str] = None,
+) -> tuple[RunReport, dict]:
+    """Replay ``bundle_dir`` under a cosmetic-only render perturbation.
+
+    Like :func:`replay_on_page`, but applies browser zoom / font-size /
+    font-family drift via an injected stylesheet and DPI via
+    ``device_scale_factor``. Returns ``(report, state)`` with the same
+    ground-truth ``state`` (``hash`` / ``banner``) read from the live app
+    after the run, which is what distinguishes a *safe halt* from a *wrong
+    action the report never noticed*.
+    """
+    page = browser.new_page(
+        viewport={"width": viewport[0], "height": viewport[1]},
+        device_scale_factor=device_scale_factor,
+    )
+    try:
+        page.goto(url)
+        css = cosmetic_css(
+            zoom=zoom, font_scale=font_scale, font_family=font_family
+        )
+        if css:
+            page.add_style_tag(content=css)
+            page.wait_for_timeout(80)  # let the reflow settle
+        backend = PlaywrightBackend(page)
+        workflow = Workflow.load(bundle_dir)
+        report = Replayer(backend).run(
+            workflow,
+            params=params,
+            bundle_dir=Path(bundle_dir),
+            run_dir=Path(run_dir),
+        )
+        state = {
+            "hash": page.evaluate("location.hash"),
+            "banner": page.evaluate(
+                "(document.getElementById('saved-banner') || {}).textContent"
+                " || null"
+            ),
+        }
+    finally:
+        page.close()
+    return report, state
+
+
 def failing_step(report: RunReport):
     """The first failed StepResult, or None."""
     for result in report.results:

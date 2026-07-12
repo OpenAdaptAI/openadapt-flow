@@ -22,3 +22,7 @@ benchmark/dom/finals/
 benchmark/dom/rows.jsonl
 benchmark/desktop/finals/
 benchmark/desktop/_work/
+benchmark/reliability/artifacts/
+benchmark/cosmetic_drift/runs/
+benchmark/cosmetic_drift/_bundle/
+benchmark/cosmetic_drift/_recording/

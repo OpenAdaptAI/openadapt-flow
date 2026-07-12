@@ -44,6 +44,10 @@ dev = [
 grounder = ["anthropic>=0.40"]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31"]
+# FreeRDPBackend: pure-Python async RDP client for the pixel-only RDP path
+# (L1/Retinology EMR over RDP). Lazily imported by AardwolfTransport — never
+# needed for the mock-tested adapter, only for the real/live transport.
+rdp = ["aardwolf>=0.2.13"]
 # On-prem VLM inference service (the GPU-box appliance side).
 service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 # Apple-Silicon dev backend for the VLM service (local model, no GPU box).

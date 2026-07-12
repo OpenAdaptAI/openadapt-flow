@@ -1,6 +1,7 @@
 .venv/
 .venv-dense/
 .venv-glyph/
+.venv-dom/
 __pycache__/
 *.pyc
 *.egg-info/

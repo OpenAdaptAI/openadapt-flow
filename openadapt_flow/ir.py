@@ -84,6 +84,21 @@ class Anchor(BaseModel):
             " text at compile time."
         ),
     )
+    structured_identity: Optional[str] = Field(
+        default=None,
+        description=(
+            "STRUCTURED identity text (DOM / accessibility tree) of the"
+            " clicked target's row, captured at record time when the"
+            " recording backend exposes it"
+            " (openadapt_flow.backend.IdentityBackend.structured_text_at)."
+            " The REAL characters (a genuine digit 0 vs a letter O), so"
+            " replay verifies identity by exact/normalized string compare"
+            " with NO OCR ambiguity -- the structured-text tier of the"
+            " identity ladder (see runtime.identity). None on pixel-only"
+            " substrates or bundles recorded before this capability; the"
+            " ladder then falls back to the OCR context_text tier."
+        ),
+    )
     landmarks: list[Landmark] = Field(default_factory=list)
     search_pad: int = Field(
         default=80,
@@ -217,9 +232,12 @@ class IdentityCheck(BaseModel):
             found no usable text in the live band; identity could not be
             judged — the step proceeds flagged, and irreversible steps
             refuse).
-        mode: ``context`` compares against the recorded band text;
-            ``param`` re-anchors on the RUN's value for a parameter whose
-            demo value was embedded in the recorded band.
+        mode: ``structured`` compares the recorded DOM/a11y identity text
+            against the live structured text at the resolved point (the
+            highest-fidelity tier -- no OCR ambiguity); ``context`` compares
+            against the recorded OCR band text (the pixel-substrate fallback);
+            ``param`` re-anchors on the RUN's value for a parameter whose demo
+            value was embedded in the recorded band.
         coverage: Matched fraction (context mode) or run/required ratio
             (param mode), diagnostic.
         expected: What the check looked for (recorded band text, or the
@@ -229,7 +247,7 @@ class IdentityCheck(BaseModel):
     """
 
     status: Literal["verified", "mismatch", "unreadable"]
-    mode: Literal["context", "param"] = "context"
+    mode: Literal["context", "param", "structured"] = "context"
     coverage: float = 0.0
     expected: str = ""
     observed: str = ""

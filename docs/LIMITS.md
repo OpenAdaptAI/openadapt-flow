@@ -60,6 +60,68 @@ were fixed on 2026-07-10. All moved to the safe-halt section below.)
   "irreversible steps refuse on unreadable band" branch never runs unless
   a human marked the step at compile time.
 
+## Identity is verified against STRUCTURED text where the backend provides it
+
+The wrong-entity story above is an OCR story, and OCR has a proven ceiling.
+An adversarial review established an **impossibility result**: two DIFFERENT
+patients with the same NAME and same DOB whose only distinguishing field is a
+collapsible identifier — an MRN differing by a single O/0 or l/1 glyph
+(`MG4408` vs `MG44O8`, `AC50061` vs `AC5OO61`) — render to a **byte-identical
+OCR band**. That band is literally the same input a legitimate re-read of the
+true row produces, so *no function downstream of OCR* can separate the two
+(same input, no distinguishing output). Measured on the real render→OCR→match
+pipeline this is **~43.8% false accept** on the digit-flanked shape in the
+name-in-band config, and the name-excluded config pays the flip side as
+over-halt. It is not a tuning gap; it is the limit of OCR-based identity.
+
+The fix is architectural: **stop relying on OCR for identity when a
+higher-fidelity signal exists.** Identity is now an ordered LADDER of verifier
+tiers (`openadapt_flow.runtime.identity.run_identity_ladder`), highest-fidelity
+first; the first tier that can judge the substrate wins and its verdict is
+FINAL:
+
+1. **Structured text (DOM / a11y).** When the backend exposes
+   `structured_text_at(point)` — the browser reads the DOM element under the
+   point (`elementFromPoint` → row `textContent` + `aria-label`); a native
+   desktop backend reads the accessibility tree (Windows UI Automation
+   `Name`/`Value`/text, macOS AX) — the recorded target's structured identity
+   string and the live structured string at the resolved point are compared
+   by **exact/normalized match, in which `0` and `O`, `1` and `l` are DISTINCT
+   characters**. The glyph-collapse cannot occur: the two rows are different
+   strings in the DOM/a11y tree. This runs on the browser backend today and on
+   native desktop wherever the a11y API returns text — importantly, an element
+   with **no stable `AutomationId` usually STILL exposes Name/Value text**, so
+   UIA/AX identity is viable on most native apps even where an AutomationId
+   selector is not. On the real dense sibling surface
+   (`benchmark/dense_surface/DENSE_SURFACE.md`) the structured-text path closes
+   the class at **0 false accept AND ~0 added over-halt** — including the exact
+   digit-flanked attack that produces ~43.8% false accept on the OCR path —
+   because DOM text is invariant across replay font/resolution: it closes the
+   class **with no OCR-availability cost.** A structured-text mismatch is
+   authoritative; the OCR fallback never overrides it.
+2. **Pixel / perceptual identifier compare (roadmapped — the next layer for
+   pure-pixel substrates).** Citrix/RDP/VDI sessions and apps with a broken
+   a11y tree expose NO structured text. There, the vision-native answer is to
+   compare the recorded target's rendered identifier CROP against the live
+   resolved identifier crop at the pixel level: OCR collapses `O`/`0` and
+   `l`/`1`, but the PIXELS do not — a different patient's MRN renders to
+   different pixels even when OCR reads them identically. This tier is not
+   built yet; the ladder is shaped (a list of tier callables) so it drops in
+   between the structured and OCR tiers with no structural change.
+3. **OCR name+DOB-primary band (#27) — the pixel-substrate fallback.** When no
+   structured text is available and the pixel tier is absent, identity falls
+   back to the OCR matcher below, with its proven-irreducible same-name/same-DOB
+   residual (it HALTS on the sole-ambiguous-identifier case; the same-name/DOB
+   + collapsible-MRN + name-shown case is the disclosed residual). The
+   glyph-disambiguating / high-resolution identifier OCR pass is the roadmapped
+   mitigation for THIS tier.
+
+Net: on browser (DOM) and native desktop (UIA/AX) the glyph-collapse class is
+CLOSED with no availability cost; on pure-pixel substrates it degrades to the
+pixel-perceptual tier (next) plus the OCR fallback with the disclosed residual.
+The residual below is now scoped to **pixel-only substrates with no structured
+text**, not to browser/desktop runs where the DOM/a11y signal is present.
+
 ## What it halts on (safely, but it halts)
 
 Failures below stop the run with an accurate per-step report — no wrong
@@ -363,19 +425,24 @@ these are what remain):
   `click_name`; `click_action` stays 18.89%) — the cheap direction. **What
   is GUARANTEED:** name+DOB-discriminated identity. **What HALTS:** identity
   that would turn on a look-alike-character identifier alone.
-- **RESIDUAL (disclosed, not fixed): a same-name/DOB collision with the
-  NAME displayed.** A genuinely DIFFERENT patient who shares the target's
-  full NAME and DOB, whose digit-body MRN OCR-collapses to the target's,
-  and whose name is IN the identity band (opening the chart via an Open
-  button rather than the name cell) is band-identical to a legitimate
-  same-patient re-read — name+DOB carry, so it VERIFIES. This is a
-  property of the OCR substrate, not the matcher: the two rows reach the
-  matcher as the same bytes. Closing it would require flagging every digit
-  MRN (catastrophic over-halt, ~3 of 4 real MRNs) or the complete upstream
-  fix — glyph-disambiguating / high-resolution OCR on identifier regions
-  (resolve letter-vs-digit before matching), which is roadmapped. Bounded
-  to the astronomically rare same-full-name + same-DOB + one-glyph-MRN
-  coincidence with the name shown.
+- **RESIDUAL (disclosed): a same-name/DOB collision with the NAME
+  displayed — on PIXEL-ONLY substrates.** A genuinely DIFFERENT patient who
+  shares the target's full NAME and DOB, whose digit-body MRN OCR-collapses
+  to the target's, and whose name is IN the identity band (opening the chart
+  via an Open button rather than the name cell) is band-identical to a
+  legitimate same-patient re-read — name+DOB carry, so the OCR tier VERIFIES.
+  This is a property of the OCR substrate, not the matcher: the two rows reach
+  the matcher as the same bytes. **On browser (DOM) and native desktop
+  (UIA/AX) this is CLOSED** by the structured-text tier above — the two MRNs
+  are different strings in the DOM/a11y tree, so the sibling mismatches (0
+  false accept on the real dense surface, digit-flanked attack included). The
+  residual is now scoped to PURE-PIXEL substrates (Citrix/RDP/VDI, broken
+  a11y) where no structured text exists; there the mitigations are the
+  pixel/perceptual identifier-crop tier (roadmapped, the next layer) and
+  glyph-disambiguating / high-resolution identifier OCR (also roadmapped).
+  Flagging every digit MRN instead would over-halt catastrophically (~3 of 4
+  real MRNs). Bounded to the astronomically rare same-full-name + same-DOB +
+  one-glyph-MRN coincidence with the name shown, on a pixel-only substrate.
 - **Indistinguishable-class aborts are permanent** — a true row whose
   name OCR letter-letter-garbles ('Neil' read as 'Nell') aborts every
   time, because the band is textually identical to a real sibling;

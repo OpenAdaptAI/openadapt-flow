@@ -2,6 +2,70 @@
 
 The identity band matcher's headline numbers (`docs/validation/IDENTITY_ROC.md`: **false accept 0.000%, false abort 26.17%**) are measured on SYNTHETIC corpora (string pairs with hand-injected OCR noise) and, at the product level, on CLEAN OpenEMR identity banners. This study measures the SAME matcher on the surface where a wrong-patient write actually does damage: a dense, sibling-heavy record LIST, rendered as HTML, screenshotted, and read by the repo's own OCR (RapidOCR). Every band string below came out of OCR reading a rendered PNG — nothing is a fabricated string.
 
+## THE REAL FIX — structured-text (DOM / a11y) identity (feat/dom-identity)
+
+Everything below the next heading is the OCR band matcher, measured on this
+dense surface. An adversarial review proved that path has an **irreducible**
+hole: two DIFFERENT same-name/same-DOB patients whose MRN differs by one O/0 or
+l/1 glyph (`MG4408` vs `MG44O8`, `AC50061` vs `AC5OO61`) render to a
+BYTE-IDENTICAL OCR band — literally the same string a legit re-read of the true
+row produces — so no string rule downstream of OCR can separate them. On this
+surface that is **43.8% false accept** on the digit-flanked attack
+(`click_action`), and the name-excluded config (`click_name`) pays it back as
+over-halt.
+
+The real fix is to stop trusting OCR for identity where a higher-fidelity
+signal exists. Identity is now an ordered LADDER
+(`openadapt_flow.runtime.identity.run_identity_ladder`): **tier 1 = STRUCTURED
+text** — the DOM row text under the click point on a browser backend
+(`backend.structured_text_at` → `elementFromPoint` → row `textContent`), or the
+UI-Automation / AX text on a native desktop backend — compared to the recorded
+target's structured text by exact/normalized match, in which `0` and `O`, `1`
+and `l` are DISTINCT characters; **tier 2 = a pixel/perceptual identifier-crop
+compare** (roadmapped — the next layer for pure-pixel Citrix/RDP/VDI substrates
+with no a11y text; OCR collapses O/0, the pixels do not); **tier N = the OCR
+name+DOB-primary band** below, the pixel-substrate fallback with the disclosed
+same-name/DOB residual. A higher tier's verdict is final — the OCR fallback
+never overrides a structured-text mismatch.
+
+**Measured on this exact render→pipeline surface**
+(`benchmark/dense_surface/dom_identity_probe.py`, seeds 1–2; raw output in
+`dom_identity_probe_seed12.txt`), STRUCTURED (DOM) path vs the OCR fallback:
+
+| corpus | STRUCTURED false accept | STRUCTURED false abort | OCR-fallback false accept | OCR-fallback false abort |
+| --- | --- | --- | --- | --- |
+| **adversarial** (same name+DOB, digit-flanked MRN) | **0/96 (0.0%)** | **0/96 (0.0%)** | 42/96 (43.8%) | 48/96 (50.0%) |
+| **realistic** (diff name/DOB, confusable MRN) | **0/96 (0.0%)** | **0/96 (0.0%)** | 0/96 (0.0%) | 48/96 (50.0%) |
+| **original** dense corpus | **0/144 (0.0%)** | **0/144 (0.0%)** | 0/144 (0.0%) | 64/144 (44.4%) |
+
+The structured path **closes the glyph-collapse class at 0 false accept AND 0
+added over-halt** — including the digit-flanked attack that gives the OCR path
+43.8% false accept — and it does so on BOTH click configs (`click_name` and
+`click_action`, 48/48 armed each). Because the DOM text is invariant across
+replay font/resolution, it carries **no OCR-availability cost**: where the OCR
+fallback pays 44–50% false abort to hold 0 false accept, the DOM path pays
+0%. The mechanism is visible in the witness rows the probe prints: the OCR
+bands are RAW-IDENTICAL (`MG4408 … == MG4408 …`) while the DOM strings are
+DISTINCT (`MG4408 …` vs `MG44O8 …`).
+
+**OCR fallback unchanged (no regression).** The OCR-fallback columns above
+reproduce #27's shipped numbers exactly (adversarial 42 FA / 48 abort;
+realistic 0 FA / 48 abort in `click_name`, 0/0 in `click_action`; original 0
+FA), confirming the fallback tier is untouched and still available on
+pure-pixel substrates.
+
+**Impossibility result, stated plainly:** same-NAME + same-DOB + a
+collapsible-ID (one O/0 or l/1 glyph apart) is UNVERIFIABLE by OCR alone — the
+two rows reach the matcher as identical bytes. It is verifiable against
+structured text (DOM / UIA / AX), which is why identity now prefers that
+signal; on pure-pixel substrates the pixel/perceptual tier (next) and
+glyph-disambiguating identifier OCR (roadmapped) are the mitigations, and the
+OCR fallback's residual (below) stands until they land.
+
+To regenerate this comparison: `python benchmark/dense_surface/dom_identity_probe.py 1 2`.
+The full 5-seed `python -m openadapt_flow.validation.dense_surface` run also
+emits a "Structured-text (DOM) identity path" section in this file.
+
 ## FIX — name+DOB-primary identity (7th reopening)
 
 The body below is the CURRENT-code re-measurement (0/360 false accept, 45.00% false abort). The history:

@@ -219,7 +219,7 @@ class Replayer:
             ):
                 continue
             report.identity_applicable_steps += 1
-            if step.anchor.context_text:
+            if step.anchor.context_text or step.anchor.structured_identity:
                 report.identity_armed_steps += 1
             else:
                 report.identity_unarmed.append(
@@ -293,7 +293,10 @@ class Replayer:
                 and step.action
                 in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK, ActionKind.TYPE)
                 and step.anchor is not None
-                and step.anchor.context_text
+                and (
+                    step.anchor.context_text
+                    or step.anchor.structured_identity
+                )
             ):
                 # Identity gate: the ladder proves the resolved target LOOKS
                 # right at a plausible position; the recorded context band
@@ -540,7 +543,79 @@ class Replayer:
         params: dict[str, str],
         workflow: Workflow,
     ) -> IdentityCheck:
-        """Verify the resolved target's identity via its live context band.
+        """Verify the resolved target's identity via the identity LADDER.
+
+        Identity is checked by an ordered ladder of verifier tiers, highest
+        fidelity first; the first tier that can judge this substrate wins and
+        its verdict is FINAL (see
+        :func:`openadapt_flow.runtime.identity.run_identity_ladder`):
+
+        - **tier 1 -- structured text (DOM / UIA / AX).** When the bundle
+          carries the target's recorded structured identity
+          (``anchor.structured_identity``) AND the live backend exposes
+          ``structured_text_at`` (browser DOM, or native a11y tree), identity
+          is verified by an exact/normalized compare of the recorded vs live
+          structured text at the resolved point -- O and 0 are distinct
+          characters, so the same-name/same-DOB glyph-collapse that defeats
+          OCR cannot occur, and the class closes with no OCR-availability
+          cost. A mismatch here is authoritative: the OCR tier never overrides
+          it.
+        - **tier 2 [SEAM, next layer] -- pixel/perceptual identifier crop.**
+          For pure-pixel substrates (Citrix/RDP/VDI, broken a11y) that expose
+          no structured text: compare the recorded identifier crop's pixels to
+          the live one's. OCR collapses O/0 and l/1, the pixels do not. Not
+          built yet; the ladder is shaped so it slots in here.
+        - **tier N -- OCR name+DOB-primary band (#27).** The pixel-substrate
+          fallback: :meth:`_verify_identity_ocr`, with its proven-irreducible
+          same-name/same-DOB residual that HALTS on the sole-ambiguous-
+          identifier case (docs/LIMITS.md).
+
+        Returns the first definitive tier verdict; ``unreadable`` if no tier
+        could judge identity.
+        """
+        anchor = step.anchor
+        assert anchor is not None
+
+        def structured_tier() -> Optional[IdentityCheck]:
+            recorded = anchor.structured_identity
+            if not recorded:
+                return None
+            getter = getattr(self.backend, "structured_text_at", None)
+            if getter is None:
+                return None
+            try:
+                live = getter(
+                    int(resolution.point[0]), int(resolution.point[1])
+                )
+            except Exception:
+                live = None
+            return identity_mod.verify_structured_identity(recorded, live)
+
+        # tier 2 [SEAM]: pixel/perceptual identifier-crop comparison for
+        # pure-pixel substrates goes HERE, between structured text and OCR --
+        # see run_identity_ladder / docs/LIMITS.md. Intentionally omitted for
+        # now; adding it is a one-line insertion into the tier list below.
+
+        def ocr_tier() -> Optional[IdentityCheck]:
+            if not anchor.context_text:
+                return None
+            return self._verify_identity_ocr(
+                step, resolution, before_png, params, workflow
+            )
+
+        return identity_mod.run_identity_ladder([structured_tier, ocr_tier])
+
+    def _verify_identity_ocr(
+        self,
+        step: Step,
+        resolution: Resolution,
+        before_png: bytes,
+        params: dict[str, str],
+        workflow: Workflow,
+    ) -> IdentityCheck:
+        """OCR name+DOB-primary identity tier (the pixel-substrate fallback).
+
+        Verify the resolved target's identity via its live OCR context band.
 
         OCRs the full-width band around the RESOLVED click point (the
         recorded crop's height as a coarse window), keeps only the lines of

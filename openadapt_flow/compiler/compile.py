@@ -862,19 +862,28 @@ def compile_recording(
                 min_confidence=MIN_OCR_CONFIDENCE,
                 reference_date=reference_date,
             )
+            # Structured identity (DOM / a11y text of the clicked row),
+            # captured by the recorder when the recording backend exposed it
+            # (openadapt_flow.backend.IdentityBackend). Stored alongside the
+            # OCR context band; replay prefers it (no OCR glyph ambiguity) and
+            # falls back to the band on pixel-only substrates.
+            structured_identity = event.get("structured_identity") or None
             anchor = Anchor(
                 template=template_rel,
                 region=crop_region,
                 click_point=click,
                 ocr_text=ocr_text,
                 context_text=context_text,
+                structured_identity=structured_identity,
                 landmarks=landmarks,
             )
             # Identity-protection audit trail: an UNARMED click proceeds
             # with NO identity verification at replay (docs/LIMITS.md), so
             # the bundle records armed/unarmed per step — with the reason
             # — for operator review BEFORE the workflow ever runs.
-            identity_armed = context_text is not None
+            identity_armed = (
+                context_text is not None or structured_identity is not None
+            )
             unarmed_reason: Optional[str] = None
             if not identity_armed:
                 unarmed_reason = _identity_unarmed_reason(

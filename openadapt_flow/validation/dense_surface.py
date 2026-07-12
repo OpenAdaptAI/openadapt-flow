@@ -343,6 +343,13 @@ class RenderedFrame:
     viewport: tuple[int, int]
     # row index -> (name_point, open_point, y_center, row_region) in SCREEN px
     points: dict[int, tuple[Point, Point, int, Region]]
+    # row index -> (name_point_struct, open_point_struct): the DOM row text
+    # under each click point EXCLUDING the clicked cell, exactly what
+    # backend.structured_text_at returns for click_name / click_action.
+    # Independent of render resolution/font -- the DOM carries the REAL
+    # characters (digit 0 vs letter O), which closes the OCR glyph-collapse
+    # class.
+    structured: dict[int, tuple[Optional[str], Optional[str]]]
 
 
 def render_frame(table: DenseTable, cond: RenderCondition, *,
@@ -407,8 +414,64 @@ def render_frame(table: DenseTable, cond: RenderCondition, *,
                 int(row_bb[2] * dsf), int(row_bb[3] * dsf),
             )
             points[i] = (name_point, open_point, y_center, row_region)
+
+        # Structured identity text per row, via the SAME DOM query the product
+        # backend runs (elementFromPoint -> enclosing row -> clone -> drop the
+        # clicked cell -> textContent). The viewport was sized to the full
+        # table height above, so page coords == viewport coords (no scroll).
+        # Queried at BOTH click points per row so each config excludes the
+        # cell it actually clicks (click_name excludes the NAME cell; the
+        # excluded cell's label is mutable evidence the ladder heals through),
+        # faithful to backend.structured_text_at.
+        structured: dict[int, tuple[Optional[str], Optional[str]]] = {}
+        js = (
+            "([px, py]) => {"
+            " const el = document.elementFromPoint(px, py);"
+            " if (!el) return null;"
+            " const row = el.closest('tr, [role=\"row\"], li,"
+            " [role=\"listitem\"]');"
+            " if (!row) return null;"
+            " const own = el.closest('td, th, [role=\"cell\"],"
+            " [role=\"gridcell\"]') || el;"
+            " own.setAttribute('data-oaflow-own', '1');"
+            " let body = '';"
+            " try {"
+            "   const clone = row.cloneNode(true);"
+            "   const m = clone.querySelector('[data-oaflow-own=\"1\"]');"
+            "   if (m) m.remove();"
+            "   body = clone.textContent || '';"
+            " } finally { own.removeAttribute('data-oaflow-own'); }"
+            " const parts = [];"
+            " const aria = row.getAttribute ?"
+            " row.getAttribute('aria-label') : null;"
+            " if (aria) parts.push(aria);"
+            " if (body) parts.push(body);"
+            " const joined = parts.join(' ').replace(/\\s+/g, ' ').trim();"
+            " return joined || null; }"
+        )
+
+        def _struct_at(css_x: float, css_y: float) -> Optional[str]:
+            return page.evaluate(js, [css_x, css_y])
+
+        for i in range(len(table.rows)):
+            name_bb = page.eval_on_selector(
+                f'[data-name="{i}"]',
+                "el => { const r = el.getBoundingClientRect();"
+                " return [r.x, r.y, r.width, r.height]; }",
+            )
+            open_bb = page.eval_on_selector(
+                f'[data-open="{i}"]',
+                "el => { const r = el.getBoundingClientRect();"
+                " return [r.x, r.y, r.width, r.height]; }",
+            )
+            name_struct = _struct_at(
+                name_bb[0] + name_bb[2] / 2, name_bb[1] + name_bb[3] / 2)
+            open_struct = _struct_at(
+                open_bb[0] + open_bb[2] / 2, open_bb[1] + open_bb[3] / 2)
+            structured[i] = (name_struct, open_struct)
         browser.close()
-    return RenderedFrame(png=png, viewport=(vw, vh), points=points)
+    return RenderedFrame(png=png, viewport=(vw, vh), points=points,
+                        structured=structured)
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +492,7 @@ from openadapt_flow.runtime import identity as identity_mod  # noqa: E402
 from openadapt_flow.runtime.identity import (  # noqa: E402
     band_region,
     context_from_lines,
+    verify_structured_identity,
     verify_target_identity,
 )
 from openadapt_flow.vision.ocr import ocr  # noqa: E402
@@ -625,6 +689,26 @@ def run_trials(seeds: list[int], *, n_rows: int,
                     ac_point = rep.points[si][pi]
                     ac = replay_observe(rep, ac_point, rec_click, crop,
                                         context_text or "")
+                    # --- Structured-text (DOM) identity path ---------------
+                    # The headline: identity verified against the DOM row text
+                    # (backend.structured_text_at), NOT OCR. Recorded on the
+                    # target row, compared to the live DOM text at the resolved
+                    # row. O and 0 are distinct in the DOM, so the digit-flanked
+                    # glyph-collapse cannot occur; and it is invariant across
+                    # replay font/resolution (no OCR availability cost).
+                    # pi selects the click config's own point (0=name,
+                    # 1=open); each excludes the cell it clicks, faithful to
+                    # backend.structured_text_at at the resolved point.
+                    struct_rec = (rec.structured.get(ti) or (None, None))[pi]
+                    struct_true = (rep.structured.get(ti) or (None, None))[pi]
+                    struct_sib = (rep.structured.get(si) or (None, None))[pi]
+                    struct_armed = struct_rec is not None
+                    sv_true = verify_structured_identity(struct_rec, struct_true)
+                    sv_sib = verify_structured_identity(struct_rec, struct_sib)
+                    struct_fa_status = (
+                        sv_true.status if sv_true is not None else "unavailable")
+                    struct_acc_status = (
+                        sv_sib.status if sv_sib is not None else "unavailable")
                     # Adjacent-row bleed (measured on the false-abort band),
                     # assigned GEOMETRICALLY (nearest row by y-center) so a
                     # neighbour's 'M'/'Active' token — same value as the
@@ -670,6 +754,17 @@ def run_trials(seeds: list[int], *, n_rows: int,
                         "acc_expected": context_text,
                         "acc_used_upscale": ac.used_upscale,
                         "is_false_accept": bool(armed and ac.check.status == "verified"),
+                        # Structured-text (DOM) identity path -- both verdicts
+                        "structured_armed": struct_armed,
+                        "structured_recorded": struct_rec,
+                        "structured_true_live": struct_true,
+                        "structured_sibling_live": struct_sib,
+                        "structured_fa_status": struct_fa_status,
+                        "structured_acc_status": struct_acc_status,
+                        "is_structured_false_abort": bool(
+                            struct_armed and struct_fa_status != "verified"),
+                        "is_structured_false_accept": bool(
+                            struct_armed and struct_acc_status == "verified"),
                         # Bleed
                         "bleed_neighbor_tokens": bleed_neighbors,
                         "bleed_present": bool(bleed_neighbors),
@@ -736,6 +831,25 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
             out.setdefault(key(t), []).append(t)
         return {k: rates(v) for k, v in sorted(out.items())}
 
+    struct_armed = [t for t in trials if t.get("structured_armed")]
+
+    def struct_rates(rows: list[dict]) -> dict[str, Any]:
+        fa = sum(t.get("is_structured_false_abort", False) for t in rows)
+        acc = sum(t.get("is_structured_false_accept", False) for t in rows)
+        return {
+            "n": len(rows),
+            "false_abort": fa,
+            "false_abort_rate": _rate(fa, len(rows)),
+            "false_accept": acc,
+            "false_accept_rate": _rate(acc, len(rows)),
+        }
+
+    def struct_group(key) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for t in struct_armed:
+            out.setdefault(key(t), []).append(t)
+        return {k: struct_rates(v) for k, v in sorted(out.items())}
+
     bleed_present = [t for t in trials if t["bleed_present"]]
     bleed_survived = [t for t in trials if t["bleed_survived_rowfilter"]]
     bleed_changed = [t for t in trials if t["bleed_changed_fa_verdict"]]
@@ -757,6 +871,13 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
             "bleed_changed_fa_verdict": len(bleed_changed),
         },
         "false_accept_details": false_accepts,
+        "structured_path": {
+            "headline": struct_rates(struct_armed),
+            "by_collision_class": struct_group(lambda t: t["collision_class"]),
+            "by_click_config": struct_group(lambda t: t["click_config"]),
+            "by_replay_condition": struct_group(
+                lambda t: t["replay_condition"]),
+        },
     }
 
 
@@ -770,6 +891,22 @@ SYNTHETIC_FALSE_ACCEPT = 0.0
 
 def _pct(x: float) -> str:
     return f"{x * 100:.2f}%"
+
+
+def _struct_rate_table(title: str, groups: dict[str, dict]) -> list[str]:
+    """Rate table for the structured-text path (no OCR mismatch/unreadable
+    split -- the DOM compare is a binary verify/mismatch)."""
+    out = [f"### {title}", "",
+           "| group | n | false-abort (over-halt) | false-accept |",
+           "| --- | --- | --- | --- |"]
+    for name, r in groups.items():
+        out.append(
+            f"| `{name}` | {r['n']} | {_pct(r['false_abort_rate'])} "
+            f"({r['false_abort']}) | {_pct(r['false_accept_rate'])} "
+            f"({r['false_accept']}) |"
+        )
+    out.append("")
+    return out
 
 
 def _rate_table(title: str, groups: dict[str, dict]) -> list[str]:
@@ -867,6 +1004,53 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         + "",
         "",
     ]
+
+    # -- Structured-text (DOM) identity path: the headline ------------------
+    sp = agg.get("structured_path")
+    if sp and sp["headline"]["n"]:
+        sh = sp["headline"]
+        lines += [
+            "## Structured-text (DOM) identity path (the headline)",
+            "",
+            "Identity here is verified against STRUCTURED text -- the DOM row "
+            "text under the click point (`backend.structured_text_at`, the "
+            "same signal a native desktop backend gets from the UIA/AX tree) "
+            "-- NOT OCR. The recorded target's DOM identity string is compared "
+            "to the live DOM string at the resolved row by exact/normalized "
+            "match, in which `0` and `O`, `1` and `l` are DISTINCT characters. "
+            "This runs on the browser backend, where the dense table's DOM is "
+            "available; on a pure-pixel substrate it is unavailable and "
+            "identity falls back to the OCR path measured below.",
+            "",
+            f"- **structured-path false accept: {_pct(sh['false_accept_rate'])}"
+            f"** ({sh['false_accept']}/{sh['n']}).",
+            f"- **structured-path false abort (over-halt): "
+            f"{_pct(sh['false_abort_rate'])}** "
+            f"({sh['false_abort']}/{sh['n']}).",
+            "",
+            "The digit-flanked glyph-collapse (`MG4408` vs `MG44O8`, `AC50061`"
+            " vs `AC5OO61`) that produces false accepts on the OCR path in "
+            "`click_action` -- and over-halts on the OCR path in `click_name` "
+            "(identity resting solely on the collapsible MRN) -- does NOT "
+            "occur here: the two MRNs are different strings in the DOM, so the "
+            "sibling MISMATCHES and the true row VERIFIES. Because the DOM text "
+            "is invariant across replay font/resolution, the structured path "
+            "carries NO OCR-availability cost: it closes the class without "
+            "#27's over-halt.",
+            "",
+        ]
+        lines += _struct_rate_table("Structured path -- by collision class",
+                                    sp["by_collision_class"])
+        lines += _struct_rate_table("Structured path -- by click config",
+                                    sp["by_click_config"])
+        lines += [
+            "The OCR name+DOB-primary path (the pixel-substrate FALLBACK) is "
+            "measured below; on this same surface it retains its safe posture "
+            "(0 false accept on the original corpus, the disclosed "
+            "digit-flanked residual, and the halt cost). The structured tier "
+            "never lets the OCR fallback override a structured mismatch.",
+            "",
+        ]
 
     lines += _rate_table("By replay condition (OCR resolution)",
                          agg["by_replay_condition"])

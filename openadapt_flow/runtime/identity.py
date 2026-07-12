@@ -1269,6 +1269,137 @@ def verify_target_identity(
     )
 
 
+# ---------------------------------------------------------------------------
+# Structured-text identity tier + the extensible identity ladder
+# ---------------------------------------------------------------------------
+#
+# The OCR context band (everything above) is the identity signal for
+# pure-PIXEL substrates. It cannot be the WHOLE story: an adversarial review
+# proved the OCR-only path cannot close the same-name/same-DOB glyph-collapse
+# case. Two DIFFERENT patients whose MRN differs only by an O/0 or l/1 glyph
+# (MG4408 vs MG44O8) render to a BYTE-IDENTICAL OCR band -- literally the same
+# string a legit re-read of the true row produces -- so no function downstream
+# of OCR can separate them (same input, no distinguishing output). This is an
+# impossibility result for OCR-based identity, not a tuning gap.
+#
+# The escape is to stop trusting OCR for identity where a higher-fidelity
+# signal exists. When the backend exposes STRUCTURED text
+# (openadapt_flow.backend.IdentityBackend.structured_text_at -- the DOM on a
+# browser, the UIA/AX tree on native desktop) the recorded target's structured
+# identity string and the live structured string at the resolved point are
+# compared DIRECTLY: an exact/normalized compare in which O and 0 are distinct
+# characters. The glyph-collapse cannot occur -- the two rows are different
+# strings in the DOM/a11y tree -- so the class closes with NO OCR ambiguity and
+# NO availability cost (identity no longer depends on OCR reading the MRN
+# glyph-for-glyph).
+#
+# Identity is therefore an EXTENSIBLE LADDER of verifier tiers, each returning
+# an IdentityCheck (verified / mismatch) or None (this tier is UNAVAILABLE for
+# this substrate -- fall through to the next):
+#
+#   tier 1  structured text (DOM / UIA / AX)   -- verify_structured_identity
+#   tier 2  [SEAM, next layer] pixel/perceptual identifier-crop compare
+#           -- for pure-pixel substrates (Citrix/RDP/VDI, broken a11y) that
+#           expose NO structured text. Rationale: OCR collapses O/0 and l/1,
+#           but the PIXELS do not -- a different patient's MRN renders to
+#           different pixels even when OCR reads them identically -- so a
+#           pixel-level comparison of the recorded vs live identifier crop is
+#           the vision-native way to catch the glyph-collapse where there is
+#           no DOM/a11y text at all. Not built yet; the ladder is shaped
+#           (a list of tier callables) so it drops in between here and the
+#           OCR tier with no structural change.
+#   tier N  OCR name+DOB-primary band (#27)    -- the pixel-substrate fallback,
+#           with its proven-irreducible same-name/same-DOB residual that HALTS
+#           on the sole-ambiguous-identifier case (docs/LIMITS.md).
+#
+# A higher tier's verdict is FINAL: the OCR fallback must never OVERRIDE a
+# structured-text mismatch (that would re-admit the very ambiguity the
+# structured tier removed).
+
+
+def normalize_structured(text: str) -> str:
+    """Normalize structured (DOM / a11y) identity text for exact compare.
+
+    Collapses runs of whitespace to single spaces and casefolds, and NOTHING
+    ELSE -- in particular it does NOT apply the OCR confusion canonicalization
+    (:func:`ocr_canonical`): the whole point of the structured tier is that O
+    and 0, l and 1 are DISTINCT characters here (the DOM/a11y layer read the
+    real glyph), so folding them would throw away exactly the signal that
+    closes the glyph-collapse class.
+    """
+    return " ".join((text or "").split()).casefold()
+
+
+def structured_identity_match(recorded: str, live: str) -> bool:
+    """Whether two structured identity strings are the same entity.
+
+    Exact compare after :func:`normalize_structured` (whitespace/case only).
+    No OCR tolerance: a one-glyph MRN difference is a real different patient in
+    the DOM/a11y tree and MUST NOT match.
+    """
+    return normalize_structured(recorded) == normalize_structured(live)
+
+
+def verify_structured_identity(
+    recorded: Optional[str], live: Optional[str]
+) -> Optional[IdentityCheck]:
+    """Structured-text identity tier (tier 1 of the ladder).
+
+    Args:
+        recorded: The anchor's recorded structured identity text
+            (``Anchor.structured_identity``), or None when the recording
+            backend did not provide it.
+        live: The live structured text at the RESOLVED point
+            (``backend.structured_text_at(point)``), or None when the live
+            backend is pixel-only / has no a11y node there.
+
+    Returns:
+        None when the tier is UNAVAILABLE -- structured text is missing on
+        EITHER side, so this substrate cannot use it and the ladder must fall
+        through to the next tier. Otherwise a definitive
+        :class:`~openadapt_flow.ir.IdentityCheck` with ``mode="structured"``:
+        ``verified`` on an exact/normalized match, ``mismatch`` otherwise. A
+        mismatch here is authoritative -- the OCR fallback never overrides it.
+    """
+    if not recorded or not live:
+        return None
+    ok = structured_identity_match(recorded, live)
+    return IdentityCheck(
+        status="verified" if ok else "mismatch",
+        mode="structured",
+        coverage=1.0 if ok else 0.0,
+        expected=recorded,
+        observed=live,
+    )
+
+
+def run_identity_ladder(
+    tiers: Iterable[Any],
+) -> IdentityCheck:
+    """Run identity verifier tiers in order; the first definitive verdict wins.
+
+    Args:
+        tiers: An ordered iterable of zero-argument callables, each returning
+            an :class:`~openadapt_flow.ir.IdentityCheck` (a definitive
+            verified/mismatch/unreadable verdict for its tier) or None (the
+            tier is UNAVAILABLE for this substrate -- try the next). Ordered
+            highest-fidelity first (structured text, then -- future -- a
+            pixel/perceptual tier, then the OCR fallback).
+
+    Returns:
+        The first non-None tier verdict. A higher tier's verdict is FINAL: a
+        structured-text mismatch is never reconsidered by a lower (OCR) tier.
+        If every tier is unavailable, an ``unreadable`` check (identity could
+        not be judged -- the caller applies its proceed-flagged / irreversible
+        policy).
+    """
+    for tier in tiers:
+        verdict = tier()
+        if verdict is not None:
+            return verdict
+    return IdentityCheck(status="unreadable")
+
+
 def upscale_crop(frame_png: bytes, region: Region, factor: int = 2) -> Optional[bytes]:
     """Crop ``region`` from a frame and upscale it (cubic) for a re-OCR.
 

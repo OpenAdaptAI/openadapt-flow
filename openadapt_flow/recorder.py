@@ -147,6 +147,17 @@ class Recorder:
         before = self._backend.screenshot()
         (self._frames_dir / f"{i:04d}_before.png").write_bytes(before)
         structural_before = self._structural_state()
+        # Structured identity of the clicked target (DOM / a11y text), when
+        # the backend exposes it: captured on the BEFORE frame, before the
+        # action, so the compiler can store it on the anchor and the replayer
+        # can verify identity against the highest-fidelity signal (no OCR
+        # ambiguity). Pointer events only (they carry x/y); absent otherwise.
+        if event.get("kind") in ("click", "double_click"):
+            structured = self._structured_identity_at(
+                int(event["x"]), int(event["y"])
+            )
+            if structured:
+                event = {**event, "structured_identity": structured}
         act()
         after = self._wait_settled()
         (self._frames_dir / f"{i:04d}_after.png").write_bytes(after)
@@ -159,6 +170,24 @@ class Recorder:
         with self._events_path.open("a") as f:
             f.write(json.dumps(line) + "\n")
         self._i += 1
+
+    def _structured_identity_at(self, x: int, y: int) -> Optional[str]:
+        """Structured (DOM / a11y) identity text under (x, y), if available.
+
+        Backends MAY expose ``structured_text_at``
+        (``openadapt_flow.backend.IdentityBackend``): the REAL characters of
+        the target's row from the DOM / accessibility tree, captured so replay
+        verifies identity by exact/normalized compare with no OCR ambiguity.
+        Pixel-only backends (no such method) or a momentary failure yield
+        None, and identity falls back to the OCR context band.
+        """
+        getter = getattr(self._backend, "structured_text_at", None)
+        if getter is None:
+            return None
+        try:
+            return getter(int(x), int(y))
+        except Exception:
+            return None
 
     def _structural_state(self) -> dict[str, Any]:
         """Structural observations the backend can provide right now.

@@ -22,9 +22,13 @@ Posture is controlled by two environment variables, safe by default:
       This is the setting a compliance team pins for a clinical deployment.
     - ``off``: never scrub (e.g. an already-de-identified fixture corpus).
 * ``OPENADAPT_FLOW_SCRUB_IMAGES`` — ``0`` (default) | ``1``
-    Opt-in Presidio image redaction of PERSISTED screenshots/crops. Off by
-    default because it is destructive (burns boxes into the saved frame) and
-    slow (OCR + NER per frame); on, it applies to report-embedded frames.
+    Opt-in Presidio image redaction of PERSISTED screenshots/crops under
+    ``auto``. Off by default there because it is destructive (burns boxes into
+    the saved frame) and slow (OCR + NER per frame). **Under ``SCRUB=on`` image
+    redaction is implied regardless of this flag** — a compliance-pinned run
+    must not leave full-frame PHI screenshots unredacted in the shareable
+    ``REPORT.md`` while text is scrubbed (that is a false sense of
+    de-identification).
 
 The scrubber is a lazy singleton so importing this module never pulls in
 Presidio/spaCy. Tests inject a fast fake via :func:`set_text_scrubber` /
@@ -137,20 +141,34 @@ def text_scrubbing_enabled() -> bool:
     return get_text_scrubber() is not None
 
 
-def image_redaction_enabled() -> bool:
-    """True when opt-in persisted-image redaction is active.
-
-    Requires BOTH ``OPENADAPT_FLOW_SCRUB_IMAGES=1`` and an available image
-    scrubber (and mode != off).
-    """
-    if scrub_mode() == "off":
-        return False
-    if os.environ.get("OPENADAPT_FLOW_SCRUB_IMAGES", "0").strip().lower() not in (
+def _scrub_images_flag_set() -> bool:
+    """True when ``OPENADAPT_FLOW_SCRUB_IMAGES`` is explicitly truthy."""
+    return os.environ.get("OPENADAPT_FLOW_SCRUB_IMAGES", "0").strip().lower() in (
         "1",
         "true",
         "yes",
         "on",
-    ):
+    )
+
+
+def image_redaction_enabled() -> bool:
+    """True when persisted-image (frame) redaction is active.
+
+    ``OPENADAPT_FLOW_SCRUB=on`` **implies** image redaction: a compliance team
+    pins ``on`` precisely so no PHI is written unredacted, and the persisted
+    step/heal frames embedded in the shareable ``REPORT.md`` are full-frame PHI
+    screenshots. Leaving them raw while text is scrubbed is a false sense of
+    de-identification, so ``on`` redacts them too (fail-closed: raises via
+    :func:`_get_image_scrubber` if the capability is missing, exactly like text).
+
+    Under ``auto`` (default), frame redaction stays **opt-in** via
+    ``OPENADAPT_FLOW_SCRUB_IMAGES=1`` (it is destructive and slow). ``off``
+    never redacts.
+    """
+    mode = scrub_mode()
+    if mode == "off":
+        return False
+    if mode != "on" and not _scrub_images_flag_set():
         return False
     return _get_image_scrubber() is not None
 

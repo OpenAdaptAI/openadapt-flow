@@ -206,3 +206,91 @@ def test_save_step_png_redacts_when_opt_in(monkeypatch, tmp_path: Path):
 
     saved = (run_dir / rel).read_bytes()
     assert Image.open(io.BytesIO(saved)).convert("RGB").getpixel((0, 0)) == (0, 0, 0)
+
+
+# -- SCRUB=on implies image redaction (no silent frame leak) ------------------
+
+
+def test_scrub_on_implies_image_redaction_without_flag(monkeypatch):
+    """SCRUB=on redacts persisted frames even with OPENADAPT_FLOW_SCRUB_IMAGES unset.
+
+    Closes the false-sense gap: a compliance-pinned run must not leave full-frame
+    PHI screenshots unredacted in the shareable REPORT.md while text is scrubbed.
+    """
+    monkeypatch.setenv("OPENADAPT_FLOW_SCRUB", "on")
+    # Note: OPENADAPT_FLOW_SCRUB_IMAGES is NOT set (default 0).
+    privacy.set_image_scrubber(_FakeImageScrubber())
+    assert privacy.image_redaction_enabled() is True
+    out = privacy.scrub_image_bytes(_png_bytes((200, 40, 40)))
+    import io
+
+    assert Image.open(io.BytesIO(out)).convert("RGB").getpixel((0, 0)) == (0, 0, 0)
+
+
+def test_scrub_on_image_redaction_fails_closed_when_capability_missing(monkeypatch):
+    """SCRUB=on + no image scrubber => image_redaction_enabled raises (fail closed)."""
+    monkeypatch.setenv("OPENADAPT_FLOW_SCRUB", "on")
+    monkeypatch.setattr(privacy, "_build_provider", lambda: None)
+    privacy.reset_scrubbers()
+    with pytest.raises(privacy.PrivacyNotAvailable):
+        privacy.image_redaction_enabled()
+
+
+def test_auto_still_requires_flag_for_image_redaction(monkeypatch):
+    """Under auto (default), frame redaction stays opt-in via the flag."""
+    privacy.set_image_scrubber(_FakeImageScrubber())
+    assert privacy.scrub_mode() == "auto"
+    assert privacy.image_redaction_enabled() is False  # no flag => off
+
+
+# -- plaintext-PHI warning when REPORT.md is written unscrubbed ---------------
+
+
+def test_report_md_warns_when_plaintext_phi(monkeypatch, tmp_path: Path):
+    """auto + no scrubber + identity-like text => one-time PlaintextPHIWarning."""
+    from openadapt_flow.report import PlaintextPHIWarning
+
+    monkeypatch.setattr(privacy, "_build_provider", lambda: None)
+    privacy.reset_scrubbers()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _phi_report().save(run_dir)
+
+    with pytest.warns(PlaintextPHIWarning):
+        md = render_run_report(run_dir).read_text()
+    # Behavior unchanged: the report is still written (in plaintext).
+    assert "John Smith" in md
+
+
+def test_report_md_no_warning_when_scrubbing_active(tmp_path: Path):
+    """A live scrubber => no plaintext warning."""
+    from openadapt_flow.report import PlaintextPHIWarning
+
+    privacy.set_text_scrubber(_FakeTextScrubber())
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _phi_report().save(run_dir)
+
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("error", PlaintextPHIWarning)
+        render_run_report(run_dir)  # must not raise
+
+
+def test_report_md_no_warning_when_scrub_off(monkeypatch, tmp_path: Path):
+    """SCRUB=off is a deliberate opt-out => stays silent."""
+    from openadapt_flow.report import PlaintextPHIWarning
+
+    monkeypatch.setenv("OPENADAPT_FLOW_SCRUB", "off")
+    monkeypatch.setattr(privacy, "_build_provider", lambda: None)
+    privacy.reset_scrubbers()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _phi_report().save(run_dir)
+
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("error", PlaintextPHIWarning)
+        render_run_report(run_dir)  # must not raise

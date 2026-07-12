@@ -14,10 +14,54 @@ Two entry points:
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 from openadapt_flow.ir import RunReport, StepResult
+from openadapt_flow.privacy import scrub_mode as _scrub_mode
 from openadapt_flow.privacy import scrub_text as _scrub_phi
+from openadapt_flow.privacy import text_scrubbing_enabled as _text_scrubbing_enabled
+
+
+class PlaintextPHIWarning(UserWarning):
+    """REPORT.md is being written with identity-like free text and no scrubber."""
+
+
+def _report_has_identity_like_text(report: RunReport) -> bool:
+    """True if the report carries free text that typically embeds PHI.
+
+    Params values and step intents are the identifier-bearing free-text fields
+    rendered into REPORT.md (patient name / DOB / MRN flow through here).
+    """
+    if any((v or "").strip() for v in report.params.values()):
+        return True
+    return any((r.intent or "").strip() for r in report.results)
+
+
+def _warn_if_plaintext_phi(report: RunReport) -> None:
+    """Warn (once) when REPORT.md will contain plaintext identity-like text.
+
+    Fires only when scrubbing is *not* active (default ``auto`` with the
+    ``privacy`` extra absent) and the report has identity-like free text.
+    ``OPENADAPT_FLOW_SCRUB=off`` is a deliberate opt-out and stays silent;
+    ``on`` fails closed upstream before reaching here. Not a behavior change —
+    the report is still written; this only makes the plaintext write visible.
+    ``warnings`` dedups per call site, so it is effectively one-time per process.
+    """
+    if _scrub_mode() == "off" or _text_scrubbing_enabled():
+        return
+    if not _report_has_identity_like_text(report):
+        return
+    warnings.warn(
+        "Writing REPORT.md with PLAINTEXT identity-like text: PHI scrubbing is "
+        "not active (OPENADAPT_FLOW_SCRUB=auto and the 'privacy' extra is not "
+        "installed). This shareable report may contain patient name/DOB/MRN. "
+        "Install it (pip install 'openadapt-flow[privacy]' && python -m spacy "
+        "download en_core_web_trf) and set OPENADAPT_FLOW_SCRUB=on to scrub and "
+        "fail closed.",
+        PlaintextPHIWarning,
+        stacklevel=2,
+    )
 
 # Ladder order for the rung histogram (cheapest first).
 _RUNG_ORDER = ("template", "template_global", "ocr", "geometry", "grounder")
@@ -71,6 +115,7 @@ def render_run_report(run_dir: Path | str) -> Path:
     """
     run = Path(run_dir)
     report = RunReport.model_validate_json((run / "report.json").read_text())
+    _warn_if_plaintext_phi(report)
 
     ok_count = sum(1 for r in report.results if r.ok)
     icon = "✅" if report.success else "❌"

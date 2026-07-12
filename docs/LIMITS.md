@@ -719,11 +719,11 @@ into the persist/log paths; the full map is in
   `report.json` is the identity **audit trail**. These are PHI-at-rest protected
   by filesystem controls and your retention policy, **not** by scrubbing. Do not
   commit real bundles or run dirs to a public repo.
-- **Image redaction is opt-in and best-effort.** Persisted screenshots are
-  redacted only when `OPENADAPT_FLOW_SCRUB_IMAGES=1`, and Presidio image
-  redaction (OCR+NER) can miss non-textual or unusually-laid-out PHI. Off by
-  default; treat saved frames as PHI unless you have verified redaction on your
-  app.
+- **Image redaction is best-effort.** Persisted screenshots are redacted when
+  `OPENADAPT_FLOW_SCRUB_IMAGES=1` (opt-in under `auto`) or implied under
+  `OPENADAPT_FLOW_SCRUB=on`, and Presidio image redaction (OCR+NER) can miss
+  non-textual or unusually-laid-out PHI. Off by default under `auto`; treat
+  saved frames as PHI unless you have verified redaction on your app.
 - **The identity crop sent to the VLM appliance is deliberately NOT scrubbed.**
   It *is* the identifier, so scrubbing it would defeat the same/different check.
   The control is a boundary, not redaction: on-prem-only destination plus
@@ -731,17 +731,26 @@ into the persist/log paths; the full map is in
   its unavoidable temp files in a `finally`). See
   [docs/deployment/ON_PREM_VLM.md](deployment/ON_PREM_VLM.md#phi-data-flow-boundary).
 - **`auto` writes plaintext when the extra is absent.** The default keeps the
-  local demo working with no NER model. A clinical deployment must set
+  local demo working with no NER model. It is not silent about it: writing
+  `REPORT.md` with identity-like text and no scrubber emits a one-time
+  `PlaintextPHIWarning`. A clinical deployment must still set
   `OPENADAPT_FLOW_SCRUB=on` (fail closed) so a missing capability aborts instead
-  of silently writing PHI.
+  of writing PHI at all.
 
 ## What held up under attack
 
 For symmetry, verified the hard way: zero crashes across every experiment;
-zero model calls and $0 spent; no false success ever occurred without a
-wrong physical action first; opaque obstructions, navigation hijacks,
-empty states, and slow screens all halted at the right step with the right
-reason; mid-run renames and position swaps of *labeled* controls healed
-correctly; and the live-app control runs (18 steps, iframes everywhere)
-stayed 20/20 compiled and 5/5 re-verified. The postcondition system is a
-real safety net — its holes are specific, listed above, and now tested.
+zero model calls and $0 spent; across the **UI-drift** matrix no false success
+ever occurred without a wrong physical action first; opaque obstructions,
+navigation hijacks, empty states, and slow screens all halted at the right step
+with the right reason; mid-run renames and position swaps of *labeled* controls
+healed correctly; and the live-app control runs (18 steps, iframes everywhere)
+stayed 20/20 compiled and 5/5 re-verified. That "no silent false success"
+claim is **scoped to render/UI drift** — it does **not** extend to the
+transactional write faults the dangerous list discloses: the 2026-07-12
+fault-model study (`benchmark/fault_model/`) found phantom/partial-save
+successes on the *correct* physical action for **5 of 7** transactional
+classes, where the screen reads success while the system of record is wrong
+(see "Postconditions read the SCREEN, not the system of record" above). The
+postcondition system is a real safety net against pixels lying about the
+screen — its holes are specific, listed above, and now tested.

@@ -48,9 +48,15 @@ validated veto-only same/different prompt + parser from the identity probe
 the collapse surface: any non-confident/unparseable answer is reported as
 `different` (a veto). `ground` only *proposes* a point (the deterministic
 identity band still disposes before any click). `verify_state` reports the
-drift-oracle postcondition (semantic "did the intended state happen?",
-robust to font/scale/theme drift) used when the deterministic postcondition
-false-fails under render drift.
+drift-oracle postcondition (semantic "did the intended state happen?") used
+when the deterministic postcondition false-fails under render drift. Its
+robustness to font/scale/theme drift is **conditionally real, not
+unqualified**: the appliance validation measured it non-functional at native
+2x Retina (the 4-bit model emits degenerate output on ~1800px+ frames, so
+frames are downscaled below ~1024px first) and ~12.5% false-rescue on
+genuinely-ambiguous in-progress screens (a `"Saving…"` read as saved). See
+[docs/LIMITS.md](../LIMITS.md) for the measured trap-set numbers before
+relying on it.
 
 ## Fail-safe behaviour (mandatory)
 

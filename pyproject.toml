@@ -30,6 +30,9 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-timeout>=2.2",
+    # Property-based (fuzz) testing of the identity gate's never-false-accept
+    # invariant (tests/test_identity_fuzz.py).
+    "hypothesis>=6.100",
     # Benchmark harness: agent baseline (anthropic) + chart rendering.
     "anthropic>=0.40",
     "matplotlib>=3.8",

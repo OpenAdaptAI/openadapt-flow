@@ -220,9 +220,12 @@ class TestSafeDirectionPins:
     def test_digit_class_homoglyph_misread_verifies(self):
         # Digit/symbol-involving confusions cannot be a different NAME
         # (human names contain no digits): genuine OCR noise, verified.
+        # The MRN here is NON-confusable (no 0/1/O/l/I) so the 8th-reopening
+        # abstain does not apply; a CONFUSABLE MRN would abstain instead
+        # (see Test8thHomonymCollapse).
         assert _status(
-            "Belford, Phil 1985-03-12 M MRN A123456",
-            "Be1ford, Phi1 1985-03-12 M MRN A123456",
+            "Belford, Phil 1985-03-12 M MRN A234567",
+            "Be1ford, Phi1 1985-03-12 M MRN A234567",
         ) == "verified"
 
     def test_digit_class_jitter_on_non_name_tokens_verifies(self):
@@ -319,11 +322,13 @@ class TestBlocker5Controls:
         ) == "mismatch"
 
     def test_raw_equal_identifier_still_verifies(self):
-        # A raw-identical MRN with only name-side digit-class noise: the
-        # identifier is not confusion-differing, so it verifies.
+        # A raw-identical NON-confusable MRN (no 0/1/O/l/I) with only
+        # name-side digit-class noise: not confusion-differing AND not
+        # glyph-collapsible, so it verifies. (A raw-identical CONFUSABLE MRN
+        # now ABSTAINS under the 8th reopening -- see Test8thHomonymCollapse.)
         assert _status(
-            "Belford, Phil 1985-03-12 M MRN A123456",
-            "Be1ford, Phi1 1985-03-12 M MRN A123456",
+            "Belford, Phil 1985-03-12 M MRN A234567",
+            "Be1ford, Phi1 1985-03-12 M MRN A234567",
         ) == "verified"
 
     def test_true_row_identifier_noise_aborts_availability_cost(self):
@@ -351,3 +356,176 @@ class TestDisclosedResidualEdges:
             "Annmarie Cox 1985-03-12 F",
             "Ann marie Cox 1985-03-12 F",
         ) == "verified"
+
+
+class TestBlocker6GlyphCollapse:
+    """6th wrong-patient reopening — the dense sibling-surface study
+    (benchmark/dense_surface/DENSE_SURFACE.md).
+
+    Below the matcher, at the OCR layer: two same-name patients whose
+    MRNs differ only by a letter/digit near-homoglyph (target 'C0X3834'
+    with a digit ZERO vs sibling 'COX3834' with a letter O) are read by
+    RapidOCR as the SAME string. The recorded band and the observed
+    sibling band are therefore RAW-IDENTICAL before band_match sees them,
+    so the identifier-suspect rule (which needs two DIFFERENT strings)
+    never fires and the sibling verified at coverage 1.0 — measured 7.2%
+    false accept (26/360) on the dense surface, 60% on the O/0 class.
+
+    The bands below are the exact recorded/observed strings RapidOCR
+    produced in the study (DENSE_SURFACE.md false-accept table): a
+    faithful reconstruction of the rendered+OCR'd probe. UPDATED for the
+    8th reopening: a RAW match on a glyph-confusable identifier now
+    ABSTAINS (band_verdict -> "abstain"), the honest "OCR cannot certify"
+    verdict, rather than asserting "mismatch" (a different entity it cannot
+    actually prove). Either way it HALTs. The name/DOB-clean controls with
+    NO confusable identifier must still verify."""
+
+    def test_o0_collapse_click_name_abstains(self):
+        # click_name: the NAME is excluded, so the glyph-confusable MRN is
+        # the sole discriminator. The sibling's collapsed band is
+        # byte-identical to the recorded target band -> ABSTAIN (halt).
+        assert _status(
+            "COX3834 1944-08-08 F Pending Open",
+            "COX3834 1944-08-08 F Pending Open",
+        ) == "abstain"
+
+    def test_o0_collapse_click_action_abstains_despite_name_and_dob(self):
+        # click_action: NAME and DOB present and raw-match, yet the MRN
+        # carries a homoglyph LETTER O -- a same-name/same-DOB homonym
+        # (COX3834 vs C0X3834) cannot be ruled out. name+DOB do NOT license
+        # it (8th reopening): ABSTAIN.
+        assert _status(
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+        ) == "abstain"
+
+    def test_l1_collapse_abstains(self):
+        # The l/1 class: 'PL16078' (digit 1) vs 'PLl6078' (letter l) collapse
+        # to one string -> confusable identifier -> ABSTAIN.
+        assert _status(
+            "PL16078 1940-10-22 F Active Open",
+            "PL16078 1940-10-22 F Active Open",
+        ) == "abstain"
+
+    def test_clean_name_dob_target_still_verifies(self):
+        # No glyph-confusable identifier in the discriminating position:
+        # identity carried by a clean name + DOB must verify normally.
+        assert _status(
+            "Petrov, Robert 1944-08-08 F Pending Open",
+            "Petrov, Robert 1944-08-08 F Pending Open",
+        ) == "verified"
+
+    def test_plain_numeric_mrn_abstains_and_suspect_edit_mismatches(self):
+        # A NAME-EXCLUDED band resting on a digit-body confusable MRN
+        # ('MG480312', containing 0/1) -> ABSTAIN (8th reopening: no
+        # name+DOB can license a collapsible MRN):
+        assert _status(
+            "MG480312 1975-03-14 M Active Open",
+            "MG480312 1975-03-14 M Active Open",
+        ) == "abstain"
+        # ...a same-patient re-read WITH a discriminative name + DOB but the
+        # SAME confusable MRN now ALSO abstains (the honest cost -- OCR alone
+        # cannot rule out a same-name/same-DOB homonym):
+        assert _status(
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+        ) == "abstain"
+        # ...and a same-name/DOB DIFFERENT patient MG48O312 (letter O) vs
+        # MG480312 is an AFFIRMATIVE confusion difference (raw-unequal,
+        # recorded token has a digit) -> suspect -> MISMATCH.
+        assert _status(
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            "MG48O312 Okonkwo, Daniel 1975-03-14 M Active",
+        ) == "mismatch"
+
+
+class TestBlocker7NameDobPrimarySupersededBy8th:
+    """7th reopening's name+DOB-primary design, REVERSED by the 8th
+    (benchmark/identity_ladder, this branch).
+
+    #27 let a matched NAME "carry" identity so a digit-body confusable MRN
+    only "corroborated" and did not halt. An adversarial review of PR #31
+    proved that unsound: two DIFFERENT patients can share NAME and DOB and
+    differ ONLY in a glyph OCR collapses (AC50061 vs AC5OO61 -> byte-
+    identical OCR band). A matched name+DOB therefore CANNOT rule out a
+    same-name/same-DOB homonym, so it must NOT license a collapsible MRN.
+
+    The honest rule: whenever the band rests on a glyph-confusable
+    identifier, the OCR tier ABSTAINS (band_verdict -> "abstain") -- it can
+    neither certify SAME nor assert DIFFERENT. On a pure-pixel substrate
+    with no pixel-crop / VLM / structured tier this HALTs (high over-halt,
+    the disclosed honest cost; docs/LIMITS.md). A DIFFERENT NAME is still an
+    affirmative MISMATCH; a clean name+DOB with NO confusable identifier
+    still verifies."""
+
+    def test_same_name_clean_reread_with_confusable_mrn_abstains(self):
+        # Even a legitimate same-patient re-read ABSTAINS when the MRN is
+        # glyph-confusable (AC50061 has a digit 0): OCR cannot distinguish it
+        # from a same-name/same-DOB homonym AC5OO61. The honest over-halt.
+        assert _status(
+            "AC50061 Nakamura, Karen 1947-11-05 M Active",
+            "AC50061 Nakamura, Karen 1947-11-05 M Active",
+        ) == "abstain"
+
+    def test_digit_flanked_different_name_sibling_row_mismatches(self):
+        # Landing on a DIFFERENT-name sibling row: the name discriminates and
+        # does NOT match -> affirmative MISMATCH (a different-name sibling
+        # still mismatches, per the fix's requirements).
+        assert _status(
+            "AC50061 Nakamura, Karen 1947-11-05 M Active",
+            "AC50072 Okafor, Janet 1961-02-08 M Active",
+        ) == "mismatch"
+
+    def test_digit_flanked_sole_discriminator_name_excluded_abstains(self):
+        # SAME/absent name, digit-flanked confusable MRN the sole basis:
+        # ABSTAIN (unverifiable via OCR).
+        for mrn_band in (
+            "AC50061 1947-11-05 M Active Open",
+            "MG480312 1970-06-02 F Active Open",
+            "RC719284 1958-09-30 M Active Open",
+        ):
+            assert _status(mrn_band, mrn_band) == "abstain"
+
+    def test_name_dob_target_with_confusable_digit_mrn_now_abstains(self):
+        # #27 verified these (name+DOB carry, digit MRN corroborates); the
+        # 8th reopening abstains -- name+DOB cannot license a collapsible MRN.
+        assert _status(
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+        ) == "abstain"
+        assert _status(
+            "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
+            "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
+        ) == "abstain"
+
+    def test_non_confusable_identifier_with_name_dob_still_verifies(self):
+        # The "no new over-halt" guarantee: a name+DOB target whose MRN has
+        # NO 0/1/O/l/I (a non-confusable identifier) still VERIFIES -- the
+        # abstain is confined to collapsible identifiers.
+        assert _status(
+            "MG4478 Okonkwo, Daniel 1975-03-14 M Active",
+            "MG4478 Okonkwo, Daniel 1975-03-14 M Active",
+        ) == "verified"
+        assert _status(
+            "RC72928 Fitzgerald, Susan 1958-09-30 F Active",
+            "RC72928 Fitzgerald, Susan 1958-09-30 F Active",
+        ) == "verified"
+
+    def test_letter_side_same_name_abstains(self):
+        # A homoglyph LETTER inside the MRN with a matched name+DOB: ABSTAIN
+        # (the 6th-reopening letter-collapse case, now honestly an abstain).
+        assert _status(
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+        ) == "abstain"
+
+    def test_8th_reopening_headline_same_name_dob_name_shown_abstains(self):
+        # THE 8th WRONG-PATIENT REOPENING, closed: #27 pinned this as
+        # VERIFIED (its "documented residual"). A SAME-name/SAME-DOB
+        # different patient whose digit MRN (MG4408) collapses to the
+        # target's (from MG44O8) is band-identical to a legit re-read. It no
+        # longer verifies -- it ABSTAINS -> HALT.
+        assert _status(
+            "MG4408 Okafor, Philip 1966-01-17 M Active",
+            "MG4408 Okafor, Philip 1966-01-17 M Active",
+        ) == "abstain"

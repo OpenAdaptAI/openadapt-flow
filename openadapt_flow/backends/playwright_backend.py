@@ -122,6 +122,87 @@ class PlaywrightBackend:
         except Exception:
             return None
 
+    # -- structured-text identity (openadapt_flow.backend.IdentityBackend) --
+
+    def structured_text_at(self, x: int, y: int) -> Optional[str]:
+        """Return the DOM text of the element/row under viewport pixel (x, y).
+
+        Identity in this stack is verified against STRUCTURED text where the
+        backend can provide it (see :class:`IdentityBackend`): the browser
+        hands back the REAL characters of the row under the point -- a genuine
+        digit ``0`` vs a letter ``O`` -- so the same-name/same-DOB
+        glyph-collapse that defeats OCR (``MG4408`` vs ``MG44O8`` reading
+        identically) simply cannot occur here; the two rows are different
+        strings in the DOM.
+
+        The point is in the same coordinate space as :meth:`click` (viewport
+        CSS pixels at deviceScaleFactor=1). ``document.elementFromPoint`` finds
+        the node under the point; we require an enclosing ROW-LIKE container
+        (``tr`` / ``[role=row]`` / ``li`` / ``[role=listitem]``) so identity is
+        judged on the whole record row (MRN + name + DOB + ...), not a single
+        cell, and return its ``aria-label`` (when present) joined with the row's text
+        EXCLUDING the clicked target's own cell/subtree -- that cell's label is
+        the mutable evidence the ladder heals through (an Open->View relabel of
+        the clicked control must not change identity), mirroring the OCR band
+        excluding the target's own crop; identity rests on the row's OTHER
+        cells (MRN, name, DOB, ...). A point with NO row-like ancestor -- a
+        standalone control whose own text is a mutable, healable label --
+        returns None (identity for such controls stays on the OCR / heal path).
+        Whitespace is collapsed. Returns None when nothing is under the point
+        or on any evaluation failure (never raises) -- the identity ladder then
+        falls back to the OCR tier.
+        """
+        try:
+            result = self.page.evaluate(
+                """([px, py]) => {
+                    const el = document.elementFromPoint(px, py);
+                    if (!el) return null;
+                    // Identity is a REPEATED-STRUCTURE (record-list) concept:
+                    // only a genuine row-like container carries it. A
+                    // standalone control (a Save button) has no row ancestor;
+                    // its own text is a MUTABLE label the resolution ladder
+                    // heals through, so we return null and leave it to the OCR
+                    // / heal path -- mirroring the OCR band excluding the
+                    // target's own label.
+                    const row = el.closest(
+                        'tr, [role="row"], li, [role="listitem"]'
+                    );
+                    if (!row) return null;
+                    // Exclude the CLICKED target's own cell/subtree: its label
+                    // is the mutable evidence the ladder heals through (an
+                    // Open->View relabel of the clicked control must NOT change
+                    // identity), mirroring the OCR band excluding the target's
+                    // own crop. Identity rests on the row's OTHER cells.
+                    const own = el.closest(
+                        'td, th, [role="cell"], [role="gridcell"]'
+                    ) || el;
+                    own.setAttribute('data-oaflow-own', '1');
+                    let body = '';
+                    try {
+                        const clone = row.cloneNode(true);
+                        const marked = clone.querySelector(
+                            '[data-oaflow-own="1"]'
+                        );
+                        if (marked) marked.remove();
+                        body = clone.textContent || '';
+                    } finally {
+                        own.removeAttribute('data-oaflow-own');
+                    }
+                    const parts = [];
+                    const aria = row.getAttribute
+                        ? row.getAttribute('aria-label') : null;
+                    if (aria) parts.push(aria);
+                    if (body) parts.push(body);
+                    const joined = parts.join(' ')
+                        .replace(/\\s+/g, ' ').trim();
+                    return joined || null;
+                }""",
+                [int(x), int(y)],
+            )
+        except Exception:
+            return None
+        return result or None
+
     def screenshot(self) -> bytes:
         """Return the current full-viewport frame as PNG bytes."""
         return self.page.screenshot(type="png", full_page=False)

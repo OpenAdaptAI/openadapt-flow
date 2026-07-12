@@ -35,20 +35,22 @@ from openadapt_flow.validation.adversary_corpus_v2 import (
 from openadapt_flow.validation.adversary_corpus_v3 import generate_corpus_v3
 
 # Measured at the ROC-chosen operating point (IDENTITY_ROC.md), AFTER the
-# 5th-reopening identifier-suspect fix:
-# v1 false aborts 28.2% — occlusion (93%), and the digit-class noise
-# classes ocr_confusion (66%) and compound_noise (68%) ROSE from 33/38%
-# because digit-class OCR noise that lands on an identifier token (DOB,
-# MRN, phone) now aborts under the identifier-suspect rule (the true-row
-# identifier-noise availability cost, disclosed in LIMITS.md), plus
-# capitalized adjacent-row bleed (26%). Budget set with headroom for
-# genuinely neutral refactors.
-V1_FALSE_ABORT_BUDGET = 0.30
+# 8th-reopening abstain fix (this branch):
+# v1 false aborts ROSE to 48.15% (was 28.2%). The +20pt jump is the OCR
+# tier now ABSTAINING on ANY band that rests on a glyph-confusable
+# identifier (an MRN/account token with an O/0 or l/1/I) -- 430 of the
+# 2160 SAME pairs carry such a token. This is the HONEST cost of the 8th
+# fix: OCR cannot rule out a same-name/same-DOB homonym whose MRN glyph it
+# collapsed, so it defers rather than false-accept. On real browser/desktop
+# substrates the structured-text tier verifies these with no OCR ambiguity;
+# the cost bites only on PURE-PIXEL substrates with no pixel-crop/VLM tier
+# (docs/LIMITS.md, docs/validation/IDENTITY_ROC.md). Budget set with headroom.
+V1_FALSE_ABORT_BUDGET = 0.52
 
-# v2 same_entity: digit_confusion_true_row ROSE from 0% to ~49% — the
-# same identifier-noise cost (half those rows have an MRN the digit noise
-# hit); lowercase bleed and hyphenated splits stay 0%.
-V2_FALSE_ABORT_BUDGET = 0.18
+# v2 same_entity: digit_confusion_true_row rows (an MRN carrying digit-class
+# noise) now ABSTAIN under the same rule -> 43.56% (was ~lower). Same honest
+# cost; recovered by the structured/pixel/VLM tiers off the OCR-only path.
+V2_FALSE_ABORT_BUDGET = 0.47
 
 
 def test_zero_false_accepts_on_frozen_corpus_v1():

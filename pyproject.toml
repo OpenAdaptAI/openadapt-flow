@@ -20,6 +20,10 @@ dependencies = [
     # The reference backend and the CLI's demo-record/replay self-serve
     # path drive a Playwright browser; core, not a dev extra.
     "playwright>=1.44",
+    # GPU-less runners call the on-prem VLM appliance over HTTP
+    # (runtime.remote_vlm). Lightweight; core so the fail-safe client is
+    # always importable on a runner.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -31,13 +35,20 @@ dev = [
     "matplotlib>=3.8",
     # WindowsBackend tests (mock WAA server).
     "requests>=2.31",
+    # VLM service tests (TestClient over the FastAPI app).
+    "fastapi>=0.110",
 ]
 grounder = ["anthropic>=0.40"]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31"]
+# On-prem VLM inference service (the GPU-box appliance side).
+service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+# Apple-Silicon dev backend for the VLM service (local model, no GPU box).
+service-mlx = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "mlx-vlm>=0.1"]
 
 [project.scripts]
 openadapt-flow = "openadapt_flow.__main__:main"
+openadapt-flow-vlm-service = "openadapt_flow.services.vlm_service.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openadapt_flow"]

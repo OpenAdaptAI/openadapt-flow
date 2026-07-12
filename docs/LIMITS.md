@@ -679,6 +679,39 @@ Structural limits of the current IR, not bugs:
   reproducing the wrong value.
 - **No drag-and-drop** (no such action in the IR or recorder).
 
+## PHI handling: what is scrubbed and what is a boundary
+
+openadapt-flow touches PHI (patient names, DOB, MRN) in identity band text,
+typed values, screenshots, and the run report. Scrubbing (via the optional
+`openadapt-privacy` extra, `pip install 'openadapt-flow[privacy]'`) is wired
+into the persist/log paths; the full map is in
+[docs/PRIVACY.md](PRIVACY.md). The honest limits:
+
+- **The shareable `REPORT.md` is scrubbed; the machine artifacts are not.**
+  Free-text in `REPORT.md` (workflow name, params, intents, errors) passes
+  through Presidio NER by default (`OPENADAPT_FLOW_SCRUB=auto`, active when the
+  extra is installed). But `workflow.json`, `report.json`, `events.jsonl`, and
+  the recording frames keep the **literal** identifiers on purpose — the compiled
+  bundle needs the recorded identity evidence to run the wrong-patient check, and
+  `report.json` is the identity **audit trail**. These are PHI-at-rest protected
+  by filesystem controls and your retention policy, **not** by scrubbing. Do not
+  commit real bundles or run dirs to a public repo.
+- **Image redaction is opt-in and best-effort.** Persisted screenshots are
+  redacted only when `OPENADAPT_FLOW_SCRUB_IMAGES=1`, and Presidio image
+  redaction (OCR+NER) can miss non-textual or unusually-laid-out PHI. Off by
+  default; treat saved frames as PHI unless you have verified redaction on your
+  app.
+- **The identity crop sent to the VLM appliance is deliberately NOT scrubbed.**
+  It *is* the identifier, so scrubbing it would defeat the same/different check.
+  The control is a boundary, not redaction: on-prem-only destination plus
+  no-retention (no client/server disk or log writes; the MLX dev backend deletes
+  its unavoidable temp files in a `finally`). See
+  [docs/deployment/ON_PREM_VLM.md](deployment/ON_PREM_VLM.md#phi-data-flow-boundary).
+- **`auto` writes plaintext when the extra is absent.** The default keeps the
+  local demo working with no NER model. A clinical deployment must set
+  `OPENADAPT_FLOW_SCRUB=on` (fail closed) so a missing capability aborts instead
+  of silently writing PHI.
+
 ## What held up under attack
 
 For symmetry, verified the hard way: zero crashes across every experiment;

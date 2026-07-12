@@ -129,16 +129,42 @@ actions observed — at the cost of availability:
   the O/0 class). The corpora could not surface this because they inject
   the collision as a text edit that keeps the two variants textually
   distinct — the exact condition the suspect rule was built for; the
-  collapse happens INSIDE OCR, upstream of any string-level rule. The fix
-  now HALTS whenever identity rests on a glyph-ambiguous identifier (a raw
-  match to an MRN carrying an O/0 or l/1/I near-homoglyph is not evidence
-  of same-identity), which returns the dense-surface false accept to
-  **0/360 at an 18.89% (68/360) per-click false-abort cost confined to the
-  two ambiguous-identifier classes** (`id_confusion_l1` 0→100%,
-  `id_confusion_O0` 55→70%; all seven other classes unchanged at 0% false
-  abort — see DENSE_SURFACE.md and the identifier limit below); a numeric
-  MRN with a stable alpha prefix and a clean name+DOB identity still
-  verify. The availability bill is equally plain:
+  collapse happens INSIDE OCR, upstream of any string-level rule. The
+  sixth fix HALTED on a homoglyph LETTER (O/l/I) in the identifier.
+  **SEVENTH reopening (digit-flanked):** a real MRN is `<alpha
+  prefix><digit body>`; when the confusable glyph is DIGIT-FLANKED,
+  RapidOCR reads the DIGIT form on BOTH a patient (`AC50061`) and a
+  DIFFERENT same-name/DOB patient (`AC5OO61`, letter O) — both collapse to
+  `AC50061`, NO homoglyph letter survives, the sixth flag misses it, and
+  the sibling verified. Measured **~87% false accept on the digit-flanked
+  shape** through the real render→OCR→match pipeline. No string flag on
+  the identifier can recover a distinction OCR destroyed at the pixel
+  level, and flagging the digit side (any 0/1 in an MRN) would halt ~3 of
+  4 real MRNs. So identity was moved onto the OCR-reliable, redundant
+  signal — the patient **NAME + DOB** — with a confusable-glyph identifier
+  used only as CORROBORATION. When a discriminative NAME carries identity
+  (the name-in-band config) a confusable-DIGIT MRN does NOT block
+  verification (a wrong sibling differs in name/DOB and is caught by
+  coverage/contradiction — the common case). When identity would rest
+  SOLELY on a glyph-vulnerable identifier — the clicked NAME cell excluded,
+  leaving only DOB + MRN + generic columns — a DIGIT-body glyph-vulnerable
+  MRN HALTS. A homoglyph LETTER stays a hard halt, preserving the
+  sixth-reopening closure with no regression: **the real dense-surface
+  study (`DENSE_SURFACE.md`) holds at 0/360 false accept**, and the
+  digit-flanked collapse is CLOSED in the name-excluded config. The cost is
+  availability, not safety, and is NOT a reduction: closing the name-
+  excluded hole raises that study's per-click false abort 18.89%→45.00%
+  (all of it the digit-side sole-discriminator halt in `click_name`;
+  `click_action`, where the name carries, stays at 18.89%) — the cheap
+  direction. What is now GUARANTEED is name+DOB-discriminated identity;
+  what HALTS is identity that would turn on a look-alike-character
+  identifier alone. **Disclosed residual:** a same-name/DOB
+  DIFFERENT patient whose digit-body MRN collapses to the target's, WITH
+  the name displayed and matching, is band-identical to a legitimate
+  same-patient re-read and verifies — this is a known OCR-substrate limit,
+  not a matcher bug; the complete upstream fix is glyph-disambiguating /
+  high-resolution OCR on identifier regions (roadmapped). The availability
+  bill is equally plain:
   **28.2% false aborts on v1's noise classes** (up from 10.7% pre-review
   and 21.2% after the first redesign), concentrated in occlusion — where
   a recount showed ~half the aborted bands still had BOTH name tokens
@@ -308,36 +334,48 @@ these are what remain):
   row). Availability cost, the cheap direction. All-DIGIT identifier
   differences (748291 vs 748292) are unaffected — not
   confusion-equivalent, still caught as a genuine mismatch.
-- **A RAW match to a glyph-ambiguous identifier now HALTS** (6th-reopening
-  fix, `benchmark/dense_surface/DENSE_SURFACE.md`): the line above only
-  catches the collision when the two identifiers reach the matcher as
-  DIFFERENT strings. On real dense OCR the confusion happens INSIDE the
-  engine — a target MRN `C0X3834` (digit ZERO) and a sibling `COX3834`
-  (letter O) are read as the SAME string, so the recorded and observed
-  bands are RAW-IDENTICAL and the suspect rule never fires. The matcher
-  now treats a raw match to an IDENTIFIER-LIKE token (letter+digit mix)
-  carrying an O/0 or l/1/I near-homoglyph as NOT same-identity evidence and
-  HALTS. This converts the 7.22% (26/360) dense-surface false accept to
-  0/360. The cost: a TRUE row whose recorded MRN carries such a homoglyph
-  now aborts too (`id_confusion_l1` 0→100%, `id_confusion_O0` 55→70% false
-  abort; overall 6.11%→18.89% per-click, all of it on those two classes —
-  see DENSE_SURFACE.md); the cheap direction. Deliberately NARROW
-  so it does not over-halt: only the O/0 and l/1/I near-homoglyph classes
-  qualify (they are the only ASCII letter/digit pairs that render as
-  near-identical glyphs), so a numeric MRN with a stable alpha prefix
-  ('MG483726', even with 0/1 digits in the body) and any identity carried
-  by a clean name+DOB verify normally.
-- **RESIDUAL (disclosed, not fixed): the halt keys on the LETTER side of
-  the homoglyph.** It fires when OCR emits the homoglyph as a LETTER
-  (O, l, I) in the identifier — which is how RapidOCR rendered every
-  collapse the dense-surface study surfaced. If OCR instead emitted the
-  DIGIT form on the recorded side (`A01234` with a real digit 0 whose
-  sibling is `AO1234` letter-O), a raw match would not be flagged, because
-  flagging bare digits 0/1 would over-halt ordinary numeric MRNs. The
-  complete upstream fix is a glyph-disambiguating OCR pass over identifier
-  regions (resolve letter-vs-digit before matching); the halt is the safe,
-  shippable measure now and the residual is bounded to identifiers whose
-  discriminating homoglyph OCR happens to read as a digit.
+- **Identity now rests on NAME + DOB, not on a confusable identifier**
+  (7th-reopening fix, `benchmark/dense_surface/DENSE_SURFACE.md`). The
+  6th-reopening fix flagged an identifier only when a homoglyph LETTER
+  (O/l/I) survived OCR. A real MRN is `<alpha prefix><digit body>`; when
+  the confusable glyph is DIGIT-FLANKED, RapidOCR reads the DIGIT form on
+  BOTH a patient (`AC50061`) and a DIFFERENT same-name/DOB patient
+  (`AC5OO61`, letter O) — both collapse to `AC50061`, NO homoglyph letter
+  survives, the letter-only flag misses it, and the sibling verified
+  (measured **~87% false accept on the digit-flanked shape**). No string
+  flag on the identifier can recover a distinction OCR destroyed at the
+  pixel level, and flagging the digit side (any 0/1 in an MRN) would halt
+  ~3 of 4 real MRNs. So identity is verified on the OCR-reliable, redundant
+  **NAME + DOB**, and a confusable-glyph identifier is CORROBORATION only:
+  when a discriminative NAME carries identity (the name-in-band config) a
+  confusable-DIGIT MRN does NOT block (a wrong sibling differs in name/DOB
+  — the common case; a realistic different-name/DOB corpus with a
+  confusable-digit MRN verifies at `click_action` false abort 0/48), and
+  when identity would rest SOLELY on a glyph-vulnerable identifier (the
+  clicked NAME cell excluded, only DOB + MRN + generic columns left) a
+  DIGIT-body MRN HALTS. A homoglyph LETTER stays a HARD halt (affirmative
+  OCR ambiguity), so the 6th-reopening closure holds with no regression
+  (the real dense-surface study stays 0/360 false accept). Honest cost:
+  this does NOT reduce the 6th fix's over-halt — the letter-homoglyph halt
+  is kept hard for safety (softening it re-verifies the same-name/DOB
+  letter siblings), and closing the digit-flanked hole in the name-excluded
+  config raises that study's per-click false abort 18.89%→45.00% (all in
+  `click_name`; `click_action` stays 18.89%) — the cheap direction. **What
+  is GUARANTEED:** name+DOB-discriminated identity. **What HALTS:** identity
+  that would turn on a look-alike-character identifier alone.
+- **RESIDUAL (disclosed, not fixed): a same-name/DOB collision with the
+  NAME displayed.** A genuinely DIFFERENT patient who shares the target's
+  full NAME and DOB, whose digit-body MRN OCR-collapses to the target's,
+  and whose name is IN the identity band (opening the chart via an Open
+  button rather than the name cell) is band-identical to a legitimate
+  same-patient re-read — name+DOB carry, so it VERIFIES. This is a
+  property of the OCR substrate, not the matcher: the two rows reach the
+  matcher as the same bytes. Closing it would require flagging every digit
+  MRN (catastrophic over-halt, ~3 of 4 real MRNs) or the complete upstream
+  fix — glyph-disambiguating / high-resolution OCR on identifier regions
+  (resolve letter-vs-digit before matching), which is roadmapped. Bounded
+  to the astronomically rare same-full-name + same-DOB + one-glyph-MRN
+  coincidence with the name shown.
 - **Indistinguishable-class aborts are permanent** — a true row whose
   name OCR letter-letter-garbles ('Neil' read as 'Nell') aborts every
   time, because the band is textually identical to a real sibling;

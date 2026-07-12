@@ -385,10 +385,12 @@ class TestBlocker6GlyphCollapse:
         ) == "mismatch"
 
     def test_o0_collapse_click_action_halts_despite_name_and_dob(self):
-        # click_action: the NAME and DOB are present and raw-match, yet
-        # they are SHARED between the same-name siblings, so they are not
-        # discriminators. Option A (no corroboration escape): the
-        # glyph-ambiguous MRN halts even when name+DOB raw-match.
+        # click_action: the NAME and DOB are present and raw-match, yet the
+        # MRN carries a homoglyph LETTER O — affirmative OCR-ambiguity
+        # evidence — so it HALTS even when name+DOB carry (the letter-side
+        # hard halt kept from #26; see _ID_HOMOGLYPH_LETTERS). This is what
+        # keeps the same-name/DOB letter-collapse closed with no regression
+        # under the name+DOB-primary redesign.
         assert _status(
             "COX3834 Petrov, Robert 1944-08-08 F Pending",
             "COX3834 Petrov, Robert 1944-08-08 F Pending",
@@ -396,7 +398,9 @@ class TestBlocker6GlyphCollapse:
 
     def test_l1_collapse_halts(self):
         # The l/1 class the serif-drift condition surfaced: 'PL16078'
-        # (digit 1) vs 'PLl6078' (letter l) collapse to one string.
+        # (digit 1) vs 'PLl6078' (letter l) collapse to one string. The
+        # recorded band carries a homoglyph LETTER l -> letter-side hard
+        # halt.
         assert _status(
             "PL16078 1940-10-22 F Active Open",
             "PL16078 1940-10-22 F Active Open",
@@ -410,12 +414,129 @@ class TestBlocker6GlyphCollapse:
             "Petrov, Robert 1944-08-08 F Pending Open",
         ) == "verified"
 
-    def test_plain_numeric_mrn_target_still_verifies(self):
-        # A numeric MRN body with a stable alpha prefix ('MG483726')
-        # carries no letter/digit near-homoglyph — it is NOT flagged and
-        # the true row verifies (over-halting this is the failure the cap
-        # must avoid), even when the numeric body contains 0/1 digits.
+    def test_plain_numeric_mrn_reconciled_to_name_dob_primary(self):
+        # RECONCILED (7th reopening) — #26 ENSHRINED the vulnerable shape
+        # here, asserting a NAME-EXCLUDED band resting on a digit-body MRN
+        # ('MG480312 <DOB> M Active Open', no name) VERIFIES. That is
+        # exactly the digit-flanked hole: a same-name/DOB different patient
+        # whose MRN collapses to the same digit string then verifies too.
+        # Under name+DOB-primary a digit-body MRN carrying glyph-vulnerable
+        # 0/1 is NOT trusted as a SOLE discriminator, so with the name
+        # excluded (nothing discriminative to carry identity) it HALTS:
         assert _status(
             "MG480312 1975-03-14 M Active Open",
             "MG480312 1975-03-14 M Active Open",
+        ) == "mismatch"
+        # ...but a same-patient re-read WITH a discriminative name + DOB
+        # verifies — the confusable-digit MRN corroborates, name+DOB carry:
+        assert _status(
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+        ) == "verified"
+        # ...and a same-name/DOB DIFFERENT patient MG48O312 (letter O) must
+        # NOT verify against MG480312: the letter-side read is a homoglyph
+        # letter -> hard halt (and the string-level pair is suspect too).
+        assert _status(
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            "MG48O312 Okonkwo, Daniel 1975-03-14 M Active",
+        ) == "mismatch"
+
+
+class TestBlocker7NameDobPrimary:
+    """7th wrong-patient reopening — the digit-flanked review
+    (benchmark/dense_surface/DENSE_SURFACE.md).
+
+    #26 flagged an identifier only when it carried a homoglyph LETTER
+    (O/l/I). A real MRN is <alpha prefix><digit body>; when the confusable
+    glyph is DIGIT-FLANKED, RapidOCR reads the DIGIT form on BOTH a patient
+    ('AC50061') and a DIFFERENT same-name/DOB patient ('AC5OO61', letter O)
+    — both collapse to 'AC50061', NO homoglyph letter survives, #26's flag
+    misses it, and the sibling verified (measured ~87% false accept on the
+    digit-flanked shape through the real render->OCR->match pipeline). No
+    string-level flag on the identifier can recover a distinction OCR
+    destroyed at the pixel level, and flagging the digit side (any 0/1 in
+    an MRN) would halt ~3 of 4 real MRNs.
+
+    The fix changes WHAT identity trusts: it is verified on the OCR-reliable
+    NAME + DOB, and a confusable-glyph identifier is corroboration only.
+    When name+DOB discriminate (different patients differ there — the common
+    case) a confusable MRN does NOT block. When identity would rest SOLELY
+    on a glyph-vulnerable identifier (no discriminative name+DOB carrier) it
+    HALTS. A digit-body MRN is a SOLE-discriminator halt only; a homoglyph
+    LETTER stays a hard halt (affirmative ambiguity)."""
+
+    def test_digit_flanked_different_name_sibling_verifies(self):
+        # DIFFERENT patients differ in NAME (the common case). Clicking the
+        # true row: name+DOB carry, the digit-body confusable MRN
+        # corroborates -> VERIFY (no over-halt).
+        assert _status(
+            "AC50061 Nakamura, Karen 1947-11-05 M Active",
+            "AC50061 Nakamura, Karen 1947-11-05 M Active",
+        ) == "verified"
+
+    def test_digit_flanked_different_name_sibling_row_mismatches(self):
+        # Landing on the DIFFERENT-name sibling row: name discriminates and
+        # does not match -> safe MISMATCH (this is why a confusable MRN
+        # need not be trusted in the common case).
+        assert _status(
+            "AC50061 Nakamura, Karen 1947-11-05 M Active",
+            "AC50072 Okafor, Janet 1961-02-08 M Active",
+        ) == "mismatch"
+
+    def test_digit_flanked_sole_discriminator_name_excluded_halts(self):
+        # SAME name + SAME DOB, digit-flanked MRN the SOLE discriminator,
+        # and the NAME is excluded from the band (opening the chart by
+        # clicking the name cell). The digit-body MRN cannot be trusted as
+        # the sole basis and there is no discriminative name+DOB carrier ->
+        # HALT (unverifiable; a safe false-abort). This is the digit-flanked
+        # analogue of #26's letter-collapse halt, now closed on the DIGIT
+        # side too.
+        assert _status(
+            "AC50061 1947-11-05 M Active Open",
+            "AC50061 1947-11-05 M Active Open",
+        ) == "mismatch"
+        assert _status(
+            "MG480312 1970-06-02 F Active Open",
+            "MG480312 1970-06-02 F Active Open",
+        ) == "mismatch"
+        assert _status(
+            "RC719284 1958-09-30 M Active Open",
+            "RC719284 1958-09-30 M Active Open",
+        ) == "mismatch"
+
+    def test_name_dob_clean_target_verifies_even_with_confusable_digit_mrn(self):
+        # A realistic patient whose MRN body carries glyph-vulnerable 0/1
+        # (as ~3 of 4 real MRNs do) still verifies when a discriminative
+        # name + DOB carry the identity — the digit MRN must NOT over-halt.
+        assert _status(
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+        ) == "verified"
+        assert _status(
+            "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
+            "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
+        ) == "verified"
+
+    def test_letter_side_same_name_halts_even_with_name_carry(self):
+        # A homoglyph LETTER inside the MRN is affirmative OCR-ambiguity
+        # evidence, so it halts even when name+DOB carry (the #26 letter
+        # signal, kept). Preserves the 6th-reopening closure with no
+        # regression.
+        assert _status(
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+            "COX3834 Petrov, Robert 1944-08-08 F Pending",
+        ) == "mismatch"
+
+    def test_documented_residual_same_name_dob_name_shown(self):
+        # DISCLOSED RESIDUAL (docs/LIMITS.md): a SAME-name/SAME-DOB
+        # different patient whose DIGIT-body MRN collapses to the target's,
+        # WITH the name displayed and matching (click_action), is
+        # band-identical to a legitimate same-patient re-read. name+DOB
+        # carry -> VERIFY. Closing this would require flagging every digit
+        # MRN (catastrophic over-halt) or glyph-disambiguating OCR on
+        # identifier regions (roadmapped). Pinned so a silent change is
+        # visible.
+        assert _status(
+            "MG4408 Okafor, Philip 1966-01-17 M Active",
+            "MG4408 Okafor, Philip 1966-01-17 M Active",
         ) == "verified"

@@ -57,6 +57,47 @@ def _b64(png: bytes) -> str:
     return base64.standard_b64encode(png).decode("utf-8")
 
 
+# End-to-end validation (benchmark/appliance_validation) measured a hard image
+# ceiling: the served 4-bit VLM (Qwen3-VL-4B-4bit) emits empty/degenerate output
+# on large screenshots (~1800px+), so at native 2x Retina the grounder and
+# state-verifier silently went inert (every call -> null/uncertain -> safe-halt,
+# but never useful). Full-frame screenshots are downscaled below this before
+# they cross the wire; identity crops are already small and are left untouched.
+_MAX_MODEL_IMAGE_DIM = 1024
+
+
+def _downscale_for_model(
+    png: bytes, max_dim: int = _MAX_MODEL_IMAGE_DIM
+) -> tuple[bytes, float]:
+    """Downscale a PNG so its longest side is ``<= max_dim``.
+
+    Returns ``(png_bytes, scale)`` where ``scale <= 1.0`` (``1.0`` when the
+    image was already small enough). A coordinate in the returned image maps
+    back to the original by DIVIDING by ``scale``. On any failure returns the
+    original bytes and ``1.0`` — the model may then abstain, which is still a
+    safe-halt, so this never trades safety for the optimisation.
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        img = Image.open(BytesIO(png))
+        w, h = img.size
+        longest = max(w, h)
+        if longest <= max_dim:
+            return png, 1.0
+        scale = max_dim / longest
+        resized = img.resize(
+            (max(1, round(w * scale)), max(1, round(h * scale)))
+        )
+        buf = BytesIO()
+        resized.save(buf, format="PNG")
+        return buf.getvalue(), scale
+    except Exception:
+        return png, 1.0
+
+
 class RemoteVLMClient:
     """Thin HTTP client for the VLM service. Never raises on transport failure.
 
@@ -187,7 +228,8 @@ class RemoteGrounder:
         intent: str,
         ocr_text: Optional[str] = None,
     ) -> Optional[GrounderMatch]:
-        data = self._client.ground(screen_png, intent, ocr_text)
+        sent, scale = _downscale_for_model(screen_png)
+        data = self._client.ground(sent, intent, ocr_text)
         if data is None:
             return None  # SAFE: service down => no proposal
         point = data.get("point")
@@ -196,7 +238,9 @@ class RemoteGrounder:
         x, y = point
         if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
             return None
-        px, py = int(round(x)), int(round(y))
+        # The model saw a downscaled frame; map the proposal back to the
+        # original screenshot's pixel space before anything acts on it.
+        px, py = int(round(x / scale)), int(round(y / scale))
         region: Region = (
             max(0, px - _REGION_HALF_W),
             max(0, py - _REGION_HALF_H),
@@ -221,7 +265,10 @@ class RemoteStateVerifier:
         self._client = client
 
     def verify(self, screenshot: bytes, expected_state: str) -> str:
-        data = self._client.verify_state(screenshot, expected_state)
+        # Downscale below the model's image ceiling; there are no coordinates
+        # to map back for a yes/no/uncertain verdict.
+        sent, _scale = _downscale_for_model(screenshot)
+        data = self._client.verify_state(sent, expected_state)
         if data is None:
             return "uncertain"  # SAFE: service down => unproven => halt
         holds = data.get("holds")

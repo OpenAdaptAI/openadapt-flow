@@ -45,12 +45,21 @@ from openadapt_flow.validation.adversary_corpus_v3 import generate_corpus_v3
 # substrates the structured-text tier verifies these with no OCR ambiguity;
 # the cost bites only on PURE-PIXEL substrates with no pixel-crop/VLM tier
 # (docs/LIMITS.md, docs/validation/IDENTITY_ROC.md). Budget set with headroom.
-V1_FALSE_ABORT_BUDGET = 0.52
+#
+# SEPARATOR-GLYPH P0 FIX (this branch): the glyph-abstain gate used to exempt
+# any SEPARATOR-bearing identifier (`token.isalnum()` excluded `MG-4408`), so a
+# same-name/same-DOB homonym with a dash-formatted collapsible MRN VERIFIED --
+# a wrong-patient false-accept. The gate now strips intra-identifier separators
+# (excluding only date-shaped tokens), so hyphen/slash-formatted collapsible
+# MRNs correctly ABSTAIN. That raised v1 over-halt 48.15% -> 60.42% (the corpus
+# carries dashed collapsible MRNs). It is the safe direction (more defer, still
+# zero false-accept -- test_zero_false_accepts_* still pass); budget widened.
+V1_FALSE_ABORT_BUDGET = 0.62
 
 # v2 same_entity: digit_confusion_true_row rows (an MRN carrying digit-class
-# noise) now ABSTAIN under the same rule -> 43.56% (was ~lower). Same honest
-# cost; recovered by the structured/pixel/VLM tiers off the OCR-only path.
-V2_FALSE_ABORT_BUDGET = 0.47
+# noise) ABSTAIN under the same rule; the separator fix lifts it to 47.33%.
+# Same honest cost; recovered by the structured/pixel/VLM tiers off OCR-only.
+V2_FALSE_ABORT_BUDGET = 0.49
 
 
 def test_zero_false_accepts_on_frozen_corpus_v1():

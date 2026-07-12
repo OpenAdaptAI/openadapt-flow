@@ -90,7 +90,13 @@ class FakeRDPTransport:
         stateful: Advance state on input (for the conformance test).
         as_raw_bytes: Return raw RGB bytes from ``framebuffer`` instead of a
             PIL image (exercises the backend's raw-bytes decode path).
+        supports_hwheel: Whether horizontal wheel events are honored. Defaults
+            to False to MATCH the real :class:`AardwolfTransport`, whose
+            aardwolf ``send_mouse`` has no horizontal wheel — so a test cannot
+            pass on a capability the live transport silently drops.
     """
+
+    supports_hwheel = False
 
     def __init__(
         self,
@@ -98,10 +104,12 @@ class FakeRDPTransport:
         *,
         stateful: bool = False,
         as_raw_bytes: bool = False,
+        supports_hwheel: bool = False,
     ) -> None:
         self.screens = screens
         self.stateful = stateful
         self.as_raw_bytes = as_raw_bytes
+        self.supports_hwheel = supports_hwheel
         self.state = 0
         self.connected = False
         self.disconnects = 0
@@ -141,6 +149,14 @@ class FakeRDPTransport:
             self.state = 3
 
     def wheel(self, dx: int, dy: int) -> None:
+        # Mirror AardwolfTransport: horizontal wheel is unsupported unless
+        # supports_hwheel is set, so a horizontal-only gesture records nothing
+        # (exactly what the live transport does). Only the honored components
+        # land in wheel_events.
+        if dx and not self.supports_hwheel:
+            dx = 0
+        if dx == 0 and dy == 0:
+            return
         self.wheel_events.append((dx, dy))
 
     def reset(self) -> None:
@@ -148,6 +164,82 @@ class FakeRDPTransport:
         self.pointer_events.clear()
         self.key_events.clear()
         self.wheel_events.clear()
+
+
+class TransportError(RuntimeError):
+    """The kind of error a real RDP transport raises mid-operation (a timeout
+    on the wire). A distinct type so tests assert on exactly it."""
+
+
+class RaisingRDPTransport(FakeRDPTransport):
+    """A fake that can fail like a real RDP transport does — the mock the
+    adversarial review found missing.
+
+    A real ``key()`` / ``pointer()`` / ``framebuffer()`` / ``connect()`` can
+    raise (a socket timeout) partway through a gesture; the plain
+    ``FakeRDPTransport`` never raises, so the backend's failure paths (stuck
+    modifiers, half-open teardown) had zero coverage. This transport raises
+    :class:`TransportError` on demand, but only AFTER recording nothing for the
+    failed call — a key whose DOWN raised is not recorded, so a test can prove
+    the backend still released it.
+
+    Args:
+        raise_on_key_down: Key tokens whose *down* edge raises.
+        raise_on_pointer: If True, every ``pointer`` call raises.
+        raise_on_framebuffer: If True, every ``framebuffer`` call raises.
+        raise_on_connect: If True, ``connect`` raises.
+    """
+
+    def __init__(
+        self,
+        screens: list[Image.Image],
+        *,
+        raise_on_key_down: frozenset[str] = frozenset(),
+        raise_on_pointer: bool = False,
+        raise_on_framebuffer: bool = False,
+        raise_on_connect: bool = False,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(screens, **kwargs)  # type: ignore[arg-type]
+        self.raise_on_key_down = raise_on_key_down
+        self.raise_on_pointer = raise_on_pointer
+        self.raise_on_framebuffer = raise_on_framebuffer
+        self.raise_on_connect = raise_on_connect
+
+    def connect(self) -> None:
+        if self.raise_on_connect:
+            raise TransportError("connect failed")
+        super().connect()
+
+    def framebuffer(self):
+        if self.raise_on_framebuffer:
+            raise TransportError("framebuffer read failed")
+        return super().framebuffer()
+
+    def pointer(self, x: int, y: int, button: str, down: bool) -> None:
+        if self.raise_on_pointer:
+            raise TransportError("pointer failed")
+        super().pointer(x, y, button, down)
+
+    def key(self, keysym_or_char: str, down: bool) -> None:
+        if down and keysym_or_char in self.raise_on_key_down:
+            raise TransportError(f"key {keysym_or_char!r} down failed")
+        super().key(keysym_or_char, down)
+
+
+def held_keys(key_events: list[tuple[str, bool]]) -> list[str]:
+    """Keys still logically DOWN after replaying a down/up event log.
+
+    A non-empty result means a stuck key — the exact silent-wrong-action the
+    stuck-modifier fix prevents. A release of a key that was never down is a
+    harmless no-op (it just doesn't appear as held)."""
+    held: list[str] = []
+    for token, down in key_events:
+        if down:
+            held.append(token)
+        elif token in held:
+            held.remove(token)
+    return held
 
 
 @pytest.fixture()
@@ -342,6 +434,58 @@ def test_press_empty_raises(backend: FreeRDPBackend) -> None:
         backend.press("")
 
 
+# -- stuck-modifier robustness (transport raises mid-gesture) -------------------
+
+
+def test_press_releases_all_keys_when_chord_key_raises() -> None:
+    # Ctrl down succeeds, then 'a' down raises (a real RDP key() timeout). The
+    # release phase MUST still run so Ctrl is not left latched — otherwise the
+    # next click becomes Ctrl+click and the next text a shortcut: the silent
+    # wrong-action the fix targets (Ctrl+a wipes a field).
+    t = RaisingRDPTransport(app_screens(), raise_on_key_down=frozenset({"a"}))
+    b = FreeRDPBackend(t)
+    with pytest.raises(TransportError):
+        b.press("ControlOrMeta+a")
+    assert held_keys(t.key_events) == []  # nothing latched down
+    # Specifically: Ctrl went down and came back up.
+    assert ("ctrl", True) in t.key_events
+    assert ("ctrl", False) in t.key_events
+
+
+def test_press_releases_modifier_when_its_own_down_raises() -> None:
+    # Even the failing key itself is released: its DOWN may already have
+    # registered on the wire before the transport raised, so the backend
+    # releases every part it attempted to press.
+    t = RaisingRDPTransport(app_screens(), raise_on_key_down=frozenset({"ctrl"}))
+    b = FreeRDPBackend(t)
+    with pytest.raises(TransportError):
+        b.press("ControlOrMeta+a")
+    assert held_keys(t.key_events) == []
+    assert ("ctrl", False) in t.key_events  # released despite its down failing
+
+
+def test_type_text_releases_char_when_key_raises() -> None:
+    # First char types cleanly; the second char's down raises. The first char
+    # must already be released and no key may be left held.
+    t = RaisingRDPTransport(app_screens(), raise_on_key_down=frozenset({"b"}))
+    b = FreeRDPBackend(t)
+    with pytest.raises(TransportError):
+        b.type_text("ab")
+    assert held_keys(t.key_events) == []
+    assert ("a", True) in t.key_events and ("a", False) in t.key_events
+
+
+def test_press_normal_chord_still_balanced_after_fix(
+    transport: FakeRDPTransport, backend: FreeRDPBackend
+) -> None:
+    # Regression: the try/finally must not change the happy-path event order.
+    backend.press("ControlOrMeta+a")
+    assert transport.key_events == [
+        ("ctrl", True), ("a", True), ("a", False), ("ctrl", False),
+    ]
+    assert held_keys(transport.key_events) == []
+
+
 # -- scroll --------------------------------------------------------------------
 
 
@@ -352,11 +496,33 @@ def test_scroll_sends_wheel(
     assert transport.wheel_events == [(0, 400)]
 
 
-def test_scroll_horizontal(
+def test_scroll_horizontal_dropped_matching_real_transport(
     transport: FakeRDPTransport, backend: FreeRDPBackend
 ) -> None:
+    # A horizontal-only scroll must record NOTHING: the real AardwolfTransport
+    # cannot emit horizontal wheel events (documented limitation), and the fake
+    # mirrors that so a test can't pass on a capability the live transport lacks.
     backend.scroll(120, 0)
-    assert transport.wheel_events == [(120, 0)]
+    assert transport.wheel_events == []
+
+
+def test_scroll_horizontal_honored_only_when_transport_supports_it() -> None:
+    # The seam is explicit: a transport that DOES support horizontal wheel
+    # records it. This documents that dropping dx is a transport-capability
+    # decision, not the backend silently swallowing input.
+    t = FakeRDPTransport(app_screens(), supports_hwheel=True)
+    b = FreeRDPBackend(t)
+    b.scroll(120, 0)
+    assert t.wheel_events == [(120, 0)]
+
+
+def test_scroll_mixed_keeps_vertical_when_horizontal_unsupported(
+    transport: FakeRDPTransport, backend: FreeRDPBackend
+) -> None:
+    # A diagonal scroll on the pixel-only transport keeps the vertical part and
+    # drops the horizontal part (rather than dropping the whole gesture).
+    backend.scroll(120, 400)
+    assert transport.wheel_events == [(0, 400)]
 
 
 def test_scroll_zero_sends_nothing(
@@ -436,6 +602,145 @@ def test_record_compile_replay_over_rdp_backend(tmp_path) -> None:
     assert transport.state == 3
 
 
+# -- AardwolfTransport internals (real transport; runs only with the rdp extra) -
+#
+# These exercise the REAL transport's failure/edge paths that the FakeRDPTransport
+# cannot model (event-loop teardown, wheel dispatch position, horizontal-wheel
+# capability). They need the optional `rdp` extra installed but NO live server —
+# a fake aardwolf connection object stands in for the wire. Skipped in CI (extra
+# absent); run locally / in the spike where aardwolf is present.
+
+
+class _FakeConn:
+    """Stand-in for an aardwolf RDPConnection: records send_mouse, no wire."""
+
+    def __init__(self) -> None:
+        self.mouse_calls: list = []
+        self.terminated = 0
+
+    async def send_mouse(self, button, x, y, pressed, steps=0):  # noqa: ANN001
+        self.mouse_calls.append((button, x, y, pressed, steps))
+
+    async def terminate(self):
+        self.terminated += 1
+
+
+def _make_connected_aardwolf(conn):
+    """An AardwolfTransport with a live event loop but a fake connection."""
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    from openadapt_flow.backends.rdp_backend import AardwolfTransport
+
+    t = AardwolfTransport(
+        "rdp+ntlm-password://u:p@h:3389", width=1280, height=800
+    )
+    t._ensure_loop()
+    t._conn = conn
+    return t
+
+
+def test_aardwolf_wheel_dispatched_at_last_pointer() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    from aardwolf.commons.queuedata.constants import MOUSEBUTTON
+
+    conn = _FakeConn()
+    t = _make_connected_aardwolf(conn)
+    try:
+        t.pointer(640, 500, "left", True)
+        t.pointer(640, 500, "left", False)
+        conn.mouse_calls.clear()
+        t.wheel(0, 300)  # scroll down
+        assert len(conn.mouse_calls) == 1
+        button, x, y, _pressed, steps = conn.mouse_calls[0]
+        # Under the cursor the user last acted at — NOT the (0,0) origin, which
+        # on Windows would scroll the top-left pane instead of the content.
+        assert (x, y) == (640, 500)
+        assert button == MOUSEBUTTON.MOUSEBUTTON_WHEEL_DOWN
+        assert steps > 0
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_wheel_falls_back_to_frame_centre_before_any_pointer() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    conn = _FakeConn()
+    t = _make_connected_aardwolf(conn)
+    try:
+        t.wheel(0, -200)  # scroll up, no pointer event sent yet
+        assert len(conn.mouse_calls) == 1
+        _button, x, y, _pressed, _steps = conn.mouse_calls[0]
+        assert (x, y) == (1280 // 2, 800 // 2)  # centre, never the origin
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_horizontal_wheel_dropped_and_warns() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    conn = _FakeConn()
+    t = _make_connected_aardwolf(conn)
+    try:
+        with pytest.warns(UserWarning, match="horizontal wheel"):
+            t.wheel(120, 0)  # horizontal only: unsupported by aardwolf
+        assert conn.mouse_calls == []  # nothing reached the wire (documented)
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_connect_failure_terminates_and_stops_thread(monkeypatch) -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    import threading
+
+    from openadapt_flow.backends.rdp_backend import AardwolfTransport
+
+    class _InstantQueue:
+        async def get(self):
+            return None  # always ready, so the connect loop spins to deadline
+
+    terminated = {"count": 0}
+
+    class _NoFrameConn:
+        desktop_buffer_has_data = False  # first frame NEVER arrives
+
+        def __init__(self) -> None:
+            self.ext_out_queue = _InstantQueue()
+
+        async def connect(self):
+            return None, None  # session opens OK...
+
+        async def terminate(self):
+            terminated["count"] += 1
+
+    conn = _NoFrameConn()
+
+    class _Factory:
+        @staticmethod
+        def from_url(url, iosettings):
+            return _Factory()
+
+        def get_connection(self, iosettings):
+            return conn
+
+    monkeypatch.setattr(
+        "aardwolf.commons.factory.RDPConnectionFactory", _Factory
+    )
+
+    t = AardwolfTransport(
+        "rdp+ntlm-password://u:p@h:3389", connect_timeout_s=0.05
+    )
+    with pytest.raises(TimeoutError):
+        t.connect()
+
+    # The half-open session was terminated (not leaked), and the event-loop
+    # thread was stopped + joined so retries can't accumulate daemon threads.
+    assert terminated["count"] == 1
+    assert t._conn is None
+    assert t._loop is None
+    assert t._thread is None
+    assert not any(
+        th.name == "aardwolf-rdp" and th.is_alive()
+        for th in threading.enumerate()
+    )
+
+
 # -- live smoke test (gated; skipped in CI) ------------------------------------
 #
 # Runs ONLY when a real RDP target is configured via env vars. It uses the
@@ -480,13 +785,18 @@ def test_live_smoke_real_rdp_framebuffer() -> None:
     )
     backend = FreeRDPBackend(transport)
     try:
-        png = backend.screenshot()
+        # POLL for a painted frame: the first frame(s) after connect are a
+        # blank/black canvas before the desktop renders, so a single grab is
+        # racy. wait_first_frame retries until a non-blank frame (or the budget
+        # is spent) — the same guard a real EMR grab needs.
+        png = backend.wait_first_frame(retries=40, settle_s=0.25)
         w, h = backend.viewport
         print(f"\n[live-smoke] connected; framebuffer {w}x{h}, {len(png)} PNG bytes")
         assert png[:8] == b"\x89PNG\r\n\x1a\n"
         img = Image.open(io.BytesIO(png))
         assert img.size == (w, h)
         # Non-trivial: more than one distinct colour (not a blank canvas).
-        assert len(img.convert("RGB").getcolors(maxcolors=1 << 24) or []) > 1
+        colors = img.convert("RGB").getcolors(maxcolors=1 << 24)
+        assert colors is None or len(colors) > 1
     finally:
         backend.close()

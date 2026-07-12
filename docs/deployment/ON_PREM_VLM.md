@@ -182,3 +182,46 @@ openadapt-flow replay bundle
   needs a postcondition-failure hook in the replayer (call the verifier only
   when a deterministic postcondition false-fails under render drift; `"uncertain"`
   keeps it a halt). Tracked as a follow-up.
+
+## PHI data-flow boundary
+
+The tiers above send **PHI in flight** to the appliance: the identity
+`compare` sends the recorded and live **identifier crops** (name / DOB / MRN),
+and `ground` / `verify_state` send **full screenshots** plus the intent and the
+expected-state text. This is the one PHI payload openadapt-flow deliberately
+does **not** scrub — and the reason it is safe anyway.
+
+**Why it is not scrubbed.** The identity crop *is* the identifier. The whole
+point of the VLM identity tier is to answer "same patient or different?" by
+comparing the recorded crop against the live one before a click. Scrub the crop
+and the comparator has nothing to judge, so a wrong-patient click would sail
+through. Scrubbing here would **defeat the safety check**, not add safety.
+
+**The control is a boundary, not redaction.** The crop is protected by:
+
+1. **On-prem only.** `OPENADAPT_FLOW_VLM_URL` points at a GPU box on the LAN.
+   Nothing leaves the building; there is no API dependency and no PHI egress. (A
+   cloud endpoint is an opt-in for *non-regulated* customers only — never the
+   default for a clinical deployment.)
+2. **No retention.** Neither side writes the crop, the screenshot, or the VLM
+   payload to disk or to logs:
+   - **Client** (`runtime/remote_vlm.py`): base64-encodes the bytes straight
+     into the HTTP body; it has no logging and no disk writes.
+   - **Server** (`services/vlm_service/app.py`): decodes base64, runs inference
+     in memory, returns a verdict. It never logs or persists the image bytes.
+   - **MLX dev backend** (`services/vlm_service/backends.py`): mlx-vlm requires
+     image *file paths*, so bytes must transit disk. They go to a **private
+     per-instance scratch dir** (created mode `0700`, not a shared world-readable
+     `/tmp` path), each file is `chmod 0600`, and **every file is deleted in a
+     `finally`** — cleaned up even if inference raises. The production
+     `VLLMBackend` sends base64 inline and touches no disk.
+3. **In-flight PHI, treated as such.** The crop is PHI moving inside the trust
+   boundary. Run the appliance HTTPS-only on the LAN, gate it with the bearer
+   token (`VLM_SERVICE_TOKEN`), and keep it inside the same network zone as the
+   runners.
+
+An operator auditing the appliance should confirm no reverse proxy, WSGI, or
+model-server logs the request body — that is the only way a crop could persist.
+The openadapt-flow code paths above do not.
+
+See [docs/PRIVACY.md](../PRIVACY.md) for the full PHI touchpoint map.

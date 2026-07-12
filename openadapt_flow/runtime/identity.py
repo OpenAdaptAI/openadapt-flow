@@ -65,7 +65,7 @@ import difflib
 import re
 from collections import Counter
 from datetime import date
-from typing import Any, Iterable, NamedTuple, Optional
+from typing import Any, Iterable, NamedTuple, Optional, Protocol, runtime_checkable
 
 from openadapt_flow.ir import IdentityCheck, Point, Region
 from openadapt_flow.volatility import (  # noqa: F401 - TIMESTAMP_RE re-exported
@@ -204,6 +204,94 @@ UNEXPLAINED_NAME_TOKENS_CAP = 0
 # chars — a dropped 'MRN' label or generic 3-char word is tolerated, a
 # >= 4-char name-like token must be read (raw or confusion) to verify.
 ABSENT_NAME_TOKEN_CAP = 3
+
+# Glyph-vulnerable identifiers — name+DOB-primary identity (7th wrong-patient
+# reopening; benchmark/dense_surface/DENSE_SURFACE.md and the digit-flanked
+# review). The 6th-reopening fix (#26) flagged an identifier that carried a
+# homoglyph LETTER (O/l/I) and charged it to a zero budget whenever it
+# matched, halting identity WHENEVER such an identifier was present — even
+# when a discriminative name+DOB independently carried the identity. That
+# had two failures, both proven on the real render->OCR->match pipeline:
+#
+#   1. DIGIT-SIDE MISS (false accept, ~87%). A real MRN is
+#      <alpha prefix><numeric body> (MG480312, AC50061). When the confusable
+#      glyph is DIGIT-FLANKED, RapidOCR reads the DIGIT form on BOTH a
+#      patient (AC50061) and a DIFFERENT same-name/DOB patient (AC5OO61,
+#      letter O) — both collapse to 'AC50061', NO homoglyph LETTER survives,
+#      #26's letter-only flag misses it, and the sibling verifies. No
+#      string-level flag on the identifier can recover a distinction OCR
+#      destroyed at the pixel level, and flagging the digit side (any 0/1 in
+#      an MRN) would halt ~3 of every 4 real MRNs — catastrophic over-halt.
+#   2. OVER-HALT (false abort). #26 halted a TRUE row whose own MRN merely
+#      contained an O/l even when the patient's name+DOB clearly and
+#      discriminatively identified them (measured 18.89% dense / 33% on a
+#      realistic different-name/DOB corpus).
+#
+# The fix changes WHAT identity trusts, not the glyph rule. Identity is
+# verified on the OCR-RELIABLE, linguistically-redundant signal — the
+# patient NAME and DOB together — and a confusable-glyph identifier is
+# CORROBORATION only, never the sole basis to verify:
+#
+#   - If a DISCRIMINATIVE NAME is present and matched (a name-like token
+#     >= ID_CARRY_NAME_MIN chars that is not a generic column word — the
+#     primary human identifier; a matched DOB corroborates it, name+DOB
+#     together), identity is CARRIED by name/DOB. A confusable-glyph MRN in
+#     the band does NOT block verification — most real patients differ by
+#     name/DOB, so a wrong (sibling) row differs there and is caught by
+#     coverage / contradiction; the MRN never has to be trusted. This is
+#     the common case and must NOT over-halt.
+#   - If identity rests SOLELY on a glyph-vulnerable identifier — no
+#     discriminative name carries it (the clicked NAME cell is excluded and
+#     only DOB + MRN + generic columns remain) and the identity turns on an
+#     identifier OCR cannot be trusted to have read glyph-for-glyph —
+#     identity is UNVERIFIABLE and HALTS. This is a safe false-ABORT (a
+#     hybrid-fallback escalation or a human retry), never a false-accept.
+#
+# Charged to a zero budget so the operating point stays a hard gate.
+GLYPH_AMBIGUOUS_ID_CHARS_CAP = 0
+
+# Minimum length of a name-like alphabetic token for it to count as a
+# DISCRIMINATIVE identity carrier (a real surname/first name). Shorter alpha
+# tokens (a 3-char label, a status word) do not carry identity on their own.
+ID_CARRY_NAME_MIN = 4
+
+# Low-entropy record-list column words that are NOT patient names: the Sex,
+# Status, and action-button vocabulary of an EMR list. A same-name sibling
+# SHARES these, so they never discriminate identity and must not be mistaken
+# for a name carrier (or a glyph-vulnerable MRN would wrongly verify because
+# 'Active'/'Open' looked like a name). Compared on the OCR-canonical form of
+# the squashed token (see :func:`_is_discriminative_name`).
+_GENERIC_IDENTITY_WORDS = frozenset(
+    (
+        "active", "inactive", "pending", "open", "closed", "male", "female",
+        "unknown", "discharged", "admitted", "scheduled", "cancelled",
+        "canceled", "completed", "review", "results", "records", "patient",
+        "status", "search", "demo", "chart", "charts", "appointment",
+    )
+)
+
+# The letter/digit NEAR-HOMOGLYPHS of the O/0 and l/1/I classes — the glyphs
+# RapidOCR collapses onto one another. BOTH sides now carry the SAME evidence
+# and are flagged identically (the 9th wrong-patient reopening): a confusable
+# glyph in an identifier-position token means OCR cannot be trusted to have read
+# that token glyph-for-glyph, whether the surviving glyph is a LETTER (O/l/I —
+# OCR read a letter where a digit likely belongs) or a DIGIT (0/1 — a
+# same-identity re-read AND a homonym whose distinguishing letter-O collapsed to
+# a digit-0 both produce this exact digit form). Earlier fixes (#26/#27) tried
+# to treat the digit side more leniently — flag only when a homoglyph LETTER
+# survived, or let a matched name+DOB "carry" a digit-body MRN — and each left a
+# live wrong-patient VERIFY (the 8th reopening on alphanumeric MRNs, the 9th on
+# PURELY NUMERIC ones: 100512 vs 1OO512 OCR byte-identically). There is no safe
+# asymmetry: any identifier-position token bearing one of these glyphs forces
+# the OCR tier to ABSTAIN. (| and ! are the shapes OCR emits for l/I.)
+_ID_HOMOGLYPH_LETTERS = frozenset("oli|!")
+_ID_HOMOGLYPH_DIGITS = frozenset("01")
+_ID_HOMOGLYPH_CHARS = _ID_HOMOGLYPH_LETTERS | _ID_HOMOGLYPH_DIGITS
+
+# Minimum length of a bare alphanumeric run for it to occupy an IDENTIFIER
+# position (an MRN / account / chart ref). Below this a run is too short to be a
+# discriminating identifier (a 1-2 char code, a sex-column letter).
+_ID_MIN_LEN = 3
 
 # Characters that cannot appear in a real person's name but do appear in
 # OCR confusion classes: a raw-unequal token pair involving one of these
@@ -458,6 +546,77 @@ def _has_digit(token: str) -> bool:
     return any(ch.isdigit() for ch in token)
 
 
+def _is_identifier_shaped(token: str) -> bool:
+    """Whether a squashed token occupies an IDENTIFIER position (an MRN /
+    account / chart ref) rather than a name, date, or column word.
+
+    Conservative by construction (the 9th wrong-patient reopening). An
+    identifier is a contiguous ALPHANUMERIC run of at least ``_ID_MIN_LEN``
+    chars that CARRIES A DIGIT:
+
+    - the alphanumeric-RUN requirement excludes dates/DOBs, which carry a `/`
+      or `-` separator (``01/15/1980`` is not a bare run) — a date is judged as
+      chronology/identity elsewhere, never as a collapsible identifier;
+    - the DIGIT requirement is what distinguishes an identifier from a NAME: a
+      real person's name carries no digit, so a purely-alphabetic run is a name
+      or a low-entropy column word (``Active``), handled by the
+      name/coverage/contradiction budgets and the letter-letter suspect rule —
+      NOT by the glyph-collapse gate. A run WITH a digit is an identifier:
+      purely numeric (``100512``), alphanumeric (``AC50061``), any casing.
+
+    This is deliberately over-inclusive on the identifier side: a bare numeric
+    run that is really an un-separated date, say, is treated AS an identifier
+    (→ the glyph gate can force ABSTAIN), the SAFE over-halting direction. Only
+    clearly non-identifier shapes (too short, separator-bearing, purely
+    alphabetic) are excluded."""
+    return len(token) >= _ID_MIN_LEN and token.isalnum() and _has_digit(token)
+
+
+def _is_glyph_vulnerable_identifier(token: str) -> bool:
+    """Whether a squashed token is an IDENTIFIER whose glyphs OCR cannot be
+    trusted to have read glyph-for-glyph (see GLYPH_AMBIGUOUS_ID_CHARS_CAP).
+
+    True iff the token is IDENTIFIER-SHAPED (:func:`_is_identifier_shaped`) AND
+    carries at least one character in the O/0 or l/1/I near-homoglyph classes
+    (:data:`_ID_HOMOGLYPH_CHARS`), on EITHER side — a letter O/l/I OR a digit
+    0/1.
+
+    The 9th wrong-patient reopening DROPPED the earlier `letter AND digit`
+    (alphanumeric-mix) requirement. A real MRN can be PURELY NUMERIC, and a
+    numeric MRN is exactly as glyph-collapsible as an alphanumeric one:
+    ``100512`` (recorded) and a DIFFERENT patient's ``1OO512`` (letter O's) OCR
+    to the byte-identical string ``100512``, so a matcher keyed on a
+    letter+digit mix never flagged ``100512`` and the homonym VERIFIED. The
+    rule is now structural and symmetric: ANY identifier-position token bearing
+    a confusable glyph — numeric, alphanumeric, or lowercase — makes the OCR
+    tier ABSTAIN. A name or a separator-bearing date is not identifier-shaped
+    and is never flagged here; a clean identifier bearing NONE of {0,1,O,l,I}
+    (e.g. ``RC79284``) is identifier-shaped but not glyph-vulnerable, so it
+    still verifies."""
+    return _is_identifier_shaped(token) and any(
+        ch in _ID_HOMOGLYPH_CHARS for ch in token
+    )
+
+
+# Back-compat alias: #26 named this predicate for the letter-only class.
+_is_glyph_ambiguous_identifier = _is_glyph_vulnerable_identifier
+
+
+def _is_discriminative_name(token: str) -> bool:
+    """Whether a squashed token is a discriminative name carrier: a
+    name-plausible, alphabetic-dominated token of at least
+    ID_CARRY_NAME_MIN chars (a real surname / first name) that is NOT a
+    low-entropy record-list column word ('Active'/'Pending'/'Open'). Short
+    alpha tokens and shared status/column words do not carry identity
+    alone."""
+    return (
+        len(token) >= ID_CARRY_NAME_MIN
+        and _alpha_dominated(token)
+        and _name_plausible(token)
+        and ocr_canonical(token) not in _GENERIC_IDENTITY_CANON
+    )
+
+
 def _suspicious_pair(expected: str, observed: str) -> bool:
     """A canonical-equal, raw-unequal token pair whose match is a
     confusion-only match on a DISCRIMINATOR — indistinguishable at band
@@ -500,6 +659,13 @@ _GEN_SUFFIX_CANON = frozenset(
     ocr_canonical(s) for s in GENERATIONAL_SUFFIXES
 )
 
+# OCR-canonical forms of the generic record-list column words (see
+# _GENERIC_IDENTITY_WORDS): compared against the canonical form of a band
+# token so 'Act1ve'/'0pen'-style OCR noise still folds to the stop word.
+_GENERIC_IDENTITY_CANON = frozenset(
+    ocr_canonical(w) for w in _GENERIC_IDENTITY_WORDS
+)
+
 
 def _is_generational_suffix(token: str) -> bool:
     """Whether a squashed token is a Jr/Sr/II/III/IV generational suffix,
@@ -532,6 +698,17 @@ class BandMatch(NamedTuple):
         max_absent_alpha_token: Longest unmatched name-like alphabetic
             recorded token — absence of the identity token itself, worse
             than trailing-numerics dropout.
+        glyph_ambiguous_id_chars: Squashed characters of MATCHED recorded
+            glyph-vulnerable identifier tokens (an identifier-position
+            token -- numeric or alphanumeric -- carrying an O/0 or l/1/I
+            near-homoglyph; see
+            GLYPH_AMBIGUOUS_ID_CHARS_CAP). Charged in FULL on EITHER side and
+            REGARDLESS of a matched name/DOB (the 8th wrong-patient
+            reopening): a RAW match here may be an OCR glyph-collapse of a
+            DIFFERENT patient's identifier, and a matched name+DOB cannot
+            rule out a same-name/same-DOB homonym whose distinguishing MRN
+            glyph collapsed. A positive value makes verify_target_identity
+            ABSTAIN (OCR cannot certify) when every OTHER budget passes.
     """
 
     coverage: float
@@ -540,11 +717,12 @@ class BandMatch(NamedTuple):
     suspect_chars: int = 0
     unexplained_name_tokens: int = 0
     max_absent_alpha_token: int = 0
+    glyph_ambiguous_id_chars: int = 0
 
 
 def _match_tokens(
     exp: list[str], obs: list[str]
-) -> tuple[list[bool], list[bool], list[bool], list[bool]]:
+) -> tuple[list[bool], list[bool], list[bool], list[bool], list[bool]]:
     """Mark matched recorded tokens and explained observed tokens.
 
     Order-insensitive at token granularity (OCR re-reads the same band in
@@ -571,8 +749,17 @@ def _match_tokens(
     name-plausible observed counterpart (the Neil/Nell collision class —
     see :data:`SUSPECT_CHARS_CAP`).
 
+    A further quality flag, ``glyph_ambiguous_id``, marks glyph-vulnerable
+    identifier tokens (an identifier-position token -- numeric or
+    alphanumeric -- carrying an O/0 or l/1/I char, on
+    either side) that matched RAW — the raw equality may be an OCR
+    glyph-collapse of a DIFFERENT identifier. Whether such a token halts
+    depends on the name+DOB-primary gate in :func:`band_match` (see
+    :data:`GLYPH_AMBIGUOUS_ID_CHARS_CAP`).
+
     Returns:
-        ``(matched, explained, raw_matched, suspect_evidence)``.
+        ``(matched, explained, raw_matched, suspect_evidence,
+        glyph_ambiguous_id)``.
     """
     exp_c = [ocr_canonical(t) for t in exp]
     obs_c = [ocr_canonical(t) for t in obs]
@@ -580,6 +767,7 @@ def _match_tokens(
     explained = [False] * len(obs)
     raw_matched = [False] * len(exp)
     suspect_evidence = [False] * len(exp)
+    glyph_ambiguous_id = [False] * len(exp)
 
     def mark(i: int, expected_raw: str, observed_raw: str) -> None:
         matched[i] = True
@@ -609,6 +797,17 @@ def _match_tokens(
             for j, oc in enumerate(obs_c):
                 if oc == concat_c:
                     rawok = concat_raw == obs[j]
+                    # SPLIT path: consecutive RECORDED tokens OCR-glued into
+                    # one observed token. The glyph-vulnerable-identifier flag
+                    # is NOT set on the whole concatenation (a name adjacent to
+                    # a numeric field, 'Evelyn'+'A743380', would look like one
+                    # letter+digit+homoglyph identifier). Instead each recorded
+                    # FRAGMENT is flagged individually in the unified post-pass
+                    # below, on its raw-matched status — so a confusable-glyph
+                    # NUMERIC/alnum fragment ('0061') of a split identifier
+                    # triggers ABSTAIN (the 9th reopening's split case) while
+                    # the adjacent pure-alpha name fragment does not. No latent
+                    # split hole remains.
                     for m in range(i, i + size):
                         matched[m] = True
                         if rawok:
@@ -633,7 +832,29 @@ def _match_tokens(
                     break
             if matched[i]:
                 break
-    return matched, explained, raw_matched, suspect_evidence
+
+    # Unified glyph-vulnerable-identifier flag (the 9th wrong-patient
+    # reopening): a property of the RECORDED token, charged on ANY match path
+    # (single / split / join). A recorded identifier-position token that
+    # matched RAW (byte-identically after squashing) AND carries a confusable
+    # O/0 or l/1/I glyph is flagged — the raw equality may be an OCR
+    # glyph-collapse of a DIFFERENT patient's identifier. Keying it here, on
+    # ``raw_matched`` alone, closes the split hole: a fragment of an
+    # OCR-split identifier ('0061') is a recorded token in its own right, so
+    # it is flagged exactly like an unsplit one. A CONFUSION-only match
+    # (raw-unequal) is NOT flagged here — the strings differ, which is
+    # affirmative different-identifier evidence handled by the suspect rule
+    # (→ mismatch), not the abstain gate.
+    for i in range(len(exp)):
+        if raw_matched[i] and _is_glyph_vulnerable_identifier(exp[i]):
+            glyph_ambiguous_id[i] = True
+    return (
+        matched,
+        explained,
+        raw_matched,
+        suspect_evidence,
+        glyph_ambiguous_id,
+    )
 
 
 def _contradicted(
@@ -760,7 +981,7 @@ def band_match(
     Returns:
         A :class:`BandMatch` (coverage, max_uncovered_run,
         contradicted_chars, suspect_chars, unexplained_name_tokens,
-        max_absent_alpha_token).
+        max_absent_alpha_token, glyph_ambiguous_id_chars).
     """
     exp = tokenize(expected_text)
     if not exp:
@@ -769,9 +990,13 @@ def band_match(
     obs = [squash(tok) for tok in obs_raw]
     exp_c = [ocr_canonical(t) for t in exp]
     obs_c_all = [ocr_canonical(t) for t in obs]
-    matched, explained, raw_matched, suspect_evidence = _match_tokens(
-        exp, obs
-    )
+    (
+        matched,
+        explained,
+        raw_matched,
+        suspect_evidence,
+        glyph_ambiguous_id,
+    ) = _match_tokens(exp, obs)
     contradicted = _contradicted(
         exp, obs, matched, explained, contradiction_sim=contradiction_sim
     )
@@ -780,6 +1005,19 @@ def band_match(
     total_chars = 0
     contradicted_chars = 0
     suspect_chars = 0
+    # Squashed chars of RAW-matched glyph-vulnerable identifier tokens (an
+    # identifier-position token, numeric or alphanumeric, carrying an O/0 or
+    # l/1/I near-homoglyph;
+    # see _is_glyph_vulnerable_identifier). ALWAYS charged, on either the
+    # letter (O/l/I) or the digit (0/1) side -- the 8th wrong-patient
+    # reopening: a matched name+DOB does NOT license a collapsible MRN,
+    # because it cannot rule out a same-name/same-DOB HOMONYM whose
+    # distinguishing MRN glyph OCR collapsed onto the recorded one. (#26/#27
+    # let a matched name "carry" the identity and suppressed the digit-side
+    # budget; a same-name/same-DOB homonym defeats that, so the suppression
+    # is removed and the OCR tier ABSTAINS whenever a confusable identifier
+    # is present -- verify_target_identity turns this budget into abstain.)
+    glyph_id_chars = 0
     max_absent_alpha = 0
     uncovered_runs: list[int] = []
     current_run = 0
@@ -791,6 +1029,15 @@ def band_match(
                 # Matched ONLY by letter-letter confusion equivalence:
                 # the Neil/Nell collision class (Blocker 1).
                 suspect_chars += len(token)
+            if glyph_ambiguous_id[i]:
+                # RAW-matched glyph-vulnerable identifier: the raw equality
+                # may be an OCR glyph-collapse of a DIFFERENT identifier
+                # (letter O/l/I <-> digit 0/1). Charged in FULL regardless of
+                # which side the homoglyph sits, and regardless of a matched
+                # name/DOB: a matched name+DOB cannot rule out a same-name/
+                # same-DOB homonym whose distinguishing MRN glyph collapsed
+                # (the 8th reopening). The OCR tier then ABSTAINS.
+                glyph_id_chars += len(token)
             if current_run:
                 uncovered_runs.append(current_run)
                 current_run = 0
@@ -849,6 +1096,15 @@ def band_match(
         for j, raw in enumerate(obs_raw)
         if not explained[j] and _name_shaped(raw, obs[j])
     )
+    # 8th wrong-patient reopening: ANY raw-matched glyph-vulnerable identifier
+    # charges the zero glyph budget, REGARDLESS of a matched name/DOB. The
+    # #26/#27 "name+DOB carries, so a digit-body MRN only corroborates"
+    # suppression was unsound: two DIFFERENT patients can share NAME and DOB
+    # and differ only in an MRN glyph OCR collapses (AC50061 vs AC5OO61 ->
+    # byte-identical OCR), so a matched name+DOB CANNOT rule out the homonym.
+    # verify_target_identity reads a positive charge here as ABSTAIN (OCR
+    # cannot certify), not verify and not mismatch.
+    glyph_ambiguous_id_chars = glyph_id_chars
     return BandMatch(
         matched_chars / total_chars,
         max(uncovered_runs, default=0),
@@ -856,6 +1112,7 @@ def band_match(
         suspect_chars,
         unexplained_names,
         max_absent_alpha,
+        glyph_ambiguous_id_chars,
     )
 
 
@@ -916,10 +1173,14 @@ def embedded_params(
     return names
 
 
-def _band_ok(match: BandMatch) -> bool:
-    """The pinned operating point (docs/validation/IDENTITY_ROC.md):
-    coverage, uncovered-run, contradiction, suspect (letter-letter
-    collision), unexplained-name and absent-name budgets must ALL hold."""
+def _band_ok_sans_glyph(match: BandMatch) -> bool:
+    """Every pinned budget EXCEPT the glyph-confusable-identifier one
+    (docs/validation/IDENTITY_ROC.md): coverage, uncovered-run,
+    contradiction, suspect (letter-letter collision), unexplained-name and
+    absent-name. These are the AFFIRMATIVE different-entity signals; a band
+    that fails any of them is a real ``mismatch``. The glyph budget is
+    handled separately (see :func:`band_verdict`) because a collapsible
+    identifier is an ABSTAIN (OCR cannot tell), not affirmative evidence."""
     return (
         match.coverage >= COVERAGE_THRESHOLD
         and match.max_uncovered_run <= UNCOVERED_RUN_CAP
@@ -928,6 +1189,40 @@ def _band_ok(match: BandMatch) -> bool:
         and match.unexplained_name_tokens <= UNEXPLAINED_NAME_TOKENS_CAP
         and match.max_absent_alpha_token <= ABSENT_NAME_TOKEN_CAP
     )
+
+
+def _band_ok(match: BandMatch) -> bool:
+    """The pinned operating point: all of :func:`_band_ok_sans_glyph` AND the
+    glyph-ambiguous-identifier budget. A fully-clean band (verifies)."""
+    return (
+        _band_ok_sans_glyph(match)
+        and match.glyph_ambiguous_id_chars <= GLYPH_AMBIGUOUS_ID_CHARS_CAP
+    )
+
+
+def band_verdict(match: BandMatch) -> str:
+    """Three-way OCR-tier verdict for a matched band: ``verified`` /
+    ``mismatch`` / ``abstain`` (the 8th wrong-patient reopening).
+
+    - ``mismatch`` -- an AFFIRMATIVE different-entity budget failed (wrong
+      name, edited DOB, replaced token, sibling superset, ...): the band is
+      readable and provably a different entity.
+    - ``abstain`` -- every affirmative budget passes (name+DOB match) BUT the
+      band rests on a glyph-confusable identifier OCR may have collapsed
+      (glyph budget exceeded). OCR cannot honestly certify SAME (a same-name/
+      same-DOB homonym with a one-glyph-different MRN is indistinguishable
+      after collapse) NOR assert DIFFERENT (it may well be the recorded
+      patient). It DEFERS; the ladder falls through to any higher-fidelity
+      tier and otherwise HALTs.
+    - ``verified`` -- every budget passes and no confusable identifier: a
+      clean name+DOB (optionally corroborated by a non-confusable identifier)
+      genuinely discriminates.
+    """
+    if not _band_ok_sans_glyph(match):
+        return "mismatch"
+    if match.glyph_ambiguous_id_chars > GLYPH_AMBIGUOUS_ID_CHARS_CAP:
+        return "abstain"
+    return "verified"
 
 
 def verify_target_identity(
@@ -950,10 +1245,19 @@ def verify_target_identity(
     Returns:
         An :class:`~openadapt_flow.ir.IdentityCheck`:
 
-        - ``verified`` — the target's identity evidence matched.
-        - ``mismatch`` — the band is readable but does NOT match: the
-          resolver found something at a plausible position that is not the
-          recorded target (or, in param mode, not the run's entity).
+        - ``verified`` — the target's identity evidence matched AND it does
+          not rest on a glyph-confusable identifier.
+        - ``mismatch`` — the band is readable and AFFIRMATIVELY a different
+          entity: the resolver found something at a plausible position that
+          is not the recorded target (or, in param mode, not the run's
+          entity).
+        - ``abstain`` — the band's name+DOB match but it rests on a
+          glyph-confusable identifier (an MRN/account token with an O/0 or
+          l/1/I) OCR may have collapsed: a same-name/same-DOB homonym whose
+          distinguishing glyph collapsed cannot be ruled out, so OCR can
+          neither certify SAME nor assert DIFFERENT (the 8th wrong-patient
+          reopening). The OCR tier DEFERS; on a pixel-only substrate with no
+          pixel-crop or VLM tier the ladder then HALTs.
         - ``unreadable`` — OCR produced no usable text in the live band;
           identity cannot be judged either way.
     """
@@ -1005,7 +1309,7 @@ def verify_target_identity(
                 )
         match = band_match(substituted, observed_text)
         return IdentityCheck(
-            status="verified" if _band_ok(match) else "mismatch",
+            status=band_verdict(match),
             mode="param",
             coverage=round(match.coverage, 4),
             expected=substituted,
@@ -1017,11 +1321,501 @@ def verify_target_identity(
         return IdentityCheck(status="unreadable", expected=expected)
     match = band_match(context_text, observed_text)
     return IdentityCheck(
-        status="verified" if _band_ok(match) else "mismatch",
+        status=band_verdict(match),
         coverage=round(match.coverage, 4),
         expected=expected,
         observed=observed_text,
     )
+
+
+# ---------------------------------------------------------------------------
+# Structured-text identity tier + the extensible identity ladder
+# ---------------------------------------------------------------------------
+#
+# The OCR context band (everything above) is the identity signal for
+# pure-PIXEL substrates. It cannot be the WHOLE story: an adversarial review
+# proved the OCR-only path cannot close the same-name/same-DOB glyph-collapse
+# case. Two DIFFERENT patients whose MRN differs only by an O/0 or l/1 glyph
+# (MG4408 vs MG44O8) render to a BYTE-IDENTICAL OCR band -- literally the same
+# string a legit re-read of the true row produces -- so no function downstream
+# of OCR can separate them (same input, no distinguishing output). This is an
+# impossibility result for OCR-based identity, not a tuning gap.
+#
+# The escape is to stop trusting OCR for identity where a higher-fidelity
+# signal exists. When the backend exposes STRUCTURED text
+# (openadapt_flow.backend.IdentityBackend.structured_text_at -- the DOM on a
+# browser, the UIA/AX tree on native desktop) the recorded target's structured
+# identity string and the live structured string at the resolved point are
+# compared DIRECTLY: an exact/normalized compare in which O and 0 are distinct
+# characters. The glyph-collapse cannot occur -- the two rows are different
+# strings in the DOM/a11y tree -- so the class closes with NO OCR ambiguity and
+# NO availability cost (identity no longer depends on OCR reading the MRN
+# glyph-for-glyph).
+#
+# Identity is therefore an EXTENSIBLE LADDER of verifier tiers, each returning
+# an IdentityCheck (verified / mismatch) or None (this tier is UNAVAILABLE for
+# this substrate -- fall through to the next):
+#
+#   tier 1  structured text (DOM / UIA / AX)   -- verify_structured_identity
+#   tier 2  pixel-compare identifier crop      -- verify_pixel_identity
+#           -- for pure-pixel substrates (Citrix/RDP/VDI, broken a11y) that
+#           expose NO structured text. OCR collapses O/0 and l/1, but the
+#           PIXELS do not -- a different patient's MRN renders to different
+#           pixels even when OCR reads them identically -- so a localized
+#           pixel comparison of the recorded vs live identifier crop catches
+#           the glyph-collapse where there is no DOM/a11y text. VERIFIES on a
+#           matching render, MISMATCHES on a localized glyph change, ABSTAINS
+#           under drift (validated: benchmark/pixel_identity).
+#   tier 3  local-VLM veto (OPTIONAL)           -- verify_vlm_identity
+#           -- injected, OFF by default. Only when identity rests on a
+#           glyph-confusable identifier AND the cheaper tiers abstained (drift
+#           the pixel tier can't judge): a local open VLM answers same/
+#           different, VETO-ONLY (different/unsure -> halt; never grants a
+#           pass, never overrides an earlier mismatch). Validated:
+#           benchmark/vlm_identity.
+#   tier N  OCR name+DOB-primary band (#27)    -- the pixel-substrate fallback,
+#           with its proven-irreducible same-name/same-DOB residual that HALTS
+#           on the sole-ambiguous-identifier case (docs/LIMITS.md).
+#
+# A higher tier's verdict is FINAL: a lower tier must never OVERRIDE it (that
+# would re-admit the very ambiguity the higher tier removed). Every tier is
+# FAIL-SAFE: unsure -> abstain to the next; if all abstain -> HALT. No tier
+# can turn a wrong patient into a verified one.
+
+
+def normalize_structured(text: str) -> str:
+    """Normalize structured (DOM / a11y) identity text for exact compare.
+
+    Collapses runs of whitespace to single spaces and casefolds, and NOTHING
+    ELSE -- in particular it does NOT apply the OCR confusion canonicalization
+    (:func:`ocr_canonical`): the whole point of the structured tier is that O
+    and 0, l and 1 are DISTINCT characters here (the DOM/a11y layer read the
+    real glyph), so folding them would throw away exactly the signal that
+    closes the glyph-collapse class.
+    """
+    return " ".join((text or "").split()).casefold()
+
+
+def structured_identity_match(recorded: str, live: str) -> bool:
+    """Whether two structured identity strings are the same entity.
+
+    Exact compare after :func:`normalize_structured` (whitespace/case only).
+    No OCR tolerance: a one-glyph MRN difference is a real different patient in
+    the DOM/a11y tree and MUST NOT match.
+    """
+    return normalize_structured(recorded) == normalize_structured(live)
+
+
+def verify_structured_identity(
+    recorded: Optional[str], live: Optional[str]
+) -> Optional[IdentityCheck]:
+    """Structured-text identity tier (tier 1 of the ladder).
+
+    Args:
+        recorded: The anchor's recorded structured identity text
+            (``Anchor.structured_identity``), or None when the recording
+            backend did not provide it.
+        live: The live structured text at the RESOLVED point
+            (``backend.structured_text_at(point)``), or None when the live
+            backend is pixel-only / has no a11y node there.
+
+    Returns:
+        None when the tier is UNAVAILABLE -- structured text is missing on
+        EITHER side, so this substrate cannot use it and the ladder must fall
+        through to the next tier. Otherwise a definitive
+        :class:`~openadapt_flow.ir.IdentityCheck` with ``mode="structured"``:
+        ``verified`` on an exact/normalized match, ``mismatch`` otherwise. A
+        mismatch here is authoritative -- the OCR fallback never overrides it.
+    """
+    if not recorded or not live:
+        return None
+    ok = structured_identity_match(recorded, live)
+    return IdentityCheck(
+        status="verified" if ok else "mismatch",
+        mode="structured",
+        coverage=1.0 if ok else 0.0,
+        expected=recorded,
+        observed=live,
+    )
+
+
+def run_identity_ladder(
+    tiers: Iterable[Any],
+) -> IdentityCheck:
+    """Run identity verifier tiers in order; the first definitive verdict wins.
+
+    Args:
+        tiers: An ordered iterable of zero-argument callables, each returning
+            an :class:`~openadapt_flow.ir.IdentityCheck` (a definitive
+            verified/mismatch/unreadable verdict for its tier) or None (the
+            tier is UNAVAILABLE for this substrate -- try the next). Ordered
+            highest-fidelity first (structured text, then -- future -- a
+            pixel/perceptual tier, then the OCR fallback).
+
+    Returns:
+        The first non-None tier verdict. A higher tier's verdict is FINAL: a
+        structured-text mismatch is never reconsidered by a lower (OCR) tier.
+        If every tier is unavailable, an ``unreadable`` check (identity could
+        not be judged -- the caller applies its proceed-flagged / irreversible
+        policy).
+    """
+    for tier in tiers:
+        verdict = tier()
+        if verdict is not None:
+            return verdict
+    return IdentityCheck(status="unreadable")
+
+
+# ---------------------------------------------------------------------------
+# Pixel-compare identity tier (tier 2) + optional local-VLM veto (tier 3)
+# ---------------------------------------------------------------------------
+#
+# These two tiers close the ladder's SEAM between structured text and OCR for
+# PURE-PIXEL substrates (Citrix/RDP/VDI, broken a11y) that expose no
+# DOM/a11y string. Both were validated as standalone probes before promotion:
+#
+#   tier 2  PIXEL COMPARE   (benchmark/pixel_identity, PR #29) -- the rendered
+#           pixels retain the O/0 and l/1 distinction OCR collapses, so a
+#           localized max abs-diff of the recorded vs live identifier crop
+#           separates the glyph-collapse wrong-patient pairs at AUC 1.0 on a
+#           STABLE render (same_max 0.0 vs diff_min ~0.097; threshold ~0.049).
+#           It BREAKS under render drift (dark theme / zoom / font), where a
+#           SAME-value crop's distance climbs above the threshold too. So it is
+#           promoted FAIL-SAFE: it VERIFIES only when the render matches (a
+#           near-zero localized distance -- structurally impossible for a
+#           different identifier, whose min stable distance is ~0.097),
+#           MISMATCHES only when the difference is LOCALIZED on an otherwise
+#           matching render (a single differing glyph), and ABSTAINS (returns
+#           None -> next tier) the moment a WHOLE-crop change signals drift.
+#           It can never false-accept: VERIFY requires a distance no different
+#           identifier ever produces. Free, no model.
+#
+#   tier 3  VLM VETO         (benchmark/vlm_identity, PR #28) -- a LOCAL open
+#           VLM (Qwen3-VL-4B via MLX, ~0.8s/call, ZERO API calls) asked
+#           "same identifier or different?". VETO-ONLY: it can only REJECT
+#           (different/unsure -> halt), never grant a pass a cheaper tier
+#           refused, and it never overrides an earlier tier's mismatch (the
+#           ladder order guarantees it runs only after the cheaper tiers
+#           ABSTAINED). OPTIONAL and config-gated like the grounder: injected
+#           via an ``IdentityVLM`` verifier, ``None`` by default, so the
+#           default install needs no model. On the digit-flanked O/0 collapse
+#           surface it scored 0% false-accept + 100% detection and 0%
+#           over-halt under theme drift (where pixel-compare breaks); it
+#           over-halts (safely) on zoom/font.
+#
+# When both pixel and VLM abstain, the ladder falls to the OCR name+DOB tier
+# (#27) and then HALT -- the disclosed residual. No tier can ever turn a
+# wrong patient into a verified one; the worst any drift can force is a HALT.
+
+# Localized max abs-diff parameters, pinned to the validated probe
+# (benchmark/pixel_identity/pixel_identity.json, method "local_maxdiff").
+PIXEL_CANON = (48, 240)             # (H, W) canonical grayscale canvas
+PIXEL_LOCALMAX_WIN = 24            # sliding-window width (columns)
+PIXEL_SAME_THRESHOLD = 0.0487     # same_max 0.0 vs diff_min ~0.097 -> AUC 1.0
+# Mismatch-vs-abstain split (measured across stable/dark/zoom/font renders):
+# a STABLE different-identifier crop is a LOCALIZED change (global L1 <= ~0.025,
+# active-column spread <= ~0.18); render DRIFT is a WHOLE-crop change (global
+# L1 >= ~0.037, spread >= ~0.30). Caps sit in the gap; either one exceeded =>
+# drift suspected => abstain (fail-safe: prefer fall-through over a halt).
+PIXEL_MISMATCH_GLOBAL_CAP = 0.030
+PIXEL_MISMATCH_SPREAD_CAP = 0.24
+PIXEL_SPREAD_EPS = 0.06           # per-column mean-diff over which a column is "active"
+
+# --- Blocker 2 (crop-scale sensitivity) -----------------------------------
+# PIXEL_SAME_THRESHOLD above is an ABSOLUTE whole-crop mean-abs-diff on a crop
+# force-resized to a FIXED WIDTH (240). That is crop-scale-SENSITIVE: a
+# realistic wide identifier CELL (an MRN with cell padding) resizes so each
+# glyph occupies few canonical columns, and a one-glyph-different MRN's diff
+# DILUTES below PIXEL_SAME_THRESHOLD -> it VERIFIES a DIFFERENT patient.
+# Empirically: a 420px-wide cell, AC50061 vs AC58061, gives localized-max
+# 0.016 < 0.0487 -> false-accept (while a same-value 1px cross-render JITTER
+# gives 0.087 -> false-abort: the metric is inverted at realistic scale).
+#
+# The forward-looking metric (pixel_localized_spike) is scale-INVARIANT: it
+# canonicalizes to a fixed HEIGHT preserving aspect (so a glyph is a
+# consistent width at any crop scale) and takes the localized max as a SPIKE
+# above the per-window median (drift) floor -- a one-glyph MRN change scores a
+# consistent ~0.038 spike at 120px/420px/840px cell widths, while uniform
+# theme drift scores ~0 (max == median). That makes a DIFFERENT MRN MISMATCH
+# at any crop scale (test_blocker2_*).
+#
+# BUT sub-pixel cross-render JITTER of the SAME value scores a spike (~0.1)
+# LARGER than a one-glyph change (~0.038): pixel compare across two real
+# renders cannot separate "same value, jittered" from "one glyph different" at
+# single-glyph granularity. So the VERIFY path cannot be made safe by any
+# threshold, and it is HARD-GATED (PIXEL_VERIFY_ENABLED=False): the tier may
+# only MISMATCH (a localized spike -> safe HALT) or ABSTAIN (fall through),
+# never VERIFY, until (a) the compiler captures a FIXED-SIZE identifier crop at
+# record time and (b) a jitter-robust distance is validated end to end. The
+# pixel tier is not production-reachable today (the compiler does not populate
+# identifier_crop), so this gate has no production impact -- it prevents a
+# latent false-accept from ever shipping. Disclosed in docs/LIMITS.md.
+PIXEL_VERIFY_ENABLED = False
+PIXEL_SI_HEIGHT = 48              # canonical HEIGHT (aspect preserved)
+PIXEL_SI_WIN_FRAC = 0.55         # sliding window width as a fraction of height (~1 glyph)
+PIXEL_SI_MISMATCH_SPIKE = 0.02   # localized spike above the drift floor => a glyph change
+PIXEL_SI_DRIFT_FLOOR = 0.10      # per-window median at/above this => whole-crop drift => abstain
+
+
+def _pixel_canon(png: bytes) -> Optional[Any]:
+    """Decode PNG bytes to the canonical grayscale crop (size-normalized).
+
+    Returns None when the bytes cannot be decoded. cv2/numpy are imported
+    lazily to keep this module import-light for unit tests.
+    """
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    return cv2.resize(
+        gray, (PIXEL_CANON[1], PIXEL_CANON[0]), interpolation=cv2.INTER_AREA
+    )
+
+
+def pixel_distances(recorded_gray: Any, live_gray: Any) -> tuple[float, float, float]:
+    """(localized max, global mean, active-column spread) of |recorded-live|.
+
+    All on the canonical grayscale crops, normalized to [0, 1]:
+
+    - **localized max** -- the max over sliding ``PIXEL_LOCALMAX_WIN``-wide
+      windows of the window's mean abs-diff (segmentation-free localization of
+      a single differing glyph; the validated ``local_maxdiff`` metric).
+    - **global mean** -- the whole-crop mean abs-diff (a drift detector: a
+      single glyph barely moves it, a theme/zoom/font change dominates it).
+    - **spread** -- fraction of columns whose mean abs-diff exceeds
+      ``PIXEL_SPREAD_EPS`` (localized change -> small; drift -> near 1.0).
+    """
+    import numpy as np
+
+    a = recorded_gray.astype(np.float32)
+    b = live_gray.astype(np.float32)
+    d = np.abs(a - b) / 255.0
+    w = d.shape[1]
+    win = PIXEL_LOCALMAX_WIN
+    local = 0.0
+    for x0 in range(0, max(1, w - win + 1), max(1, win // 3)):
+        local = max(local, float(d[:, x0:x0 + win].mean()))
+    glob = float(d.mean())
+    col = d.mean(axis=0)
+    spread = float((col > PIXEL_SPREAD_EPS).mean())
+    return local, glob, spread
+
+
+def _pixel_canon_aspect(png: bytes) -> Optional[Any]:
+    """Decode PNG to grayscale canonicalized to a FIXED HEIGHT, aspect
+    PRESERVED (so a glyph keeps a consistent width at any crop scale -- the
+    scale-invariant fix for Blocker 2). Returns None on undecodable bytes."""
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    h, w = gray.shape[:2]
+    nw = max(8, int(round(w * PIXEL_SI_HEIGHT / max(1, h))))
+    return cv2.resize(gray, (nw, PIXEL_SI_HEIGHT), interpolation=cv2.INTER_AREA)
+
+
+def pixel_localized_spike(
+    recorded_png: bytes, live_png: bytes
+) -> Optional[tuple[float, float]]:
+    """Scale-INVARIANT localized distance (Blocker 2 fix): ``(spike, floor)``.
+
+    Both crops are canonicalized to a fixed HEIGHT with aspect preserved
+    (:func:`_pixel_canon_aspect`), truncated to the shared width, and the
+    sliding-window (~one-glyph-wide) mean abs-diffs are computed. Returns:
+
+    - ``spike`` -- the MAX window mean-diff MINUS the per-window MEDIAN: a
+      localized glyph-scale change spikes ONE window above the median floor
+      (consistent ~0.038 for a one-glyph MRN change at ANY crop width);
+      uniform theme drift moves every window equally, so max == median and the
+      spike is ~0.
+    - ``floor`` -- the per-window median: high (~1.0) under a whole-crop wash
+      (dark theme), so a large spike riding a high floor is drift, not a glyph
+      change.
+
+    Returns None when either crop is undecodable.
+    """
+    import numpy as np
+
+    ra = _pixel_canon_aspect(recorded_png)
+    la = _pixel_canon_aspect(live_png)
+    if ra is None or la is None:
+        return None
+    a = ra.astype(np.float32)
+    b = la.astype(np.float32)
+    w = min(a.shape[1], b.shape[1])
+    d = np.abs(a[:, :w] - b[:, :w]) / 255.0
+    win = max(4, int(PIXEL_SI_WIN_FRAC * PIXEL_SI_HEIGHT))
+    means = [
+        float(d[:, x0:x0 + win].mean())
+        for x0 in range(0, max(1, w - win + 1), max(1, win // 4))
+    ]
+    if not means:
+        return 0.0, 0.0
+    arr = np.array(means)
+    floor = float(np.median(arr))
+    return float(arr.max() - floor), floor
+
+
+def verify_pixel_identity(
+    recorded_png: Optional[bytes], live_png: Optional[bytes]
+) -> Optional[IdentityCheck]:
+    """Pixel-compare identity tier (tier 2 of the ladder), scale-invariant and
+    VERIFY-GATED (Blocker 2).
+
+    Uses the scale-INVARIANT localized-spike distance
+    (:func:`pixel_localized_spike`) so a one-glyph-different MRN is detected at
+    ANY crop scale (the absolute-threshold metric diluted below its cap on
+    realistic wide cells and FALSE-ACCEPTED -- Blocker 2). Three-way:
+
+    - **mismatch** -- a localized glyph-scale SPIKE
+      (>= :data:`PIXEL_SI_MISMATCH_SPIKE`) that is NOT riding a whole-crop
+      drift floor (floor < :data:`PIXEL_SI_DRIFT_FLOOR`): a different
+      identifier -> HALT. Scale-invariant, so this fires on a realistic cell.
+    - **abstain** (``None``) -- no localized spike (same value, OR the crops
+      are identical), OR a whole-crop drift wash: fall through to the next
+      tier. A would-be VERIFY lands here because the VERIFY path is HARD-GATED
+      (``PIXEL_VERIFY_ENABLED`` False): cross-render sub-pixel JITTER of the
+      SAME value spikes LARGER than a one-glyph change, so no threshold makes
+      VERIFY safe until fixed-size crop capture + a jitter-robust distance land
+      (docs/LIMITS.md). The tier therefore NEVER false-accepts.
+    - **verify** -- only when ``PIXEL_VERIFY_ENABLED`` is turned on (it is not).
+
+    Returns None when either crop is missing or undecodable.
+    """
+    if not recorded_png or not live_png:
+        return None
+    dist = pixel_localized_spike(recorded_png, live_png)
+    if dist is None:
+        return None
+    spike, floor = dist
+    if spike >= PIXEL_SI_MISMATCH_SPIKE and floor < PIXEL_SI_DRIFT_FLOOR:
+        return IdentityCheck(
+            status="mismatch",
+            mode="pixel",
+            coverage=0.0,
+            expected="recorded identifier crop",
+            observed=(
+                f"identifier pixels differ locally (spike {spike:.3f}, "
+                f"floor {floor:.3f}) — a different identifier"
+            ),
+        )
+    if PIXEL_VERIFY_ENABLED and spike < PIXEL_SI_MISMATCH_SPIKE and floor < PIXEL_SI_DRIFT_FLOOR:
+        return IdentityCheck(
+            status="verified",
+            mode="pixel",
+            coverage=1.0,
+            expected="recorded identifier crop",
+            observed=f"live identifier crop matches (spike {spike:.3f})",
+        )
+    return None  # same-but-gated, or whole-crop drift -> abstain to next tier
+
+
+@runtime_checkable
+class IdentityVLM(Protocol):
+    """Protocol for the optional local-VLM same/different identity comparator.
+
+    Implementations answer whether two identifier crops show the SAME
+    characters. VETO-ONLY by contract: an implementation must fold any
+    non-confident answer to ``"different"`` (the memo's rule -- the model may
+    only reject, never grant a pass). See
+    :class:`openadapt_flow.runtime.identity_vlm.MLXIdentityVLM`.
+    """
+
+    def same_or_different(self, recorded_png: bytes, live_png: bytes) -> str:
+        """Return ``"same"`` or ``"different"`` for the two identifier crops."""
+        ...
+
+
+def identity_rests_on_confusable_identifier(text: Optional[str]) -> bool:
+    """Whether identity here rests on a GLYPH-CONFUSABLE identifier.
+
+    True iff any token in ``text`` is an identifier-like string carrying an
+    O/0 or l/1/I near-homoglyph (see :func:`_is_glyph_vulnerable_identifier`)
+    -- the only case where the expensive VLM veto earns its cost, because a
+    plain name+DOB is already discriminated by the cheaper tiers.
+    """
+    if not text:
+        return False
+    return any(
+        _is_glyph_vulnerable_identifier(squash(tok)) for tok in tokenize(text)
+    )
+
+
+def verify_vlm_identity(
+    recorded_png: Optional[bytes],
+    live_png: Optional[bytes],
+    *,
+    verifier: Optional[IdentityVLM],
+    glyph_confusable: bool,
+) -> Optional[IdentityCheck]:
+    """Optional local-VLM veto tier (tier 3 of the ladder).
+
+    Gated three ways -- returns None (abstain) unless ALL hold: a ``verifier``
+    is injected (the tier is OFF by default), identity rests on a
+    ``glyph_confusable`` identifier (else the cheaper tiers suffice), and both
+    crops are present.
+
+    TRULY VETO-ONLY: the verifier can only REJECT. A ``"different"`` answer
+    (and anything else, or any error from a broken/missing model) is a
+    ``mismatch`` -> HALT. A ``"same"`` answer does NOT grant a pass: it
+    ABSTAINS (returns None), leaving the decision to prior/other evidence.
+    A local open VLM reading a glyph-confusable identifier is trustworthy to
+    REJECT a wrong patient (100% detection on the collapse surface) but NOT
+    to CERTIFY a right one -- so a "same" answer may only FAIL TO VETO, never
+    upgrade an otherwise-unverified target. When the VLM is the sole signal,
+    "same" -> abstain -> the ladder HALTs. It never overrides an earlier tier
+    (the ladder only reaches it after the cheaper tiers abstained).
+    """
+    if verifier is None or not glyph_confusable:
+        return None
+    if not recorded_png or not live_png:
+        return None
+    try:
+        verdict = verifier.same_or_different(recorded_png, live_png)
+    except Exception:
+        verdict = "different"  # veto-only: a broken model halts, never passes
+    same = str(verdict).strip().lower() == "same"
+    if same:
+        # Veto-only: a "same" answer cannot by itself certify identity. Abstain
+        # so a higher-fidelity signal (or, absent one, HALT) decides.
+        return None
+    return IdentityCheck(
+        status="mismatch",
+        mode="vlm",
+        coverage=0.0,
+        expected="recorded identifier crop",
+        observed="local-VLM verdict: different",
+    )
+
+
+def crop_region(frame_png: bytes, region: Region) -> Optional[bytes]:
+    """Crop ``region`` (x, y, w, h) from a PNG frame; return it as PNG bytes.
+
+    Feeds the pixel/VLM identity tiers with the live identifier crop re-cut at
+    the resolved point. Returns None when the frame cannot be decoded or the
+    clamped region is empty (so the tiers abstain). cv2/numpy are lazy to keep
+    this module import-light.
+    """
+    import cv2
+    import numpy as np
+
+    img = cv2.imdecode(np.frombuffer(frame_png, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    x0, y0 = max(0, int(region[0])), max(0, int(region[1]))
+    x1 = min(w, int(region[0]) + int(region[2]))
+    y1 = min(h, int(region[1]) + int(region[3]))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    ok, buf = cv2.imencode(".png", img[y0:y1, x0:x1])
+    return buf.tobytes() if ok else None
 
 
 def upscale_crop(frame_png: bytes, region: Region, factor: int = 2) -> Optional[bytes]:

@@ -84,6 +84,46 @@ class Anchor(BaseModel):
             " text at compile time."
         ),
     )
+    structured_identity: Optional[str] = Field(
+        default=None,
+        description=(
+            "STRUCTURED identity text (DOM / accessibility tree) of the"
+            " clicked target's row, captured at record time when the"
+            " recording backend exposes it"
+            " (openadapt_flow.backend.IdentityBackend.structured_text_at)."
+            " The REAL characters (a genuine digit 0 vs a letter O), so"
+            " replay verifies identity by exact/normalized string compare"
+            " with NO OCR ambiguity -- the structured-text tier of the"
+            " identity ladder (see runtime.identity). None on pixel-only"
+            " substrates or bundles recorded before this capability; the"
+            " ladder then falls back to the OCR context_text tier."
+        ),
+    )
+    identifier_crop: Optional[str] = Field(
+        default=None,
+        description=(
+            "Bundle-relative PNG crop of the target row's DISCRIMINATIVE"
+            " IDENTIFIER cell (the MRN / name+DOB region), captured at record"
+            " time on PIXEL-ONLY substrates that expose no structured text."
+            " Feeds the pixel-compare and optional VLM tiers of the identity"
+            " ladder (see runtime.identity): the rendered PIXELS retain the"
+            " O/0 and l/1 distinction OCR collapses, so a crop-vs-crop compare"
+            " catches the glyph-collapse wrong-patient where the DOM/a11y"
+            " tree is unavailable. None on browser/desktop substrates (the"
+            " structured tier handles those) or bundles recorded before this"
+            " capability; the ladder then falls through to the OCR band tier."
+        ),
+    )
+    identifier_region: Optional[Region] = Field(
+        default=None,
+        description=(
+            "Location of `identifier_crop` in the recorded frame (x, y, w, h)."
+            " Replay re-crops the SAME box at the resolved point (translated"
+            " by the recorded region's offset from the recorded click point,"
+            " exactly as the OCR band's exclude region is) so the pixel/VLM"
+            " tiers compare like-for-like. Set iff `identifier_crop` is set."
+        ),
+    )
     landmarks: list[Landmark] = Field(default_factory=list)
     search_pad: int = Field(
         default=80,
@@ -212,14 +252,27 @@ class IdentityCheck(BaseModel):
     """Outcome of the pre-click target-identity check (runtime.identity).
 
     Attributes:
-        status: ``verified`` (band matched), ``mismatch`` (band readable but
-            wrong — the run must halt, never click), or ``unreadable`` (OCR
+        status: ``verified`` (band matched), ``mismatch`` (band readable and
+            AFFIRMATIVELY wrong — a different entity; the run must halt, never
+            click), ``abstain`` (the band is readable and its name/DOB match,
+            but it rests on a GLYPH-CONFUSABLE identifier OCR may have
+            collapsed — a same-name/same-DOB homonym cannot be ruled out, so
+            OCR cannot honestly certify SAME *or* assert DIFFERENT; the OCR
+            tier defers and the ladder HALTs if no higher-fidelity tier
+            verifies — the 8th wrong-patient reopening), or ``unreadable`` (OCR
             found no usable text in the live band; identity could not be
-            judged — the step proceeds flagged, and irreversible steps
-            refuse).
-        mode: ``context`` compares against the recorded band text;
-            ``param`` re-anchors on the RUN's value for a parameter whose
-            demo value was embedded in the recorded band.
+            judged). ``abstain`` and ``unreadable`` both mean "could not
+            certify": the step proceeds flagged, and irreversible steps refuse.
+        mode: ``structured`` compares the recorded DOM/a11y identity text
+            against the live structured text at the resolved point (the
+            highest-fidelity tier -- no OCR ambiguity); ``pixel`` compares the
+            recorded vs live identifier-crop PIXELS (catches the O/0 glyph
+            collapse OCR discards, on stable renders); ``vlm`` is the optional
+            local-VLM same/different veto for glyph-confusable identifiers
+            under render drift; ``context`` compares against the recorded OCR
+            band text (the pixel-substrate fallback); ``param`` re-anchors on
+            the RUN's value for a parameter whose demo value was embedded in
+            the recorded band.
         coverage: Matched fraction (context mode) or run/required ratio
             (param mode), diagnostic.
         expected: What the check looked for (recorded band text, or the
@@ -228,8 +281,8 @@ class IdentityCheck(BaseModel):
         param: The parameter that drove a param-mode check, if any.
     """
 
-    status: Literal["verified", "mismatch", "unreadable"]
-    mode: Literal["context", "param"] = "context"
+    status: Literal["verified", "mismatch", "abstain", "unreadable"]
+    mode: Literal["context", "param", "structured", "pixel", "vlm"] = "context"
     coverage: float = 0.0
     expected: str = ""
     observed: str = ""

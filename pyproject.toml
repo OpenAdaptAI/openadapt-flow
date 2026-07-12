@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openadapt-flow"
-version = "0.2.0"
+version = "0.3.0"
 description = "Demonstration compiler: record a desktop workflow once, compile it into a deterministic, self-healing, locally-run script."
 readme = "README.md"
 license = { text = "MIT" }
@@ -29,6 +29,9 @@ dev = [
     # Benchmark harness: agent baseline (anthropic) + chart rendering.
     "anthropic>=0.40",
     "matplotlib>=3.8",
+    # Pixel-identity validation probe: SSIM comparison method (dev-only; the
+    # pixel tier is hard-gated OFF in the shipped runtime).
+    "scikit-image>=0.22",
     # WindowsBackend tests (mock WAA server).
     "requests>=2.31",
 ]

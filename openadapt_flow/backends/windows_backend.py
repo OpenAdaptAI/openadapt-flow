@@ -10,10 +10,21 @@ openadapt-evals — plain HTTP, no adapter layer):
                                ``{"command": "<bare Python statements>"}`` —
                                NOT wrapped in ``python -c "..."``.
 
-The backend is vision-only by construction: PNG frames in, pixel-coordinate
-input out. It deliberately does NOT implement the optional
+The backend is vision-only by construction for RESOLUTION: PNG frames in,
+pixel-coordinate input out. It deliberately does NOT implement the optional
 `StructuralBackend` observations (url/title/page count) — native Windows has
 no cheap equivalent, so those steps stay honestly unverified (docs/LIMITS.md).
+
+It DOES implement the optional `IdentityBackend.structured_text_at`: identity
+verification (unlike resolution) can use a higher-fidelity signal than OCR
+where one exists. On native Windows that signal is the UI Automation tree --
+the element under a point exposes ``Name``/``Value``/text even when it has no
+stable ``AutomationId`` (the Phase-2 "no AutomationId" finding does not block
+UIA *text* extraction). The read runs a UIA ``ElementFromPoint`` snippet on the
+VM and returns the row-like element's real characters when the WAA execute
+channel echoes them back, or None when it cannot (older WAA server that does
+not return command output, UIA unavailable, pixel-only session) -- in which
+case the identity ladder falls back to the OCR name+DOB-primary tier.
 
 Typed text is embedded into the command via ``repr()`` (a valid Python
 literal, immune to quoting bugs). Non-ASCII text cannot be typed by
@@ -204,6 +215,145 @@ class WindowsBackend:
         raise RuntimeError(
             f"screenshot failed after {self._screenshot_max_retries} attempts"
         ) from last_error
+
+    # -- structured-text identity (openadapt_flow.backend.IdentityBackend) --
+
+    def structured_text_at(self, x: int, y: int) -> Optional[str]:
+        """Return the UI Automation text of the element/row under (x, y).
+
+        Identity verification prefers STRUCTURED text over OCR where the
+        backend can provide it (see :class:`IdentityBackend`): UIA hands back
+        the REAL characters of the control under the point, so the
+        same-name/same-DOB glyph-collapse that defeats OCR (an MRN whose only
+        difference is an O/0 or l/1 glyph) cannot occur -- the two rows are
+        different strings in the a11y tree.
+
+        Runs a ``uiautomation.ControlFromPoint`` snippet on the VM: it walks
+        up to the enclosing ROW / list-item control (so identity is judged on
+        the whole record row, not one cell), EXCLUDES the clicked control's own
+        cell (its label is mutable evidence the ladder heals through -- mirror
+        of the OCR band excluding the target's own crop), and prints the
+        remaining cells' ``Name`` text between sentinel markers. Returns None when there
+        is no row-like ancestor (a standalone control whose own text is a
+        mutable, healable label -- identity stays on the OCR / heal path),
+        when the WAA server does not echo command output, when UIA is
+        unavailable, or when nothing is under the point (never raises) -- the
+        identity ladder then falls back to the OCR tier.
+        """
+        snippet = (
+            "import json\n"
+            "def _oaflow_structured_text_at(px, py):\n"
+            "    try:\n"
+            "        import uiautomation as auto\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    try:\n"
+            "        el = auto.ControlFromPoint(px, py)\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    if el is None:\n"
+            "        return None\n"
+            "    row = el\n"
+            "    found_row = False\n"
+            "    for _ in range(6):\n"
+            "        try:\n"
+            "            ct = row.ControlTypeName\n"
+            "        except Exception:\n"
+            "            ct = ''\n"
+            "        if ct in ('DataItemControl', 'ListItemControl',\n"
+            "                  'TreeItemControl', 'TableRowControl'):\n"
+            "            found_row = True\n"
+            "            break\n"
+            "        parent = getattr(row, 'GetParentControl', None)\n"
+            "        nxt = parent() if parent else None\n"
+            "        if nxt is None:\n"
+            "            break\n"
+            "        row = nxt\n"
+            "    if not found_row:\n"
+            "        return None\n"
+            "    own = el\n"
+            "    for _ in range(6):\n"
+            "        p2 = getattr(own, 'GetParentControl', None)\n"
+            "        par = p2() if p2 else None\n"
+            "        if par is None:\n"
+            "            own = None\n"
+            "            break\n"
+            "        if par is row:\n"
+            "            break\n"
+            "        own = par\n"
+            "    parts = []\n"
+            "    got_child = False\n"
+            "    try:\n"
+            "        for c in row.GetChildren():\n"
+            "            if own is not None and c is own:\n"
+            "                continue\n"
+            "            nm = getattr(c, 'Name', '') or ''\n"
+            "            if nm:\n"
+            "                parts.append(str(nm))\n"
+            "                got_child = True\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    if not got_child:\n"
+            "        v = getattr(row, 'Name', '') or ''\n"
+            "        if v:\n"
+            "            parts.append(str(v))\n"
+            "    text = ' '.join(parts).split()\n"
+            "    return ' '.join(text) if text else None\n"
+            "print('<<OAFLOW_STRUCTURED>>' + json.dumps("
+            f"_oaflow_structured_text_at({int(x)}, {int(y)})) "
+            "+ '<<END_OAFLOW_STRUCTURED>>')\n"
+        )
+        body = self._execute_read(snippet)
+        if not body:
+            return None
+        import json as _json
+
+        start = body.find("<<OAFLOW_STRUCTURED>>")
+        end = body.find("<<END_OAFLOW_STRUCTURED>>")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        payload = body[start + len("<<OAFLOW_STRUCTURED>>") : end]
+        try:
+            value = _json.loads(payload)
+        except Exception:
+            return None
+        if not value:
+            return None
+        return str(value)
+
+    def _execute_read(self, command: str) -> Optional[str]:
+        """POST bare Python to WAA and return the response body if any.
+
+        Unlike :meth:`_execute` (which discards the body), this returns the
+        server's textual output so a UIA read can travel back. Tolerant of the
+        WAA server's exact response shape (raw stdout, or a JSON envelope with
+        an ``output``/``stdout``/``result`` field); returns None on any
+        non-200, missing output, or transport failure -- identity then falls
+        back to OCR.
+        """
+        try:
+            resp = self._session.post(
+                f"{self.server_url}/execute_windows",
+                json={"command": command},
+                timeout=self._timeout_s,
+            )
+        except Exception:
+            return None
+        if resp.status_code != 200:
+            return None
+        text = resp.text or ""
+        if "<<OAFLOW_STRUCTURED>>" in text:
+            return text
+        try:
+            data = resp.json()
+        except Exception:
+            return text or None
+        if isinstance(data, dict):
+            for key in ("output", "stdout", "result", "data"):
+                val = data.get(key)
+                if isinstance(val, str) and val:
+                    return val
+        return None
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at pixel coordinates via pyautogui."""

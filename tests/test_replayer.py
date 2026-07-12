@@ -891,6 +891,46 @@ def test_identity_param_mode_mismatch_halts(bundle, run_dir):
     assert "patient" in report.results[0].error
 
 
+def test_identity_abstain_halts_irreversible_step(bundle, run_dir):
+    """8th wrong-patient reopening: the live band's name+DOB match but it
+    rests on a glyph-confusable MRN (MG4408) OCR may have collapsed. The OCR
+    tier ABSTAINS (cannot certify SAME nor assert DIFFERENT), so an
+    IRREVERSIBLE step HALTS without clicking -- the wrong patient is never
+    opened, and the reason names the collapse."""
+    vision = resolving_vision()
+    vision.ocr_lines = [OcrLine("MG4408 Okafor, Philip 1966-01-17 M Active")]
+    backend = FakeBackend()
+    step = context_click_step(
+        "MG4408 Okafor, Philip 1966-01-17 M Active", risk="irreversible")
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is False
+    assert backend.actions == []  # never clicked
+    result = report.results[0]
+    assert result.identity.status == "abstain"
+    assert "irreversible" in result.error
+    assert "human confirmation" in result.error
+    assert "glyph-confusable" in result.error
+
+
+def test_identity_abstain_proceeds_flagged_when_reversible(bundle, run_dir):
+    """The abstain is disclosed, never silent: a REVERSIBLE step proceeds on
+    positional evidence but the result carries the abstain flag (recoverable,
+    and the report shows the id ⚠ marker)."""
+    vision = resolving_vision()
+    vision.ocr_lines = [OcrLine("MG4408 Okafor, Philip 1966-01-17 M Active")]
+    backend = FakeBackend()
+    step = context_click_step(
+        "MG4408 Okafor, Philip 1966-01-17 M Active", risk="reversible")
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+    assert report.success is True
+    assert ("click", 110, 105, False) in backend.actions
+    assert report.results[0].identity.status == "abstain"
+
+
 def test_identity_unreadable_proceeds_flagged_when_reversible(bundle, run_dir):
     """No usable text in the live band: fall back to current behavior for
     reversible steps, but the result carries the unreadable flag (the

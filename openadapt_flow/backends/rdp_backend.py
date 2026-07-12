@@ -106,7 +106,15 @@ class RDPTransport(Protocol):
 
     def wheel(self, dx: int, dy: int) -> None:
         """Send a wheel gesture by ``(dx, dy)`` framebuffer pixels (Backend
-        convention: positive ``dy`` scrolls content up / view down)."""
+        convention: positive ``dy`` scrolls content up / view down).
+
+        A transport MAY only support vertical scrolling: the real
+        :class:`AardwolfTransport` drops a non-zero ``dx`` because aardwolf's
+        wheel API has no horizontal event. A transport that dispatches the
+        wheel at a cursor position SHOULD use the last pointer location (the
+        remote OS routes the wheel to the window under the cursor), not a fixed
+        origin.
+        """
         ...
 
 
@@ -228,6 +236,36 @@ class FreeRDPBackend:
         img.convert("RGB").save(buf, format="PNG")
         return buf.getvalue()
 
+    def wait_first_frame(
+        self, *, retries: int = 20, settle_s: float = 0.25
+    ) -> bytes:
+        """Poll :meth:`screenshot` until a non-blank frame, returning its PNG.
+
+        The first frame(s) an RDP session paints are often a single-colour
+        blank canvas that arrives before the desktop actually renders — a real
+        EMR grab right after connect hits this too, and asserting on that frame
+        is racy. This helper grabs up to ``retries`` frames, sleeping
+        ``settle_s`` between attempts, and returns the first frame with more
+        than one distinct colour; if none appears within the budget it returns
+        the last frame grabbed (the caller still gets a frame and decides).
+
+        Opt-in by design: :meth:`screenshot` stays a single cheap grab with no
+        hidden sleeping. Call this once, right after connect, when you need the
+        desktop to have painted before you read pixels.
+        """
+        import time
+
+        last = self.screenshot()
+        for attempt in range(max(1, retries)):
+            if attempt:
+                last = self.screenshot()
+            img = Image.open(io.BytesIO(last)).convert("RGB")
+            colors = img.getcolors(maxcolors=1 << 24)
+            if colors is None or len(colors) > 1:
+                return last
+            time.sleep(settle_s)
+        return last
+
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at framebuffer pixel coordinates.
 
@@ -240,10 +278,20 @@ class FreeRDPBackend:
             self._transport.pointer(int(x), int(y), "left", False)
 
     def type_text(self, text: str) -> None:
-        """Type text into the focused control, one key down/up per character."""
+        """Type text into the focused control, one key down/up per character.
+
+        Every character's key-up is sent in a ``finally`` so a transport
+        failure between down and up can never leave a key latched down: a real
+        RDP ``key()`` can time out mid-character, and a stuck key silently
+        corrupts every subsequent input (auto-repeat, or the held key acting as
+        a modifier). Releasing a key that never actually registered is a
+        harmless no-op on the target, so the guarantee costs nothing.
+        """
         for ch in text:
-            self._transport.key(ch, True)
-            self._transport.key(ch, False)
+            try:
+                self._transport.key(ch, True)
+            finally:
+                self._release_keys((ch,))
 
     def press(self, key: str) -> None:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``.
@@ -251,15 +299,45 @@ class FreeRDPBackend:
         A chord is pressed by sending every part down in order, then releasing
         every part in reverse order — the natural nesting a human produces
         (modifiers wrap the key). A single key is a plain down/up.
+
+        Every key sent (or attempted) down is released in a ``finally``, so a
+        transport exception mid-chord — a real RDP ``key()`` timeout — can never
+        leave a modifier latched. That matters because a stuck ``Ctrl`` turns
+        the next click into ``Ctrl+click`` and the next text into a shortcut
+        (``Ctrl+a`` then a character wipes the field): a silent wrong-action.
+        A part is queued for release *before* its down is sent, so even a key
+        whose own down raised (it may already have registered on the wire) is
+        released; a redundant release is a no-op on the target.
         """
         parts = normalize_chord(key)
+        pressed: list[str] = []
+        try:
+            for part in parts:
+                pressed.append(part)
+                self._transport.key(part, True)
+        finally:
+            self._release_keys(reversed(pressed))
+
+    def _release_keys(self, parts) -> None:
+        """Release each key token, best-effort: one failing release never
+        blocks the others and never masks an in-flight exception."""
         for part in parts:
-            self._transport.key(part, True)
-        for part in reversed(parts):
-            self._transport.key(part, False)
+            try:
+                self._transport.key(part, False)
+            except Exception:  # noqa: BLE001 - release is best-effort teardown
+                pass
 
     def scroll(self, dx: int, dy: int) -> None:
-        """Dispatch a wheel gesture by ``(dx, dy)`` pixels."""
+        """Dispatch a wheel gesture by ``(dx, dy)`` pixels.
+
+        Limitation — horizontal scroll: the real :class:`AardwolfTransport`
+        can only emit *vertical* wheel events (aardwolf's ``send_mouse``
+        exposes ``WHEEL_UP``/``WHEEL_DOWN`` but no horizontal ``HWHEEL``), so a
+        non-zero ``dx`` is silently dropped by that transport. This is a
+        documented capability gap, not a bug in this method; the in-repo
+        :class:`FakeRDPTransport` models the same drop so a test cannot pass on
+        a capability the live transport lacks.
+        """
         if dx == 0 and dy == 0:
             return
         self._transport.wheel(int(dx), int(dy))
@@ -361,6 +439,9 @@ class AardwolfTransport:
         self._loop = None
         self._thread = None
         self._conn = None
+        # Last pointer position, so a wheel gesture is dispatched under the
+        # cursor (where the remote OS routes it) rather than at the origin.
+        self._last_pointer: Optional[tuple[int, int]] = None
 
     @classmethod
     def from_credentials(
@@ -406,6 +487,24 @@ class AardwolfTransport:
         )
         self._thread.start()
 
+    def _stop_loop(self) -> None:
+        """Stop the event loop and join its thread (idempotent).
+
+        Shared by :meth:`disconnect` and the :meth:`connect` failure path so a
+        teardown never leaks the daemon thread; without the join a per-retry
+        connect-then-fail loop would accumulate one live ``aardwolf-rdp`` thread
+        (and its event loop) per attempt.
+        """
+        import threading
+
+        loop, thread = self._loop, self._thread
+        self._loop = None
+        self._thread = None
+        if loop is not None:
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+
     def _run(self, coro, timeout: float):
         import asyncio
 
@@ -435,22 +534,39 @@ class AardwolfTransport:
         async def _connect():
             factory = RDPConnectionFactory.from_url(self._url, iosettings)
             conn = factory.get_connection(iosettings)
-            _, err = await conn.connect()
-            if err is not None:
-                raise err
-            # Drain the out-queue until the desktop buffer has real pixels, so
-            # the first framebuffer() is not a blank canvas.
-            deadline = asyncio.get_event_loop().time() + self._connect_timeout_s
-            while not getattr(conn, "desktop_buffer_has_data", False):
-                if asyncio.get_event_loop().time() > deadline:
-                    raise TimeoutError("no RDP frame within connect timeout")
+            try:
+                _, err = await conn.connect()
+                if err is not None:
+                    raise err
+                # Drain the out-queue until the desktop buffer has real pixels,
+                # so the first framebuffer() is not a blank canvas.
+                deadline = asyncio.get_event_loop().time() + self._connect_timeout_s
+                while not getattr(conn, "desktop_buffer_has_data", False):
+                    if asyncio.get_event_loop().time() > deadline:
+                        raise TimeoutError("no RDP frame within connect timeout")
+                    try:
+                        await asyncio.wait_for(conn.ext_out_queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+                return conn
+            except BaseException:
+                # The session opened but never delivered a usable frame (or
+                # connect() itself errored): terminate it here so a half-open
+                # connection is not leaked. self._conn was never assigned, so
+                # disconnect() alone would skip this teardown.
                 try:
-                    await asyncio.wait_for(conn.ext_out_queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
+                    await conn.terminate()
+                except Exception:  # noqa: BLE001 - teardown is best-effort
                     pass
-            return conn
+                raise
 
-        self._conn = self._run(_connect(), self._connect_timeout_s + 5.0)
+        try:
+            self._conn = self._run(_connect(), self._connect_timeout_s + 5.0)
+        except BaseException:
+            # Connect failed: stop and join the event-loop thread so repeated
+            # failing connects cannot pile up daemon threads + event loops.
+            self._stop_loop()
+            raise
 
     def disconnect(self) -> None:
         """Terminate the session and stop the event loop (idempotent)."""
@@ -461,10 +577,7 @@ class AardwolfTransport:
                 self._run(conn.terminate(), self._op_timeout_s)
             except Exception:  # noqa: BLE001 - teardown is best-effort
                 pass
-        if loop is not None:
-            loop.call_soon_threadsafe(loop.stop)
-        self._loop = None
-        self._thread = None
+        self._stop_loop()
 
     def framebuffer(self) -> Framebuffer:
         """Return ``(PIL image, width, height)`` for the current desktop."""
@@ -487,6 +600,8 @@ class AardwolfTransport:
         }.get(button, MOUSEBUTTON.MOUSEBUTTON_LEFT)
         if self._conn is None:
             raise RuntimeError("transport not connected")
+        # Remember where the pointer is so wheel() can dispatch under it.
+        self._last_pointer = (int(x), int(y))
         self._run(
             self._conn.send_mouse(btn, int(x), int(y), bool(down)),
             self._op_timeout_s,
@@ -511,22 +626,51 @@ class AardwolfTransport:
             )
 
     def wheel(self, dx: int, dy: int) -> None:
+        """Send a wheel gesture, dispatched under the last pointer position.
+
+        Limitation: aardwolf's ``send_mouse`` only exposes vertical
+        ``WHEEL_UP``/``WHEEL_DOWN`` (there is no horizontal ``HWHEEL`` in its
+        public API), so a non-zero ``dx`` is dropped — a documented capability
+        gap. A non-zero ``dx`` with ``dy == 0`` therefore does nothing; a warning
+        is emitted so the drop is not silent.
+
+        The wheel is dispatched at :attr:`_last_pointer` (the last place a
+        pointer event was sent), not at the origin: Windows routes a wheel event
+        to the window under the cursor, so sending it at ``(0, 0)`` would scroll
+        the top-left pane instead of the content the caller just clicked into.
+        """
+        import warnings
+
         from aardwolf.commons.queuedata.constants import MOUSEBUTTON
 
         if self._conn is None:
             raise RuntimeError("transport not connected")
+        if dx and not dy:
+            warnings.warn(
+                "AardwolfTransport cannot emit horizontal wheel events "
+                "(aardwolf send_mouse has no HWHEEL); dropping dx="
+                f"{dx}. See FreeRDPBackend.scroll docstring.",
+                stacklevel=2,
+            )
+        if not dy:
+            return
         # aardwolf wheel "steps" are wheel-delta units; approximate one notch
         # (~120 units) per ~100 px, matching WindowsBackend's notch ratio. The
         # replayer re-resolves after each scroll, so the exact ratio is not
         # load-bearing.
-        if dy:
-            btn = (
-                MOUSEBUTTON.MOUSEBUTTON_WHEEL_DOWN
-                if dy > 0
-                else MOUSEBUTTON.MOUSEBUTTON_WHEEL_UP
-            )
-            steps = max(1, round(abs(dy) / 100)) * 120
-            self._run(
-                self._conn.send_mouse(btn, 0, 0, False, steps),
-                self._op_timeout_s,
-            )
+        btn = (
+            MOUSEBUTTON.MOUSEBUTTON_WHEEL_DOWN
+            if dy > 0
+            else MOUSEBUTTON.MOUSEBUTTON_WHEEL_UP
+        )
+        steps = max(1, round(abs(dy) / 100)) * 120
+        # Dispatch under the cursor; fall back to the frame centre if no pointer
+        # event has been sent yet (never the origin, which routes to top-left).
+        if self._last_pointer is not None:
+            x, y = self._last_pointer
+        else:
+            x, y = self._width // 2, self._height // 2
+        self._run(
+            self._conn.send_mouse(btn, x, y, False, steps),
+            self._op_timeout_s,
+        )

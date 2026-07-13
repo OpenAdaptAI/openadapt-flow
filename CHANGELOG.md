@@ -1,6 +1,44 @@
 # CHANGELOG
 
 
+## v0.8.0 (2026-07-13)
+
+### Features
+
+- Governed healing — reviewable patches, regression/perturbation gate, identity-never-weakened
+  invariant (fixes heal context-drop) ([#70](https://github.com/OpenAdaptAI/openadapt-flow/pull/70),
+  [`422ccf6`](https://github.com/OpenAdaptAI/openadapt-flow/commit/422ccf6566e955392a6ed218c0bccf60983ee7ae))
+
+A heal was a LOCAL locator repair that silently swapped the anchor bundle, and (two external
+  reviews) it could refresh a step's identity context to None — flipping an ARMED step to UNARMED
+  and disabling the pre-click identity gate for that step while still reporting green. This makes
+  healing a governed patch pipeline whose invariant is: a repair may change HOW an operation is
+  performed, but never silently weaken WHAT it means or how its effects are verified.
+
+New module openadapt_flow/runtime/healing/: - patch.py: HealEvent -> reviewable, diffable HealPatch
+  (identity vs locator changes called out; identity_before/after snapshots). - governance.py:
+  identity_preserved() (the invariant), effect/risk regression checks, RegressionGate.
+  Deterministic, $0, no model calls; identity reuses the same OCR band matcher the pre-click gate
+  uses. - pipeline.py: candidate -> gate -> canary -> promote/rollback; govern_heal() entrypoint. A
+  refused patch is QUARANTINED (persisted for review) and the run HALTS — never auto-applies an
+  unverified repair. - perturbation.py: deterministic synthetic UI-drift harness (shift/scale/
+  retheme/reflow) + replay_patch regression report; reusable for held-out validation and future
+  patch induction.
+
+replayer.py: near-zero change — the heal hook now governs the built event and only applies a
+  PROMOTED patch; a quarantined heal fails the step so the run halts. The identity-weakening is
+  fixed in the heal code path, not by restructuring the replayer.
+
+Tests (tests/test_governed_healing.py): the old ARMED->UNARMED weakening is reproduced end-to-end
+  and blocked (quarantine + halt, anchor unchanged); a benign locator drift heals + passes the gate
+  + promotes; dropped identity/ effect coverage and risk downgrades are rejected; the perturbation
+  harness is deterministic. Full suite green (1007 passed, 10 skipped).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.7.0 (2026-07-13)
 
 ### Features

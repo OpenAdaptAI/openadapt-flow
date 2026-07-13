@@ -24,6 +24,10 @@ dependencies = [
     # (runtime.remote_vlm). Lightweight; core so the fail-safe client is
     # always importable on a runner.
     "httpx>=0.27",
+    # Policy files (openadapt_flow.policy) are YAML; the `certify` CLI and the
+    # shipped example policies load them. Tiny, pure-Python, core so `certify`
+    # works out of the box.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

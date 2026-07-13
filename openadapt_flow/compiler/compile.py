@@ -30,6 +30,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.risk import classify_step_risk
 from openadapt_flow.runtime.identity import band_region, context_from_lines, coverage
 from openadapt_flow.vision.hashing import phash_distance, phash_png
 from openadapt_flow.vision.ocr import OcrLine, normalize_text, ocr
@@ -742,11 +743,16 @@ def compile_recording(
     geometry landmark. The bundle gets ``workflow.json``,
     ``templates/*.png`` and a generated readable ``workflow.py``.
 
-    Risk is opt-in: every step compiles as ``risk="reversible"`` unless
-    ``risk_overrides`` marks it ``"irreversible"`` — there is no automatic
-    risk classification. Irreversible steps refuse to act when they only
-    resolve below the OCR rung or when their identity band is unreadable
-    (see :class:`~openadapt_flow.runtime.Replayer`).
+    Risk is AUTO-CLASSIFIED: each CLICK/DOUBLE_CLICK step whose intent or
+    button label is write-shaped (create/update/delete/submit/save/confirm
+    ...) compiles as ``risk="irreversible"`` (see :mod:`openadapt_flow.risk`);
+    everything else is ``"reversible"``. ``risk_overrides`` still wins, in
+    either direction. Irreversible steps refuse to act when they only resolve
+    below the OCR rung or when their identity band is unreadable (see
+    :class:`~openadapt_flow.runtime.Replayer`), so this arms those safeguards
+    by default for consequential writes instead of only when a human marks a
+    step. The classifier leans irreversible when unsure on a write-shaped step
+    (the safe direction; false-positive posture documented in the module).
 
     Args:
         recording_dir: Recording directory (meta.json, events.jsonl, frames/).
@@ -1042,6 +1048,16 @@ def compile_recording(
             # a vacuous pass. Steps with no structural change either stay
             # honestly vacuous (docs/LIMITS.md).
             step.expect = _structural_postconditions(event)
+
+    # Auto risk-classification: infer risk="irreversible" for write-shaped
+    # steps (create/update/delete/submit/save/confirm ... — keyword + action
+    # heuristics on the intent and button label; see openadapt_flow.risk) so
+    # the irreversible-step safeguards (below-OCR-rung refusal, unreadable-
+    # identity-band refusal) are armed BY DEFAULT rather than only when a human
+    # passes risk_overrides. Conservative: an unsure write-shaped step leans
+    # irreversible (the safe direction). Explicit risk_overrides below win.
+    for step in steps:
+        step.risk = classify_step_risk(step)
 
     if risk_overrides:
         by_id = {step.id: step for step in steps}

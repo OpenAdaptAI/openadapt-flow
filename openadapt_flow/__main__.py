@@ -8,6 +8,8 @@ imported lazily inside each handler so ``--help`` always works):
 - ``replay`` — replay a bundle; serves the bundled MockMed demo app when no
   ``--url`` is given (with optional ``--drift`` to demonstrate healing).
 - ``bench`` — replay a bundle N times against MockMed and aggregate.
+- ``lint`` — report a bundle's coverage gaps (advice; exit code by severity).
+- ``certify`` — enforce a safety policy on a bundle (refuse it if it fails).
 - ``emit-skill`` — emit an Agent Skills folder for a bundle.
 - ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
 """
@@ -247,6 +249,36 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_lint(args: argparse.Namespace) -> int:
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.policy import SEVERITY_ORDER, lint_workflow
+
+    workflow = Workflow.load(Path(args.bundle))
+    report = lint_workflow(workflow)
+    print(report.render())
+    # Exit code by max severity: nonzero once anything reaches `error`
+    # (an unarmed or vacuous IRREVERSIBLE step). `--strict` also fails on warn.
+    threshold = "warn" if args.strict else "error"
+    fail = SEVERITY_ORDER[report.max_severity] >= SEVERITY_ORDER[threshold]
+    return 1 if (report.findings and fail) else 0
+
+
+def _cmd_certify(args: argparse.Namespace) -> int:
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.policy import evaluate_policy, load_policy
+
+    workflow = Workflow.load(Path(args.bundle))
+    try:
+        policy = load_policy(args.policy)
+    except (FileNotFoundError, ValueError) as e:
+        raise SystemExit(str(e))
+    report = evaluate_policy(workflow, policy)
+    print(report.render())
+    # A failing certification exits nonzero so CI / deploy gates refuse the
+    # bundle — the whole point of making "runnable" distinct from "certified".
+    return 0 if report.passed else 2
+
+
 def _cmd_emit_skill(args: argparse.Namespace) -> int:
     from openadapt_flow.emit.skill import emit_skill
 
@@ -407,6 +439,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--headed", action="store_true", help="Run the browsers headed"
     )
     p.set_defaults(func=_cmd_benchmark)
+
+    p = sub.add_parser(
+        "lint",
+        help=(
+            "Report a bundle's coverage gaps (unarmed clicks, vacuous "
+            "postconditions, under-classified risk); exits nonzero by severity"
+        ),
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit nonzero on warnings too (default: only on errors)",
+    )
+    p.set_defaults(func=_cmd_lint)
+
+    p = sub.add_parser(
+        "certify",
+        help=(
+            "Enforce a policy on a bundle (exits nonzero + reports if it "
+            "fails); makes 'runnable' distinct from 'certified safe'"
+        ),
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--policy",
+        required=True,
+        help=(
+            "Policy YAML path, or a built-in name (permissive, clinical-write)"
+        ),
+    )
+    p.set_defaults(func=_cmd_certify)
 
     p = sub.add_parser(
         "emit-skill", help="Emit an Agent Skills folder for a bundle"

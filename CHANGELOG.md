@@ -1,6 +1,342 @@
 # CHANGELOG
 
 
+## v0.7.0 (2026-07-13)
+
+### Features
+
+- Policy engine + `lint`/`certify` + auto risk-classification (enforcement, not just disclosure)
+  ([#65](https://github.com/OpenAdaptAI/openadapt-flow/pull/65),
+  [`fe8876d`](https://github.com/OpenAdaptAI/openadapt-flow/commit/fe8876dbdaa438b9f9369980639b201a3679749a))
+
+Turn the bundle's safety posture from DISCLOSURE into ENFORCEMENT: the compiler already reported
+  weak coverage (unarmed clicks, vacuous postconditions, risk defaulting to reversible) but never
+  refused an uncertifiable workflow before running it. "Compiled successfully" is too weak. This
+  adds a compile-/pre-deploy layer on top of the unchanged replayer/identity/heal logic.
+
+- Auto risk-classification (openadapt_flow/risk.py): the compiler now infers risk="irreversible" for
+  CLICK/DOUBLE_CLICK steps whose intent/label is write-shaped
+  (create/update/delete/submit/save/confirm/add ...), word- boundary matched so `address` != `add`.
+  Biased toward irreversible on write-shaped steps (a false irreversible costs availability; a false
+  reversible costs safety). risk_overrides still wins either way. This arms the existing below-OCR /
+  unreadable-identity refusals by default for consequential writes.
+
+- Policy schema + certifier (openadapt_flow/policy.py): a Policy (loadable from YAML, extra=forbid
+  so a typo'd rule fails loudly) with rules prohibit_unarmed_clicks,
+  prohibit_vacuous_postconditions, require_identity_for, require_effect_verification_for,
+  max_unverified_steps, require_human_approval_below_confidence. evaluate_policy() -> a structured
+  pass/fail report naming each violating step + reason.
+
+- CLI: `openadapt-flow lint <bundle>` reports coverage gaps by severity (exit code by max severity);
+  `openadapt-flow certify <bundle> --policy <name|path>` enforces a policy and exits nonzero on
+  failure — making "runnable" distinct from "certified safe". Two example policies ship: permissive
+  (default) and clinical-write (strict).
+
+- Tests: auto-risk flags a save/submit step irreversible and leaves benign navigation reversible;
+  certify FAILS a gappy bundle and PASSES a clean one under the strict policy; lint reports the
+  known gaps; example policies parse. Two e2e healing tests recompile with write steps forced
+  reversible (via a new bundle_writes_reversible fixture) so they isolate the heal mechanism from
+  the now-default risk gate; the gate itself stays covered by TestIrreversibleRiskGate. Docs
+  (LIMITS.md, README) updated.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Testing
+
+- Live OpenEMR end-to-end for the FHIR EffectVerifier (real GUI/API write → FHIR read-back)
+  ([#68](https://github.com/OpenAdaptAI/openadapt-flow/pull/68),
+  [`15962c5`](https://github.com/OpenAdaptAI/openadapt-flow/commit/15962c59ce622e2f57e81bc36c1ae8c52992ffa5))
+
+* feat: EffectVerifier — independent effect verification against system-of-record (OpenEMR FHIR +
+  second substrate)
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* test: live OpenEMR end-to-end for the FHIR EffectVerifier (real API write → FHIR read-back)
+
+Close PR #63's one honest caveat ("OpenEMR did NOT run live; the FHIR verifier is contract-gated
+  against a fake"). Stand up a REAL local OpenEMR and wire the verifier's live path to it.
+
+- benchmark/openemr_live/: docker-compose (OpenEMR 7.0.3 + MariaDB) with the REST + FHIR R4 APIs and
+  OAuth2 enabled, a setup.sh that waits for install, enables the APIs + password grant, registers +
+  enables an OAuth2 client, mints a bearer token, and prints OPENEMR_FHIR_BASE_URL/TOKEN/VERIFY_TLS,
+  and a README with the one-command bring-up. - tests/test_effect_fhir_live_openemr.py: env-gated
+  live test (skips in CI, runs when the instance is up). Writes a real Patient via OpenEMR's FHIR
+  API, then has the #63 FhirEffectVerifier independently read it back: CONFIRMED (record_written +
+  field_equals), REFUTED (wrong field value; absent record), INDETERMINATE→HALT (401 bad token is
+  never "record absent").
+
+Honest scope: the live write is a FHIR Patient POST (an API write, not GUI-driven) — OpenEMR's FHIR
+  API exposes Observation read-only, so the note-as-Observation write the fake models cannot be
+  created over FHIR on a stock OpenEMR. The property proven is the one the fake could not: the
+  verifier's verdicts are correct against a REAL FHIR server. Verified end-to-end against
+  openemr/openemr:7.0.3 (6/6 live tests).
+
+Stacks on feat/effect-verifier (#63); retarget to main after #63 merges.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.6.0 (2026-07-13)
+
+### Features
+
+- Silent-wrong-action-rate benchmark (screen-verify vs effect-verify on MockMed faults)
+  ([#67](https://github.com/OpenAdaptAI/openadapt-flow/pull/67),
+  [`81f757d`](https://github.com/OpenAdaptAI/openadapt-flow/commit/81f757d048deee24d3b21ccff0fb2814b16c1310))
+
+* feat: EffectVerifier — independent effect verification against system-of-record (OpenEMR FHIR +
+  second substrate)
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: silent-wrong-action-rate benchmark (screen-verify vs effect-verify on MockMed faults)
+
+Turn the #63 transactional fault-class matrix (tests/test_effect_fault_matrix.py) into a measured,
+  publishable metric: the silent-wrong-action rate instrument
+  (docs/validation/SILENT_WRONG_ACTION_RATE.md) pointed at our OWN runtime. No competitor runs, no
+  paid API, no model calls, localhost only.
+
+For each MockMed fault scenario (mockmed.fault_server) it records three independent judgments per
+  run: ground truth off the system-of-record store (before vs after), the SCREEN oracle (app.js
+  saved-banner rule applied to the real server response), and the EFFECT oracle (#63
+  RestRecordVerifier's consequential-save contract against GET /api/db). Numbers are REAL — every
+  run drives the fault server and reads back the store.
+
+Measured (n=10/scenario, 90 runs): screen-verify silent-wrong-action rate 55.6% (undetected-wrong
+  83.3%), effect-verify 0.0% (0.0%); false-abort screen 33.3% vs effect 0.0% (effect also rescues
+  the timeout false-abort).
+
+- openadapt_flow/benchmark/silent_wrong_action.py: benchmark + CLI (python -m
+  openadapt_flow.benchmark.silent_wrong_action), results.json, SILENT_WRONG_ACTION.md, chart via
+  chart_fonts (repo convention). - tests/test_silent_wrong_action_benchmark.py: CI guard for the
+  qualitative claim (screen silent rate > 0; effect drives it to 0). -
+  benchmark/silent_wrong_action/: committed real artifacts.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Wire EffectVerifier into the live replay path (Step.effects + halt/compensate on non-CONFIRMED)
+  ([#66](https://github.com/OpenAdaptAI/openadapt-flow/pull/66),
+  [`e975ace`](https://github.com/OpenAdaptAI/openadapt-flow/commit/e975ace853de42f5afb44254cbcbdc6c96adc928))
+
+* feat: EffectVerifier — independent effect verification against system-of-record (OpenEMR FHIR +
+  second substrate)
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: wire EffectVerifier into the live replay path (Step.effects + halt/compensate on
+  non-CONFIRMED)
+
+Real runs are now protected by independent system-of-record verification, not just the screen
+  oracle. Closes the wiring gap between the merged EffectVerifier library (PR #63) and the Replayer.
+
+- ir.Step gains `effects: list[Effect]` (default empty; RFC WORKFLOW_PROGRAM_IR.md 2.2). Threaded
+  through bundle save/load round-trip; additive and back-compatible (bundles with no effects replay
+  unchanged). The Effect type is imported at the BOTTOM of ir.py to avoid a circular import through
+  runtime's package init; Step/Workflow are model_rebuilt. - Replayer gains `effect_verifier` /
+  `effect_compensator` (OFF by default, mirroring state_verifier/grounder/identity_vlm). It
+  snapshots the real system of record BEFORE a step's action and, after the screen postconditions
+  pass, verifies each declared Effect against the record. A non-CONFIRMED verdict (REFUTED /
+  INDETERMINATE) HALTS; an irreversible effect first runs reconcile_or_escalate (RECONCILED
+  continues, ESCALATE halts). Zero model calls -- est_model_cost_usd untouched, the $0 guarantee. -
+  Fail-safe: a step that declares effects with NO verifier configured is a deployment error and
+  HALTS before acting -- an unverifiable consequential write is never silently accepted. -
+  StepResult carries effect_verified / effect_results for the audit trail. - docs/LIMITS.md "5 of 7
+  silent" updated: the gap is now closable in the live path, with the honest caveat that protection
+  requires effects declared on the step AND a verifier configured. - tests/test_replayer_effects.py
+  drives the REAL Replayer against the live MockMed fault_server via RestRecordVerifier: REFUTED
+  halts despite a green screen; CONFIRMED proceeds; duplicate irreversible reconciles (and halts
+  without a compensator); effects-without-verifier halts; a no-effects bundle replays unchanged.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.5.0 (2026-07-13)
+
+### Continuous Integration
+
+- Fix release double-build; add workflow_dispatch manual publish
+  ([#59](https://github.com/OpenAdaptAI/openadapt-flow/pull/59),
+  [`0f377e1`](https://github.com/OpenAdaptAI/openadapt-flow/commit/0f377e165ccb1374592d6ad98bec62fd9df8fd0e))
+
+The v0.4.0 auto-release tagged and bumped the version but FAILED to publish: the workflow ran a
+  separate 'uv build' step AND pyproject's semantic_release build_command runs 'uv build' too, so
+  the second build hit PermissionError overwriting dist/openadapt_flow-0.4.0.tar.gz.
+
+Fix: the auto-release job no longer has a separate build step — Semantic
+
+Release's build_command is the single source of dist/, which the publish step consumes (this matches
+  how the other repos avoid the collision). Added a workflow_dispatch 'manual-publish' job that
+  checks out a given ref/tag, builds, and publishes to PyPI (OIDC) — used to publish the
+  already-tagged v0.4.0 without deleting the tag, and a permanent manual/recovery path.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Documentation
+
+- Rfc — workflow-program IR (control flow, induction, capability-adaptive compilation)
+  ([#61](https://github.com/OpenAdaptAI/openadapt-flow/pull/61),
+  [`16a3621`](https://github.com/OpenAdaptAI/openadapt-flow/commit/16a36218b441d8a5936a37f3516d5abd97a42d00))
+
+Design-only RFC for evolving the compiled artifact from a linear action list (ir.Workflow =
+  list[Step]) into a parameterized workflow program: a state machine with typed params, guarded
+  transitions, loops over worklists, branches, subflows, wait-until predicates, exception/approval
+  nodes, and per-state risk + compensation. Today's linear workflow is the degenerate case (backward
+  compatible).
+
+Grounds every claim in the current code (ir.py, compiler/compile.py, backend.py, emit/*, DESIGN.md,
+  docs/LIMITS.md) and the PBD lineage (Ringer straight-line replay -> Rousillon/Helena generalizer,
+  WebRobot loopy-program synthesis, PROLEX single-demo recovery, Skill-DisCo parameterized FSM
+  subgraphs, AWM/ASI skill induction, Socrates-style disambiguation). Covers: motivation (demo =
+  evidence not spec), the target IR/DSL with a worked add-patient-note example, the induction loop
+  (bootstrap -> candidates -> interactive disambiguation -> multi-trace -> validate/quarantine),
+  capability-adaptive compilation (one contract, many backend impls), a tiered runtime
+  (deterministic -> bounded one-transition model recovery -> durable checkpoint/resume, never
+  free-run the remainder), a phased reversible migration, and an honest scope split (buildable now
+  vs. needs a real customer workflow).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Silent-wrong-action-rate instrument (anonymized, launch-ready)
+  ([#60](https://github.com/OpenAdaptAI/openadapt-flow/pull/60),
+  [`874ece3`](https://github.com/OpenAdaptAI/openadapt-flow/commit/874ece377d3374f4c617160832f64885d034bf21))
+
+Add docs/validation/SILENT_WRONG_ACTION_RATE.md: an anonymized category measurement of the
+  silent-wrong-action rate under UI drift for the self-healing / deterministic-replay automation
+  class. Same methodology, ground truth, and "our own engine first / glass house / instrument not
+  indictment / pre-committed interpretation" framing as our internal study, with our own honest
+  pre/post-fix numbers, but with all other tools reduced to architecture classes (Tool A/B/C) — no
+  product, vendor, version, or model names, and no raw tool-identifying evidence.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Effectverifier — independent effect verification against system-of-record (OpenEMR FHIR + second
+  substrate) ([#63](https://github.com/OpenAdaptAI/openadapt-flow/pull/63),
+  [`2d85f1b`](https://github.com/OpenAdaptAI/openadapt-flow/commit/2d85f1b06a02e366e9f3bfb2af626c4d9e75de5d))
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.4.0 (2026-07-13)
 
 ### Bug Fixes

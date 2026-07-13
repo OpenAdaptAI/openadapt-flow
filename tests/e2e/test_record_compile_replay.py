@@ -274,8 +274,13 @@ class TestMoveDrift:
 
 class TestRenameDrift:
     def test_replay_heals_via_lower_rungs_and_updates_ocr_text(
-        self, bundle, mockmed_url, replay, tmp_path: Path
+        self, bundle_writes_reversible, mockmed_url, replay, tmp_path: Path
     ) -> None:
+        # Uses the writes-reversible bundle: rename drift drives the Save button
+        # down to the geometry rung, which the auto-classified irreversible
+        # risk gate would otherwise (correctly) refuse — see the fixture and
+        # TestIrreversibleRiskGate. This test isolates the HEALING mechanism.
+        bundle = bundle_writes_reversible
         healed = tmp_path / "healed-bundle"
         url = drift_url(mockmed_url, "rename")
 
@@ -343,14 +348,15 @@ class TestIrreversibleRiskGate:
     def test_irreversible_step_refuses_below_ocr_resolution(
         self, recording_dir, mockmed_url, replay, tmp_path: Path
     ) -> None:
-        """v0 policy end-to-end, through the supported plumbing: risk is
-        opt-in at compile time (``risk_overrides`` — never auto-assigned),
-        and an irreversible step whose anchor only resolves below the ocr
-        rung must NOT act. The save step is marked irreversible at compile
-        time; under rename drift its template no longer matches, and with
-        ocr_text cleared the geometry rung (landmarks are unchanged by
-        rename) is the only evidence left — the gate must refuse and fail
-        the run."""
+        """v0 policy end-to-end, through the supported plumbing: an
+        irreversible step whose anchor only resolves below the ocr rung must
+        NOT act. The save step is marked irreversible here via an explicit
+        ``risk_overrides`` (auto risk-classification would now mark it
+        irreversible too — see openadapt_flow.risk — but the override keeps
+        this test independent of the heuristic); under rename drift its
+        template no longer matches, and with ocr_text cleared the geometry
+        rung (landmarks are unchanged by rename) is the only evidence left —
+        the gate must refuse and fail the run."""
         from openadapt_flow.compiler import compile_recording
 
         gated = tmp_path / "gated-bundle"

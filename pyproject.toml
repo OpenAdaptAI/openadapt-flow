@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openadapt-flow"
-version = "0.4.0"
+version = "0.7.0"
 description = "Demonstration compiler: record a desktop workflow once, compile it into a deterministic, self-healing, locally-run script."
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,6 +24,10 @@ dependencies = [
     # (runtime.remote_vlm). Lightweight; core so the fail-safe client is
     # always importable on a runner.
     "httpx>=0.27",
+    # Policy files (openadapt_flow.policy) are YAML; the `certify` CLI and the
+    # shipped example policies load them. Tiny, pure-Python, core so `certify`
+    # works out of the box.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -80,6 +84,9 @@ interop = ["openadapt-types>=0.1.0"]
 [project.scripts]
 openadapt-flow = "openadapt_flow.__main__:main"
 openadapt-flow-vlm-service = "openadapt_flow.services.vlm_service.__main__:main"
+
+
+
 
 
 [tool.hatch.build.targets.wheel]

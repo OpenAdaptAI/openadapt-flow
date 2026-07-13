@@ -970,17 +970,21 @@ def build_compile(work: Path, out: Path, bundle: Path, base_frame: Path) -> None
     _label(lbl_param, (note_region[0], note_region[1] - 58),
            "param", f'note = "{param_val}"', GOOD)
 
-    # Code panel (real workflow.py step_010 excerpt).
+    # Code panel (real workflow.py step_010 excerpt), wrapped to fit.
+    cp = tuple(save["anchor"]["click_point"])
     code_lines = [
-        "# step_010: click 'Save Encounter'  [irreversible]",
-        f"flow.click(template='templates/step_010.png',",
-        f"           click_point={tuple(save['anchor']['click_point'])},",
-        f"           ocr_text='Save Encounter')",
-        f"# expect text_present '{assert_text}'",
+        "# step_010  [irreversible]",
+        "flow.click(",
+        "  template='step_010.png',",
+        f"  click_point={cp},",
+        "  ocr_text='Save Encounter')",
         "",
-        f"PARAMS = {{'note': '{param_val}'}}",
+        "# assert:",
+        f"#   text_present '{assert_text}'",
+        "",
+        "PARAMS = {'note': <note>}",
     ]
-    panel = _code_panel(code_lines, width=560, height=560)
+    panel = _code_panel(code_lines, width=548, height=560)
 
     title_f = _font(_FONT_SANS_B, 40)
     sub_f = _font(_FONT_SANS, 24)

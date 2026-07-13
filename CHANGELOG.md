@@ -1,6 +1,45 @@
 # CHANGELOG
 
 
+## v0.19.0 (2026-07-13)
+
+### Features
+
+- Opt-in session-video capture + how-it-works media generator
+  ([#85](https://github.com/OpenAdaptAI/openadapt-flow/pull/85),
+  [`513cfb4`](https://github.com/OpenAdaptAI/openadapt-flow/commit/513cfb4044acb5d154a11516ed1a46da6600d8f8))
+
+* feat: opt-in Playwright session-video capture + how-it-works media generator
+
+Add an OFF-by-default WebM session-video capture to the recorder and replayer, and a
+  scripts/demo_media.py orchestrator that drives the real pipeline (record -> compile -> replay ->
+  heal -> audit) against MockMed and a live OpenEMR to render the website's five "How it works"
+  clips.
+
+- PlaywrightBackend.launch(record_video_dir=...): opt-in; when set the page lives in a context that
+  records a WebM finalized on close(). None keeps the old direct-page path with zero effect on
+  normal runs. - demo_driver.record_triage_demo(record_video_dir=...) threads it through. - CLI:
+  `demo-record --record-video DIR` and `replay --record-video DIR`. - scripts/demo_media.py: renders
+  webm(VP9)+mp4(H.264 faststart)+gif+jpg poster per step (~880px, palette-optimized), writes
+  MANIFEST.json, and honestly labels real footage vs the crafted Compile annotation. Presentation
+  overlays are post-processing only and never touch the app under test. -
+  tests/e2e/test_video_capture.py pins both halves of the opt-in contract.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* fix: wrap the Compile code-panel excerpt so it fits the panel width
+
+The workflow.py excerpt lines overflowed the 548px code panel at 880px output width; reflow onto
+  short lines (still the real step_010 fields: click_point, ocr_text, the irreversible risk, the
+  text_present assert, and the note param).
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.18.0 (2026-07-13)
 
 ### Features

@@ -1,6 +1,83 @@
 # CHANGELOG
 
 
+## v0.17.0 (2026-07-13)
+
+### Features
+
+- Continuous skill learning — versioned skill library + governed learn/promote loop (reuses #70
+  promotion gate) ([#83](https://github.com/OpenAdaptAI/openadapt-flow/pull/83),
+  [`642cc75`](https://github.com/OpenAdaptAI/openadapt-flow/commit/642cc7514f5b9cfb1df4c814318779629acdfcec))
+
+* feat: workflow-program IR Phase 2 — loops, branches, subflows, exception paths (the state machine)
+
+Evolve the compiled artifact from a linear action list into a parameterized STATE MACHINE (RFC
+  docs/design/WORKFLOW_PROGRAM_IR.md §2), closing the review's "a workflow is not a list of actions"
+  gap. Phase 1 (typed params, guards, wait_until) added the pieces; Phase 2 adds the control flow a
+  trajectory cannot carry: LOOPS over a worklist, guarded BRANCHES, reusable SUBFLOWS, and
+
+EXCEPTION paths — the program the PBD literature (Rousillon, WebRobot, Skill-DisCo, PROLEX) says a
+  demonstration compiler must express.
+
+IR (openadapt_flow/ir.py), additive and backward-compatible: - State (action | branch | loop |
+  subflow_call | terminal) + Transition (guarded edge) form a ProgramGraph; an action state's
+  payload IS a Phase-1 Step (the unchanged hardened leaf), a transition's guard IS a Phase-1
+  Predicate. - Relation (worklist) + LoopSpec (bounded per-row body subflow); Workflow gains
+  optional program / subflows / data_sources. When program is None the linear steps list runs
+  exactly as today. - lift_to_program: mechanical degenerate lift (RFC §2.6) — a linear bundle is
+  the single-path graph.
+
+Interpreter (runtime/replayer.py): a deterministic graph interpreter ($0, zero model calls) that
+  REUSES the linear per-action pipeline unchanged — every action state runs through _run_step, so
+  identity / effect / risk / heal gates fire identically inside loop bodies and branches. Adds
+  guarded transition selection (first match wins, no-match HALTs fail-safe), bounded worklist loops,
+  subflow dispatch, and on_exception routing (graph try/except); unhandled failures and
+  halt/escalate terminals stop the run. Bounded against non-terminating graphs (step budget +
+  nesting depth). Linear path is byte-for-byte unchanged (program=None branch).
+
+Tests (tests/test_program_ir_phase2.py, 18): loop runs body 3x / 0x / run-time worklist / bound
+  enforced; branch takes each arm (param + screen predicate) and dead-ends HALT; subflow reused as
+  loop body AND direct call; on_exception catches a failed action and continues; identity- and
+  effect-gates fire inside a loop body; the lifted linear graph replays byte-identically to the
+  linear replayer; program round-trips through save/load. Full non-e2e suite green in isolation (859
+  passed; the concurrent-agent FileNotFoundError errors are environmental).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: continuous skill learning — versioned skill library + governed learn/promote loop (reuses
+  #70 promotion gate)
+
+Add openadapt_flow/learning/: orchestration for the review's item 7 — cluster successful/failed
+  traces, revise the inferred Phase-2 state machine, validate a candidate on held-out executions,
+  and promote only verified versions.
+
+- SkillLibrary: skills as versioned ProgramGraphs (id -> ordered versions, each with provenance +
+  validation score + status active/candidate/rolled_back/ superseded), persistent as JSON on disk;
+  promotion retires the prior active, never deletes it (auditable lineage). - learn_from_traces:
+  cluster -> coverage check -> revise (via a thin Inducer Protocol; multi-trace induction is a
+  sibling PR, stubbed here) -> validate -> promote/quarantine. Reuses PR #70's RegressionGate per
+  surviving step (identity/effect/risk may not regress), lifted from one heal to a whole program,
+  then a held-out coverage canary — a candidate is promoted only if it passes BOTH; else the active
+  version is retained and the candidate is quarantined with the reason (never a silent adoption). -
+  Symbolic Phase-2 coverage interpreter: walks a ProgramGraph over a trace's observed facts with the
+  SAME control-flow rules as runtime.replayer (guarded transitions, skip-guards, bounded loops) —
+  deterministic, $0, no backend. - Synthetic drift-stream harness (synth_stream): a MockMed
+  add-patient-note skill drifting over time (a new consent dialog appears mid-stream, a field is
+  renamed) plus a deterministic reference inducer, so the loop is exercised end-to-end with no live
+  app and no model calls.
+
+Tests (tests/test_continuous_learning.py): a new dialog mid-stream is detected, induced, validated,
+  and PROMOTED; noise/failures alone do NOT promote (stability); a rigged inducer that regresses
+  identity/effect/risk is REJECTED by the gate with the active version retained; an uncoverable
+  drift is refused; version history + provenance are correct. No model calls at runtime.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.16.0 (2026-07-13)
 
 ### Features

@@ -32,6 +32,7 @@ healed bundle is written.
 from __future__ import annotations
 
 import math
+import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -101,6 +102,17 @@ MASKED_REPEAT_FRACTION = 0.66
 # once the anchor is in view), so a run of N recorded scrolls has a combined
 # budget of ~2.5x the total recorded distance.
 SCROLL_BUDGET_FACTOR = 2.5
+
+# A secret TYPE step's value is never stored in the bundle; it is read at
+# replay from this environment variable (the param name upper-cased, with
+# non-alphanumeric characters mapped to '_'). See ir.Step.secret.
+SECRET_ENV_PREFIX = "OPENADAPT_FLOW_SECRET_"
+
+
+def secret_env_var(param: str) -> str:
+    """Environment variable a secret parameter's value is read from."""
+    key = "".join(ch if ch.isalnum() else "_" for ch in param).upper()
+    return f"{SECRET_ENV_PREFIX}{key}"
 
 
 class Replayer:
@@ -717,7 +729,24 @@ class Replayer:
             return None
 
         if step.action is ActionKind.TYPE:
-            if step.param is not None:
+            if step.secret:
+                # Secret value is never in the bundle/params: inject it from
+                # the environment, failing fast with an actionable message.
+                env_var = secret_env_var(step.param or "")
+                text = os.environ.get(env_var, "")
+                if not step.param:
+                    return (
+                        f"Step '{step.id}' ({step.intent}) is marked secret "
+                        "but names no parameter"
+                    )
+                if not text:
+                    return (
+                        f"Step '{step.id}' ({step.intent}) requires secret "
+                        f"parameter '{step.param}', but the environment "
+                        f"variable {env_var} is not set — export it with the "
+                        "secret value and re-run"
+                    )
+            elif step.param is not None:
                 if step.param not in params:
                     return (
                         f"Step '{step.id}' ({step.intent}) requires parameter "

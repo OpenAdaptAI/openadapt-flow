@@ -1,6 +1,88 @@
 # CHANGELOG
 
 
+## v0.9.0 (2026-07-13)
+
+### Features
+
+- Interactive `record --url` + secret-typed parameters (never persisted)
+  ([#64](https://github.com/OpenAdaptAI/openadapt-flow/pull/64),
+  [`7f145f1`](https://github.com/OpenAdaptAI/openadapt-flow/commit/7f145f11845db2ecf3f47aa6949dd6fdaf49636e))
+
+Closes the #1 adoption gap: the README promised "record a GUI workflow once" but the only recorder
+  (`demo-record`) ran the hard-coded MockMed script. There was no way to record your OWN app.
+
+record --url: - New `openadapt-flow record --url <app>` opens a headed browser on the user's own app
+  and watches real clicks/typing/keys/scrolls via in-page capture-phase DOM listeners (installed
+  with add_init_script so they survive navigations), writing the EXACT recording format `compile`
+  already consumes. Stop with Ctrl-C or by closing the window. record -> compile -> replay now
+  closes the self-serve loop for any app, not just the bundled demo. - Architecture: the
+  expose_binding callback only appends raw events to a Python list (calling any page method inside a
+  sync-API binding callback deadlocks the driver); the main loop drains it and does all
+  screenshotting. Each step's before-frame is the previous step's settled frame (no post-navigation
+  race); type/scroll runs capture their after-frame+structural state at the moment they happen so a
+  following navigating click can't corrupt them. Structured DOM identity is captured in-page at
+  click time, arming the identity ladder on interactively-recorded bundles. Reuses the existing
+  Recorder via a new `record_observed` seam — the recording format is not forked.
+
+Secret-typed parameters: - input[type=password] is auto-detected as secret; any field can be marked
+  with `--secret <name>`. A secret's literal value is NEVER read into Python, never written to
+  meta.json / events.jsonl / the compiled bundle, and its field region is redacted (solid black)
+  from the persisted before/after frames. - At replay the value is injected from
+  OPENADAPT_FLOW_SECRET_<PARAM>; a missing secret fails fast with an actionable message naming the
+  env var. - Schema: ir.Step.secret + Workflow.secret_params; compiler carries the secret through
+  with text=None; replayer resolves it from the environment.
+
+Tests: tests/test_secret_params.py (fast unit: recorder redaction/non-persist,
+
+compiler carry-through, replayer env injection + missing-secret error) and
+  tests/test_interactive_recorder.py (headless scripted record -> compile -> replay proving the
+  loop, no secret leak in any artifact, frame redaction, and env injection). Full suite: 962 passed,
+  9 skipped.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.8.0 (2026-07-13)
+
+### Features
+
+- Governed healing — reviewable patches, regression/perturbation gate, identity-never-weakened
+  invariant (fixes heal context-drop) ([#70](https://github.com/OpenAdaptAI/openadapt-flow/pull/70),
+  [`422ccf6`](https://github.com/OpenAdaptAI/openadapt-flow/commit/422ccf6566e955392a6ed218c0bccf60983ee7ae))
+
+A heal was a LOCAL locator repair that silently swapped the anchor bundle, and (two external
+  reviews) it could refresh a step's identity context to None — flipping an ARMED step to UNARMED
+  and disabling the pre-click identity gate for that step while still reporting green. This makes
+  healing a governed patch pipeline whose invariant is: a repair may change HOW an operation is
+  performed, but never silently weaken WHAT it means or how its effects are verified.
+
+New module openadapt_flow/runtime/healing/: - patch.py: HealEvent -> reviewable, diffable HealPatch
+  (identity vs locator changes called out; identity_before/after snapshots). - governance.py:
+  identity_preserved() (the invariant), effect/risk regression checks, RegressionGate.
+  Deterministic, $0, no model calls; identity reuses the same OCR band matcher the pre-click gate
+  uses. - pipeline.py: candidate -> gate -> canary -> promote/rollback; govern_heal() entrypoint. A
+  refused patch is QUARANTINED (persisted for review) and the run HALTS — never auto-applies an
+  unverified repair. - perturbation.py: deterministic synthetic UI-drift harness (shift/scale/
+  retheme/reflow) + replay_patch regression report; reusable for held-out validation and future
+  patch induction.
+
+replayer.py: near-zero change — the heal hook now governs the built event and only applies a
+  PROMOTED patch; a quarantined heal fails the step so the run halts. The identity-weakening is
+  fixed in the heal code path, not by restructuring the replayer.
+
+Tests (tests/test_governed_healing.py): the old ARMED->UNARMED weakening is reproduced end-to-end
+  and blocked (quarantine + halt, anchor unchanged); a benign locator drift heals + passes the gate
+  + promotes; dropped identity/ effect coverage and risk downgrades are rejected; the perturbation
+  harness is deterministic. Full suite green (1007 passed, 10 skipped).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.7.0 (2026-07-13)
 
 ### Features

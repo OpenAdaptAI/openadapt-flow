@@ -240,6 +240,18 @@ class Step(BaseModel):
     anchor: Optional[Anchor] = None  # None for pure keyboard/wait steps
     text: Optional[str] = None  # literal text for TYPE
     param: Optional[str] = None  # if set, TYPE text comes from params[param]
+    secret: bool = Field(
+        default=False,
+        description=(
+            "TYPE steps only: the parameter is a SECRET (e.g. a password)."
+            " Its literal value is NEVER stored in the recording, the events"
+            " log, or this bundle; at replay it is injected from the"
+            " environment variable OPENADAPT_FLOW_SECRET_<PARAM> (the param"
+            " name upper-cased). ``text`` is always None for a secret step,"
+            " and ``param`` names the required secret. A missing secret at"
+            " replay is a clear, fail-fast error (see runtime.Replayer)."
+        ),
+    )
     key: Optional[str] = None  # for KEY, e.g. "Enter"
     scroll_dx: Optional[int] = None  # for SCROLL: wheel delta, px right
     scroll_dy: Optional[int] = None  # for SCROLL: wheel delta, px down
@@ -294,6 +306,14 @@ class Workflow(BaseModel):
     viewport: Optional[tuple[int, int]] = None
     params: dict[str, str] = Field(
         default_factory=dict, description="param name -> example/default value"
+    )
+    secret_params: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of SECRET parameters (e.g. passwords). Their values are"
+            " NEVER stored here or in ``params``; each is injected at replay"
+            " from OPENADAPT_FLOW_SECRET_<PARAM> (see Step.secret)."
+        ),
     )
     steps: list[Step] = Field(default_factory=list)
 

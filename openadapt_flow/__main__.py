@@ -279,6 +279,60 @@ def _cmd_certify(args: argparse.Namespace) -> int:
     return 0 if report.passed else 2
 
 
+def _cmd_disambiguate(args: argparse.Namespace) -> int:
+    import json
+
+    from openadapt_flow.compiler.disambiguation import (
+        apply_answers,
+        detect_ambiguities,
+    )
+    from openadapt_flow.ir import Workflow
+
+    bundle = Path(args.bundle)
+    workflow = Workflow.load(bundle)
+    questions = detect_ambiguities(workflow)
+
+    if not questions:
+        print("No ambiguities detected; the demo is fully specified.")
+        return 0
+
+    answers: dict[str, str] = {}
+    if args.answers:
+        answers = json.loads(Path(args.answers).read_text())
+    elif args.interactive:
+        # Thin interactive wrapper -- prompts a human, then calls the same API
+        # the tests drive directly. The core stays non-interactive.
+        for q in questions:
+            print(f"\n{q.prompt}")
+            for opt in q.options:
+                print(f"  ({opt.key}) {opt.label}")
+            tag = "" if q.consequential else f" [default: {q.default_key}]"
+            reply = input(f"Answer for {q.id}{tag}: ").strip()
+            if reply:
+                answers[q.id] = reply
+    else:
+        # Non-interactive listing: surface the questions and exit nonzero if
+        # any is a consequential (must-answer) ambiguity.
+        for q in questions:
+            flag = " (CONSEQUENTIAL)" if q.consequential else ""
+            print(f"\n[{q.kind.value}] {q.id}{flag}\n  {q.prompt}")
+            for opt in q.options:
+                print(f"  ({opt.key}) {opt.label}")
+        consequential = any(q.consequential for q in questions)
+        print(
+            f"\n{len(questions)} question(s) detected. Re-run with "
+            "--interactive or --answers to resolve."
+        )
+        return 2 if consequential else 0
+
+    result = apply_answers(workflow, answers)
+    print(result.render())
+    if args.write:
+        result.workflow.save(bundle)
+        print(f"Resolved workflow written to {bundle}")
+    return 0 if result.certified else 2
+
+
 def _cmd_emit_skill(args: argparse.Namespace) -> int:
     from openadapt_flow.emit.skill import emit_skill
 
@@ -471,6 +525,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_certify)
+
+    p = sub.add_parser(
+        "disambiguate",
+        help=(
+            "Surface compile-time multiple-choice questions for an ambiguous "
+            "demo and apply the answers as guards/params (ask, don't guess)"
+        ),
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for each question on the terminal",
+    )
+    p.add_argument(
+        "--answers",
+        help="JSON file mapping question id -> chosen option key",
+    )
+    p.add_argument(
+        "--write",
+        action="store_true",
+        help="Save the resolved workflow back into the bundle",
+    )
+    p.set_defaults(func=_cmd_disambiguate)
 
     p = sub.add_parser(
         "emit-skill", help="Emit an Agent Skills folder for a bundle"

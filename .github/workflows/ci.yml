@@ -4,15 +4,52 @@ on:
   push:
   pull_request:
 
+# GitHub Actions are pinned to full commit SHAs (not mutable tags) as a
+# supply-chain control; the trailing comment records the human-readable
+# version. Dependabot (.github/dependabot.yml) proposes SHA bumps.
+
 jobs:
-  test:
+  # --- Lint + format + type-check (fast, single interpreter) ---------------
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
+
+      - name: Install
+        run: pip install -e .[dev]
+
+      - name: Ruff lint
+        run: ruff check openadapt_flow
+
+      - name: Ruff format check
+        run: ruff format --check openadapt_flow
+
+      - name: Mypy
+        run: mypy
+
+  # --- Test matrix: Python 3.10-3.13 on Linux, plus a macOS leg ------------
+  test:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          # At least one non-Linux leg for the browser/OCR runtime.
+          - os: macos-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Install
         run: pip install -e .[dev]
@@ -23,18 +60,68 @@ jobs:
       # --basetemp pins pytest's tmp_path factory inside the workspace so
       # run dirs (REPORT.md + step/heal PNGs) survive for artifact upload;
       # by default they land in the system temp dir and are unrecoverable
-      # when a drift/heal test fails in CI.
+      # when a drift/heal test fails in CI. --cov reports coverage as a
+      # visibility number (no hard floor yet).
       - name: Test
-        run: mkdir -p runs && pytest -q --basetemp=runs/ci
+        run: |
+          mkdir -p runs
+          pytest -q --basetemp=runs/ci \
+            --cov=openadapt_flow --cov-report=term-missing:skip-covered
 
       - name: Upload run artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runs
+          name: runs-${{ matrix.os }}-py${{ matrix.python-version }}
           path: |
             runs/**/REPORT.md
             runs/**/BENCH.md
             runs/**/report.json
             runs/**/*.png
           if-no-files-found: warn
+
+  # --- Windows: pure-Python / mock backend tests (no live VM, no browser) --
+  windows-mock:
+    needs: lint
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e .[dev]
+
+      # The WindowsBackend + RDP backend suites mock the WAA/RDP servers with
+      # stdlib HTTP + fakes (no live VM, no Playwright browser), so they run
+      # anywhere. This proves the 4-method Backend protocol on Windows.
+      - name: Windows mock backend tests
+        run: pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py
+
+  # --- Clean-wheel install: build, install in a fresh venv, import ---------
+  wheel:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel
+        run: |
+          pip install build
+          python -m build --wheel
+
+      - name: Install the wheel in a clean venv and import
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          # Import from a dir without the source tree; assert __version__ equals
+          # the installed distribution metadata (the drift bug this PR fixes —
+          # version-agnostic so it keeps holding across releases) and that the
+          # py.typed marker shipped inside the wheel.
+          cd /tmp && /tmp/clean/bin/python -c "import os, importlib.metadata as m, openadapt_flow; v = openadapt_flow.__version__; dist = m.version('openadapt-flow'); print('attr', v, 'dist', dist); assert v == dist, (v, dist); p = os.path.join(os.path.dirname(openadapt_flow.__file__), 'py.typed'); assert os.path.exists(p), 'py.typed missing from installed package'; print('py.typed present, import OK')"

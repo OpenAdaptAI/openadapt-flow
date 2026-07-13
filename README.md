@@ -56,9 +56,51 @@ expectations entirely, the run halts with a report instead of guessing, and
 steps tagged irreversible won't act on a low-confidence match at all.
 
 The runtime is vision-only (PNG in, clicks and keys out) behind a small
-`Backend` protocol. The reference backend is a headless browser, which is why
-the whole loop runs in CI with no OS permissions. Desktop and RDP backends
-are adapters to come, not rewrites.
+`Backend` protocol. The reference headless-browser backend is the production
+path — it's why the whole loop runs in CI with no OS permissions. The same
+four-method protocol already has two more backends, no rewrites: a
+`WindowsBackend` (desktop over the WAA HTTP contract, experimental) and a
+`FreeRDPBackend` for pixel-only RDP (its frame decode is proven against a
+real captured RDP frame). Browser is what we'd put in production today;
+desktop and RDP are real but earlier on the maturity curve.
+
+## When to use something else
+
+Reach for a selector-based tool when a stable programmatic surface exists and
+you control it:
+
+- **Playwright codegen / Selenium IDE** — you own a web app with stable DOM
+  selectors and only need to drive *that* app. A recorded selector script is
+  simpler and faster than vision. Use them.
+- **Selector RPA (UiPath, Power Automate Desktop)** — you want a large vendor
+  suite, a visual designer, and enterprise connectors, and your targets expose
+  reliable selectors/UIA automation IDs.
+
+openadapt-flow is for the case those tools struggle with: **the same
+demonstration has to run across substrates that don't share a selector model**
+— a browser today, a Citrix/RDP pixel stream or a legacy desktop app tomorrow —
+and you need it to be *deterministic and auditable* rather than re-reasoned by a
+model each run.
+
+Why vision anchors instead of selectors, even when a DOM is available?
+
+- **Determinism + review.** Each step resolves through a fixed ladder (template
+  → OCR → geometry) and every self-heal is written back as a reviewable diff.
+  No hidden model reasoning on the hot path.
+- **Cross-substrate.** A pixel-in/clicks-out contract is the one interface that
+  exists over RDP/Citrix, a native desktop, and a browser alike, so one
+  compiled workflow spans all three.
+- **Identity + safety layer.** The runtime verifies it's acting on the *right*
+  target and halts instead of guessing; steps tagged irreversible won't act on a
+  low-confidence match. That gate is substrate-independent.
+
+Honest caveat: where a real DOM or UIA tree exists, selectors are often the
+better signal — and we take that seriously. We ship a DOM-selector benchmark
+arm (`openadapt_flow.benchmark.dom_arm`) that steelmans a hand-written
+Playwright script against the same schedule, precisely so the vision claim is
+tested against the real incumbent rather than an agent. Vision-first is the
+floor that works on every substrate, not a rejection of structure; where a DOM
+is present, consuming it is on the roadmap.
 
 ## Proof
 

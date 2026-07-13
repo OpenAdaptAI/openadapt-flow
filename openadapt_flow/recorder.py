@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import imagehash
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from openadapt_flow.backend import Backend
 from openadapt_flow.ir import StructuralLocator
@@ -81,6 +81,7 @@ class Recorder:
         self._settle_stable_frames = settle_stable_frames
         self._settle_timeout_s = settle_timeout_s
         self._params: dict[str, str] = {}
+        self._secret_params: set[str] = set()
         self._i = 0
         self._t0 = time.monotonic()
 
@@ -136,6 +137,7 @@ class Recorder:
             "viewport": [int(viewport[0]), int(viewport[1])],
             "app_url": self._app_url,
             "params": dict(self._params),
+            "secret_params": sorted(self._secret_params),
         }
         (self._dir / "meta.json").write_text(json.dumps(meta, indent=2))
         return self._dir
@@ -144,9 +146,7 @@ class Recorder:
 
     def _record(self, event: dict[str, Any], act: Callable[[], None]) -> None:
         """Capture before frame, act, wait settle, capture after, log event."""
-        i = self._i
         before = self._backend.screenshot()
-        (self._frames_dir / f"{i:04d}_before.png").write_bytes(before)
         structural_before = self._structural_state()
         # Structured identity of the clicked target (DOM / a11y text), when
         # the backend exposes it: captured on the BEFORE frame, before the
@@ -175,11 +175,107 @@ class Recorder:
                 event = {**event, "structured_identity": structured}
         act()
         after = self._wait_settled()
-        (self._frames_dir / f"{i:04d}_after.png").write_bytes(after)
+        self._commit(event, before, after, structural_before)
+
+    def record_observed(
+        self,
+        event: dict[str, Any],
+        *,
+        before_png: bytes,
+        structural_before: dict[str, Any],
+        structured_identity: Optional[str] = None,
+        param: Optional[str] = None,
+        secret: bool = False,
+        redact_region: Optional[tuple[int, int, int, int]] = None,
+        after_png: Optional[bytes] = None,
+        structural_after: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Persist an event the USER already performed (no backend action).
+
+        The driving methods (``click`` / ``type_text`` / ...) perform the
+        action and screenshot around it. ``record_observed`` instead records
+        an action the caller OBSERVED in a live session the user is driving:
+        the action already happened, so nothing is performed on the backend.
+
+        Frame chaining mirrors a driven demonstration: ``before_png`` is the
+        pre-action frame the caller supplies (the previous step's settled
+        frame — the screen the user saw before acting), and the after frame is
+        captured now, once the screen settles.
+
+        Args:
+            event: The event dict (``{"kind": ..., ...}``) without ``i``/``t``.
+            before_png: Pre-action frame (the previous settled frame).
+            structural_before: URL/title/page-count observed before the action
+                (captured in-page at action time, pre-navigation).
+            structured_identity: DOM/a11y identity of the clicked row, captured
+                in-page at click time; stored on click/double_click events.
+            param: Parameter name for a TYPE event, if any.
+            secret: TYPE only. When True the value is a SECRET: the event
+                carries NO ``text`` (never persisted), ``param`` is registered
+                as a secret parameter, and the value is injected from the
+                environment at replay (see ir.Step.secret).
+            redact_region: (x, y, w, h) blacked out in BOTH the before and
+                after frames before they are written — a secret field's pixels
+                must never persist to disk.
+            after_png: Pre-captured settled after-frame. When None, the screen
+                is settled and captured now.
+        """
+        event = dict(event)
+        if event.get("kind") in ("click", "double_click") and structured_identity:
+            event["structured_identity"] = structured_identity
+        if param is not None:
+            event["param"] = param
+            if secret:
+                event["secret"] = True
+                event.pop("text", None)
+                self._secret_params.add(param)
+            else:
+                self._params[param] = str(event.get("text", ""))
+        # A caller that already captured the settled after-frame at the right
+        # moment (e.g. a typed field's value BEFORE a following navigating
+        # click) passes it in; otherwise we settle and capture now.
+        if after_png is None:
+            after_png = self._wait_settled()
+        self._commit(
+            event,
+            before_png,
+            after_png,
+            structural_before,
+            redact_region=redact_region,
+            structural_after=structural_after,
+        )
+
+    def _commit(
+        self,
+        event: dict[str, Any],
+        before_png: bytes,
+        after_png: bytes,
+        structural_before: dict[str, Any],
+        *,
+        redact_region: Optional[tuple[int, int, int, int]] = None,
+        structural_after: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Write this step's before/after frames and its events.jsonl line.
+
+        ``redact_region`` (when given) is blacked out in both frames before
+        they hit disk — the single choke point that keeps a secret field's
+        pixels out of every persisted frame. ``structural_after`` lets a
+        caller supply the post-action URL/title/page-count captured at the
+        right moment (a deferred type-run flush must not read a URL a LATER
+        navigating click produced); when None it is read now.
+        """
+        i = self._i
+        if redact_region is not None:
+            before_png = self._redact(before_png, redact_region)
+            after_png = self._redact(after_png, redact_region)
+        (self._frames_dir / f"{i:04d}_before.png").write_bytes(before_png)
+        (self._frames_dir / f"{i:04d}_after.png").write_bytes(after_png)
         line: dict[str, Any] = {"i": i, **event}
         for key, value in structural_before.items():
             line[f"{key}_before"] = value
-        for key, value in self._structural_state().items():
+        if structural_after is None:
+            structural_after = self._structural_state()
+        for key, value in structural_after.items():
             line[f"{key}_after"] = value
         line["t"] = round(time.monotonic() - self._t0, 3)
         with self._events_path.open("a") as f:
@@ -205,6 +301,20 @@ class Recorder:
             return getter(int(x), int(y))
         except Exception:
             return None
+    @staticmethod
+    def _redact(
+        png: bytes, region: tuple[int, int, int, int]
+    ) -> bytes:
+        """Return ``png`` with ``region`` (x, y, w, h) filled solid black."""
+        x, y, w, h = (int(v) for v in region)
+        with Image.open(io.BytesIO(png)) as img:
+            frame = img.convert("RGB")
+        ImageDraw.Draw(frame).rectangle(
+            [max(0, x), max(0, y), x + w, y + h], fill=(0, 0, 0)
+        )
+        out = io.BytesIO()
+        frame.save(out, format="PNG")
+        return out.getvalue()
 
     def _structured_identity_at(self, x: int, y: int) -> Optional[str]:
         """Structured (DOM / a11y) identity text under (x, y), if available.

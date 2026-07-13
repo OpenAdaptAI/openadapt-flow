@@ -28,13 +28,52 @@ pip install openadapt-flow && playwright install chromium
 
 openadapt-flow demo-record --out rec                     # record a demonstration
 openadapt-flow compile rec --out bundle --name my-task   # compile it
+openadapt-flow lint bundle                               # report coverage gaps
+openadapt-flow certify bundle --policy clinical-write    # refuse it if unsafe
 openadapt-flow replay bundle                             # replay: local, $0
 openadapt-flow replay bundle --drift theme               # drift the UI, watch it heal
 ```
 
 The last two commands serve the bundled MockMed demo app and write an
-illustrated `REPORT.md` per run. Pass `--url` to replay against your own app;
-recorded parameter values are the defaults and `--param` overrides them.
+illustrated `REPORT.md` per run.
+
+### Record your own app
+
+`record --url` opens a headed browser on YOUR app and watches what you do —
+real clicks, typing, key presses and scrolls — writing the same recording
+format `compile` consumes. Perform the workflow, then press Ctrl-C (or close
+the window) to finish:
+
+```bash
+openadapt-flow record --url https://your.app --out rec   # do the task, Ctrl-C
+openadapt-flow compile rec --out bundle --name my-task
+openadapt-flow replay bundle --url https://your.app       # replay it
+```
+
+Pass `--url` to `replay` to run against your own app; recorded parameter values
+are the defaults and `--param` overrides them.
+
+**Secrets never get recorded.** A `input[type=password]` field (or any field
+named with `--secret <name>`) is a secret parameter: its value is never written
+to the recording, the events log, the compiled bundle, or the saved frames (its
+region is redacted). At replay it is injected from the environment and a missing
+one fails fast:
+
+```bash
+openadapt-flow record --url https://your.app --out rec --secret password
+export OPENADAPT_FLOW_SECRET_PASSWORD='…'                 # supplied at replay
+openadapt-flow replay bundle --url https://your.app
+```
+
+**Compiled is not the same as certified safe.** `lint` reports a bundle's
+coverage gaps (clicks that act with no identity check, steps that assert
+nothing, write steps left mis-classified) with a severity each; `certify`
+enforces a policy and exits nonzero — refusing the bundle before it deploys —
+when it fails. Risk is auto-classified at compile time (write-shaped clicks —
+save/submit/create/delete/... — become `irreversible`, which arms the
+low-confidence refusal), and two example policies ship: a permissive default
+and a strict `clinical-write.yaml`. See [docs/LIMITS.md](docs/LIMITS.md) for
+what the heuristic does and does not catch.
 
 ## How it works
 

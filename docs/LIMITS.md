@@ -50,15 +50,32 @@ were fixed on 2026-07-10. All moved to the safe-halt section below.)
   surviving text is shorter than 12 squashed characters are treated the
   same way (a generic fragment like "Active High 3" matches every sibling
   row — recording it would arm false confidence, so it is not recorded).
-- **Risk classification is opt-in and never auto-assigned.** Every step
-  compiles as `risk="reversible"` unless the compile caller passes
-  `risk_overrides` naming the step; nothing in the compiler infers
-  irreversibility. Concretely: in a default-compiled bundle, an
-  unreadable identity band on a chart-open click **proceeds** (flagged
-  `identity: "unreadable"` in the report), and the wrong-patient-write
-  tail behind that click **remains reachable with a green report** — the
-  "irreversible steps refuse on unreadable band" branch never runs unless
-  a human marked the step at compile time.
+- **Risk classification is now AUTO-ASSIGNED (heuristic), and enforceable —
+  but the heuristic is fallible.** As of the policy-engine PR the compiler
+  infers `risk="irreversible"` for CLICK/DOUBLE_CLICK steps whose intent or
+  button label is write-shaped — create/update/delete/submit/save/confirm/add
+  and siblings, word-boundary matched (see `openadapt_flow/risk.py`) — so the
+  "irreversible steps refuse on unreadable band / below-OCR rung" branch now
+  runs BY DEFAULT for consequential writes instead of only when a human marks
+  the step. `risk_overrides` still wins in either direction. The classifier is
+  deliberately biased toward irreversible (a false irreversible costs
+  availability; a false reversible costs safety), but it is a keyword heuristic,
+  not understanding: it misses writes with non-write labels (an icon-only
+  "commit" button, a bare "OK" that saves) and steps that commit via a
+  submitting Enter key (KEY steps are never auto-irreversible), and it over-flags
+  benign write-word labels ("Apply filter", "Add to favourites"). It reads only
+  the label/intent, never the app's true effect. So the wrong-patient-write tail
+  behind a write step with a *non-write label* is still reachable with a green
+  report unless a human adds `risk_overrides`. Two new pre-deploy commands turn
+  this from disclosure into enforcement: `openadapt-flow lint <bundle>` reports
+  the residual gaps (unarmed clicks, vacuous postconditions, under-classified
+  risk) with a severity each, and `openadapt-flow certify <bundle> --policy
+  <p.yaml>` REFUSES a bundle that violates a policy (e.g. the shipped
+  `clinical-write.yaml`: no unarmed clicks, identity required on every write /
+  entity-navigation step, effect verification required on every write) before it
+  is ever deployed — making "runnable" distinct from "certified safe". This is a
+  compile-/pre-deploy layer only; the replayer, identity ladder and healer are
+  unchanged.
 - **Postconditions read the SCREEN, not the system of record — so
   transactional write faults are silent UNLESS a step declares `effects` and
   a verifier is configured.** A 2026-07-12 fault-model study
@@ -671,9 +688,12 @@ Other known-remaining items:
   exposed to wrong-entity clicks.
 - **Label-only and too-generic-band targets** (see the dangerous list)
   compile with no identity context at all.
-- **Automatic risk classification does not exist** — `risk_overrides` at
-  compile time is the only way a step becomes irreversible (see the
-  dangerous list for what that means by default).
+- **Automatic risk classification is a keyword heuristic, not understanding**
+  — the compiler now auto-marks write-shaped clicks irreversible (see the
+  dangerous list), but a write behind a non-write label, or committed via an
+  Enter key press, is not caught; `risk_overrides` remains the way to correct
+  a miss, and `certify` with a strict policy is the gate that refuses a bundle
+  whose gaps were not closed.
 - **Param targets whose row text varies with the entity** halt on the
   correct row (see the parameters section) — a re-anchoring strategy that
   can verify such rows without falling back to position is future work.

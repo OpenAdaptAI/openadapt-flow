@@ -277,12 +277,18 @@ class TestNavigationHijackMidRun:
 
 class TestTargetRenamedMidRun:
     def test_save_button_renamed_mid_run_heals_and_saves(
-        self, bundle, mockmed_url, _browser, tmp_path
+        self, bundle_writes_reversible, mockmed_url, _browser, tmp_path
     ) -> None:
         """PASS (healed). The save button's label changes to 'Commit
         Record' after the form renders. Template and OCR evidence die, the
         geometry rung (landmarks are unchanged) resolves it, the anchor is
-        healed, and the encounter saves normally."""
+        healed, and the encounter saves normally.
+
+        Uses the writes-reversible bundle so this isolates the HEALING
+        mechanism: with the default bundle the auto-classified irreversible
+        Save would (correctly) refuse a geometry-rung resolution — the risk
+        gate covered by TestIrreversibleRiskGate."""
+        bundle = bundle_writes_reversible
 
         def inject(page):
             page.wait_for_selector("#save-encounter", timeout=5000)

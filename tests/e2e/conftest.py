@@ -69,6 +69,34 @@ def bundle(recording_dir: Path, tmp_path_factory: pytest.TempPathFactory) -> Bun
     return Bundle(dir=out, workflow=workflow)
 
 
+@pytest.fixture(scope="session")
+def bundle_writes_reversible(
+    recording_dir: Path, tmp_path_factory: pytest.TempPathFactory
+) -> Bundle:
+    """The shared bundle recompiled with every auto-classified irreversible
+    (write-shaped) step forced back to ``reversible``.
+
+    Auto risk-classification (:mod:`openadapt_flow.risk`) marks the demo's
+    write steps (Save Encounter, New Encounter) irreversible, which arms the
+    below-OCR risk gate: an irreversible step that can only be located via the
+    geometry rung REFUSES to act — the intended safety default. The
+    rename-drift healing tests deliberately drive the Save button down to the
+    geometry rung to exercise anchor HEALING, so they use this fixture to
+    disable the gate and isolate the healing mechanism from it. The gate itself
+    is covered by
+    ``TestIrreversibleRiskGate::test_irreversible_step_refuses_below_ocr_resolution``.
+    """
+    out = tmp_path_factory.mktemp("bundle-writes-reversible")
+    probe = compile_recording(recording_dir, out, name="triage-demo")
+    overrides = {
+        step.id: "reversible" for step in probe.steps if step.risk == "irreversible"
+    }
+    workflow = compile_recording(
+        recording_dir, out, name="triage-demo", risk_overrides=overrides
+    )
+    return Bundle(dir=out, workflow=workflow)
+
+
 @pytest.fixture(scope="module")
 def _browser() -> Iterator[object]:
     """One headless chromium shared by all replays (pages are per-replay).

@@ -315,6 +315,132 @@ class ApiBinding(BaseModel):
     )
 
 
+# -- Workflow-program IR, Phase 1 (RFC docs/design/WORKFLOW_PROGRAM_IR.md §6) --
+#
+# Additive, backward-compatible first step toward the parameterized workflow
+# program: typed parameters, a per-step `wait_until` readiness predicate, and a
+# per-step `guard` precondition. ALL optional -- a bundle that declares none of
+# them loads and replays EXACTLY as a v0 linear bundle does. These fields are
+# deliberately ORTHOGONAL to Step.effects / Step.risk / the Anchor identity
+# rungs: they add control-flow *around* the existing hardened action leaf, they
+# do not restructure it (RFC §2.1). Full branches/loops/subflows are Phase 2 --
+# NOT built here.
+
+
+class ParamKind(str, Enum):
+    """Typed-parameter kinds (RFC §2.2 ``ParamSpec.type``).
+
+    ``entity_ref`` names an ENTITY to be re-resolved by the identity ladder at
+    run time (the "which patient" fix, docs/LIMITS.md), not a literal to blindly
+    substitute; the other kinds are literal values. Phase 1 stores the type for
+    typing/validation/emit -- kind-specific run-time resolution (entity_ref
+    re-resolution) is Phase 2+.
+    """
+
+    STRING = "string"
+    DATE = "date"
+    ENUM = "enum"
+    NUMBER = "number"
+    ENTITY_REF = "entity_ref"
+
+
+class ParamSpec(BaseModel):
+    """A TYPED workflow parameter (RFC §2.2). Supersedes a bare
+    ``params: dict[str, str]`` entry by carrying a type, the recorded demo
+    value (``example``, which doubles as the replay default), whether it is
+    required, and enum choices. Additive: ``Workflow.param_specs`` lives
+    ALONGSIDE the frozen ``Workflow.params`` dict; a bundle with an empty
+    ``param_specs`` behaves exactly as before.
+    """
+
+    name: str
+    type: ParamKind = ParamKind.STRING
+    example: Optional[str] = Field(
+        default=None,
+        description="Recorded demo value; also the replay default when the "
+        "caller supplies no value for this parameter.",
+    )
+    required: bool = True
+    choices: list[str] = Field(
+        default_factory=list, description="Allowed values for an enum param."
+    )
+
+
+class PredicateKind(str, Enum):
+    """Deterministic, model-free predicate kinds (RFC §2.2 ``Predicate``).
+
+    A predicate is evaluated over the CURRENT observed frame / run parameters
+    with ZERO model calls -- it is the thing a linear IR cannot express. Phase 1
+    ships the concrete kinds needed to (a) subsume today's SCROLL closed loop
+    (``anchor_resolves``), (b) turn the optional-modal case into a guarded
+    branch (``text_present``), and (c) branch on a parameter (``param_equals``),
+    plus boolean composition. ``worklist_nonempty`` (loops) is Phase 2.
+    """
+
+    #: The embedded ``anchor`` resolves on the current frame via the (model-free)
+    #: resolution ladder -- today's closed-loop scroll stop condition, now a
+    #: first-class predicate.
+    ANCHOR_RESOLVES = "anchor_resolves"
+    #: ``text`` is present on the current frame (tolerant OCR presence check).
+    TEXT_PRESENT = "text_present"
+    #: ``text`` is NOT present on the current frame.
+    TEXT_ABSENT = "text_absent"
+    #: The run's value for parameter ``param`` equals ``value`` (string compare).
+    PARAM_EQUALS = "param_equals"
+    AND = "and"
+    OR = "or"
+    NOT = "not"
+
+
+class Predicate(BaseModel):
+    """A deterministic condition over observed state (RFC §2.2 ``Predicate``).
+
+    Used two ways in Phase 1: as a ``Step.wait_until`` readiness predicate (the
+    replayer polls it, BOUNDED by ``timeout_s``, and HALTS on timeout -- never
+    proceeds-anyway) and as the condition inside a ``Guard``. Model-free by
+    construction (see ``runtime.replayer._predicate_holds``); an unknown kind
+    fails safe (does not hold).
+    """
+
+    kind: PredicateKind
+    anchor: Optional[Anchor] = None  # ANCHOR_RESOLVES
+    text: Optional[str] = None  # TEXT_PRESENT / TEXT_ABSENT
+    param: Optional[str] = None  # PARAM_EQUALS
+    value: Optional[str] = None  # PARAM_EQUALS
+    intent: Optional[str] = Field(
+        default=None,
+        description="Human-readable label (also the resolution-ladder intent "
+        "for an ANCHOR_RESOLVES predicate).",
+    )
+    operands: list["Predicate"] = Field(
+        default_factory=list, description="Sub-predicates for AND / OR / NOT."
+    )
+    timeout_s: float = Field(
+        default=5.0,
+        description="wait_until bound: how long the replayer polls this "
+        "predicate before HALTing (fail-safe; never proceed-anyway).",
+    )
+
+
+class Guard(BaseModel):
+    """A deterministic precondition on a step (RFC §2.2, Phase 1 scope).
+
+    ``predicate`` is evaluated over the step's entry frame. When it does NOT
+    hold, ``on_unmet`` decides: ``"halt"`` (the DEFAULT -- the safe direction
+    for an unmet precondition, per the RFC's refuse-rather-than-guess posture)
+    stops the run naming the step; ``"skip"`` makes the step a no-op success
+    (the expected-but-optional case, e.g. dismissing a survey modal only when it
+    appeared -- a guarded branch WITHOUT the Phase-2 state machine). Full
+    multi-way branching is Phase 2.
+    """
+
+    predicate: Predicate
+    on_unmet: Literal["halt", "skip"] = "halt"
+
+
+Predicate.model_rebuild()  # resolve the self-referential `operands`
+
+
 class Step(BaseModel):
     id: str
     intent: str = Field(description="Human-readable purpose of the step")
@@ -322,6 +448,18 @@ class Step(BaseModel):
     anchor: Optional[Anchor] = None  # None for pure keyboard/wait steps
     text: Optional[str] = None  # literal text for TYPE
     param: Optional[str] = None  # if set, TYPE text comes from params[param]
+    secret: bool = Field(
+        default=False,
+        description=(
+            "TYPE steps only: the parameter is a SECRET (e.g. a password)."
+            " Its literal value is NEVER stored in the recording, the events"
+            " log, or this bundle; at replay it is injected from the"
+            " environment variable OPENADAPT_FLOW_SECRET_<PARAM> (the param"
+            " name upper-cased). ``text`` is always None for a secret step,"
+            " and ``param`` names the required secret. A missing secret at"
+            " replay is a clear, fail-fast error (see runtime.Replayer)."
+        ),
+    )
     key: Optional[str] = None  # for KEY, e.g. "Enter"
     scroll_dx: Optional[int] = None  # for SCROLL: wheel delta, px right
     scroll_dy: Optional[int] = None  # for SCROLL: wheel delta, px down
@@ -349,6 +487,19 @@ class Step(BaseModel):
     # configured also falls through to the GUI (the API tier's safe fallback).
     api_binding: Optional[ApiBinding] = None
     risk: Literal["reversible", "irreversible"] = "reversible"
+    # Workflow-program IR, Phase 1 (RFC §6) -- both OPTIONAL and additive; a
+    # step with neither replays EXACTLY as a v0 step. Orthogonal to effects /
+    # risk / identity above.
+    #
+    # ``wait_until``: a BOUNDED readiness predicate the replayer polls BEFORE
+    # acting; timeout => HALT (fail-safe, never proceed-anyway). This subsumes
+    # today's SCROLL closed loop as its first concrete predicate -- a SCROLL
+    # step's default readiness is "the next anchored step's anchor resolves",
+    # now expressed as an ANCHOR_RESOLVES predicate (see runtime.replayer).
+    wait_until: Optional[Predicate] = None
+    # ``guard``: a deterministic precondition evaluated on the entry frame.
+    # Unmet => HALT (default) or SKIP the step (see Guard.on_unmet).
+    guard: Optional[Guard] = None
     timeout_s: float = 10.0
     # Identity-protection audit trail (clicks and anchored TYPE steps):
     # whether this step's click is guarded by the pre-click identity check
@@ -386,6 +537,19 @@ class Workflow(BaseModel):
     viewport: Optional[tuple[int, int]] = None
     params: dict[str, str] = Field(
         default_factory=dict, description="param name -> example/default value"
+    )
+    # Workflow-program IR, Phase 1 (RFC §2.2, §6): TYPED parameter specs, ADDITIVE
+    # alongside the frozen ``params`` dict above. Keyed by param name. Empty by
+    # default, so a v0 bundle is unaffected; when present, the replayer folds each
+    # spec's ``example`` in as a default and fails fast on a missing required one.
+    param_specs: dict[str, "ParamSpec"] = Field(default_factory=dict)
+    secret_params: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of SECRET parameters (e.g. passwords). Their values are"
+            " NEVER stored here or in ``params``; each is injected at replay"
+            " from OPENADAPT_FLOW_SECRET_<PARAM> (see Step.secret)."
+        ),
     )
     steps: list[Step] = Field(default_factory=list)
 
@@ -493,6 +657,10 @@ class StepResult(BaseModel):
     step_id: str
     intent: str
     ok: bool
+    # Workflow-program IR, Phase 1: True when a step was SKIPPED because its
+    # ``guard`` was unmet with ``on_unmet="skip"`` (a no-op success -- the
+    # step did not act). False for every executed step; additive.
+    skipped: bool = False
     resolution: Optional[Resolution] = None
     identity: Optional[IdentityCheck] = None  # pre-click identity verdict
     input_verified: Optional[bool] = None  # TYPE steps: typed input landed

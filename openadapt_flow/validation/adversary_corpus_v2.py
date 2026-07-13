@@ -85,12 +85,12 @@ from typing import Callable
 
 from openadapt_flow.validation.adversary_corpus import (
     FIRST_NAMES,
+    LABEL_DIFFERENT,
+    LABEL_SAME,
     LAST_NAMES,
     PRIORITIES,
     PROCEDURES,
     CorpusPair,
-    LABEL_DIFFERENT,
-    LABEL_SAME,
     _band,
     _person,
     _with_first,

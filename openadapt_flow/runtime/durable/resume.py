@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from openadapt_flow.ir import RunReport, Workflow
-
 from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 
 

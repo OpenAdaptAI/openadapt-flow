@@ -46,9 +46,9 @@ from random import Random
 from typing import Callable
 
 from openadapt_flow.validation.adversary_corpus import (
+    LABEL_DIFFERENT,
     PROCEDURES,
     CorpusPair,
-    LABEL_DIFFERENT,
     _person,
     build_manifest,
 )

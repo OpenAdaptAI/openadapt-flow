@@ -25,8 +25,8 @@ from typing import Optional
 
 import httpx
 
-from openadapt_flow.runtime.grounder import GrounderMatch
 from openadapt_flow.ir import Point, Region
+from openadapt_flow.runtime.grounder import GrounderMatch
 
 # Grounder region half-extents (mirrors runtime.grounder.AnthropicGrounder).
 _REGION_HALF_W = 20

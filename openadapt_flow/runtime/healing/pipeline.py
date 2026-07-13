@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from openadapt_flow.ir import Anchor, HealEvent, Step
 from openadapt_flow.runtime.healing.governance import (

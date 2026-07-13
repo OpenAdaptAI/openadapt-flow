@@ -199,6 +199,8 @@ class AnthropicStepAnnotator:
             # there follows here too.
             from openadapt_flow.benchmark.agent_baseline import (
                 MODEL as DEFAULT_MODEL,
+            )
+            from openadapt_flow.benchmark.agent_baseline import (
                 load_api_key,
             )
 

@@ -89,8 +89,7 @@ from openadapt_flow.compiler.compile import (
 from openadapt_flow.ir import Anchor, Resolution, Step, Workflow
 from openadapt_flow.runtime import identity as I
 from openadapt_flow.runtime.replayer import Replayer
-from openadapt_flow.validation.dense_surface import render_table_html
-from openadapt_flow.validation.dense_surface import DenseTable, Row
+from openadapt_flow.validation.dense_surface import DenseTable, Row, render_table_html
 from openadapt_flow.validation.pixel_identity_probe import COLLAPSE_PAIRS
 
 # Glyph-collapse pairs OCR provably collapses -- BOTH the O/0 and l/1 classes,

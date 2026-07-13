@@ -33,7 +33,6 @@ from openadapt_flow.ir import (
     Anchor,
     HealEvent,
     ProgramGraph,
-    State,
     StateKind,
     Step,
 )

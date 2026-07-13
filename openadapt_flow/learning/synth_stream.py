@@ -42,8 +42,8 @@ from openadapt_flow.ir import (
     Step,
     Transition,
 )
-from openadapt_flow.runtime.effects.effect import Effect, EffectKind
 from openadapt_flow.learning.trace import ExecutionTrace, TraceStep
+from openadapt_flow.runtime.effects.effect import Effect, EffectKind
 
 # -- the MockMed skill's canonical intents ------------------------------------
 

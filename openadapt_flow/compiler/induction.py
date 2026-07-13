@@ -327,7 +327,6 @@ from openadapt_flow.compiler.disambiguation import (  # noqa: E402
     _looks_like_dialog,
 )
 
-
 # ===========================================================================
 # Reduce a trace to tokens (collapse consecutive repeats into loop candidates)
 # ===========================================================================

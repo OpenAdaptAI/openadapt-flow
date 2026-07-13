@@ -1,0 +1,12 @@
+# Default owner for everything in the repo.
+* @abrichr
+
+# Safety-critical core: identity gate, resolution ladder, halt/postcondition
+# logic. Changes here warrant extra scrutiny (never-false-accept invariant).
+/openadapt_flow/runtime/identity.py   @abrichr
+/openadapt_flow/runtime/replayer.py   @abrichr
+/openadapt_flow/validation/           @abrichr
+
+# Release, CI, and supply-chain configuration.
+/.github/                             @abrichr
+/pyproject.toml                       @abrichr

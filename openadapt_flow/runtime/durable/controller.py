@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Optional
 
 from openadapt_flow.ir import Step, StepResult, Workflow
-
 from openadapt_flow.runtime.durable.checkpoint import (
     CheckpointStore,
     PendingEscalation,

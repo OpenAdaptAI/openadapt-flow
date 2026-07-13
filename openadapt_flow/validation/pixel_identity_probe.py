@@ -59,10 +59,10 @@ from PIL import Image
 # Reuse the dense-surface fixture's RENDERING unchanged (read it, call it,
 # never edit it): the HTML/CSS that defines exactly how an MRN cell paints.
 from openadapt_flow.validation.dense_surface import (
-    Row,
     DenseTable,
-    render_table_html,
+    Row,
     _filler_row,
+    render_table_html,
 )
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ altitude a trace stream lives at.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from openadapt_flow.ir import (

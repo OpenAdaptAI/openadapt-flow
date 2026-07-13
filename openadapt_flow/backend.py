@@ -8,7 +8,7 @@ OS layer (pyautogui/Quartz), or an RDP session.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.ir import StructuralHandle, StructuralLocator

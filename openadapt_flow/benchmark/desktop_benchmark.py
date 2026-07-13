@@ -151,7 +151,8 @@ class DesktopHarness:
         log: Callable = print,
     ) -> "DesktopHarness":
         from openadapt_flow.backends.parallels_vm import (
-            DEFAULT_VM_UUID, ParallelsVM,
+            DEFAULT_VM_UUID,
+            ParallelsVM,
         )
 
         vm = ParallelsVM(vm_uuid or DEFAULT_VM_UUID)
@@ -214,8 +215,8 @@ class DesktopHarness:
     # -- app lifecycle --
     def write_cfg(self, cfg: dict) -> None:
         """Write pn_env.json (drift knobs) into the guest via HTTP push."""
-        import tempfile
         import os
+        import tempfile
 
         tmp = Path(tempfile.mkdtemp()) / "pn_env.json"
         tmp.write_text(json.dumps(cfg))

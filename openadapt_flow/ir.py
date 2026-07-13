@@ -527,6 +527,165 @@ class Step(BaseModel):
     )
 
 
+# -- Workflow-program IR, Phase 2 (RFC docs/design/WORKFLOW_PROGRAM_IR.md §2) --
+#
+# The parameterized STATE MACHINE: the control flow a linear action list cannot
+# express -- LOOPS over a worklist, guarded BRANCHES, reusable SUBFLOWS, and
+# EXCEPTION paths. Built ADDITIVELY on the Phase-1 pieces: a state's action IS a
+# Phase-1 ``Step`` (the unchanged, hardened action leaf -- same anchor/identity/
+# effect/risk machinery), a transition's guard IS a Phase-1 ``Predicate``, and a
+# branch reuses the SAME model-free predicate evaluation. BACKWARD-COMPATIBLE:
+# ``Workflow.program`` is OPTIONAL -- when it is None the runtime executes
+# today's linear ``Workflow.steps`` loop byte-for-byte, and a linear bundle
+# lifts mechanically to the degenerate single-path graph (``lift_to_program``,
+# RFC §2.6). ZERO model calls at run time -- guards, branches, loops, and
+# subflow dispatch are all deterministic ($0 replay).
+
+
+class StateKind(str, Enum):
+    """The kinds of node in a workflow-program graph (RFC §2.2)."""
+
+    ACTION = "action"  # perform a Step (today's hardened action leaf)
+    BRANCH = "branch"  # pick an outgoing transition by guard; performs no action
+    LOOP = "loop"  # iterate a worklist, running a body subflow per row
+    SUBFLOW_CALL = "subflow_call"  # invoke a reusable named subflow
+    TERMINAL = "terminal"  # end this (sub)graph: success | halt | escalate
+
+
+class Transition(BaseModel):
+    """A guarded edge to a target state (RFC §2.2) -- the thing a linear IR
+    cannot express.
+
+    ``guard`` is a Phase-1 :class:`Predicate` evaluated (model-free) over the
+    current frame / run params; ``None`` means UNCONDITIONAL (the RFC's ``TRUE``
+    edge -- the default fall-through, and the only edge kind a degenerate linear
+    program has). A state's ``transitions`` are evaluated IN ORDER; the first
+    whose guard holds wins. Multiple non-``TRUE`` transitions make a multi-way
+    branch.
+    """
+
+    guard: Optional[Predicate] = None
+    target: str = Field(description="Id of the state this edge leads to")
+    label: str = Field(default="", description="Human-readable edge label")
+
+
+class Relation(BaseModel):
+    """A worklist a ``loop`` state iterates over (RFC §2.3).
+
+    Variable-length ``rows``; each row is a mapping of param name -> value that
+    is bound into the run params in scope for that loop iteration. Rows may be
+    INLINED here (deterministic, $0 -- the authored/compiled case) or supplied
+    at run time (``Replayer.run(worklists=...)``) for a genuinely data-dependent
+    queue whose length is unknown until run time. Either way iteration stays
+    BOUNDED (see :class:`LoopSpec.max_iterations`).
+    """
+
+    name: str
+    rows: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="Inline worklist rows; each binds params for one iteration",
+    )
+    description: str = ""
+
+
+class LoopSpec(BaseModel):
+    """The body of a ``loop`` state (RFC §2.3; Rousillon / Helena / WebRobot).
+
+    Binds a ``relation`` (worklist) and a ``body`` subflow that runs ONCE PER
+    ROW, the row's fields merged into the run params for that iteration (so an
+    ``entity_ref`` param re-resolves by the identity ladder each pass --
+    iteration N acts on the RIGHT row, not a recorded pixel position). A
+    zero-row worklist runs the body ZERO times. Iteration is BOUNDED by
+    ``max_iterations`` -- a worklist longer than the bound HALTs (fail-safe),
+    never runs unbounded.
+    """
+
+    relation: str = Field(description="Name of the Relation / worklist to loop")
+    body: str = Field(description="SubflowId run once per row")
+    var: str = Field(
+        default="",
+        description="Optional human label for the loop variable (for reports)",
+    )
+    max_iterations: int = Field(
+        default=1000, description="Hard upper bound on iterations (fail-safe)"
+    )
+
+
+class State(BaseModel):
+    """A node in the workflow-program graph (RFC §2.2).
+
+    Its ``kind`` selects the payload: ``action`` carries a hardened Phase-1
+    :class:`Step`; ``branch`` picks an edge purely by guard; ``loop`` iterates a
+    worklist; ``subflow_call`` invokes a reusable subgraph; ``terminal`` ends the
+    (sub)graph. ``transitions`` are the outgoing edges (empty on a terminal, a
+    single unconditional edge on a degenerate linear node). ``on_exception``
+    routes a FAILED action to a local handler instead of aborting the whole run.
+    """
+
+    id: str
+    kind: StateKind
+    # kind == ACTION: the hardened Phase-1 Step to perform (unchanged leaf --
+    # anchor resolution, identity gate, effects, risk all ride along on it).
+    step: Optional[Step] = None
+    # kind == LOOP: the worklist + per-row body subflow.
+    loop: Optional[LoopSpec] = None
+    # kind == SUBFLOW_CALL: the reusable subflow to invoke, then continue.
+    subflow: Optional[str] = None
+    # Outgoing edges, evaluated IN ORDER (first matching guard wins). Empty on a
+    # terminal; a single unconditional Transition on a degenerate linear node.
+    transitions: list[Transition] = Field(default_factory=list)
+    # Local exception handler (RFC §2.4): when this state's action FAILS (a
+    # resolution / identity / postcondition / effect HALT), route to THIS state
+    # instead of aborting the whole run -- the graph analog of try/except. None
+    # (default) => an unhandled failure HALTs the run, exactly as today.
+    on_exception: Optional[str] = None
+    # kind == TERMINAL: how this (sub)graph ends. "success" completes normally
+    # (returns to the caller for a subflow); "halt" / "escalate" stop the ENTIRE
+    # run (success=False) -- the safe default for an underdetermined/failed path.
+    outcome: Optional[Literal["success", "halt", "escalate"]] = None
+    reason: str = ""
+
+
+class ProgramGraph(BaseModel):
+    """A directed graph of :class:`State`s with a single ``entry`` (RFC §2.2).
+
+    Used both as the top-level program (``Workflow.program``) and as a reusable
+    subflow (``Workflow.subflows[name]``, or a ``loop`` body). Walked state by
+    state from ``entry`` until a terminal (or, for a subflow, until it falls off
+    / reaches a ``success`` terminal, which RETURNS to the caller).
+    """
+
+    entry: str
+    states: dict[str, State] = Field(default_factory=dict)
+
+
+def lift_to_program(workflow: "Workflow") -> ProgramGraph:
+    """Mechanically lift a linear ``Workflow`` to the degenerate straight-line
+    program (RFC §2.6): each ``Step[i]`` becomes an ``action`` State with a
+    single unconditional ``Transition`` to ``Step[i+1]``, and a final ``success``
+    terminal. The graph interpreter over this lift replays byte-for-byte
+    identically to the linear ``Replayer`` -- the proof that "a linear bundle is
+    the degenerate single-path graph".
+    """
+    states: dict[str, State] = {}
+    steps = workflow.steps
+    end_id = "__end__"
+    for i, step in enumerate(steps):
+        sid = f"s::{step.id}"
+        target = end_id if i + 1 >= len(steps) else f"s::{steps[i + 1].id}"
+        states[sid] = State(
+            id=sid,
+            kind=StateKind.ACTION,
+            step=step,
+            transitions=[Transition(target=target, label="")],
+        )
+    states[end_id] = State(
+        id=end_id, kind=StateKind.TERMINAL, outcome="success"
+    )
+    entry = f"s::{steps[0].id}" if steps else end_id
+    return ProgramGraph(entry=entry, states=states)
+
+
 class Workflow(BaseModel):
     schema_version: int = 1
     name: str
@@ -552,6 +711,18 @@ class Workflow(BaseModel):
         ),
     )
     steps: list[Step] = Field(default_factory=list)
+    # Workflow-program IR, Phase 2 (RFC §2): the parameterized STATE MACHINE.
+    # ALL optional and additive -- when ``program`` is None the runtime executes
+    # the linear ``steps`` loop above byte-for-byte (today's behavior); a linear
+    # bundle carries none of these. When ``program`` is present the runtime
+    # interprets the graph (loops / branches / subflows / exception paths),
+    # reusing the SAME per-action machinery (identity/effect/risk/heal gates) for
+    # every ``action`` state. ``subflows`` are reusable named subgraphs (a loop
+    # body or a shared component); ``data_sources`` are the worklists loops
+    # iterate. See ``lift_to_program`` for the degenerate linear lift (RFC §2.6).
+    program: Optional["ProgramGraph"] = None
+    subflows: dict[str, "ProgramGraph"] = Field(default_factory=dict)
+    data_sources: dict[str, "Relation"] = Field(default_factory=dict)
 
     # -- bundle I/O ---------------------------------------------------------
 
@@ -661,6 +832,12 @@ class StepResult(BaseModel):
     # ``guard`` was unmet with ``on_unmet="skip"`` (a no-op success -- the
     # step did not act). False for every executed step; additive.
     skipped: bool = False
+    # Workflow-program IR, Phase 2: True when this (failed) action state was
+    # routed to its ``State.on_exception`` handler instead of aborting the run
+    # (the graph analog of a caught try/except). The result stays ``ok=False``
+    # (the action DID fail) but the run continued via the handler; additive,
+    # default False for every linear-mode and unhandled result.
+    exception_handled: bool = False
     resolution: Optional[Resolution] = None
     identity: Optional[IdentityCheck] = None  # pre-click identity verdict
     input_verified: Optional[bool] = None  # TYPE steps: typed input landed
@@ -707,6 +884,14 @@ class RunReport(BaseModel):
     params: dict[str, str] = Field(default_factory=dict)
     results: list[StepResult] = Field(default_factory=list)
     success: bool = False
+    # Workflow-program IR, Phase 2: the outcome of the terminal state the graph
+    # interpreter ended on ("success" | "halt" | "escalate"), or None for a
+    # linear-mode run (no program graph) or a run that fell off the graph. The
+    # ordered ``visited_states`` trace records the state ids the interpreter
+    # walked (action/branch/loop/subflow/terminal), for the audit trail. Both
+    # additive and empty/None on a linear run.
+    terminal_outcome: Optional[str] = None
+    visited_states: list[str] = Field(default_factory=list)
     rung_counts: dict[str, int] = Field(default_factory=dict)
     heal_count: int = 0
     model_calls: int = 0
@@ -744,4 +929,12 @@ from openadapt_flow.runtime.effects.effect import Effect  # noqa: E402,F401
 
 ApiBinding.model_rebuild()
 Step.model_rebuild()
+# Phase-2 state-machine models: State embeds Step (whose Effect forward ref is
+# resolved just above), Transition embeds Predicate, ProgramGraph embeds State,
+# and Workflow embeds ProgramGraph/Relation -- rebuild in dependency order so
+# every forward reference is resolved before Workflow's schema is completed.
+Transition.model_rebuild()
+LoopSpec.model_rebuild()
+State.model_rebuild()
+ProgramGraph.model_rebuild()
 Workflow.model_rebuild()

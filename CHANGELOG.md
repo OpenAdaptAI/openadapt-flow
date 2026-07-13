@@ -1,6 +1,65 @@
 # CHANGELOG
 
 
+## v0.15.0 (2026-07-13)
+
+### Features
+
+- Opt-in compile-time model annotation (label/risk/param proposals, confirm-don't-trust; runtime
+  stays $0) ([#78](https://github.com/OpenAdaptAI/openadapt-flow/pull/78),
+  [`75120bb`](https://github.com/OpenAdaptAI/openadapt-flow/commit/75120bba1a3a2bf8952875af314b572a07418db2))
+
+The reviews' 'use the model at compile time, not just repair time' cheap win. A StepAnnotator
+  Protocol proposes step labels, richer risk classifications, and parameter inferences from a
+  demonstration; the model runs ONCE at compile, OFF by default, behind an interface (fake for
+  tests, lazy Anthropic impl). A proposed risk UPGRADE applies (safe direction); a downgrade or
+  consequential param is FLAGGED needs_operator_confirmation, never silently trusted. The
+  runtime/replayer is untouched — zero model calls at replay.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Workflow-program IR Phase 2 — loops, branches, subflows, exception paths (the state machine)
+  ([#79](https://github.com/OpenAdaptAI/openadapt-flow/pull/79),
+  [`ffe2242`](https://github.com/OpenAdaptAI/openadapt-flow/commit/ffe2242a5a36f9fa3c04111deb94402fcaa3af6b))
+
+Evolve the compiled artifact from a linear action list into a parameterized STATE MACHINE (RFC
+  docs/design/WORKFLOW_PROGRAM_IR.md §2), closing the review's "a workflow is not a list of actions"
+  gap. Phase 1 (typed params, guards, wait_until) added the pieces; Phase 2 adds the control flow a
+  trajectory cannot carry: LOOPS over a worklist, guarded BRANCHES, reusable SUBFLOWS, and
+
+EXCEPTION paths — the program the PBD literature (Rousillon, WebRobot, Skill-DisCo, PROLEX) says a
+  demonstration compiler must express.
+
+IR (openadapt_flow/ir.py), additive and backward-compatible: - State (action | branch | loop |
+  subflow_call | terminal) + Transition (guarded edge) form a ProgramGraph; an action state's
+  payload IS a Phase-1 Step (the unchanged hardened leaf), a transition's guard IS a Phase-1
+  Predicate. - Relation (worklist) + LoopSpec (bounded per-row body subflow); Workflow gains
+  optional program / subflows / data_sources. When program is None the linear steps list runs
+  exactly as today. - lift_to_program: mechanical degenerate lift (RFC §2.6) — a linear bundle is
+  the single-path graph.
+
+Interpreter (runtime/replayer.py): a deterministic graph interpreter ($0, zero model calls) that
+  REUSES the linear per-action pipeline unchanged — every action state runs through _run_step, so
+  identity / effect / risk / heal gates fire identically inside loop bodies and branches. Adds
+  guarded transition selection (first match wins, no-match HALTs fail-safe), bounded worklist loops,
+  subflow dispatch, and on_exception routing (graph try/except); unhandled failures and
+  halt/escalate terminals stop the run. Bounded against non-terminating graphs (step budget +
+  nesting depth). Linear path is byte-for-byte unchanged (program=None branch).
+
+Tests (tests/test_program_ir_phase2.py, 18): loop runs body 3x / 0x / run-time worklist / bound
+  enforced; branch takes each arm (param + screen predicate) and dead-ends HALT; subflow reused as
+  loop body AND direct call; on_exception catches a failed action and continues; identity- and
+  effect-gates fire inside a loop body; the lifted linear graph replays byte-identically to the
+  linear replayer; program round-trips through save/load. Full non-e2e suite green in isolation (859
+  passed; the concurrent-agent FileNotFoundError errors are environmental).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.14.0 (2026-07-13)
 
 ### Features

@@ -8,11 +8,41 @@ OS layer (pyautogui/Quartz), or an RDP session.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, TYPE_CHECKING, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.ir import StructuralHandle, StructuralLocator
 
+
+@runtime_checkable
+class SystemOfRecordBackend(Protocol):
+    """Optional system-of-record observation a backend MAY expose.
+
+    Vision (and even structural URL/title) cannot see whether a consequential
+    write actually reached the system of record — a partial save, a phantom
+    optimistic-UI success, a duplicate submission all look identical on screen
+    (``docs/LIMITS.md`` "5 of 7 write faults silent"). A backend that can read
+    the app's authoritative store (a JSON ``/api/db`` endpoint, an EMR's own
+    API) exposes it here; the recorder snapshots it before and after each event
+    (``sor_before`` / ``sor_after`` on the event, exactly as it already records
+    ``url_before`` / ``url_after``), and the compiler's effect miner
+    (``compiler.effect_mining``) derives typed ``record_written`` /
+    ``field_equals`` effects from the observed delta.
+
+    Backends without a readable system of record (pixel-only substrates) simply
+    do not implement this; the miner then falls back to a flagged placeholder
+    or an honest "no verifiable effect derivable" (never a fabricated binding).
+    """
+
+    @property
+    def system_of_record(self) -> Optional[list[dict[str, Any]]]:
+        """Current system-of-record records, or None if unobservable.
+
+        None (not ``[]``) when the store cannot be read right now — the miner
+        distinguishes "not observed" from "observed empty" (a legitimate
+        baseline for a first write).
+        """
+        ...
 
 @runtime_checkable
 class StructuralBackend(Protocol):

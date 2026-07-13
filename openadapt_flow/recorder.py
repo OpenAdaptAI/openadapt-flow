@@ -11,7 +11,9 @@ Recording format (DESIGN.md):
                          # {"i":3,"kind":"scroll","dx":0,"dy":400,"t":4.02}
                          # Events additionally carry url/title/pages
                          # _before/_after keys when the backend exposes
-                         # structural observations (StructuralBackend).
+                         # structural observations (StructuralBackend), and
+                         # sor_before/sor_after (a system-of-record snapshot)
+                         # when it exposes SystemOfRecordBackend.
       frames/{i:04d}_before.png
       frames/{i:04d}_after.png   # captured after the action settled
 
@@ -349,6 +351,12 @@ class Recorder:
             ("url", "url"),
             ("page_title", "title"),
             ("page_count", "pages"),
+            # System-of-record snapshot (openadapt_flow.backend.
+            # SystemOfRecordBackend): the app's authoritative records right
+            # now, captured before/after each event so the compiler's effect
+            # miner can derive record_written/field_equals from the delta. A
+            # list value flows through unchanged (a list is not None).
+            ("system_of_record", "sor"),
         ):
             try:
                 value = getattr(self._backend, attr, None)

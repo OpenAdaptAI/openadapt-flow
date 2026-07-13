@@ -23,6 +23,8 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     Landmark,
+    ParamKind,
+    ParamSpec,
     Point,
     Postcondition,
     PostconditionKind,
@@ -1079,6 +1081,18 @@ def compile_recording(
         recording_id=meta.get("id"),
         viewport=tuple(viewport) if viewport else None,
         params=params,
+        # Workflow-program IR, Phase 1: emit a TYPED spec for each recorded
+        # parameter alongside the frozen ``params`` dict -- generalizing the
+        # recorder's single "note value at replay" into a first-class,
+        # typed+required param. Phase 1 types every recorded value as a
+        # string with its demo value as the example/default; richer types
+        # (entity_ref/enum/date) come from disambiguation in a later phase.
+        param_specs={
+            pname: ParamSpec(
+                name=pname, type=ParamKind.STRING, example=value
+            )
+            for pname, value in params.items()
+        },
         steps=steps,
     )
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import math
 from datetime import date, datetime
 from pathlib import Path
@@ -127,6 +128,8 @@ PROXIMITY_POOL_RATIO = 0.6
 # Excluded (parameterized) values shorter than this (squashed) are not used
 # for exclusion or leak-linting: 1-2 char examples fuzzily match everything.
 MIN_EXCLUDE_CHARS = 3
+
+logger = logging.getLogger(__name__)
 
 
 def _load_events(recording_dir: Path) -> list[dict]:
@@ -723,6 +726,7 @@ def compile_recording(
     *,
     name: str,
     risk_overrides: Optional[dict[str, str]] = None,
+    mine_effects: bool = False,
 ) -> Workflow:
     """Compile a recording directory into a workflow bundle.
 
@@ -764,6 +768,15 @@ def compile_recording(
         risk_overrides: Optional ``{step_id: risk}`` map (step ids are
             positional: ``step_000`` is the first recorded event). Values
             must be ``"reversible"`` or ``"irreversible"``.
+        mine_effects: Opt-in system-of-record effect mining
+            (``compiler.effect_mining``). When True, each step gets candidate
+            typed ``Effect``s auto-derived from what the demonstration observed:
+            a real ``record_written`` / ``field_equals`` from a captured
+            ``/api/db``-style SoR delta, a flagged placeholder for a
+            consequential step whose binding is app-specific (not derivable),
+            or nothing (with an honest "no verifiable effect derivable" log).
+            Default False keeps the bundle byte-identical to before; even when
+            True a bundle is unchanged wherever mining derives nothing.
 
     Returns:
         The compiled :class:`Workflow` (also saved to the bundle).
@@ -1099,6 +1112,20 @@ def compile_recording(
                     "'reversible' or 'irreversible')"
                 )
             by_id[step_id].risk = risk
+
+    # System-of-record effect mining (opt-in). Runs LAST, after risk_overrides,
+    # so each step's `risk` (the consequential-write signal) is final. Attaches
+    # auto-derived typed effects to `Step.effects`; never fabricates a binding
+    # (see compiler.effect_mining). Off by default → bundle byte-identical.
+    if mine_effects:
+        from openadapt_flow.compiler.effect_mining import mine_step_effects
+
+        for step, _sb, _sa, event in pending:
+            mined = mine_step_effects(event, step, exclude_texts=exclude_texts)
+            if mined.effects:
+                step.effects = mined.effects
+            log = logger.info if mined.disposition != "none" else logger.debug
+            log("effect-mining %s: %s", step.id, mined.reason)
 
     workflow = Workflow(
         name=name,

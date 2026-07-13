@@ -118,6 +118,17 @@ class Effect(BaseModel):
     #: How long a verifier may poll the system of record before ruling
     #: INDETERMINATE (the SoR write may lag the GUI paint).
     timeout_s: float = 5.0
+    #: Set by the compiler's effect miner
+    #: (``compiler.effect_mining``) on a PLACEHOLDER effect: the step is a
+    #: consequential write, but its system-of-record binding (which API /
+    #: record / idempotency key) was NOT derivable from the demonstration —
+    #: it is "irreducibly app-specific" (RFC ``WORKFLOW_PROGRAM_IR.md`` §7).
+    #: The miner refuses to INVENT an endpoint, so :attr:`match` here is a
+    #: sentinel, not a real selector. Such an effect must never be silently
+    #: trusted: a run treats it as fail-safe (the replayer HALTs rather than
+    #: verify a fabricated binding — see ``runtime.replayer._verify_effects``)
+    #: until an operator completes the binding and clears this flag.
+    needs_operator_confirmation: bool = False
 
 
 class EffectState(BaseModel):

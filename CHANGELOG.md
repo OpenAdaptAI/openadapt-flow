@@ -1,6 +1,41 @@
 # CHANGELOG
 
 
+## v0.11.0 (2026-07-13)
+
+### Features
+
+- Competitor-drift instrument harness (pluggable external-agent silent-wrong-action-rate runner,
+  cost-capped) ([#73](https://github.com/OpenAdaptAI/openadapt-flow/pull/73),
+  [`fea38e9`](https://github.com/OpenAdaptAI/openadapt-flow/commit/fea38e9075ddbd4ecd6a2ecca2d10918fc5e59ee))
+
+Extend the self-directed silent-wrong-action benchmark (#67) from "our own runtime" to ANY external
+  computer-use agent. A new `openadapt_flow.instrument` package points the #63 EffectVerifier at an
+  arbitrary external agent's runs against the MockMed transactional-fault suite
+  (`mockmed.fault_server`) and measures its silent-wrong-action rate (wrong effect landed while the
+  agent reported success), anonymized by architecture class.
+
+This PR is the HARNESS ONLY: no concrete competitor adapter, no paid API / model call, no vendor
+  name. The real (cost-capped) run against a real competitor is a separate, user-gated step this
+  makes one command away.
+
+- `ExternalAgentAdapter` Protocol: the pluggable seam (run_task + a pre-flight estimate_cost_usd +
+  an anonymized architecture_class). A real adapter wraps a vendor's own entry points behind it, out
+  of this repo (docstring example). - `run_instrument`: drives an adapter through the fault suite,
+  reads the system of record with RestRecordVerifier, and computes the rate — output anonymized by
+  architecture class (Tool A/B/C), structurally enforced; never a vendor. - `CostGuard`: hard
+  max_cost_usd / max_steps / max_runs kill-switch that aborts the WHOLE run the instant a cap would
+  be crossed (pre- and post-flight), plus a dry-run mode that projects cost BEFORE spending. No run
+  can silently exceed. - `StubExternalAgentAdapter`: deterministic, offline, $0 stub (screen-blind
+  and honest modes) proving the harness measures nonzero silent-wrong on the fault classes and zero
+  on clean ones end to end. - 25 tests; reuses the #67 ground-truth judge and #63 effect contract as
+  the single source of truth. No existing files modified.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.10.0 (2026-07-13)
 
 ### Features

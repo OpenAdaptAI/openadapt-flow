@@ -14,7 +14,10 @@ import logging
 import math
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from openadapt_flow.compiler.annotate import StepAnnotator
 
 import cv2
 import numpy as np
@@ -727,6 +730,8 @@ def compile_recording(
     name: str,
     risk_overrides: Optional[dict[str, str]] = None,
     mine_effects: bool = False,
+    annotate: bool = False,
+    annotator: Optional["StepAnnotator"] = None,
 ) -> Workflow:
     """Compile a recording directory into a workflow bundle.
 
@@ -777,6 +782,24 @@ def compile_recording(
             or nothing (with an honest "no verifiable effect derivable" log).
             Default False keeps the bundle byte-identical to before; even when
             True a bundle is unchanged wherever mining derives nothing.
+        annotate: Opt-in COMPILE-TIME model annotation
+            (``compiler.annotate``). When True, a :class:`StepAnnotator` proposes
+            richer step LABELS, RISK refinements, and typed PARAMETER inferences
+            over the compiled workflow, and its proposals are applied with the
+            confirm-don't-trust asymmetry: a risk UPGRADE (reversible ->
+            irreversible) and a pure parameter TYPE enrichment are applied; a
+            risk DOWNGRADE or a consequential parameter inference is FLAGGED for
+            an operator, never applied. Applied risk upgrades land in
+            ``step.risk``; the full proposal/flag audit trail is written to a
+            bundle sidecar ``annotations.json``. This is COMPILE-TIME ONLY -- the
+            replayer never reads it and makes ZERO model calls. Default False
+            keeps the bundle byte-identical to today (heuristic only, no model,
+            no key needed).
+        annotator: The :class:`StepAnnotator` to use when ``annotate`` is True.
+            None defaults to :class:`~openadapt_flow.compiler.annotate.
+            AnthropicStepAnnotator` (the real model, resolved lazily -- it needs
+            an API key only when it actually runs). Tests pass a network-free
+            fake. Ignored when ``annotate`` is False.
 
     Returns:
         The compiled :class:`Workflow` (also saved to the bundle).
@@ -1158,6 +1181,35 @@ def compile_recording(
             "parameter values outside designated parameter slots:\n  "
             + "\n  ".join(violations)
         )
+
+    # Opt-in COMPILE-TIME model annotation (off by default). Runs LAST, over the
+    # fully-built workflow. Applies model proposals with the confirm-don't-trust
+    # asymmetry (risk upgrade / type-enrichment applied; downgrade /
+    # consequential param FLAGGED), and writes the audit trail to a bundle
+    # sidecar. COMPILE-TIME ONLY: the replayer never reads this and makes ZERO
+    # model calls. Off -> `workflow` and the bundle are byte-identical to today.
+    if annotate:
+        from openadapt_flow.compiler.annotate import (
+            AnthropicStepAnnotator,
+            apply_annotations,
+        )
+
+        ann = annotator if annotator is not None else AnthropicStepAnnotator()
+        result = apply_annotations(workflow, ann)
+        workflow = result.workflow
+        (bundle / "annotations.json").write_text(
+            result.model_dump_json(indent=2, exclude={"workflow"})
+        )
+        for flag in result.flagged:
+            logger.warning(
+                "annotation FLAGGED (needs operator confirmation) %s: %s",
+                flag.step_id,
+                flag.detail,
+            )
+        for applied in result.applied:
+            logger.info(
+                "annotation applied %s: %s", applied.step_id, applied.detail
+            )
 
     workflow.save(bundle)
     (bundle / "workflow.py").write_text(render_workflow_py(workflow))

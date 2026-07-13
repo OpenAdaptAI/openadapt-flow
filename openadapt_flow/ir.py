@@ -20,9 +20,15 @@ import json
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    # Type-only import for the Step.effects forward reference. The RUNTIME
+    # import is at the BOTTOM of this module (see the note there) to avoid a
+    # circular import through openadapt_flow.runtime's package init.
+    from openadapt_flow.runtime.effects.effect import Effect
 
 Region = tuple[int, int, int, int]
 Point = tuple[int, int]
@@ -175,6 +181,18 @@ class Step(BaseModel):
     scroll_dx: Optional[int] = None  # for SCROLL: wheel delta, px right
     scroll_dy: Optional[int] = None  # for SCROLL: wheel delta, px down
     expect: list[Postcondition] = Field(default_factory=list)
+    # System-of-record effects (RFC docs/design/WORKFLOW_PROGRAM_IR.md 2.2):
+    # typed assertions verified against the REAL system of record (an API/DB
+    # read), NOT the screen — closing the transactional-write gap the vision
+    # `expect` postconditions above are blind to (docs/LIMITS.md "5 of 7
+    # silent"). Verified by the run's configured EffectVerifier AFTER the
+    # action executes; a non-CONFIRMED verdict (REFUTED / INDETERMINATE) HALTS
+    # the run (see openadapt_flow.runtime.replayer and
+    # docs/design/EFFECT_VERIFIER.md). Additive and back-compatible: the
+    # default is empty, so a bundle carrying no effects replays exactly as
+    # before, and a declared effect with no verifier configured is a
+    # deployment error that HALTS (never a silent unverifiable write).
+    effects: list["Effect"] = Field(default_factory=list)
     risk: Literal["reversible", "irreversible"] = "reversible"
     timeout_s: float = 10.0
     # Identity-protection audit trail (clicks and anchored TYPE steps):
@@ -308,6 +326,16 @@ class StepResult(BaseModel):
     input_verified: Optional[bool] = None  # TYPE steps: typed input landed
     input_retried: bool = False  # TYPE steps: refocus-and-retype fired
     postconditions_ok: Optional[bool] = None
+    # System-of-record effect verification (runtime.effects.EffectVerifier).
+    # None when the step declared no `effects`; True when every declared
+    # effect was CONFIRMED (or a duplicate was RECONCILED by compensation);
+    # False when one HALTED the run (REFUTED / INDETERMINATE / escalated, or
+    # effects were declared with no verifier configured). ``effect_results``
+    # holds one human-readable verdict line per declared effect, for the
+    # audit trail (mirrors the identity check's report surface). ZERO model
+    # calls on this path — effect verification reads the system of record.
+    effect_verified: Optional[bool] = None
+    effect_results: list[str] = Field(default_factory=list)
     # Drift-oracle: postconditions that deterministically FAILED but were
     # confirmed by the optional on-prem VLM state-verifier under render drift
     # (recorded for audit; empty unless an appliance is configured).
@@ -353,3 +381,21 @@ class RunReport(BaseModel):
         path = run / "report.json"
         path.write_text(self.model_dump_json(indent=2))
         return path
+
+
+# -- forward-reference resolution --------------------------------------------
+#
+# Step.effects is typed ``list[Effect]`` where Effect lives in
+# ``openadapt_flow.runtime.effects.effect``. That type is imported HERE, at the
+# very bottom of the module, NOT at the top: importing it eagerly triggers
+# ``openadapt_flow.runtime``'s package __init__, which imports the Replayer,
+# which imports THIS module — so a top-level import would recurse through a
+# half-initialized ``ir`` (Step/Workflow not yet defined) and fail. By the time
+# this line runs every class above is fully defined, so the (import-light — no
+# OCR/cv2/model deps) runtime package loads cleanly and Step's schema can be
+# completed. Effect enters this module's globals so ``model_rebuild`` resolves
+# the forward reference; bundles with no effects are unaffected.
+from openadapt_flow.runtime.effects.effect import Effect  # noqa: E402,F401
+
+Step.model_rebuild()
+Workflow.model_rebuild()

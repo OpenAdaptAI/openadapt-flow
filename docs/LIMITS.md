@@ -60,7 +60,8 @@ were fixed on 2026-07-10. All moved to the safe-halt section below.)
   "irreversible steps refuse on unreadable band" branch never runs unless
   a human marked the step at compile time.
 - **Postconditions read the SCREEN, not the system of record — so
-  transactional write faults are silent.** A 2026-07-12 fault-model study
+  transactional write faults are silent UNLESS a step declares `effects` and
+  a verifier is configured.** A 2026-07-12 fault-model study
   (`benchmark/fault_model/`) drove 90 replays through a real persistence
   boundary and found the vision postconditions (`text_present` /
   `region_stable` / `url_changed`) silently mishandle **5 of 7** transactional
@@ -69,11 +70,37 @@ were fixed on 2026-07-10. All moved to the safe-halt section below.)
   reports success over an empty database; a partial save drops a field; a
   stale/concurrent edit overwrites another user's change. None is render drift
   — the recorded pixels match perfectly, so self-healing cannot catch them —
-  and none is caught, because the screen showed success. Closing this needs
-  verification against the system of record (an app-specific effect check or
-  API/DB read) and an at-most-once guard (idempotency keys); neither is
-  generically expressible in a vision-only replay. Full taxonomy:
-  `benchmark/fault_model/FAULT_MODEL.md`.
+  and none is caught by the screen, because the screen showed success.
+
+  **This gap is now closable in the live replay path — with two honest
+  preconditions.** A step may carry typed system-of-record `effects`
+  (`ir.Step.effects`: `record_written` / `field_equals`, RFC
+  `WORKFLOW_PROGRAM_IR.md` §2.2), and when the run is given an `EffectVerifier`
+  (`Replayer(effect_verifier=…)`, e.g. the `RestRecordVerifier` /
+  `FhirEffectVerifier`) the replayer snapshots the REAL record before the
+  action and, after the screen postconditions pass, rules each effect
+  CONFIRMED / REFUTED / INDETERMINATE against that record — an API/DB read,
+  never the pixels. A non-CONFIRMED verdict HALTs the run (an irreversible
+  effect may first `reconcile_or_escalate` — a compensable duplicate is
+  RECONCILED, everything else ESCALATEs). All five silently-mishandled classes
+  above REFUTE and halt through the real `Replayer` (see
+  `tests/test_replayer_effects.py`; the verifier's own proof matrix is
+  `tests/test_effect_fault_matrix.py` and `docs/design/EFFECT_VERIFIER.md`).
+  The path makes **zero model calls** — the $0 runtime guarantee holds.
+
+  **The two preconditions are the residual limit, and they are real:**
+  protection requires (1) the step to actually DECLARE the effect (the
+  compiler does not yet mine effects from a demonstration — they are authored /
+  supplied per deployment against the app's system of record), and (2) a
+  verifier to be CONFIGURED for the deployment. A bundle with no declared
+  effects, or a run with no verifier, still has only the screen oracle for the
+  write and remains exactly as silent as before. The one fail-safe that IS
+  automatic: a step that declares effects while NO verifier is configured is a
+  deployment/configuration error and HALTs — an unverifiable consequential
+  write is never silently accepted. An at-most-once guard (idempotency keys)
+  is expressed through `Effect.idempotency_key`. Full taxonomy:
+  `benchmark/fault_model/FAULT_MODEL.md`; the effect layer:
+  `docs/design/EFFECT_VERIFIER.md`.
 
 ### The optional drift-oracle can turn a halt into a pass (opt-in tradeoff)
 
@@ -751,6 +778,13 @@ transactional write faults the dangerous list discloses: the 2026-07-12
 fault-model study (`benchmark/fault_model/`) found phantom/partial-save
 successes on the *correct* physical action for **5 of 7** transactional
 classes, where the screen reads success while the system of record is wrong
-(see "Postconditions read the SCREEN, not the system of record" above). The
-postcondition system is a real safety net against pixels lying about the
-screen — its holes are specific, listed above, and now tested.
+(see "Postconditions read the SCREEN, not the system of record" above). That
+gap is now **closable in the live replay path** — a step that declares
+`effects` and a run given an `EffectVerifier` HALT on all five classes through
+the real `Replayer`, at zero model cost — but only under the two disclosed
+preconditions (effects declared on the step AND a verifier configured); a
+bundle/run missing either is as silent as before. The postcondition system
+remains a real safety net against pixels lying about the screen — its holes
+are specific, listed above, and now tested; the effect layer is the
+independent safety net against the *record* being wrong while the screen
+lies.

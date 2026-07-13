@@ -1,6 +1,61 @@
 # CHANGELOG
 
 
+## v0.14.0 (2026-07-13)
+
+### Features
+
+- Api/tool actuator tier — perform writes via API when available, GUI fallback
+  ([#72](https://github.com/OpenAdaptAI/openadapt-flow/pull/72),
+  [`9c55239`](https://github.com/OpenAdaptAI/openadapt-flow/commit/9c552397202facc471cad561531c42ce250f53e6))
+
+* feat: structural (DOM/UIA) action rung — vision-first, not vision-only
+
+Make structural (DOM/accessibility) evidence a first-class ACTION rung — the deterministic top of
+  the resolution ladder — not just an identity signal. On structure-bearing backends the runtime
+  re-finds the recorded target as a DOM/UIA element and acts on its center deterministically,
+  falling back to the visual ladder (template/ocr/geometry/grounder) only where structure is absent
+  (pixel-only substrates: RDP/Citrix/canvas). Two external reviews + the desktop benchmark converge
+  here: UIA execution 21/21 vs compiled visual replay 6/21.
+
+Ladder: API → tool/MCP → [structural DOM/UIA] → template → template_global →
+
+ocr → geometry → grounder(VLM) → human. `structural` is rung 0, above `ocr`, so an irreversible step
+  may act on it (strongest evidence). The visual rungs are unchanged — the fallback floor for
+  pixel-only substrates.
+
+- ir: StructuralLocator (selector / role+name / UIA AutomationId) on Anchor.structural;
+  StructuralHandle; "structural" added to Rung. - backend: optional StructuralActionBackend protocol
+  (structural_locator_at + locate_structural). - resolver: structural rung first; falls through
+  unchanged on miss/pixel-only. - playwright/windows backends: DOM (#id / role+name, with an
+  occlusion hit-test) and UIA (AutomationId / role+name) locate. - recorder/compiler: capture the
+  locator at record time; keep the visual anchor. - replayer: structural resolution flows through
+  the SAME click path, so the identity gate + risk gate still fire; exempt from healing
+  (deterministic locate ≠ stale template). New use_structural flag (default True) lets the
+  visual-floor characterization suites exercise the pixel-only path.
+
+Availability measured in benchmark/structural_action (21/21 vs 6/21). Identity gate proven to still
+  abort a sibling on a structurally-resolved point. Occlusion safe-halt preserved. New coverage in
+  tests/test_structural_rung.py and tests/e2e/test_structural_action.py.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: API/tool actuator tier — perform writes via API when available, GUI as fallback
+
+The EXECUTE half of the capability ladder (the reviews' 'where a real API exists, GUI-driving it is
+  the wrong tool'). When a step carries a reachable ApiBinding, actuate the write via the API
+  deterministically, confirm it with the EffectVerifier (non-CONFIRMED -> HALT), and skip GUI
+  actuation; otherwise fall through to the structural->visual ladder unchanged. Fail-safe: an
+  attempted-but-unknown API outcome HALTS rather than risk a double-write. Additive (no binding ->
+  replays as today). $0 / zero model calls.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.13.0 (2026-07-13)
 
 ### Continuous Integration

@@ -24,7 +24,7 @@ rounds against our own wrong-target check.
 ## Try it
 
 ```bash
-pip install openadapt-flow && playwright install chromium
+pip install openadapt-flow
 
 openadapt-flow demo-record --out rec                     # record a demonstration
 openadapt-flow compile rec --out bundle --name my-task   # compile it
@@ -33,6 +33,13 @@ openadapt-flow certify bundle --policy clinical-write    # refuse it if unsafe
 openadapt-flow replay bundle                             # replay: local, $0
 openadapt-flow replay bundle --drift theme               # drift the UI, watch it heal
 ```
+
+On the first command that needs a browser, openadapt-flow downloads the
+Chromium build Playwright needs (a one-time ~150MB fetch) — no separate
+`playwright install chromium` step. Prefer the fast, isolated installs
+`uvx openadapt-flow …` or `uv tool install openadapt-flow`. In air-gapped
+or CI environments that pre-provision the browser, set
+`OPENADAPT_FLOW_NO_AUTO_INSTALL=1` to disable the auto-download.
 
 The last two commands serve the bundled MockMed demo app and write an
 illustrated `REPORT.md` per run.
@@ -175,7 +182,8 @@ on-prem-only + no-retention. Full map: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ```bash
 git clone https://github.com/OpenAdaptAI/openadapt-flow && cd openadapt-flow
-pip install -e '.[dev]' && playwright install chromium
+pip install -e '.[dev]'
+playwright install chromium  # optional: else auto-downloads on first launch
 pytest -q
 ```
 

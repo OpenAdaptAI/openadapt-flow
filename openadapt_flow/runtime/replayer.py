@@ -551,6 +551,26 @@ class Replayer:
         """
         assert self.effect_verifier is not None  # guaranteed by the caller
         for effect in step.effects:
+            # A compiler-mined PLACEHOLDER effect (binding not derivable from
+            # the demonstration — see compiler.effect_mining) carries a
+            # sentinel selector, NOT a real one. Never verify it against the
+            # system of record: that would either falsely refute or, worse,
+            # silently pass. Fail-safe HALT until an operator completes the
+            # binding and clears the flag — same posture as the identity gate.
+            if effect.needs_operator_confirmation:
+                result.effect_verified = False
+                result.effect_results.append(
+                    f"[unbound] {effect.kind.value}: NEEDS OPERATOR "
+                    "CONFIRMATION — placeholder effect not bound to the system "
+                    "of record (compiler could not derive it); HALT"
+                )
+                return (
+                    f"System-of-record effect for step '{step.id}' "
+                    f"({step.intent}) is an unconfirmed PLACEHOLDER — the "
+                    "compiler flagged its binding as app-specific and it must "
+                    "be completed by an operator before this consequential "
+                    "write can run — run aborted"
+                )
             verdict = self.effect_verifier.verify(effect, before)
             if verdict.confirmed:
                 result.effect_results.append(

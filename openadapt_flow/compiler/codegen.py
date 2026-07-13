@@ -8,7 +8,7 @@ executed by the runtime — but it must be syntactically valid Python
 
 from __future__ import annotations
 
-from openadapt_flow.ir import ActionKind, Postcondition, Step, Workflow
+from openadapt_flow.ir import ActionKind, Effect, Postcondition, Step, Workflow
 
 
 def _expect_comment(expect: list[Postcondition]) -> list[str]:
@@ -22,6 +22,30 @@ def _expect_comment(expect: list[Postcondition]) -> list[str]:
             parts.append(f"region={pc.region}")
         if pc.phash is not None:
             parts.append(f"phash={pc.phash!r} (tol {pc.phash_tolerance})")
+        lines.append("    # " + " ".join(parts))
+    return lines
+
+
+def _effect_comment(effects: list[Effect]) -> list[str]:
+    """Render mined system-of-record effects as comment lines (for review).
+
+    A ``needs_operator_confirmation`` effect is flagged loudly — it is a
+    PLACEHOLDER the compiler could not bind and the run will refuse to trust
+    until an operator completes it (see compiler.effect_mining)."""
+    lines = []
+    for eff in effects:
+        parts = [f"effect {eff.kind.value}"]
+        if eff.match:
+            parts.append(f"match={eff.match}")
+        if eff.field is not None:
+            parts.append(f"field={eff.field!r} value={eff.value!r}")
+        if eff.kind.value == "record_written":
+            parts.append(f"count={eff.expected_count}")
+        if eff.idempotency_key is not None:
+            parts.append(f"idempotency_key={eff.idempotency_key!r}")
+        parts.append(f"[{eff.risk}]")
+        if eff.needs_operator_confirmation:
+            parts.append("!! NEEDS OPERATOR CONFIRMATION (placeholder)")
         lines.append("    # " + " ".join(parts))
     return lines
 
@@ -90,5 +114,6 @@ def render_workflow_py(workflow: Workflow) -> str:
             )
         lines.append(_step_call(step))
         lines.extend(_expect_comment(step.expect))
+        lines.extend(_effect_comment(step.effects))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

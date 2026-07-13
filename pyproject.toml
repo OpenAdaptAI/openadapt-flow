@@ -45,6 +45,11 @@ dev = [
     "fastapi>=0.110",
 ]
 grounder = ["anthropic>=0.40"]
+# PRIMARY grounding rung: OCR text-anchoring via openadapt-grounding
+# (pillow + pytesseract; CPU-only, no GPU, no served model, no paid API).
+# OCRAnchorGrounder imports it lazily and abstains (returns None) when absent,
+# so the core stays installable and the ladder safe-halts without it.
+grounding = ["openadapt-grounding>=0.1.0"]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31"]
 # FreeRDPBackend: pure-Python async RDP client for the pixel-only RDP path

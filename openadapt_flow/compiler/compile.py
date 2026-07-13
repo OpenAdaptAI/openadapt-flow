@@ -929,7 +929,15 @@ def compile_recording(
         elif kind == "type":
             param = event.get("param")
             text = event.get("text")
-            if param:
+            secret = bool(event.get("secret"))
+            if secret:
+                # A secret's literal value is never in the recording, so it
+                # is never in the bundle either: the step carries only the
+                # param name, and the value is injected from the environment
+                # at replay (see ir.Step.secret / runtime.Replayer).
+                text = None
+                intent = f"type <{param}> (secret)"
+            elif param:
                 intent = f"type <{param}>"
             else:
                 intent = f"type '{_text_preview(text or '')}'"
@@ -941,6 +949,7 @@ def compile_recording(
                         action=ActionKind.TYPE,
                         text=text,
                         param=param,
+                        secret=secret,
                     ),
                     before_png,
                     after_png,
@@ -1023,7 +1032,8 @@ def compile_recording(
             # A parameterized TYPE step's changed region is the typed
             # value's own pixels — never assert it (it varies per run).
             include_region_stable=not (
-                step.action is ActionKind.TYPE and step.param is not None
+                step.action is ActionKind.TYPE
+                and (step.param is not None or step.secret)
             ),
             before_lines=(
                 cached_lines(i, "before", step_before)
@@ -1079,6 +1089,7 @@ def compile_recording(
         recording_id=meta.get("id"),
         viewport=tuple(viewport) if viewport else None,
         params=params,
+        secret_params=list(meta.get("secret_params") or []),
         steps=steps,
     )
 

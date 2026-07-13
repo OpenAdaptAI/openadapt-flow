@@ -67,14 +67,77 @@ class Landmark(BaseModel):
     )
 
 
-class Anchor(BaseModel):
-    """Redundant visual evidence for locating a step's target on screen.
+class StructuralLocator(BaseModel):
+    """A stable structural (DOM / accessibility) locator for a step's target.
 
-    Resolution ladder consumes fields in order of preference:
-    template (local, then global) -> ocr_text -> landmarks -> grounder.
+    Captured at record time from the recording backend's structured layer
+    (:meth:`openadapt_flow.backend.StructuralActionBackend.structural_locator_at`)
+    and consumed at replay by the structural ACTION rung -- the TOP of the
+    resolution ladder (:mod:`openadapt_flow.runtime.resolver`). The runtime
+    re-finds the SAME element by its stable identity -- a DOM id / CSS selector
+    / ARIA role+name, or a Windows UIA ``AutomationId`` / ``ControlType``+
+    ``Name`` -- and acts on the element's center DETERMINISTICALLY, with no
+    pixel matching. This is the thesis shift from "vision-only" to
+    "deterministic compiled automation with visual FALLBACK": the desktop
+    benchmark measured UIA execution 21/21 vs compiled visual replay 6/21 under
+    render drift.
+
+    The visual anchor (template / ocr_text / landmarks) is ALWAYS kept too: the
+    ladder falls through to it UNCHANGED when this locator is absent (pixel-only
+    substrate -- RDP/Citrix/canvas) or when the element cannot be located at
+    replay (see docs/LIMITS.md). Structural resolution is ADDITIVE -- it never
+    removes the visual floor.
+
+    Fields are backend-neutral; a browser backend fills ``selector`` / ``role``
+    / ``name`` from the DOM, a native backend fills ``automation_id`` / ``role``
+    / ``name`` from the UIA/AX tree. Each backend uses whichever fields it
+    recorded; unset fields are ignored.
+    """
+
+    selector: Optional[str] = Field(
+        default=None,
+        description="Stable CSS/DOM selector, e.g. '#open-p1' (browser)",
+    )
+    role: Optional[str] = Field(
+        default=None,
+        description="ARIA / UIA control role, e.g. 'button', 'link'",
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="Accessible name / label / text of the target element",
+    )
+    automation_id: Optional[str] = Field(
+        default=None,
+        description="Windows UIA AutomationId (native desktop backends)",
+    )
+
+
+class Anchor(BaseModel):
+    """Redundant evidence for locating a step's target on screen.
+
+    Resolution ladder consumes fields in order of preference (strongest, most
+    drift-tolerant first): ``structural`` (DOM / UIA element, when the backend
+    supports it) -> template (local, then global) -> ocr_text -> landmarks ->
+    grounder. ``structural`` is the deterministic top rung; the remaining
+    (visual) rungs are the FALLBACK floor for pixel-only substrates.
     """
 
     template: str = Field(description="Bundle-relative path to the PNG crop")
+    structural: Optional[StructuralLocator] = Field(
+        default=None,
+        description=(
+            "STRUCTURAL locator (DOM selector / role+name, or UIA"
+            " AutomationId / role+name) of the clicked target, captured at"
+            " record time when the recording backend exposes it"
+            " (openadapt_flow.backend.StructuralActionBackend). Drives the"
+            " structural ACTION rung -- the TOP of the resolution ladder --"
+            " which re-finds the SAME element deterministically (no pixel"
+            " match) and is far more drift-tolerant than the visual rungs"
+            " (21/21 vs 6/21 on the desktop benchmark). None on pixel-only"
+            " substrates or bundles compiled before this capability; the"
+            " ladder then resolves via the visual rungs below."
+        ),
+    )
     region: Region = Field(description="Crop location in the recorded frame")
     click_point: Point = Field(description="Click point in the recorded frame")
     ocr_text: Optional[str] = Field(
@@ -303,6 +366,18 @@ class Step(BaseModel):
     anchor: Optional[Anchor] = None  # None for pure keyboard/wait steps
     text: Optional[str] = None  # literal text for TYPE
     param: Optional[str] = None  # if set, TYPE text comes from params[param]
+    secret: bool = Field(
+        default=False,
+        description=(
+            "TYPE steps only: the parameter is a SECRET (e.g. a password)."
+            " Its literal value is NEVER stored in the recording, the events"
+            " log, or this bundle; at replay it is injected from the"
+            " environment variable OPENADAPT_FLOW_SECRET_<PARAM> (the param"
+            " name upper-cased). ``text`` is always None for a secret step,"
+            " and ``param`` names the required secret. A missing secret at"
+            " replay is a clear, fail-fast error (see runtime.Replayer)."
+        ),
+    )
     key: Optional[str] = None  # for KEY, e.g. "Enter"
     scroll_dx: Optional[int] = None  # for SCROLL: wheel delta, px right
     scroll_dy: Optional[int] = None  # for SCROLL: wheel delta, px down
@@ -376,6 +451,14 @@ class Workflow(BaseModel):
     # default, so a v0 bundle is unaffected; when present, the replayer folds each
     # spec's ``example`` in as a default and fails fast on a missing required one.
     param_specs: dict[str, "ParamSpec"] = Field(default_factory=dict)
+    secret_params: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of SECRET parameters (e.g. passwords). Their values are"
+            " NEVER stored here or in ``params``; each is injected at replay"
+            " from OPENADAPT_FLOW_SECRET_<PARAM> (see Step.secret)."
+        ),
+    )
     steps: list[Step] = Field(default_factory=list)
 
     # -- bundle I/O ---------------------------------------------------------
@@ -400,7 +483,24 @@ class Workflow(BaseModel):
 
 # -- runtime results ---------------------------------------------------------
 
-Rung = Literal["template", "template_global", "ocr", "geometry", "grounder"]
+Rung = Literal[
+    "structural", "template", "template_global", "ocr", "geometry", "grounder"
+]
+
+
+class StructuralHandle(BaseModel):
+    """Result of a backend's structural locate: the resolved element's point.
+
+    ``point`` is the element's center in the SAME coordinate space as
+    :meth:`openadapt_flow.backend.Backend.click` (the pixels the resolver
+    emits), so a structurally-resolved target flows through the IDENTICAL click
+    path -- the pre-click identity gate and the irreversible risk gate still
+    fire (structural resolution makes identity STRONGER, an exact element; it
+    never bypasses it). ``confidence`` is 1.0 for a deterministic exact locate.
+    """
+
+    point: Point
+    confidence: float = 1.0
 
 
 class Resolution(BaseModel):

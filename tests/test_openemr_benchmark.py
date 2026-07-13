@@ -377,6 +377,31 @@ class TestOpenemrOrchestrator:
         assert (tmp_path / "latency_cost.png").stat().st_size > 1000
         assert "latency_cost.png" in (tmp_path / "BENCHMARK.md").read_text()
 
+    def test_write_outputs_survives_font_lookup_failure(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """A corrupt font cache must skip the chart, not fail the benchmark.
+
+        Simulates ``ValueError: Failed to find font DejaVu Sans`` from
+        ``findfont`` (fresh venvs / concurrent runs). The cosmetic PNG may be
+        skipped, but the numeric ``results.json`` must be written intact and
+        the call must not raise.
+        """
+        import json
+
+        from matplotlib import font_manager
+
+        def boom(*args: Any, **kwargs: Any) -> str:
+            raise ValueError("Failed to find font DejaVu Sans")
+
+        monkeypatch.setattr(font_manager.fontManager, "findfont", boom)
+        monkeypatch.setattr(font_manager, "findfont", boom)
+
+        write_openemr_outputs(self.make_results(), tmp_path)  # must not raise
+        loaded = json.loads((tmp_path / "results.json").read_text())
+        assert loaded["arms"]["agent"]["success_count"] == 8
+        assert "latency_cost.png" in (tmp_path / "BENCHMARK.md").read_text()
+
     def test_run_paces_and_records_failures(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:

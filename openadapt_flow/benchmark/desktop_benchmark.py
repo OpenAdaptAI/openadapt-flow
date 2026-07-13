@@ -708,13 +708,9 @@ def _identity_transfer_verdict(results: dict) -> str:
 
 def render_chart(results: dict, path: Path) -> None:
     """Stacked outcome bars per arm (success / wrong-action / halt)."""
-    try:
-        import matplotlib
+    from openadapt_flow.benchmark.chart_fonts import configure_bundled_font
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:  # noqa: BLE001
-        return
+    plt = configure_bundled_font()
     arms = list(results["arms"])
     succ = [results["arms"][a]["success"] for a in arms]
     wrong = [results["arms"][a]["wrong_action"] for a in arms]
@@ -744,7 +740,9 @@ def write_outputs(results: dict, out_dir: str | Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     (out_dir / "BENCHMARK.md").write_text(render_markdown(results))
-    render_chart(results, out_dir / "outcomes.png")
+    from openadapt_flow.benchmark.chart_fonts import safe_render
+
+    safe_render(render_chart, results, out_dir / "outcomes.png")
 
 
 if __name__ == "__main__":  # pragma: no cover

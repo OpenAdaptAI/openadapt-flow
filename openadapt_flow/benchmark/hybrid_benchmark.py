@@ -879,10 +879,9 @@ def render_hybrid_chart(results: dict[str, Any], out_png: Path) -> Path:
     Returns:
         The written PNG path.
     """
-    import matplotlib
+    from openadapt_flow.benchmark.chart_fonts import configure_bundled_font
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = configure_bundled_font()
 
     surface = "#fcfcfb"
     ink = "#0b0b0b"
@@ -1431,7 +1430,9 @@ def write_hybrid_outputs(results: dict[str, Any], out_dir: Path) -> None:
     (out_dir / "results.json").write_text(
         json.dumps(results, indent=2) + "\n"
     )
-    render_hybrid_chart(results, out_dir / "success_cost.png")
+    from openadapt_flow.benchmark.chart_fonts import safe_render
+
+    safe_render(render_hybrid_chart, results, out_dir / "success_cost.png")
     (out_dir / "BENCHMARK.md").write_text(render_hybrid_markdown(results))
 
 

@@ -63,7 +63,6 @@ jobs:
   # browser/OCR record->compile->replay suite (tests/e2e), which is exercised
   # post-merge by `test-matrix`. Keeps PR feedback quick.
   test:
-    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -123,7 +122,6 @@ jobs:
   # Python 3.10-3.13 on Linux plus a macOS leg, on push to main and nightly.
   test-matrix:
     if: ${{ github.event_name != 'pull_request' }}
-    needs: lint
     strategy:
       fail-fast: false
       matrix:
@@ -181,7 +179,6 @@ jobs:
   # Post-merge / nightly only (not a required check, not run on PRs).
   windows-mock:
     if: ${{ github.event_name != 'pull_request' }}
-    needs: lint
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -205,7 +202,6 @@ jobs:
   # Post-merge / nightly only (not a required check, not run on PRs).
   wheel:
     if: ${{ github.event_name != 'pull_request' }}
-    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

@@ -54,6 +54,7 @@ from openadapt_flow.ir import (
 from openadapt_flow.privacy import scrub_image_bytes as _scrub_png
 from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.runtime import heal as heal_mod
+from openadapt_flow.runtime import healing as healing_mod
 from openadapt_flow.runtime import identity as identity_mod
 from openadapt_flow.runtime.effects import (
     EffectState,
@@ -502,11 +503,20 @@ class Replayer:
                 # Heal from the PRE-action frame: that is the frame the
                 # anchor was resolved against (the action may have navigated
                 # to a different screen, where a crop at the old location
-                # would be garbage).
-                result.heal = self._heal_step(
+                # would be garbage). The heal is GOVERNED: a patch that would
+                # weaken the step's identity band (the reviewed context-drop
+                # bug), effect coverage, or risk class is quarantined and the
+                # run HALTS rather than silently applying an unverified repair.
+                heal_outcome = self._heal_step(
                     step, resolution, matched_region, before_png, workflow,
                     run_dir, new_crops,
                 )
+                if heal_outcome.promoted:
+                    result.heal = heal_outcome.event
+                else:
+                    result.ok = False
+                    error = heal_outcome.halt_reason
+                    result.error = error
         except Exception as exc:  # defensive: report, don't crash the run
             result.ok = False
             result.error = f"Step '{step.id}' raised {type(exc).__name__}: {exc}"
@@ -1504,14 +1514,26 @@ class Replayer:
         run_dir: Path,
         new_crops: dict[str, bytes],
     ):
-        """Build, apply, and persist a heal for a non-template success."""
+        """Build, govern, and (if promoted) apply/persist a heal.
+
+        A heal is a governed PATCH, not a silent bundle swap: the raw event is
+        wrapped in a reviewable :class:`~openadapt_flow.runtime.healing.HealPatch`
+        and run through the regression gate (identity + effect + risk) before
+        it may touch the workflow. A patch that would weaken the step's
+        identity band -- the reviewed context-drop bug -- is QUARANTINED
+        (persisted under ``run_dir/heals/<step_id>/patch.json`` for review)
+        and NOT applied; the returned outcome's ``promoted`` is False and the
+        caller halts the run (refuse-rather-than-guess).
+        """
         event, crop_png = heal_mod.build_heal_event(
             step, resolution, matched_region, frame_png, self.vision
         )
-        heal_mod.apply_heal(workflow, event)
-        heal_mod.persist_heal(event, crop_png, frame_png, run_dir)
-        new_crops[step.id] = crop_png
-        return event
+        outcome = healing_mod.govern_heal(step, event, run_dir=run_dir)
+        if outcome.promoted:
+            heal_mod.apply_heal(workflow, event)
+            heal_mod.persist_heal(event, crop_png, frame_png, run_dir)
+            new_crops[step.id] = crop_png
+        return outcome
 
     # -- io ----------------------------------------------------------------------
 

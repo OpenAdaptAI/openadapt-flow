@@ -1,6 +1,46 @@
 # CHANGELOG
 
 
+## v0.12.0 (2026-07-13)
+
+### Features
+
+- Structural (DOM/UIA) action rung — vision-first, not vision-only
+  ([#69](https://github.com/OpenAdaptAI/openadapt-flow/pull/69),
+  [`d9e5e6f`](https://github.com/OpenAdaptAI/openadapt-flow/commit/d9e5e6f47b76602e9f314051f9e0fd76a11cced5))
+
+Make structural (DOM/accessibility) evidence a first-class ACTION rung — the deterministic top of
+  the resolution ladder — not just an identity signal. On structure-bearing backends the runtime
+  re-finds the recorded target as a DOM/UIA element and acts on its center deterministically,
+  falling back to the visual ladder (template/ocr/geometry/grounder) only where structure is absent
+  (pixel-only substrates: RDP/Citrix/canvas). Two external reviews + the desktop benchmark converge
+  here: UIA execution 21/21 vs compiled visual replay 6/21.
+
+Ladder: API → tool/MCP → [structural DOM/UIA] → template → template_global →
+
+ocr → geometry → grounder(VLM) → human. `structural` is rung 0, above `ocr`, so an irreversible step
+  may act on it (strongest evidence). The visual rungs are unchanged — the fallback floor for
+  pixel-only substrates.
+
+- ir: StructuralLocator (selector / role+name / UIA AutomationId) on Anchor.structural;
+  StructuralHandle; "structural" added to Rung. - backend: optional StructuralActionBackend protocol
+  (structural_locator_at + locate_structural). - resolver: structural rung first; falls through
+  unchanged on miss/pixel-only. - playwright/windows backends: DOM (#id / role+name, with an
+  occlusion hit-test) and UIA (AutomationId / role+name) locate. - recorder/compiler: capture the
+  locator at record time; keep the visual anchor. - replayer: structural resolution flows through
+  the SAME click path, so the identity gate + risk gate still fire; exempt from healing
+  (deterministic locate ≠ stale template). New use_structural flag (default True) lets the
+  visual-floor characterization suites exercise the pixel-only path.
+
+Availability measured in benchmark/structural_action (21/21 vs 6/21). Identity gate proven to still
+  abort a sibling on a structurally-resolved point. Occlusion safe-halt preserved. New coverage in
+  tests/test_structural_rung.py and tests/e2e/test_structural_action.py.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.11.0 (2026-07-13)
 
 ### Features

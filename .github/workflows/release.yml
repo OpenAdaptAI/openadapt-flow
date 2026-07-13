@@ -1,24 +1,31 @@
 name: Release and PyPI Publish
 
-# Auto-release on merge to main, driven by Conventional Commits (matches the
-# other openadapt repos, e.g. openadapt-capture). Python Semantic Release reads
-# the commit history since the last tag, computes the next version (feat -> minor,
-# fix/perf -> patch), bumps pyproject, tags, and — only when it actually cuts a
-# release — builds and publishes to PyPI (OIDC) + GitHub Releases.
+# Two paths:
+#   push to main       -> Python Semantic Release auto-versions from Conventional
+#                         Commits (feat -> minor, fix/perf -> patch), tags, and
+#                         publishes to PyPI (OIDC) + GitHub Releases.
+#   workflow_dispatch  -> build & publish an existing ref/tag to PyPI (manual /
+#                         recovery, e.g. when a tag was created but the publish
+#                         step failed).
 #
-# Prerequisites (repo settings, not code):
-#   - secrets.ADMIN_TOKEN: a token allowed to push the release commit/tag past
-#     branch protection (the same secret the other openadapt repos use).
-#   - PyPI Trusted Publishing configured for openadapt-flow with environment
-#     "pypi" (already set up; v0.3.0 published this way).
+# Prerequisites (repo/org settings): secrets.ADMIN_TOKEN (org-level, visibility
+# "all") to push the release commit/tag past branch protection; PyPI Trusted
+# Publishing for openadapt-flow with environment "pypi".
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or ref to build and publish to PyPI (e.g. v0.4.0)"
+        required: true
 
 jobs:
-  release:
+  # ---- Auto-release on merge to main -------------------------------------
+  auto-release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     concurrency: release
     environment: pypi
@@ -52,16 +59,15 @@ jobs:
         if: steps.check_skip.outputs.skip != 'true'
         uses: astral-sh/setup-uv@v4
 
+      # Semantic Release computes the version, bumps pyproject, tags, AND runs
+      # `build_command` (uv build) to populate dist/. There is deliberately no
+      # separate build step — a second `uv build` would collide on dist/*.tar.gz.
       - name: Python Semantic Release
         if: steps.check_skip.outputs.skip != 'true'
         id: release
         uses: python-semantic-release/python-semantic-release@v9.15.2
         with:
           github_token: ${{ secrets.ADMIN_TOKEN }}
-
-      - name: Build package
-        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        run: uv build
 
       - name: Publish to PyPI
         if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
@@ -72,3 +78,31 @@ jobs:
         uses: python-semantic-release/publish-action@v9.15.2
         with:
           github_token: ${{ secrets.ADMIN_TOKEN }}
+
+  # ---- Manual / recovery publish of an existing ref ----------------------
+  manual-publish:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # PyPI Trusted Publishing (OIDC)
+
+    steps:
+      - name: Checkout the requested ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

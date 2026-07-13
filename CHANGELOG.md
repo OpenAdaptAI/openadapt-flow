@@ -1,6 +1,112 @@
 # CHANGELOG
 
 
+## v0.7.0 (2026-07-13)
+
+### Features
+
+- Policy engine + `lint`/`certify` + auto risk-classification (enforcement, not just disclosure)
+  ([#65](https://github.com/OpenAdaptAI/openadapt-flow/pull/65),
+  [`fe8876d`](https://github.com/OpenAdaptAI/openadapt-flow/commit/fe8876dbdaa438b9f9369980639b201a3679749a))
+
+Turn the bundle's safety posture from DISCLOSURE into ENFORCEMENT: the compiler already reported
+  weak coverage (unarmed clicks, vacuous postconditions, risk defaulting to reversible) but never
+  refused an uncertifiable workflow before running it. "Compiled successfully" is too weak. This
+  adds a compile-/pre-deploy layer on top of the unchanged replayer/identity/heal logic.
+
+- Auto risk-classification (openadapt_flow/risk.py): the compiler now infers risk="irreversible" for
+  CLICK/DOUBLE_CLICK steps whose intent/label is write-shaped
+  (create/update/delete/submit/save/confirm/add ...), word- boundary matched so `address` != `add`.
+  Biased toward irreversible on write-shaped steps (a false irreversible costs availability; a false
+  reversible costs safety). risk_overrides still wins either way. This arms the existing below-OCR /
+  unreadable-identity refusals by default for consequential writes.
+
+- Policy schema + certifier (openadapt_flow/policy.py): a Policy (loadable from YAML, extra=forbid
+  so a typo'd rule fails loudly) with rules prohibit_unarmed_clicks,
+  prohibit_vacuous_postconditions, require_identity_for, require_effect_verification_for,
+  max_unverified_steps, require_human_approval_below_confidence. evaluate_policy() -> a structured
+  pass/fail report naming each violating step + reason.
+
+- CLI: `openadapt-flow lint <bundle>` reports coverage gaps by severity (exit code by max severity);
+  `openadapt-flow certify <bundle> --policy <name|path>` enforces a policy and exits nonzero on
+  failure — making "runnable" distinct from "certified safe". Two example policies ship: permissive
+  (default) and clinical-write (strict).
+
+- Tests: auto-risk flags a save/submit step irreversible and leaves benign navigation reversible;
+  certify FAILS a gappy bundle and PASSES a clean one under the strict policy; lint reports the
+  known gaps; example policies parse. Two e2e healing tests recompile with write steps forced
+  reversible (via a new bundle_writes_reversible fixture) so they isolate the heal mechanism from
+  the now-default risk gate; the gate itself stays covered by TestIrreversibleRiskGate. Docs
+  (LIMITS.md, README) updated.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Testing
+
+- Live OpenEMR end-to-end for the FHIR EffectVerifier (real GUI/API write → FHIR read-back)
+  ([#68](https://github.com/OpenAdaptAI/openadapt-flow/pull/68),
+  [`15962c5`](https://github.com/OpenAdaptAI/openadapt-flow/commit/15962c59ce622e2f57e81bc36c1ae8c52992ffa5))
+
+* feat: EffectVerifier — independent effect verification against system-of-record (OpenEMR FHIR +
+  second substrate)
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* test: live OpenEMR end-to-end for the FHIR EffectVerifier (real API write → FHIR read-back)
+
+Close PR #63's one honest caveat ("OpenEMR did NOT run live; the FHIR verifier is contract-gated
+  against a fake"). Stand up a REAL local OpenEMR and wire the verifier's live path to it.
+
+- benchmark/openemr_live/: docker-compose (OpenEMR 7.0.3 + MariaDB) with the REST + FHIR R4 APIs and
+  OAuth2 enabled, a setup.sh that waits for install, enables the APIs + password grant, registers +
+  enables an OAuth2 client, mints a bearer token, and prints OPENEMR_FHIR_BASE_URL/TOKEN/VERIFY_TLS,
+  and a README with the one-command bring-up. - tests/test_effect_fhir_live_openemr.py: env-gated
+  live test (skips in CI, runs when the instance is up). Writes a real Patient via OpenEMR's FHIR
+  API, then has the #63 FhirEffectVerifier independently read it back: CONFIRMED (record_written +
+  field_equals), REFUTED (wrong field value; absent record), INDETERMINATE→HALT (401 bad token is
+  never "record absent").
+
+Honest scope: the live write is a FHIR Patient POST (an API write, not GUI-driven) — OpenEMR's FHIR
+  API exposes Observation read-only, so the note-as-Observation write the fake models cannot be
+  created over FHIR on a stock OpenEMR. The property proven is the one the fake could not: the
+  verifier's verdicts are correct against a REAL FHIR server. Verified end-to-end against
+  openemr/openemr:7.0.3 (6/6 live tests).
+
+Stacks on feat/effect-verifier (#63); retarget to main after #63 merges.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.6.0 (2026-07-13)
 
 ### Features

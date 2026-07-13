@@ -20,7 +20,7 @@ import json
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -233,6 +233,88 @@ class Postcondition(BaseModel):
     )
 
 
+class ApiBinding(BaseModel):
+    """A declarative API/tool call that performs a step's write WITHOUT the GUI.
+
+    The TOP of the capability ladder (RFC ``docs/design/WORKFLOW_PROGRAM_IR.md``
+    section 4, the ``api`` implementation of a ``TransitionContract``): where the
+    target app exposes a real API, driving its GUI to make the same write is the
+    wrong tool. When a step carries an ``ApiBinding`` AND the run configures an
+    :class:`~openadapt_flow.runtime.actuators.ApiActuator`, the runtime performs
+    the write by CALLING the API deterministically (``$0``, zero model calls),
+    confirms it with the same
+    :class:`~openadapt_flow.runtime.effects.EffectVerifier` that gates a GUI
+    write, and SKIPS the GUI resolution/act for that step. This is the
+    ``api`` leaf of the same contract the structural rung realizes as ``dom_uia``
+    and the visual ladder realizes as ``vision_rdp`` -- one semantic effect,
+    backend-specific implementation.
+
+    ADDITIVE and back-compatible: the field is optional and defaults absent, so a
+    bundle carrying no binding replays EXACTLY as today (GUI actuation). A binding
+    present with no actuator configured also falls through to the GUI ladder --
+    the API tier is an OPTIMIZATION whose safe fallback is the GUI, never a gate
+    that can block a runnable step.
+
+    Fields are REST/JSON-first but shaped so a FHIR / MCP / tool binding fits the
+    same model (``kind`` selects the substrate; a FHIR resource POST, an MCP tool
+    invocation, and a plain REST write all reduce to method + endpoint + body +
+    the expected effect). Placeholders ``{param}`` in the URL / query / body are
+    substituted from the run's typed params (``Workflow.params`` overlaid by the
+    caller's values) at actuation time.
+    """
+
+    kind: Literal["rest", "fhir", "mcp", "tool"] = Field(
+        default="rest",
+        description="Substrate: 'rest'/'fhir' HTTP, or an 'mcp'/'tool' call",
+    )
+    method: str = Field(
+        default="POST",
+        description="HTTP verb (REST/FHIR) or logical operation name (mcp/tool)",
+    )
+    url_template: str = Field(
+        description=(
+            "Endpoint template; absolute (http...) or relative to the"
+            " actuator's base_url. `{param}` placeholders are substituted from"
+            " the run's typed params."
+        ),
+    )
+    body_template: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "JSON request body template; string leaves may carry `{param}`"
+            " placeholders substituted from the run's params."
+        ),
+    )
+    query: dict[str, str] = Field(
+        default_factory=dict,
+        description="Query-string params; values may carry `{param}` too",
+    )
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra request headers; values may carry `{param}`",
+    )
+    expected_status: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Explicit acceptable HTTP status codes; empty means any 2xx is"
+            " success (anything else is treated as an attempted write of"
+            " unknown effect and HALTs -- never GUI-retried)."
+        ),
+    )
+    timeout_s: float = Field(
+        default=5.0, description="Per-request timeout in seconds"
+    )
+    effects: list["Effect"] = Field(
+        default_factory=list,
+        description=(
+            "The system-of-record effect(s) this call is expected to produce."
+            " Used to CONFIRM the API write via the run's EffectVerifier when"
+            " the step itself declares no `effects` (an API write must be"
+            " confirmable, exactly as a GUI write with declared effects is)."
+        ),
+    )
+
+
 # -- Workflow-program IR, Phase 1 (RFC docs/design/WORKFLOW_PROGRAM_IR.md §6) --
 #
 # Additive, backward-compatible first step toward the parameterized workflow
@@ -394,6 +476,16 @@ class Step(BaseModel):
     # before, and a declared effect with no verifier configured is a
     # deployment error that HALTS (never a silent unverifiable write).
     effects: list["Effect"] = Field(default_factory=list)
+    # API/tool binding (RFC section 4, the `api` implementation of the
+    # transition contract): a declarative description of the API call that
+    # performs THIS step's write. When present AND the run configures an
+    # ApiActuator, the runtime performs the write via the API (deterministic,
+    # $0, no model), confirms it with the EffectVerifier, and SKIPS the GUI
+    # resolve/act for this step (see openadapt_flow.runtime.replayer). Additive
+    # and back-compatible: None (default) means the step actuates through the
+    # GUI resolution ladder EXACTLY as today; a binding present with no actuator
+    # configured also falls through to the GUI (the API tier's safe fallback).
+    api_binding: Optional[ApiBinding] = None
     risk: Literal["reversible", "irreversible"] = "reversible"
     # Workflow-program IR, Phase 1 (RFC §6) -- both OPTIONAL and additive; a
     # step with neither replays EXACTLY as a v0 step. Orthogonal to effects /
@@ -584,6 +676,11 @@ class StepResult(BaseModel):
     # calls on this path — effect verification reads the system of record.
     effect_verified: Optional[bool] = None
     effect_results: list[str] = Field(default_factory=list)
+    # How this step's write was PERFORMED: "api" when actuated via an
+    # ApiBinding (GUI resolve/act skipped), None when it went through the GUI
+    # resolution ladder (the default). Diagnostic/audit — lets an operator see
+    # which steps ran on the deterministic API tier vs the visual floor.
+    actuation: Optional[str] = None
     # Drift-oracle: postconditions that deterministically FAILED but were
     # confirmed by the optional on-prem VLM state-verifier under render drift
     # (recorded for audit; empty unless an appliance is configured).
@@ -645,5 +742,6 @@ class RunReport(BaseModel):
 # the forward reference; bundles with no effects are unaffected.
 from openadapt_flow.runtime.effects.effect import Effect  # noqa: E402,F401
 
+ApiBinding.model_rebuild()
 Step.model_rebuild()
 Workflow.model_rebuild()

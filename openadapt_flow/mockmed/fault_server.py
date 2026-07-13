@@ -39,6 +39,10 @@ Fault modes (selected by ``?fault=`` on the write POST, forwarded by the app):
 - ``idempotent``  -- like ``duplicate`` but the app sends an idempotency key
                      and the server de-duplicates on it (the RECOMMENDED fix).
 
+A ``DELETE /api/encounter/<id>`` route (additive; never used by a
+``?fault=`` path) lets the EffectVerifier compensation hook reconcile a
+detected duplicate against this same system of record.
+
 All data is fake. Nothing here touches the network beyond localhost.
 """
 
@@ -134,6 +138,23 @@ class FaultDB:
         with self._lock:
             self.rejected_writes += 1
 
+    def delete(self, record_id: int) -> bool:
+        """Delete the record with ``record_id``. Returns True iff one was
+        removed.
+
+        Additive endpoint used ONLY by the EffectVerifier compensation hook
+        (``openadapt_flow.runtime.effects.compensation``) to reconcile a
+        detected DUPLICATE write against this same system of record. The
+        fault-model study never issues a DELETE, so study behavior and every
+        ``?fault=`` path are unchanged.
+        """
+        with self._lock:
+            before = len(self._records)
+            self._records = [
+                r for r in self._records if r["id"] != record_id
+            ]
+            return len(self._records) != before
+
     def snapshot(self) -> dict:
         with self._lock:
             return {
@@ -186,6 +207,27 @@ def _make_handler(db: FaultDB, directory: str):
                 return
             if path == "/api/encounter":
                 self._handle_encounter(parsed)
+                return
+            self._send_json(404, {"ok": False, "error": "not found"})
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            # Additive compensation route: remove one encounter row by id so
+            # the EffectVerifier compensation hook can reconcile a duplicate
+            # against this system of record. Not used by any ?fault= path.
+            path = urlparse(self.path).path
+            prefix = "/api/encounter/"
+            if path.startswith(prefix):
+                raw = path[len(prefix):]
+                try:
+                    record_id = int(raw)
+                except ValueError:
+                    self._send_json(400, {"ok": False, "error": "bad id"})
+                    return
+                removed = db.delete(record_id)
+                self._send_json(
+                    200 if removed else 404,
+                    {"ok": removed, "id": record_id},
+                )
                 return
             self._send_json(404, {"ok": False, "error": "not found"})
 

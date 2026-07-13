@@ -28,6 +28,8 @@ pip install openadapt-flow && playwright install chromium
 
 openadapt-flow demo-record --out rec                     # record a demonstration
 openadapt-flow compile rec --out bundle --name my-task   # compile it
+openadapt-flow lint bundle                               # report coverage gaps
+openadapt-flow certify bundle --policy clinical-write    # refuse it if unsafe
 openadapt-flow replay bundle                             # replay: local, $0
 openadapt-flow replay bundle --drift theme               # drift the UI, watch it heal
 ```
@@ -62,6 +64,16 @@ openadapt-flow record --url https://your.app --out rec --secret password
 export OPENADAPT_FLOW_SECRET_PASSWORD='…'                 # supplied at replay
 openadapt-flow replay bundle --url https://your.app
 ```
+
+**Compiled is not the same as certified safe.** `lint` reports a bundle's
+coverage gaps (clicks that act with no identity check, steps that assert
+nothing, write steps left mis-classified) with a severity each; `certify`
+enforces a policy and exits nonzero — refusing the bundle before it deploys —
+when it fails. Risk is auto-classified at compile time (write-shaped clicks —
+save/submit/create/delete/... — become `irreversible`, which arms the
+low-confidence refusal), and two example policies ship: a permissive default
+and a strict `clinical-write.yaml`. See [docs/LIMITS.md](docs/LIMITS.md) for
+what the heuristic does and does not catch.
 
 ## How it works
 

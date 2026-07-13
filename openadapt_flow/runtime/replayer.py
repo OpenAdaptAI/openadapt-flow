@@ -10,6 +10,19 @@ pass or time out (with one re-settle retry). Postcondition failure is
 semantic drift: the run halts, naming the step and embedding its
 before/after screenshots in the report.
 
+Steps that declare system-of-record ``effects`` (``ir.Step.effects``) get a
+SECOND, independent verification the screen oracle cannot provide: an
+``EffectVerifier`` (``runtime.effects``) snapshots the real system of record
+BEFORE the action and, after the action's screen postconditions pass, rules
+each declared ``Effect`` CONFIRMED / REFUTED / INDETERMINATE against that
+record (an API/DB read, never the pixels). A non-CONFIRMED verdict HALTS the
+run — mirroring the identity gate's refuse-rather-than-guess posture — and for
+an irreversible effect a configured compensator may ``reconcile_or_escalate``
+(RECONCILED continues, ESCALATE halts). A step that declares effects with NO
+verifier configured is a deployment error and HALTS (an unverifiable
+consequential write is never allowed to pass). This path makes ZERO model
+calls — effect verification reads the system of record.
+
 Steps that succeed via any rung other than ``template`` are healed: the
 anchor is refreshed from the live frame, the heal is recorded under
 ``run_dir/heals/<step_id>/``, and — when ``save_healed_to`` is set — a full
@@ -43,6 +56,11 @@ from openadapt_flow.privacy import scrub_image_bytes as _scrub_png
 from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import identity as identity_mod
+from openadapt_flow.runtime.effects import (
+    EffectState,
+    EffectVerifier,
+    reconcile_or_escalate,
+)
 from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 
 # REGION_STABLE template check: how far the expected content may shift from
@@ -112,6 +130,21 @@ class Replayer:
             optional local-VLM veto tier of the pre-click identity ladder;
             None (default) disables that tier -- the ladder still runs
             structured-text, pixel-compare, OCR, and halt with no model.
+        effect_verifier: Optional system-of-record ``EffectVerifier``
+            (``runtime.effects``) bound to the deployment's system of record
+            (a REST/FHIR API, a document store). When set, any step that
+            declares ``ir.Step.effects`` is verified against the REAL record
+            after its screen postconditions pass; a non-CONFIRMED verdict
+            HALTS. When None (default) a bundle with NO effects replays
+            exactly as before, but a step that DOES declare effects is a
+            deployment/config error and HALTS (fail-safe: an unverifiable
+            consequential write is never silently accepted). Reads only —
+            ZERO model calls.
+        effect_compensator: Optional ``Compensator`` (e.g. ``RestCompensator``)
+            invoked via ``reconcile_or_escalate`` when an IRREVERSIBLE effect
+            is REFUTED as a duplicate — deletes the extras and re-verifies
+            (RECONCILED continues, else ESCALATE halts). None (default) means
+            every refuted/indeterminate effect simply halts.
         poll_interval_s: Postcondition polling interval in seconds.
     """
 
@@ -123,6 +156,8 @@ class Replayer:
         grounder: Optional[Any] = None,
         identity_vlm: Optional[Any] = None,
         state_verifier: Optional[Any] = None,
+        effect_verifier: Optional[EffectVerifier] = None,
+        effect_compensator: Optional[Any] = None,
         poll_interval_s: float = 0.05,
     ) -> None:
         if vision is None:
@@ -131,6 +166,12 @@ class Replayer:
         self.backend = backend
         self.vision = vision
         self.grounder = grounder
+        # System-of-record effect verification (OFF by default). The verifier
+        # is bound to the deployment's system of record; the optional
+        # compensator undoes a detected duplicate irreversible write. Neither
+        # makes a model call — the $0 runtime guarantee is preserved.
+        self.effect_verifier = effect_verifier
+        self.effect_compensator = effect_compensator
         # Optional local-VLM identity veto (tier 3 of the identity ladder),
         # OFF by default like the grounder: an IdentityVLM verifier or None.
         # When None the ladder runs structured-text + pixel-compare + OCR +
@@ -296,6 +337,9 @@ class Replayer:
         # can observe them): structural postconditions compare the step's
         # END state against this — never against a recorded literal.
         start_state = self._structural_state()
+        # System-of-record pre-state, snapshotted just before the action when
+        # the step declares effects (see the block guarding self._act below).
+        effect_pre_state: Optional[EffectState] = None
 
         try:
             resolution, matched_region, error = self._resolve_step(
@@ -384,6 +428,30 @@ class Replayer:
                         f"and its target identity {reason} — needs human "
                         "confirmation; refusing to act"
                     )
+            # System-of-record effect verification -- SNAPSHOT the record just
+            # before the (consequential) action, so the post-action verifier
+            # can count only what THIS step wrote (delta / at-most-once /
+            # collateral loss). Fail-safe, mirroring the identity gate: a step
+            # that declares effects with NO verifier configured is a deployment
+            # error -- refuse to perform an unverifiable consequential write
+            # rather than pass it silently.
+            if error is None and step.effects:
+                if self.effect_verifier is None:
+                    error = (
+                        f"Step '{step.id}' ({step.intent}) declares "
+                        f"{len(step.effects)} system-of-record effect(s) but no "
+                        "EffectVerifier is configured for this run — refusing "
+                        "to perform an unverifiable consequential write "
+                        "(deployment/configuration error); run aborted"
+                    )
+                    result.effect_verified = False
+                    result.effect_results.append(
+                        "no EffectVerifier configured for a step that declares "
+                        "effects (fail-safe HALT)"
+                    )
+                else:
+                    effect_pre_state = self.effect_verifier.capture_pre_state()
+
             if error is None:
                 error = self._act(
                     step,
@@ -425,6 +493,14 @@ class Replayer:
                         f"(semantic drift) — failed: {detail} — run aborted"
                     )
 
+            # Independent system-of-record verification, AFTER the screen
+            # postconditions passed: the screen oracle cannot see a partial
+            # save, a phantom optimistic-UI success, a duplicate write, or a
+            # lost update -- the EffectVerifier reads the REAL record and HALTs
+            # on any non-CONFIRMED verdict (docs/design/EFFECT_VERIFIER.md).
+            if error is None and effect_pre_state is not None:
+                error = self._verify_effects(step, effect_pre_state, result)
+
             result.ok = error is None
             result.error = error
 
@@ -450,6 +526,92 @@ class Replayer:
         result.after_png = self._save_step_png(run_dir, step.id, "after", last_frame)
         result.elapsed_ms = (time.monotonic() - t0) * 1000.0
         return result
+
+    # -- system-of-record effect verification -----------------------------------
+
+    def _verify_effects(
+        self,
+        step: Step,
+        before: EffectState,
+        result: StepResult,
+    ) -> Optional[str]:
+        """Verify each declared Effect against the system of record; HALT on
+        any non-CONFIRMED verdict.
+
+        Runs AFTER the action and its screen postconditions. For each
+        ``step.effects`` entry the configured verifier rules CONFIRMED /
+        REFUTED / INDETERMINATE against the REAL record (an API/DB read, never
+        the screen). A CONFIRMED effect proceeds; a non-CONFIRMED effect halts,
+        except that an IRREVERSIBLE effect is first routed through
+        ``reconcile_or_escalate`` -- a duplicate the configured compensator can
+        undo is RECONCILED (proceed), everything else ESCALATEs (halt). Every
+        verdict is recorded on ``result.effect_results`` for the audit trail.
+        Makes ZERO model calls (the $0 runtime guarantee).
+
+        Returns an error string (HALT) or None (all effects confirmed or
+        reconciled).
+        """
+        assert self.effect_verifier is not None  # guaranteed by the caller
+        for effect in step.effects:
+            verdict = self.effect_verifier.verify(effect, before)
+            if verdict.confirmed:
+                result.effect_results.append(
+                    f"[{verdict.substrate}] {effect.kind.value}: CONFIRMED"
+                    + (f" — {verdict.reason}" if verdict.reason else "")
+                )
+                continue
+
+            # Non-CONFIRMED: never proceed on an unverified/contradicted write.
+            # An irreversible effect gets one reconcile-or-escalate pass (a
+            # compensable duplicate is fixable; missing / partial / collateral
+            # loss / INDETERMINATE always escalate). A reversible effect just
+            # halts. Either way the run stops -- this is the same
+            # refuse-rather-than-guess posture as the identity gate.
+            if effect.risk == "irreversible":
+                comp = reconcile_or_escalate(
+                    effect,
+                    verdict,
+                    verifier=self.effect_verifier,
+                    before=before,
+                    compensator=self.effect_compensator,
+                )
+                if comp.proceed:
+                    result.effect_results.append(
+                        f"[{verdict.substrate}] {effect.kind.value}: "
+                        f"{verdict.verdict.value.upper()} → RECONCILED "
+                        f"({comp.actions_taken} action(s)) — {comp.reason}"
+                    )
+                    continue
+                result.effect_verified = False
+                result.effect_results.append(
+                    f"[{verdict.substrate}] {effect.kind.value}: "
+                    f"{verdict.verdict.value.upper()} → "
+                    f"{comp.outcome.value.upper()} — {comp.reason}"
+                )
+                return (
+                    f"System-of-record effect verification HALTED step "
+                    f"'{step.id}' ({step.intent}): {effect.kind.value} "
+                    f"{verdict.verdict.value} against the {verdict.substrate} "
+                    f"system of record and could not be reconciled "
+                    f"({comp.outcome.value}) — "
+                    f"{comp.escalation or comp.reason} — run aborted"
+                )
+
+            result.effect_verified = False
+            result.effect_results.append(
+                f"[{verdict.substrate}] {effect.kind.value}: "
+                f"{verdict.verdict.value.upper()} — {verdict.reason}"
+            )
+            return (
+                f"System-of-record effect verification HALTED step "
+                f"'{step.id}' ({step.intent}): {effect.kind.value} "
+                f"{verdict.verdict.value} against the {verdict.substrate} "
+                f"system of record (the screen showed success but the record "
+                f"is wrong or unverifiable) — {verdict.reason} — run aborted"
+            )
+
+        result.effect_verified = True
+        return None
 
     def _resolve_step(
         self,

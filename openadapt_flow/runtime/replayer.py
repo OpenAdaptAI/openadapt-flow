@@ -43,12 +43,16 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     IdentityCheck,
+    LoopSpec,
     Point,
     Predicate,
     PredicateKind,
+    ProgramGraph,
     Region,
     Resolution,
     RunReport,
+    State,
+    StateKind,
     Step,
     StepResult,
     UnarmedStep,
@@ -116,6 +120,70 @@ def secret_env_var(param: str) -> str:
     """Environment variable a secret parameter's value is read from."""
     key = "".join(ch if ch.isalnum() else "_" for ch in param).upper()
     return f"{SECRET_ENV_PREFIX}{key}"
+
+
+# Bounds for the Phase-2 program interpreter -- deterministic termination
+# guarantees. A worklist loop is bounded per-loop (LoopSpec.max_iterations); the
+# graph walk itself is bounded by a total step budget (so an authored cycle of
+# always-true transitions can never spin forever) and subflow/loop nesting is
+# depth-bounded.
+PROGRAM_MAX_STEPS = 100_000
+PROGRAM_MAX_DEPTH = 64
+
+
+class _GraphStepContext:
+    """Per-action-state context the program interpreter feeds ``_run_step``.
+
+    Supplies the two pieces the linear loop derives from list position but a
+    graph lacks: the previously EXECUTED action (for the click-to-focus TYPE
+    heuristic) and the SCROLL closed-loop successors (the next anchored action
+    state and the immediately following state). All optional; a None field means
+    "no such successor" (the scroll loop then falls back to its open-loop
+    gesture, exactly as at the end of a linear workflow).
+    """
+
+    __slots__ = ("prev_action", "next_anchored", "following")
+
+    def __init__(
+        self,
+        prev_action: Optional[ActionKind] = None,
+        next_anchored: Optional[Step] = None,
+        following: Optional[Step] = None,
+    ) -> None:
+        self.prev_action = prev_action
+        self.next_anchored = next_anchored
+        self.following = following
+
+
+class _ProgramHalt(Exception):
+    """Internal signal: an unrecoverable state was reached (an unhandled action
+    failure, a dead-end with no matching transition, a bound exceeded, or a
+    ``halt`` / ``escalate`` terminal). Carries the outcome + reason the run
+    report records. Caught only by ``_interpret_program`` -- never escapes the
+    Replayer."""
+
+    def __init__(self, outcome: str, reason: str) -> None:
+        super().__init__(reason)
+        self.outcome = outcome
+        self.reason = reason
+
+
+def _all_workflow_steps(workflow: Workflow):
+    """Yield every ``Step`` in a workflow for whole-bundle audits.
+
+    Linear bundle: the ``steps`` list. Program bundle: every ``action`` state's
+    step across the top-level program graph AND all subflows (a loop body's
+    steps included). Order is stable but not execution order -- used only for
+    static coverage counting, not for running.
+    """
+    if workflow.program is None:
+        yield from workflow.steps
+        return
+    graphs = [workflow.program, *workflow.subflows.values()]
+    for graph in graphs:
+        for state in graph.states.values():
+            if state.kind is StateKind.ACTION and state.step is not None:
+                yield state.step
 
 
 class Replayer:
@@ -234,11 +302,20 @@ class Replayer:
         workflow: Workflow,
         *,
         params: Optional[dict[str, str]] = None,
+        worklists: Optional[dict[str, list[dict[str, str]]]] = None,
         bundle_dir: Path,
         run_dir: Path,
         save_healed_to: Optional[Path] = None,
     ) -> RunReport:
         """Execute the workflow and write a run directory.
+
+        A workflow with no ``program`` graph runs the LINEAR ``steps`` loop
+        exactly as before (byte-for-byte back-compatible). A workflow carrying a
+        ``program`` (Workflow-program IR Phase 2) is interpreted as a STATE
+        MACHINE -- loops, branches, subflows, exception paths -- reusing the
+        IDENTICAL per-action machinery (resolve / identity gate / effect verify /
+        risk gate / heal) for every ``action`` state. Both paths make ZERO model
+        calls on the deterministic path (the $0 runtime guarantee).
 
         Args:
             workflow: The compiled workflow. Heals are applied to this
@@ -246,6 +323,11 @@ class Replayer:
             params: Values for parameterized TYPE steps (``step.param``).
                 Parameters not supplied here fall back to the recorded
                 example/default values in ``workflow.params``.
+            worklists: Program mode only -- run-time worklist rows for ``loop``
+                states, keyed by relation name (each a list of param-dict rows).
+                Overrides any inline ``Workflow.data_sources`` rows of the same
+                name; the mechanism that makes a loop VARIABLE-LENGTH at run
+                time. Ignored for a linear (no-program) workflow.
             bundle_dir: The workflow bundle directory (source of template
                 crops).
             run_dir: Output directory for report.json, per-step screenshots
@@ -254,9 +336,9 @@ class Replayer:
                 workflow.json + new and unchanged template crops) here.
 
         Returns:
-            The RunReport (also saved as ``run_dir/report.json``). The run
-            aborts at the first failed step; ``success`` is True only if
-            every step completed.
+            The RunReport (also saved as ``run_dir/report.json``). A linear run
+            aborts at the first failed step; a program run ends at a terminal
+            state (or an unhandled failure). ``success`` reflects that outcome.
         """
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
@@ -310,39 +392,40 @@ class Replayer:
             report.save(run_dir)
             return report
 
-        for step_index, step in enumerate(workflow.steps):
-            result = self._run_step(
-                step,
-                workflow=workflow,
-                step_index=step_index,
+        if workflow.program is not None:
+            # Workflow-program IR, Phase 2: interpret the STATE MACHINE. The
+            # interpreter appends StepResults (and accounts each) exactly as the
+            # linear loop does, but walks the graph -- loops / branches /
+            # subflows / exception paths -- instead of a straight list. It sets
+            # report.success / terminal_outcome from the terminal it ends on.
+            self._interpret_program(
+                workflow,
                 params=params,
+                worklists=worklists or {},
                 bundle_dir=bundle_dir,
                 run_dir=run_dir,
+                report=report,
                 new_crops=new_crops,
             )
-            report.results.append(result)
-            if result.ok and result.resolution is not None:
-                rung = result.resolution.rung
-                report.rung_counts[rung] = report.rung_counts.get(rung, 0) + 1
-                if rung == "grounder":
-                    report.model_calls += 1
-            elif result.ok and result.actuation == "api":
-                # API-tier actuation has no visual resolution rung; count it
-                # under "api" so the run report shows the deterministic top of
-                # the ladder in the same place as the visual rungs. Zero model
-                # calls (the $0 guarantee holds on the API path too).
-                report.rung_counts["api"] = report.rung_counts.get("api", 0) + 1
-            # Drift-oracle state-verifier calls are model calls too (honest
-            # accounting: a rescued run is not a zero-model run).
-            report.model_calls += result.drift_oracle_calls
-            if result.heal is not None:
-                report.heal_count += 1
-            if not result.ok:
-                break
+        else:
+            for step_index, step in enumerate(workflow.steps):
+                result = self._run_step(
+                    step,
+                    workflow=workflow,
+                    step_index=step_index,
+                    params=params,
+                    bundle_dir=bundle_dir,
+                    run_dir=run_dir,
+                    new_crops=new_crops,
+                )
+                report.results.append(result)
+                self._account_result(report, result)
+                if not result.ok:
+                    break
 
-        report.success = len(report.results) == len(workflow.steps) and all(
-            result.ok for result in report.results
-        )
+            report.success = len(report.results) == len(workflow.steps) and all(
+                result.ok for result in report.results
+            )
         report.total_ms = (time.monotonic() - t_run) * 1000.0
 
         if save_healed_to is not None:
@@ -367,7 +450,11 @@ class Replayer:
         identity verification (docs/LIMITS.md), so each one is listed by
         id with the compile-time reason for the operator.
         """
-        for step in workflow.steps:
+        # Cover the whole bundle: the linear ``steps`` list, OR (program mode)
+        # every ``action`` state's step across the program graph and all
+        # subflows -- so a hand-authored/compiled PROGRAM's identity coverage is
+        # audited exactly as a linear bundle's is.
+        for step in _all_workflow_steps(workflow):
             if step.anchor is None or step.action not in (
                 ActionKind.CLICK,
                 ActionKind.DOUBLE_CLICK,
@@ -391,6 +478,472 @@ class Replayer:
                     )
                 )
 
+    @staticmethod
+    def _account_result(report: RunReport, result: StepResult) -> None:
+        """Fold one StepResult's rung / model-call / heal counts into the
+        report. Shared by the linear loop and the program interpreter so both
+        account a step identically (a rescued or grounded run is never counted
+        as a zero-model run)."""
+        if result.ok and result.resolution is not None:
+            rung = result.resolution.rung
+            report.rung_counts[rung] = report.rung_counts.get(rung, 0) + 1
+            if rung == "grounder":
+                report.model_calls += 1
+        elif result.ok and result.actuation == "api":
+            # API-tier actuation has no visual resolution rung; count it under
+            # "api" so the report shows the deterministic top of the ladder in
+            # the same place as the visual rungs. Zero model calls.
+            report.rung_counts["api"] = report.rung_counts.get("api", 0) + 1
+        # Drift-oracle state-verifier calls are model calls too (honest
+        # accounting).
+        report.model_calls += result.drift_oracle_calls
+        if result.heal is not None:
+            report.heal_count += 1
+
+    # -- Workflow-program IR, Phase 2: the state-machine interpreter -----------
+    #
+    # Deterministic graph interpreter ($0, ZERO model calls on the happy path).
+    # It REUSES the linear per-action machinery unchanged: every ``action``
+    # state is executed by ``_run_step`` -- the SAME settle / resolve / identity
+    # gate / effect verify / risk gate / heal pipeline the linear replayer runs
+    # -- so no safety property is weakened by adding control flow AROUND the
+    # hardened leaf. The interpreter only adds: which state runs next (guarded
+    # transitions), loops over a worklist, subflow dispatch, and routing a
+    # failed action to a local exception handler instead of aborting.
+
+    def _interpret_program(
+        self,
+        workflow: Workflow,
+        *,
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+    ) -> None:
+        """Interpret ``workflow.program`` as a state machine, writing results
+        and the terminal outcome onto ``report``.
+
+        Normal completion (a ``success`` terminal, or falling off a graph with
+        no further transition) => ``report.success = True``. Any ``_ProgramHalt``
+        -- an unhandled action failure, a dead-end branch, a ``halt`` /
+        ``escalate`` terminal, or a safety bound exceeded -- stops the whole run
+        with ``success = False`` and records the reason.
+        """
+        assert workflow.program is not None
+        self._prev_action: Optional[ActionKind] = None
+        self._program_step_budget = PROGRAM_MAX_STEPS
+        try:
+            self._walk_graph(
+                workflow.program,
+                workflow=workflow,
+                params=params,
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+                depth=0,
+            )
+            report.success = True
+            if report.terminal_outcome is None:
+                # Fell off the top graph with no explicit terminal: a clean,
+                # complete run (every executed state succeeded or was handled).
+                report.terminal_outcome = "success"
+        except _ProgramHalt as halt:
+            report.success = False
+            report.terminal_outcome = halt.outcome
+            report.results.append(
+                StepResult(
+                    step_id="<terminal>",
+                    intent=f"program {halt.outcome}",
+                    ok=False,
+                    error=halt.reason,
+                )
+            )
+
+    def _walk_graph(
+        self,
+        graph: ProgramGraph,
+        *,
+        workflow: Workflow,
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+        depth: int,
+    ) -> None:
+        """Walk one graph from ``entry`` to a terminal / fall-off.
+
+        Returns normally on completion (a ``success`` terminal RETURNS to the
+        caller -- for a subflow that means "continue after the call"; for the
+        top program it means the run succeeded). Raises ``_ProgramHalt`` to stop
+        the ENTIRE run.
+        """
+        if depth > PROGRAM_MAX_DEPTH:
+            raise _ProgramHalt(
+                "halt",
+                f"program nesting exceeded {PROGRAM_MAX_DEPTH} levels "
+                "(possible unbounded recursion) — run aborted",
+            )
+        state_id: Optional[str] = graph.entry
+        while state_id is not None:
+            self._program_step_budget -= 1
+            if self._program_step_budget <= 0:
+                raise _ProgramHalt(
+                    "halt",
+                    f"program exceeded {PROGRAM_MAX_STEPS} state transitions "
+                    "(possible non-terminating graph) — run aborted",
+                )
+            state = graph.states.get(state_id)
+            if state is None:
+                raise _ProgramHalt(
+                    "halt",
+                    f"program references undefined state '{state_id}' — "
+                    "run aborted",
+                )
+            report.visited_states.append(state.id)
+
+            if state.kind is StateKind.TERMINAL:
+                outcome = state.outcome or "success"
+                report.terminal_outcome = outcome
+                if outcome == "success":
+                    return  # RETURN to caller / top-program success
+                raise _ProgramHalt(
+                    outcome,
+                    state.reason
+                    or f"reached '{outcome}' terminal state '{state.id}' — "
+                    "run aborted",
+                )
+
+            state_id = self._exec_state(
+                state,
+                graph,
+                workflow=workflow,
+                params=params,
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+                depth=depth,
+            )
+        # Fell off the graph (a state with no outgoing transition): normal
+        # completion / subflow return.
+
+    def _exec_state(
+        self,
+        state: State,
+        graph: ProgramGraph,
+        *,
+        workflow: Workflow,
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+        depth: int,
+    ) -> Optional[str]:
+        """Execute one non-terminal state; return the next state id (or None to
+        fall off the current graph). Raises ``_ProgramHalt`` on an unrecoverable
+        state."""
+        if state.kind is StateKind.ACTION:
+            return self._exec_action_state(
+                state,
+                graph,
+                workflow=workflow,
+                params=params,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+            )
+
+        if state.kind is StateKind.BRANCH:
+            # A branch performs no action: it picks an outgoing edge purely by
+            # guard (evaluated on the current frame). No matching edge is a
+            # fail-safe HALT unless the state routes to an exception handler.
+            nxt = self._select_transition(
+                state, params=params, bundle_dir=bundle_dir
+            )
+            if nxt is None:
+                return self._on_state_failure(
+                    state,
+                    f"branch state '{state.id}' has no transitions to follow "
+                    "— run aborted",
+                )
+            return nxt
+
+        if state.kind is StateKind.LOOP:
+            return self._exec_loop_state(
+                state,
+                workflow=workflow,
+                params=params,
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+                depth=depth,
+            )
+
+        if state.kind is StateKind.SUBFLOW_CALL:
+            sub = workflow.subflows.get(state.subflow or "")
+            if sub is None:
+                return self._on_state_failure(
+                    state,
+                    f"subflow_call state '{state.id}' names undefined subflow "
+                    f"'{state.subflow}' — run aborted",
+                )
+            self._walk_graph(
+                sub,
+                workflow=workflow,
+                params=params,
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+                depth=depth + 1,
+            )
+            return self._select_transition(
+                state, params=params, bundle_dir=bundle_dir
+            )
+
+        raise _ProgramHalt(
+            "halt", f"state '{state.id}' has unsupported kind {state.kind!r}"
+        )
+
+    def _exec_action_state(
+        self,
+        state: State,
+        graph: ProgramGraph,
+        *,
+        workflow: Workflow,
+        params: dict[str, str],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+    ) -> Optional[str]:
+        """Run an ``action`` state's Step through the SHARED per-step pipeline,
+        then pick the next transition. A genuine failure routes to
+        ``on_exception`` (recorded as handled) or HALTs the run."""
+        if state.step is None:
+            raise _ProgramHalt(
+                "halt", f"action state '{state.id}' carries no step"
+            )
+        ctx = self._build_graph_ctx(state, graph)
+        result = self._run_step(
+            state.step,
+            workflow=workflow,
+            step_index=0,
+            params=params,
+            bundle_dir=bundle_dir,
+            run_dir=run_dir,
+            new_crops=new_crops,
+            graph_ctx=ctx,
+        )
+        report.results.append(result)
+        self._account_result(report, result)
+        # Track the previously EXECUTED action for the next TYPE step's
+        # click-to-focus heuristic. A SKIPPED step (guard on_unmet="skip") did
+        # not act, so it leaves the previous action / click point untouched.
+        if not result.skipped:
+            self._prev_action = state.step.action
+
+        if not result.ok:
+            # A skipped guard is ok=True; only a genuine failure lands here.
+            if state.on_exception is not None:
+                result.exception_handled = True
+                return state.on_exception  # graph try/except: route + continue
+            raise _ProgramHalt(
+                "halt",
+                result.error
+                or f"action state '{state.id}' failed — run aborted",
+            )
+        return self._select_transition(
+            state, params=params, bundle_dir=bundle_dir
+        )
+
+    def _exec_loop_state(
+        self,
+        state: State,
+        *,
+        workflow: Workflow,
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+        depth: int,
+    ) -> Optional[str]:
+        """Iterate a worklist, running the body subflow once per row (RFC §2.3).
+
+        Zero rows => the body runs zero times. The row's fields merge into the
+        params in scope for that iteration (an ``entity_ref`` param then
+        re-resolves by the identity ladder each pass). Iteration is BOUNDED:
+        more rows than ``max_iterations`` HALTs (fail-safe)."""
+        loop = state.loop
+        if loop is None:
+            raise _ProgramHalt(
+                "halt", f"loop state '{state.id}' carries no LoopSpec"
+            )
+        body = workflow.subflows.get(loop.body)
+        if body is None:
+            return self._on_state_failure(
+                state,
+                f"loop state '{state.id}' body subflow '{loop.body}' is not "
+                "defined — run aborted",
+            )
+        rows = self._resolve_worklist(state, loop, workflow, worklists)
+        if len(rows) > loop.max_iterations:
+            return self._on_state_failure(
+                state,
+                f"loop state '{state.id}' worklist has {len(rows)} rows, "
+                f"exceeding max_iterations={loop.max_iterations} — run aborted",
+            )
+        for row in rows:
+            iter_params = {**params, **row}
+            self._walk_graph(
+                body,
+                workflow=workflow,
+                params=iter_params,
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+                depth=depth + 1,
+            )
+        return self._select_transition(
+            state, params=params, bundle_dir=bundle_dir
+        )
+
+    def _on_state_failure(self, state: State, reason: str) -> str:
+        """A non-action state hit an unrecoverable condition: route to its
+        ``on_exception`` handler if it has one, else HALT the run."""
+        if state.on_exception is not None:
+            return state.on_exception
+        raise _ProgramHalt("halt", reason)
+
+    def _resolve_worklist(
+        self,
+        state: State,
+        loop: LoopSpec,
+        workflow: Workflow,
+        worklists: dict[str, list[dict[str, str]]],
+    ) -> list[dict[str, str]]:
+        """The rows a loop iterates: a run-time ``worklists`` entry (variable
+        length, highest priority) else the inline ``data_sources`` relation. An
+        undefined relation is a config error (HALT) -- distinct from a defined
+        but EMPTY relation, which legitimately runs the body zero times."""
+        if loop.relation in worklists:
+            return list(worklists[loop.relation])
+        relation = workflow.data_sources.get(loop.relation)
+        if relation is not None:
+            return list(relation.rows)
+        raise _ProgramHalt(
+            "halt",
+            f"loop state '{state.id}' relation '{loop.relation}' is not "
+            "defined in data_sources and no run-time worklist was supplied — "
+            "run aborted",
+        )
+
+    def _select_transition(
+        self,
+        state: State,
+        *,
+        params: dict[str, str],
+        bundle_dir: Path,
+    ) -> Optional[str]:
+        """Pick this state's next state id (RFC §2.2): evaluate ``transitions``
+        IN ORDER, first whose guard holds wins; ``None`` guard is unconditional.
+
+        Returns the target id, or None when the state has NO transitions (fall
+        off / subflow return). When transitions exist but NONE match on the
+        current screen it is a dead end -- a fail-safe HALT (never guess an
+        edge). Screenshots only when a guard actually needs a frame, so a
+        degenerate all-unconditional chain replays with no extra settles (the
+        byte-identical linear lift)."""
+        transitions = state.transitions
+        if not transitions:
+            return None
+        if all(t.guard is None for t in transitions):
+            return transitions[0].target
+        frame = self.vision.wait_settled(self.backend)
+        for t in transitions:
+            if t.guard is None or self._predicate_holds(
+                t.guard, frame, bundle_dir, params
+            ):
+                return t.target
+        raise _ProgramHalt(
+            "halt",
+            f"no outgoing transition matched at state '{state.id}' on the "
+            "current screen (guards: "
+            + ", ".join(
+                self._describe_predicate(t.guard)
+                for t in transitions
+                if t.guard is not None
+            )
+            + ") — run aborted",
+        )
+
+    def _build_graph_ctx(
+        self, state: State, graph: ProgramGraph
+    ) -> _GraphStepContext:
+        """Assemble the ``_GraphStepContext`` for an action state: the previously
+        executed action (for the TYPE focus heuristic) and, for a SCROLL step,
+        the closed-loop successors derived from the graph's transitions."""
+        next_anchored: Optional[Step] = None
+        following: Optional[Step] = None
+        if state.step is not None and state.step.action is ActionKind.SCROLL:
+            following, next_anchored = self._scroll_successors(state, graph)
+        return _GraphStepContext(
+            prev_action=self._prev_action,
+            next_anchored=next_anchored,
+            following=following,
+        )
+
+    @staticmethod
+    def _scroll_successors(
+        state: State, graph: ProgramGraph
+    ) -> tuple[Optional[Step], Optional[Step]]:
+        """(immediately-following step, next anchored step) for a SCROLL state's
+        closed loop, following unconditional transitions within this graph. The
+        SCROLL-in-a-graph case is rare; this is best-effort and stays inside the
+        one graph (subflow boundaries end the scan)."""
+
+        def first_target(s: State) -> Optional[str]:
+            for t in s.transitions:
+                if t.guard is None:
+                    return t.target
+            return s.transitions[0].target if s.transitions else None
+
+        following: Optional[Step] = None
+        next_anchored: Optional[Step] = None
+        visited: set[str] = set()
+        cur = first_target(state)
+        first = True
+        while cur is not None and cur not in visited:
+            visited.add(cur)
+            st = graph.states.get(cur)
+            if st is None or st.kind is not StateKind.ACTION or st.step is None:
+                break
+            if first:
+                following = st.step
+                first = False
+            if st.step.anchor is not None:
+                next_anchored = st.step
+                break
+            cur = first_target(st)
+        return following, next_anchored
+
     # -- per-step execution ---------------------------------------------------
 
     def _run_step(
@@ -403,8 +956,16 @@ class Replayer:
         bundle_dir: Path,
         run_dir: Path,
         new_crops: dict[str, bytes],
+        graph_ctx: Optional["_GraphStepContext"] = None,
     ) -> StepResult:
-        """Execute a single step; never raises (failures land in the result)."""
+        """Execute a single step; never raises (failures land in the result).
+
+        ``graph_ctx`` is set ONLY by the program interpreter (Phase 2): it
+        supplies the ``prev_action`` / scroll-successor context the linear loop
+        derives from ``workflow.steps[step_index±1]`` (which does not exist in a
+        graph). When None (the linear path) every lookup is exactly as before --
+        so a linear run is byte-for-byte unchanged.
+        """
         t0 = time.monotonic()
         result = StepResult(step_id=step.id, intent=step.intent, ok=False)
 
@@ -579,6 +1140,7 @@ class Replayer:
                     bundle_dir=bundle_dir,
                     before_png=before_png,
                     result=result,
+                    graph_ctx=graph_ctx,
                 )
 
             if error is None:
@@ -963,6 +1525,7 @@ class Replayer:
         bundle_dir: Path,
         before_png: bytes,
         result: StepResult,
+        graph_ctx: Optional["_GraphStepContext"] = None,
     ) -> Optional[str]:
         """Perform the step's action through the backend.
 
@@ -1023,10 +1586,7 @@ class Replayer:
                 # Fresh baseline AFTER the focusing click so its own focus
                 # ring never counts as "input landed".
                 before_png = self.backend.screenshot()
-            elif step_index > 0 and workflow.steps[step_index - 1].action in (
-                ActionKind.CLICK,
-                ActionKind.DOUBLE_CLICK,
-            ):
+            elif self._prev_was_click(workflow, step_index, graph_ctx):
                 field_point = self._last_click_point
             self.backend.type_text(text)
             if not text:
@@ -1053,9 +1613,34 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 before_png=before_png,
                 params=params,
+                graph_ctx=graph_ctx,
             )
 
         return f"Step '{step.id}' has unsupported action {step.action!r}"
+
+    @staticmethod
+    def _prev_was_click(
+        workflow: Workflow,
+        step_index: int,
+        graph_ctx: Optional["_GraphStepContext"],
+    ) -> bool:
+        """Whether the step executed just before this TYPE step was a click.
+
+        Linear mode reads ``workflow.steps[step_index - 1]`` exactly as before;
+        program mode reads the interpreter-supplied ``graph_ctx.prev_action``
+        (the previously EXECUTED action state -- the graph has no positional
+        predecessor). The click-to-focus-then-type heuristic is thereby
+        identical on both paths.
+        """
+        if graph_ctx is not None:
+            return graph_ctx.prev_action in (
+                ActionKind.CLICK,
+                ActionKind.DOUBLE_CLICK,
+            )
+        return step_index > 0 and workflow.steps[step_index - 1].action in (
+            ActionKind.CLICK,
+            ActionKind.DOUBLE_CLICK,
+        )
 
     # -- Workflow-program IR gates: guard + wait_until --------------------------
 
@@ -1619,6 +2204,7 @@ class Replayer:
         bundle_dir: Path,
         before_png: bytes,
         params: dict[str, str],
+        graph_ctx: Optional["_GraphStepContext"] = None,
     ) -> Optional[str]:
         """Execute a SCROLL step as a closed loop on a wait_until predicate.
 
@@ -1648,7 +2234,15 @@ class Replayer:
         """
         dx = step.scroll_dx or 0
         dy = step.scroll_dy or 0
-        next_step = self._next_anchored_step(workflow, step_index)
+        # The next anchored step (default scroll stop condition): linear mode
+        # scans forward in ``workflow.steps``; program mode uses the
+        # interpreter-supplied successor (the target of this state's
+        # unconditional transition chain).
+        next_step = (
+            graph_ctx.next_anchored
+            if graph_ctx is not None
+            else self._next_anchored_step(workflow, step_index)
+        )
         # The scroll's readiness is a wait_until predicate: an explicit
         # step.wait_until wins; otherwise the next anchor's ANCHOR_RESOLVES.
         stop_pred = step.wait_until
@@ -1676,9 +2270,13 @@ class Replayer:
                 return None
 
         following = (
-            workflow.steps[step_index + 1]
-            if step_index + 1 < len(workflow.steps)
-            else None
+            graph_ctx.following
+            if graph_ctx is not None
+            else (
+                workflow.steps[step_index + 1]
+                if step_index + 1 < len(workflow.steps)
+                else None
+            )
         )
         if following is not None and following.action is ActionKind.SCROLL:
             # The next SCROLL step continues the loop with its own budget.

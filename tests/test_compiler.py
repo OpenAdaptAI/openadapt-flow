@@ -29,9 +29,7 @@ def blank() -> np.ndarray:
     return np.full((VIEWPORT[1], VIEWPORT[0], 3), 245, dtype=np.uint8)
 
 
-def draw_button(
-    img: np.ndarray, x: int, y: int, w: int, h: int, label: str
-) -> None:
+def draw_button(img: np.ndarray, x: int, y: int, w: int, h: int, label: str) -> None:
     cv2.rectangle(img, (x, y), (x + w, y + h), (205, 205, 205), -1)
     cv2.rectangle(img, (x, y), (x + w, y + h), (70, 70, 70), 2)
     cv2.putText(
@@ -67,9 +65,7 @@ def write_frame(recording: Path, i: int, suffix: str, img: np.ndarray) -> None:
 
 def fuzzy_eq(a: str, b: str, min_ratio: float = 0.7) -> bool:
     return (
-        difflib.SequenceMatcher(
-            None, normalize_text(a), normalize_text(b)
-        ).ratio()
+        difflib.SequenceMatcher(None, normalize_text(a), normalize_text(b)).ratio()
         >= min_ratio
     )
 
@@ -199,7 +195,9 @@ class TestCompileRecording:
             assert not fuzzy_eq(lm.ocr_text, "Sign In")
         # the title sits above the click point -> the LANDMARK is above the
         # target (relation describes the landmark's position, see ir.Landmark)
-        titles = [lm for lm in anchor.landmarks if fuzzy_eq(lm.ocr_text, "MockMed Portal")]
+        titles = [
+            lm for lm in anchor.landmarks if fuzzy_eq(lm.ocr_text, "MockMed Portal")
+        ]
         assert titles and titles[0].relation == "above"
         # exact offsets landmark-center -> click point are carried through
         for lm in anchor.landmarks:
@@ -233,14 +231,10 @@ class TestCompileRecording:
         assert "note" in step.intent
         # the only new text on screen is the typed (parameterized) value:
         # it must NOT be asserted as TEXT_PRESENT
-        assert all(
-            pc.kind is not PostconditionKind.TEXT_PRESENT for pc in step.expect
-        )
+        assert all(pc.kind is not PostconditionKind.TEXT_PRESENT for pc in step.expect)
         # and the diff-based REGION_STABLE is skipped too: the changed
         # region is the typed value's own pixels, which vary per run
-        assert all(
-            pc.kind is not PostconditionKind.REGION_STABLE for pc in step.expect
-        )
+        assert all(pc.kind is not PostconditionKind.REGION_STABLE for pc in step.expect)
 
     def test_key_step(self, compiled) -> None:
         step = compiled["workflow"].steps[2]
@@ -278,9 +272,7 @@ class TestCompileRecording:
         # regenerating from the model matches what's on disk
         assert source == render_workflow_py(compiled["workflow"])
 
-    def test_region_stable_carries_expected_content_template(
-        self, compiled
-    ) -> None:
+    def test_region_stable_carries_expected_content_template(self, compiled) -> None:
         """Every REGION_STABLE postcondition ships a crop of the expected
         region content so the replayer can tolerate small layout shifts."""
         bundle = compiled["bundle"]
@@ -307,8 +299,7 @@ class TestCompileRecording:
         write_frame(recording, 0, "before", before)
         write_frame(recording, 0, "after", after)
         (recording / "events.jsonl").write_text(
-            json.dumps({"i": 0, "kind": "scroll", "dx": 0, "dy": 400, "t": 1.0})
-            + "\n"
+            json.dumps({"i": 0, "kind": "scroll", "dx": 0, "dy": 400, "t": 1.0}) + "\n"
         )
         (recording / "meta.json").write_text(
             json.dumps(
@@ -347,9 +338,7 @@ class TestCompileRecording:
         write_frame(recording, 0, "before", before)
         write_frame(recording, 0, "after", after)
         (recording / "events.jsonl").write_text(
-            json.dumps(
-                {"i": 0, "kind": "double_click", "x": 640, "y": 424, "t": 1.0}
-            )
+            json.dumps({"i": 0, "kind": "double_click", "x": 640, "y": 424, "t": 1.0})
             + "\n"
         )
         (recording / "meta.json").write_text(
@@ -373,9 +362,7 @@ class TestCompileRecording:
         assert step.anchor.click_point == (640, 424)
         assert (bundle / step.anchor.template).exists()
         # Postconditions derived just like a single click.
-        assert any(
-            pc.kind is PostconditionKind.TEXT_PRESENT for pc in step.expect
-        )
+        assert any(pc.kind is PostconditionKind.TEXT_PRESENT for pc in step.expect)
 
     def test_param_value_never_asserted_in_downstream_steps(
         self, tmp_path: Path
@@ -401,8 +388,7 @@ class TestCompileRecording:
         draw_text(saved, 200, 620, "Chart synchronization complete")
 
         events = [
-            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note",
-             "t": 1.0},
+            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note", "t": 1.0},
             {"i": 1, "kind": "click", "x": 640, "y": 424, "t": 2.0},
         ]
         frames = {0: (base, typed), 1: (typed, saved)}
@@ -430,9 +416,7 @@ class TestCompileRecording:
         click_step = workflow.steps[1]
         assert click_step.action is ActionKind.CLICK
         text_pcs = [
-            pc
-            for pc in click_step.expect
-            if pc.kind is PostconditionKind.TEXT_PRESENT
+            pc for pc in click_step.expect if pc.kind is PostconditionKind.TEXT_PRESENT
         ]
         # The stable new line IS asserted...
         assert text_pcs, "expected a TEXT_PRESENT for the non-param new text"
@@ -445,12 +429,10 @@ class TestCompileRecording:
                     continue
                 hay = "".join(normalize_text(pc.text or "").split())
                 matcher = difflib.SequenceMatcher(None, squashed_note, hay)
-                contained = sum(
-                    b.size for b in matcher.get_matching_blocks()
-                ) / len(squashed_note)
-                assert contained < 0.8, (
-                    f"param value baked into {step.id}: {pc.text!r}"
+                contained = sum(b.size for b in matcher.get_matching_blocks()) / len(
+                    squashed_note
                 )
+                assert contained < 0.8, f"param value baked into {step.id}: {pc.text!r}"
 
     def test_click_target_labels_never_asserted(self, tmp_path: Path) -> None:
         """A button label that appears after a click but is itself a later
@@ -497,9 +479,7 @@ class TestCompileRecording:
             )
         )
 
-        workflow = compile_recording(
-            recording, tmp_path / "bundle", name="labels"
-        )
+        workflow = compile_recording(recording, tmp_path / "bundle", name="labels")
         step0, step1 = workflow.steps
         # Sanity: the second click's anchor label is the "Finish" button.
         assert step1.anchor is not None and step1.anchor.ocr_text
@@ -511,8 +491,7 @@ class TestCompileRecording:
         assert PostconditionKind.REGION_STABLE in kinds0
         # Step 1 still asserts its genuinely new, non-label text.
         text_pcs = [
-            pc for pc in step1.expect
-            if pc.kind is PostconditionKind.TEXT_PRESENT
+            pc for pc in step1.expect if pc.kind is PostconditionKind.TEXT_PRESENT
         ]
         assert text_pcs
         assert fuzzy_eq(text_pcs[0].text, "All steps completed successfully")
@@ -539,9 +518,7 @@ class TestCompileRecording:
 
 
 class TestIdentityContext:
-    def test_row_click_captures_context_outside_crop(
-        self, tmp_path: Path
-    ) -> None:
+    def test_row_click_captures_context_outside_crop(self, tmp_path: Path) -> None:
         """A click on a button inside a table-like row records the row's
         OTHER text (the discriminative name column) as identity context —
         excluding the button's own crop (mutable label) and any
@@ -563,8 +540,7 @@ class TestIdentityContext:
         write_frame(recording, 0, "before", before)
         write_frame(recording, 0, "after", after)
         (recording / "events.jsonl").write_text(
-            json.dumps({"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0})
-            + "\n"
+            json.dumps({"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0}) + "\n"
         )
         (recording / "meta.json").write_text(
             json.dumps(
@@ -637,9 +613,7 @@ class TestStabilitySelectedMining:
     """Postcondition mining selects for STABILITY, not novelty — the fix for
     the ':01'-class false halts (docs/validation/VALIDATION.md, Track D)."""
 
-    def test_clock_fragment_never_wins_even_when_longest(
-        self, tmp_path: Path
-    ) -> None:
+    def test_clock_fragment_never_wins_even_when_longest(self, tmp_path: Path) -> None:
         """A new timestamped log row (longer text!) must lose to shorter
         stable UI text; no mined TEXT_PRESENT may carry a clock time."""
         before = blank()
@@ -653,9 +627,7 @@ class TestStabilitySelectedMining:
         _write_recording(recording, events, {0: (before, after)})
         wf = compile_recording(recording, tmp_path / "bundle", name="clock")
         text_pcs = [
-            pc
-            for pc in wf.steps[0].expect
-            if pc.kind is PostconditionKind.TEXT_PRESENT
+            pc for pc in wf.steps[0].expect if pc.kind is PostconditionKind.TEXT_PRESENT
         ]
         assert text_pcs, "expected the stable candidate to be asserted"
         assert fuzzy_eq(text_pcs[0].text, "Inbox loaded")
@@ -687,9 +659,7 @@ class TestStabilitySelectedMining:
         )
         wf = compile_recording(recording, tmp_path / "bundle", name="toast")
         text_pcs = [
-            pc
-            for pc in wf.steps[0].expect
-            if pc.kind is PostconditionKind.TEXT_PRESENT
+            pc for pc in wf.steps[0].expect if pc.kind is PostconditionKind.TEXT_PRESENT
         ]
         assert text_pcs
         assert fuzzy_eq(text_pcs[0].text, "Record updated")
@@ -720,9 +690,7 @@ class TestStabilitySelectedMining:
         kinds = [pc.kind for pc in wf.steps[0].expect]
         assert PostconditionKind.REGION_STABLE not in kinds, wf.steps[0].expect
 
-    def test_dob_banner_in_identity_region_is_asserted(
-        self, tmp_path: Path
-    ) -> None:
+    def test_dob_banner_in_identity_region_is_asserted(self, tmp_path: Path) -> None:
         """FIXED: the old blanket timestamp filter dropped the patient
         banner because a DOB looks like a date, leaving only patient-
         agnostic text. A date FAR from the recording date is identity data
@@ -737,9 +705,7 @@ class TestStabilitySelectedMining:
         _write_recording(recording, events, {0: (before, after)})
         wf = compile_recording(recording, tmp_path / "bundle", name="dob")
         text_pcs = [
-            pc
-            for pc in wf.steps[0].expect
-            if pc.kind is PostconditionKind.TEXT_PRESENT
+            pc for pc in wf.steps[0].expect if pc.kind is PostconditionKind.TEXT_PRESENT
         ]
         assert text_pcs, "the DOB banner must not be filtered as a timestamp"
         assert fuzzy_eq(text_pcs[0].text, "Jane Sample DOB 1980-01-01", 0.6)
@@ -783,8 +749,7 @@ class TestParameterHygiene:
         draw_text(saved, 200, 620, "Chart synchronization complete")
 
         events = [
-            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note",
-             "t": 1.0},
+            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note", "t": 1.0},
             {"i": 1, "kind": "click", "x": 640, "y": 424, "t": 2.0},
         ]
         recording = tmp_path / "rec"
@@ -801,9 +766,9 @@ class TestParameterHygiene:
         for lm in anchor.landmarks:
             hay = "".join(normalize_text(lm.ocr_text).split())
             matcher = difflib.SequenceMatcher(None, squashed_note, hay)
-            contained = sum(
-                b.size for b in matcher.get_matching_blocks()
-            ) / len(squashed_note)
+            contained = sum(b.size for b in matcher.get_matching_blocks()) / len(
+                squashed_note
+            )
             assert contained < 0.8, f"param leaked into landmark {lm.ocr_text!r}"
 
     def test_lint_flags_param_value_in_postcondition(self) -> None:
@@ -914,8 +879,7 @@ class TestParameterHygiene:
         typed = base.copy()
         draw_text(typed, 200, 320, NOTE_VALUE)
         events = [
-            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note",
-             "t": 1.0},
+            {"i": 0, "kind": "type", "text": NOTE_VALUE, "param": "note", "t": 1.0},
         ]
         recording = tmp_path / "rec"
         _write_recording(
@@ -936,23 +900,17 @@ class TestParameterHygiene:
 
 
 class TestStructuralPostconditions:
-    def _navigation_recording(
-        self, tmp_path: Path, extra: dict
-    ) -> tuple[Path, Path]:
+    def _navigation_recording(self, tmp_path: Path, extra: dict) -> tuple[Path, Path]:
         """A click whose before/after frames are IDENTICAL (the visual
         runtime saw nothing) plus recorder-captured structural keys."""
         frame = blank()
         draw_button(frame, 560, 400, 160, 48, "Report")
-        events = [
-            {"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0, **extra}
-        ]
+        events = [{"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0, **extra}]
         recording = tmp_path / "rec"
         _write_recording(recording, events, {0: (frame, frame)})
         return recording, tmp_path / "bundle"
 
-    def test_new_tab_click_mines_new_tab_postcondition(
-        self, tmp_path: Path
-    ) -> None:
+    def test_new_tab_click_mines_new_tab_postcondition(self, tmp_path: Path) -> None:
         recording, bundle = self._navigation_recording(
             tmp_path,
             {
@@ -994,9 +952,7 @@ class TestStructuralPostconditions:
         kinds = [pc.kind for pc in wf.steps[0].expect]
         assert kinds == [PostconditionKind.TITLE_CHANGED]
 
-    def test_no_structural_change_stays_honestly_vacuous(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_structural_change_stays_honestly_vacuous(self, tmp_path: Path) -> None:
         recording, bundle = self._navigation_recording(
             tmp_path,
             {
@@ -1054,9 +1010,7 @@ class TestRiskOverrides:
         )
         by_id = {s.id: s for s in workflow.steps}
         assert by_id["step_003"].risk == "irreversible"
-        assert all(
-            s.risk == "reversible" for s in workflow.steps if s.id != "step_003"
-        )
+        assert all(s.risk == "reversible" for s in workflow.steps if s.id != "step_003")
         # The risk survives the bundle round-trip.
         reloaded = Workflow.load(tmp_path / "bundle")
         assert {s.id: s.risk for s in reloaded.steps} == {

@@ -69,9 +69,7 @@ def key_step(step_id, key) -> Step:
 
 
 def type_step(step_id, param) -> Step:
-    return Step(
-        id=step_id, intent=f"type {param}", action=ActionKind.TYPE, param=param
-    )
+    return Step(id=step_id, intent=f"type {param}", action=ActionKind.TYPE, param=param)
 
 
 def failing_click(step_id) -> Step:
@@ -94,9 +92,7 @@ def action(step: Step, *, to: str, on_exception: str | None = None) -> State:
 
 
 def terminal(state_id, outcome="success", reason="") -> State:
-    return State(
-        id=state_id, kind=StateKind.TERMINAL, outcome=outcome, reason=reason
-    )
+    return State(id=state_id, kind=StateKind.TERMINAL, outcome=outcome, reason=reason)
 
 
 def graph(entry, *states: State) -> ProgramGraph:
@@ -281,9 +277,7 @@ def test_branch_on_screen_predicate_dismisses_optional_modal(bundle, run_dir):
             step=key_step("s_save", "S"),
             transitions=[
                 Transition(
-                    guard=Predicate(
-                        kind=PredicateKind.TEXT_PRESENT, text="Survey"
-                    ),
+                    guard=Predicate(kind=PredicateKind.TEXT_PRESENT, text="Survey"),
                     target="s_dismiss",
                 ),
                 Transition(target="done"),  # unconditional fall-through
@@ -373,9 +367,7 @@ def test_subflow_reused_as_loop_body_and_direct_call(bundle, run_dir):
         name="greet-all",
         program=program,
         subflows={"greet": greet},
-        data_sources={
-            "queue": Relation(name="queue", rows=[{"n": "1"}, {"n": "2"}])
-        },
+        data_sources={"queue": Relation(name="queue", rows=[{"n": "1"}, {"n": "2"}])},
     )
     backend = FakeBackend()
     report = Replayer(backend, vision=FakeVision(), poll_interval_s=0.01).run(
@@ -439,7 +431,9 @@ def test_on_exception_catches_failed_action_and_continues(bundle, run_dir):
         ),
         terminal("done"),
     )
-    wf = Workflow(name="save-or-recover", program=program, subflows={"recover": recover})
+    wf = Workflow(
+        name="save-or-recover", program=program, subflows={"recover": recover}
+    )
     backend = FakeBackend()
     # FakeVision with NO template match -> the click's resolution ladder fails.
     report = Replayer(backend, vision=FakeVision(), poll_interval_s=0.01).run(
@@ -500,7 +494,9 @@ def test_identity_gate_fires_inside_loop_body(bundle, run_dir):
     body = graph(
         "b_click",
         action(
-            context_click_step("Jane Sample Knee pain referral High", step_id="b_click"),
+            context_click_step(
+                "Jane Sample Knee pain referral High", step_id="b_click"
+            ),
             to="b_end",
         ),
         terminal("b_end"),
@@ -614,13 +610,9 @@ def test_lifted_linear_graph_replays_identically_to_linear(bundle, run_dir):
 
     assert r_lin.success is r_grf.success is True
     assert b_lin.actions == b_grf.actions  # byte-identical actuation
-    assert [r.step_id for r in r_lin.results] == [
-        r.step_id for r in r_grf.results
-    ]
+    assert [r.step_id for r in r_lin.results] == [r.step_id for r in r_grf.results]
     assert [r.ok for r in r_lin.results] == [r.ok for r in r_grf.results]
-    assert [
-        (r.resolution.rung if r.resolution else None) for r in r_lin.results
-    ] == [
+    assert [(r.resolution.rung if r.resolution else None) for r in r_lin.results] == [
         (r.resolution.rung if r.resolution else None) for r in r_grf.results
     ]
     assert r_lin.model_calls == r_grf.model_calls == 0
@@ -632,9 +624,9 @@ def test_no_program_field_replays_exactly_as_v0(bundle, run_dir):
     wf = _linear_workflow()
     assert wf.program is None and wf.subflows == {} and wf.data_sources == {}
     backend = FakeBackend()
-    report = Replayer(backend, vision=_resolving_for_linear(), poll_interval_s=0.01).run(
-        wf, bundle_dir=bundle, run_dir=run_dir
-    )
+    report = Replayer(
+        backend, vision=_resolving_for_linear(), poll_interval_s=0.01
+    ).run(wf, bundle_dir=bundle, run_dir=run_dir)
     assert report.success is True
     assert report.terminal_outcome is None  # linear runs set no terminal
     assert backend.actions == [
@@ -648,9 +640,7 @@ def test_program_round_trips_through_bundle_save_load(bundle):
     """A program graph (states, transitions, loops, subflows, data_sources)
     survives ``Workflow.save`` -> ``Workflow.load``."""
     wf = _loop_over_queue_workflow()
-    wf.data_sources = {
-        "queue": Relation(name="queue", rows=[{"patient": "Alice"}])
-    }
+    wf.data_sources = {"queue": Relation(name="queue", rows=[{"patient": "Alice"}])}
     wf.save(bundle)
     loaded = Workflow.load(bundle)
     assert loaded.program is not None

@@ -429,9 +429,7 @@ class Replayer:
         if resume_from:
             from openadapt_flow.runtime.durable import resumed_step_results
 
-            report.results.extend(
-                resumed_step_results(run_dir, workflow, resume_from)
-            )
+            report.results.extend(resumed_step_results(run_dir, workflow, resume_from))
             if durable_run is not None:
                 durable_run.store.clear_pending()
 
@@ -486,9 +484,7 @@ class Replayer:
         return report
 
     @staticmethod
-    def _record_identity_coverage(
-        workflow: Workflow, report: RunReport
-    ) -> None:
+    def _record_identity_coverage(workflow: Workflow, report: RunReport) -> None:
         """Record the bundle's identity-protection coverage on the report.
 
         Computed over the WHOLE workflow at run start (not just executed
@@ -651,8 +647,7 @@ class Replayer:
             if state is None:
                 raise _ProgramHalt(
                     "halt",
-                    f"program references undefined state '{state_id}' — "
-                    "run aborted",
+                    f"program references undefined state '{state_id}' — run aborted",
                 )
             report.visited_states.append(state.id)
 
@@ -664,8 +659,7 @@ class Replayer:
                 raise _ProgramHalt(
                     outcome,
                     state.reason
-                    or f"reached '{outcome}' terminal state '{state.id}' — "
-                    "run aborted",
+                    or f"reached '{outcome}' terminal state '{state.id}' — run aborted",
                 )
 
             state_id = self._exec_state(
@@ -716,9 +710,7 @@ class Replayer:
             # A branch performs no action: it picks an outgoing edge purely by
             # guard (evaluated on the current frame). No matching edge is a
             # fail-safe HALT unless the state routes to an exception handler.
-            nxt = self._select_transition(
-                state, params=params, bundle_dir=bundle_dir
-            )
+            nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
             if nxt is None:
                 return self._on_state_failure(
                     state,
@@ -759,9 +751,7 @@ class Replayer:
                 new_crops=new_crops,
                 depth=depth + 1,
             )
-            return self._select_transition(
-                state, params=params, bundle_dir=bundle_dir
-            )
+            return self._select_transition(state, params=params, bundle_dir=bundle_dir)
 
         raise _ProgramHalt(
             "halt", f"state '{state.id}' has unsupported kind {state.kind!r}"
@@ -783,9 +773,7 @@ class Replayer:
         then pick the next transition. A genuine failure routes to
         ``on_exception`` (recorded as handled) or HALTs the run."""
         if state.step is None:
-            raise _ProgramHalt(
-                "halt", f"action state '{state.id}' carries no step"
-            )
+            raise _ProgramHalt("halt", f"action state '{state.id}' carries no step")
         ctx = self._build_graph_ctx(state, graph)
         result = self._run_step(
             state.step,
@@ -812,12 +800,9 @@ class Replayer:
                 return state.on_exception  # graph try/except: route + continue
             raise _ProgramHalt(
                 "halt",
-                result.error
-                or f"action state '{state.id}' failed — run aborted",
+                result.error or f"action state '{state.id}' failed — run aborted",
             )
-        return self._select_transition(
-            state, params=params, bundle_dir=bundle_dir
-        )
+        return self._select_transition(state, params=params, bundle_dir=bundle_dir)
 
     def _exec_loop_state(
         self,
@@ -840,9 +825,7 @@ class Replayer:
         more rows than ``max_iterations`` HALTs (fail-safe)."""
         loop = state.loop
         if loop is None:
-            raise _ProgramHalt(
-                "halt", f"loop state '{state.id}' carries no LoopSpec"
-            )
+            raise _ProgramHalt("halt", f"loop state '{state.id}' carries no LoopSpec")
         body = workflow.subflows.get(loop.body)
         if body is None:
             return self._on_state_failure(
@@ -870,9 +853,7 @@ class Replayer:
                 new_crops=new_crops,
                 depth=depth + 1,
             )
-        return self._select_transition(
-            state, params=params, bundle_dir=bundle_dir
-        )
+        return self._select_transition(state, params=params, bundle_dir=bundle_dir)
 
     def _on_state_failure(self, state: State, reason: str) -> str:
         """A non-action state hit an unrecoverable condition: route to its
@@ -943,9 +924,7 @@ class Replayer:
             + ") — run aborted",
         )
 
-    def _build_graph_ctx(
-        self, state: State, graph: ProgramGraph
-    ) -> _GraphStepContext:
+    def _build_graph_ctx(self, state: State, graph: ProgramGraph) -> _GraphStepContext:
         """Assemble the ``_GraphStepContext`` for an action state: the previously
         executed action (for the TYPE focus heuristic) and, for a SCROLL step,
         the closed-loop successors derived from the graph's transitions."""
@@ -1195,10 +1174,8 @@ class Replayer:
             if error is None:
                 after_png = self.vision.wait_settled(self.backend)
                 last_frame = after_png
-                postconditions_ok, last_frame, failed = (
-                    self._check_postconditions(
-                        step, after_png, bundle_dir, start_state, result
-                    )
+                postconditions_ok, last_frame, failed = self._check_postconditions(
+                    step, after_png, bundle_dir, start_state, result
                 )
                 result.postconditions_ok = postconditions_ok
                 if result.postcondition_drift_rescues:
@@ -1257,8 +1234,13 @@ class Replayer:
                 # coverage, or risk class is quarantined and the run HALTS
                 # rather than silently applying an unverified repair.
                 heal_outcome = self._heal_step(
-                    step, resolution, matched_region, before_png, workflow,
-                    run_dir, new_crops,
+                    step,
+                    resolution,
+                    matched_region,
+                    before_png,
+                    workflow,
+                    run_dir,
+                    new_crops,
                 )
                 if heal_outcome.promoted:
                     result.heal = heal_outcome.event
@@ -1517,9 +1499,13 @@ class Replayer:
         needs_anchor = step.action in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK)
         if step.anchor is None:
             if needs_anchor:
-                return None, None, (
-                    f"Step '{step.id}' ({step.intent}) is a {step.action.value} "
-                    "step but has no anchor"
+                return (
+                    None,
+                    None,
+                    (
+                        f"Step '{step.id}' ({step.intent}) is a {step.action.value} "
+                        "step but has no anchor"
+                    ),
                 )
             return None, None, None
 
@@ -1534,8 +1520,7 @@ class Replayer:
         # is None and resolution uses the visual ladder unchanged.
         structural = (
             self.backend
-            if self.use_structural
-            and hasattr(self.backend, "locate_structural")
+            if self.use_structural and hasattr(self.backend, "locate_structural")
             else None
         )
         resolved = resolve(
@@ -1549,17 +1534,25 @@ class Replayer:
             structural=structural,
         )
         if resolved is None:
-            return None, None, (
-                f"Could not resolve target for step '{step.id}' "
-                f"({step.intent}): all resolution rungs failed"
+            return (
+                None,
+                None,
+                (
+                    f"Could not resolve target for step '{step.id}' "
+                    f"({step.intent}): all resolution rungs failed"
+                ),
             )
         resolution, matched_region = resolved
 
         if step.risk == "irreversible" and is_below_ocr(resolution.rung):
-            return resolution, matched_region, (
-                f"Step '{step.id}' ({step.intent}) is irreversible but only "
-                f"resolved via the '{resolution.rung}' rung — needs human "
-                "confirmation; refusing to act (v0 policy)"
+            return (
+                resolution,
+                matched_region,
+                (
+                    f"Step '{step.id}' ({step.intent}) is irreversible but only "
+                    f"resolved via the '{resolution.rung}' rung — needs human "
+                    "confirmation; refusing to act (v0 policy)"
+                ),
             )
         return resolution, matched_region, None
 
@@ -1640,9 +1633,7 @@ class Replayer:
             self.backend.type_text(text)
             if not text:
                 return None  # nothing typed, nothing to verify
-            return self._verify_typed_input(
-                step, text, field_point, before_png, result
-            )
+            return self._verify_typed_input(step, text, field_point, before_png, result)
 
         if step.action is ActionKind.KEY:
             if not step.key:
@@ -1720,12 +1711,16 @@ class Replayer:
         ):
             if step.guard.on_unmet == "skip":
                 return False, None, before_png
-            return False, (
-                f"Guard precondition for step '{step.id}' ({step.intent}) is "
-                f"unmet on the current screen "
-                f"({self._describe_predicate(step.guard.predicate)}) — "
-                "refusing to act; run aborted"
-            ), before_png
+            return (
+                False,
+                (
+                    f"Guard precondition for step '{step.id}' ({step.intent}) is "
+                    f"unmet on the current screen "
+                    f"({self._describe_predicate(step.guard.predicate)}) — "
+                    "refusing to act; run aborted"
+                ),
+                before_png,
+            )
 
         # wait_until (readiness). SCROLL consumes its own predicate as the stop
         # condition of its closed loop (_act_scroll), so it is skipped here.
@@ -1736,13 +1731,17 @@ class Replayer:
                 if self._predicate_holds(pred, before_png, bundle_dir, params):
                     return True, None, before_png
                 if time.monotonic() >= deadline:
-                    return False, (
-                        f"wait_until predicate for step '{step.id}' "
-                        f"({step.intent}) did not hold within "
-                        f"{pred.timeout_s:.1f}s "
-                        f"({self._describe_predicate(pred)}) — readiness never "
-                        "reached; refusing to proceed-anyway; run aborted"
-                    ), before_png
+                    return (
+                        False,
+                        (
+                            f"wait_until predicate for step '{step.id}' "
+                            f"({step.intent}) did not hold within "
+                            f"{pred.timeout_s:.1f}s "
+                            f"({self._describe_predicate(pred)}) — readiness never "
+                            "reached; refusing to proceed-anyway; run aborted"
+                        ),
+                        before_png,
+                    )
                 time.sleep(self.poll_interval_s)
                 before_png = self.vision.wait_settled(self.backend)
 
@@ -1771,27 +1770,25 @@ class Replayer:
             template_path = Path(bundle_dir) / pred.anchor.template
             if template_path.is_file():
                 template_png = template_path.read_bytes()
-            return resolve(
-                pred.anchor,
-                frame_png,
-                self.vision,
-                None,  # NEVER ground inside a predicate probe: stay model-free
-                pred.intent or pred.anchor.ocr_text or "",
-                template_png=template_png,
-                viewport=self.backend.viewport,
-            ) is not None
-        if kind is PredicateKind.TEXT_PRESENT:
-            return bool(pred.text) and self.vision.text_present(
-                frame_png, pred.text
-            )
-        if kind is PredicateKind.TEXT_ABSENT:
-            return not (
-                pred.text and self.vision.text_present(frame_png, pred.text)
-            )
-        if kind is PredicateKind.PARAM_EQUALS:
             return (
-                pred.param is not None
-                and str(params.get(pred.param)) == str(pred.value)
+                resolve(
+                    pred.anchor,
+                    frame_png,
+                    self.vision,
+                    None,  # NEVER ground inside a predicate probe: stay model-free
+                    pred.intent or pred.anchor.ocr_text or "",
+                    template_png=template_png,
+                    viewport=self.backend.viewport,
+                )
+                is not None
+            )
+        if kind is PredicateKind.TEXT_PRESENT:
+            return bool(pred.text) and self.vision.text_present(frame_png, pred.text)
+        if kind is PredicateKind.TEXT_ABSENT:
+            return not (pred.text and self.vision.text_present(frame_png, pred.text))
+        if kind is PredicateKind.PARAM_EQUALS:
+            return pred.param is not None and str(params.get(pred.param)) == str(
+                pred.value
             )
         if kind is PredicateKind.AND:
             return all(
@@ -1825,9 +1822,7 @@ class Replayer:
         if kind == "param_equals":
             return f"param_equals({pred.param!r}=={pred.value!r})"
         if kind in ("and", "or", "not"):
-            inner = ", ".join(
-                Replayer._describe_predicate(op) for op in pred.operands
-            )
+            inner = ", ".join(Replayer._describe_predicate(op) for op in pred.operands)
             return f"{kind}({inner})"
         return str(kind)
 
@@ -1890,9 +1885,7 @@ class Replayer:
             if getter is None:
                 return None
             try:
-                live = getter(
-                    int(resolution.point[0]), int(resolution.point[1])
-                )
+                live = getter(int(resolution.point[0]), int(resolution.point[1]))
             except Exception:
                 live = None
             return identity_mod.verify_structured_identity(recorded, live)
@@ -2037,12 +2030,8 @@ class Replayer:
                 line
                 for line in self.vision.ocr(png, region=region)
                 if line.text.strip()
-                and not identity_mod.regions_intersect(
-                    line.region, exclude_region
-                )
-                and not identity_mod.is_volatile_line(
-                    line.text, reference_date=today
-                )
+                and not identity_mod.regions_intersect(line.region, exclude_region)
+                and not identity_mod.is_volatile_line(line.text, reference_date=today)
             ]
             lines = identity_mod.lines_near_point(lines, point_y)
             observed = " ".join(line.text.strip() for line in lines)
@@ -2121,10 +2110,7 @@ class Replayer:
             if not alnum:
                 continue
             most_common = max(alnum.count(ch) for ch in set(alnum))
-            if (
-                len(alnum) >= 4
-                and most_common / len(alnum) >= MASKED_REPEAT_FRACTION
-            ):
+            if len(alnum) >= 4 and most_common / len(alnum) >= MASKED_REPEAT_FRACTION:
                 continue  # homogeneous glyph run: masked-dot misread
             total += len(alnum)
         return total
@@ -2151,9 +2137,7 @@ class Replayer:
         """
         after_png = self.vision.wait_settled(self.backend)
         region = self._field_region(field_point)
-        changed = self.vision.pixels_changed(
-            baseline_png, after_png, region=region
-        )
+        changed = self.vision.pixels_changed(baseline_png, after_png, region=region)
         needle = identity_mod.squash(text)
         if len(needle) < identity_mod.MIN_PARAM_CHARS:
             return changed, changed  # too short for OCR to arbitrate
@@ -2177,8 +2161,7 @@ class Replayer:
         # the verdict.
         landed = (
             self._readable_chars(after_png, region)
-            <= self._readable_chars(baseline_png, region)
-            + MASKED_NEW_TEXT_SLACK
+            <= self._readable_chars(baseline_png, region) + MASKED_NEW_TEXT_SLACK
         )
         return landed, changed
 
@@ -2204,9 +2187,7 @@ class Replayer:
         confirmed must never be reported as success (VALIDATION.md 'focus
         stolen' finding).
         """
-        landed, changed = self._typed_input_landed(
-            text, field_point, baseline_png
-        )
+        landed, changed = self._typed_input_landed(text, field_point, baseline_png)
         if landed:
             result.input_verified = True
             return None
@@ -2227,9 +2208,7 @@ class Replayer:
             self.backend.press("ControlOrMeta+a")
         retry_baseline = self.backend.screenshot()
         self.backend.type_text(text)
-        landed, _changed = self._typed_input_landed(
-            text, field_point, retry_baseline
-        )
+        landed, _changed = self._typed_input_landed(text, field_point, retry_baseline)
         if landed:
             result.input_verified = True
             return None
@@ -2345,7 +2324,7 @@ class Replayer:
     @staticmethod
     def _next_anchored_step(workflow: Workflow, step_index: int) -> Optional[Step]:
         """The first step after ``step_index`` that carries an anchor."""
-        for candidate in workflow.steps[step_index + 1:]:
+        for candidate in workflow.steps[step_index + 1 :]:
             if candidate.anchor is not None:
                 return candidate
         return None
@@ -2419,9 +2398,7 @@ class Replayer:
         failed_pcs = [
             pc
             for pc in step.expect
-            if not self._postcondition_passes(
-                pc, frame_png, bundle_dir, start_state
-            )
+            if not self._postcondition_passes(pc, frame_png, bundle_dir, start_state)
         ]
         if failed_pcs and self.state_verifier is not None:
             failed_pcs = self._drift_oracle_rescue(failed_pcs, frame_png, result)
@@ -2503,9 +2480,7 @@ class Replayer:
         for pc in step.expect:
             deadline = time.monotonic() + pc.timeout_s
             while True:
-                if self._postcondition_passes(
-                    pc, frame_png, bundle_dir, start_state
-                ):
+                if self._postcondition_passes(pc, frame_png, bundle_dir, start_state):
                     break
                 if time.monotonic() >= deadline:
                     return False, frame_png
@@ -2539,23 +2514,15 @@ class Replayer:
                 except Exception:
                     current = None
                 start = (start_state or {}).get("page_count")
-                return (
-                    current is not None
-                    and start is not None
-                    and current > start
-                )
+                return current is not None and start is not None and current > start
             return changed
         if kind == "text_present":
             # text_present (not find_text): presence must not depend on
             # whether the OCR engine merged the target into a longer box
             # or split it across boxes — see vision.ocr.text_present.
-            return pc.text is not None and self.vision.text_present(
-                frame_png, pc.text
-            )
+            return pc.text is not None and self.vision.text_present(frame_png, pc.text)
         if kind == "text_absent":
-            return pc.text is None or not self.vision.text_present(
-                frame_png, pc.text
-            )
+            return pc.text is None or not self.vision.text_present(frame_png, pc.text)
         if kind == "region_stable":
             if pc.region is None or pc.phash is None:
                 return True
@@ -2627,9 +2594,7 @@ class Replayer:
     # -- io ----------------------------------------------------------------------
 
     @staticmethod
-    def _save_step_png(
-        run_dir: Path, step_id: str, suffix: str, png: bytes
-    ) -> str:
+    def _save_step_png(run_dir: Path, step_id: str, suffix: str, png: bytes) -> str:
         """Save a per-step screenshot; return its run-dir-relative path.
 
         These frames are embedded by relative path into the shareable

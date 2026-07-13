@@ -269,9 +269,7 @@ def _as_workflow(trace: TraceInput) -> Workflow:
 
     recording = Path(trace)
     with tempfile.TemporaryDirectory(prefix="induce-boot-") as tmp:
-        return compile_recording(
-            recording, Path(tmp) / "bundle", name=recording.name
-        )
+        return compile_recording(recording, Path(tmp) / "bundle", name=recording.name)
 
 
 _LEADING_VERBS = frozenset(
@@ -326,7 +324,6 @@ from openadapt_flow.compiler.disambiguation import (  # noqa: E402
     _dialog_text,
     _looks_like_dialog,
 )
-
 
 # ===========================================================================
 # Reduce a trace to tokens (collapse consecutive repeats into loop candidates)
@@ -390,8 +387,7 @@ def _reduce_trace(steps: list[Step]) -> list:
             length, reps = found
             body_steps = steps[i : i + length]
             iterations = [
-                steps[i + r * length : i + r * length + length]
-                for r in range(reps)
+                steps[i + r * length : i + r * length + length] for r in range(reps)
             ]
             toks.append(_LoopTok(body_steps, iterations))
             i += length * reps
@@ -577,9 +573,7 @@ def induce_program(
                 continue  # the whole group is handled once, at its first column
             seen_div_groups.add(grp)
             group_cols = [c for c in columns if c.divergent_group == grp]
-            _handle_divergence(
-                idx, group_cols, workflows, result, propose, decisions
-            )
+            _handle_divergence(idx, group_cols, workflows, result, propose, decisions)
             # Underdetermined divergence => refuse to emit (handled below).
             continue
 
@@ -603,9 +597,7 @@ def induce_program(
             continue
 
         # --- single step present in SOME traces: branch or optional -------
-        node, dec = _emit_optional_single(
-            idx, col, present, n, result, propose
-        )
+        node, dec = _emit_optional_single(idx, col, present, n, result, propose)
         nodes.append(node)
         decisions.append(dec)
 
@@ -815,10 +807,7 @@ def _emit_optional_single(idx, col, present, n, result, propose):
             Proposal(
                 target=branch_id,
                 kind="guard",
-                content=(
-                    proposed
-                    or f"confirm guard: TEXT_PRESENT({dialog_text!r})"
-                ),
+                content=(proposed or f"confirm guard: TEXT_PRESENT({dialog_text!r})"),
             )
         )
         dec = ColumnDecision(
@@ -870,9 +859,7 @@ def _emit_optional_single(idx, col, present, n, result, propose):
     return node, dec
 
 
-def _handle_divergence(
-    idx, group_cols, workflows, result, propose, decisions
-):
+def _handle_divergence(idx, group_cols, workflows, result, propose, decisions):
     """A ``replace`` divergence: mutually-exclusive content at the same aligned
     position. If a discriminating condition were DETECTABLE it would be a
     branch; here none is derivable structurally, so this is a contradiction the
@@ -933,9 +920,7 @@ def _handle_divergence(
             detail=(
                 f"traces diverge between {labels} with no detectable "
                 "condition -- cannot decide the guard; refusing to guess a "
-                "branch on a"
-                + (" consequential" if consequential else "")
-                + " node."
+                "branch on a" + (" consequential" if consequential else "") + " node."
             ),
             consequential=consequential,
             question=question,
@@ -1000,9 +985,7 @@ def reproduction_score(result: InductionResult, trace: TraceInput) -> float:
         return 0.0
     held = _reduce_trace(_as_workflow(trace).steps)
 
-    col_sigs = [
-        d.align_sig for d in result.column_decisions if d.kind != "divergent"
-    ]
+    col_sigs = [d.align_sig for d in result.column_decisions if d.kind != "divergent"]
     decs = [d for d in result.column_decisions if d.kind != "divergent"]
     held_sigs = [str(tok.align_sig) for tok in held]
 

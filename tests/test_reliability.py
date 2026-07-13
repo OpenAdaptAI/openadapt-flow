@@ -68,7 +68,9 @@ def _ok(step_id="s0") -> StepResult:
         step_id=step_id,
         intent="ok",
         ok=True,
-        resolution=Resolution(rung="template", point=(1, 1), confidence=1.0, elapsed_ms=1.0),
+        resolution=Resolution(
+            rung="template", point=(1, 1), confidence=1.0, elapsed_ms=1.0
+        ),
     )
 
 
@@ -89,12 +91,32 @@ def _fail(error: str, *, resolution: bool = True, step_id="s1") -> StepResult:
 @pytest.mark.parametrize(
     "error, resolution, expected",
     [
-        ("Could not resolve target ...: all resolution rungs failed", False, "resolution_failed"),
+        (
+            "Could not resolve target ...: all resolution rungs failed",
+            False,
+            "resolution_failed",
+        ),
         ("Identity check failed for step 's1' ...", True, "identity_mismatch"),
-        ("Postconditions failed for step 's1' ...: failed: text_present 'x'", True, "postcondition_failed"),
-        ("Typed input could not be verified for step 's1' ...", True, "typed_input_unverified"),
-        ("Step 's1' ...: closed-loop scroll exhausted its budget ...", True, "scroll_exhausted"),
-        ("Step 's1' is irreversible but only resolved ... refusing to act", True, "risk_gate"),
+        (
+            "Postconditions failed for step 's1' ...: failed: text_present 'x'",
+            True,
+            "postcondition_failed",
+        ),
+        (
+            "Typed input could not be verified for step 's1' ...",
+            True,
+            "typed_input_unverified",
+        ),
+        (
+            "Step 's1' ...: closed-loop scroll exhausted its budget ...",
+            True,
+            "scroll_exhausted",
+        ),
+        (
+            "Step 's1' is irreversible but only resolved ... refusing to act",
+            True,
+            "risk_gate",
+        ),
         ("Step 's1' raised RuntimeError: nope", True, "step_exception"),
         ("something else entirely", True, "other_halt"),
     ],
@@ -106,8 +128,12 @@ def test_classify_failure_categories(error, resolution, expected):
 
 
 def test_classify_failure_record_and_compile():
-    assert classify_failure(None, "record RuntimeError: x")["category"] == "record_error"
-    assert classify_failure(None, "compile ValueError: y")["category"] == "compile_error"
+    assert (
+        classify_failure(None, "record RuntimeError: x")["category"] == "record_error"
+    )
+    assert (
+        classify_failure(None, "compile ValueError: y")["category"] == "compile_error"
+    )
 
 
 def test_classify_failure_no_failing_step():
@@ -142,16 +168,34 @@ def test_root_cause_empty_is_none():
 
 def test_aggregate_distribution():
     results = [
-        {"compile_success": True, "outcome": "success", "failure_category": None,
-         "root_cause_hint": None, "rung_counts": {"template": 3}},
-        {"compile_success": True, "outcome": "safe_halt",
-         "failure_category": "postcondition_failed", "root_cause_hint": "dynamic_content",
-         "rung_counts": {"template": 1}},
-        {"compile_success": True, "outcome": "wrong_action",
-         "failure_category": "wrong_action_silent", "root_cause_hint": "ground_truth_disagrees",
-         "rung_counts": {}},
-        {"compile_success": False, "outcome": "record_error",
-         "failure_category": "record_error", "root_cause_hint": None, "rung_counts": {}},
+        {
+            "compile_success": True,
+            "outcome": "success",
+            "failure_category": None,
+            "root_cause_hint": None,
+            "rung_counts": {"template": 3},
+        },
+        {
+            "compile_success": True,
+            "outcome": "safe_halt",
+            "failure_category": "postcondition_failed",
+            "root_cause_hint": "dynamic_content",
+            "rung_counts": {"template": 1},
+        },
+        {
+            "compile_success": True,
+            "outcome": "wrong_action",
+            "failure_category": "wrong_action_silent",
+            "root_cause_hint": "ground_truth_disagrees",
+            "rung_counts": {},
+        },
+        {
+            "compile_success": False,
+            "outcome": "record_error",
+            "failure_category": "record_error",
+            "root_cause_hint": None,
+            "rung_counts": {},
+        },
     ]
     s = aggregate(results)
     assert s["n_apps"] == 4
@@ -179,8 +223,14 @@ def test_corpus_is_serializable_and_valid():
     assert len(ids) == len(set(ids)), "duplicate corpus ids"
     valid_actions = {"click", "double_click", "type", "press", "scroll"}
     valid_verify = {
-        "url_contains", "dom_text_contains", "dom_visible", "dom_count",
-        "dom_value_equals", "dom_value_nonempty", "dom_checked", "self_reported",
+        "url_contains",
+        "dom_text_contains",
+        "dom_visible",
+        "dom_count",
+        "dom_value_equals",
+        "dom_value_nonempty",
+        "dom_checked",
+        "self_reported",
     }
     for app in CORPUS:
         assert app.url.startswith("http"), app.id
@@ -275,7 +325,9 @@ def test_run_target_end_to_end_success(local_form_url, _browser, tmp_path: Path)
     assert result["heal_count"] == 0
 
 
-def test_run_target_record_error_on_bad_selector(local_form_url, _browser, tmp_path: Path):
+def test_run_target_record_error_on_bad_selector(
+    local_form_url, _browser, tmp_path: Path
+):
     """A selector that never appears is captured as a record_error, not a crash."""
     app = AppSpec(
         id="local_bad",

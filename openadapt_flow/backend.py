@@ -8,7 +8,7 @@ OS layer (pyautogui/Quartz), or an RDP session.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.ir import StructuralHandle, StructuralLocator
@@ -43,6 +43,7 @@ class SystemOfRecordBackend(Protocol):
         baseline for a first write).
         """
         ...
+
 
 @runtime_checkable
 class StructuralBackend(Protocol):
@@ -166,9 +167,7 @@ class StructuralActionBackend(Protocol):
     that point (never raises) -- resolution then uses the visual ladder.
     """
 
-    def structural_locator_at(
-        self, x: int, y: int
-    ) -> Optional["StructuralLocator"]:
+    def structural_locator_at(self, x: int, y: int) -> Optional["StructuralLocator"]:
         """Return a stable structural locator for the element at pixel (x, y).
 
         The coordinate space matches :meth:`Backend.click`. Returns None when

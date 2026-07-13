@@ -64,12 +64,15 @@ def test_worked_example_roundtrips_through_bundle_save_load(bundle):
         params={"note": "Follow-up in 2 weeks", "encounter_type": "Triage"},
         param_specs={
             "note": ParamSpec(
-                name="note", type=ParamKind.STRING,
+                name="note",
+                type=ParamKind.STRING,
                 example="Follow-up in 2 weeks",
             ),
             "encounter_type": ParamSpec(
-                name="encounter_type", type=ParamKind.ENUM,
-                example="Triage", choices=["Triage", "Consult"],
+                name="encounter_type",
+                type=ParamKind.ENUM,
+                example="Triage",
+                choices=["Triage", "Consult"],
             ),
         },
         steps=[
@@ -82,7 +85,8 @@ def test_worked_example_roundtrips_through_bundle_save_load(bundle):
                 guard=Guard(
                     predicate=Predicate(
                         kind=PredicateKind.PARAM_EQUALS,
-                        param="encounter_type", value="Triage",
+                        param="encounter_type",
+                        value="Triage",
                     ),
                     on_unmet="skip",
                 ),
@@ -95,7 +99,8 @@ def test_worked_example_roundtrips_through_bundle_save_load(bundle):
                 param="note",
                 wait_until=Predicate(
                     kind=PredicateKind.TEXT_PRESENT,
-                    text="Save Encounter", timeout_s=2.0,
+                    text="Save Encounter",
+                    timeout_s=2.0,
                 ),
             ),
         ],
@@ -126,8 +131,7 @@ def _type_param_workflow() -> Workflow:
                 name="note", type=ParamKind.STRING, example="recorded default"
             )
         },
-        steps=[Step(id="t1", intent="type note", action=ActionKind.TYPE,
-                    param="note")],
+        steps=[Step(id="t1", intent="type note", action=ActionKind.TYPE, param="note")],
     )
 
 
@@ -146,8 +150,10 @@ def test_typed_param_example_is_the_replay_default(bundle, run_dir):
 def test_caller_param_overrides_typed_example(bundle, run_dir):
     backend = FakeBackend()
     report = Replayer(backend, vision=FakeVision(), poll_interval_s=0.01).run(
-        _type_param_workflow(), params={"note": "run value"},
-        bundle_dir=bundle, run_dir=run_dir,
+        _type_param_workflow(),
+        params={"note": "run value"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert backend.actions == [("type", "run value")]
@@ -184,10 +190,16 @@ def test_wait_until_holds_then_step_proceeds(bundle, run_dir):
     # "Ready" absent on the first probe, present on the second.
     vision.text_results = {"Ready": [None, Match((10, 10), (0, 0, 5, 5))]}
     backend = FakeBackend()
-    wf = Workflow(name="wf", steps=[
-        key_step(wait_until=Predicate(
-            kind=PredicateKind.TEXT_PRESENT, text="Ready", timeout_s=1.0))
-    ])
+    wf = Workflow(
+        name="wf",
+        steps=[
+            key_step(
+                wait_until=Predicate(
+                    kind=PredicateKind.TEXT_PRESENT, text="Ready", timeout_s=1.0
+                )
+            )
+        ],
+    )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         wf, bundle_dir=bundle, run_dir=run_dir
     )
@@ -198,10 +210,16 @@ def test_wait_until_holds_then_step_proceeds(bundle, run_dir):
 def test_wait_until_timeout_halts_and_never_proceeds(bundle, run_dir):
     vision = FakeVision()  # "Ready" is never present
     backend = FakeBackend()
-    wf = Workflow(name="wf", steps=[
-        key_step(wait_until=Predicate(
-            kind=PredicateKind.TEXT_PRESENT, text="Ready", timeout_s=0.05))
-    ])
+    wf = Workflow(
+        name="wf",
+        steps=[
+            key_step(
+                wait_until=Predicate(
+                    kind=PredicateKind.TEXT_PRESENT, text="Ready", timeout_s=0.05
+                )
+            )
+        ],
+    )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         wf, bundle_dir=bundle, run_dir=run_dir
     )
@@ -218,10 +236,19 @@ def test_wait_until_timeout_halts_and_never_proceeds(bundle, run_dir):
 
 def test_guard_unmet_halts_by_default(bundle, run_dir):
     backend = FakeBackend()
-    wf = Workflow(name="wf", params={"mode": "user"}, steps=[
-        key_step(guard=Guard(predicate=Predicate(
-            kind=PredicateKind.PARAM_EQUALS, param="mode", value="admin")))
-    ])
+    wf = Workflow(
+        name="wf",
+        params={"mode": "user"},
+        steps=[
+            key_step(
+                guard=Guard(
+                    predicate=Predicate(
+                        kind=PredicateKind.PARAM_EQUALS, param="mode", value="admin"
+                    )
+                )
+            )
+        ],
+    )
     report = Replayer(backend, vision=FakeVision(), poll_interval_s=0.01).run(
         wf, bundle_dir=bundle, run_dir=run_dir
     )
@@ -236,12 +263,20 @@ def test_guard_unmet_skip_makes_step_a_noop_success(bundle, run_dir):
     still runs. This is a guarded branch WITHOUT the Phase-2 state machine."""
     vision = FakeVision()  # "Survey" never present
     backend = FakeBackend()
-    wf = Workflow(name="wf", steps=[
-        key_step("dismiss", key="Escape", guard=Guard(
-            predicate=Predicate(kind=PredicateKind.TEXT_PRESENT, text="Survey"),
-            on_unmet="skip")),
-        key_step("next", key="Tab"),
-    ])
+    wf = Workflow(
+        name="wf",
+        steps=[
+            key_step(
+                "dismiss",
+                key="Escape",
+                guard=Guard(
+                    predicate=Predicate(kind=PredicateKind.TEXT_PRESENT, text="Survey"),
+                    on_unmet="skip",
+                ),
+            ),
+            key_step("next", key="Tab"),
+        ],
+    )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         wf, bundle_dir=bundle, run_dir=run_dir
     )
@@ -256,11 +291,19 @@ def test_guard_met_executes_step_normally(bundle, run_dir):
     vision = FakeVision()
     vision.text_results = {"Survey": Match((10, 10), (0, 0, 5, 5))}
     backend = FakeBackend()
-    wf = Workflow(name="wf", steps=[
-        key_step("dismiss", key="Escape", guard=Guard(
-            predicate=Predicate(kind=PredicateKind.TEXT_PRESENT, text="Survey"),
-            on_unmet="skip")),
-    ])
+    wf = Workflow(
+        name="wf",
+        steps=[
+            key_step(
+                "dismiss",
+                key="Escape",
+                guard=Guard(
+                    predicate=Predicate(kind=PredicateKind.TEXT_PRESENT, text="Survey"),
+                    on_unmet="skip",
+                ),
+            ),
+        ],
+    )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         wf, bundle_dir=bundle, run_dir=run_dir
     )
@@ -281,8 +324,11 @@ def test_scroll_wait_until_predicate_is_the_stop_condition(bundle, run_dir):
     vision.text_results = {"Bottom": [None, Match((10, 10), (0, 0, 5, 5))]}
     backend = FakeBackend()
     scroll = Step(
-        id="sc1", intent="scroll to bottom", action=ActionKind.SCROLL,
-        scroll_dx=0, scroll_dy=400,
+        id="sc1",
+        intent="scroll to bottom",
+        action=ActionKind.SCROLL,
+        scroll_dx=0,
+        scroll_dy=400,
         wait_until=Predicate(kind=PredicateKind.TEXT_PRESENT, text="Bottom"),
     )
     wf = Workflow(name="wf", steps=[scroll, key_step("k1", "Enter")])
@@ -301,8 +347,9 @@ def test_default_scroll_still_waits_on_next_anchor(bundle, run_dir):
     target = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     vision.template_results = [None, None, target, target]
     backend = FakeBackend()
-    scroll = Step(id="sc1", intent="scroll", action=ActionKind.SCROLL,
-                  scroll_dx=0, scroll_dy=400)
+    scroll = Step(
+        id="sc1", intent="scroll", action=ActionKind.SCROLL, scroll_dx=0, scroll_dy=400
+    )
     wf = Workflow(name="wf", steps=[scroll, click_step()])
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         wf, bundle_dir=bundle, run_dir=run_dir
@@ -322,8 +369,7 @@ def test_no_new_fields_replays_exactly_as_before(bundle, run_dir):
         Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     ]
     backend = FakeBackend()
-    wf = Workflow(name="wf", steps=[click_step(),
-                                    key_step("k1", "Enter")])
+    wf = Workflow(name="wf", steps=[click_step(), key_step("k1", "Enter")])
     # sanity: the additive fields default to empty/None
     assert wf.param_specs == {}
     assert wf.steps[0].guard is None and wf.steps[0].wait_until is None

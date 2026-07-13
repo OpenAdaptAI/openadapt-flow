@@ -249,9 +249,7 @@ def test_regressing_revision_is_rejected_by_gate(library, mode):
     step is REJECTED by the regression gate (reused from PR #70); the active
     version is retained and the candidate is quarantined with the reason."""
     stream = generate_stream(n_baseline=5, n_drift=5, drift=Drift.CONSENT_DIALOG)
-    out = learn_from_traces(
-        library, "mockmed", stream, inducer=_RiggedInducer(mode)
-    )
+    out = learn_from_traces(library, "mockmed", stream, inducer=_RiggedInducer(mode))
     assert out.action == "quarantined"
     assert out.gate is not None and not out.gate.passed
     assert f"{mode} regression" in " ".join(out.gate.failures)
@@ -281,7 +279,9 @@ def test_version_history_is_correct_across_multiple_cycles(library):
     """Two drift epochs: after each promotion the prior active is superseded, a
     rejected candidate is rolled_back, and exactly one version stays active."""
     # Epoch 1: consent dialog -> promote v2.
-    s1 = generate_stream(n_baseline=4, n_drift=4, drift=Drift.CONSENT_DIALOG, prefix="e1")
+    s1 = generate_stream(
+        n_baseline=4, n_drift=4, drift=Drift.CONSENT_DIALOG, prefix="e1"
+    )
     learn_from_traces(library, "mockmed", s1, inducer=StructuralDiffInducer())
     assert library.active_version("mockmed").version == 2
 

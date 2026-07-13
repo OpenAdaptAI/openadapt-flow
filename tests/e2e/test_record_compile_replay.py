@@ -179,9 +179,7 @@ class TestParamSubstitution:
         new_note = "Annual physical follow up call"
         assert squash(new_note) != squash(NOTE_TEXT)
 
-        report, run_dir = replay(
-            bundle.dir, mockmed_url, params={"note": new_note}
-        )
+        report, run_dir = replay(bundle.dir, mockmed_url, params={"note": new_note})
         assert report.success, failure_summary(report)
 
         # Banner OCR on the final after-frame: "Encounter saved — <note>".
@@ -228,9 +226,7 @@ class TestThemeDrift:
         # crops score far below TEMPLATE_THRESHOLD): all anchored steps must
         # resolve off-template and be healed. Anything less means the drift
         # fixture (or the threshold) stopped exercising the lower rungs.
-        assert report.rung_counts.get("template", 0) == 0, (
-            failure_summary(report)
-        )
+        assert report.rung_counts.get("template", 0) == 0, failure_summary(report)
         assert report.heal_count == N_ANCHORED, failure_summary(report)
         for result in anchored_results(report):
             assert result.resolution.rung != "template"
@@ -289,8 +285,8 @@ class TestRenameDrift:
         # Renamed labels break template AND ocr evidence; geometry resolves
         # (ocr acceptable if fuzzy matching still clears the bar).
         for step_id in RENAMED_STEPS:
-            assert rung_of(report, step_id) in ("geometry", "ocr"), (
-                failure_summary(report)
+            assert rung_of(report, step_id) in ("geometry", "ocr"), failure_summary(
+                report
             )
         assert report.heal_count >= 1
 
@@ -411,16 +407,12 @@ class TestCliSmoke:
                 timeout=420,
             )
 
-        proc = cli(
-            "demo-record", "--out", str(rec), "--note-text", NOTE_TEXT
-        )
+        proc = cli("demo-record", "--out", str(rec), "--note-text", NOTE_TEXT)
         assert proc.returncode == 0, proc.stderr
         assert (rec / "meta.json").is_file()
         assert (rec / "events.jsonl").is_file()
 
-        proc = cli(
-            "compile", str(rec), "--out", str(bundle), "--name", "cli-smoke"
-        )
+        proc = cli("compile", str(rec), "--out", str(bundle), "--name", "cli-smoke")
         assert proc.returncode == 0, proc.stderr
         assert (bundle / "workflow.json").is_file()
 
@@ -436,9 +428,7 @@ class TestCliSmoke:
             "--param",
             "note=Different note for the CLI smoke run",
         )
-        assert proc.returncode == 0, (
-            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-        )
+        assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         assert (run_dir / "report.json").is_file()
         report_md = run_dir / "REPORT.md"
         assert report_md.is_file()
@@ -450,17 +440,9 @@ class TestCliSmoke:
         assert "click steps identity-armed" in md
         # The bundle itself carries the audit fields for click steps.
         wf = json.loads((bundle / "workflow.json").read_text())
-        clicks = [
-            s for s in wf["steps"]
-            if s["action"] in ("click", "double_click")
-        ]
-        assert clicks and all(
-            s["identity_armed"] is not None for s in clicks
-        )
-        assert all(
-            s["identity_armed"] or s["identity_unarmed_reason"]
-            for s in clicks
-        )
+        clicks = [s for s in wf["steps"] if s["action"] in ("click", "double_click")]
+        assert clicks and all(s["identity_armed"] is not None for s in clicks)
+        assert all(s["identity_armed"] or s["identity_unarmed_reason"] for s in clicks)
 
         proc = cli("emit-skill", str(bundle), "--out", str(skills))
         assert proc.returncode == 0, proc.stderr
@@ -483,9 +465,7 @@ class TestCliSmoke:
             "--save-healed-to",
             str(healed),
         )
-        assert proc.returncode == 0, (
-            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-        )
+        assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         assert "bundled MockMed" in proc.stdout
         assert (selfserve_run / "report.json").is_file()
         assert (healed / "workflow.json").is_file()
@@ -493,8 +473,6 @@ class TestCliSmoke:
         assert report["success"] and report["heal_count"] >= 1
 
         # --url and --drift together must be rejected loudly.
-        proc = cli(
-            "replay", str(bundle), "--url", mockmed_url, "--drift", "theme"
-        )
+        proc = cli("replay", str(bundle), "--url", mockmed_url, "--drift", "theme")
         assert proc.returncode != 0
         assert "--drift" in proc.stderr

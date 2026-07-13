@@ -33,7 +33,6 @@ from openadapt_flow.ir import (
     Anchor,
     HealEvent,
     ProgramGraph,
-    State,
     StateKind,
     Step,
 )
@@ -90,7 +89,7 @@ def _effect_baseline_and_now(
     for effect in old_step.effects:
         key = _effect_key(effect)
         baseline[key] = True
-        now[key] = (lambda k=key: k in new_keys)
+        now[key] = lambda k=key: k in new_keys
     return baseline, now
 
 

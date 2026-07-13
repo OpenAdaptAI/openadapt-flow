@@ -71,7 +71,9 @@ CORPUS: list[AppSpec] = [
             _c("button[id^=add-to-cart]", "Add first product to cart"),
             _c(".shopping_cart_link", "Open cart"),
         ],
-        verify=Verify(kind="dom_text_contains", selector=".shopping_cart_badge", value="1"),
+        verify=Verify(
+            kind="dom_text_contains", selector=".shopping_cart_badge", value="1"
+        ),
         params={"username": "standard_user", "password": "secret_sauce"},
         notes="Standard e-commerce browse->cart; demo credentials are public.",
     ),
@@ -129,7 +131,9 @@ CORPUS: list[AppSpec] = [
             _c("#checkbox-1", "experience checkbox"),
             _c(".btn.btn-lg.btn-primary", "Submit"),
         ],
-        verify=Verify(kind="dom_text_contains", selector=".alert", value="successfully submitted"),
+        verify=Verify(
+            kind="dom_text_contains", selector=".alert", value="successfully submitted"
+        ),
         params={"first": "Grace", "last": "Hopper"},
     ),
     AppSpec(
@@ -148,8 +152,14 @@ CORPUS: list[AppSpec] = [
             _t("Bletchley Park", param="address"),
             _c("#submit", "Submit"),
         ],
-        verify=Verify(kind="dom_text_contains", selector="#output", value="Alan Turing"),
-        params={"name": "Alan Turing", "email": "alan@example.com", "address": "Bletchley Park"},
+        verify=Verify(
+            kind="dom_text_contains", selector="#output", value="Alan Turing"
+        ),
+        params={
+            "name": "Alan Turing",
+            "email": "alan@example.com",
+            "address": "Bletchley Park",
+        },
         notes="STRESS: third-party ad iframes shift element positions between load and interaction.",
     ),
     AppSpec(
@@ -165,7 +175,9 @@ CORPUS: list[AppSpec] = [
             _c("#checkBox1", "tick checkbox"),
             _c("#myButton", "click button"),
         ],
-        verify=Verify(kind="dom_value_equals", selector="#myTextInput", value="hello world"),
+        verify=Verify(
+            kind="dom_value_equals", selector="#myTextInput", value="hello world"
+        ),
         params={"text": "hello world"},
     ),
     # ---- todo / CRUD -------------------------------------------------------
@@ -316,7 +328,9 @@ CORPUS: list[AppSpec] = [
             _c(".dt-search input", "focus search"),
             _t("London", param="query"),
         ],
-        verify=Verify(kind="dom_value_equals", selector=".dt-search input", value="London"),
+        verify=Verify(
+            kind="dom_value_equals", selector=".dt-search input", value="London"
+        ),
         params={"query": "London"},
         notes="STRESS: dense data table with live client-side filtering.",
     ),
@@ -388,7 +402,9 @@ CORPUS: list[AppSpec] = [
             _c("input[type=number]", "focus number input"),
             _t("42", param="value"),
         ],
-        verify=Verify(kind="dom_value_equals", selector="input[type=number]", value="42"),
+        verify=Verify(
+            kind="dom_value_equals", selector="input[type=number]", value="42"
+        ),
         params={"value": "42"},
     ),
     AppSpec(
@@ -472,7 +488,9 @@ CORPUS: list[AppSpec] = [
             _c("input[type=text]", "focus first text input"),
             _t("First", param="value"),
         ],
-        verify=Verify(kind="dom_value_equals", selector="input[type=text]", value="First"),
+        verify=Verify(
+            kind="dom_value_equals", selector="input[type=text]", value="First"
+        ),
         params={"value": "First"},
         notes="KNOWN-HARD: cookie-consent wall + heavy ad iframes.",
     ),

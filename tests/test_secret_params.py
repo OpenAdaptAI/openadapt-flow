@@ -87,9 +87,7 @@ def test_recorder_secret_not_persisted_and_region_redacted(tmp_path: Path) -> No
     meta = json.loads((rec_dir / "meta.json").read_text())
     assert meta["secret_params"] == ["password"]
     assert "password" not in meta["params"]
-    blob = (rec_dir / "meta.json").read_text() + (
-        rec_dir / "events.jsonl"
-    ).read_text()
+    blob = (rec_dir / "meta.json").read_text() + (rec_dir / "events.jsonl").read_text()
     assert SECRET not in blob
 
     # events: the type event carries the param + secret flag but NO text.
@@ -144,8 +142,7 @@ def _write_secret_recording(rec_dir: Path) -> None:
         )
     )
     (rec_dir / "events.jsonl").write_text(
-        json.dumps({"i": 0, "kind": "type", "param": "password", "secret": True})
-        + "\n"
+        json.dumps({"i": 0, "kind": "type", "param": "password", "secret": True}) + "\n"
     )
 
 

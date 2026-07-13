@@ -71,6 +71,7 @@ def verify_encounter_saved(
     Returns:
         A :class:`VerifyResult`; ``success`` requires both checks to pass.
     """
+
     def any_found(candidates: tuple[str, ...]) -> bool:
         return any(
             find_text(screen_png, c, min_ratio=min_ratio) is not None

@@ -11,6 +11,12 @@ name: Release and PyPI Publish
 # Prerequisites (repo/org settings): secrets.ADMIN_TOKEN (org-level, visibility
 # "all") to push the release commit/tag past branch protection; PyPI Trusted
 # Publishing for openadapt-flow with environment "pypi".
+#
+# Supply chain: GitHub Actions below are pinned to full commit SHAs (not mutable
+# tags) with the human-readable version in a trailing comment; Dependabot
+# (.github/dependabot.yml) proposes SHA bumps. Follow-up (settings change, not
+# code): the org-wide ADMIN_TOKEN (visibility "all") should become a
+# repo-scoped fine-grained token or GitHub App to narrow its blast radius.
 
 on:
   push:
@@ -35,7 +41,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           token: ${{ secrets.ADMIN_TOKEN }}
@@ -51,13 +57,13 @@ jobs:
 
       - name: Set up Python
         if: steps.check_skip.outputs.skip != 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
       - name: Install uv
         if: steps.check_skip.outputs.skip != 'true'
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
 
       # Semantic Release computes the version, bumps pyproject, tags, AND runs
       # `build_command` (uv build) to populate dist/. There is deliberately no
@@ -65,17 +71,17 @@ jobs:
       - name: Python Semantic Release
         if: steps.check_skip.outputs.skip != 'true'
         id: release
-        uses: python-semantic-release/python-semantic-release@v9.15.2
+        uses: python-semantic-release/python-semantic-release@7b3f71697ccfbaef884e1e754b6364e974b134cf # v9.15.2
         with:
           github_token: ${{ secrets.ADMIN_TOKEN }}
 
       - name: Publish to PyPI
         if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
 
       - name: Publish GitHub Release
         if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        uses: python-semantic-release/publish-action@v9.15.2
+        uses: python-semantic-release/publish-action@b9c41d4b0754dee5a6c7188d42b33f66e3a8aafd # v9.15.2
         with:
           github_token: ${{ secrets.ADMIN_TOKEN }}
 
@@ -89,20 +95,20 @@ jobs:
 
     steps:
       - name: Checkout the requested ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ inputs.ref }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
 
       - name: Build package
         run: uv build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

@@ -28,9 +28,7 @@ from openadapt_flow.validation.adversary_corpus_v2 import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MANIFEST_PATH = (
-    REPO_ROOT / "docs/validation/adversary_corpus_v2_manifest.json"
-)
+MANIFEST_PATH = REPO_ROOT / "docs/validation/adversary_corpus_v2_manifest.json"
 
 
 def test_corpus_v2_matches_frozen_manifest():
@@ -95,8 +93,7 @@ def test_v1_manifest_untouched():
     original frozen seed and hash (v1's own freeze test verifies the
     regeneration; this pins the file identity)."""
     v1 = json.loads(
-        (REPO_ROOT / "docs/validation/adversary_corpus_manifest.json")
-        .read_text()
+        (REPO_ROOT / "docs/validation/adversary_corpus_manifest.json").read_text()
     )
     assert v1["seed"] == 20260710
     assert v1["n_total"] == 4360

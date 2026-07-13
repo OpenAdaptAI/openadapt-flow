@@ -46,18 +46,17 @@ def _mock_run(monkeypatch, responses):
 
 def test_status_parses_running(monkeypatch):
     # `prlctl list --all -o status,uuid` puts STATUS in the first column.
-    out = (
-        "STATUS   UUID\n"
-        f"running  {UUID}\n"
-    )
+    out = f"STATUS   UUID\nrunning  {UUID}\n"
     _mock_run(monkeypatch, {"list": _completed(out)})
     assert ParallelsVM(UUID).status() == "running"
 
 
 def test_snapshot_parses_id(monkeypatch):
-    out = ("Creating the snapshot...\n"
-           "The snapshot with id {516f223f-7e3a-48f4-90d0-f69f9aaa7644} "
-           "has been successfully created.\n")
+    out = (
+        "Creating the snapshot...\n"
+        "The snapshot with id {516f223f-7e3a-48f4-90d0-f69f9aaa7644} "
+        "has been successfully created.\n"
+    )
     _mock_run(monkeypatch, {"snapshot": _completed(out)})
     sid = ParallelsVM(UUID).snapshot("ready")
     assert sid == "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
@@ -93,28 +92,35 @@ def test_guest_ip_skips_apipa(monkeypatch):
 
 
 def test_host_ip_matches_guest_subnet(monkeypatch):
-    _mock_run(monkeypatch, {"exec": _completed(
-        "   IPv4 Address. . . . . . . . . . . : 10.211.55.3\n")})
+    _mock_run(
+        monkeypatch,
+        {"exec": _completed("   IPv4 Address. . . . . . . . . . . : 10.211.55.3\n")},
+    )
     vm = ParallelsVM(UUID)
     ifconfig = types.SimpleNamespace(
         stdout="\tinet 10.211.55.2 netmask 0xffffff00 broadcast 10.211.55.255\n"
-               "\tinet 192.168.1.20 netmask 0xffffff00\n"
+        "\tinet 192.168.1.20 netmask 0xffffff00\n"
     )
-    monkeypatch.setattr(pv.subprocess, "run",
-                        lambda *a, **k: ifconfig if a[0] == ["ifconfig"]
-                        else _completed(
-                            "   IPv4 Address. . . : 10.211.55.3\n"))
+    monkeypatch.setattr(
+        pv.subprocess,
+        "run",
+        lambda *a, **k: (
+            ifconfig
+            if a[0] == ["ifconfig"]
+            else _completed("   IPv4 Address. . . : 10.211.55.3\n")
+        ),
+    )
     assert vm.host_ip("10.211.55.3") == "10.211.55.2"
 
 
 def test_run_raises_on_nonzero(monkeypatch):
-    _mock_run(monkeypatch, {"start": _completed("boom", returncode=1,
-                                                stderr="no such VM")})
+    _mock_run(
+        monkeypatch, {"start": _completed("boom", returncode=1, stderr="no such VM")}
+    )
     with pytest.raises(ParallelsError):
         ParallelsVM(UUID).start()
 
 
 def test_shim_url_uses_guest_ip(monkeypatch):
-    _mock_run(monkeypatch, {"exec": _completed(
-        "   IPv4 Address. . . : 10.211.55.3\n")})
+    _mock_run(monkeypatch, {"exec": _completed("   IPv4 Address. . . : 10.211.55.3\n")})
     assert ParallelsVM(UUID).shim_url() == "http://10.211.55.3:5000"

@@ -207,9 +207,7 @@ class PlaywrightBackend:
 
     # -- structural action (openadapt_flow.backend.StructuralActionBackend) --
 
-    def structural_locator_at(
-        self, x: int, y: int
-    ) -> Optional[StructuralLocator]:
+    def structural_locator_at(self, x: int, y: int) -> Optional[StructuralLocator]:
         """Return a stable DOM locator for the element under (x, y).
 
         Walks from ``document.elementFromPoint`` to the nearest ACTIONABLE
@@ -285,9 +283,7 @@ class PlaywrightBackend:
             if locator.selector:
                 loc = self.page.locator(locator.selector)
             elif locator.role and locator.name:
-                loc = self.page.get_by_role(
-                    locator.role, name=locator.name, exact=True
-                )
+                loc = self.page.get_by_role(locator.role, name=locator.name, exact=True)
             if loc is None:
                 return None
             if loc.count() != 1:

@@ -21,11 +21,11 @@ from openadapt_flow.runtime.healing.governance import (  # noqa: F401
     risk_regression,
 )
 from openadapt_flow.runtime.healing.patch import (  # noqa: F401
+    IDENTITY_FIELDS,
+    LOCATOR_FIELDS,
     AnchorChange,
     HealPatch,
     IdentitySnapshot,
-    IDENTITY_FIELDS,
-    LOCATOR_FIELDS,
 )
 from openadapt_flow.runtime.healing.perturbation import (  # noqa: F401
     DriftCase,

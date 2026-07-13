@@ -51,15 +51,27 @@ def draw_button(img: np.ndarray, x: int, y: int, w: int, h: int, label: str) -> 
     cv2.rectangle(img, (x, y), (x + w, y + h), (205, 205, 205), -1)
     cv2.rectangle(img, (x, y), (x + w, y + h), (70, 70, 70), 2)
     cv2.putText(
-        img, label, (x + 12, y + h // 2 + 8),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+        img,
+        label,
+        (x + 12, y + h // 2 + 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
     )
 
 
 def draw_text(img: np.ndarray, x: int, y: int, text: str) -> None:
     cv2.putText(
-        img, text, (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+        img,
+        text,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
     )
 
 
@@ -145,14 +157,13 @@ class MockWaa:
                     mock.commands.append(command)
                     mock._advance(command)
                 self._reply(
-                    200, json.dumps({"status": "ok"}).encode(),
+                    200,
+                    json.dumps({"status": "ok"}).encode(),
                     "application/json",
                 )
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(
-            target=self._server.serve_forever, daemon=True
-        )
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
 
@@ -299,15 +310,13 @@ def test_execute_error_raises(waa: MockWaa) -> None:
 def test_type_text_ascii_with_hostile_quoting(
     waa: MockWaa, backend: WindowsBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    text = "O'Brien \"note\" C:\\path\\to\\file"
+    text = 'O\'Brien "note" C:\\path\\to\\file'
     backend.type_text(text)
     fake = exec_last_command(waa, monkeypatch)
     assert fake.calls == [("write", (text,), {"interval": 0.05})]
 
 
-def test_type_text_empty_sends_nothing(
-    waa: MockWaa, backend: WindowsBackend
-) -> None:
+def test_type_text_empty_sends_nothing(waa: MockWaa, backend: WindowsBackend) -> None:
     backend.type_text("")
     assert waa.commands == []
 

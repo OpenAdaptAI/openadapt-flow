@@ -83,8 +83,12 @@ def cluster_traces(
             continue
         clusters.successes.append(trace)
         if active is None:
-            repro = ReproResult(reproduced=False, consumed=0, total=len(trace.steps),
-                                reason="no active program yet")
+            repro = ReproResult(
+                reproduced=False,
+                consumed=0,
+                total=len(trace.steps),
+                reason="no active program yet",
+            )
         else:
             repro = program_reproduces(active, trace, subflows=subflows)
         if not repro.reproduced:

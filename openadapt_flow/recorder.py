@@ -162,17 +162,13 @@ class Recorder:
             # put it on the anchor and the replayer's structural ACTION rung can
             # re-find the SAME element deterministically (no pixel match). Absent
             # on pixel-only backends; resolution then uses the visual anchor.
-            locator = self._structural_locator_at(
-                int(event["x"]), int(event["y"])
-            )
+            locator = self._structural_locator_at(int(event["x"]), int(event["y"]))
             if locator is not None:
                 event = {
                     **event,
                     "structural": locator.model_dump(exclude_none=True),
                 }
-            structured = self._structured_identity_at(
-                int(event["x"]), int(event["y"])
-            )
+            structured = self._structured_identity_at(int(event["x"]), int(event["y"]))
             if structured:
                 event = {**event, "structured_identity": structured}
         act()
@@ -284,9 +280,7 @@ class Recorder:
             f.write(json.dumps(line) + "\n")
         self._i += 1
 
-    def _structural_locator_at(
-        self, x: int, y: int
-    ) -> Optional[StructuralLocator]:
+    def _structural_locator_at(self, x: int, y: int) -> Optional[StructuralLocator]:
         """Stable structural locator for the element under (x, y), if any.
 
         Backends MAY expose ``structural_locator_at``
@@ -303,10 +297,9 @@ class Recorder:
             return getter(int(x), int(y))
         except Exception:
             return None
+
     @staticmethod
-    def _redact(
-        png: bytes, region: tuple[int, int, int, int]
-    ) -> bytes:
+    def _redact(png: bytes, region: tuple[int, int, int, int]) -> bytes:
         """Return ``png`` with ``region`` (x, y, w, h) filled solid black."""
         x, y, w, h = (int(v) for v in region)
         with Image.open(io.BytesIO(png)) as img:
@@ -376,10 +369,7 @@ class Recorder:
         png = self._backend.screenshot()
         prev = _phash(png)
         consecutive = 1
-        while (
-            consecutive < self._settle_stable_frames
-            and time.monotonic() < deadline
-        ):
+        while consecutive < self._settle_stable_frames and time.monotonic() < deadline:
             time.sleep(self._settle_interval_s)
             png = self._backend.screenshot()
             cur = _phash(png)

@@ -113,9 +113,29 @@ _MIN_ANCHOR_TOKEN_LEN = 3
 # carry no row-identifying signal.
 _INTENT_STOPWORDS = frozenset(
     {
-        "the", "for", "row", "click", "select", "open", "in", "on", "of",
-        "patient", "record", "button", "control", "mrn", "id", "and", "to",
-        "a", "an", "at", "this", "that", "with",
+        "the",
+        "for",
+        "row",
+        "click",
+        "select",
+        "open",
+        "in",
+        "on",
+        "of",
+        "patient",
+        "record",
+        "button",
+        "control",
+        "mrn",
+        "id",
+        "and",
+        "to",
+        "a",
+        "an",
+        "at",
+        "this",
+        "that",
+        "with",
     }
 )
 

@@ -211,9 +211,7 @@ class TestDateInput:
 
 
 class TestModalDialog:
-    def test_open_and_confirm_dom_modal(
-        self, mockmed_url, _browser, tmp_path
-    ) -> None:
+    def test_open_and_confirm_dom_modal(self, mockmed_url, _browser, tmp_path) -> None:
         """SUPPORTED. DOM-rendered modal open + confirm are ordinary clicks."""
         url = f"{mockmed_url}widgets.html?panel=modal"
 
@@ -278,7 +276,10 @@ class TestTypeahead:
             _browser, url, ops, tmp_path, "typeahead-param"
         )
         report, state = replay_on_page(
-            _browser, bundle_dir, url, tmp_path / "run",
+            _browser,
+            bundle_dir,
+            url,
+            tmp_path / "run",
             params={"prefix": "Bo"},
         )
         # It must never claim the recorded contact was chosen.
@@ -292,9 +293,7 @@ class TestTypeahead:
             )
         else:
             # Or it halted before clicking anything.
-            assert state["status"] == "Ready and waiting.", describe(
-                report, state
-            )
+            assert state["status"] == "Ready and waiting.", describe(report, state)
 
 
 class TestTablePagination:
@@ -345,7 +344,10 @@ class TestSortReorder:
         )
         assert recorded == "Order picked: Basic metabolic panel."
         report, state = replay_on_page(
-            _browser, bundle_dir, url + "&presort=desc", tmp_path / "run",
+            _browser,
+            bundle_dir,
+            url + "&presort=desc",
+            tmp_path / "run",
             params={},
         )
         assert report.success is False, describe(report, state)
@@ -353,15 +355,11 @@ class TestSortReorder:
         assert state["status"] == "Ready and waiting.", describe(report, state)
         failed = failing_step(report)
         assert failed is not None and failed.step_id == "step_000"
-        assert "Identity check failed" in (failed.error or ""), describe(
-            report, state
-        )
+        assert "Identity check failed" in (failed.error or ""), describe(report, state)
 
 
 class TestKeyboardFlow:
-    def test_tab_type_enter_flow_replays(
-        self, mockmed_url, _browser, tmp_path
-    ) -> None:
+    def test_tab_type_enter_flow_replays(self, mockmed_url, _browser, tmp_path) -> None:
         """SUPPORTED. One focusing click, then keyboard only (type, Tab,
         type, Enter)."""
         url = f"{mockmed_url}widgets.html?panel=kbd"

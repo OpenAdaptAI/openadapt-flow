@@ -34,9 +34,7 @@ def test_noop_when_browser_present(monkeypatch):
     """Present browser -> probe returns True -> install NEVER runs."""
     monkeypatch.setattr(bs, "_chromium_present", lambda: True)
     calls = []
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: calls.append((a, k))
-    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)))
 
     bs.ensure_chromium_installed()
 
@@ -76,9 +74,7 @@ def test_opt_out_skips_install(monkeypatch):
 
     monkeypatch.setattr(bs, "_chromium_present", _boom)
     calls = []
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: calls.append((a, k))
-    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append((a, k)))
 
     bs.ensure_chromium_installed()
 
@@ -110,9 +106,7 @@ def test_probe_failure_falls_back_to_install(monkeypatch):
 
     monkeypatch.setattr(bs, "_chromium_present", _raise)
     calls = []
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, *a, **k: calls.append(cmd)
-    )
+    monkeypatch.setattr(subprocess, "run", lambda cmd, *a, **k: calls.append(cmd))
 
     bs.ensure_chromium_installed()
 
@@ -122,9 +116,7 @@ def test_probe_failure_falls_back_to_install(monkeypatch):
 def test_import_is_side_effect_free(monkeypatch):
     """Importing the package must NOT trigger an install (no import-time work)."""
     called = []
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: called.append((a, k))
-    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: called.append((a, k)))
 
     importlib.reload(importlib.import_module("openadapt_flow"))
 

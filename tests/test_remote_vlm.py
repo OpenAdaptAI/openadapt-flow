@@ -36,7 +36,8 @@ def test_identity_pass_through_verdicts(monkeypatch):
 
 def test_identity_different_is_mismatch(monkeypatch):
     monkeypatch.setattr(
-        httpx, "post",
+        httpx,
+        "post",
         lambda url, **kw: httpx.Response(200, json={"verdict": "different"}),
     )
     idv = RemoteIdentityVLM(RemoteVLMClient("http://x", token="t"))
@@ -46,9 +47,11 @@ def test_identity_different_is_mismatch(monkeypatch):
 
 def test_grounder_pass_through_point(monkeypatch):
     monkeypatch.setattr(
-        httpx, "post",
-        lambda url, **kw: httpx.Response(200, json={"point": [120, 45],
-                                                    "confidence": 0.9}),
+        httpx,
+        "post",
+        lambda url, **kw: httpx.Response(
+            200, json={"point": [120, 45], "confidence": 0.9}
+        ),
     )
     g = RemoteGrounder(RemoteVLMClient("http://x", token="t"))
     m = g.locate(PNG, "Save button")
@@ -126,7 +129,8 @@ def test_state_fails_safe_to_uncertain(name, post, monkeypatch):
 
 def test_identity_uncertain_verdict_is_abstain(monkeypatch):
     monkeypatch.setattr(
-        httpx, "post",
+        httpx,
+        "post",
         lambda url, **kw: httpx.Response(200, json={"verdict": "uncertain"}),
     )
     idv = RemoteIdentityVLM(RemoteVLMClient("http://x", token="t"))
@@ -135,7 +139,8 @@ def test_identity_uncertain_verdict_is_abstain(monkeypatch):
 
 def test_grounder_null_point_is_none(monkeypatch):
     monkeypatch.setattr(
-        httpx, "post",
+        httpx,
+        "post",
         lambda url, **kw: httpx.Response(200, json={"point": None}),
     )
     g = RemoteGrounder(RemoteVLMClient("http://x", token="t"))

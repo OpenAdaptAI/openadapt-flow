@@ -79,9 +79,16 @@ class FakeVision:
         self.text_results: dict = {}
         self.ocr_lines: list = []
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None, scales=(0.85, 1.0, 1.18),
-                      threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         if self.template_results:
             return self.template_results.pop(0)
         return None
@@ -101,8 +108,7 @@ class FakeVision:
     def phash_distance(self, a, b):
         return 0
 
-    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2,
-                     timeout_s=3.0):
+    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2, timeout_s=3.0):
         return backend.screenshot()
 
 
@@ -188,8 +194,12 @@ def test_heal_produces_valid_bundle_and_is_idempotent(case):
             "Save": Match(resolved, (resolved[0], resolved[1], 1, 1), 0.8)
         }
         backend = FakeBackend(frame, viewport)
-        step = Step(id="s1", intent="click 'Save'", action=ActionKind.CLICK,
-                    anchor=anchor.model_copy())
+        step = Step(
+            id="s1",
+            intent="click 'Save'",
+            action=ActionKind.CLICK,
+            anchor=anchor.model_copy(),
+        )
         workflow = Workflow(name="wf", viewport=viewport, steps=[step])
 
         report1 = Replayer(backend, vision=vision).run(
@@ -202,9 +212,10 @@ def test_heal_produces_valid_bundle_and_is_idempotent(case):
         # --- Invariant 1: the healed bundle is a valid, sound artifact. ---
         healed_wf = Workflow.load(healed)
         # Round-trips through JSON unchanged (never corrupts the workflow).
-        assert Workflow.model_validate_json(
-            healed_wf.model_dump_json()
-        ).model_dump() == healed_wf.model_dump()
+        assert (
+            Workflow.model_validate_json(healed_wf.model_dump_json()).model_dump()
+            == healed_wf.model_dump()
+        )
 
         new_anchor = healed_wf.steps[0].anchor
         assert new_anchor is not None

@@ -236,9 +236,7 @@ class FreeRDPBackend:
         img.convert("RGB").save(buf, format="PNG")
         return buf.getvalue()
 
-    def wait_first_frame(
-        self, *, retries: int = 20, settle_s: float = 0.25
-    ) -> bytes:
+    def wait_first_frame(self, *, retries: int = 20, settle_s: float = 0.25) -> bytes:
         """Poll :meth:`screenshot` until a non-blank frame, returning its PNG.
 
         The first frame(s) an RDP session paints are often a single-colour

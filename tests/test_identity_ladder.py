@@ -51,13 +51,14 @@ def _with_bar(cols: int, x0: int = 100, val: int = 0) -> np.ndarray:
     """A blank white canvas with one narrow full-height black bar -- a single
     LOCALIZED differing 'glyph cell'."""
     img = _blank()
-    img[:, x0:x0 + cols] = val
+    img[:, x0 : x0 + cols] = val
     return img
 
 
 # ---------------------------------------------------------------------------
 # pixel tier: verify / mismatch / abstain
 # ---------------------------------------------------------------------------
+
 
 def test_pixel_verify_is_hard_gated_identical_crop_abstains() -> None:
     # Blocker 2: the VERIFY path is HARD-GATED (PIXEL_VERIFY_ENABLED False)
@@ -90,8 +91,8 @@ def test_pixel_abstains_on_whole_crop_drift() -> None:
 def test_pixel_never_false_accepts_a_different_identifier() -> None:
     # A different identifier must NEVER verify, stable or drifted.
     rec = _png(_blank())
-    stable_diff = _png(_with_bar(5))           # localized -> mismatch
-    drift_diff = _png(_blank(120))             # whole-crop -> abstain
+    stable_diff = _png(_with_bar(5))  # localized -> mismatch
+    drift_diff = _png(_blank(120))  # whole-crop -> abstain
     for live in (stable_diff, drift_diff):
         check = I.verify_pixel_identity(rec, live)
         assert check is None or check.status != "verified"
@@ -108,6 +109,7 @@ def test_pixel_abstains_when_crop_missing() -> None:
 # false-accept), and the decision must be SCALE-INVARIANT.
 # ---------------------------------------------------------------------------
 
+
 def _scalable_font(size: int):
     """A real scalable TrueType font that exists on every platform the suite
     runs on. macOS ships Arial; Linux CI does not, so we fall back to the
@@ -116,12 +118,14 @@ def _scalable_font(size: int):
     too degenerate for the pixel comparisons below, so it is a last resort only.
     """
     from PIL import ImageFont
+
     candidates = [
-        "/System/Library/Fonts/Supplemental/Arial.ttf",       # macOS
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",    # Debian/Ubuntu
+        "/System/Library/Fonts/Supplemental/Arial.ttf",  # macOS
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Debian/Ubuntu
     ]
     try:  # matplotlib bundles DejaVuSans and is present in the dev/CI env
         import matplotlib.font_manager as fm
+
         candidates.append(fm.findfont("DejaVu Sans"))
     except Exception:
         pass
@@ -138,6 +142,7 @@ def _mrn_cell(text: str, *, width: int, jitter: int = 0) -> bytes:
     (PIL, so no browser). ``width`` varies the cell scale; ``jitter`` shifts
     the text a sub-pixel-equivalent amount (a cross-render artifact)."""
     from PIL import Image, ImageDraw
+
     img = Image.new("L", (width, 40), 255)
     draw = ImageDraw.Draw(img)
     font = _scalable_font(22)
@@ -149,9 +154,9 @@ def test_blocker2_wide_cell_different_mrn_does_not_false_accept() -> None:
     # The exact Blocker-2 shape: a WIDE cell where a one-digit-different MRN's
     # diff dilutes below the OLD absolute threshold. It must NOT verify.
     rec = _mrn_cell("AC50061", width=420)
-    diff = _mrn_cell("AC58061", width=420)      # one digit different
+    diff = _mrn_cell("AC58061", width=420)  # one digit different
     check = I.verify_pixel_identity(rec, diff)
-    assert check is None or check.status != "verified"   # never a false-accept
+    assert check is None or check.status != "verified"  # never a false-accept
     assert check is not None and check.status == "mismatch"  # affirmatively caught
 
 
@@ -177,6 +182,7 @@ def test_blocker2_verify_gated_even_for_same_value() -> None:
 # VLM veto tier: optional, gated, veto-only
 # ---------------------------------------------------------------------------
 
+
 class _FakeVLM:
     def __init__(self, verdict: str, *, boom: bool = False) -> None:
         self.verdict = verdict
@@ -192,14 +198,16 @@ class _FakeVLM:
 
 def test_vlm_tier_off_by_default_returns_none() -> None:
     # No verifier injected -> tier abstains (optional; default install = no model).
-    assert I.verify_vlm_identity(
-        b"a", b"b", verifier=None, glyph_confusable=True) is None
+    assert (
+        I.verify_vlm_identity(b"a", b"b", verifier=None, glyph_confusable=True) is None
+    )
 
 
 def test_vlm_tier_only_runs_on_confusable_identifier() -> None:
     vlm = _FakeVLM("different")
-    assert I.verify_vlm_identity(
-        b"a", b"b", verifier=vlm, glyph_confusable=False) is None
+    assert (
+        I.verify_vlm_identity(b"a", b"b", verifier=vlm, glyph_confusable=False) is None
+    )
     assert vlm.calls == 0  # not even consulted for a non-confusable id
 
 
@@ -209,9 +217,11 @@ def test_vlm_is_veto_only_same_abstains_different_vetoes() -> None:
     # decision to prior/other evidence (and, absent any, HALT). Only
     # "different" produces a verdict, and it is always a mismatch (veto).
     same = I.verify_vlm_identity(
-        b"a", b"b", verifier=_FakeVLM("same"), glyph_confusable=True)
+        b"a", b"b", verifier=_FakeVLM("same"), glyph_confusable=True
+    )
     diff = I.verify_vlm_identity(
-        b"a", b"b", verifier=_FakeVLM("different"), glyph_confusable=True)
+        b"a", b"b", verifier=_FakeVLM("different"), glyph_confusable=True
+    )
     assert same is None  # cannot by itself certify identity
     assert diff.status == "mismatch" and diff.mode == "vlm"
 
@@ -220,11 +230,14 @@ def test_vlm_same_cannot_upgrade_unverified_target_to_verified() -> None:
     # In the pixel-abstain path the VLM is the only remaining signal; a
     # "same" answer must NOT upgrade the target -> the ladder HALTs (unreadable),
     # never a VLM-granted pass.
-    out = I.run_identity_ladder([
-        lambda: None,  # pixel abstains (drift)
-        lambda: I.verify_vlm_identity(
-            b"a", b"b", verifier=_FakeVLM("same"), glyph_confusable=True),
-    ])
+    out = I.run_identity_ladder(
+        [
+            lambda: None,  # pixel abstains (drift)
+            lambda: I.verify_vlm_identity(
+                b"a", b"b", verifier=_FakeVLM("same"), glyph_confusable=True
+            ),
+        ]
+    )
     assert out.status != "verified"
     assert out.status == "unreadable"
 
@@ -232,9 +245,11 @@ def test_vlm_same_cannot_upgrade_unverified_target_to_verified() -> None:
 def test_vlm_unsure_or_broken_model_vetoes_never_passes() -> None:
     # Veto-only: a garbled verdict, and an exception, both HALT.
     garbled = I.verify_vlm_identity(
-        b"a", b"b", verifier=_FakeVLM("maybe?"), glyph_confusable=True)
+        b"a", b"b", verifier=_FakeVLM("maybe?"), glyph_confusable=True
+    )
     broken = I.verify_vlm_identity(
-        b"a", b"b", verifier=_FakeVLM("same", boom=True), glyph_confusable=True)
+        b"a", b"b", verifier=_FakeVLM("same", boom=True), glyph_confusable=True
+    )
     assert garbled.status == "mismatch"
     assert broken.status == "mismatch"
 
@@ -248,6 +263,7 @@ def test_identity_rests_on_confusable_identifier() -> None:
 # ---------------------------------------------------------------------------
 # Full ladder order + fall-through + no-override
 # ---------------------------------------------------------------------------
+
 
 def test_ladder_order_structured_beats_pixel() -> None:
     struct = lambda: IdentityCheck(status="verified", mode="structured")
@@ -265,7 +281,7 @@ def test_ladder_pixel_mismatch_not_overridden_by_vlm_or_ocr() -> None:
 
 
 def test_ladder_abstain_falls_through_to_next_tier() -> None:
-    pixel = lambda: None                                    # abstain (drift)
+    pixel = lambda: None  # abstain (drift)
     vlm = lambda: IdentityCheck(status="mismatch", mode="vlm")
     out = I.run_identity_ladder([pixel, vlm])
     assert out.mode == "vlm"
@@ -280,6 +296,7 @@ def test_ladder_all_abstain_is_unreadable_halt() -> None:
 # 0-false-accept across configs, at the tier level (no browser)
 # ---------------------------------------------------------------------------
 
+
 def test_zero_false_accept_wrong_identifier_across_configs() -> None:
     """A wrong identifier is never VERIFIED whether the top tier is structured,
     pixel, or the VLM veto -- the safety invariant, browser-free."""
@@ -288,17 +305,18 @@ def test_zero_false_accept_wrong_identifier_across_configs() -> None:
     live_png = _png(_with_bar(5))  # a different identifier (localized glyph)
 
     # structured config
-    s = I.run_identity_ladder(
-        [lambda: I.verify_structured_identity(rec_str, live_str)])
+    s = I.run_identity_ladder([lambda: I.verify_structured_identity(rec_str, live_str)])
     # pixel config
     p = I.run_identity_ladder([lambda: I.verify_pixel_identity(rec_png, live_png)])
     # pixel+vlm config (drift -> pixel abstains -> vlm vetoes)
-    v = I.run_identity_ladder([
-        lambda: None,
-        lambda: I.verify_vlm_identity(
-            rec_png, live_png, verifier=_FakeVLM("different"),
-            glyph_confusable=True),
-    ])
+    v = I.run_identity_ladder(
+        [
+            lambda: None,
+            lambda: I.verify_vlm_identity(
+                rec_png, live_png, verifier=_FakeVLM("different"), glyph_confusable=True
+            ),
+        ]
+    )
     for out in (s, p, v):
         assert out.status != "verified"  # wrong patient NEVER verifies
 
@@ -308,7 +326,11 @@ def test_zero_false_accept_wrong_identifier_across_configs() -> None:
 # ---------------------------------------------------------------------------
 
 from openadapt_flow.ir import (  # noqa: E402
-    ActionKind, Anchor, Resolution, Step, Workflow,
+    ActionKind,
+    Anchor,
+    Resolution,
+    Step,
+    Workflow,
 )
 from openadapt_flow.runtime.replayer import Replayer  # noqa: E402
 
@@ -321,8 +343,7 @@ class _Backend:
     def screenshot(self):
         return _png(_blank())
 
-    def click(self, x, y, *, double=False):
-        ...
+    def click(self, x, y, *, double=False): ...
 
     def wait_settled(self, **kw):
         return self.screenshot()
@@ -333,16 +354,18 @@ def _bundle_with_crop(tmp_path, crop_arr) -> tuple:
     (tmp_path / "templates" / "id.png").write_bytes(_png(crop_arr))
     (tmp_path / "templates" / "t.png").write_bytes(_png(_blank()))
     step = Step(
-        id="s1", intent="click row", action=ActionKind.CLICK,
+        id="s1",
+        intent="click row",
+        action=ActionKind.CLICK,
         anchor=Anchor(
-            template="templates/t.png", region=(0, 0, _W, _H),
+            template="templates/t.png",
+            region=(0, 0, _W, _H),
             click_point=(0, 0),
             identifier_crop="templates/id.png",
             identifier_region=(0, 0, _W, _H),
         ),
     )
-    res = Resolution(rung="template", point=(0, 0), confidence=0.9,
-                     elapsed_ms=1.0)
+    res = Resolution(rung="template", point=(0, 0), confidence=0.9, elapsed_ms=1.0)
     return step, res
 
 
@@ -352,8 +375,9 @@ def test_replayer_pixel_tier_matching_crop_abstains_verify_gated(tmp_path) -> No
     # abstains -> unreadable HALT. The pixel tier can never grant a pass.
     step, res = _bundle_with_crop(tmp_path, _blank())
     rp = Replayer(_Backend(), vision=object(), poll_interval_s=0.01)
-    check = rp._verify_identity(step, res, _png(_blank()), {},
-                                Workflow(name="wf"), tmp_path)
+    check = rp._verify_identity(
+        step, res, _png(_blank()), {}, Workflow(name="wf"), tmp_path
+    )
     assert check.status != "verified"
     assert check.status == "unreadable"
 
@@ -363,26 +387,35 @@ def test_replayer_pixel_tier_mismatch_halts_wrong_identifier(tmp_path) -> None:
     # different identifier on a matching render -> pixel MISMATCH -> halt.
     step, res = _bundle_with_crop(tmp_path, _with_bar(5))
     rp = Replayer(_Backend(), vision=object(), poll_interval_s=0.01)
-    check = rp._verify_identity(step, res, _png(_blank()), {},
-                                Workflow(name="wf"), tmp_path)
+    check = rp._verify_identity(
+        step, res, _png(_blank()), {}, Workflow(name="wf"), tmp_path
+    )
     assert check.status == "mismatch" and check.mode == "pixel"
 
 
 def test_replayer_vlm_tier_off_by_default_no_crop_falls_through(tmp_path) -> None:
     # No identifier_crop and no VLM: pixel+vlm abstain; with no context_text
     # the OCR tier also abstains -> unreadable HALT (default install, no model).
-    step = Step(id="s1", intent="click", action=ActionKind.CLICK,
-                anchor=Anchor(template="templates/t.png", region=(0, 0, _W, _H),
-                              click_point=(0, 0),
-                              structured_identity="MG44O8 X"))
+    step = Step(
+        id="s1",
+        intent="click",
+        action=ActionKind.CLICK,
+        anchor=Anchor(
+            template="templates/t.png",
+            region=(0, 0, _W, _H),
+            click_point=(0, 0),
+            structured_identity="MG44O8 X",
+        ),
+    )
     res = Resolution(rung="template", point=(0, 0), confidence=0.9, elapsed_ms=1.0)
 
     class _NoStruct(_Backend):
         pass  # no structured_text_at
 
     rp = Replayer(_NoStruct(), vision=object(), poll_interval_s=0.01)
-    check = rp._verify_identity(step, res, _png(_blank()), {},
-                                Workflow(name="wf"), tmp_path)
+    check = rp._verify_identity(
+        step, res, _png(_blank()), {}, Workflow(name="wf"), tmp_path
+    )
     assert check.status == "unreadable"  # nothing verified -> HALT, no model
 
 
@@ -390,10 +423,12 @@ def test_replayer_vlm_tier_off_by_default_no_crop_falls_through(tmp_path) -> Non
 # Integrated harness (browser) -- guarded
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.timeout(900)  # heavy browser+OCR integration; ~350s local, slower CI
 def test_harness_zero_false_accept_all_configs(tmp_path) -> None:
     pytest.importorskip("playwright")
     from openadapt_flow.validation import identity_ladder as H
+
     summary = H.run(tmp_path)
     # THE safety invariant, measured on the REAL Replayer._verify_identity
     # production tier stack (the OCR tier the replayer always appends is in the

@@ -189,10 +189,7 @@ class CheckpointStore:
         return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in step_id)
 
     def _checkpoint_path(self, checkpoint: RunCheckpoint) -> Path:
-        name = (
-            f"step_{checkpoint.step_index:04d}_"
-            f"{self._safe(checkpoint.step_id)}.json"
-        )
+        name = f"step_{checkpoint.step_index:04d}_{self._safe(checkpoint.step_id)}.json"
         return self.checkpoints_dir / name
 
     def write_checkpoint(self, checkpoint: RunCheckpoint) -> Path:

@@ -22,6 +22,7 @@ from benchmark.comparison_artifact import generate as gen
 # Extraction fidelity — the loaded figures equal the source files
 # ---------------------------------------------------------------------------
 
+
 def _raw(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -67,6 +68,7 @@ def test_speedup_is_derived_from_real_p50s() -> None:
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+
 def test_zero_cost_formats_as_dollar_zero() -> None:
     assert gen.fmt_usd(0.0) == "$0"
     assert gen.fmt_usd_short(0.0) == "$0"
@@ -81,6 +83,7 @@ def test_nice_axis_ceils_above_max() -> None:
 # ---------------------------------------------------------------------------
 # End-to-end build — emitted HTML carries the REAL figures
 # ---------------------------------------------------------------------------
+
 
 def test_build_emits_html_and_json_with_real_figures(tmp_path) -> None:
     payload = gen.build(tmp_path)
@@ -100,22 +103,22 @@ def test_build_emits_html_and_json_with_real_figures(tmp_path) -> None:
 
     # The real OpenEMR headline figures must appear verbatim in the page.
     for needle in (
-        f"{oe.compiled.success_count}/{oe.compiled.n}",   # 20/20
-        f"{oe.agent.success_count}/{oe.agent.n}",         # 10/10
-        gen.fmt_s(oe.compiled.p50_s),                     # 39.2 s
-        gen.fmt_s(oe.agent.p50_s),                        # 70.4 s
-        gen.fmt_s(oe.agent.p95_s),                        # 82.6 s
-        gen.fmt_usd(oe.agent.cost_per_run),               # $0.5522
-        gen.fmt_usd(oe.agent.cost_total, 2),              # $5.52
+        f"{oe.compiled.success_count}/{oe.compiled.n}",  # 20/20
+        f"{oe.agent.success_count}/{oe.agent.n}",  # 10/10
+        gen.fmt_s(oe.compiled.p50_s),  # 39.2 s
+        gen.fmt_s(oe.agent.p50_s),  # 70.4 s
+        gen.fmt_s(oe.agent.p95_s),  # 82.6 s
+        gen.fmt_usd(oe.agent.cost_per_run),  # $0.5522
+        gen.fmt_usd(oe.agent.cost_total, 2),  # $5.52
     ):
         assert needle in html, f"missing OpenEMR figure in HTML: {needle!r}"
 
     # The MockMed anchor figures too.
     for needle in (
-        f"{mm.compiled.success_count}/{mm.compiled.n}",   # 100/100
-        gen.fmt_s(mm.compiled.p50_s),                     # 4.9 s
-        gen.fmt_s(mm.agent.p50_s),                        # 37.5 s
-        gen.fmt_usd(mm.agent.cost_per_run),               # $0.2716
+        f"{mm.compiled.success_count}/{mm.compiled.n}",  # 100/100
+        gen.fmt_s(mm.compiled.p50_s),  # 4.9 s
+        gen.fmt_s(mm.agent.p50_s),  # 37.5 s
+        gen.fmt_usd(mm.agent.cost_per_run),  # $0.2716
     ):
         assert needle in html, f"missing MockMed figure in HTML: {needle!r}"
 
@@ -129,7 +132,7 @@ def test_build_emits_html_and_json_with_real_figures(tmp_path) -> None:
     )
 
     # Self-contained: no external asset references.
-    for banned in ("http://", "https://cdn", "<script", "src=\"http"):
+    for banned in ("http://", "https://cdn", "<script", 'src="http'):
         assert banned not in html, f"page is not self-contained: {banned!r}"
 
     # The JSON payload's figures round-trip the source files.

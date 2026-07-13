@@ -101,14 +101,11 @@ def _compiled_run(
         "identity_applicable_steps": report.identity_applicable_steps,
         "identity_armed_steps": report.identity_armed_steps,
         "identity_unarmed": [
-            {"step_id": u.step_id, "reason": u.reason}
-            for u in report.identity_unarmed
+            {"step_id": u.step_id, "reason": u.reason} for u in report.identity_unarmed
         ],
         "actions": len(report.results),
         "first_failure": (
-            {"step": failed[0].step_id, "error": failed[0].error}
-            if failed
-            else None
+            {"step": failed[0].step_id, "error": failed[0].error} if failed else None
         ),
         "api_calls": 0,
         "input_tokens": 0,
@@ -191,9 +188,7 @@ def _agent_run(
                 "api_calls": ledger.api_calls,
                 "input_tokens": ledger.input_tokens,
                 "output_tokens": ledger.output_tokens,
-                "cache_creation_input_tokens": (
-                    ledger.cache_creation_input_tokens
-                ),
+                "cache_creation_input_tokens": (ledger.cache_creation_input_tokens),
                 "cache_read_input_tokens": ledger.cache_read_input_tokens,
                 "cost_usd": ledger.cost_usd,
                 "stopped": "error",
@@ -247,9 +242,7 @@ def _arm_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "wall_s_p50": _percentile(walls, 50.0),
         "wall_s_p95": _percentile(walls, 95.0),
         "wall_s_mean": statistics.fmean(walls) if walls else 0.0,
-        "actions_mean": (
-            statistics.fmean(r["actions"] for r in rows) if rows else 0.0
-        ),
+        "actions_mean": (statistics.fmean(r["actions"] for r in rows) if rows else 0.0),
         "input_tokens_total": sum(r["input_tokens"] for r in rows),
         "output_tokens_total": sum(r["output_tokens"] for r in rows),
         "cache_creation_input_tokens_total": sum(
@@ -344,8 +337,7 @@ def aggregate_results(
             "input": agent_baseline.INPUT_USD_PER_MTOK,
             "output": agent_baseline.OUTPUT_USD_PER_MTOK,
             "note": (
-                "list price; an introductory $2/$10 rate applies through "
-                "2026-08-31"
+                "list price; an introductory $2/$10 rate applies through 2026-08-31"
             ),
         },
         "platform": platform.platform(),
@@ -384,9 +376,7 @@ def render_chart(results: dict[str, Any], out_png: Path) -> Path:
     compiled = results["arms"]["compiled"]
     agent = results["arms"]["agent"]
 
-    fig, (ax_lat, ax_cost) = plt.subplots(
-        1, 2, figsize=(9.6, 4.2), facecolor=surface
-    )
+    fig, (ax_lat, ax_cost) = plt.subplots(1, 2, figsize=(9.6, 4.2), facecolor=surface)
     fig.suptitle(
         "Compiled replay vs. computer-use agent — same task, same check",
         color=ink,
@@ -497,23 +487,23 @@ Triage, enter a note, save.
 
 | | compiled replay | computer-use agent |
 |---|---|---|
-| runs | {c['n']} | {a['n']} |
-| success rate | {c['success_rate']:.0%} ({c['success_count']}/{c['n']}) \
-| {a['success_rate']:.0%} ({a['success_count']}/{a['n']}) |
-| latency p50 | {c['wall_s_p50']:.1f} s | {a['wall_s_p50']:.1f} s |
-| latency p95 | {c['wall_s_p95']:.1f} s | {a['wall_s_p95']:.1f} s |
-| model cost / run | $0 | ${a['cost_usd_per_run']:.4f} |
-| total model cost | $0 | ${a['cost_usd_total']:.2f} |
-| tokens (uncached in / out, total) | 0 / 0 | {a['input_tokens_total']:,} / \
-{a['output_tokens_total']:,} |
+| runs | {c["n"]} | {a["n"]} |
+| success rate | {c["success_rate"]:.0%} ({c["success_count"]}/{c["n"]}) \
+| {a["success_rate"]:.0%} ({a["success_count"]}/{a["n"]}) |
+| latency p50 | {c["wall_s_p50"]:.1f} s | {a["wall_s_p50"]:.1f} s |
+| latency p95 | {c["wall_s_p95"]:.1f} s | {a["wall_s_p95"]:.1f} s |
+| model cost / run | $0 | ${a["cost_usd_per_run"]:.4f} |
+| total model cost | $0 | ${a["cost_usd_total"]:.2f} |
+| tokens (uncached in / out, total) | 0 / 0 | {a["input_tokens_total"]:,} / \
+{a["output_tokens_total"]:,} |
 
 ## Drift (`?drift=theme`, one run per arm)
 
 MockMed re-rendered with a dark palette, which invalidates every recorded
 template crop:
 
-- compiled (healing on): {_drift_line(drift['compiled'])}
-- agent (as-is): {_drift_line(drift['agent'])}
+- compiled (healing on): {_drift_line(drift["compiled"])}
+- agent (as-is): {_drift_line(drift["agent"])}
 
 ## Methodology
 
@@ -527,9 +517,9 @@ template crop:
 - **Same interface.** Both arms drive the same `PlaywrightBackend`,
   vision-only: PNG screenshots in, pixel-coordinate clicks / typed text /
   key presses out. Neither arm uses DOM selectors at run time.
-- **Agent arm.** Model `{results['model']}` with the
-  `{results['computer_tool']}` computer-use tool (beta header
-  `{results['beta_header']}`), a 25-action budget, and history bounded to
+- **Agent arm.** Model `{results["model"]}` with the
+  `{results["computer_tool"]}` computer-use tool (beta header
+  `{results["beta_header"]}`), a 25-action budget, and history bounded to
   the last 3 screenshots. The task prompt states user intent (the numbered
   task above), not steps or coordinates. Every executed action returns a
   settled screenshot, using the same settle logic the replayer uses.
@@ -540,9 +530,9 @@ template crop:
 - **Latency** is wall-clock around the replay / agent loop only (browser
   and server startup excluded for both arms).
 - **Cost** is computed from API `usage` token counts at list pricing
-  (${results['pricing_usd_per_mtok']['input']:.2f} /
-  ${results['pricing_usd_per_mtok']['output']:.2f} per MTok input/output
-  for {results['model']}). An introductory $2/$10 rate applies through
+  (${results["pricing_usd_per_mtok"]["input"]:.2f} /
+  ${results["pricing_usd_per_mtok"]["output"]:.2f} per MTok input/output
+  for {results["model"]}). An introductory $2/$10 rate applies through
   2026-08-31, so billed cost today is about a third lower than reported.
   Compiled replay makes zero model calls.
 {identity_block}
@@ -552,30 +542,30 @@ template crop:
 - **MockMed is a simple app.** Five screens, no scrolling, no popups, high
   contrast, big labels. It is close to a best case for both arms; harder
   apps would slow and likely degrade both, plausibly at different rates.
-- **The agent arm has a smaller N** ({a['n']} vs {c['n']}) because agent
+- **The agent arm has a smaller N** ({a["n"]} vs {c["n"]}) because agent
   runs cost real money and minutes. Its success rate carries wider error
   bars.
-- **Model version pinned.** Results describe `{results['model']}` with the
-  `{results['computer_tool']}` tool on {date}; newer models will differ.
+- **Model version pinned.** Results describe `{results["model"]}` with the
+  `{results["computer_tool"]}` tool on {date}; newer models will differ.
 - **The compiled arm needs a demonstration first.** The one-time
   record + compile step (about a minute of human demonstration) is the
   price of the fast replays; the agent needs only the prompt.
 - **Drift is n=1 per arm** — an existence result, not a rate.
 - **Latency includes deliberate settle waits** (screenshot stability
   polling) in both arms; a tuned production loop could shave both.
-- Single machine ({results['platform']}), local server, no network
+- Single machine ({results["platform"]}), local server, no network
   variance in the compiled arm; agent latency includes real API round
   trips.
 
 ## Reproduce
 
 ```
-openadapt-flow benchmark --n-compiled {c['n']} --n-agent {a['n']} --out benchmark/
+openadapt-flow benchmark --n-compiled {c["n"]} --n-agent {a["n"]} --out benchmark/
 ```
 
 Requires `ANTHROPIC_API_KEY` (or `~/.anthropic/api_key`). The agent arm
-costs real money (about ${a['cost_usd_total']:.2f} at list price for
-{a['n']} runs when this was generated).
+costs real money (about ${a["cost_usd_total"]:.2f} at list price for
+{a["n"]} runs when this was generated).
 """
 
 
@@ -587,9 +577,7 @@ def write_outputs(results: dict[str, Any], out_dir: Path) -> None:
         out_dir: Output directory (created if needed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n"
-    )
+    (out_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     from openadapt_flow.benchmark.chart_fonts import safe_render
 
     safe_render(render_chart, results, out_dir / "latency_cost.png")
@@ -655,9 +643,7 @@ def run_benchmark(
 
             agent_rows: list[dict[str, Any]] = []
             for i in range(n_agent):
-                row = _agent_run(
-                    url, note_text, client=agent_client, headed=headed
-                )
+                row = _agent_run(url, note_text, client=agent_client, headed=headed)
                 row["i"] = i
                 agent_rows.append(row)
                 log(

@@ -98,13 +98,20 @@ def note_for_slot(arm: str, slot: int) -> str:
     tag = _ARM_TAGS.get(arm, arm[:1].upper())
     return f"{_NOTE_POOL[slot % len(_NOTE_POOL)]} [{tag}{slot:02d}]"
 
+
 #: The perturbation drift modes from the validation suite (PR #12/#13),
 #: plus ``sort`` (a changed default sort order — every referral present,
 #: the recorded target no longer first) and ``typelabel`` (Triage segment
 #: relabeled AND reordered), both flag-gated in the MockMed app.
 PERTURBATIONS: tuple[str, ...] = (
-    "lookalike", "missing", "grow", "sort",
-    "theme", "rename", "move", "typelabel",
+    "lookalike",
+    "missing",
+    "grow",
+    "sort",
+    "theme",
+    "rename",
+    "move",
+    "typelabel",
 )
 
 # -- the DOM-selector script (the steelman) ------------------------------------
@@ -174,8 +181,7 @@ def dom_script(
         # cannot tell. Measured, not assumed.
         open_step = (
             "open first referral",
-            lambda: page.get_by_role(
-                "button", name="Open").first.click(),
+            lambda: page.get_by_role("button", name="Open").first.click(),
         )
     else:
         # Identity reading: scope the Open button to the row whose
@@ -186,46 +192,53 @@ def dom_script(
         # the compiled arm's recorded identity band carries.
         open_step = (
             "open referral by patient name",
-            lambda: page.get_by_role("row", name=target_patient)
-            .get_by_role("button", name="Open")
-            .click(),
+            lambda: (
+                page.get_by_role("row", name=target_patient)
+                .get_by_role("button", name="Open")
+                .click()
+            ),
         )
     return [
         # Form fields by their explicit <label for=...> — Playwright's
         # first recommendation for inputs. fill() auto-waits for the
         # field to be visible, enabled, and editable.
-        ("fill username", lambda: page.get_by_label(
-            "Username").fill(USERNAME)),
-        ("fill password", lambda: page.get_by_label(
-            "Password").fill(PASSWORD)),
+        ("fill username", lambda: page.get_by_label("Username").fill(USERNAME)),
+        ("fill password", lambda: page.get_by_label("Password").fill(PASSWORD)),
         # Buttons by role + accessible name: the user-facing contract.
-        ("click Sign In", lambda: page.get_by_role(
-            "button", name="Sign In").click()),
+        ("click Sign In", lambda: page.get_by_role("button", name="Sign In").click()),
         # The arm-defining step: positional or name-filtered (see above).
         open_step,
-        ("click New Encounter", lambda: page.get_by_role(
-            "button", name="New Encounter").click()),
+        (
+            "click New Encounter",
+            lambda: page.get_by_role("button", name="New Encounter").click(),
+        ),
         # Accessible-name matching is case-insensitive substring by
         # default, so this survives a "Triage" -> "Triage Assessment"
         # relabel (typelabel drift) and any reordering of the segment
         # buttons — role queries don't care about position.
-        ("select Triage type", lambda: page.get_by_role(
-            "button", name="Triage").click()),
+        (
+            "select Triage type",
+            lambda: page.get_by_role("button", name="Triage").click(),
+        ),
         # The note textarea has <label for="note">Note</label>.
         ("fill note", lambda: page.get_by_label("Note").fill(note_text)),
         # Exact-enough name; a "Save Encounter" -> "Submit Encounter"
         # relabel (rename drift) breaks this selector — that is a real
         # maintenance cost of name-anchored selectors and is counted as
         # such, not hidden.
-        ("click Save Encounter", lambda: page.get_by_role(
-            "button", name="Save Encounter").click()),
+        (
+            "click Save Encounter",
+            lambda: page.get_by_role("button", name="Save Encounter").click(),
+        ),
         # Outcome assertion: wait for the saved banner. Without this the
         # script would silently "pass" when the save click bounces off a
         # survey modal (modal-once) or an inline validation error
         # (reqfield). get_by_text is fine here: we are asserting rendered
         # content, not targeting a control.
-        ("confirm saved banner", lambda: page.get_by_text(
-            "Encounter saved").wait_for(state="visible")),
+        (
+            "confirm saved banner",
+            lambda: page.get_by_text("Encounter saved").wait_for(state="visible"),
+        ),
     ]
 
 
@@ -312,7 +325,7 @@ def dom_run(
             save_final_to.parent.mkdir(parents=True, exist_ok=True)
             save_final_to.write_bytes(final_png)
         final_url = backend.url or ""
-        final_hash = final_url[final_url.find("#"):] if "#" in final_url else ""
+        final_hash = final_url[final_url.find("#") :] if "#" in final_url else ""
     finally:
         close()
     row = {
@@ -424,10 +437,7 @@ def needs_maintenance(row: dict[str, Any]) -> bool:
         str(row.get("arm", "")).startswith("dom")
         and row.get("condition", "clean") != "clean"
         and classify_outcome(row) == "halt-or-error"
-        and (
-            row.get("failed_step") is not None
-            or row.get("error") is not None
-        )
+        and (row.get("failed_step") is not None or row.get("error") is not None)
     )
 
 
@@ -458,12 +468,8 @@ def dom_arm_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     from openadapt_flow.benchmark.run_benchmark import _arm_aggregate
 
     agg = _arm_aggregate(rows)
-    agg["clean"] = _split_rate(
-        [r for r in rows if r.get("condition") == "clean"]
-    )
-    agg["drift"] = _split_rate(
-        [r for r in rows if r.get("condition") != "clean"]
-    )
+    agg["clean"] = _split_rate([r for r in rows if r.get("condition") == "clean"])
+    agg["drift"] = _split_rate([r for r in rows if r.get("condition") != "clean"])
     agg["wrong_action_count"] = sum(
         1 for r in rows if classify_outcome(r) == "wrong-action"
     )
@@ -536,21 +542,14 @@ def aggregate_dom_results(
             ),
         },
         "perturbations": list(perturbations),
-        "arms": {
-            arm: dom_arm_aggregate(rows)
-            for arm, rows in schedule_runs.items()
-        },
+        "arms": {arm: dom_arm_aggregate(rows) for arm, rows in schedule_runs.items()},
         "perturbation_matrix": matrix,
         "totals": {
             arm: {
                 "wrong_action_count": sum(
-                    1
-                    for r in rows
-                    if classify_outcome(r) == "wrong-action"
+                    1 for r in rows if classify_outcome(r) == "wrong-action"
                 ),
-                "maintenance_count": sum(
-                    1 for r in rows if needs_maintenance(r)
-                ),
+                "maintenance_count": sum(1 for r in rows if needs_maintenance(r)),
                 "verification_dispute_count": sum(
                     1 for r in rows if verification_dispute(r)
                 ),
@@ -782,11 +781,7 @@ def _condition_outcome(
         outcome = classify_outcome(r)
         if outcome == "success":
             heals = r.get("heal_count")
-            extra = (
-                f", {heals} heal{'s' if heals != 1 else ''}"
-                if heals
-                else ""
-            )
+            extra = f", {heals} heal{'s' if heals != 1 else ''}" if heals else ""
             parts.append(f"success ({r['wall_s']:.1f}s{extra})")
         elif outcome == "wrong-action":
             parts.append(
@@ -799,13 +794,9 @@ def _condition_outcome(
                 f"COMPLETED; see the measurement-validity note"
             )
         else:
-            where = r.get("failed_step") or (
-                (r.get("first_failure") or {}).get("step")
-            )
+            where = r.get("failed_step") or ((r.get("first_failure") or {}).get("step"))
             maint = " — needs human edit" if needs_maintenance(r) else ""
-            parts.append(
-                f"halt/error at `{where}` ({r['wall_s']:.1f}s){maint}"
-            )
+            parts.append(f"halt/error at `{where}` ({r['wall_s']:.1f}s){maint}")
     unique = sorted(set(parts))
     if len(unique) == 1 and len(parts) > 1:
         return f"{parts[0]} x{len(parts)}"
@@ -875,9 +866,7 @@ def _dom_verdict(results: dict[str, Any]) -> str:
 
     def absorbed(arm: str) -> list[str]:
         return sorted(
-            cond
-            for cond, o in perturbation_outcomes(arm).items()
-            if o == {"success"}
+            cond for cond, o in perturbation_outcomes(arm).items() if o == {"success"}
         )
 
     def broke_loud(arm: str) -> list[str]:
@@ -904,13 +893,11 @@ def _dom_verdict(results: dict[str, Any]) -> str:
 
     wrong = {a: totals[a]["wrong_action_count"] for a in arms_present}
     schedule_line = "; ".join(
-        f"{a} {aggs[a]['success_count']}/{aggs[a]['n']}"
-        for a in arms_present
+        f"{a} {aggs[a]['success_count']}/{aggs[a]['n']}" for a in arms_present
     )
     c_p50 = clean_p50("compiled")
     dom_p50s = [
-        p for a in arms_present if a != "compiled"
-        for p in [clean_p50(a)] if p > 0
+        p for a in arms_present if a != "compiled" for p in [clean_p50(a)] if p > 0
     ]
     ratio = (c_p50 / max(dom_p50s)) if (c_p50 and dom_p50s) else 0.0
     speed = (
@@ -1015,7 +1002,7 @@ def _dom_verdict(results: dict[str, Any]) -> str:
     )
     parts.append(
         f"(c) **What demonstration buys: the identity came for free.** "
-        f"Nobody had to DECIDE that \"first referral\" really means "
+        f'Nobody had to DECIDE that "first referral" really means '
         f"Jane Sample — the demonstration captured the target's "
         f"identity as a matter of course, while the DOM arms needed "
         f"that judgment hand-written into a selector (and the "
@@ -1057,9 +1044,7 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
     buckets = {a: _slot_group_outcomes(results, a) for a in arms}
     schedule_table = "".join(
         f"| `{cond}` | "
-        + " | ".join(
-            _fmt_bucket(buckets[a].get(cond, empty_bucket)) for a in arms
-        )
+        + " | ".join(_fmt_bucket(buckets[a].get(cond, empty_bucket)) for a in arms)
         + " |\n"
         for cond in sched_conditions
         if any(cond in buckets[a] for a in arms)
@@ -1067,27 +1052,24 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
 
     perturbation_table = "".join(
         f"| `{cond}` | "
-        + " | ".join(
-            _condition_outcome(results, "perturbation", a, cond)
-            for a in arms
-        )
+        + " | ".join(_condition_outcome(results, "perturbation", a, cond) for a in arms)
         + " |\n"
         for cond in results["perturbations"]
     )
 
     def stat_row(label: str, fmt: Callable[[dict[str, Any]], str]) -> str:
-        return f"| {label} | " + " | ".join(
-            fmt(aggs[a]) for a in arms
-        ) + " |\n"
+        return f"| {label} | " + " | ".join(fmt(aggs[a]) for a in arms) + " |\n"
 
     headline_table = (
-        "| | " + " | ".join(_MD_ARM_LABELS[a] for a in arms) + " |\n"
-        + "|---" * (len(arms) + 1) + "|\n"
+        "| | "
+        + " | ".join(_MD_ARM_LABELS[a] for a in arms)
+        + " |\n"
+        + "|---" * (len(arms) + 1)
+        + "|\n"
         + stat_row("runs", lambda a: f"{a['n']}")
         + stat_row(
             "success rate",
-            lambda a: f"{a['success_rate']:.0%} "
-            f"({a['success_count']}/{a['n']})",
+            lambda a: f"{a['success_rate']:.0%} ({a['success_count']}/{a['n']})",
         )
         + stat_row(
             "success on clean slots",
@@ -1099,9 +1081,7 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
         )
         + stat_row("wall-clock p50", lambda a: f"{a['wall_s_p50']:.1f} s")
         + stat_row("wall-clock p95", lambda a: f"{a['wall_s_p95']:.1f} s")
-        + stat_row(
-            "wrong-action events", lambda a: f"{a['wrong_action_count']}"
-        )
+        + stat_row("wrong-action events", lambda a: f"{a['wrong_action_count']}")
         + stat_row(
             "maintenance events (needs human edit)",
             lambda a: f"{a['maintenance_count']}",
@@ -1122,11 +1102,7 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
             f"with the save evidence on screen but "
             f"right_patient={r.get('right_patient')}, "
             f"wrong_type_row={r.get('wrong_type_row')}"
-            + (
-                f", final state `{r.get('final_hash')}`"
-                if r.get("final_hash")
-                else ""
-            )
+            + (f", final state `{r.get('final_hash')}`" if r.get("final_hash") else "")
             for arm, r in wrong_rows
         )
         if wrong_rows
@@ -1157,11 +1133,7 @@ def render_dom_markdown(results: dict[str, Any]) -> str:
             + "\n".join(
                 f"- {d['arm']} on `{d['condition']}` "
                 f"({d['phase']} slot {d['slot']}"
-                + (
-                    f", final state `{d['final_hash']}`"
-                    if d.get("final_hash")
-                    else ""
-                )
+                + (f", final state `{d['final_hash']}`" if d.get("final_hash") else "")
                 + f", right_patient={d['right_patient']}): "
                 f"`finals/{d['phase']}_{d['arm']}_"
                 + (
@@ -1215,8 +1187,8 @@ documented in `openadapt_flow/benchmark/dom_arm.py`.
 
 ## Head-to-head on the frozen 20-slot schedule
 
-The hybrid benchmark's exact schedule: {len(sched['conditions'])} slots,
-{n_drift} drifted ({sched['drift_fraction']:.0%} — two each of `notice`,
+The hybrid benchmark's exact schedule: {len(sched["conditions"])} slots,
+{n_drift} drifted ({sched["drift_fraction"]:.0%} — two each of `notice`,
 `reqfield`, `modal-once`), identical condition per slot index for every
 arm.
 
@@ -1229,8 +1201,8 @@ number is "zero cost"; they are different currencies.
 
 Per-condition outcomes on the schedule:
 
-| condition | {' | '.join(_MD_ARM_LABELS[a] for a in arms)} |
-|---{'|---' * len(arms)}|
+| condition | {" | ".join(_MD_ARM_LABELS[a] for a in arms)} |
+|---{"|---" * len(arms)}|
 {schedule_table}
 ## Head-to-head on the perturbation drift modes
 
@@ -1238,16 +1210,18 @@ The validation suite's drift matrix (PR #12/#13) plus `sort` and
 `typelabel`; every mode is flag-gated in the MockMed app and deterministic.
 One fresh browser per run.
 
-| drift mode | {' | '.join(_MD_ARM_LABELS[a] for a in arms)} |
-|---{'|---' * len(arms)}|
+| drift mode | {" | ".join(_MD_ARM_LABELS[a] for a in arms)} |
+|---{"|---" * len(arms)}|
 {perturbation_table}
 ## Wrong-action events, all arms
 
 {wrong_block}
 
-Totals: {', '.join(
-    f"{_MD_ARM_LABELS[a]} {totals[a]['wrong_action_count']}" for a in arms
-)} (schedule + perturbation runs).
+Totals: {
+        ", ".join(
+            f"{_MD_ARM_LABELS[a]} {totals[a]['wrong_action_count']}" for a in arms
+        )
+    } (schedule + perturbation runs).
 
 ## Measurement validity — where the judge itself is the weak link
 
@@ -1258,7 +1232,7 @@ Totals: {', '.join(
 A DOM script that drift breaks **loudly** (selector timeout, failed
 outcome assertion) stays broken until a human edits the script — every
 such run is counted above as a maintenance event (DOM total:
-{totals['dom']['maintenance_count']}). A DOM script that drift breaks
+{totals["dom"]["maintenance_count"]}). A DOM script that drift breaks
 **silently** (wrong-action rows) is worse: it needs the same human edit
 plus someone noticing the bad writes first, and every run until then
 mutates the wrong record.
@@ -1354,7 +1328,7 @@ Unmeasured variants, for completeness:
   the totals.
 - **n = 1-2 per perturbation cell.** The hooks are deterministic, so
   these are existence results by design, not rates.
-- Single machine ({results['platform']}); local server; no network.
+- Single machine ({results["platform"]}); local server; no network.
 
 ## Reproduce
 
@@ -1375,9 +1349,7 @@ def write_dom_outputs(results: dict[str, Any], out_dir: Path) -> None:
         out_dir: Output directory (created if needed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n"
-    )
+    (out_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     from openadapt_flow.benchmark.chart_fonts import safe_render
 
     safe_render(render_dom_chart, results, out_dir / "outcome_matrix.png")
@@ -1431,9 +1403,7 @@ def run_dom_benchmark(
             fh.write(json.dumps(row) + "\n")
 
     schedule_runs: dict[str, list[dict[str, Any]]] = {a: [] for a in ARMS}
-    perturbation_runs: dict[str, list[dict[str, Any]]] = {
-        a: [] for a in ARMS
-    }
+    perturbation_runs: dict[str, list[dict[str, Any]]] = {a: [] for a in ARMS}
 
     url, stop = serve(port=0)
     try:
@@ -1472,9 +1442,7 @@ def run_dom_benchmark(
                             target,
                             note,
                             target_patient=(
-                                TARGET_PATIENT
-                                if arm == "dom_named"
-                                else None
+                                TARGET_PATIENT if arm == "dom_named" else None
                             ),
                             save_final_to=final_png,
                             headed=headed,
@@ -1494,8 +1462,7 @@ def run_dom_benchmark(
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 row.update(
-                    {"slot": slot, "condition": condition, "note": note,
-                     "phase": phase}
+                    {"slot": slot, "condition": condition, "note": note, "phase": phase}
                 )
                 persist(row)
                 log(
@@ -1507,9 +1474,7 @@ def run_dom_benchmark(
 
             for slot, condition in enumerate(schedule):
                 for arm in ARMS:
-                    schedule_runs[arm].append(
-                        one_run(arm, condition, slot, "schedule")
-                    )
+                    schedule_runs[arm].append(one_run(arm, condition, slot, "schedule"))
 
             slot = len(schedule)
             for condition in perturbations:
@@ -1552,9 +1517,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=1,
         help="runs per perturbation condition per arm (default: 1)",
     )
-    parser.add_argument(
-        "--headed", action="store_true", help="run browsers headed"
-    )
+    parser.add_argument("--headed", action="store_true", help="run browsers headed")
     args = parser.parse_args(argv)
     run_dom_benchmark(
         args.out,

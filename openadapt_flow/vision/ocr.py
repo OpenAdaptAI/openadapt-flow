@@ -117,9 +117,7 @@ def upscale_png(screen_png: bytes, factor: int = 2) -> bytes:
     img = cv2.imdecode(np.frombuffer(screen_png, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return screen_png
-    up = cv2.resize(
-        img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC
-    )
+    up = cv2.resize(img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
     ok, buf = cv2.imencode(".png", up)
     return buf.tobytes() if ok else screen_png
 
@@ -189,14 +187,10 @@ def text_present(
             ).ratio()
             if ratio >= min_ratio:
                 return True
-        hay = "".join(
-            normalize_text(" ".join(line.text for line in lines)).split()
-        )
+        hay = "".join(normalize_text(" ".join(line.text for line in lines)).split())
         # autojunk=False: the default heuristic marks frequent characters
         # of a long OCR haystack as junk, silently dropping real matches.
-        matcher = difflib.SequenceMatcher(
-            None, squashed_target, hay, autojunk=False
-        )
+        matcher = difflib.SequenceMatcher(None, squashed_target, hay, autojunk=False)
         longest = max(
             (block.size for block in matcher.get_matching_blocks()),
             default=0,
@@ -235,15 +229,11 @@ def find_text(
         return None
     best: Optional[tuple[float, OcrLine]] = None
     for line in ocr(screen_png, region=region):
-        ratio = difflib.SequenceMatcher(
-            None, normalize_text(line.text), target
-        ).ratio()
+        ratio = difflib.SequenceMatcher(None, normalize_text(line.text), target).ratio()
         if best is None or ratio > best[0]:
             best = (ratio, line)
     if best is None or best[0] < min_ratio:
         return None
     ratio, line = best
     x, y, w, h = line.region
-    return Match(
-        point=(x + w // 2, y + h // 2), region=line.region, confidence=ratio
-    )
+    return Match(point=(x + w // 2, y + h // 2), region=line.region, confidence=ratio)

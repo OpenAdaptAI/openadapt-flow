@@ -28,9 +28,7 @@ def test_launch_without_record_video_writes_no_video(mockmed_url: str) -> None:
         close()
 
 
-def test_launch_with_record_video_writes_webm(
-    mockmed_url: str, tmp_path: Path
-) -> None:
+def test_launch_with_record_video_writes_webm(mockmed_url: str, tmp_path: Path) -> None:
     """Opt-in launch records a WebM that is flushed to disk on close()."""
     vid_dir = tmp_path / "video"
     vid_dir.mkdir()

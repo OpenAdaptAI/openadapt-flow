@@ -52,8 +52,10 @@ def test_fhir_confirms_real_write(fhir):
     assert before.reachable and before.records == []
     store.add_observation(patient=PATIENT, note=NOTE)
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match={"patient": REF},
-        expected_count=1, timeout_s=1.0,
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"patient": REF},
+        expected_count=1,
+        timeout_s=1.0,
     )
     assert v.verify(eff, before).verdict is Verdict.CONFIRMED
 
@@ -64,8 +66,11 @@ def test_fhir_field_equals_reads_back_note(fhir):
     before = v.capture_pre_state()
     store.add_observation(patient=PATIENT, note=NOTE)
     eff = Effect(
-        kind=EffectKind.FIELD_EQUALS, match={"patient": REF},
-        field="note", value=NOTE, timeout_s=1.0,
+        kind=EffectKind.FIELD_EQUALS,
+        match={"patient": REF},
+        field="note",
+        value=NOTE,
+        timeout_s=1.0,
     )
     assert v.verify(eff, before).verdict is Verdict.CONFIRMED
 
@@ -77,8 +82,11 @@ def test_fhir_refutes_partial_save(fhir):
     before = v.capture_pre_state()
     store.add_observation(patient=PATIENT, note=None)
     eff = Effect(
-        kind=EffectKind.FIELD_EQUALS, match={"patient": REF},
-        field="note", value=NOTE, timeout_s=1.0,
+        kind=EffectKind.FIELD_EQUALS,
+        match={"patient": REF},
+        field="note",
+        value=NOTE,
+        timeout_s=1.0,
     )
     verdict = v.verify(eff, before)
     assert verdict.verdict is Verdict.REFUTED
@@ -91,8 +99,10 @@ def test_fhir_refutes_duplicate(fhir):
     store.add_observation(patient=PATIENT, note=NOTE)
     store.add_observation(patient=PATIENT, note=NOTE)
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match={"patient": REF},
-        expected_count=1, timeout_s=1.0,
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"patient": REF},
+        expected_count=1,
+        timeout_s=1.0,
     )
     verdict = v.verify(eff, before)
     assert verdict.verdict is Verdict.REFUTED
@@ -105,8 +115,10 @@ def test_fhir_refutes_phantom_write(fhir):
     v = _verifier(base)
     before = v.capture_pre_state()
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match={"patient": REF},
-        expected_count=1, timeout_s=0.5,
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"patient": REF},
+        expected_count=1,
+        timeout_s=0.5,
     )
     assert v.verify(eff, before).verdict is Verdict.REFUTED
 
@@ -123,8 +135,10 @@ def test_fhir_refutes_collateral_loss(fhir):
     store.delete_where(patient=PATIENT, source="other")
     store.add_observation(patient=PATIENT, note=NOTE, source="replay")
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match={"patient": REF, "note": NOTE},
-        expected_count=1, timeout_s=1.0,
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"patient": REF, "note": NOTE},
+        expected_count=1,
+        timeout_s=1.0,
     )
     verdict = v.verify(eff, before)
     assert verdict.verdict is Verdict.REFUTED
@@ -137,14 +151,17 @@ def test_fhir_expired_token_is_indeterminate_not_absent(fhir):
     _base, store2, stop = _fhir_fake.serve(token="good-token")
     try:
         v = FhirEffectVerifier(
-            _base, resource_type="Observation",
+            _base,
+            resource_type="Observation",
             search_params={"patient": PATIENT},
-            access_token="WRONG", timeout_s=0.5,
+            access_token="WRONG",
+            timeout_s=0.5,
         )
         before = v.capture_pre_state()
         assert not before.reachable  # 401 -> unreadable
         eff = Effect(
-            kind=EffectKind.RECORD_WRITTEN, match={"patient": REF},
+            kind=EffectKind.RECORD_WRITTEN,
+            match={"patient": REF},
             timeout_s=0.3,
         )
         assert v.verify(eff, before).verdict is Verdict.INDETERMINATE
@@ -154,13 +171,14 @@ def test_fhir_expired_token_is_indeterminate_not_absent(fhir):
 
 def test_fhir_unreachable_is_indeterminate():
     v = FhirEffectVerifier(
-        "http://127.0.0.1:1", resource_type="Observation",
-        search_params={"patient": PATIENT}, timeout_s=0.2,
+        "http://127.0.0.1:1",
+        resource_type="Observation",
+        search_params={"patient": PATIENT},
+        timeout_s=0.2,
     )
     before = v.capture_pre_state()
     assert not before.reachable
-    eff = Effect(kind=EffectKind.RECORD_WRITTEN, match={"patient": REF},
-                 timeout_s=0.1)
+    eff = Effect(kind=EffectKind.RECORD_WRITTEN, match={"patient": REF}, timeout_s=0.1)
     assert v.verify(eff, before).verdict is Verdict.INDETERMINATE
 
 
@@ -180,8 +198,11 @@ def test_live_openemr_fhir_reachable():
     token = os.environ.get("OPENEMR_FHIR_TOKEN")
     patient = os.environ.get("OPENEMR_FHIR_PATIENT", "1")
     v = FhirEffectVerifier(
-        base, resource_type="Observation",
-        search_params={"patient": patient}, access_token=token, timeout_s=15.0,
+        base,
+        resource_type="Observation",
+        search_params={"patient": patient},
+        access_token=token,
+        timeout_s=15.0,
     )
     before = v.capture_pre_state()
     assert before.reachable, (

@@ -103,10 +103,7 @@ def _bundle(resources: list[dict]) -> dict:
         "type": "searchset",
         "total": len(resources),
         "link": [{"relation": "self", "url": "http://fake/Observation"}],
-        "entry": [
-            {"fullUrl": f"urn:uuid:{r['id']}", "resource": r}
-            for r in resources
-        ],
+        "entry": [{"fullUrl": f"urn:uuid:{r['id']}", "resource": r} for r in resources],
     }
 
 
@@ -164,9 +161,7 @@ def serve(
     store = FhirStore()
     httpd = ThreadingHTTPServer((host, 0), _make_handler(store, token))
     port = httpd.server_address[1]
-    thread = threading.Thread(
-        target=httpd.serve_forever, name="fake-fhir", daemon=True
-    )
+    thread = threading.Thread(target=httpd.serve_forever, name="fake-fhir", daemon=True)
     thread.start()
 
     def stop() -> None:

@@ -93,8 +93,12 @@ class TestScaleDriftSafeHalts:
         self, bundle, mockmed_url, _browser, run_dir, kwargs
     ) -> None:
         report, state = replay_cosmetic(
-            _browser, bundle.dir, mockmed_url, run_dir,
-            params=dict(PARAMS), **kwargs,
+            _browser,
+            bundle.dir,
+            mockmed_url,
+            run_dir,
+            params=dict(PARAMS),
+            **kwargs,
         )
         assert report.success is False, describe(report, state)
         assert state["banner"] is None, describe(report, state)  # no save
@@ -107,9 +111,9 @@ class TestScaleDriftSafeHalts:
         # point positionally, observed on macOS) or the ladder could not
         # resolve the unlabeled anchor at all. Both are safe -- nothing was
         # clicked past step_000 and nothing was saved.
-        assert (
-            failed.postconditions_ok is False or failed.resolution is None
-        ), describe(report, state)
+        assert failed.postconditions_ok is False or failed.resolution is None, describe(
+            report, state
+        )
 
 
 class TestFontFamilySubstitution:
@@ -128,8 +132,12 @@ class TestFontFamilySubstitution:
         self, bundle, mockmed_url, _browser, run_dir, family
     ) -> None:
         report, state = replay_cosmetic(
-            _browser, bundle.dir, mockmed_url, run_dir,
-            params=dict(PARAMS), font_family=family,
+            _browser,
+            bundle.dir,
+            mockmed_url,
+            run_dir,
+            params=dict(PARAMS),
+            font_family=family,
         )
         # Platform glyph availability varies, so pin the SAFE invariant, not
         # a specific pass/halt: a run either completes on the target patient
@@ -162,8 +170,12 @@ class TestNoWrongActionAcrossSweep:
         wrong_actions = []
         for i, kwargs in enumerate(sweep):
             report, state = replay_cosmetic(
-                _browser, bundle.dir, mockmed_url, run_dir / f"p{i}",
-                params=dict(PARAMS), **kwargs,
+                _browser,
+                bundle.dir,
+                mockmed_url,
+                run_dir / f"p{i}",
+                params=dict(PARAMS),
+                **kwargs,
             )
             if not _no_wrong_write(state) or (
                 report.success and state["hash"] != TARGET_HASH

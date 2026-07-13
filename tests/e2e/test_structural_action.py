@@ -82,8 +82,13 @@ def test_structural_on_never_wrong_writes_under_cosmetic_drift(
     ]
     for i, kwargs in enumerate(sweep):
         report, state = replay_cosmetic(
-            _browser, bundle.dir, mockmed_url, tmp_path / f"p{i}",
-            params=dict(PARAMS), use_structural=True, **kwargs,
+            _browser,
+            bundle.dir,
+            mockmed_url,
+            tmp_path / f"p{i}",
+            params=dict(PARAMS),
+            use_structural=True,
+            **kwargs,
         )
         wrong_write = state["banner"] is not None and state["hash"] != TARGET_HASH
         assert not wrong_write, describe(report, state)

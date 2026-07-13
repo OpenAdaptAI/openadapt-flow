@@ -138,8 +138,9 @@ def _dirs(tmp_path):
 
 
 def _record_written(**over):
-    kw = dict(kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
-              timeout_s=2.0)
+    kw = dict(
+        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1, timeout_s=2.0
+    )
     kw.update(over)
     return Effect(**kw)
 
@@ -154,9 +155,7 @@ def test_api_binding_actuates_and_confirms_skipping_gui(tmp_path):
         vision = _vision_that_confirms_saved()
         # The effect contract rides on the BINDING itself (self-contained) to
         # prove the API tier confirms even when the step declares no effects.
-        workflow = _api_save_workflow(
-            effects=[_record_written()], effects_on="binding"
-        )
+        workflow = _api_save_workflow(effects=[_record_written()], effects_on="binding")
         bundle, run_dir = _dirs(tmp_path)
         replayer = Replayer(
             backend,
@@ -415,7 +414,8 @@ def test_no_binding_bundle_replays_unchanged(tmp_path):
                 key="Enter",
                 expect=[
                     Postcondition(
-                        kind=PostconditionKind.TEXT_PRESENT, text="Saved",
+                        kind=PostconditionKind.TEXT_PRESENT,
+                        text="Saved",
                         timeout_s=0.2,
                     )
                 ],
@@ -443,8 +443,11 @@ def test_no_binding_bundle_replays_unchanged(tmp_path):
 
 
 def test_actuator_unavailable_on_connection_refused():
-    binding = ApiBinding(url_template="http://127.0.0.1:1/api/encounter",
-                         body_template={"patient_id": "p1"}, timeout_s=1.0)
+    binding = ApiBinding(
+        url_template="http://127.0.0.1:1/api/encounter",
+        body_template={"patient_id": "p1"},
+        timeout_s=1.0,
+    )
     res = ApiActuator().actuate(binding, {})
     assert res.status is ActuationStatus.UNAVAILABLE
     assert res.should_fall_through is True
@@ -453,8 +456,9 @@ def test_actuator_unavailable_on_connection_refused():
 def test_actuator_unavailable_on_missing_param():
     # A URL/body that references a param the run did not supply cannot be built
     # -> UNAVAILABLE (before-send, nothing written, safe to fall through).
-    binding = ApiBinding(url_template="/api/encounter",
-                         body_template={"note": "{missing}"})
+    binding = ApiBinding(
+        url_template="/api/encounter", body_template={"note": "{missing}"}
+    )
     res = ApiActuator("http://127.0.0.1:9").actuate(binding, {})
     assert res.status is ActuationStatus.UNAVAILABLE
     assert "missing" in res.reason
@@ -463,9 +467,11 @@ def test_actuator_unavailable_on_missing_param():
 def test_actuator_actuated_on_2xx():
     url, db, stop = _fault_server()
     try:
-        binding = ApiBinding(url_template="/api/encounter",
-                             body_template={"patient_id": "p1", "type": "Triage",
-                                            "note": "n"}, timeout_s=2.0)
+        binding = ApiBinding(
+            url_template="/api/encounter",
+            body_template={"patient_id": "p1", "type": "Triage", "note": "n"},
+            timeout_s=2.0,
+        )
         res = ApiActuator(url).actuate(binding, {})
         assert res.status is ActuationStatus.ACTUATED
         assert res.http_status == 200
@@ -477,8 +483,11 @@ def test_actuator_actuated_on_2xx():
 def test_actuator_halts_on_non_2xx():
     url, _db, stop = _fault_server()
     try:
-        binding = ApiBinding(url_template="/api/encounter?fault=session",
-                             body_template={"patient_id": "p1"}, timeout_s=2.0)
+        binding = ApiBinding(
+            url_template="/api/encounter?fault=session",
+            body_template={"patient_id": "p1"},
+            timeout_s=2.0,
+        )
         res = ApiActuator(url).actuate(binding, {})
         assert res.status is ActuationStatus.HALT
         assert res.http_status == 401

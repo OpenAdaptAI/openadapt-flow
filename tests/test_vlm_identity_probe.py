@@ -113,7 +113,9 @@ def test_pixel_diff_identical_is_zero():
 
 
 def test_pixel_diff_black_vs_white_is_one():
-    assert pixel_diff_fraction(_png((0, 0, 0)), _png((255, 255, 255))) == pytest.approx(1.0)
+    assert pixel_diff_fraction(_png((0, 0, 0)), _png((255, 255, 255))) == pytest.approx(
+        1.0
+    )
 
 
 def test_pixel_diff_partial_is_between():

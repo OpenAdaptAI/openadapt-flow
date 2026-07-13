@@ -56,7 +56,9 @@ def _type(step_id: str, field: str, value: str, *, risk: str = "reversible") -> 
     )
 
 
-def _key(step_id: str, key: str, *, intent: str | None = None, risk="reversible") -> Step:
+def _key(
+    step_id: str, key: str, *, intent: str | None = None, risk="reversible"
+) -> Step:
     return Step(
         id=step_id,
         intent=intent or f"press {key}",
@@ -179,9 +181,7 @@ def bundle(tmp_path):
 
 def _run(workflow, bundle, run_dir, *, vision=None, worklists=None, params=None):
     backend = FakeBackend()
-    report = Replayer(
-        backend, vision=vision or FakeVision(), poll_interval_s=0.01
-    ).run(
+    report = Replayer(backend, vision=vision or FakeVision(), poll_interval_s=0.01).run(
         workflow,
         bundle_dir=bundle,
         run_dir=run_dir,
@@ -273,8 +273,14 @@ def test_b_loop_program_replays_body_once_per_row(bundle, tmp_path):
         result.workflow,
         bundle,
         tmp_path / "run",
-        worklists={rel: [{"patient": "Q1"}, {"patient": "Q2"}, {"patient": "Q3"},
-                         {"patient": "Q4"}]},
+        worklists={
+            rel: [
+                {"patient": "Q1"},
+                {"patient": "Q2"},
+                {"patient": "Q3"},
+                {"patient": "Q4"},
+            ]
+        },
     )
     assert report.success is True
     assert backend.actions == [
@@ -311,9 +317,7 @@ def test_c_optional_dialog_induces_a_guarded_branch():
     result = induce_program(mockmed_optional_traces())
     assert result.certified is True
 
-    branches = [
-        s for s in result.program.states.values() if s.kind is StateKind.BRANCH
-    ]
+    branches = [s for s in result.program.states.values() if s.kind is StateKind.BRANCH]
     assert len(branches) == 1
     branch = branches[0]
     # Two arms: guarded (dialog present) + unconditional fall-through.
@@ -339,16 +343,19 @@ def test_c_branch_program_dismisses_when_present_skips_when_absent(bundle, tmp_p
         result.workflow, bundle, tmp_path / "present", vision=v_present
     )
     assert report.success is True
-    assert backend.actions == [("type", "Alice"), ("press", "S"),
-                               ("press", "Escape"), ("press", "Enter")]
+    assert backend.actions == [
+        ("type", "Alice"),
+        ("press", "S"),
+        ("press", "Escape"),
+        ("press", "Enter"),
+    ]
 
     # Popup ABSENT -> fall-through skips the dismiss.
     backend2, report2 = _run(
         result.workflow, bundle, tmp_path / "absent", vision=FakeVision()
     )
     assert report2.success is True
-    assert backend2.actions == [("type", "Alice"), ("press", "S"),
-                                ("press", "Enter")]
+    assert backend2.actions == [("type", "Alice"), ("press", "S"), ("press", "Enter")]
 
 
 def test_c_optional_non_dialog_step_becomes_a_guarded_skip(bundle, tmp_path):
@@ -484,8 +491,11 @@ def test_single_trace_induces_the_degenerate_linear_bootstrap():
     assert result.certified is True
     assert result.program is not None
     assert not result.param_specs  # nothing varies -> nothing is a param
-    assert all(d.kind in ("literal",) for d in result.column_decisions
-               if d.field in ("patient", "dose"))
+    assert all(
+        d.kind in ("literal",)
+        for d in result.column_decisions
+        if d.field in ("patient", "dose")
+    )
 
 
 def test_induction_makes_zero_model_calls_and_replays_at_zero_cost(bundle, tmp_path):

@@ -113,22 +113,58 @@ class Scenario:
 #: does flag (timeout false-abort, session safe-halt) plus the recommended fix.
 SCENARIOS: tuple[Scenario, ...] = (
     Scenario("ok", "single", False, False, "control: a clean accepted write"),
-    Scenario("partial", "single", False, False,
-             "backend persisted the row but dropped the note field"),
-    Scenario("optimistic", "single", False, False,
-             "UI painted success; the server then rejected the write"),
-    Scenario("duplicate", "double", False, False,
-             "double-submit: the write landed twice"),
-    Scenario("double", "double", False, False,
-             "double-delivered click: the write landed twice"),
-    Scenario("stale", "single", False, True,
-             "last-write-wins destroyed a concurrent actor's row"),
-    Scenario("timeout", "single", False, False,
-             "row committed, then the client aborted (screen false-abort)"),
-    Scenario("session", "single", False, False,
-             "session expired (401): nothing persisted (both halt safely)"),
-    Scenario("idempotent", "double", True, False,
-             "recommended fix: idempotency key collapses the double-submit"),
+    Scenario(
+        "partial",
+        "single",
+        False,
+        False,
+        "backend persisted the row but dropped the note field",
+    ),
+    Scenario(
+        "optimistic",
+        "single",
+        False,
+        False,
+        "UI painted success; the server then rejected the write",
+    ),
+    Scenario(
+        "duplicate", "double", False, False, "double-submit: the write landed twice"
+    ),
+    Scenario(
+        "double",
+        "double",
+        False,
+        False,
+        "double-delivered click: the write landed twice",
+    ),
+    Scenario(
+        "stale",
+        "single",
+        False,
+        True,
+        "last-write-wins destroyed a concurrent actor's row",
+    ),
+    Scenario(
+        "timeout",
+        "single",
+        False,
+        False,
+        "row committed, then the client aborted (screen false-abort)",
+    ),
+    Scenario(
+        "session",
+        "single",
+        False,
+        False,
+        "session expired (401): nothing persisted (both halt safely)",
+    ),
+    Scenario(
+        "idempotent",
+        "double",
+        True,
+        False,
+        "recommended fix: idempotency key collapses the double-submit",
+    ),
 )
 
 
@@ -328,9 +364,7 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     correct_rows = [r for r in rows if r["ground_truth_correct"]]
 
     def undetected(rows_: list[dict[str, Any]], key: str) -> float:
-        return (
-            sum(1 for r in rows_ if r[key]) / len(rows_) if rows_ else 0.0
-        )
+        return sum(1 for r in rows_ if r[key]) / len(rows_) if rows_ else 0.0
 
     # Per-scenario summary (verdicts are deterministic per class; N proves
     # reproducibility — flag any within-scenario disagreement honestly).
@@ -458,15 +492,19 @@ def render_markdown(results: dict[str, Any]) -> str:
     body = ""
     for name in results["scenarios"]:
         ps = m["per_scenario"][name]
-        gt = "correct" if ps["ground_truth_correct"] is True else (
-            f"WRONG ({ps['ground_truth_fault']})"
+        gt = (
+            "correct"
+            if ps["ground_truth_correct"] is True
+            else (f"WRONG ({ps['ground_truth_fault']})")
         )
-        screen = "pass" if ps["screen_pass"] is True else (
-            "fail" if ps["screen_pass"] is False else str(ps["screen_pass"])
+        screen = (
+            "pass"
+            if ps["screen_pass"] is True
+            else ("fail" if ps["screen_pass"] is False else str(ps["screen_pass"]))
         )
         effect = ps["effect_verdict"]
-        silent = "YES — silent wrong-action" if ps["screen_silent_wrong_rate"] else (
-            "—"
+        silent = (
+            "YES — silent wrong-action" if ps["screen_silent_wrong_rate"] else ("—")
         )
         body += f"| `{name}` | {gt} | {screen} | {effect} | {silent} |\n"
 
@@ -477,7 +515,7 @@ instrument](../../docs/validation/SILENT_WRONG_ACTION_RATE.md) reduced to a
 number and pointed at our OWN runtime — the transactional fault-class matrix
 (`tests/test_effect_fault_matrix.py`) turned into a measured metric. Every
 figure below comes from actually running the MockMed transactional-fault
-suite (`mockmed.fault_server`) {results['n_per_scenario']} times per scenario
+suite (`mockmed.fault_server`) {results["n_per_scenario"]} times per scenario
 and reading the real system of record; nothing is hardcoded. No model calls,
 localhost only.
 
@@ -485,20 +523,20 @@ localhost only.
 
 ## Headline
 
-Over **{m['n_runs']} runs** across {len(results['scenarios'])} transactional
-fault scenarios ({m['n_wrong_effect']} of which produced a genuinely wrong /
+Over **{m["n_runs"]} runs** across {len(results["scenarios"])} transactional
+fault scenarios ({m["n_wrong_effect"]} of which produced a genuinely wrong /
 absent / duplicate business effect, judged independently against the system of
 record):
 
 | metric | screen-verify (weak oracle) | effect-verify (#63) |
 |---|---|---|
-| **silent-wrong-action rate** (wrong effect ∧ oracle says success, over all runs) | **{s['silent_wrong_action_rate']:.1%}** ({s['silent_wrong_count']}/{m['n_runs']}) | **{e['silent_wrong_action_rate']:.1%}** ({e['silent_wrong_count']}/{m['n_runs']}) |
-| **undetected-wrong rate** (oracle says success \\| a wrong effect occurred) | **{s['undetected_wrong_rate']:.1%}** | **{e['undetected_wrong_rate']:.1%}** |
-| **false-abort rate** (oracle halts \\| the effect was correct) | {s['false_abort_rate']:.1%} ({s['false_abort_count']} run(s)) | {e['false_abort_rate']:.1%} ({e['false_abort_count']} run(s)) |
+| **silent-wrong-action rate** (wrong effect ∧ oracle says success, over all runs) | **{s["silent_wrong_action_rate"]:.1%}** ({s["silent_wrong_count"]}/{m["n_runs"]}) | **{e["silent_wrong_action_rate"]:.1%}** ({e["silent_wrong_count"]}/{m["n_runs"]}) |
+| **undetected-wrong rate** (oracle says success \\| a wrong effect occurred) | **{s["undetected_wrong_rate"]:.1%}** | **{e["undetected_wrong_rate"]:.1%}** |
+| **false-abort rate** (oracle halts \\| the effect was correct) | {s["false_abort_rate"]:.1%} ({s["false_abort_count"]} run(s)) | {e["false_abort_rate"]:.1%} ({e["false_abort_count"]} run(s)) |
 
-The screen oracle silently passes a wrong write in **{s['undetected_wrong_rate']:.0%}**
+The screen oracle silently passes a wrong write in **{s["undetected_wrong_rate"]:.0%}**
 of the runs where one occurred; the effect verifier drives that to
-**{e['undetected_wrong_rate']:.0%}** by reading the record instead of the
+**{e["undetected_wrong_rate"]:.0%}** by reading the record instead of the
 pixels — and, as a bonus, converts the screen's `timeout` false-abort (the row
 landed but the screen reported failure) into a correct CONFIRMED, so it also
 has the lower false-abort rate.
@@ -528,7 +566,7 @@ run-to-run disagreement); N proves reproducibility.
 
 ```
 .venv/bin/python -m openadapt_flow.benchmark.silent_wrong_action \\
-    --out {DEFAULT_OUT_DIR} --n {results['n_per_scenario']}
+    --out {DEFAULT_OUT_DIR} --n {results["n_per_scenario"]}
 ```
 
 Serves `mockmed.fault_server` locally, drives each fault scenario, and reads
@@ -644,8 +682,7 @@ def run_and_write(
         f"effect={m['effect']['undetected_wrong_rate']:.0%})"
     )
     log(
-        f"Wrote {out / 'results.json'}, SILENT_WRONG_ACTION.md, "
-        "silent_wrong_action.png"
+        f"Wrote {out / 'results.json'}, SILENT_WRONG_ACTION.md, silent_wrong_action.png"
     )
     return results
 

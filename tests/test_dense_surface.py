@@ -17,17 +17,25 @@ from openadapt_flow.validation import dense_surface as ds
 # Fixture
 # ---------------------------------------------------------------------------
 
+
 def test_collision_pairs_cover_every_class() -> None:
     pairs = ds.build_collision_pairs(seed=1)
     classes = {p.collision_class for p in pairs}
     expected = {
-        "near_surname", "nguyen_variant", "generational_suffix",
-        "same_surname_diff_first", "letterletter_name",
-        "same_name_diff_dob", "mrn_transposition",
-        "id_confusion_l1", "id_confusion_O0",
+        "near_surname",
+        "nguyen_variant",
+        "generational_suffix",
+        "same_surname_diff_first",
+        "letterletter_name",
+        "same_name_diff_dob",
+        "mrn_transposition",
+        "id_confusion_l1",
+        "id_confusion_O0",
         # 9th reopening: purely-numeric + split-numeric homonyms must be in the
         # corpus so the numeric hole can never be hidden by measurement again.
-        "id_numeric_O0", "id_numeric_l1", "id_split_numeric_O0",
+        "id_numeric_O0",
+        "id_numeric_l1",
+        "id_split_numeric_O0",
     }
     assert expected <= classes
 
@@ -42,16 +50,17 @@ def test_numeric_id_classes_are_same_name_dob_all_digit_and_collapsible() -> Non
         assert p.target.name == p.sibling.name
         assert p.target.dob == p.sibling.dob
         assert p.target.mrn != p.sibling.mrn
-        assert p.target.mrn.isdigit()          # target MRN is PURELY NUMERIC
+        assert p.target.mrn.isdigit()  # target MRN is PURELY NUMERIC
         # the sibling swaps a confusable digit for its look-alike letter
         assert any(c in "Ol" for c in p.sibling.mrn)
 
 
 def test_split_numeric_id_class_has_fragmented_confusable_mrn() -> None:
-    p = {p.collision_class: p
-         for p in ds.build_collision_pairs(seed=2)}["id_split_numeric_O0"]
+    p = {p.collision_class: p for p in ds.build_collision_pairs(seed=2)}[
+        "id_split_numeric_O0"
+    ]
     assert p.target.name == p.sibling.name and p.target.dob == p.sibling.dob
-    assert " " in p.target.mrn                  # a SPLIT (fragmented) MRN
+    assert " " in p.target.mrn  # a SPLIT (fragmented) MRN
     # each numeric fragment carries a confusable 0 the sibling renders as O
     assert "0" in p.target.mrn and "O" in p.sibling.mrn
 
@@ -92,7 +101,8 @@ def test_dense_table_keeps_all_pairs_and_pads() -> None:
 def test_render_html_places_click_targets() -> None:
     table = ds.build_dense_table(seed=1, n_rows=40)
     html = ds.render_table_html(
-        table, font_family="Arial", font_px=15, row_pad_px=6, top_offset_px=4)
+        table, font_family="Arial", font_px=15, row_pad_px=6, top_offset_px=4
+    )
     assert 'data-name="0"' in html and 'data-open="0"' in html
     # every seeded collision name is present in the DOM
     for pair in table.pairs:
@@ -103,31 +113,56 @@ def test_render_html_places_click_targets() -> None:
 # Aggregation / Markdown (synthetic trial records, no browser)
 # ---------------------------------------------------------------------------
 
+
 def _trial(**kw):
     base = dict(
-        seed=1, collision_class="near_surname", note="",
-        click_config="click_name", replay_condition="native_arial",
-        target_name="A, X", sibling_name="B, Y", target_mrn="M1",
-        sibling_mrn="M2", target_dob="1980-01-01", sibling_dob="1980-01-01",
-        armed=True, context_text="M1 1980-01-01 M Active",
-        fa_status="verified", fa_coverage=1.0, fa_observed="M1 ...",
-        fa_used_upscale=False, fa_surname_readable=True,
-        fa_status_no_rowfilter="verified", is_false_abort=False,
-        acc_status="mismatch", acc_coverage=0.5, acc_observed="M2 ...",
-        acc_expected="M1 ...", acc_used_upscale=False, is_false_accept=False,
-        bleed_neighbor_tokens=[], bleed_present=False,
-        bleed_survived_rowfilter=False, bleed_changed_fa_verdict=False,
+        seed=1,
+        collision_class="near_surname",
+        note="",
+        click_config="click_name",
+        replay_condition="native_arial",
+        target_name="A, X",
+        sibling_name="B, Y",
+        target_mrn="M1",
+        sibling_mrn="M2",
+        target_dob="1980-01-01",
+        sibling_dob="1980-01-01",
+        armed=True,
+        context_text="M1 1980-01-01 M Active",
+        fa_status="verified",
+        fa_coverage=1.0,
+        fa_observed="M1 ...",
+        fa_used_upscale=False,
+        fa_surname_readable=True,
+        fa_status_no_rowfilter="verified",
+        is_false_abort=False,
+        acc_status="mismatch",
+        acc_coverage=0.5,
+        acc_observed="M2 ...",
+        acc_expected="M1 ...",
+        acc_used_upscale=False,
+        is_false_accept=False,
+        bleed_neighbor_tokens=[],
+        bleed_present=False,
+        bleed_survived_rowfilter=False,
+        bleed_changed_fa_verdict=False,
     )
     base.update(kw)
     return base
 
 
 def _result(trials):
-    return {"trials": trials, "meta": {
-        "seeds": [1], "n_rows": 40, "replay_conditions": ["native_arial"],
-        "record_condition": "record", "click_configs": list(ds.CLICK_CONFIGS),
-        "operating_point": {},
-    }}
+    return {
+        "trials": trials,
+        "meta": {
+            "seeds": [1],
+            "n_rows": 40,
+            "replay_conditions": ["native_arial"],
+            "record_condition": "record",
+            "click_configs": list(ds.CLICK_CONFIGS),
+            "operating_point": {},
+        },
+    }
 
 
 def test_aggregate_counts_false_abort_and_accept() -> None:
@@ -135,8 +170,11 @@ def test_aggregate_counts_false_abort_and_accept() -> None:
         _trial(),  # clean
         _trial(fa_status="mismatch", is_false_abort=True),
         _trial(fa_status="unreadable", is_false_abort=True),
-        _trial(acc_status="verified", is_false_accept=True,
-               collision_class="id_confusion_O0"),
+        _trial(
+            acc_status="verified",
+            is_false_accept=True,
+            collision_class="id_confusion_O0",
+        ),
     ]
     agg = ds.aggregate(_result(trials))
     h = agg["headline"]
@@ -150,18 +188,22 @@ def test_aggregate_counts_false_abort_and_accept() -> None:
 
 
 def test_aggregate_excludes_unarmed_from_rates() -> None:
-    trials = [_trial(), _trial(armed=False, context_text=None,
-                               is_false_abort=False)]
+    trials = [_trial(), _trial(armed=False, context_text=None, is_false_abort=False)]
     agg = ds.aggregate(_result(trials))
     assert agg["headline"]["n"] == 1  # unarmed excluded from rate denominator
     assert agg["unarmed_count"] == 1
 
 
 def test_markdown_reports_false_accept_prominently() -> None:
-    trials = [_trial(acc_status="verified", is_false_accept=True,
-                     collision_class="id_confusion_O0",
-                     acc_expected="COX3834 1944-08-08",
-                     acc_observed="COX3834 1944-08-08")]
+    trials = [
+        _trial(
+            acc_status="verified",
+            is_false_accept=True,
+            collision_class="id_confusion_O0",
+            acc_expected="COX3834 1944-08-08",
+            acc_observed="COX3834 1944-08-08",
+        )
+    ]
     agg = ds.aggregate(_result(trials))
     md = ds.render_markdown(_result(trials), agg)
     assert "FALSE ACCEPT" in md
@@ -182,8 +224,11 @@ def test_markdown_zero_false_accept_states_held() -> None:
 def test_bleed_aggregation() -> None:
     trials = [
         _trial(bleed_present=True, bleed_neighbor_tokens=["Foo"]),
-        _trial(bleed_present=True, bleed_survived_rowfilter=True,
-               bleed_changed_fa_verdict=True),
+        _trial(
+            bleed_present=True,
+            bleed_survived_rowfilter=True,
+            bleed_changed_fa_verdict=True,
+        ),
     ]
     agg = ds.aggregate(_result(trials))
     assert agg["bleed"]["bleed_present"] == 2
@@ -194,6 +239,7 @@ def test_bleed_aggregation() -> None:
 # ---------------------------------------------------------------------------
 # End-to-end render + OCR (Playwright + RapidOCR)
 # ---------------------------------------------------------------------------
+
 
 def test_end_to_end_record_and_replay_faithful() -> None:
     pytest.importorskip("playwright.sync_api")

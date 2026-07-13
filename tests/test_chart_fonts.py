@@ -31,9 +31,7 @@ def test_configure_registers_bundled_font_and_returns_pyplot() -> None:
 
     from matplotlib import font_manager
 
-    ttf = (
-        Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
-    )
+    ttf = Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
     assert ttf.is_file()
     # The exact bundled family is known to the in-memory font manager, so a
     # findfont lookup resolves without touching the fragile on-disk cache.

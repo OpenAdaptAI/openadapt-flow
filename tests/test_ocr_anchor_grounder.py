@@ -67,8 +67,12 @@ def test_abstains_on_textless_frame() -> None:
     # A frame with no OCR text yields no boxes => no proposal (the ladder
     # halts; the remote-VLM fallback would earn its cost here).
     g = OCRAnchorGrounder()
-    assert g.locate(_blank_png(), intent="click Open for Jane Doe MRN 123",
-                    ocr_text="Open") is None
+    assert (
+        g.locate(
+            _blank_png(), intent="click Open for Jane Doe MRN 123", ocr_text="Open"
+        )
+        is None
+    )
 
 
 def test_abstains_on_undecodable_bytes() -> None:
@@ -163,7 +167,11 @@ from openadapt_flow.validation.dense_surface import (  # noqa: E402
 
 def _norm_glyph(s: str) -> str:
     return (
-        s.lower().replace("o", "0").replace("l", "1").replace("i", "1").replace("|", "1")
+        s.lower()
+        .replace("o", "0")
+        .replace("l", "1")
+        .replace("i", "1")
+        .replace("|", "1")
     )
 
 
@@ -210,7 +218,9 @@ def test_resolves_dense_clean_rows_within_tolerance(dense_eval_case) -> None:
             continue  # sibling separation is the identity band's job
         clean_total += 1
         assert m is not None, f"row {i} ({row.name}) got no proposal"
-        err = ((m.point[0] - open_truth[0]) ** 2 + (m.point[1] - open_truth[1]) ** 2) ** 0.5
+        err = (
+            (m.point[0] - open_truth[0]) ** 2 + (m.point[1] - open_truth[1]) ** 2
+        ) ** 0.5
         if err <= tol:
             clean_hits += 1
             any_hit_beats_baseline = True

@@ -64,9 +64,16 @@ class _FakeVision:
         self.template_calls = 0
         self.text_calls = 0
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None, scales=(0.85, 1.0, 1.18),
-                      threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         self.template_calls += 1
         if self.template_results:
             return self.template_results.pop(0)
@@ -108,6 +115,7 @@ def _anchor(**kw):
 # resolver mechanics
 # ---------------------------------------------------------------------------
 
+
 def test_structural_is_top_of_ladder_and_not_below_ocr() -> None:
     assert RUNG_ORDER[0] == "structural"
     # Strongest evidence: an irreversible step is allowed to act on it.
@@ -117,14 +125,17 @@ def test_structural_is_top_of_ladder_and_not_below_ocr() -> None:
 def test_structural_rung_tried_first_and_wins() -> None:
     vision = _FakeVision()
     # A template match is *also* available — but structural must pre-empt it.
-    vision.template_results = [
-        _Match(point=(120, 110), region=(100, 100, 40, 20))
-    ]
-    backend = _FakeStructural(StructuralHandle(point=(207, 133),
-                                               confidence=1.0))
+    vision.template_results = [_Match(point=(120, 110), region=(100, 100, 40, 20))]
+    backend = _FakeStructural(StructuralHandle(point=(207, 133), confidence=1.0))
     screen = make_png()
-    res = resolve(_anchor(), screen, vision, template_png=b"tpl",
-                  viewport=VIEWPORT, structural=backend)
+    res = resolve(
+        _anchor(),
+        screen,
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+        structural=backend,
+    )
     assert res is not None
     resolution, region = res
     assert resolution.rung == "structural"
@@ -139,27 +150,35 @@ def test_structural_rung_tried_first_and_wins() -> None:
 
 def test_structural_miss_falls_through_to_visual_unchanged() -> None:
     vision = _FakeVision()
-    vision.template_results = [
-        _Match(point=(120, 110), region=(100, 100, 40, 20))
-    ]
+    vision.template_results = [_Match(point=(120, 110), region=(100, 100, 40, 20))]
     backend = _FakeStructural(None)  # element absent / ambiguous -> None
-    res = resolve(_anchor(), make_png(), vision, template_png=b"tpl",
-                  viewport=VIEWPORT, structural=backend)
+    res = resolve(
+        _anchor(),
+        make_png(),
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+        structural=backend,
+    )
     assert res is not None
     resolution, _ = res
-    assert resolution.rung == "template"       # visual floor still works
+    assert resolution.rung == "template"  # visual floor still works
     assert vision.template_calls == 1
     assert backend.calls  # structural WAS attempted first
 
 
 def test_structural_exception_falls_through_no_crash() -> None:
     vision = _FakeVision()
-    vision.template_results = [
-        _Match(point=(120, 110), region=(100, 100, 40, 20))
-    ]
+    vision.template_results = [_Match(point=(120, 110), region=(100, 100, 40, 20))]
     backend = _FakeStructural(None, raises=True)
-    res = resolve(_anchor(), make_png(), vision, template_png=b"tpl",
-                  viewport=VIEWPORT, structural=backend)
+    res = resolve(
+        _anchor(),
+        make_png(),
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+        structural=backend,
+    )
     assert res is not None and res[0].rung == "template"
 
 
@@ -167,22 +186,30 @@ def test_pixel_only_backend_uses_visual_ladder() -> None:
     # structural=None models a pixel-only substrate (RDP/Citrix/canvas): the
     # visual ladder is used exactly as before.
     vision = _FakeVision()
-    vision.template_results = [
-        _Match(point=(120, 110), region=(100, 100, 40, 20))
-    ]
-    res = resolve(_anchor(), make_png(), vision, template_png=b"tpl",
-                  viewport=VIEWPORT, structural=None)
+    vision.template_results = [_Match(point=(120, 110), region=(100, 100, 40, 20))]
+    res = resolve(
+        _anchor(),
+        make_png(),
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+        structural=None,
+    )
     assert res is not None and res[0].rung == "template"
 
 
 def test_anchor_without_locator_never_calls_structural() -> None:
     vision = _FakeVision()
-    vision.template_results = [
-        _Match(point=(120, 110), region=(100, 100, 40, 20))
-    ]
+    vision.template_results = [_Match(point=(120, 110), region=(100, 100, 40, 20))]
     backend = _FakeStructural(StructuralHandle(point=(1, 1)))
-    res = resolve(_anchor(structural=None), make_png(), vision,
-                  template_png=b"tpl", viewport=VIEWPORT, structural=backend)
+    res = resolve(
+        _anchor(structural=None),
+        make_png(),
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+        structural=backend,
+    )
     assert res is not None and res[0].rung == "template"
     assert backend.calls == []  # no locator -> structural skipped
 
@@ -190,6 +217,7 @@ def test_anchor_without_locator_never_calls_structural() -> None:
 # ---------------------------------------------------------------------------
 # identity gate STILL fires on a structurally-resolved point
 # ---------------------------------------------------------------------------
+
 
 class _IdentityAndStructuralBackend:
     """Backend that resolves structurally AND exposes structured identity."""
@@ -230,7 +258,9 @@ def test_structural_resolution_still_faces_identity_gate() -> None:
     backend = _IdentityAndStructuralBackend((207, 133), sibling)
     rp = Replayer(backend, vision=_FakeVision(), poll_interval_s=0.01)
     step = Step(
-        id="s1", intent="open patient", action=ActionKind.CLICK,
+        id="s1",
+        intent="open patient",
+        action=ActionKind.CLICK,
         anchor=_anchor(structured_identity=recorded),
     )
     # 1) resolution comes from the structural rung...
@@ -240,8 +270,9 @@ def test_structural_resolution_still_faces_identity_gate() -> None:
     assert resolution.point == (207, 133)
     # 2) ...and the pre-click identity gate STILL runs on that point, catching
     #    the sibling (structure makes identity stronger, never bypasses it).
-    check = rp._verify_identity(step, resolution, make_png(), {},
-                                Workflow(name="wf"), None)
+    check = rp._verify_identity(
+        step, resolution, make_png(), {}, Workflow(name="wf"), None
+    )
     assert check.status == "mismatch"
     assert check.mode == "structured"
 
@@ -249,6 +280,7 @@ def test_structural_resolution_still_faces_identity_gate() -> None:
 # ---------------------------------------------------------------------------
 # Windows UIA backend (faked WAA execute channel)
 # ---------------------------------------------------------------------------
+
 
 class _Resp:
     def __init__(self, text="", json_data=None, status=200):
@@ -274,12 +306,15 @@ class _FakeSession:
 
 def _win_backend(resp):
     from openadapt_flow.backends.windows_backend import WindowsBackend
+
     return WindowsBackend(session=_FakeSession(resp), viewport=(800, 600))
 
 
 def test_windows_structural_locator_at_parses_uia_dict() -> None:
-    payload = ('<<OAFLOW_STRUCTURED>>{"automation_id": "open-p1", '
-               '"role": "button", "name": "Open"}<<END_OAFLOW_STRUCTURED>>')
+    payload = (
+        '<<OAFLOW_STRUCTURED>>{"automation_id": "open-p1", '
+        '"role": "button", "name": "Open"}<<END_OAFLOW_STRUCTURED>>'
+    )
     be = _win_backend(_Resp(text="log\n" + payload))
     loc = be.structural_locator_at(120, 110)
     assert isinstance(loc, StructuralLocator)
@@ -309,13 +344,13 @@ def test_windows_locate_structural_parses_point() -> None:
 def test_windows_locate_structural_none_on_null() -> None:
     payload = "<<OAFLOW_STRUCTURED>>null<<END_OAFLOW_STRUCTURED>>"
     be = _win_backend(_Resp(text=payload))
-    assert be.locate_structural(
-        StructuralLocator(automation_id="x")) is None
+    assert be.locate_structural(StructuralLocator(automation_id="x")) is None
 
 
 def test_windows_locate_structural_skips_server_without_ids() -> None:
     session = _FakeSession(_Resp(text=""))
     from openadapt_flow.backends.windows_backend import WindowsBackend
+
     be = WindowsBackend(session=session, viewport=(800, 600))
     # A locator with no automation_id and no role+name is unresolvable; the
     # backend must not even hit the server.
@@ -326,6 +361,7 @@ def test_windows_locate_structural_skips_server_without_ids() -> None:
 # ---------------------------------------------------------------------------
 # recorder captures the locator; compiler stores it on the anchor
 # ---------------------------------------------------------------------------
+
 
 class _RecordingStructuralBackend:
     def __init__(self):
@@ -347,21 +383,27 @@ class _RecordingStructuralBackend:
     def scroll(self, dx, dy): ...
 
     def structural_locator_at(self, x, y):
-        return StructuralLocator(selector="#open-p1", role="button",
-                                 name="Open")
+        return StructuralLocator(selector="#open-p1", role="button", name="Open")
 
 
 def test_recorder_captures_structural_locator(tmp_path) -> None:
     from openadapt_flow.recorder import Recorder
 
-    rec = Recorder(_RecordingStructuralBackend(), tmp_path / "rec",
-                   settle_timeout_s=0.05, settle_interval_s=0.01)
+    rec = Recorder(
+        _RecordingStructuralBackend(),
+        tmp_path / "rec",
+        settle_timeout_s=0.05,
+        settle_interval_s=0.01,
+    )
     rec.click(120, 110)
     rec.finish()
     lines = (tmp_path / "rec" / "events.jsonl").read_text().splitlines()
     event = json.loads(lines[0])
-    assert event["structural"] == {"selector": "#open-p1",
-                                   "role": "button", "name": "Open"}
+    assert event["structural"] == {
+        "selector": "#open-p1",
+        "role": "button",
+        "name": "Open",
+    }
 
 
 def test_compiler_stores_structural_locator(tmp_path) -> None:
@@ -374,23 +416,51 @@ def test_compiler_stores_structural_locator(tmp_path) -> None:
     (recording / "frames").mkdir(parents=True)
     before = np.full((200, 300, 3), 240, np.uint8)
     cv2.rectangle(before, (100, 100), (160, 130), (200, 210, 255), -1)
-    cv2.putText(before, "Open", (104, 122), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (10, 20, 40), 1, cv2.LINE_AA)
+    cv2.putText(
+        before,
+        "Open",
+        (104, 122),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (10, 20, 40),
+        1,
+        cv2.LINE_AA,
+    )
     after = before.copy()
-    cv2.putText(after, "Saved", (40, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(
+        after,
+        "Saved",
+        (40, 180),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
     for suffix, img in (("before", before), ("after", after)):
         ok, buf = cv2.imencode(".png", img)
         assert ok
-        (recording / "frames" / f"0000_{suffix}.png").write_bytes(
-            buf.tobytes())
-    event = {"i": 0, "kind": "click", "x": 130, "y": 115, "t": 1.0,
-             "structural": {"selector": "#open-p1", "role": "button",
-                            "name": "Open"}}
+        (recording / "frames" / f"0000_{suffix}.png").write_bytes(buf.tobytes())
+    event = {
+        "i": 0,
+        "kind": "click",
+        "x": 130,
+        "y": 115,
+        "t": 1.0,
+        "structural": {"selector": "#open-p1", "role": "button", "name": "Open"},
+    }
     (recording / "events.jsonl").write_text(json.dumps(event) + "\n")
-    (recording / "meta.json").write_text(json.dumps({
-        "id": "rec-1", "created_at": "2026-07-13T00:00:00+00:00",
-        "viewport": [300, 200], "app_url": "http://x/", "params": {}}))
+    (recording / "meta.json").write_text(
+        json.dumps(
+            {
+                "id": "rec-1",
+                "created_at": "2026-07-13T00:00:00+00:00",
+                "viewport": [300, 200],
+                "app_url": "http://x/",
+                "params": {},
+            }
+        )
+    )
 
     wf = compile_recording(recording, tmp_path / "bundle", name="wf")
     anchor = wf.steps[0].anchor
@@ -403,22 +473,24 @@ def test_compiler_stores_structural_locator(tmp_path) -> None:
 # Playwright DOM end-to-end (real browser; skipped when unavailable)
 # ---------------------------------------------------------------------------
 
+
 def _pw_backend():
     pytest.importorskip("playwright.sync_api")
     from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+
     return PlaywrightBackend
 
 
 def test_playwright_structural_locator_and_locate_roundtrip() -> None:
     from openadapt_flow.validation.structural_action import build_html
+
     PlaywrightBackend = _pw_backend()
     backend, close = PlaywrightBackend.launch("about:blank", headless=True)
     try:
         backend.page.set_content(build_html(6, drift=False))
         backend.page.wait_for_timeout(50)
         box = backend.page.locator("#open-p2").bounding_box()
-        cx, cy = int(box["x"] + box["width"] / 2), int(box["y"] +
-                                                       box["height"] / 2)
+        cx, cy = int(box["x"] + box["width"] / 2), int(box["y"] + box["height"] / 2)
         loc = backend.structural_locator_at(cx, cy)
         assert loc is not None and loc.selector == "#open-p2"
         handle = backend.locate_structural(loc)
@@ -432,6 +504,7 @@ def test_playwright_structural_locator_and_locate_roundtrip() -> None:
 
 def test_playwright_structural_survives_drift_where_visual_fails() -> None:
     from openadapt_flow.validation.structural_action import run_probe
+
     _pw_backend()
     report = run_probe(n=9, headless=True)
     # Structural resolves every target whose id is still in the DOM...

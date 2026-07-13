@@ -1,6 +1,25 @@
 # CHANGELOG
 
 
+## v0.10.0 (2026-07-13)
+
+### Features
+
+- Workflow-program IR Phase 1 — typed params, guards, wait_until (additive, back-compatible)
+  ([#71](https://github.com/OpenAdaptAI/openadapt-flow/pull/71),
+  [`8bfcffe`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8bfcffe8d95572dbdf2d96899a29be87ae92d101))
+
+Implements the RFC's Phase 1 (docs/design/WORKFLOW_PROGRAM_IR.md): the first additive,
+  backward-compatible step from a linear macro IR toward a parameterized program. Typed parameters
+  on Workflow (substituted at replay), an optional per-step guard (deterministic precondition;
+  fail-safe), and wait_until (bounded readiness predicate that subsumes the SCROLL closed-loop). A
+  bundle with none of these replays byte-identically to today. $0 / zero model calls.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.9.0 (2026-07-13)
 
 ### Features

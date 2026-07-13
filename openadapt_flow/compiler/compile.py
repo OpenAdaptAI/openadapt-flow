@@ -32,6 +32,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.risk import classify_step_risk
 from openadapt_flow.runtime.identity import band_region, context_from_lines, coverage
 from openadapt_flow.vision.hashing import phash_distance, phash_png
 from openadapt_flow.vision.ocr import OcrLine, normalize_text, ocr
@@ -744,11 +745,16 @@ def compile_recording(
     geometry landmark. The bundle gets ``workflow.json``,
     ``templates/*.png`` and a generated readable ``workflow.py``.
 
-    Risk is opt-in: every step compiles as ``risk="reversible"`` unless
-    ``risk_overrides`` marks it ``"irreversible"`` — there is no automatic
-    risk classification. Irreversible steps refuse to act when they only
-    resolve below the OCR rung or when their identity band is unreadable
-    (see :class:`~openadapt_flow.runtime.Replayer`).
+    Risk is AUTO-CLASSIFIED: each CLICK/DOUBLE_CLICK step whose intent or
+    button label is write-shaped (create/update/delete/submit/save/confirm
+    ...) compiles as ``risk="irreversible"`` (see :mod:`openadapt_flow.risk`);
+    everything else is ``"reversible"``. ``risk_overrides`` still wins, in
+    either direction. Irreversible steps refuse to act when they only resolve
+    below the OCR rung or when their identity band is unreadable (see
+    :class:`~openadapt_flow.runtime.Replayer`), so this arms those safeguards
+    by default for consequential writes instead of only when a human marks a
+    step. The classifier leans irreversible when unsure on a write-shaped step
+    (the safe direction; false-positive posture documented in the module).
 
     Args:
         recording_dir: Recording directory (meta.json, events.jsonl, frames/).
@@ -925,7 +931,15 @@ def compile_recording(
         elif kind == "type":
             param = event.get("param")
             text = event.get("text")
-            if param:
+            secret = bool(event.get("secret"))
+            if secret:
+                # A secret's literal value is never in the recording, so it
+                # is never in the bundle either: the step carries only the
+                # param name, and the value is injected from the environment
+                # at replay (see ir.Step.secret / runtime.Replayer).
+                text = None
+                intent = f"type <{param}> (secret)"
+            elif param:
                 intent = f"type <{param}>"
             else:
                 intent = f"type '{_text_preview(text or '')}'"
@@ -937,6 +951,7 @@ def compile_recording(
                         action=ActionKind.TYPE,
                         text=text,
                         param=param,
+                        secret=secret,
                     ),
                     before_png,
                     after_png,
@@ -1019,7 +1034,8 @@ def compile_recording(
             # A parameterized TYPE step's changed region is the typed
             # value's own pixels — never assert it (it varies per run).
             include_region_stable=not (
-                step.action is ActionKind.TYPE and step.param is not None
+                step.action is ActionKind.TYPE
+                and (step.param is not None or step.secret)
             ),
             before_lines=(
                 cached_lines(i, "before", step_before)
@@ -1044,6 +1060,16 @@ def compile_recording(
             # a vacuous pass. Steps with no structural change either stay
             # honestly vacuous (docs/LIMITS.md).
             step.expect = _structural_postconditions(event)
+
+    # Auto risk-classification: infer risk="irreversible" for write-shaped
+    # steps (create/update/delete/submit/save/confirm ... — keyword + action
+    # heuristics on the intent and button label; see openadapt_flow.risk) so
+    # the irreversible-step safeguards (below-OCR-rung refusal, unreadable-
+    # identity-band refusal) are armed BY DEFAULT rather than only when a human
+    # passes risk_overrides. Conservative: an unsure write-shaped step leans
+    # irreversible (the safe direction). Explicit risk_overrides below win.
+    for step in steps:
+        step.risk = classify_step_risk(step)
 
     if risk_overrides:
         by_id = {step.id: step for step in steps}
@@ -1077,6 +1103,7 @@ def compile_recording(
             )
             for pname, value in params.items()
         },
+        secret_params=list(meta.get("secret_params") or []),
         steps=steps,
     )
 

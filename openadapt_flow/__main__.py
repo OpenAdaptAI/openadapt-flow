@@ -3,11 +3,15 @@
 Subcommands (thin wrappers over the module APIs; sibling modules are
 imported lazily inside each handler so ``--help`` always works):
 
+- ``record`` — open a headed browser on your OWN app (``--url``) and
+  record what you do into the format ``compile`` consumes.
 - ``demo-record`` — serve MockMed locally and record the canonical demo.
 - ``compile`` — compile a recording directory into a workflow bundle.
 - ``replay`` — replay a bundle; serves the bundled MockMed demo app when no
   ``--url`` is given (with optional ``--drift`` to demonstrate healing).
 - ``bench`` — replay a bundle N times against MockMed and aggregate.
+- ``lint`` — report a bundle's coverage gaps (advice; exit code by severity).
+- ``certify`` — enforce a safety policy on a bundle (refuse it if it fails).
 - ``emit-skill`` — emit an Agent Skills folder for a bundle.
 - ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
 """
@@ -38,6 +42,28 @@ def _with_drift(url: str, drift: str | None) -> str:
     if not drift:
         return url
     return f"{url.rstrip('/')}/?drift={drift}"
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    from openadapt_flow.interactive_recorder import record_interactive
+
+    out = record_interactive(
+        args.url,
+        Path(args.out),
+        secret_fields=tuple(args.secret or ()),
+        param_fields=tuple(args.param or ()),
+        headless=args.headless,
+    )
+    print(f"Recording written to {out}")
+    secrets = sorted(args.secret or ())
+    if secrets:
+        print(
+            "Secret field(s) recorded (values NOT stored): "
+            + ", ".join(secrets)
+            + ". At replay, export "
+            + ", ".join(f"OPENADAPT_FLOW_SECRET_{name.upper()}" for name in secrets)
+        )
+    return 0
 
 
 def _cmd_demo_record(args: argparse.Namespace) -> int:
@@ -247,6 +273,36 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_lint(args: argparse.Namespace) -> int:
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.policy import SEVERITY_ORDER, lint_workflow
+
+    workflow = Workflow.load(Path(args.bundle))
+    report = lint_workflow(workflow)
+    print(report.render())
+    # Exit code by max severity: nonzero once anything reaches `error`
+    # (an unarmed or vacuous IRREVERSIBLE step). `--strict` also fails on warn.
+    threshold = "warn" if args.strict else "error"
+    fail = SEVERITY_ORDER[report.max_severity] >= SEVERITY_ORDER[threshold]
+    return 1 if (report.findings and fail) else 0
+
+
+def _cmd_certify(args: argparse.Namespace) -> int:
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.policy import evaluate_policy, load_policy
+
+    workflow = Workflow.load(Path(args.bundle))
+    try:
+        policy = load_policy(args.policy)
+    except (FileNotFoundError, ValueError) as e:
+        raise SystemExit(str(e))
+    report = evaluate_policy(workflow, policy)
+    print(report.render())
+    # A failing certification exits nonzero so CI / deploy gates refuse the
+    # bundle — the whole point of making "runnable" distinct from "certified".
+    return 0 if report.passed else 2
+
+
 def _cmd_emit_skill(args: argparse.Namespace) -> int:
     from openadapt_flow.emit.skill import emit_skill
 
@@ -273,6 +329,44 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser(
+        "record",
+        help="Record YOUR app interactively in a headed browser (--url)",
+    )
+    p.add_argument(
+        "--url", required=True, help="URL of the app to record against"
+    )
+    p.add_argument("--out", required=True, help="Recording output directory")
+    p.add_argument(
+        "--secret",
+        action="append",
+        default=[],
+        metavar="FIELD",
+        help=(
+            "Mark a typed field (by name or id) as a SECRET; its value is "
+            "never persisted and is injected at replay from "
+            "OPENADAPT_FLOW_SECRET_<FIELD>. input[type=password] is always "
+            "treated as secret. Repeatable."
+        ),
+    )
+    p.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="FIELD",
+        help=(
+            "Record a typed field (by name or id) as a PARAMETER; its "
+            "demonstrated value becomes the default, overridable at replay "
+            "with --param. Repeatable."
+        ),
+    )
+    p.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run the browser headless (scripted/CI recording)",
+    )
+    p.set_defaults(func=_cmd_record)
 
     p = sub.add_parser(
         "demo-record",
@@ -407,6 +501,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--headed", action="store_true", help="Run the browsers headed"
     )
     p.set_defaults(func=_cmd_benchmark)
+
+    p = sub.add_parser(
+        "lint",
+        help=(
+            "Report a bundle's coverage gaps (unarmed clicks, vacuous "
+            "postconditions, under-classified risk); exits nonzero by severity"
+        ),
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit nonzero on warnings too (default: only on errors)",
+    )
+    p.set_defaults(func=_cmd_lint)
+
+    p = sub.add_parser(
+        "certify",
+        help=(
+            "Enforce a policy on a bundle (exits nonzero + reports if it "
+            "fails); makes 'runnable' distinct from 'certified safe'"
+        ),
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--policy",
+        required=True,
+        help=(
+            "Policy YAML path, or a built-in name (permissive, clinical-write)"
+        ),
+    )
+    p.set_defaults(func=_cmd_certify)
 
     p = sub.add_parser(
         "emit-skill", help="Emit an Agent Skills folder for a bundle"

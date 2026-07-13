@@ -1,0 +1,43 @@
+# Strict policy for clinical / system-of-record write workflows.
+#
+# Refuses any bundle that could take an unverified or misdirected write action
+# unattended. Intended for the healthcare/EMR flagship surface, where a
+# wrong-patient or phantom write is the catastrophic failure. Expect a freshly
+# compiled real-app bundle to FAIL this until its gaps are closed (that is the
+# point — "compiled" must not be mistaken for "certified safe").
+name: clinical-write
+description: >-
+  Strict gate for irreversible writes against a system of record: no unarmed
+  clicks, no vacuous steps, identity required on every entity-navigation and
+  write step, effect verification required on every write, and human sign-off
+  for any thinly-evidenced step.
+
+# No click may act without a verified target identity.
+prohibit_unarmed_clicks: true
+
+# Every effect-expecting step must assert something (no vacuous passes).
+prohibit_vacuous_postconditions: true
+
+# Belt-and-braces over prohibit_unarmed_clicks: the wrong-entity surface
+# (navigational data clicks) and every write MUST be identity-armed.
+require_identity_for:
+  - entity_navigation
+  - write
+
+# Every consequential write must verify its effect landed on screen.
+require_effect_verification_for:
+  - write
+  - save
+  - submit
+  - create
+  - update
+  - delete
+  - confirm
+  - send
+
+# Zero tolerance for steps that assert nothing.
+max_unverified_steps: 0
+
+# Any step resolving on thin evidence (below template+label) needs human
+# sign-off before it runs unattended.
+require_human_approval_below_confidence: 0.8

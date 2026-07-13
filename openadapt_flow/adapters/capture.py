@@ -5,100 +5,116 @@ This module is the *recording adapter contract* for desktop demonstrations
 recording format the compiler consumes (``meta.json`` + ``events.jsonl`` +
 ``frames/{i:04d}_before.png`` / ``_after.png``).
 
-Input contract (an openadapt-capture session directory):
+Input contract (a real openadapt-capture >= 0.5 session directory):
 
     <capture>/
-      capture.db     # SQLite:
-                     #   capture(id, started_at, ended_at, platform,
-                     #           screen_width, screen_height, pixel_ratio,
-                     #           video_start_time, task_description, ...)
-                     #   events(timestamp REAL, type TEXT, data JSON, ...)
-      video.mp4      # screen video; a frame's wall-clock time is
-                     #   capture.video_start_time + frame_pts_seconds
+      recording.db            # SQLAlchemy per-capture database:
+                              #   recording(timestamp, monitor_width,
+                              #     monitor_height, platform, task_description,
+                              #     video_start_time, config, ...)
+                              #   action_event(name, timestamp, mouse_x,
+                              #     mouse_y, mouse_dx, mouse_dy,
+                              #     mouse_button_name, mouse_pressed, key_name,
+                              #     key_char, canonical_key_name, ...)
+      oa_recording-*.mp4      # action-gated screen video
 
-The adapter consumes *derived* action events (openadapt-capture's
-post-processing merges raw down/up/move streams into these):
+The adapter is a thin bridge over openadapt-capture's **public API** — it does
+*no* raw SQL and knows nothing about capture's schema. It calls
+``CaptureSession.load(dir)`` and iterates ``.actions(include_moves=False)``,
+which runs capture's own event-processing pipeline (raw mouse/keyboard streams
+-> merged clicks / drags / typed text) and exposes each merged action as a
+public ``Action`` (``.type``, ``.timestamp``, ``.x/.y/.dx/.dy``,
+``.button/.text/.keys``). Frames come from ``CaptureSession.get_frame_at`` (the
+same tested frame-extraction path ``Action.screenshot`` uses), so the adapter
+inherits capture's decoding and survives capture's future schema changes.
 
-    mouse.singleclick   {x, y, button}      -> {"kind": "click"}
-    mouse.doubleclick   {x, y, button}      -> {"kind": "double_click"}
-    key.type            {text}              -> {"kind": "type"}
-    key.down            {key_name|key_char} -> {"kind": "key"} (named,
-                                               non-modifier keys only)
-    mouse.scroll        {x, y, dx, dy}      -> {"kind": "scroll"}
+Action mapping (capture ``Action.type`` -> flow event ``kind``):
 
-Raw-only sessions (no derived events) are rejected: run openadapt-capture's
-``process_events`` first. Deriving actions from raw streams is the capture
-library's job, not this adapter's.
+    mouse.singleclick   -> {"kind": "click", x, y}
+    mouse.doubleclick   -> {"kind": "double_click", x, y}
+    mouse.scroll        -> {"kind": "scroll", dx, dy}
+    key.type            -> {"kind": "type", text[, param]}  OR
+                           {"kind": "key", key}             (see below)
 
-Coordinate spaces: capture mouse coordinates are in *logical points*
-(pynput); video frames are *physical pixels* (on Retina/HiDPI these differ
-by ``pixel_ratio``). openadapt-flow requires event coordinates in the same
-pixel space as the frames, so points are scaled by
-``video_frame_width / capture.screen_width`` (empirical, not the stored
-pixel_ratio — the video is authoritative).
+capture's processing merges *all* keyboard input into ``key.type``
+(``KeyTypeEvent``) actions, one per key-release burst — so a typed word arrives
+as a *run* of single-character ``key.type`` actions, and a named key such as
+Enter arrives as a ``key.type`` with **empty** ``.text`` and its name in
+``.keys``. This adapter therefore:
 
-Frame selection: for an event at wall-clock time ``T``, the *before* frame
-is the last video frame at or before ``T`` and the *after* frame is the
-frame at ``T + settle_s``, clamped to just before the next event (an
-approximation of the live Recorder's perceptual-hash settle wait; see
-docs/desktop/PHASE1.md for the tradeoff).
+  * coalesces consecutive character ``key.type`` actions (non-empty ``.text``,
+    including spaces and shifted characters) into one flow ``type`` event, so
+    the compiler sees a whole typed value (and per-run parameter marking works);
+  * emits a flow ``key`` event for a named special key (empty ``.text``, e.g.
+    Enter/Tab/Escape/arrows), mapped through ``_KEY_NAME_MAP``;
+  * skips a bare modifier press (no workflow meaning on its own).
 
-Scroll deltas: pynput reports wheel *notches* with positive ``dy`` = scroll
-up, while the flow recording stores *pixels* with positive ``dy`` = view
-down (Playwright wheel convention). Notches are converted at
+Loud rejection (a demonstrated action must never be *silently* dropped): drags
+(``mouse.drag``), non-left clicks, modifier chords/shortcuts (ctrl/alt/cmd + a
+key), unmapped named keys, and any unknown input action type all raise instead
+of being ignored.
+
+Coordinate spaces: capture mouse coordinates are in *logical points* (pynput);
+video frames are *physical pixels*. openadapt-flow requires event coordinates in
+the same pixel space as the frames, so points are scaled by
+``CaptureSession.pixel_ratio`` (physical / logical). NOTE: capture 0.5.x only
+persists ``pixel_ratio`` when the recorder wrote it into the recording
+``config`` JSON; absent that it defaults to 1.0 and coordinates pass through
+unscaled. On a HiDPI capture whose ``pixel_ratio`` was not persisted, click
+coordinates would be under-scaled — an honest limitation of the upstream
+metadata, not something this adapter can recover from pixels alone.
+
+Frame selection: openadapt-capture records **action-gated** video (frames are
+encoded around user actions, not continuously). For an event at wall-clock time
+``T`` the *before* frame is ``get_frame_at(T)`` and the *after* frame is
+``get_frame_at(T + settle_s)`` clamped to just before the next event — an
+approximation of the live Recorder's perceptual-hash settle wait (see
+docs/desktop/PHASE1.md). Because the video is action-gated, a per-action frame
+may be unavailable; a missing *before* frame for a click is fatal (the compiler
+requires it), a missing *after* frame simply yields no postconditions for that
+step.
+
+Scroll deltas: pynput reports wheel *notches* with positive ``dy`` = scroll up,
+while the flow recording stores *pixels* with positive ``dy`` = view down
+(Playwright wheel convention). Notches are converted at
 ``SCROLL_PIXELS_PER_NOTCH`` px/notch and the vertical sign is flipped.
+
+openadapt-capture is an **optional** dependency (the ``capture`` extra:
+``pip install 'openadapt-flow[capture]'``); it is imported lazily so the flow
+core never pulls it onto the replay hot path.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:  # pragma: no cover
+    from openadapt_capture.capture import Action, CaptureSession
+    from PIL.Image import Image
 
 # Wheel-notch -> pixel conversion (matches the WindowsBackend constant; the
 # exact ratio is not load-bearing — replay's closed-loop scroll re-resolves
 # after each gesture).
 SCROLL_PIXELS_PER_NOTCH = 100
 
-# Capture event types this adapter consumes.
-_ACTION_TYPES = {
-    "mouse.singleclick",
-    "mouse.doubleclick",
-    "key.type",
-    "key.down",
-    "mouse.scroll",
-}
-# Derived action types with no flow equivalent: converting a demonstration
-# that contains them would silently drop a user action (a wrong-action
-# seed), so they fail the conversion loudly instead.
-_REJECTED_ACTION_TYPES = {
-    "mouse.drag",
-    "key.shortcut",
-}
-# Raw / non-action streams, safely skipped (their information is already
-# merged into the derived events or is irrelevant to replay).
-_IGNORED_TYPES = {
-    "mouse.move",
-    "mouse.down",
-    "mouse.up",
-    "key.up",
-    "screen.frame",
-    "audio.chunk",
-}
+# Search window (seconds) for get_frame_at. Capture is action-gated, so frames
+# cluster around action timestamps; a generous window finds the nearest one.
+FRAME_TOLERANCE_S = 2.0
 
-# pynput key names (openadapt-capture ``key_name``) -> flow/Playwright names.
+# pynput key names (openadapt-capture ``key_name`` / ``.keys``) ->
+# flow/Playwright names.
 _KEY_NAME_MAP = {
     "enter": "Enter",
+    "return": "Enter",
     "tab": "Tab",
     "esc": "Escape",
     "escape": "Escape",
     "backspace": "Backspace",
     "delete": "Delete",
-    "space": "Space",
     "home": "Home",
     "end": "End",
     "page_up": "PageUp",
@@ -109,8 +125,8 @@ _KEY_NAME_MAP = {
     "right": "ArrowRight",
 }
 
-# Bare modifier presses carry no workflow meaning (their effect is only
-# visible combined with another key, which capture merges elsewhere).
+# Bare modifier presses carry no workflow meaning on their own (their effect is
+# only visible combined with another key).
 _MODIFIER_KEY_NAMES = {
     "shift", "shift_l", "shift_r",
     "ctrl", "ctrl_l", "ctrl_r",
@@ -118,141 +134,175 @@ _MODIFIER_KEY_NAMES = {
     "cmd", "cmd_l", "cmd_r",
     "caps_lock",
 }
+# Modifiers that, combined with another key, form a shortcut/chord with no flow
+# equivalent (shift is excluded — shift+char is just a shifted character).
+_CHORD_MODIFIER_NAMES = _MODIFIER_KEY_NAMES - {
+    "shift", "shift_l", "shift_r", "caps_lock",
+}
 
 
-@dataclass
-class _Session:
-    """Metadata row from capture.db's ``capture`` table."""
+def _require_capture() -> "type[CaptureSession]":
+    """Return openadapt-capture's ``CaptureSession`` or raise a clear error.
 
-    started_at: float
-    screen_width: int
-    screen_height: int
-    pixel_ratio: float
-    video_start_time: Optional[float]
-    task_description: Optional[str]
+    openadapt-capture is an optional dependency (the ``capture`` extra); import
+    it lazily so the flow core never depends on it.
+    """
+    try:
+        from openadapt_capture import CaptureSession
+    except ImportError as exc:  # pragma: no cover - exercised via install state
+        raise ImportError(
+            "openadapt-capture is required to convert desktop recordings but "
+            "is not installed. Install the optional extra:\n\n"
+            "    pip install 'openadapt-flow[capture]'\n"
+        ) from exc
+    return CaptureSession
 
 
-class _Video:
-    """Random-access frame reader for the capture's screen video."""
+def _flow_events(
+    actions: "list[Action]",
+    scale: float,
+    value_to_param: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Convert capture ``Action``s into ordered flow event dicts.
 
-    def __init__(self, path: Path) -> None:
-        import cv2
+    Each returned dict carries the flow event fields plus a private ``_ts``
+    (the source wall-clock timestamp, used later for frame selection). Runs of
+    character ``key.type`` actions are coalesced into a single ``type`` event.
 
-        self._cv2 = cv2
-        self._cap = cv2.VideoCapture(str(path))
-        if not self._cap.isOpened():
-            raise ValueError(f"cannot open capture video: {path}")
-        self.fps = float(self._cap.get(cv2.CAP_PROP_FPS)) or 30.0
-        self.frame_count = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.duration_s = (
-            self.frame_count / self.fps if self.frame_count else 0.0
-        )
+    Raises:
+        ValueError: On any action that has no flow equivalent (drag, non-left
+            click, modifier chord, unmapped named key, unknown input type) —
+            converting it would silently drop a demonstrated action.
+    """
+    events: list[dict[str, Any]] = []
+    # A run of typed characters, buffered so the compiler sees one ``type``
+    # event per typed value (capture emits one key.type per key-release burst).
+    text_run: dict[str, Any] = {"chars": [], "ts": None}
 
-    def frame_png_at(self, t_video: float) -> bytes:
-        """Return the frame nearest to video-time ``t_video`` as PNG bytes."""
-        t = min(max(t_video, 0.0), max(self.duration_s - 1.0 / self.fps, 0.0))
-        index = min(
-            int(round(t * self.fps)),
-            max(self.frame_count - 1, 0),
-        )
-        self._cap.set(self._cv2.CAP_PROP_POS_FRAMES, index)
-        ok, frame = self._cap.read()
-        if not ok:
-            raise ValueError(
-                f"cannot read video frame at t={t_video:.3f}s (index {index})"
+    def flush_text() -> None:
+        if not text_run["chars"]:
+            return
+        text = "".join(text_run["chars"])
+        line: dict[str, Any] = {
+            "kind": "type",
+            "text": text,
+            "_ts": text_run["ts"],
+        }
+        if text in value_to_param:
+            line["param"] = value_to_param[text]
+        events.append(line)
+        text_run["chars"] = []
+        text_run["ts"] = None
+
+    for action in actions:
+        atype = action.type
+        ts = float(action.timestamp)
+
+        if atype in ("mouse.singleclick", "mouse.doubleclick"):
+            flush_text()
+            button = action.button or "left"
+            if button != "left":
+                raise ValueError(
+                    f"{atype} with button={button!r} has no flow equivalent "
+                    f"(t={ts:.3f}); converting would silently drop a user action"
+                )
+            kind = "click" if atype == "mouse.singleclick" else "double_click"
+            events.append(
+                {
+                    "kind": kind,
+                    "x": int(round((action.x or 0.0) * scale)),
+                    "y": int(round((action.y or 0.0) * scale)),
+                    "_ts": ts,
+                }
             )
-        ok, buf = self._cv2.imencode(".png", frame)
-        if not ok:  # pragma: no cover - imencode failure is environmental
-            raise ValueError("cannot encode video frame as PNG")
-        return buf.tobytes()
-
-    def close(self) -> None:
-        self._cap.release()
-
-
-def _load_session(db_path: Path) -> _Session:
-    """Read the ``capture`` metadata row."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM capture LIMIT 1").fetchone()
-    if row is None:
-        raise ValueError(f"no capture row in {db_path}")
-    keys = row.keys()
-    return _Session(
-        started_at=float(row["started_at"]),
-        screen_width=int(row["screen_width"]),
-        screen_height=int(row["screen_height"]),
-        pixel_ratio=float(row["pixel_ratio"]) if "pixel_ratio" in keys and row["pixel_ratio"] is not None else 1.0,
-        video_start_time=(
-            float(row["video_start_time"])
-            if "video_start_time" in keys and row["video_start_time"] is not None
-            else None
-        ),
-        task_description=(
-            row["task_description"] if "task_description" in keys else None
-        ),
-    )
-
-
-def _load_action_events(db_path: Path) -> list[dict[str, Any]]:
-    """Read derived action events (timestamp order) from capture.db."""
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT timestamp, type, data FROM events ORDER BY timestamp"
-        ).fetchall()
-    seen_types = {r[1] for r in rows}
-    rejected = sorted(seen_types & _REJECTED_ACTION_TYPES)
-    if rejected:
-        raise ValueError(
-            f"capture contains derived action types {rejected} that have no "
-            "openadapt-flow equivalent; converting would silently drop user "
-            "actions"
-        )
-    # Unknown *input-stream* types are load-bearing (dropping one drops a
-    # user action); unknown auxiliary streams (window/browser/audio
-    # metadata) are not.
-    unknown_input = sorted(
-        t
-        for t in seen_types
-        if t.startswith(("mouse.", "key."))
-        and t not in _ACTION_TYPES | _REJECTED_ACTION_TYPES | _IGNORED_TYPES
-    )
-    if unknown_input:
-        raise ValueError(
-            f"capture contains unknown input event types {unknown_input}; "
-            "extend the adapter before converting"
-        )
-    actions = [
-        {"timestamp": float(r[0]), "type": r[1], **json.loads(r[2])}
-        for r in rows
-        if r[1] in _ACTION_TYPES
-    ]
-    if not actions:
-        raise ValueError(
-            "capture.db contains no derived action events "
-            f"(found types: {sorted(seen_types)}); run openadapt-capture's "
-            "process_events() to merge raw mouse/keyboard streams first"
-        )
-    return actions
-
-
-def _key_event_name(event: dict[str, Any]) -> Optional[str]:
-    """Flow key name for a ``key.down`` event, or None to skip it."""
-    key_name = event.get("key_name") or event.get("canonical_key_name")
-    if key_name:
-        if key_name in _MODIFIER_KEY_NAMES:
-            return None
-        mapped = _KEY_NAME_MAP.get(key_name)
-        if mapped is None:
-            raise ValueError(
-                f"unmapped key.down key_name {key_name!r} at "
-                f"t={event['timestamp']:.3f}; extend _KEY_NAME_MAP"
+        elif atype == "mouse.scroll":
+            flush_text()
+            # pynput: notches, +dy = scroll up. Flow: pixels, +dy = view down.
+            events.append(
+                {
+                    "kind": "scroll",
+                    "dx": int(round((action.dx or 0.0) * SCROLL_PIXELS_PER_NOTCH)),
+                    "dy": int(round(-(action.dy or 0.0) * SCROLL_PIXELS_PER_NOTCH)),
+                    "_ts": ts,
+                }
             )
-        return mapped
-    char = event.get("key_char") or event.get("canonical_key_char")
-    return char or None
+        elif atype == "mouse.drag":
+            raise ValueError(
+                f"mouse.drag has no flow equivalent (t={ts:.3f}); converting "
+                "would silently drop a user action"
+            )
+        elif atype == "key.type":
+            _convert_key_type(action, ts, events, text_run, flush_text)
+        elif atype == "mouse.move":
+            continue  # defensive: include_moves=False already filters these
+        elif atype.startswith(("mouse.", "key.")):
+            raise ValueError(
+                f"unknown input action type {atype!r} (t={ts:.3f}); extend the "
+                "adapter before converting"
+            )
+        else:
+            continue  # non-input auxiliary action; safely ignored
+
+    flush_text()
+    return events
+
+
+def _convert_key_type(
+    action: "Action",
+    ts: float,
+    events: list[dict[str, Any]],
+    text_run: dict[str, Any],
+    flush_text: Callable[[], None],
+) -> None:
+    """Handle one ``key.type`` action: accumulate text, or emit a key event.
+
+    capture merges all keyboard input into ``key.type`` actions. This routes
+    each one:
+
+      * modifier chord (ctrl/alt/cmd + key) -> reject (no flow equivalent);
+      * non-empty ``.text`` -> typed characters, accumulated into ``text_run``
+        (spaces and shifted characters included);
+      * empty ``.text`` with a single named special key -> flow ``key`` event;
+      * bare modifier press -> skipped (no workflow meaning on its own).
+    """
+    keys = list(action.keys or [])
+    mods = [k for k in keys if k in _MODIFIER_KEY_NAMES]
+    non_mods = [k for k in keys if k not in _MODIFIER_KEY_NAMES]
+    if non_mods and any(k in _CHORD_MODIFIER_NAMES for k in mods):
+        raise ValueError(
+            f"keyboard shortcut {'+'.join(keys)!r} has no flow equivalent "
+            f"(t={ts:.3f}); converting would silently drop a user action"
+        )
+
+    if action.text:
+        # Literal typed characters (a shifted character carries shift in .keys
+        # but is still just text). Accumulated into the run buffer.
+        if not text_run["chars"]:
+            text_run["ts"] = ts
+        text_run["chars"].append(action.text)
+        return
+
+    # Empty text: a named special key press (Enter/Tab/...) or a bare modifier.
+    if not non_mods:
+        return  # bare modifier press: nothing to emit, do not break a text run
+    if len(non_mods) != 1:
+        raise ValueError(
+            f"key.type action with multiple named keys {non_mods!r} has no "
+            f"flow equivalent (t={ts:.3f})"
+        )
+    name = non_mods[0]
+    mapped = _KEY_NAME_MAP.get(name.lower())
+    if mapped is None:
+        raise ValueError(
+            f"unmapped key {name!r} at t={ts:.3f}; extend _KEY_NAME_MAP"
+        )
+    flush_text()
+    events.append({"kind": "key", "key": mapped, "_ts": ts})
+
+
+def _write_png(path: Path, image: "Image") -> None:
+    """Write a PIL frame to ``path`` as PNG."""
+    image.save(path, format="PNG")
 
 
 def convert_capture(
@@ -264,12 +314,17 @@ def convert_capture(
 ) -> Path:
     """Convert an openadapt-capture session into a flow recording directory.
 
+    Consumes a real openadapt-capture session through its public API
+    (``CaptureSession.load(dir).actions()``) and writes a compile-ready
+    recording (``meta.json`` + ``events.jsonl`` + ``frames/``).
+
     Args:
-        capture_dir: Directory containing ``capture.db`` and ``video.mp4``.
+        capture_dir: An openadapt-capture session directory (contains
+            ``recording.db`` and an ``oa_recording-*.mp4`` video).
         out_recording_dir: Output recording directory (created if missing).
-        params: Optional ``{param_name: demonstrated_value}`` map. A ``type``
-            event whose text equals a demonstrated value is marked as that
-            parameter (the compiler then treats it as per-run input and
+        params: Optional ``{param_name: demonstrated_value}`` map. A coalesced
+            ``type`` event whose text equals a demonstrated value is marked as
+            that parameter (the compiler then treats it as per-run input and
             lints against value leakage).
         settle_s: Seconds after each action at which the *after* frame is
             sampled (clamped to just before the next event).
@@ -278,18 +333,19 @@ def convert_capture(
         The recording directory path (compile-ready).
 
     Raises:
-        FileNotFoundError: If ``capture.db`` or ``video.mp4`` is missing.
-        ValueError: On raw-only sessions, unmapped keys, non-left clicks,
-            multiple params demonstrating the same value, or an unreadable
-            video.
+        ImportError: If the optional ``capture`` extra (openadapt-capture) is
+            not installed.
+        FileNotFoundError: If ``capture_dir`` is not a valid capture session
+            (no ``recording.db``) — raised by ``CaptureSession.load``.
+        ValueError: On a session with no convertible actions, an action with no
+            flow equivalent (drag, non-left click, modifier chord, unmapped
+            named key, unknown input type), multiple params demonstrating the
+            same value, or a click whose before frame is missing from the
+            action-gated video.
     """
+    CaptureSession = _require_capture()
     capture_dir = Path(capture_dir)
     out_dir = Path(out_recording_dir)
-    db_path = capture_dir / "capture.db"
-    video_path = capture_dir / "video.mp4"
-    for path in (db_path, video_path):
-        if not path.exists():
-            raise FileNotFoundError(path)
 
     params = dict(params or {})
     value_to_param: dict[str, str] = {}
@@ -301,67 +357,65 @@ def convert_capture(
             )
         value_to_param[value] = name
 
-    session = _load_session(db_path)
-    events = _load_action_events(db_path)
-    video = _Video(video_path)
+    session = CaptureSession.load(capture_dir)
     try:
-        # Capture coords are logical points; frames are physical pixels.
-        # The video is authoritative for the frame pixel space.
-        scale_x = video.width / session.screen_width
-        scale_y = video.height / session.screen_height
-        video_t0 = (
-            session.video_start_time
-            if session.video_start_time is not None
-            else session.started_at
-        )
+        scale = float(session.pixel_ratio or 1.0)
+        actions = list(session.actions(include_moves=False))
+        events = _flow_events(actions, scale, value_to_param)
+        if not events:
+            raise ValueError(
+                "capture session produced no convertible actions "
+                f"({len(actions)} raw actions); nothing to compile"
+            )
 
+        started_at = float(session.started_at)
         frames_dir = out_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
-        events_path = out_dir / "events.jsonl"
 
         used_params: dict[str, str] = {}
+        viewport: Optional[list[int]] = None
         lines: list[str] = []
-        i = 0
-        for j, event in enumerate(events):
-            line = _convert_event(event, scale_x, scale_y, value_to_param)
-            if line is None:  # skippable (e.g. bare modifier press)
-                continue
-            if "param" in line:
-                used_params[line["param"]] = line["text"]
 
-            t_event = event["timestamp"] - video_t0
-            t_after = t_event + settle_s
-            if j + 1 < len(events):
-                next_t = events[j + 1]["timestamp"] - video_t0
-                t_after = min(t_after, max(next_t - 1.0 / video.fps, t_event))
-            (frames_dir / f"{i:04d}_before.png").write_bytes(
-                video.frame_png_at(t_event - 1.0 / video.fps)
-            )
-            (frames_dir / f"{i:04d}_after.png").write_bytes(
-                video.frame_png_at(t_after)
+        for i, event in enumerate(events):
+            ts = float(event["_ts"])
+            before_img = session.get_frame_at(ts, tolerance=FRAME_TOLERANCE_S)
+            t_after = ts + settle_s
+            if i + 1 < len(events):
+                t_after = min(t_after, float(events[i + 1]["_ts"]))
+            after_img = session.get_frame_at(
+                t_after, tolerance=FRAME_TOLERANCE_S
             )
 
-            line["i"] = i
-            line["t"] = round(event["timestamp"] - session.started_at, 3)
-            # Match the Recorder's key order ({"i", ...event, "t"}).
-            ordered = {
-                "i": line.pop("i"),
-                **{k: v for k, v in line.items() if k != "t"},
-                "t": line["t"],
-            }
-            lines.append(json.dumps(ordered))
-            i += 1
+            if event["kind"] in ("click", "double_click") and before_img is None:
+                raise ValueError(
+                    f"no video frame available for {event['kind']} at "
+                    f"t={ts - started_at:.3f}s: the action-gated capture video "
+                    "has no frame near this action, so its target cannot be "
+                    "anchored"
+                )
+            if before_img is not None:
+                _write_png(frames_dir / f"{i:04d}_before.png", before_img)
+                if viewport is None:
+                    viewport = [before_img.width, before_img.height]
+            if after_img is not None:
+                _write_png(frames_dir / f"{i:04d}_after.png", after_img)
+                if viewport is None:
+                    viewport = [after_img.width, after_img.height]
 
-        if i == 0:
-            raise ValueError(
-                "no convertible action events (all were skippable)"
-            )
-        events_path.write_text("\n".join(lines) + "\n")
+            if "param" in event:
+                used_params[event["param"]] = event["text"]
+
+            line: dict[str, Any] = {"i": i}
+            line.update({k: v for k, v in event.items() if k != "_ts"})
+            line["t"] = round(ts - started_at, 3)
+            lines.append(json.dumps(line))
+
+        (out_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
 
         meta = {
             "id": uuid.uuid4().hex,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "viewport": [video.width, video.height],
+            "viewport": viewport,
             "app_url": None,
             "params": used_params,
             "source": "openadapt-capture",
@@ -370,50 +424,4 @@ def convert_capture(
         (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
         return out_dir
     finally:
-        video.close()
-
-
-def _convert_event(
-    event: dict[str, Any],
-    scale_x: float,
-    scale_y: float,
-    value_to_param: dict[str, str],
-) -> Optional[dict[str, Any]]:
-    """Convert one capture action event to a flow event line (sans i/t).
-
-    Returns None for events that are valid but carry no workflow meaning
-    (bare modifier presses).
-    """
-    etype = event["type"]
-    if etype in ("mouse.singleclick", "mouse.doubleclick"):
-        button = event.get("button", "left")
-        if button != "left":
-            raise ValueError(
-                f"{etype} with button={button!r} has no flow equivalent "
-                f"(t={event['timestamp']:.3f})"
-            )
-        kind = "click" if etype == "mouse.singleclick" else "double_click"
-        return {
-            "kind": kind,
-            "x": int(round(event["x"] * scale_x)),
-            "y": int(round(event["y"] * scale_y)),
-        }
-    if etype == "key.type":
-        text = event["text"]
-        line: dict[str, Any] = {"kind": "type", "text": text}
-        if text in value_to_param:
-            line["param"] = value_to_param[text]
-        return line
-    if etype == "key.down":
-        key = _key_event_name(event)
-        if key is None:
-            return None
-        return {"kind": "key", "key": key}
-    if etype == "mouse.scroll":
-        # pynput: notches, +dy = scroll up. Flow: pixels, +dy = view down.
-        return {
-            "kind": "scroll",
-            "dx": int(round(event.get("dx", 0) * SCROLL_PIXELS_PER_NOTCH)),
-            "dy": int(round(-event.get("dy", 0) * SCROLL_PIXELS_PER_NOTCH)),
-        }
-    raise ValueError(f"unhandled capture event type: {etype!r}")
+        session.close()

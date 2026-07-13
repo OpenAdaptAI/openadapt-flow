@@ -66,6 +66,12 @@ privacy = ["openadapt-privacy[presidio]>=0.1.0"]
 service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 # Apple-Silicon dev backend for the VLM service (local model, no GPU box).
 service-mlx = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "mlx-vlm>=0.1"]
+# Cross-platform desktop recording on-ramp: convert an openadapt-capture
+# session into a flow recording (openadapt_flow.adapters.capture). Optional and
+# imported lazily — the flow core never pulls it onto the replay hot path. Note:
+# openadapt-capture screenshots the display when imported, so this on-ramp needs
+# a real desktop session (not headless CI).
+capture = ["openadapt-capture>=0.5.1"]
 # Canonical action-vocabulary interop (openadapt_flow.interop.types). Boundary
 # only (emit / benchmark round-trip); never on the replay hot path. The shim
 # imports openadapt-types lazily, so the core stays importable without it.

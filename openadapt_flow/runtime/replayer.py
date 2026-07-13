@@ -226,6 +226,13 @@ class Replayer:
             step with a binding then actuates through the GUI ladder exactly as
             today (the API tier is an optimization whose safe fallback IS the
             GUI). Never makes a model call.
+        durable: When True, enable the Tier-3 durable runtime (RFC §5): write a
+            checkpoint after each verified step and, on a halt, a durable
+            pending escalation, so the run can be RESUMED from the last verified
+            checkpoint (``openadapt_flow.runtime.durable.resume``) rather than
+            re-run from step 0. None of this touches the backend, vision, or a
+            model — it is bookkeeping over the ``StepResult``. Off by default;
+            a non-durable run behaves exactly as before.
         poll_interval_s: Postcondition polling interval in seconds.
     """
 
@@ -240,6 +247,7 @@ class Replayer:
         effect_verifier: Optional[EffectVerifier] = None,
         effect_compensator: Optional[Any] = None,
         api_actuator: Optional[Any] = None,
+        durable: bool = False,
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
     ) -> None:
@@ -270,6 +278,13 @@ class Replayer:
         # step falls through to the GUI ladder unchanged. Deterministic; makes
         # no model call (the $0 runtime guarantee holds on this path too).
         self.api_actuator = api_actuator
+        # Durable tiered runtime (RFC §5, Tier 3), OFF by default. When True,
+        # run() writes a RunCheckpoint after each VERIFIED step and, on a halt,
+        # a PendingEscalation instead of just dying -- so the run can be
+        # RESUMED from the last verified checkpoint (see
+        # openadapt_flow.runtime.durable and run()'s ``resume_from``). Pure
+        # bookkeeping over the StepResult; no backend/vision/model involvement.
+        self.durable = durable
         # Whether the deterministic structural ACTION rung (top of the ladder)
         # may run. True (default) = product behavior: on a structure-bearing
         # backend, resolve the recorded target as a DOM/UIA element. Set False
@@ -306,6 +321,7 @@ class Replayer:
         bundle_dir: Path,
         run_dir: Path,
         save_healed_to: Optional[Path] = None,
+        resume_from: Optional[int] = None,
     ) -> RunReport:
         """Execute the workflow and write a run directory.
 
@@ -334,6 +350,13 @@ class Replayer:
                 (``steps/``), and heal artifacts (``heals/``).
             save_healed_to: When set, write a full healed bundle (updated
                 workflow.json + new and unchanged template crops) here.
+            resume_from: Tier-3 durable resume (RFC §5). When set, steps with
+                index ``< resume_from`` are treated as already verified: they
+                are NOT re-executed (so an already-confirmed consequential write
+                is never re-performed) and their results are reconstructed from
+                the persisted checkpoints. Execution begins at ``resume_from``
+                (the previously-paused step). Normally supplied by
+                ``openadapt_flow.runtime.durable.resume``, not by hand.
 
         Returns:
             The RunReport (also saved as ``run_dir/report.json``). A linear run
@@ -392,12 +415,30 @@ class Replayer:
             report.save(run_dir)
             return report
 
+        durable_run = None
+        if self.durable:
+            from openadapt_flow.runtime.durable import DurableRun
+
+            durable_run = DurableRun(
+                run_dir,
+                workflow_name=workflow.name,
+                bundle_dir=bundle_dir,
+                params=params,
+                save_healed_to=save_healed_to,
+            )
+        if resume_from:
+            from openadapt_flow.runtime.durable import resumed_step_results
+
+            report.results.extend(
+                resumed_step_results(run_dir, workflow, resume_from)
+            )
+            if durable_run is not None:
+                durable_run.store.clear_pending()
+
         if workflow.program is not None:
-            # Workflow-program IR, Phase 2: interpret the STATE MACHINE. The
-            # interpreter appends StepResults (and accounts each) exactly as the
-            # linear loop does, but walks the graph -- loops / branches /
-            # subflows / exception paths -- instead of a straight list. It sets
-            # report.success / terminal_outcome from the terminal it ends on.
+            # Workflow-program IR, Phase 2: interpret the STATE MACHINE (loops /
+            # branches / subflows / exception paths). Durable checkpointing of
+            # the graph path is future work; state_id is carried for it.
             self._interpret_program(
                 workflow,
                 params=params,
@@ -409,6 +450,10 @@ class Replayer:
             )
         else:
             for step_index, step in enumerate(workflow.steps):
+                # Resume: never re-execute an already-verified step (no
+                # re-performed confirmed writes); its result was pre-loaded.
+                if resume_from and step_index < resume_from:
+                    continue
                 result = self._run_step(
                     step,
                     workflow=workflow,
@@ -419,6 +464,10 @@ class Replayer:
                     new_crops=new_crops,
                 )
                 report.results.append(result)
+                if durable_run is not None:
+                    # Tier-3: verified step -> checkpoint; halt -> pending
+                    # escalation (resumable from the last checkpoint).
+                    durable_run.record(step_index, step, result, params)
                 self._account_result(report, result)
                 if not result.ok:
                     break

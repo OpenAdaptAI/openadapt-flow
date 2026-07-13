@@ -1,6 +1,136 @@
 # CHANGELOG
 
 
+## v0.6.0 (2026-07-13)
+
+### Features
+
+- Silent-wrong-action-rate benchmark (screen-verify vs effect-verify on MockMed faults)
+  ([#67](https://github.com/OpenAdaptAI/openadapt-flow/pull/67),
+  [`81f757d`](https://github.com/OpenAdaptAI/openadapt-flow/commit/81f757d048deee24d3b21ccff0fb2814b16c1310))
+
+* feat: EffectVerifier — independent effect verification against system-of-record (OpenEMR FHIR +
+  second substrate)
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: silent-wrong-action-rate benchmark (screen-verify vs effect-verify on MockMed faults)
+
+Turn the #63 transactional fault-class matrix (tests/test_effect_fault_matrix.py) into a measured,
+  publishable metric: the silent-wrong-action rate instrument
+  (docs/validation/SILENT_WRONG_ACTION_RATE.md) pointed at our OWN runtime. No competitor runs, no
+  paid API, no model calls, localhost only.
+
+For each MockMed fault scenario (mockmed.fault_server) it records three independent judgments per
+  run: ground truth off the system-of-record store (before vs after), the SCREEN oracle (app.js
+  saved-banner rule applied to the real server response), and the EFFECT oracle (#63
+  RestRecordVerifier's consequential-save contract against GET /api/db). Numbers are REAL — every
+  run drives the fault server and reads back the store.
+
+Measured (n=10/scenario, 90 runs): screen-verify silent-wrong-action rate 55.6% (undetected-wrong
+  83.3%), effect-verify 0.0% (0.0%); false-abort screen 33.3% vs effect 0.0% (effect also rescues
+  the timeout false-abort).
+
+- openadapt_flow/benchmark/silent_wrong_action.py: benchmark + CLI (python -m
+  openadapt_flow.benchmark.silent_wrong_action), results.json, SILENT_WRONG_ACTION.md, chart via
+  chart_fonts (repo convention). - tests/test_silent_wrong_action_benchmark.py: CI guard for the
+  qualitative claim (screen silent rate > 0; effect drives it to 0). -
+  benchmark/silent_wrong_action/: committed real artifacts.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Wire EffectVerifier into the live replay path (Step.effects + halt/compensate on non-CONFIRMED)
+  ([#66](https://github.com/OpenAdaptAI/openadapt-flow/pull/66),
+  [`e975ace`](https://github.com/OpenAdaptAI/openadapt-flow/commit/e975ace853de42f5afb44254cbcbdc6c96adc928))
+
+* feat: EffectVerifier — independent effect verification against system-of-record (OpenEMR FHIR +
+  second substrate)
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: wire EffectVerifier into the live replay path (Step.effects + halt/compensate on
+  non-CONFIRMED)
+
+Real runs are now protected by independent system-of-record verification, not just the screen
+  oracle. Closes the wiring gap between the merged EffectVerifier library (PR #63) and the Replayer.
+
+- ir.Step gains `effects: list[Effect]` (default empty; RFC WORKFLOW_PROGRAM_IR.md 2.2). Threaded
+  through bundle save/load round-trip; additive and back-compatible (bundles with no effects replay
+  unchanged). The Effect type is imported at the BOTTOM of ir.py to avoid a circular import through
+  runtime's package init; Step/Workflow are model_rebuilt. - Replayer gains `effect_verifier` /
+  `effect_compensator` (OFF by default, mirroring state_verifier/grounder/identity_vlm). It
+  snapshots the real system of record BEFORE a step's action and, after the screen postconditions
+  pass, verifies each declared Effect against the record. A non-CONFIRMED verdict (REFUTED /
+  INDETERMINATE) HALTS; an irreversible effect first runs reconcile_or_escalate (RECONCILED
+  continues, ESCALATE halts). Zero model calls -- est_model_cost_usd untouched, the $0 guarantee. -
+  Fail-safe: a step that declares effects with NO verifier configured is a deployment error and
+  HALTS before acting -- an unverifiable consequential write is never silently accepted. -
+  StepResult carries effect_verified / effect_results for the audit trail. - docs/LIMITS.md "5 of 7
+  silent" updated: the gap is now closable in the live path, with the honest caveat that protection
+  requires effects declared on the step AND a verifier configured. - tests/test_replayer_effects.py
+  drives the REAL Replayer against the live MockMed fault_server via RestRecordVerifier: REFUTED
+  halts despite a green screen; CONFIRMED proceeds; duplicate irreversible reconciles (and halts
+  without a compensator); effects-without-verifier halts; a no-effects bundle replays unchanged.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.5.0 (2026-07-13)
 
 ### Continuous Integration

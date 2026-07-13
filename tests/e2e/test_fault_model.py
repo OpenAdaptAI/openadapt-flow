@@ -185,7 +185,11 @@ def _replay_fault(
     try:
         page.goto(f"{base_url}{query}")
         backend = PlaywrightBackend(page)
-        return Replayer(backend).run(
+        # Floor: the fault-model suite characterizes runtime behavior under
+        # API/persistence faults; pin the visual resolution path so outcomes
+        # isolate the fault, not the rung (structural default is covered by
+        # tests/e2e/test_structural_action.py).
+        return Replayer(backend, use_structural=False).run(
             Workflow.load(bundle_dir),
             params=dict(PARAMS),
             bundle_dir=Path(bundle_dir),

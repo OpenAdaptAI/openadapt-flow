@@ -41,6 +41,8 @@ from typing import Optional
 
 import requests
 
+from openadapt_flow.ir import StructuralHandle, StructuralLocator
+
 DEFAULT_SERVER_URL = "http://localhost:5001"
 
 # Screenshot retry defaults (mirrors WAADirect in openadapt-evals).
@@ -354,6 +356,184 @@ class WindowsBackend:
                 if isinstance(val, str) and val:
                     return val
         return None
+
+    # -- structural action (openadapt_flow.backend.StructuralActionBackend) --
+
+    def _read_structured_json(self, snippet: str) -> object:
+        """Run ``snippet`` on the VM and decode its sentinel-wrapped JSON.
+
+        The snippet must ``print`` its result as
+        ``<<OAFLOW_STRUCTURED>>` + json.dumps(value) + `<<END_OAFLOW_STRUCTURED>>``.
+        Returns the decoded value (which may itself be None), or None when the
+        server echoes nothing, the markers are absent, or decoding fails --
+        callers then fall back to the visual ladder.
+        """
+        body = self._execute_read(snippet)
+        if not body:
+            return None
+        import json as _json
+
+        start = body.find("<<OAFLOW_STRUCTURED>>")
+        end = body.find("<<END_OAFLOW_STRUCTURED>>")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        payload = body[start + len("<<OAFLOW_STRUCTURED>>") : end]
+        try:
+            return _json.loads(payload)
+        except Exception:
+            return None
+
+    def structural_locator_at(
+        self, x: int, y: int
+    ) -> Optional[StructuralLocator]:
+        """Return a stable UIA locator for the control under (x, y).
+
+        Runs a ``uiautomation.ControlFromPoint`` snippet on the VM: it climbs to
+        the nearest ACTIONABLE control (button / hyperlink / menu-item / ...) and
+        reads its ``AutomationId``, ``ControlType`` (mapped to an ARIA-style
+        role) and ``Name``. Returns None when there is no actionable control,
+        neither an AutomationId nor a usable role+name exists, UIA is
+        unavailable, or the WAA server does not echo output (never raises) --
+        the step then relies on the visual anchor.
+        """
+        snippet = (
+            "import json\n"
+            "def _oaflow_locator_at(px, py):\n"
+            "    try:\n"
+            "        import uiautomation as auto\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    try:\n"
+            "        el = auto.ControlFromPoint(px, py)\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    if el is None:\n"
+            "        return None\n"
+            "    actionable = None\n"
+            "    node = el\n"
+            "    actionable_types = ('ButtonControl', 'HyperlinkControl',\n"
+            "        'MenuItemControl', 'TabItemControl', 'ListItemControl',\n"
+            "        'CheckBoxControl', 'RadioButtonControl',\n"
+            "        'SplitButtonControl', 'EditControl')\n"
+            "    for _ in range(6):\n"
+            "        try:\n"
+            "            ct = node.ControlTypeName\n"
+            "        except Exception:\n"
+            "            ct = ''\n"
+            "        if ct in actionable_types:\n"
+            "            actionable = node\n"
+            "            break\n"
+            "        p = getattr(node, 'GetParentControl', None)\n"
+            "        nxt = p() if p else None\n"
+            "        if nxt is None:\n"
+            "            break\n"
+            "        node = nxt\n"
+            "    if actionable is None:\n"
+            "        actionable = el\n"
+            "    try:\n"
+            "        ct = actionable.ControlTypeName\n"
+            "    except Exception:\n"
+            "        ct = ''\n"
+            "    role_map = {'ButtonControl': 'button',\n"
+            "        'HyperlinkControl': 'link', 'MenuItemControl': 'menuitem',\n"
+            "        'TabItemControl': 'tab', 'ListItemControl': 'listitem',\n"
+            "        'CheckBoxControl': 'checkbox',\n"
+            "        'RadioButtonControl': 'radio', 'EditControl': 'textbox',\n"
+            "        'SplitButtonControl': 'button'}\n"
+            "    role = role_map.get(ct)\n"
+            "    aid = str(getattr(actionable, 'AutomationId', '') or '')\n"
+            "    name = ' '.join(str(getattr(actionable, 'Name', '') or ''"
+            ").split())\n"
+            "    aid = aid or None\n"
+            "    name = name or None\n"
+            "    if not aid and not (role and name):\n"
+            "        return None\n"
+            "    return {'automation_id': aid, 'role': role, 'name': name}\n"
+            "print('<<OAFLOW_STRUCTURED>>' + json.dumps("
+            f"_oaflow_locator_at({int(x)}, {int(y)})) "
+            "+ '<<END_OAFLOW_STRUCTURED>>')\n"
+        )
+        value = self._read_structured_json(snippet)
+        if not isinstance(value, dict):
+            return None
+        return StructuralLocator(
+            automation_id=value.get("automation_id"),
+            role=value.get("role"),
+            name=value.get("name"),
+        )
+
+    def locate_structural(
+        self, locator: StructuralLocator
+    ) -> Optional[StructuralHandle]:
+        """Locate ``locator``'s control via UIA; return its center point.
+
+        Searches the UIA tree from the root by ``AutomationId`` first, else by
+        the mapped ``ControlType`` + ``Name``, and returns the matched control's
+        ``BoundingRectangle`` center in :meth:`click` coordinate space. Returns
+        None on no/ambiguous match, an empty rectangle, unavailable UIA, or no
+        echoed output (never raises) -- the resolver then uses the visual ladder.
+        """
+        aid = locator.automation_id or ""
+        role = locator.role or ""
+        name = locator.name or ""
+        if not aid and not (role and name):
+            return None
+        snippet = (
+            "import json\n"
+            "def _oaflow_locate(aid, role, name):\n"
+            "    try:\n"
+            "        import uiautomation as auto\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    try:\n"
+            "        root = auto.GetRootControl()\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    ctrl_map = {'button': 'ButtonControl',\n"
+            "        'link': 'HyperlinkControl', 'menuitem': 'MenuItemControl',\n"
+            "        'tab': 'TabItemControl', 'listitem': 'ListItemControl',\n"
+            "        'checkbox': 'CheckBoxControl',\n"
+            "        'radio': 'RadioButtonControl', 'textbox': 'EditControl'}\n"
+            "    el = None\n"
+            "    if aid:\n"
+            "        try:\n"
+            "            cand = auto.Control(searchFromControl=root,\n"
+            "                AutomationId=aid)\n"
+            "            if cand.Exists(0, 0):\n"
+            "                el = cand\n"
+            "        except Exception:\n"
+            "            el = None\n"
+            "    if el is None and role and name:\n"
+            "        cls = getattr(auto, ctrl_map.get(role, ''), None)\n"
+            "        if cls is not None:\n"
+            "            try:\n"
+            "                cand = cls(searchFromControl=root, Name=name)\n"
+            "                if cand.Exists(0, 0):\n"
+            "                    el = cand\n"
+            "            except Exception:\n"
+            "                el = None\n"
+            "    if el is None:\n"
+            "        return None\n"
+            "    try:\n"
+            "        r = el.BoundingRectangle\n"
+            "    except Exception:\n"
+            "        return None\n"
+            "    if r is None or r.right <= r.left or r.bottom <= r.top:\n"
+            "        return None\n"
+            "    cx = int((r.left + r.right) / 2)\n"
+            "    cy = int((r.top + r.bottom) / 2)\n"
+            "    return [cx, cy]\n"
+            "print('<<OAFLOW_STRUCTURED>>' + json.dumps(_oaflow_locate("
+            f"{aid!r}, {role!r}, {name!r})) + '<<END_OAFLOW_STRUCTURED>>')\n"
+        )
+        value = self._read_structured_json(snippet)
+        if (
+            not isinstance(value, list)
+            or len(value) != 2
+            or not all(isinstance(v, (int, float)) for v in value)
+        ):
+            return None
+        return StructuralHandle(point=(int(value[0]), int(value[1])))
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at pixel coordinates via pyautogui."""

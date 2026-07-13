@@ -47,7 +47,14 @@ from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 from PIL import Image
 
-from openadapt_flow.ir import Anchor, ActionKind, Landmark, Step
+from openadapt_flow.ir import (
+    Anchor,
+    ActionKind,
+    Landmark,
+    Step,
+    StructuralHandle,
+    StructuralLocator,
+)
 from openadapt_flow.runtime.resolver import (
     RUNG_ORDER,
     is_below_ocr,
@@ -120,6 +127,13 @@ class FakeBackend:
     @property
     def viewport(self):
         return self._viewport
+
+    def locate_structural(self, locator):
+        # Only invoked by _resolve_step when anchor.structural is set (the
+        # structural-rung gate case); returns a deterministic in-viewport point.
+        vw, vh = self._viewport
+        return StructuralHandle(point=(min(110, vw - 1), min(105, vh - 1)),
+                                confidence=1.0)
 
 
 def _png(size) -> bytes:
@@ -318,7 +332,11 @@ def _gate_case(draw):
     )
     vision = FakeVision()
     grounder = None
-    if rung == "template":
+    if rung == "structural":
+        # Structural is the deterministic TOP rung: a recorded locator +
+        # backend.locate_structural resolve it (FakeBackend supplies the point).
+        anchor.structural = StructuralLocator(selector="#x")
+    elif rung == "template":
         vision.template_results = [m]
     elif rung == "template_global":
         vision.template_results = [None, m]

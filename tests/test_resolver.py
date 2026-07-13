@@ -337,9 +337,15 @@ def test_all_rungs_fail_returns_none(screen, anchor):
 
 
 def test_ladder_order_is_frozen():
+    # ``structural`` (DOM/UIA) is the deterministic TOP rung, above the visual
+    # rungs; the visual floor keeps its historical order underneath.
     assert RUNG_ORDER == (
-        "template", "template_global", "ocr", "geometry", "grounder"
+        "structural", "template", "template_global", "ocr", "geometry",
+        "grounder",
     )
+    # Structural is the STRONGEST evidence: it must sit above ocr so the
+    # irreversible-risk gate (is_below_ocr) lets an irreversible step act on it.
+    assert not is_below_ocr("structural")
     assert not is_below_ocr("template")
     assert not is_below_ocr("template_global")
     assert not is_below_ocr("ocr")

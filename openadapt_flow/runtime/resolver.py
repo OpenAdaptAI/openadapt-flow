@@ -1,8 +1,18 @@
 """Resolution ladder: locate a step's target on the live screen.
 
-The ladder walks progressively weaker (but more drift-tolerant) evidence:
+The ladder walks from the STRONGEST, most drift-tolerant evidence down to
+progressively weaker (but more widely available) evidence. The full capability
+hierarchy is API -> tool/MCP -> DOM/UIA -> geometry -> OCR -> template -> VLM
+-> human; the API and tool/MCP rungs are future placeholders, so the rungs
+implemented here are:
 
-1. ``template``        — template match inside ``anchor.region`` padded by
+0. ``structural``       — DETERMINISTIC. Re-find the recorded target as a
+   DOM/UIA *element* via ``backend.locate_structural`` (a stable selector /
+   role+name / AutomationId the compiler captured) and act on its center. Tried
+   FIRST, and only when the backend exposes the capability AND the anchor
+   carries a structural locator. Pixel-only substrates (RDP/Citrix/canvas) and
+   failed locates fall through to the visual rungs UNCHANGED.
+1. ``template``         — template match inside ``anchor.region`` padded by
    ``anchor.search_pad`` (clamped to the viewport).
 2. ``template_global``  — template match over the full frame.
 3. ``ocr``              — fuzzy text match on ``anchor.ocr_text``.
@@ -10,9 +20,15 @@ The ladder walks progressively weaker (but more drift-tolerant) evidence:
    relation/distance to estimate the target point.
 5. ``grounder``         — optional injected model-backed grounding.
 
+Rungs 1-5 are the VISUAL FALLBACK floor: the runtime remains able to operate a
+pure-pixel surface where no structure exists. Structural resolution is
+ADDITIVE — it is preferred where present, never a replacement.
+
 The ``vision`` argument is a namespace-like object (the real
 ``openadapt_flow.vision`` module or a test fake) exposing ``find_template``
-and ``find_text``.
+and ``find_text``. The ``structural`` argument is an optional object exposing
+``locate_structural`` (a Backend implementing
+:class:`openadapt_flow.backend.StructuralActionBackend`).
 """
 
 from __future__ import annotations
@@ -25,6 +41,7 @@ from typing import Any, Optional
 from openadapt_flow.ir import Anchor, Point, Region, Resolution, Rung
 
 RUNG_ORDER: tuple[Rung, ...] = (
+    "structural",
     "template",
     "template_global",
     "ocr",
@@ -227,11 +244,13 @@ def resolve(
     *,
     template_png: Optional[bytes] = None,
     viewport: Optional[tuple[int, int]] = None,
+    structural: Optional[Any] = None,
 ) -> Optional[tuple[Resolution, Region]]:
     """Walk the resolution ladder for ``anchor`` against a live frame.
 
     Args:
-        anchor: The step's anchor (template path/region, ocr text, landmarks).
+        anchor: The step's anchor (structural locator, template path/region,
+            ocr text, landmarks).
         screen_png: Current frame as PNG bytes.
         vision: Namespace-like object exposing ``find_template(screen, tmpl,
             *, search_region=None)`` and ``find_text(screen, text)``, each
@@ -243,6 +262,12 @@ def resolve(
             None the two template rungs are skipped.
         viewport: (width, height) of the frame; parsed from ``screen_png``'s
             PNG header when omitted.
+        structural: Optional backend exposing ``locate_structural(locator)``
+            (:class:`openadapt_flow.backend.StructuralActionBackend`). When
+            provided AND ``anchor.structural`` is set, the DETERMINISTIC
+            structural rung runs FIRST; a successful locate short-circuits the
+            visual rungs. None (pixel-only substrate) or a failed locate falls
+            through to the visual ladder unchanged.
 
     Returns:
         ``(resolution, matched_region)`` on success, where ``matched_region``
@@ -256,6 +281,36 @@ def resolve(
 
     def elapsed_ms() -> float:
         return (time.monotonic() - t0) * 1000.0
+
+    # Rung 0: structural (DOM / UIA) — the strongest, deterministic evidence.
+    # Tried FIRST, and only when a structural-capable backend is injected AND
+    # the anchor carries a recorded structural locator. On a pixel-only
+    # substrate (RDP/Citrix/canvas), a backend without the capability, or a
+    # failed/ambiguous locate, ``locate_structural`` yields None and we fall
+    # through to the visual ladder UNCHANGED. The resolved point flows through
+    # the SAME click path as any visual rung, so the identity and risk gates
+    # still fire on it; structural sits ABOVE ``ocr`` in RUNG_ORDER, so an
+    # irreversible step MAY act on it (it is the strongest evidence, not the
+    # weakest). Future API and tool/MCP rungs sit above this one.
+    if structural is not None and anchor.structural is not None:
+        locate = getattr(structural, "locate_structural", None)
+        if locate is not None:
+            try:
+                handle = locate(anchor.structural)
+            except Exception:
+                handle = None
+            if handle is not None:
+                point = (int(handle.point[0]), int(handle.point[1]))
+                region = _clamp_region_of_size(
+                    point, (anchor.region[2], anchor.region[3]), viewport
+                )
+                resolution = Resolution(
+                    rung="structural",
+                    point=point,
+                    confidence=float(getattr(handle, "confidence", 1.0)),
+                    elapsed_ms=elapsed_ms(),
+                )
+                return resolution, region
 
     # Rung 1: template within the padded local search region.
     if template_png is not None:

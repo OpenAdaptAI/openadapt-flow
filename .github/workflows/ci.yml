@@ -101,8 +101,7 @@ jobs:
       - name: Test (fast unit suite)
         run: |
           mkdir -p runs
-          pytest -q --ignore=tests/e2e --basetemp=runs/ci \
-            --cov=openadapt_flow --cov-report=term-missing:skip-covered
+          pytest -q --ignore=tests/e2e --basetemp=runs/ci
 
       - name: Upload run artifacts
         if: always()
@@ -160,8 +159,7 @@ jobs:
       - name: Test (full suite incl. e2e)
         run: |
           mkdir -p runs
-          pytest -q --basetemp=runs/ci \
-            --cov=openadapt_flow --cov-report=term-missing:skip-covered
+          pytest -q --basetemp=runs/ci
 
       - name: Upload run artifacts
         if: always()

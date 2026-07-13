@@ -1,6 +1,106 @@
 # CHANGELOG
 
 
+## v0.5.0 (2026-07-13)
+
+### Continuous Integration
+
+- Fix release double-build; add workflow_dispatch manual publish
+  ([#59](https://github.com/OpenAdaptAI/openadapt-flow/pull/59),
+  [`0f377e1`](https://github.com/OpenAdaptAI/openadapt-flow/commit/0f377e165ccb1374592d6ad98bec62fd9df8fd0e))
+
+The v0.4.0 auto-release tagged and bumped the version but FAILED to publish: the workflow ran a
+  separate 'uv build' step AND pyproject's semantic_release build_command runs 'uv build' too, so
+  the second build hit PermissionError overwriting dist/openadapt_flow-0.4.0.tar.gz.
+
+Fix: the auto-release job no longer has a separate build step — Semantic
+
+Release's build_command is the single source of dist/, which the publish step consumes (this matches
+  how the other repos avoid the collision). Added a workflow_dispatch 'manual-publish' job that
+  checks out a given ref/tag, builds, and publishes to PyPI (OIDC) — used to publish the
+  already-tagged v0.4.0 without deleting the tag, and a permanent manual/recovery path.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Documentation
+
+- Rfc — workflow-program IR (control flow, induction, capability-adaptive compilation)
+  ([#61](https://github.com/OpenAdaptAI/openadapt-flow/pull/61),
+  [`16a3621`](https://github.com/OpenAdaptAI/openadapt-flow/commit/16a36218b441d8a5936a37f3516d5abd97a42d00))
+
+Design-only RFC for evolving the compiled artifact from a linear action list (ir.Workflow =
+  list[Step]) into a parameterized workflow program: a state machine with typed params, guarded
+  transitions, loops over worklists, branches, subflows, wait-until predicates, exception/approval
+  nodes, and per-state risk + compensation. Today's linear workflow is the degenerate case (backward
+  compatible).
+
+Grounds every claim in the current code (ir.py, compiler/compile.py, backend.py, emit/*, DESIGN.md,
+  docs/LIMITS.md) and the PBD lineage (Ringer straight-line replay -> Rousillon/Helena generalizer,
+  WebRobot loopy-program synthesis, PROLEX single-demo recovery, Skill-DisCo parameterized FSM
+  subgraphs, AWM/ASI skill induction, Socrates-style disambiguation). Covers: motivation (demo =
+  evidence not spec), the target IR/DSL with a worked add-patient-note example, the induction loop
+  (bootstrap -> candidates -> interactive disambiguation -> multi-trace -> validate/quarantine),
+  capability-adaptive compilation (one contract, many backend impls), a tiered runtime
+  (deterministic -> bounded one-transition model recovery -> durable checkpoint/resume, never
+  free-run the remainder), a phased reversible migration, and an honest scope split (buildable now
+  vs. needs a real customer workflow).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Silent-wrong-action-rate instrument (anonymized, launch-ready)
+  ([#60](https://github.com/OpenAdaptAI/openadapt-flow/pull/60),
+  [`874ece3`](https://github.com/OpenAdaptAI/openadapt-flow/commit/874ece377d3374f4c617160832f64885d034bf21))
+
+Add docs/validation/SILENT_WRONG_ACTION_RATE.md: an anonymized category measurement of the
+  silent-wrong-action rate under UI drift for the self-healing / deterministic-replay automation
+  class. Same methodology, ground truth, and "our own engine first / glass house / instrument not
+  indictment / pre-committed interpretation" framing as our internal study, with our own honest
+  pre/post-fix numbers, but with all other tools reduced to architecture classes (Tool A/B/C) — no
+  product, vendor, version, or model names, and no raw tool-identifying evidence.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Effectverifier — independent effect verification against system-of-record (OpenEMR FHIR + second
+  substrate) ([#63](https://github.com/OpenAdaptAI/openadapt-flow/pull/63),
+  [`2d85f1b`](https://github.com/OpenAdaptAI/openadapt-flow/commit/2d85f1b06a02e366e9f3bfb2af626c4d9e75de5d))
+
+Screen/vision postconditions silently mishandle 5 of 7 transactional fault classes (fault-model
+  study, docs/LIMITS.md). This adds the concrete runtime for the RFC's typed Effect
+  (docs/design/WORKFLOW_PROGRAM_IR.md, PR #61): verify REAL business effects against a system of
+  record, not the screen.
+
+- EffectVerifier protocol (capture_pre_state / verify) with typed Effect (record_written /
+  field_equals) and a three-valued, fail-safe verdict: CONFIRMED / REFUTED / INDETERMINATE→HALT
+  (mirrors the identity gate's refuse-rather-than-guess posture; an unreachable SoR never reads as
+  success). - Three structurally-different verifier substrates, proving substrate- agnosticism:
+  FhirEffectVerifier (OpenEMR FHIR R4, primary — real documented
+
+contract; CI runs a byte-faithful FHIR Bundle fake, live path gated behind OPENEMR_FHIR_BASE_URL),
+  RestRecordVerifier (MockMed fault_server /api/db, live in CI), DocumentHashVerifier (filesystem,
+  SHA-256, non-HTTP). - Idempotency / at-most-once: an idempotency key plumbed through
+  record_written verifies exactly one record per key. - Compensation: reconcile_or_escalate +
+  RestCompensator — a detected duplicate on an irreversible effect is compensated (delete extras)
+  and re-verified, or durably escalated; missing/partial/collateral/indeterminate always escalate. -
+  THE PROOF (tests/test_effect_fault_matrix.py): at the real persistence boundary, screen-verify
+  PASSES but effect-verify CATCHES each of the 5 silent classes — duplicate, optimistic-UI-reject,
+  partial save, stale overwrite, double-click. - Additive DELETE /api/encounter/<id> on fault_server
+  for compensation (never used by any ?fault= path; study behavior unchanged).
+
+No Anthropic/model calls on any path (runtime hot path stays $0).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.4.0 (2026-07-13)
 
 ### Bug Fixes

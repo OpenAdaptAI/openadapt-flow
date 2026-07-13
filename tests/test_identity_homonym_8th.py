@@ -50,14 +50,18 @@ _ROW_K = 2  # the patient row under test (two filler rows precede it)
 
 
 def _filler(i: int) -> Row:
-    return Row(f"Filler{i}, Pat", "1971-02-0%d" % (i % 9 + 1),
-               f"ZZ{1000 + i}", "M", "Active")
+    return Row(
+        f"Filler{i}, Pat", "1971-02-0%d" % (i % 9 + 1), f"ZZ{1000 + i}", "M", "Active"
+    )
 
 
 def _render(mrn: str):
-    rows = [_filler(0), _filler(1),
-            Row("Smith, John", "01/15/1980", mrn, "M", "Active"),
-            _filler(3)]
+    rows = [
+        _filler(0),
+        _filler(1),
+        Row("Smith, John", "01/15/1980", mrn, "M", "Active"),
+        _filler(3),
+    ]
     table = DenseTable(rows=rows, pairs=[], n_rows=len(rows))
     return render_frame(table, _COND, top_offset_px=0)
 
@@ -75,7 +79,8 @@ def _processed_context(frame, k: int) -> str:
     band = I.band_region((open_pt[0], open_pt[1]), 24, frame.viewport)
     exclude = (open_pt[0] - 30, open_pt[1] - 12, 60, 24)
     lines = [
-        ln for ln in vision.ocr(frame.png, region=band)
+        ln
+        for ln in vision.ocr(frame.png, region=band)
         if ln.text.strip()
         and not I.regions_intersect(ln.region, exclude)
         and not I.is_volatile_line(ln.text, reference_date=date.today())
@@ -97,7 +102,7 @@ class _PixelOnlyBackend:
 
 
 def _verdict_on_wrong_patient():
-    rec = _render("AC50061")   # recorded target (digit zeros)
+    rec = _render("AC50061")  # recorded target (digit zeros)
     live = _render("AC5OO61")  # live SIBLING row (letter O) -- different patient
 
     rec_band = _band_ocr(rec, _ROW_K)
@@ -113,15 +118,22 @@ def _verdict_on_wrong_patient():
         context_text=context_text,
         identifier_crop=None,  # pixel-only: no crop -> pixel & vlm tiers abstain
     )
-    step = Step(id="open_patient", intent="open patient chart",
-                action="click", anchor=anchor, risk="irreversible")
+    step = Step(
+        id="open_patient",
+        intent="open patient chart",
+        action="click",
+        anchor=anchor,
+        risk="irreversible",
+    )
     wf = Workflow(name="repro_8th", params={}, steps=[step])
-    res = Resolution(rung="ocr", point=(live_open_pt[0], live_open_pt[1]),
-                     confidence=0.9, elapsed_ms=1.0)
-    replayer = Replayer(
-        _PixelOnlyBackend(rec.viewport, live.png), vision=vision)
-    check = replayer._verify_identity(
-        step, res, live.png, {}, wf, bundle_dir=None)
+    res = Resolution(
+        rung="ocr",
+        point=(live_open_pt[0], live_open_pt[1]),
+        confidence=0.9,
+        elapsed_ms=1.0,
+    )
+    replayer = Replayer(_PixelOnlyBackend(rec.viewport, live.png), vision=vision)
+    check = replayer._verify_identity(step, res, live.png, {}, wf, bundle_dir=None)
     return rec_band, live_band, context_text, check
 
 
@@ -142,7 +154,7 @@ def test_wrong_patient_does_not_verify_via_real_replayer_ocr_tier():
     # the discriminative name really is in the recorded band (so the pre-fix
     # name-carry path was exercised)
     assert "smith" in I.squash(context_text)
-    assert check.status != "verified"          # the safety invariant
-    assert check.status == "abstain"           # the honest verdict (not a
+    assert check.status != "verified"  # the safety invariant
+    assert check.status == "abstain"  # the honest verdict (not a
     #                                            false "mismatch/different")
     assert check.mode == "context"

@@ -15,7 +15,12 @@ import pytest
 
 from openadapt_flow.backend import Backend, IdentityBackend
 from openadapt_flow.ir import (
-    ActionKind, Anchor, IdentityCheck, Resolution, Step, Workflow,
+    ActionKind,
+    Anchor,
+    IdentityCheck,
+    Resolution,
+    Step,
+    Workflow,
 )
 from openadapt_flow.runtime.identity import (
     normalize_structured,
@@ -29,9 +34,11 @@ from openadapt_flow.runtime.identity import (
 # normalize_structured: O/0 stay DISTINCT (that is the whole point)
 # ---------------------------------------------------------------------------
 
+
 def test_normalize_collapses_whitespace_and_casefolds() -> None:
     assert normalize_structured("  MG4408   Okafor,  Philip ") == (
-        "mg4408 okafor, philip")
+        "mg4408 okafor, philip"
+    )
 
 
 def test_normalize_does_not_fold_o_zero_or_l_one() -> None:
@@ -45,16 +52,22 @@ def test_normalize_does_not_fold_o_zero_or_l_one() -> None:
 # structured_identity_match / the exact review probes
 # ---------------------------------------------------------------------------
 
+
 def test_same_row_reread_matches() -> None:
     rec = "MG4408 Okafor, Philip 1966-01-17 M Active"
-    assert structured_identity_match(rec, "  mg4408 okafor, philip 1966-01-17 m active ")
+    assert structured_identity_match(
+        rec, "  mg4408 okafor, philip 1966-01-17 m active "
+    )
 
 
-@pytest.mark.parametrize("target,sibling", [
-    ("MG4408", "MG44O8"),      # digit 0 vs letter O, digit-flanked
-    ("AC50061", "AC5OO61"),    # the review's second probe
-    ("PL1234", "PLl234"),      # digit 1 vs letter l
-])
+@pytest.mark.parametrize(
+    "target,sibling",
+    [
+        ("MG4408", "MG44O8"),  # digit 0 vs letter O, digit-flanked
+        ("AC50061", "AC5OO61"),  # the review's second probe
+        ("PL1234", "PLl234"),  # digit 1 vs letter l
+    ],
+)
 def test_digit_flanked_siblings_mismatch(target, sibling) -> None:
     # Same name+DOB, MRN one glyph apart: OCR collapses these to one string,
     # the DOM does not -> structured compare MUST mismatch.
@@ -67,6 +80,7 @@ def test_digit_flanked_siblings_mismatch(target, sibling) -> None:
 # verify_structured_identity: verdicts + availability
 # ---------------------------------------------------------------------------
 
+
 def test_verify_structured_verified_and_mismatch() -> None:
     assert verify_structured_identity("MG4408 X", "MG4408 X").status == "verified"
     v = verify_structured_identity("MG4408 X", "MG44O8 X")
@@ -74,12 +88,15 @@ def test_verify_structured_verified_and_mismatch() -> None:
     assert v.mode == "structured"
 
 
-@pytest.mark.parametrize("rec,live", [
-    (None, "MG4408"),
-    ("MG4408", None),
-    (None, None),
-    ("", "MG4408"),
-])
+@pytest.mark.parametrize(
+    "rec,live",
+    [
+        (None, "MG4408"),
+        ("MG4408", None),
+        (None, None),
+        ("", "MG4408"),
+    ],
+)
 def test_verify_structured_unavailable_when_either_side_missing(rec, live) -> None:
     # Unavailable (None) => ladder falls through to the next tier.
     assert verify_structured_identity(rec, live) is None
@@ -88,6 +105,7 @@ def test_verify_structured_unavailable_when_either_side_missing(rec, live) -> No
 # ---------------------------------------------------------------------------
 # run_identity_ladder: first definitive verdict wins; mismatch is final
 # ---------------------------------------------------------------------------
+
 
 def _verified():
     return IdentityCheck(status="verified", mode="structured")
@@ -99,12 +117,15 @@ def _mismatch():
 
 def test_ladder_first_non_none_wins() -> None:
     called = []
+
     def t1():
         called.append("t1")
         return _verified()
+
     def t2():
         called.append("t2")
         return IdentityCheck(status="mismatch")
+
     out = run_identity_ladder([t1, t2])
     assert out.status == "verified"
     assert called == ["t1"]  # t2 never consulted
@@ -119,9 +140,11 @@ def test_ladder_ocr_never_overrides_structured_mismatch() -> None:
     # Structured tier says mismatch; an OCR tier that WOULD verify must never
     # run (higher tier's verdict is final).
     ocr_ran = []
+
     def ocr():
         ocr_ran.append(True)
         return IdentityCheck(status="verified")
+
     out = run_identity_ladder([_mismatch, ocr])
     assert out.status == "mismatch"
     assert not ocr_ran
@@ -135,12 +158,15 @@ def test_ladder_all_unavailable_is_unreadable() -> None:
 # Protocol conformance
 # ---------------------------------------------------------------------------
 
+
 def test_identity_backend_runtime_checkable() -> None:
     class HasIt:
         def structured_text_at(self, x, y):
             return None
+
     class Lacks:
         pass
+
     assert isinstance(HasIt(), IdentityBackend)
     assert not isinstance(Lacks(), IdentityBackend)
 
@@ -148,6 +174,7 @@ def test_identity_backend_runtime_checkable() -> None:
 # ---------------------------------------------------------------------------
 # WindowsBackend UIA structured text (fake WAA session)
 # ---------------------------------------------------------------------------
+
 
 class _Resp:
     def __init__(self, status_code=200, text="", json_data=None):
@@ -173,6 +200,7 @@ class _FakeSession:
 
 def _win_backend(resp):
     from openadapt_flow.backends.windows_backend import WindowsBackend
+
     return WindowsBackend(session=_FakeSession(resp), viewport=(800, 600))
 
 
@@ -191,7 +219,7 @@ def test_windows_structured_text_none_when_no_echo() -> None:
 
 
 def test_windows_structured_text_none_on_uia_null() -> None:
-    payload = '<<OAFLOW_STRUCTURED>>null<<END_OAFLOW_STRUCTURED>>'
+    payload = "<<OAFLOW_STRUCTURED>>null<<END_OAFLOW_STRUCTURED>>"
     be = _win_backend(_Resp(text=payload))
     assert be.structured_text_at(100, 200) is None
 
@@ -222,8 +250,9 @@ def test_playwright_structured_text_distinguishes_glyph_siblings() -> None:
 
     with sync.sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 800, "height": 400},
-                                device_scale_factor=1)
+        page = browser.new_page(
+            viewport={"width": 800, "height": 400}, device_scale_factor=1
+        )
         page.set_content(_TWO_ROW_HTML, wait_until="networkidle")
         be = PlaywrightBackend(page)
         boxes = {}
@@ -231,7 +260,8 @@ def test_playwright_structured_text_distinguishes_glyph_siblings() -> None:
             bb = page.eval_on_selector(
                 f"[data-row='{i}']",
                 "el => { const r = el.getBoundingClientRect();"
-                " return [r.x + r.width/2, r.y + r.height/2]; }")
+                " return [r.x + r.width/2, r.y + r.height/2]; }",
+            )
             boxes[i] = bb
         t0 = be.structured_text_at(int(boxes[0][0]), int(boxes[0][1]))
         t1 = be.structured_text_at(int(boxes[1][0]), int(boxes[1][1]))
@@ -280,6 +310,7 @@ class _FakeVision:
 
 class _PixelBackend:
     """Pure-pixel backend: no structured_text_at (OCR fallback only)."""
+
     def __init__(self):
         self._f = _png()
         self.actions = []
@@ -294,18 +325,16 @@ class _PixelBackend:
     def click(self, x, y, *, double=False):
         self.actions.append((x, y))
 
-    def type_text(self, text):
-        ...
+    def type_text(self, text): ...
 
-    def press(self, key):
-        ...
+    def press(self, key): ...
 
-    def scroll(self, dx, dy):
-        ...
+    def scroll(self, dx, dy): ...
 
 
 class _StructuredBackend(_PixelBackend):
     """Backend that exposes structured_text_at (DOM/a11y)."""
+
     def __init__(self, text):
         super().__init__()
         self._text = text
@@ -318,18 +347,22 @@ class _StructuredBackend(_PixelBackend):
 
 def _step(structured_identity=None, context_text=None):
     return Step(
-        id="s1", intent="click row", action=ActionKind.CLICK,
+        id="s1",
+        intent="click row",
+        action=ActionKind.CLICK,
         anchor=Anchor(
-            template="templates/x.png", region=(100, 100, 50, 20),
-            click_point=(110, 105), ocr_text="Open",
-            context_text=context_text, structured_identity=structured_identity,
+            template="templates/x.png",
+            region=(100, 100, 50, 20),
+            click_point=(110, 105),
+            ocr_text="Open",
+            context_text=context_text,
+            structured_identity=structured_identity,
         ),
     )
 
 
 def _resolution():
-    return Resolution(rung="template", point=(110, 105), confidence=0.9,
-                      elapsed_ms=1.0)
+    return Resolution(rung="template", point=(110, 105), confidence=0.9, elapsed_ms=1.0)
 
 
 def test_replayer_structured_tier_verifies_and_skips_ocr() -> None:
@@ -339,7 +372,11 @@ def test_replayer_structured_tier_verifies_and_skips_ocr() -> None:
     rp = Replayer(backend, vision=vision, poll_interval_s=0.01)
     check = rp._verify_identity(
         _step(structured_identity=rec, context_text="ignored band text here"),
-        _resolution(), backend.screenshot(), {}, None)
+        _resolution(),
+        backend.screenshot(),
+        {},
+        None,
+    )
     assert check.status == "verified"
     assert check.mode == "structured"
     assert vision.ocr_calls == 0  # OCR tier never consulted
@@ -348,13 +385,17 @@ def test_replayer_structured_tier_verifies_and_skips_ocr() -> None:
 
 def test_replayer_structured_mismatch_halts_and_not_overridden() -> None:
     rec = "MG4408 Okafor, Philip 1966-01-17"
-    live = "MG44O8 Okafor, Philip 1966-01-17"   # sibling glyph-collapse
+    live = "MG44O8 Okafor, Philip 1966-01-17"  # sibling glyph-collapse
     backend = _StructuredBackend(live)
     vision = _FakeVision()
     rp = Replayer(backend, vision=vision, poll_interval_s=0.01)
     check = rp._verify_identity(
         _step(structured_identity=rec, context_text="band"),
-        _resolution(), backend.screenshot(), {}, None)
+        _resolution(),
+        backend.screenshot(),
+        {},
+        None,
+    )
     assert check.status == "mismatch"
     assert check.mode == "structured"
     assert vision.ocr_calls == 0  # OCR must NOT override a structured mismatch
@@ -368,11 +409,17 @@ def test_replayer_falls_back_to_ocr_when_structured_unavailable() -> None:
     vision = _FakeVision(ocr_lines=[])  # empty band -> unreadable
     rp = Replayer(backend, vision=vision, poll_interval_s=0.01)
     check = rp._verify_identity(
-        _step(structured_identity="MG4408 X 1966-01-17",
-              context_text="MG4408 X 1966-01-17"),
-        _resolution(), backend.screenshot(), {}, Workflow(name="wf"))
-    assert vision.ocr_calls > 0            # OCR tier WAS consulted
-    assert check.mode != "structured"      # verdict came from the OCR tier
+        _step(
+            structured_identity="MG4408 X 1966-01-17",
+            context_text="MG4408 X 1966-01-17",
+        ),
+        _resolution(),
+        backend.screenshot(),
+        {},
+        Workflow(name="wf"),
+    )
+    assert vision.ocr_calls > 0  # OCR tier WAS consulted
+    assert check.mode != "structured"  # verdict came from the OCR tier
 
 
 def test_replayer_pixel_backend_uses_ocr_tier_only() -> None:
@@ -381,9 +428,15 @@ def test_replayer_pixel_backend_uses_ocr_tier_only() -> None:
     vision = _FakeVision(ocr_lines=[])
     rp = Replayer(backend, vision=vision, poll_interval_s=0.01)
     check = rp._verify_identity(
-        _step(structured_identity="MG4408 X 1966-01-17",
-              context_text="MG4408 X 1966-01-17"),
-        _resolution(), backend.screenshot(), {}, Workflow(name="wf"))
+        _step(
+            structured_identity="MG4408 X 1966-01-17",
+            context_text="MG4408 X 1966-01-17",
+        ),
+        _resolution(),
+        backend.screenshot(),
+        {},
+        Workflow(name="wf"),
+    )
     assert vision.ocr_calls > 0
     assert check.mode != "structured"
 
@@ -414,15 +467,16 @@ class _RecStructuredBackend(_PixelBackend):
 
 
 def _events(rec_dir: _Path):
-    return [_json.loads(ln) for ln in
-            (rec_dir / "events.jsonl").read_text().splitlines()]
+    return [
+        _json.loads(ln) for ln in (rec_dir / "events.jsonl").read_text().splitlines()
+    ]
 
 
 def test_recorder_captures_structured_identity_on_click(tmp_path) -> None:
     be = _RecStructuredBackend("MG4408 Okafor, Philip 1966-01-17")
     rec = Recorder(be, tmp_path / "rec")
     rec.click(10, 20)
-    rec.type_text("hello")     # non-pointer: no structured_identity
+    rec.type_text("hello")  # non-pointer: no structured_identity
     rec_dir = rec.finish()
     evs = _events(rec_dir)
     click_ev = next(e for e in evs if e["kind"] == "click")
@@ -469,14 +523,30 @@ def test_compiler_stores_structured_identity_and_arms(tmp_path) -> None:
     _write_frame(rec, 0, "before")
     _write_frame(rec, 0, "after")
     struct = "MG4408 Okafor, Philip 1966-01-17 M Active"
-    (rec / "events.jsonl").write_text(_json.dumps({
-        "i": 0, "kind": "click", "x": 200, "y": 150, "t": 1.0,
-        "structured_identity": struct,
-    }) + "\n")
-    (rec / "meta.json").write_text(_json.dumps({
-        "id": "r1", "created_at": "2026-07-12T00:00:00+00:00",
-        "viewport": [400, 300], "app_url": "http://x/", "params": {},
-    }))
+    (rec / "events.jsonl").write_text(
+        _json.dumps(
+            {
+                "i": 0,
+                "kind": "click",
+                "x": 200,
+                "y": 150,
+                "t": 1.0,
+                "structured_identity": struct,
+            }
+        )
+        + "\n"
+    )
+    (rec / "meta.json").write_text(
+        _json.dumps(
+            {
+                "id": "r1",
+                "created_at": "2026-07-12T00:00:00+00:00",
+                "viewport": [400, 300],
+                "app_url": "http://x/",
+                "params": {},
+            }
+        )
+    )
     wf = compile_recording(rec, tmp_path / "bundle", name="wf")
     step = wf.steps[0]
     assert step.anchor.structured_identity == struct

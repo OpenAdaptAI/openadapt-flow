@@ -20,6 +20,7 @@ from openadapt_flow.benchmark.desktop_benchmark import (
 
 # --- _classify unit table ---------------------------------------------------
 
+
 def test_classify_success():
     j = {"wrong_action": False, "target_note_ok": True, "wrong_patient_id": None}
     assert _classify(j, completed=True, cosmetic=True) == ("success", False)
@@ -47,6 +48,7 @@ def test_classify_completed_but_no_write_is_miss():
 
 # --- fake harness -----------------------------------------------------------
 
+
 class FakeHarness:
     """Scripts a DB outcome per (arm, condition)."""
 
@@ -63,8 +65,12 @@ class FakeHarness:
         return work_dir / "bundle"
 
     def uia_tree_quality(self):
-        return {"n_usable_id": 5, "n_targets": 6, "usable_fraction": 0.833,
-                "identity_target_has_id": False}
+        return {
+            "n_usable_id": 5,
+            "n_targets": 6,
+            "usable_fraction": 0.833,
+            "identity_target_has_id": False,
+        }
 
     def _apply(self, arm):
         outcome = self.script.get((arm, self._cond), "success")
@@ -73,32 +79,49 @@ class FakeHarness:
 
     def compiled_run(self, bundle, note, run_dir):
         self._apply("compiled")
-        return {"replay_success": self._completed, "rungs": {"template": 4},
-                "identity": {"verified": 1, "mismatch": 0, "unreadable": 0},
-                "halt_step": None if self._completed else "step_003",
-                "halt_reason": None if self._completed else "mismatch"}
+        return {
+            "replay_success": self._completed,
+            "rungs": {"template": 4},
+            "identity": {"verified": 1, "mismatch": 0, "unreadable": 0},
+            "halt_step": None if self._completed else "step_003",
+            "halt_reason": None if self._completed else "mismatch",
+        }
 
     def uia_run(self, mode, note):
         arm = "uia_identity" if mode == "identity" else "uia_positional"
         self._apply(arm)
-        return {"status": "ok" if self._completed else "no_row_selected",
-                "selected_index": 0, "selected_name": "Neil Sorenson"}
+        return {
+            "status": "ok" if self._completed else "no_row_selected",
+            "selected_index": 0,
+            "selected_name": "Neil Sorenson",
+        }
 
     def judge(self, note):
         if self._last == "success":
-            return {"target_note_ok": True, "wrong_patient_id": None,
-                    "wrong_action": False}
+            return {
+                "target_note_ok": True,
+                "wrong_patient_id": None,
+                "wrong_action": False,
+            }
         if self._last == "wrong":
-            return {"target_note_ok": False, "wrong_patient_id": 11,
-                    "wrong_action": True}
-        return {"target_note_ok": False, "wrong_patient_id": None,
-                "wrong_action": False}
+            return {
+                "target_note_ok": False,
+                "wrong_patient_id": 11,
+                "wrong_action": True,
+            }
+        return {
+            "target_note_ok": False,
+            "wrong_patient_id": None,
+            "wrong_action": False,
+        }
 
 
 def test_full_matrix_aggregates_and_writes(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "_armed_coverage",
-                        lambda bundle: {"click_steps": 4, "armed_clicks": 2,
-                                        "armed_coverage": 0.5})
+    monkeypatch.setattr(
+        db,
+        "_armed_coverage",
+        lambda bundle: {"click_steps": 4, "armed_clicks": 2, "armed_coverage": 0.5},
+    )
     # Positional arm mis-writes under sibling drift; identity + compiled hold.
     script = {
         ("uia_positional", "data_siblings"): "wrong",
@@ -135,17 +158,23 @@ def test_full_matrix_aggregates_and_writes(tmp_path, monkeypatch):
 
 
 def test_error_in_arm_becomes_error_row(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "_armed_coverage",
-                        lambda bundle: {"click_steps": 4, "armed_clicks": 2,
-                                        "armed_coverage": 0.5})
+    monkeypatch.setattr(
+        db,
+        "_armed_coverage",
+        lambda bundle: {"click_steps": 4, "armed_clicks": 2, "armed_coverage": 0.5},
+    )
 
     class Boom(FakeHarness):
         def compiled_run(self, *a, **k):
             raise RuntimeError("vm gone")
 
     results = run_desktop_benchmark(
-        tmp_path / "out", conditions=["clean"], arms=("compiled",),
-        n_per=1, harness=Boom({}), log=lambda *a: None,
+        tmp_path / "out",
+        conditions=["clean"],
+        arms=("compiled",),
+        n_per=1,
+        harness=Boom({}),
+        log=lambda *a: None,
     )
     assert results["arms"]["compiled"]["error"] == 1
     assert results["runs"][0]["outcome"] == "error"
@@ -154,19 +183,45 @@ def test_error_in_arm_becomes_error_row(tmp_path, monkeypatch):
 def test_markdown_renders_headline_and_matrix(tmp_path):
     results = {
         "generated_at": "2026-07-10T00:00:00+00:00",
-        "task": "t", "substrate": "s", "target_app_note": "n",
-        "identity_armed_coverage": {"armed_clicks": 2, "click_steps": 4,
-                                    "armed_coverage": 0.5},
-        "uia_tree_quality": {"n_usable_id": 5, "n_targets": 6,
-                             "usable_fraction": 0.833,
-                             "identity_target_has_id": False},
-        "arms": {"compiled": {"n": 2, "success": 2, "wrong_action": 0,
-                              "safe_halt": 0, "false_abort": 0, "miss": 0,
-                              "error": 0, "success_rate": 1.0,
-                              "wrong_action_rate": 0.0, "wall_s_mean": 10.0}},
-        "matrix": {"compiled": {"clean": {"n": 2, "success": 2,
-                                          "wrong_action": 0, "safe_halt": 0,
-                                          "false_abort": 0}}},
+        "task": "t",
+        "substrate": "s",
+        "target_app_note": "n",
+        "identity_armed_coverage": {
+            "armed_clicks": 2,
+            "click_steps": 4,
+            "armed_coverage": 0.5,
+        },
+        "uia_tree_quality": {
+            "n_usable_id": 5,
+            "n_targets": 6,
+            "usable_fraction": 0.833,
+            "identity_target_has_id": False,
+        },
+        "arms": {
+            "compiled": {
+                "n": 2,
+                "success": 2,
+                "wrong_action": 0,
+                "safe_halt": 0,
+                "false_abort": 0,
+                "miss": 0,
+                "error": 0,
+                "success_rate": 1.0,
+                "wrong_action_rate": 0.0,
+                "wall_s_mean": 10.0,
+            }
+        },
+        "matrix": {
+            "compiled": {
+                "clean": {
+                    "n": 2,
+                    "success": 2,
+                    "wrong_action": 0,
+                    "safe_halt": 0,
+                    "false_abort": 0,
+                }
+            }
+        },
         "conditions": ["clean"],
         "runs": [],
     }

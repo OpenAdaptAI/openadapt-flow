@@ -120,9 +120,7 @@ def test_collateral_loss_refuted():
 
 
 def test_field_equals_refutes_partial():
-    eff = Effect(
-        kind=EffectKind.FIELD_EQUALS, match=TARGET, field="note", value=NOTE
-    )
+    eff = Effect(kind=EffectKind.FIELD_EQUALS, match=TARGET, field="note", value=NOTE)
     recs = [{"id": 1, "patient_id": "p1", "type": "Triage", "note": ""}]
     v = judge_records(eff, _state([]), recs, substrate="test")
     assert v.verdict is Verdict.REFUTED
@@ -156,7 +154,9 @@ def test_rest_verifier_confirms_real_write(sor):
     assert before.reachable and before.records == []
     _post_encounter(base)
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        expected_count=1,
         timeout_s=2.0,
     )
     v = verifier.verify(eff, before)
@@ -181,8 +181,11 @@ def test_rest_idempotent_write_is_at_most_once(sor):
     _post_encounter(base, fault="idempotent", key="run-42")
     _post_encounter(base, fault="idempotent", key="run-42")
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
-        idempotency_key="run-42", timeout_s=2.0,
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        expected_count=1,
+        idempotency_key="run-42",
+        timeout_s=2.0,
     )
     v = verifier.verify(eff, before)
     assert v.verdict is Verdict.CONFIRMED, v.reason
@@ -203,13 +206,16 @@ def test_document_hash_confirms_and_reads_back(tmp_path):
 
     digest = hashlib.sha256(b"signed export body").hexdigest()
     written = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match={"name": "report.txt"},
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"name": "report.txt"},
         expected_count=1,
     )
     assert verifier.verify(written, before).verdict is Verdict.CONFIRMED
     field = Effect(
-        kind=EffectKind.FIELD_EQUALS, match={"name": "report.txt"},
-        field="sha256", value=digest,
+        kind=EffectKind.FIELD_EQUALS,
+        match={"name": "report.txt"},
+        field="sha256",
+        value=digest,
     )
     assert verifier.verify(field, before).verdict is Verdict.CONFIRMED
 
@@ -221,9 +227,7 @@ def test_document_hash_refutes_duplicate_export(tmp_path):
     before = verifier.capture_pre_state()
     (store / "report.txt").write_text("x")
     (store / "report (1).txt").write_text("x")  # duplicate export
-    eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match={}, expected_count=1
-    )
+    eff = Effect(kind=EffectKind.RECORD_WRITTEN, match={}, expected_count=1)
     v = verifier.verify(eff, before)
     assert v.verdict is Verdict.REFUTED
     assert v.observed_count == 2
@@ -247,8 +251,11 @@ def test_compensation_reconciles_detected_duplicate(sor):
     _post_encounter(base)  # two non-idempotent submissions -> two rows
     _post_encounter(base)
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
-        risk="irreversible", timeout_s=2.0,
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        expected_count=1,
+        risk="irreversible",
+        timeout_s=2.0,
     )
     verdict = verifier.verify(eff, before)
     assert verdict.verdict is Verdict.REFUTED and verdict.observed_count == 2
@@ -269,13 +276,20 @@ def test_compensation_escalates_partial_save(sor):
     before = verifier.capture_pre_state()
     _post_encounter(base, fault="partial")  # row persists, note dropped
     eff = Effect(
-        kind=EffectKind.FIELD_EQUALS, match=TARGET, field="note", value=NOTE,
-        risk="irreversible", timeout_s=2.0,
+        kind=EffectKind.FIELD_EQUALS,
+        match=TARGET,
+        field="note",
+        value=NOTE,
+        risk="irreversible",
+        timeout_s=2.0,
     )
     verdict = verifier.verify(eff, before)
     assert verdict.verdict is Verdict.REFUTED
     result = reconcile_or_escalate(
-        eff, verdict, verifier=verifier, before=before,
+        eff,
+        verdict,
+        verifier=verifier,
+        before=before,
         compensator=RestCompensator(base),
     )
     assert result.outcome is CompensationOutcome.ESCALATED
@@ -287,13 +301,18 @@ def test_compensation_escalates_when_indeterminate():
     verifier = RestRecordVerifier("http://127.0.0.1:1")
     before = EffectState(substrate="rest", reachable=False)
     eff = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, risk="irreversible",
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        risk="irreversible",
         timeout_s=0.1,
     )
     verdict = verifier.verify(eff, before)
     assert verdict.verdict is Verdict.INDETERMINATE
     result = reconcile_or_escalate(
-        eff, verdict, verifier=verifier, before=before,
+        eff,
+        verdict,
+        verifier=verifier,
+        before=before,
         compensator=RestCompensator("http://127.0.0.1:1"),
     )
     assert result.outcome is CompensationOutcome.ESCALATED

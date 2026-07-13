@@ -291,9 +291,7 @@ def test_effects_declared_but_no_verifier_is_config_error_halt(tmp_path):
         vision = _vision_that_confirms_saved()
         workflow = _save_workflow(
             effects=[
-                Effect(
-                    kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1
-                )
+                Effect(kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1)
             ]
         )
         bundle, run_dir = _dirs(tmp_path)

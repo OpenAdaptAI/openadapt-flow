@@ -72,11 +72,9 @@ def test_aggregate_over_all_scenarios():
     results = run_benchmark(n=1, log=lambda _msg: None)
     # One run per scenario -> exactly len(SCENARIOS) runs, all accounted for.
     assert results["metrics"]["n_runs"] == len(SCENARIOS)
-    assert (
-        results["metrics"]["n_wrong_effect"]
-        + results["metrics"]["n_correct_effect"]
-        == len(SCENARIOS)
-    )
+    assert results["metrics"]["n_wrong_effect"] + results["metrics"][
+        "n_correct_effect"
+    ] == len(SCENARIOS)
     # The markdown renders without error and states both headline rates.
     md = render_markdown(results)
     assert "silent-wrong-action rate" in md
@@ -87,19 +85,29 @@ def test_aggregate_is_pure_and_deterministic():
     # aggregate() over hand-built rows: no server, exercises the metric math.
     rows = [
         {
-            "scenario": "optimistic", "ground_truth_correct": False,
-            "screen_pass": True, "effect_confirmed": False,
-            "effect_verdict": "refuted", "ground_truth_fault": "absent",
-            "records_after": 0, "screen_silent_wrong": True,
-            "effect_silent_wrong": False, "screen_false_abort": False,
+            "scenario": "optimistic",
+            "ground_truth_correct": False,
+            "screen_pass": True,
+            "effect_confirmed": False,
+            "effect_verdict": "refuted",
+            "ground_truth_fault": "absent",
+            "records_after": 0,
+            "screen_silent_wrong": True,
+            "effect_silent_wrong": False,
+            "screen_false_abort": False,
             "effect_false_abort": False,
         },
         {
-            "scenario": "ok", "ground_truth_correct": True,
-            "screen_pass": True, "effect_confirmed": True,
-            "effect_verdict": "confirmed", "ground_truth_fault": "correct",
-            "records_after": 1, "screen_silent_wrong": False,
-            "effect_silent_wrong": False, "screen_false_abort": False,
+            "scenario": "ok",
+            "ground_truth_correct": True,
+            "screen_pass": True,
+            "effect_confirmed": True,
+            "effect_verdict": "confirmed",
+            "ground_truth_fault": "correct",
+            "records_after": 1,
+            "screen_silent_wrong": False,
+            "effect_silent_wrong": False,
+            "screen_false_abort": False,
             "effect_false_abort": False,
         },
     ]

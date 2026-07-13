@@ -124,10 +124,7 @@ class TestDomScript:
     def test_named_variant_differs_in_exactly_one_step(self) -> None:
         positional = [n for n, _ in dom_script(FakePage(), NOTE)]
         named = [
-            n
-            for n, _ in dom_script(
-                FakePage(), NOTE, target_patient="Jane Sample"
-            )
+            n for n, _ in dom_script(FakePage(), NOTE, target_patient="Jane Sample")
         ]
         assert positional[3] == "open first referral"
         assert named[3] == "open referral by patient name"
@@ -136,14 +133,17 @@ class TestDomScript:
 
     def test_named_variant_scopes_open_to_the_patient_row(self) -> None:
         page = FakePage()
-        done, failed, error = run_dom_script(
-            page, NOTE, target_patient="Jane Sample"
-        )
+        done, failed, error = run_dom_script(page, NOTE, target_patient="Jane Sample")
         assert (done, failed, error) == (9, None, None)
         # Row filtered by the demonstrated patient's accessible name,
         # then the Open button inside it — no .first anywhere.
         assert page.calls[3] == (
-            "role", "row", "Jane Sample", "role", "button", "Open",
+            "role",
+            "row",
+            "Jane Sample",
+            "role",
+            "button",
+            "Open",
             "click",
         )
 
@@ -180,8 +180,14 @@ class TestScheduleAndNotes:
 
     def test_perturbation_menu(self) -> None:
         assert PERTURBATIONS == (
-            "lookalike", "missing", "grow", "sort",
-            "theme", "rename", "move", "typelabel",
+            "lookalike",
+            "missing",
+            "grow",
+            "sort",
+            "theme",
+            "rename",
+            "move",
+            "typelabel",
         )
 
     def test_notes_distinct_per_arm_and_slot(self) -> None:
@@ -192,9 +198,7 @@ class TestScheduleAndNotes:
             for arm in ARMS
             for slot in range(len(SCHEDULE) + len(PERTURBATIONS))
         }
-        assert len(notes) == len(ARMS) * (
-            len(SCHEDULE) + len(PERTURBATIONS)
-        )
+        assert len(notes) == len(ARMS) * (len(SCHEDULE) + len(PERTURBATIONS))
 
     def test_condition_url(self) -> None:
         assert condition_url("http://x/", "clean") == "http://x/"
@@ -206,45 +210,54 @@ class TestScheduleAndNotes:
 
 class TestClassification:
     def test_wrong_action_outranks_success_flag(self) -> None:
-        assert classify_outcome(
-            {"success": False, "wrong_action": True}
-        ) == "wrong-action"
+        assert (
+            classify_outcome({"success": False, "wrong_action": True}) == "wrong-action"
+        )
 
     def test_success(self) -> None:
-        assert classify_outcome(
-            {"success": True, "wrong_action": False}
-        ) == "success"
+        assert classify_outcome({"success": True, "wrong_action": False}) == "success"
 
     def test_everything_else_is_halt_or_error(self) -> None:
         assert classify_outcome({"success": False}) == "halt-or-error"
 
     def test_maintenance_is_dom_loud_break_on_drift_only(self) -> None:
         loud_dom = {
-            "arm": "dom", "condition": "rename", "success": False,
+            "arm": "dom",
+            "condition": "rename",
+            "success": False,
             "failed_step": "open first referral",
         }
         assert needs_maintenance(loud_dom)
         # Wrong actions are counted separately, not as maintenance.
         silent_dom = {
-            "arm": "dom", "condition": "sort",
-            "success": False, "wrong_action": True,
+            "arm": "dom",
+            "condition": "sort",
+            "success": False,
+            "wrong_action": True,
         }
         assert not needs_maintenance(silent_dom)
         # Compiled halts are safe halts, never hand-edited.
         compiled = {
-            "arm": "compiled", "condition": "rename", "success": False,
+            "arm": "compiled",
+            "condition": "rename",
+            "success": False,
         }
         assert not needs_maintenance(compiled)
         # A clean-slot DOM failure is a bug, not drift maintenance.
         clean_dom = {
-            "arm": "dom", "condition": "clean", "success": False,
+            "arm": "dom",
+            "condition": "clean",
+            "success": False,
             "failed_step": "confirm saved banner",
         }
         assert not needs_maintenance(clean_dom)
         # A completed run the judge failed has nothing to edit.
         disputed = {
-            "arm": "dom", "condition": "theme", "success": False,
-            "failed_step": None, "error": None,
+            "arm": "dom",
+            "condition": "theme",
+            "success": False,
+            "failed_step": None,
+            "error": None,
         }
         assert not needs_maintenance(disputed)
 
@@ -253,26 +266,38 @@ class TestClassification:
 
         # DOM: every step ran, no error, judge said no -> dispute.
         assert verification_dispute(
-            {"arm": "dom", "condition": "theme", "success": False,
-             "failed_step": None, "error": None}
+            {
+                "arm": "dom",
+                "condition": "theme",
+                "success": False,
+                "failed_step": None,
+                "error": None,
+            }
         )
         # Compiled: replayer green, judge said no -> dispute.
         assert verification_dispute(
-            {"arm": "compiled", "condition": "theme", "success": False,
-             "replayer_success": True}
+            {
+                "arm": "compiled",
+                "condition": "theme",
+                "success": False,
+                "replayer_success": True,
+            }
         )
         # A loud break is a real failure, not a dispute.
         assert not verification_dispute(
-            {"arm": "dom", "condition": "rename", "success": False,
-             "failed_step": "open first referral"}
+            {
+                "arm": "dom",
+                "condition": "rename",
+                "success": False,
+                "failed_step": "open first referral",
+            }
         )
         # Successes and wrong actions are never disputes.
         assert not verification_dispute(
             {"arm": "dom", "success": True, "failed_step": None}
         )
         assert not verification_dispute(
-            {"arm": "dom", "success": False, "wrong_action": True,
-             "failed_step": None}
+            {"arm": "dom", "success": False, "wrong_action": True, "failed_step": None}
         )
 
 
@@ -315,9 +340,13 @@ def fabricated_results() -> dict[str, Any]:
     def dom_schedule(arm: str) -> list[dict[str, Any]]:
         return [
             make_row(
-                arm, c, success=(c == "clean"), wall=1.0,
+                arm,
+                c,
+                success=(c == "clean"),
+                wall=1.0,
                 failed_step=None if c == "clean" else "confirm saved banner",
-                slot=i, phase="schedule",
+                slot=i,
+                phase="schedule",
             )
             for i, c in enumerate(SCHEDULE)
         ]
@@ -325,8 +354,12 @@ def fabricated_results() -> dict[str, Any]:
     schedule_runs = {
         "compiled": [
             make_row(
-                "compiled", c, success=(c == "clean"), heal_count=0,
-                slot=i, phase="schedule",
+                "compiled",
+                c,
+                success=(c == "clean"),
+                heal_count=0,
+                slot=i,
+                phase="schedule",
             )
             for i, c in enumerate(SCHEDULE)
         ],
@@ -353,12 +386,8 @@ def fabricated_results() -> dict[str, Any]:
                 "dom",
                 c,
                 success=(c in ("theme", "move", "typelabel")),
-                wrong_action=(
-                    c in ("lookalike", "missing", "grow", "sort")
-                ),
-                failed_step=(
-                    "open first referral" if c == "rename" else None
-                ),
+                wrong_action=(c in ("lookalike", "missing", "grow", "sort")),
+                failed_step=("open first referral" if c == "rename" else None),
                 final_hash="#patient/p0" if c == "lookalike" else "",
                 slot=20 + i,
                 phase="perturbation",
@@ -375,9 +404,7 @@ def fabricated_results() -> dict[str, Any]:
                     if c in ("missing", "rename")
                     else None
                 ),
-                final_hash=(
-                    "" if c in ("missing", "rename") else "#patient/p1"
-                ),
+                final_hash=("" if c in ("missing", "rename") else "#patient/p1"),
                 slot=20 + i,
                 phase="perturbation",
             )
@@ -392,7 +419,9 @@ class TestAggregation:
         rows = [
             make_row("dom", "clean", success=True),
             make_row(
-                "dom", "notice", success=False,
+                "dom",
+                "notice",
+                success=False,
                 failed_step="open first referral",
             ),
             make_row("dom", "sort", success=False, wrong_action=True),
@@ -401,7 +430,9 @@ class TestAggregation:
         assert agg["n"] == 3
         assert agg["success_count"] == 1
         assert agg["clean"] == {
-            "n": 1, "success_count": 1, "success_rate": 1.0,
+            "n": 1,
+            "success_count": 1,
+            "success_rate": 1.0,
         }
         assert agg["drift"]["n"] == 2
         assert agg["wrong_action_count"] == 1
@@ -409,9 +440,7 @@ class TestAggregation:
         assert agg["maintenance_count"] == 1  # the notice loud break only
 
     def test_heal_totals_only_when_present(self) -> None:
-        compiled = dom_arm_aggregate(
-            [make_row("compiled", "clean", heal_count=2)]
-        )
+        compiled = dom_arm_aggregate([make_row("compiled", "clean", heal_count=2)])
         assert compiled["heal_count_total"] == 2
         dom = dom_arm_aggregate([make_row("dom", "clean")])
         assert "heal_count_total" not in dom
@@ -435,23 +464,15 @@ class TestAggregation:
         # The identity reading of the same script: zero wrong actions,
         # fail-closed on missing/rename.
         assert results["totals"]["dom_named"]["wrong_action_count"] == 0
-        assert (
-            matrix["sort"]["dom_named"][0]["outcome"] == "success"
-        )
-        assert (
-            matrix["missing"]["dom_named"][0]["outcome"]
-            == "halt-or-error"
-        )
+        assert matrix["sort"]["dom_named"][0]["outcome"] == "success"
+        assert matrix["missing"]["dom_named"][0]["outcome"] == "halt-or-error"
         # Maintenance: rename (loud) + 6 schedule drifts; wrong actions
         # and judge disputes are NOT maintenance.
         assert results["totals"]["dom"]["maintenance_count"] == 7
         # Name-filtered: 6 schedule + missing + rename.
         assert results["totals"]["dom_named"]["maintenance_count"] == 8
         assert results["totals"]["compiled"]["maintenance_count"] == 0
-        assert (
-            results["totals"]["compiled"]["verification_dispute_count"]
-            == 1
-        )
+        assert results["totals"]["compiled"]["verification_dispute_count"] == 1
         disputes = results["verification_disputes"]
         assert len(disputes) == 1
         assert disputes[0]["arm"] == "compiled"
@@ -474,8 +495,7 @@ class TestRenderer:
     def test_markdown_wrong_action_totals(self) -> None:
         md = render_dom_markdown(fabricated_results())
         assert (
-            "Totals: compiled replay 0, DOM (positional) 4, "
-            "DOM (name-filtered) 0" in md
+            "Totals: compiled replay 0, DOM (positional) 4, DOM (name-filtered) 0" in md
         )
 
     def test_markdown_reports_verification_disputes(self) -> None:
@@ -507,8 +527,14 @@ def make_screen(*lines: str) -> bytes:
     img = np.full((800, 1280, 3), 245, dtype=np.uint8)
     for i, line in enumerate(lines):
         cv2.putText(
-            img, line, (40, 200 + i * 60),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+            img,
+            line,
+            (40, 200 + i * 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
         )
     return to_png(img)
 

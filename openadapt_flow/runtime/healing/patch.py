@@ -56,9 +56,7 @@ class AnchorChange(BaseModel):
     """One field that a heal changed on the step's anchor (old -> new)."""
 
     field: str
-    identity: bool = Field(
-        description="True when this field carries identity evidence"
-    )
+    identity: bool = Field(description="True when this field carries identity evidence")
     old: Any = None
     new: Any = None
 
@@ -146,8 +144,7 @@ class HealPatch(BaseModel):
         the step means (identity) or only HOW it is located (locator).
         """
         lines = [
-            f"HealPatch step={self.step_id} rung={self.rung_used} "
-            f"status={self.status}",
+            f"HealPatch step={self.step_id} rung={self.rung_used} status={self.status}",
             f"  identity armed: {self.identity_before.armed} -> "
             f"{self.identity_after.armed}",
         ]

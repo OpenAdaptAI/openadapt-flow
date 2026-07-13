@@ -189,8 +189,7 @@ def _escalate(
         actions_taken=actions_taken,
         final_verdict=verdict,
         escalation=(
-            f"[{verdict.substrate}] {verdict.kind.value}: {verdict.reason} "
-            f"-- {reason}"
+            f"[{verdict.substrate}] {verdict.kind.value}: {verdict.reason} -- {reason}"
         ),
     )
 
@@ -231,9 +230,7 @@ class RestCompensator:
         self, effect: Effect, verdict: EffectVerdict, context: Any = None
     ) -> CompensationAction:
         # Keep the earliest record (lowest id); delete the rest.
-        records = sorted(
-            verdict.matched_records, key=lambda r: r.get("id", 0)
-        )
+        records = sorted(verdict.matched_records, key=lambda r: r.get("id", 0))
         extras = records[1:]
         deleted: list[dict[str, Any]] = []
         for rec in extras:

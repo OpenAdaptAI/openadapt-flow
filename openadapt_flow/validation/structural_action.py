@@ -33,6 +33,7 @@ whose id is still in the DOM; visual resolves only the non-drifted minority.
 Runnable via benchmark/structural_action/structural_action_probe.py; the
 reusable logic (build_html / run_probe) also backs tests/test_structural_rung.py.
 """
+
 from __future__ import annotations
 
 import io
@@ -46,8 +47,8 @@ from openadapt_flow.ir import Anchor
 from openadapt_flow.runtime.resolver import resolve
 
 # Grid layout (viewport is the PlaywrightBackend default 1280x800).
-_COL_X = 90            # baseline button column (left)
-_DRIFT_COL_X = 560     # drifted buttons jump to a second column
+_COL_X = 90  # baseline button column (left)
+_DRIFT_COL_X = 560  # drifted buttons jump to a second column
 _TOP = 70
 _ROW_H = 34
 _BTN_W = 84
@@ -71,7 +72,7 @@ def _button_html(index: int, *, drift: bool) -> str:
     cls = "open-btn"
     if drift and not stable:
         left = _DRIFT_COL_X
-        label = "View"          # rename drift (label no longer matches crop/OCR)
+        label = "View"  # rename drift (label no longer matches crop/OCR)
         cls = "open-btn drifted"  # dark-theme restyle
     top = _TOP + index * _ROW_H
     return (
@@ -160,9 +161,7 @@ def run_probe(n: int = 21, *, headless: bool = True) -> dict:
                 )
             )
 
-        templates = {
-            i: _crop_png(base_png, anchors[i].region) for i in range(n)
-        }
+        templates = {i: _crop_png(base_png, anchors[i].region) for i in range(n)}
 
         # -- drift the surface ---------------------------------------------
         backend.page.set_content(build_html(n, drift=True))

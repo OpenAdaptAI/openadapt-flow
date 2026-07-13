@@ -167,9 +167,7 @@ class TestSerializeDemo:
         wf = make_workflow()
         lines = serialize_demo(wf).splitlines()
         assert len(lines) == len(wf.steps)
-        assert all(
-            line.startswith(f"{i}.") for i, line in enumerate(lines, 1)
-        )
+        assert all(line.startswith(f"{i}.") for i, line in enumerate(lines, 1))
 
 
 # -- prompts ----------------------------------------------------------------------
@@ -290,8 +288,7 @@ class TestSchedule:
     def test_condition_url(self) -> None:
         assert condition_url("http://h:1/", "clean") == "http://h:1/"
         assert (
-            condition_url("http://h:1/", "modal-once")
-            == "http://h:1/?drift=modal-once"
+            condition_url("http://h:1/", "modal-once") == "http://h:1/?drift=modal-once"
         )
 
 
@@ -367,9 +364,7 @@ def fake_launch(monkeypatch: pytest.MonkeyPatch) -> FakeBackend:
     monkeypatch.setattr(
         playwright_backend.PlaywrightBackend,
         "launch",
-        staticmethod(
-            lambda url, headless=True: (backend, lambda: None)
-        ),
+        staticmethod(lambda url, headless=True: (backend, lambda: None)),
     )
     return backend
 
@@ -412,9 +407,7 @@ class TestHybridRun:
         fake_launch.png = SUCCESS_SCREEN
         install_fake_replayer(
             monkeypatch,
-            FakeReport(
-                [FakeStepResult("step_000", "click", True)], success=True
-            ),
+            FakeReport([FakeStepResult("step_000", "click", True)], success=True),
         )
 
         def boom(*args: Any, **kwargs: Any) -> None:
@@ -487,7 +480,7 @@ class TestHybridRun:
             "http://x/",
             tmp_path / "run",
             NOTE,
-            demo_text="1. click the element labeled \"Username\"",
+            demo_text='1. click the element labeled "Username"',
             ledger=ledger,
         )
         # Handoff prompt construction.
@@ -698,38 +691,46 @@ def _row(
 
 def make_results() -> dict[str, Any]:
     compiled = [
-        _row("compiled", s, c, success=(c == "clean"))
-        for s, c in enumerate(SCHEDULE)
+        _row("compiled", s, c, success=(c == "clean")) for s, c in enumerate(SCHEDULE)
     ]
     hybrid = []
     for s, c in enumerate(SCHEDULE):
         if c == "clean":
             hybrid.append(
                 _row(
-                    "hybrid", s, c, success=True,
-                    fallback_used=False, halted=False,
-                    fallback_actions=0, fallback_cost_usd=0.0,
+                    "hybrid",
+                    s,
+                    c,
+                    success=True,
+                    fallback_used=False,
+                    halted=False,
+                    fallback_actions=0,
+                    fallback_cost_usd=0.0,
                     fallback_skipped_reason=None,
                 )
             )
         else:
             hybrid.append(
                 _row(
-                    "hybrid", s, c, success=True, cost=0.2,
-                    fallback_used=True, halted=True,
+                    "hybrid",
+                    s,
+                    c,
+                    success=True,
+                    cost=0.2,
+                    fallback_used=True,
+                    halted=True,
                     halt_step="step_004",
-                    fallback_actions=6, fallback_cost_usd=0.2,
+                    fallback_actions=6,
+                    fallback_cost_usd=0.2,
                     fallback_skipped_reason=None,
                 )
             )
     agent = [
-        _row("agent", s, SCHEDULE[s], success=True, cost=0.27,
-             api_calls=13)
+        _row("agent", s, SCHEDULE[s], success=True, cost=0.27, api_calls=13)
         for s in AGENT_SLOTS
     ]
     demo_agent = [
-        _row("demo_agent", s, SCHEDULE[s], success=(i != 0), cost=0.30,
-             api_calls=12)
+        _row("demo_agent", s, SCHEDULE[s], success=(i != 0), cost=0.30, api_calls=12)
         for i, s in enumerate(AGENT_SLOTS)
     ]
     return aggregate_hybrid_results(
@@ -755,9 +756,7 @@ class TestAggregation:
         assert arms["compiled"]["cost_per_success_usd"] == 0.0
         assert arms["agent"]["cost_per_success_usd"] == pytest.approx(0.27)
         # Hybrid: 6 fallbacks x $0.20 over 20 successes.
-        assert arms["hybrid"]["cost_per_success_usd"] == pytest.approx(
-            6 * 0.2 / 20
-        )
+        assert arms["hybrid"]["cost_per_success_usd"] == pytest.approx(6 * 0.2 / 20)
 
     def test_hybrid_fallback_stats(self) -> None:
         h = make_results()["arms"]["hybrid"]
@@ -770,9 +769,7 @@ class TestAggregation:
 
     def test_clean_drift_split(self) -> None:
         c = make_results()["arms"]["compiled"]
-        assert c["clean"] == {
-            "n": 14, "success_count": 14, "success_rate": 1.0
-        }
+        assert c["clean"] == {"n": 14, "success_count": 14, "success_rate": 1.0}
         assert c["drift"]["n"] == 6
         assert c["drift"]["success_count"] == 0
 
@@ -786,9 +783,7 @@ class TestAggregation:
     def test_total_spend_recorded(self) -> None:
         results = make_results()
         expected = 6 * 0.2 + 8 * 0.27 + 8 * 0.30
-        assert results["cost_caps_usd"]["total_spent_list"] == pytest.approx(
-            expected
-        )
+        assert results["cost_caps_usd"]["total_spent_list"] == pytest.approx(expected)
 
 
 # -- markdown + outputs ----------------------------------------------------------------
@@ -823,9 +818,7 @@ class TestMarkdownAndOutputs:
         assert (tmp_path / "BENCHMARK.md").is_file()
         assert (tmp_path / "success_cost.png").is_file()
         loaded = json.loads((tmp_path / "results.json").read_text())
-        assert set(loaded["arms"]) == {
-            "compiled", "agent", "demo_agent", "hybrid"
-        }
+        assert set(loaded["arms"]) == {"compiled", "agent", "demo_agent", "hybrid"}
 
 
 # -- orchestrator guardrails --------------------------------------------------------
@@ -849,13 +842,12 @@ def install_fake_arms(
     def log_url(arm: str, url: str) -> None:
         if url_log is not None:
             url_log.append((arm, url))
+
     import openadapt_flow.compiler as compiler
     import openadapt_flow.demo_driver as demo_driver
     import openadapt_flow.mockmed.server as server
 
-    monkeypatch.setattr(
-        server, "serve", lambda port=0: ("http://x:1/", lambda: None)
-    )
+    monkeypatch.setattr(server, "serve", lambda port=0: ("http://x:1/", lambda: None))
     monkeypatch.setattr(
         demo_driver,
         "record_triage_demo",
@@ -879,23 +871,40 @@ def install_fake_arms(
         log_url("hybrid", url)
         if "drift" not in url:
             return _row(
-                "hybrid", 0, "x", success=True,
-                fallback_used=False, halted=False,
-                fallback_actions=0, fallback_cost_usd=0.0,
+                "hybrid",
+                0,
+                "x",
+                success=True,
+                fallback_used=False,
+                halted=False,
+                fallback_actions=0,
+                fallback_cost_usd=0.0,
                 fallback_skipped_reason=None,
             )
         if not ledger.can_start():
             return _row(
-                "hybrid", 0, "x", success=False,
-                fallback_used=False, halted=True,
-                fallback_actions=0, fallback_cost_usd=0.0,
+                "hybrid",
+                0,
+                "x",
+                success=False,
+                fallback_used=False,
+                halted=True,
+                fallback_actions=0,
+                fallback_cost_usd=0.0,
                 fallback_skipped_reason=ledger.blocked_reason(),
             )
         ledger.record(0.2)
         return _row(
-            "hybrid", 0, "x", success=True, cost=0.2,
-            fallback_used=True, halted=True, halt_step="step_004",
-            fallback_actions=6, fallback_cost_usd=0.2,
+            "hybrid",
+            0,
+            "x",
+            success=True,
+            cost=0.2,
+            fallback_used=True,
+            halted=True,
+            halt_step="step_004",
+            fallback_actions=6,
+            fallback_cost_usd=0.2,
             fallback_skipped_reason=None,
         )
 
@@ -903,9 +912,7 @@ def install_fake_arms(
 
     def fake_agent_run(url, note, **kw):
         log_url("agent", url)
-        return _row(
-            "agent", 0, "x", success=True, cost=agent_cost, api_calls=13
-        )
+        return _row("agent", 0, "x", success=True, cost=agent_cost, api_calls=13)
 
     monkeypatch.setattr(hybrid_benchmark, "_agent_run", fake_agent_run)
 
@@ -947,9 +954,7 @@ class TestOrchestratorGuardrails:
         assert "preflight" in results["arm_notes"]["agent"]
         assert "preflight" in results["arm_notes"]["hybrid"]
         # No fallback fired anywhere.
-        assert all(
-            not r["fallback_used"] for r in results["runs"]["hybrid"]
-        )
+        assert all(not r["fallback_used"] for r in results["runs"]["hybrid"])
 
     def test_rows_jsonl_appended_for_every_run(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -999,9 +1004,7 @@ class TestOrchestratorGuardrails:
         assert len(url_log) == len(expected)
         for (arm, url), (want_arm, slot) in zip(url_log, expected):
             assert arm == want_arm
-            assert url == condition_url(base, SCHEDULE[slot]), (
-                arm, slot, url
-            )
+            assert url == condition_url(base, SCHEDULE[slot]), (arm, slot, url)
         # And the stamped labels agree with the URLs actually used.
         by_slot: dict[int, set[str]] = {}
         for rows in results["runs"].values():

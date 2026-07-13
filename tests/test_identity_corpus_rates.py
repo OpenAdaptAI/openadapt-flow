@@ -68,8 +68,7 @@ def test_zero_false_accepts_on_frozen_corpus_v1():
         (p.category, p.recorded, p.observed)
         for p in generate_corpus()
         if p.label == LABEL_DIFFERENT
-        and verify_target_identity(p.recorded, p.observed).status
-        == "verified"
+        and verify_target_identity(p.recorded, p.observed).status == "verified"
     ]
     assert not offenders, (
         f"{len(offenders)} wrong-entity bands VERIFIED — wrong-patient "
@@ -85,8 +84,7 @@ def test_zero_false_accepts_on_frozen_corpus_v2():
         (p.label, p.category, p.recorded, p.observed)
         for p in generate_corpus_v2()
         if p.label in (LABEL_DIFFERENT, LABEL_INDISTINGUISHABLE)
-        and verify_target_identity(p.recorded, p.observed).status
-        == "verified"
+        and verify_target_identity(p.recorded, p.observed).status == "verified"
     ]
     assert not offenders, (
         f"{len(offenders)} wrong-entity/indistinguishable bands VERIFIED "
@@ -102,8 +100,7 @@ def test_zero_false_accepts_on_frozen_corpus_v3():
         (p.recorded, p.observed)
         for p in generate_corpus_v3()
         if p.label == LABEL_DIFFERENT
-        and verify_target_identity(p.recorded, p.observed).status
-        == "verified"
+        and verify_target_identity(p.recorded, p.observed).status == "verified"
     ]
     assert not offenders, (
         f"{len(offenders)} identifier-collision bands VERIFIED — "

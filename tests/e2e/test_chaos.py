@@ -39,8 +39,12 @@ def chaos(inject, *, after_click=None, after_type=None):
 
 def run(bundle, mockmed_url, _browser, tmp_path: Path, factory):
     return replay_on_page(
-        _browser, bundle.dir, mockmed_url, tmp_path / "run",
-        params=dict(PARAMS), backend_factory=factory,
+        _browser,
+        bundle.dir,
+        mockmed_url,
+        tmp_path / "run",
+        params=dict(PARAMS),
+        backend_factory=factory,
     )
 
 
@@ -59,12 +63,13 @@ class TestEntityDeletedMidRun:
 
         def inject(page):
             page.wait_for_selector("#open-p1", timeout=5000)
-            page.evaluate(
-                "document.getElementById('open-p1').closest('tr').remove()"
-            )
+            page.evaluate("document.getElementById('open-p1').closest('tr').remove()")
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_click=3),
         )
         assert report.success is False, describe(report, state)
@@ -98,7 +103,10 @@ class TestBlockingModalMidRun:
             )
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_type=3),
         )
         assert report.success is False, describe(report, state)
@@ -129,7 +137,10 @@ class TestBlockingModalMidRun:
             )
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_type=3),
         )
         assert report.success is False, describe(report, state)
@@ -161,7 +172,10 @@ class TestLayoutSwapMidRun:
             )
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_click=5),
         )
         assert report.success is True, describe(report, state)
@@ -202,7 +216,10 @@ class TestDialogOverFieldWhileTyping:
             )
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_type=3),
         )
         assert report.success is False, describe(report, state)
@@ -229,12 +246,13 @@ class TestFocusStolenBeforeTyping:
         test_replayer.test_type_verification_failure_halts_run.)"""
 
         def inject(page):
-            page.evaluate(
-                "document.activeElement && document.activeElement.blur()"
-            )
+            page.evaluate("document.activeElement && document.activeElement.blur()")
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_click=7),
         )
         assert report.success is True, describe(report, state)
@@ -244,9 +262,7 @@ class TestFocusStolenBeforeTyping:
         assert state["banner"].strip() == (
             f"Encounter saved — {PARAMS['note'][:40]}"
         ), describe(report, state)
-        type_result = next(
-            r for r in report.results if r.step_id == "step_009"
-        )
+        type_result = next(r for r in report.results if r.step_id == "step_009")
         assert type_result.input_retried is True
         assert type_result.input_verified is True
 
@@ -264,7 +280,10 @@ class TestNavigationHijackMidRun:
             page.evaluate("location.hash = '#tasks'")
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_click=7),
         )
         assert report.success is False, describe(report, state)
@@ -298,7 +317,10 @@ class TestTargetRenamedMidRun:
             )
 
         report, state = run(
-            bundle, mockmed_url, _browser, tmp_path,
+            bundle,
+            mockmed_url,
+            _browser,
+            tmp_path,
             chaos(inject, after_click=5),
         )
         assert report.success is True, describe(report, state)

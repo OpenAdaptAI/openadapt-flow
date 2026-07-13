@@ -71,9 +71,7 @@ class FakeBackend:
 
 
 def tool_use(action: dict[str, Any], block_id: str = "tu_1") -> Any:
-    return SimpleNamespace(
-        type="tool_use", id=block_id, name="computer", input=action
-    )
+    return SimpleNamespace(type="tool_use", id=block_id, name="computer", input=action)
 
 
 def text_block(text: str) -> Any:
@@ -98,16 +96,12 @@ class FakeClient:
     ``messages`` payload it was called with.
     """
 
-    def __init__(
-        self, script: list[Any], repeat: Any | None = None
-    ) -> None:
+    def __init__(self, script: list[Any], repeat: Any | None = None) -> None:
         self.script = list(script)
         self.repeat = repeat
         self.calls: list[list[dict[str, Any]]] = []
         self.kwargs: list[dict[str, Any]] = []
-        self.beta = SimpleNamespace(
-            messages=SimpleNamespace(create=self._create)
-        )
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs["messages"])
@@ -165,9 +159,7 @@ class TestAgentActions:
         backend = FakeBackend()
         client = FakeClient(
             [
-                response(
-                    [tool_use({"action": "screenshot"}, "tu_1")], "tool_use"
-                ),
+                response([tool_use({"action": "screenshot"}, "tu_1")], "tool_use"),
                 response(
                     [
                         tool_use(
@@ -227,11 +219,7 @@ class TestAgentActions:
         client = FakeClient(
             [
                 response(
-                    [
-                        tool_use(
-                            {"action": "left_click", "coordinate": [1, 2]}
-                        )
-                    ],
+                    [tool_use({"action": "left_click", "coordinate": [1, 2]})],
                     "tool_use",
                 ),
                 response([text_block("ok")], "end_turn"),
@@ -250,9 +238,7 @@ class TestAgentActions:
 class TestAgentBudgetAndHistory:
     def test_budget_stop(self) -> None:
         backend = FakeBackend()
-        looping = response(
-            [tool_use({"action": "screenshot"})], "tool_use"
-        )
+        looping = response([tool_use({"action": "screenshot"})], "tool_use")
         client = FakeClient([], repeat=looping)
         result = run_agent(backend, "task", client=client, max_actions=5)
         assert result.actions == 5
@@ -263,24 +249,17 @@ class TestAgentBudgetAndHistory:
 
     def test_history_keeps_only_last_three_screenshots(self) -> None:
         backend = FakeBackend()
-        looping = response(
-            [tool_use({"action": "screenshot"})], "tool_use"
-        )
+        looping = response([tool_use({"action": "screenshot"})], "tool_use")
         client = FakeClient([], repeat=looping)
         run_agent(backend, "task", client=client, max_actions=8)
         final_messages = client.calls[-1]
         images = 0
         stubs = 0
         for msg in final_messages:
-            if msg.get("role") != "user" or not isinstance(
-                msg.get("content"), list
-            ):
+            if msg.get("role") != "user" or not isinstance(msg.get("content"), list):
                 continue
             for block in msg["content"]:
-                if not (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_result"
-                ):
+                if not (isinstance(block, dict) and block.get("type") == "tool_result"):
                     continue
                 for item in block["content"]:
                     if item["type"] == "image":
@@ -360,9 +339,7 @@ class TestCostAndConfig:
                     in_tok=1000,
                     out_tok=200,
                 ),
-                response(
-                    [text_block("done")], "end_turn", in_tok=1500, out_tok=50
-                ),
+                response([text_block("done")], "end_turn", in_tok=1500, out_tok=50),
             ]
         )
         result = run_agent(backend, "task", client=client)
@@ -538,19 +515,13 @@ def agent_row(
 
 class TestOrchestrator:
     def make_results(self) -> dict:
-        compiled = [
-            compiled_row(i, wall=4.0 + i * 0.1) for i in range(10)
-        ]
-        agents = [
-            agent_row(i, success=i != 0, wall=80.0 + i * 5) for i in range(4)
-        ]
+        compiled = [compiled_row(i, wall=4.0 + i * 0.1) for i in range(10)]
+        agents = [agent_row(i, success=i != 0, wall=80.0 + i * 5) for i in range(4)]
         drift = {
             "compiled": compiled_row(0, wall=8.0) | {"heal_count": 8},
             "agent": agent_row(0, wall=95.0),
         }
-        return aggregate_results(
-            compiled, agents, drift, note_text=NOTE
-        )
+        return aggregate_results(compiled, agents, drift, note_text=NOTE)
 
     def test_aggregates(self) -> None:
         results = self.make_results()

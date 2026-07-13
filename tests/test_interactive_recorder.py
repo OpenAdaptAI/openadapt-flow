@@ -69,9 +69,7 @@ def server_url() -> Iterator[str]:
 
 
 @pytest.fixture(scope="module")
-def recording(
-    server_url: str, tmp_path_factory: pytest.TempPathFactory
-) -> Path:
+def recording(server_url: str, tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("interactive_rec") / "rec"
     return record_interactive(
         server_url,
@@ -83,9 +81,7 @@ def recording(
 
 
 @pytest.fixture(scope="module")
-def bundle(
-    recording: Path, tmp_path_factory: pytest.TempPathFactory
-) -> Path:
+def bundle(recording: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("interactive_bundle") / "bundle"
     compile_recording(recording, out, name="my-app-triage")
     return out
@@ -150,9 +146,9 @@ def test_secret_field_region_redacted_in_frames(recording: Path) -> None:
     secret_i = next(e["i"] for e in events if e.get("secret"))
     for suffix in ("before", "after"):
         arr = np.asarray(
-            Image.open(
-                recording / "frames" / f"{secret_i:04d}_{suffix}.png"
-            ).convert("RGB")
+            Image.open(recording / "frames" / f"{secret_i:04d}_{suffix}.png").convert(
+                "RGB"
+            )
         )
         # Redaction fills the field rect solid black — a sizeable pure-black
         # block that an unredacted login screen would never contain.

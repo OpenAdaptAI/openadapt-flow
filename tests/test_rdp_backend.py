@@ -46,15 +46,27 @@ def draw_button(img: np.ndarray, x: int, y: int, w: int, h: int, label: str) -> 
     cv2.rectangle(img, (x, y), (x + w, y + h), (205, 205, 205), -1)
     cv2.rectangle(img, (x, y), (x + w, y + h), (70, 70, 70), 2)
     cv2.putText(
-        img, label, (x + 12, y + h // 2 + 8),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+        img,
+        label,
+        (x + 12, y + h // 2 + 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
     )
 
 
 def draw_text(img: np.ndarray, x: int, y: int, text: str) -> None:
     cv2.putText(
-        img, text, (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+        img,
+        text,
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
     )
 
 
@@ -73,8 +85,9 @@ def app_screens() -> list[Image.Image]:
     s3 = s2.copy()
     draw_text(s3, 420, 320, BANNER_SAVED)
     # cv2 arrays are BGR; convert to RGB PIL images (transport-native form).
-    return [Image.fromarray(cv2.cvtColor(s, cv2.COLOR_BGR2RGB)) for s in
-            [s0, s1, s2, s3]]
+    return [
+        Image.fromarray(cv2.cvtColor(s, cv2.COLOR_BGR2RGB)) for s in [s0, s1, s2, s3]
+    ]
 
 
 class FakeRDPTransport:
@@ -363,9 +376,12 @@ def test_type_text_per_char_key_events(
 ) -> None:
     backend.type_text("Ab1")
     assert transport.key_events == [
-        ("A", True), ("A", False),
-        ("b", True), ("b", False),
-        ("1", True), ("1", False),
+        ("A", True),
+        ("A", False),
+        ("b", True),
+        ("b", False),
+        ("1", True),
+        ("1", False),
     ]
 
 
@@ -381,9 +397,12 @@ def test_type_text_preserves_case_and_symbols(
 ) -> None:
     backend.type_text("O'B")
     assert transport.key_events == [
-        ("O", True), ("O", False),
-        ("'", True), ("'", False),
-        ("B", True), ("B", False),
+        ("O", True),
+        ("O", False),
+        ("'", True),
+        ("'", False),
+        ("B", True),
+        ("B", False),
     ]
 
 
@@ -405,9 +424,7 @@ def test_normalize_chord(chord: str, expected: list[str]) -> None:
     assert normalize_chord(chord) == expected
 
 
-def test_press_single_key(
-    transport: FakeRDPTransport, backend: FreeRDPBackend
-) -> None:
+def test_press_single_key(transport: FakeRDPTransport, backend: FreeRDPBackend) -> None:
     backend.press("enter")
     assert transport.key_events == [("enter", True), ("enter", False)]
 
@@ -425,7 +442,10 @@ def test_press_chord_nests_down_then_reverse_up(
     backend.press("ControlOrMeta+a")
     # Down in order, up in reverse: Ctrl down, a down, a up, Ctrl up.
     assert transport.key_events == [
-        ("ctrl", True), ("a", True), ("a", False), ("ctrl", False),
+        ("ctrl", True),
+        ("a", True),
+        ("a", False),
+        ("ctrl", False),
     ]
 
 
@@ -481,7 +501,10 @@ def test_press_normal_chord_still_balanced_after_fix(
     # Regression: the try/finally must not change the happy-path event order.
     backend.press("ControlOrMeta+a")
     assert transport.key_events == [
-        ("ctrl", True), ("a", True), ("a", False), ("ctrl", False),
+        ("ctrl", True),
+        ("a", True),
+        ("a", False),
+        ("ctrl", False),
     ]
     assert held_keys(transport.key_events) == []
 
@@ -630,9 +653,7 @@ def _make_connected_aardwolf(conn):
     pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
     from openadapt_flow.backends.rdp_backend import AardwolfTransport
 
-    t = AardwolfTransport(
-        "rdp+ntlm-password://u:p@h:3389", width=1280, height=800
-    )
+    t = AardwolfTransport("rdp+ntlm-password://u:p@h:3389", width=1280, height=800)
     t._ensure_loop()
     t._conn = conn
     return t
@@ -719,13 +740,9 @@ def test_aardwolf_connect_failure_terminates_and_stops_thread(monkeypatch) -> No
         def get_connection(self, iosettings):
             return conn
 
-    monkeypatch.setattr(
-        "aardwolf.commons.factory.RDPConnectionFactory", _Factory
-    )
+    monkeypatch.setattr("aardwolf.commons.factory.RDPConnectionFactory", _Factory)
 
-    t = AardwolfTransport(
-        "rdp+ntlm-password://u:p@h:3389", connect_timeout_s=0.05
-    )
+    t = AardwolfTransport("rdp+ntlm-password://u:p@h:3389", connect_timeout_s=0.05)
     with pytest.raises(TimeoutError):
         t.connect()
 
@@ -736,8 +753,7 @@ def test_aardwolf_connect_failure_terminates_and_stops_thread(monkeypatch) -> No
     assert t._loop is None
     assert t._thread is None
     assert not any(
-        th.name == "aardwolf-rdp" and th.is_alive()
-        for th in threading.enumerate()
+        th.name == "aardwolf-rdp" and th.is_alive() for th in threading.enumerate()
     )
 
 

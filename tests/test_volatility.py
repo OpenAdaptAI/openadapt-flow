@@ -117,10 +117,7 @@ class TestMonthNameDates:
 
     def test_month_day_without_year_is_always_volatile(self) -> None:
         """'Updated Jul 8' recurs annually — chronology, never identity."""
-        assert (
-            classify_text("Updated Jul 8", reference_date=RECORDED)
-            == "near_date"
-        )
+        assert classify_text("Updated Jul 8", reference_date=RECORDED) == "near_date"
         assert is_volatile_line("Updated Jul 8", reference_date=RECORDED)
 
     def test_far_month_date_is_identity_data(self) -> None:
@@ -131,8 +128,7 @@ class TestMonthNameDates:
 
     def test_far_month_year_is_stable(self) -> None:
         assert (
-            classify_text("Member since January 1980", reference_date=RECORDED)
-            is None
+            classify_text("Member since January 1980", reference_date=RECORDED) is None
         )
 
     def test_bare_month_word_is_not_a_date(self) -> None:
@@ -159,26 +155,17 @@ class TestRelativeTime:
         ],
     )
     def test_relative_time_is_volatile(self, text: str) -> None:
-        assert (
-            classify_text(text, reference_date=RECORDED) == "relative_time"
-        )
+        assert classify_text(text, reference_date=RECORDED) == "relative_time"
         assert is_volatile_line(text, reference_date=RECORDED)
 
     def test_day_words_are_volatile_only_standalone(self) -> None:
         """'Today's Appointments' is chrome that always reads the same."""
-        assert (
-            classify_text("Today's Appointments", reference_date=RECORDED)
-            is None
-        )
-        assert not is_volatile_line(
-            "Today's Appointments", reference_date=RECORDED
-        )
+        assert classify_text("Today's Appointments", reference_date=RECORDED) is None
+        assert not is_volatile_line("Today's Appointments", reference_date=RECORDED)
 
 
 class TestCountsAndCounters:
-    ENTRIES_BANNER = (
-        "Showing 1 to 1 of 1 entries (filtered from 56 total entries)"
-    )
+    ENTRIES_BANNER = "Showing 1 to 1 of 1 entries (filtered from 56 total entries)"
 
     @pytest.mark.parametrize(
         "text",
@@ -199,19 +186,14 @@ class TestCountsAndCounters:
         drift it should catch ('0 to 0 of 0 entries…') at 0.95 against it —
         a passing match on the wrong state — so the string may never become
         an assertion at all."""
-        assert (
-            classify_text(self.ENTRIES_BANNER, reference_date=RECORDED)
-            == "count"
-        )
+        assert classify_text(self.ENTRIES_BANNER, reference_date=RECORDED) == "count"
         # The squashed form is what OCR actually returned on the live demo.
         squashed = "Showing1to1of1entries(filteredfrom56totalentries)"
         assert classify_text(squashed, reference_date=RECORDED) == "count"
         assert is_volatile_line(self.ENTRIES_BANNER, reference_date=RECORDED)
 
     @pytest.mark.parametrize("text", ["Inbox (2)", "Messages (14)"])
-    def test_parenthesized_counters_are_volatile_decoration(
-        self, text: str
-    ) -> None:
+    def test_parenthesized_counters_are_volatile_decoration(self, text: str) -> None:
         """Strip-and-test: removing the parenthesized number leaves the
         classification unchanged, so the counter is live decoration and the
         composite must not be asserted (the label alone may still be)."""
@@ -303,10 +285,7 @@ class TestDates:
     def test_bare_far_date_without_text_is_still_volatile(self) -> None:
         """A DOB is stable evidence only inside an identity region with real
         text; a bare date fragment has no semantics to anchor."""
-        assert (
-            classify_text("1980-01-01", reference_date=RECORDED)
-            == "digit_dominated"
-        )
+        assert classify_text("1980-01-01", reference_date=RECORDED) == "digit_dominated"
 
     def test_window_boundary(self) -> None:
         near = RECORDED.toordinal() - DATE_VOLATILITY_WINDOW_DAYS

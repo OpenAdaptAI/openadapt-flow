@@ -201,7 +201,9 @@ def test_save_step_png_redacts_when_opt_in(monkeypatch, tmp_path: Path):
     privacy.set_image_scrubber(_FakeImageScrubber())
     run_dir = tmp_path / "run"
     (run_dir / "steps").mkdir(parents=True)
-    rel = Replayer._save_step_png(run_dir, "step_x", "before", _png_bytes((200, 40, 40)))
+    rel = Replayer._save_step_png(
+        run_dir, "step_x", "before", _png_bytes((200, 40, 40))
+    )
     import io
 
     saved = (run_dir / rel).read_bytes()

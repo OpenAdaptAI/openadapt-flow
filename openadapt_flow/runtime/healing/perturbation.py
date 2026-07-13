@@ -133,9 +133,7 @@ def perturb(
     if kind is DriftKind.SCALE:
         sw, sh = max(1, int(w * scale)), max(1, int(h * scale))
         out = image.resize((sw, sh))
-        point = _clamp(
-            (int(target[0] * scale), int(target[1] * scale)), (sw, sh)
-        )
+        point = _clamp((int(target[0] * scale), int(target[1] * scale)), (sw, sh))
         return DriftCase("scale", kind, _dump(out), point)
 
     if kind is DriftKind.RETHEME:
@@ -153,9 +151,7 @@ def perturb(
         out.paste((255, 255, 255), (0, fold, w, h))
         out.paste(below, (0, min(h - 1, fold + reflow_dy)))
         moved = target[1] >= fold
-        point = _clamp(
-            (target[0], target[1] + (reflow_dy if moved else 0)), (w, h)
-        )
+        point = _clamp((target[0], target[1] + (reflow_dy if moved else 0)), (w, h))
         return DriftCase("reflow", kind, _dump(out), point)
 
     raise ValueError(f"unknown drift kind {kind!r}")
@@ -229,7 +225,10 @@ def replay_patch(
         if not expected_band:
             results.append(
                 CaseResult(
-                    case.label, case.kind, located=True, identity_ok=True,
+                    case.label,
+                    case.kind,
+                    located=True,
+                    identity_ok=True,
                     detail="unarmed patch: no identity band to verify",
                 )
             )

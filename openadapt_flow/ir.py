@@ -301,9 +301,7 @@ class ApiBinding(BaseModel):
             " unknown effect and HALTs -- never GUI-retried)."
         ),
     )
-    timeout_s: float = Field(
-        default=5.0, description="Per-request timeout in seconds"
-    )
+    timeout_s: float = Field(default=5.0, description="Per-request timeout in seconds")
     effects: list["Effect"] = Field(
         default_factory=list,
         description=(
@@ -568,9 +566,7 @@ class Workflow(BaseModel):
     @classmethod
     def load(cls, bundle_dir: Path | str) -> "Workflow":
         bundle = Path(bundle_dir)
-        return cls.model_validate(
-            json.loads((bundle / "workflow.json").read_text())
-        )
+        return cls.model_validate(json.loads((bundle / "workflow.json").read_text()))
 
 
 # -- runtime results ---------------------------------------------------------

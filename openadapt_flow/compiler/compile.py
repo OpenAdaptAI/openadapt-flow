@@ -149,7 +149,10 @@ def _read_png(path: Path) -> Optional[bytes]:
 
 
 def _clamped_crop_region(
-    click: Point, frame_w: int, frame_h: int, size: tuple[int, int] = (TEMPLATE_W, TEMPLATE_H)
+    click: Point,
+    frame_w: int,
+    frame_h: int,
+    size: tuple[int, int] = (TEMPLATE_W, TEMPLATE_H),
 ) -> Region:
     """Compute a ``size`` crop centered on ``click``, clamped so it stays
     inside the frame (shrunk only if the frame itself is smaller)."""
@@ -160,9 +163,7 @@ def _clamped_crop_region(
     return (x, y, w, h)
 
 
-def _discriminative_crop_region(
-    frame: np.ndarray, click: Point
-) -> Region:
+def _discriminative_crop_region(frame: np.ndarray, click: Point) -> Region:
     """Crop region centered on ``click`` with enough structure to match.
 
     Starts at TEMPLATE_W x TEMPLATE_H and grows through CROP_GROWTH_LADDER
@@ -213,17 +214,13 @@ def _best_crop_text(
     given). Returns None if nothing confident was recognized.
     """
     confident = [
-        l
-        for l in lines
-        if l.confidence >= MIN_OCR_CONFIDENCE and l.text.strip()
+        l for l in lines if l.confidence >= MIN_OCR_CONFIDENCE and l.text.strip()
     ]
     if not confident:
         return None
     if click_y is not None:
         row = [
-            l
-            for l in confident
-            if l.region[1] <= click_y <= l.region[1] + l.region[3]
+            l for l in confident if l.region[1] <= click_y <= l.region[1] + l.region[3]
         ]
         if row:
             row.sort(key=lambda l: l.region[0])
@@ -289,21 +286,15 @@ def _landmarks_for(
     ]
 
 
-def _largest_changed_region(
-    before_png: bytes, after_png: bytes
-) -> Optional[Region]:
+def _largest_changed_region(before_png: bytes, after_png: bytes) -> Optional[Region]:
     """Bounding rect of the largest changed area between two frames.
 
     ``cv2.absdiff`` -> grayscale -> threshold ``DIFF_THRESHOLD`` -> dilate ->
     largest external contour's bounding rect. Returns None if nothing
     changed.
     """
-    before = cv2.imdecode(
-        np.frombuffer(before_png, dtype=np.uint8), cv2.IMREAD_COLOR
-    )
-    after = cv2.imdecode(
-        np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR
-    )
+    before = cv2.imdecode(np.frombuffer(before_png, dtype=np.uint8), cv2.IMREAD_COLOR)
+    after = cv2.imdecode(np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR)
     if before is None or after is None:
         return None
     if before.shape != after.shape:
@@ -313,9 +304,7 @@ def _largest_changed_region(
     _, mask = cv2.threshold(gray, DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
     kernel = np.ones((9, 9), dtype=np.uint8)
     mask = cv2.dilate(mask, kernel, iterations=2)
-    contours, _ = cv2.findContours(
-        mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
     largest = max(contours, key=cv2.contourArea)
@@ -428,9 +417,7 @@ def _new_text_postcondition(
         stable new text.
     """
     before_norm = {normalize_text(l.text) for l in before_lines}
-    before_squashed = [
-        _squash(l.text) for l in before_lines if l.text.strip()
-    ]
+    before_squashed = [_squash(l.text) for l in before_lines if l.text.strip()]
 
     def seen_before(text: str, norm: str) -> bool:
         if norm in before_norm:
@@ -476,6 +463,7 @@ def _new_text_postcondition(
         if alpha >= PROXIMITY_POOL_RATIO * best_alpha
     ]
     if click_point is not None and len(pool) > 1:
+
         def dist(line: OcrLine) -> float:
             lx, ly, lw, lh = line.region
             return math.hypot(
@@ -485,9 +473,7 @@ def _new_text_postcondition(
         chosen = min(pool, key=lambda c: dist(c[0]))[0]
     else:
         chosen = max(pool, key=lambda c: c[1])[0]
-    return Postcondition(
-        kind=PostconditionKind.TEXT_PRESENT, text=chosen.text.strip()
-    )
+    return Postcondition(kind=PostconditionKind.TEXT_PRESENT, text=chosen.text.strip())
 
 
 def _postconditions(
@@ -546,9 +532,7 @@ def _postconditions(
         else None
     )
     if changed is not None:
-        after = cv2.imdecode(
-            np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR
-        )
+        after = cv2.imdecode(np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR)
         frame_h, frame_w = after.shape[:2]
         x, y, w, h = changed
         x0 = max(0, x - REGION_STABLE_PAD)
@@ -556,10 +540,14 @@ def _postconditions(
         x1 = min(frame_w, x + w + REGION_STABLE_PAD)
         y1 = min(frame_h, y + h + REGION_STABLE_PAD)
         padded: Region = (x0, y0, x1 - x0, y1 - y0)
-        if next_before_png is not None and phash_distance(
-            phash_png(after_png, region=padded),
-            phash_png(next_before_png, region=padded),
-        ) > REGION_STABLE_TOLERANCE:
+        if (
+            next_before_png is not None
+            and phash_distance(
+                phash_png(after_png, region=padded),
+                phash_png(next_before_png, region=padded),
+            )
+            > REGION_STABLE_TOLERANCE
+        ):
             # The region kept changing with NO action in between — it is
             # self-mutating (animation, clock, fading toast) and would
             # false-halt any replay; never assert it.
@@ -621,9 +609,7 @@ def _structural_postconditions(event: dict) -> list[Postcondition]:
     return pcs
 
 
-def lint_param_leakage(
-    workflow: Workflow, param_values: tuple[str, ...]
-) -> list[str]:
+def lint_param_leakage(workflow: Workflow, param_values: tuple[str, ...]) -> list[str]:
     """Scan a compiled workflow for demo parameter values baked in as
     literals outside the designated parameter slots.
 
@@ -645,9 +631,7 @@ def lint_param_leakage(
     Returns:
         Human-readable violation strings (empty when clean).
     """
-    values = tuple(
-        v for v in param_values if len(_squash(v)) >= MIN_EXCLUDE_CHARS
-    )
+    values = tuple(v for v in param_values if len(_squash(v)) >= MIN_EXCLUDE_CHARS)
     if not values:
         return []
     violations: list[str] = []
@@ -916,9 +900,7 @@ def compile_recording(
             # with NO identity verification at replay (docs/LIMITS.md), so
             # the bundle records armed/unarmed per step — with the reason
             # — for operator review BEFORE the workflow ever runs.
-            identity_armed = (
-                context_text is not None or structured_identity is not None
-            )
+            identity_armed = context_text is not None or structured_identity is not None
             unarmed_reason: Optional[str] = None
             if not identity_armed:
                 unarmed_reason = _identity_unarmed_reason(
@@ -1070,16 +1052,12 @@ def compile_recording(
                 else None
             ),
             after_lines=(
-                cached_lines(i, "after", step_after)
-                if step_after is not None
-                else None
+                cached_lines(i, "after", step_after) if step_after is not None else None
             ),
             next_lines=next_lines,
             next_before_png=next_before,
             reference_date=reference_date,
-            click_point=(
-                step.anchor.click_point if step.anchor is not None else None
-            ),
+            click_point=(step.anchor.click_point if step.anchor is not None else None),
         )
         if not step.expect:
             # Nothing visual survived mining: fall back to structural
@@ -1139,9 +1117,7 @@ def compile_recording(
         # string with its demo value as the example/default; richer types
         # (entity_ref/enum/date) come from disambiguation in a later phase.
         param_specs={
-            pname: ParamSpec(
-                name=pname, type=ParamKind.STRING, example=value
-            )
+            pname: ParamSpec(name=pname, type=ParamKind.STRING, example=value)
             for pname, value in params.items()
         },
         secret_params=list(meta.get("secret_params") or []),

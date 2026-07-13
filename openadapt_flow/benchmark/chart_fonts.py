@@ -45,9 +45,7 @@ def configure_bundled_font() -> Any:
     matplotlib.use("Agg")
     from matplotlib import font_manager
 
-    font_path = (
-        Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
-    )
+    font_path = Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf"
     if font_path.is_file():
         try:
             font_manager.fontManager.addfont(str(font_path))
@@ -57,8 +55,7 @@ def configure_bundled_font() -> Any:
     import matplotlib.pyplot as plt
 
     existing = [
-        f for f in plt.rcParams.get("font.sans-serif", [])
-        if f != BUNDLED_FONT_NAME
+        f for f in plt.rcParams.get("font.sans-serif", []) if f != BUNDLED_FONT_NAME
     ]
     plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["font.sans-serif"] = [BUNDLED_FONT_NAME, *existing]

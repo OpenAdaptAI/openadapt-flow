@@ -248,7 +248,9 @@ def load_policy(source: str | Path) -> Policy:
     except yaml.YAMLError as e:  # pragma: no cover - passthrough
         raise ValueError(f"could not parse policy YAML {path}: {e}") from e
     if not isinstance(data, dict):
-        raise ValueError(f"policy {path} must be a YAML mapping, got {type(data).__name__}")
+        raise ValueError(
+            f"policy {path} must be a YAML mapping, got {type(data).__name__}"
+        )
     try:
         return Policy.model_validate(data)
     except Exception as e:
@@ -456,7 +458,9 @@ class LintReport(BaseModel):
             lines.append("  no coverage gaps found.")
         for f in ordered:
             where = f"[{f.step_id}] " if f.step_id else ""
-            lines.append(f"  {icon[f.severity]} {f.severity:5} ({f.code}) {where}{f.message}")
+            lines.append(
+                f"  {icon[f.severity]} {f.severity:5} ({f.code}) {where}{f.message}"
+            )
         return "\n".join(lines)
 
 

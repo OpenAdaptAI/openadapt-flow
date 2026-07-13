@@ -84,8 +84,7 @@ def _reocr_text(
     lines = [
         line
         for line in lines
-        if isinstance(getattr(line, "text", None), str)
-        and line.text.strip()
+        if isinstance(getattr(line, "text", None), str) and line.text.strip()
     ]
     if not lines:
         return None
@@ -186,9 +185,7 @@ def build_heal_event(
         )
 
     crop_png = _crop_png(frame_png, new_region)
-    new_text = _reocr_text(
-        vision, frame_png, new_region, click_y=resolution.point[1]
-    )
+    new_text = _reocr_text(vision, frame_png, new_region, click_y=resolution.point[1])
     new_context = _recontext(vision, frame_png, new_region, resolution.point, frame)
     new_anchor = old_anchor.model_copy(
         update={

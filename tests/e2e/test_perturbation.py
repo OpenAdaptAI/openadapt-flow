@@ -45,8 +45,12 @@ class TestViewportChange:
         self, bundle, mockmed_url, _browser, run_dir, viewport
     ) -> None:
         report, state = replay_on_page(
-            _browser, bundle.dir, mockmed_url, run_dir,
-            params=dict(PARAMS), viewport=viewport,
+            _browser,
+            bundle.dir,
+            mockmed_url,
+            run_dir,
+            params=dict(PARAMS),
+            viewport=viewport,
         )
         assert report.success, describe(report, state)
         assert report.heal_count == 0
@@ -62,8 +66,12 @@ class TestViewportChange:
         arrives even earlier, at the note-field click, because that step's
         REGION_STABLE region extends below the smaller viewport."""
         report, state = replay_on_page(
-            _browser, bundle.dir, mockmed_url, run_dir,
-            params=dict(PARAMS), viewport=(900, 360),
+            _browser,
+            bundle.dir,
+            mockmed_url,
+            run_dir,
+            params=dict(PARAMS),
+            viewport=(900, 360),
         )
         assert report.success is False, describe(report, state)
         assert state["banner"] is None  # nothing was saved
@@ -86,8 +94,12 @@ class TestScaleChanges:
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
         report, state = replay_on_page(
-            _browser, bundle.dir, mockmed_url, run_dir,
-            params=dict(PARAMS), device_scale_factor=2,
+            _browser,
+            bundle.dir,
+            mockmed_url,
+            run_dir,
+            params=dict(PARAMS),
+            device_scale_factor=2,
         )
         assert report.success is False, describe(report, state)
         assert state["banner"] is None
@@ -99,7 +111,10 @@ class TestScaleChanges:
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
         report, state = replay_on_page(
-            _browser, bundle.dir, drift_url(mockmed_url, "zoom"), run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "zoom"),
+            run_dir,
             params=dict(PARAMS),
         )
         assert report.success is False, describe(report, state)
@@ -120,7 +135,10 @@ class TestFontDrift:
         metrics, and its stored template crop no longer matches either.
         Cosmetic drift, zero replayability."""
         report, state = replay_on_page(
-            _browser, bundle.dir, drift_url(mockmed_url, "font"), run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "font"),
+            run_dir,
             params=dict(PARAMS),
         )
         assert report.success is False, describe(report, state)
@@ -153,7 +171,10 @@ class TestDataDrift:
         (coverage ~0.67 from the shared reason/priority columns, below the
         0.8 bar) and the run halts without clicking anything."""
         report, state = replay_on_page(
-            _browser, bundle.dir, drift_url(mockmed_url, "lookalike"), run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "lookalike"),
+            run_dir,
             params=dict(PARAMS),
         )
         assert report.success is False, describe(report, state)
@@ -175,7 +196,10 @@ class TestDataDrift:
         Cardiology follow-up Medium') shares nothing with the recorded row
         (coverage 0.0) — safe halt, never click a look-alike."""
         report, state = replay_on_page(
-            _browser, bundle.dir, drift_url(mockmed_url, "missing"), run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "missing"),
+            run_dir,
             params=dict(PARAMS),
         )
         assert report.success is False, describe(report, state)
@@ -200,7 +224,10 @@ class TestDataDrift:
         patient '#patient/p1' (true row resolved first). A save to any
         other patient is the fixed failure mode."""
         report, state = replay_on_page(
-            _browser, bundle.dir, drift_url(mockmed_url, "grow"), run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "grow"),
+            run_dir,
             params=dict(PARAMS),
         )
         if report.success:
@@ -222,7 +249,10 @@ class TestDataDrift:
         fails first. The halt is safe, but note the mechanism: postcondition
         text mined from mutable table DATA, not from chrome."""
         report, state = replay_on_page(
-            _browser, bundle.dir, drift_url(mockmed_url, "empty"), run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "empty"),
+            run_dir,
             params=dict(PARAMS),
         )
         assert report.success is False, describe(report, state)
@@ -245,7 +275,10 @@ class TestSlowApp:
         # a slow CI machine adds real risk of a false halt here. If this
         # test flakes, suspect machine load before suspecting the product.
         report, state = replay_on_page(
-            _browser, bundle.dir, drift_url(mockmed_url, "slow"), run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "slow"),
+            run_dir,
             params=dict(PARAMS),
         )
         assert report.success, describe(report, state)
@@ -255,8 +288,10 @@ class TestSlowApp:
         self, bundle, mockmed_url, _browser, run_dir
     ) -> None:
         report, state = replay_on_page(
-            _browser, bundle.dir,
-            drift_url(mockmed_url, "slow") + "&slowms=12000", run_dir,
+            _browser,
+            bundle.dir,
+            drift_url(mockmed_url, "slow") + "&slowms=12000",
+            run_dir,
             params=dict(PARAMS),
         )
         assert report.success is False, describe(report, state)

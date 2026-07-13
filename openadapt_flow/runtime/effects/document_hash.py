@@ -79,9 +79,7 @@ class DocumentHashVerifier:
         if not self.root.is_dir():
             return None
         try:
-            paths = sorted(
-                p for p in self.root.glob(self.glob) if p.is_file()
-            )
+            paths = sorted(p for p in self.root.glob(self.glob) if p.is_file())
         except OSError:
             return None
         records: list[dict[str, Any]] = []
@@ -116,6 +114,4 @@ class DocumentHashVerifier:
         self, expected: Effect, before: EffectState, context: Any = None
     ) -> EffectVerdict:
         current = self._scan()
-        return judge_records(
-            expected, before, current, substrate=self.substrate
-        )
+        return judge_records(expected, before, current, substrate=self.substrate)

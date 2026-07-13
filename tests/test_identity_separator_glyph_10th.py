@@ -31,6 +31,7 @@ def _verify(mrn: str) -> str:
 # The reopening: dash/slash-formatted collapsible MRNs must ABSTAIN.
 # ---------------------------------------------------------------------------
 
+
 def test_dashed_o0_mrn_abstains():
     # MG-4408 (recorded) vs MG-44O8 (a DIFFERENT patient) OCR-collapse to the
     # same band. OCR cannot rule out the homonym -> ABSTAIN (never verify).
@@ -50,6 +51,7 @@ def test_lowercase_l1_dashed_mrn_abstains():
 # No over-halt: a CLEAN separator MRN (no O/0/l/1/I glyph) still VERIFIES.
 # ---------------------------------------------------------------------------
 
+
 def test_clean_dashed_mrn_still_verifies():
     for mrn in ("RC79284", "AC-79-284", "MG-4478"):
         assert _verify(mrn) == "verified", mrn
@@ -58,6 +60,7 @@ def test_clean_dashed_mrn_still_verifies():
 # ---------------------------------------------------------------------------
 # Dates never become gated identifiers (else every DOB would over-halt).
 # ---------------------------------------------------------------------------
+
 
 def test_dob_does_not_gate_the_band():
     # The band carries a DOB (01/15/1980) AND a clean MRN -> verifies.
@@ -74,5 +77,5 @@ def test_is_date_like_classification():
 def test_is_identifier_shaped_includes_separator_mrn_excludes_dates():
     assert I._is_identifier_shaped("MG-4408") is True
     assert I._is_identifier_shaped("123-45-6789") is True
-    assert I._is_identifier_shaped("01/15/1980") is False   # a date
-    assert I._is_identifier_shaped("Active") is False        # a name/word
+    assert I._is_identifier_shaped("01/15/1980") is False  # a date
+    assert I._is_identifier_shaped("Active") is False  # a name/word

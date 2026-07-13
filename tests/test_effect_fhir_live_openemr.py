@@ -117,9 +117,7 @@ def _create_patient(
         "gender": "male",
         "birthDate": "1980-01-01",
     }
-    resp = session.post(
-        f"{base}/Patient", json=resource, headers=headers, timeout=30
-    )
+    resp = session.post(f"{base}/Patient", json=resource, headers=headers, timeout=30)
     assert resp.status_code in (200, 201), (
         f"Patient create failed: HTTP {resp.status_code} {resp.text[:400]}"
     )

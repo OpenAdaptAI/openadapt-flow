@@ -167,7 +167,9 @@ def pixel_diff_fraction(png_a: bytes, png_b: bytes) -> float:
     cb = Image.new("L", (w, h), 255)
     ca.paste(a, (0, 0))
     cb.paste(b, (0, 0))
-    return float(np.mean(np.abs(np.asarray(ca, np.int16) - np.asarray(cb, np.int16))) / 255.0)
+    return float(
+        np.mean(np.abs(np.asarray(ca, np.int16) - np.asarray(cb, np.int16))) / 255.0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,8 +239,9 @@ class Comparator:
         self.load_seconds = time.time() - t0
         return self
 
-    def compare(self, png_a: bytes, png_b: bytes, tmp_dir: Path,
-                max_tokens: int = 6) -> dict[str, Any]:
+    def compare(
+        self, png_a: bytes, png_b: bytes, tmp_dir: Path, max_tokens: int = 6
+    ) -> dict[str, Any]:
         """Render the stacked pair, ask the VLM, parse veto-only.
 
         Returns ``{verdict, raw, latency_s}`` where verdict is same/different.
@@ -255,9 +258,13 @@ class Comparator:
         )
         t0 = time.time()
         res = generate(
-            self._model, self._processor, formatted,
-            image=[str(img_path)], max_tokens=max_tokens,
-            temperature=0.0, verbose=False,
+            self._model,
+            self._processor,
+            formatted,
+            image=[str(img_path)],
+            max_tokens=max_tokens,
+            temperature=0.0,
+            verbose=False,
         )
         latency = time.time() - t0
         raw = res.text if hasattr(res, "text") else str(res)
@@ -343,14 +350,27 @@ def run_probe(model_name: str, out_dir: Path, *, quick: bool = False) -> dict[st
         # Save the first few composed pairs for audit.
         if idx < 4:
             (audit_dir / f"collapse_{cls}_{a}_vs_{b}.png").write_bytes(
-                compose_pair(pa, pb))
-        trials.append(Trial(
-            suite="collapse", collision_class=cls, code_a=a, code_b=b,
-            truth="different", cond_a=RECORD_COND.name, cond_b=RECORD_COND.name,
-            ocr_a=ocr_a, ocr_b=ocr_b, ocr_collapsed=(ocr_a == ocr_b),
-            pixel_diff=pixel_diff_fraction(pa, pb), verdict=r["verdict"],
-            raw=r["raw"], latency_s=r["latency_s"], note=note,
-        ))
+                compose_pair(pa, pb)
+            )
+        trials.append(
+            Trial(
+                suite="collapse",
+                collision_class=cls,
+                code_a=a,
+                code_b=b,
+                truth="different",
+                cond_a=RECORD_COND.name,
+                cond_b=RECORD_COND.name,
+                ocr_a=ocr_a,
+                ocr_b=ocr_b,
+                ocr_collapsed=(ocr_a == ocr_b),
+                pixel_diff=pixel_diff_fraction(pa, pb),
+                verdict=r["verdict"],
+                raw=r["raw"],
+                latency_s=r["latency_s"],
+                note=note,
+            )
+        )
 
     # ---- Suite 2: same-value clean (SAME patient, re-rendered) ----
     values = SAME_VALUES[:4] if quick else SAME_VALUES
@@ -358,14 +378,25 @@ def run_probe(model_name: str, out_dir: Path, *, quick: bool = False) -> dict[st
         pa = _crop(val, RECORD_COND)
         pb = _crop(val, RECORD_COND)  # deterministic re-render
         r = cmp.compare(pa, pb, tmp_dir)
-        trials.append(Trial(
-            suite="same_clean", collision_class="identical", code_a=val,
-            code_b=val, truth="same", cond_a=RECORD_COND.name,
-            cond_b=RECORD_COND.name, ocr_a=_ocr_read(pa), ocr_b=_ocr_read(pb),
-            ocr_collapsed=True, pixel_diff=pixel_diff_fraction(pa, pb),
-            verdict=r["verdict"], raw=r["raw"], latency_s=r["latency_s"],
-            note="same value, clean re-render",
-        ))
+        trials.append(
+            Trial(
+                suite="same_clean",
+                collision_class="identical",
+                code_a=val,
+                code_b=val,
+                truth="same",
+                cond_a=RECORD_COND.name,
+                cond_b=RECORD_COND.name,
+                ocr_a=_ocr_read(pa),
+                ocr_b=_ocr_read(pb),
+                ocr_collapsed=True,
+                pixel_diff=pixel_diff_fraction(pa, pb),
+                verdict=r["verdict"],
+                raw=r["raw"],
+                latency_s=r["latency_s"],
+                note="same value, clean re-render",
+            )
+        )
 
     # ---- Suite 3: same-value under render drift (the value test) ----
     for val in values:
@@ -373,19 +404,31 @@ def run_probe(model_name: str, out_dir: Path, *, quick: bool = False) -> dict[st
         for cond in DRIFT_CONDS:
             pb = _crop(val, cond)
             r = cmp.compare(pa, pb, tmp_dir)
-            trials.append(Trial(
-                suite="same_drift", collision_class=cond.name, code_a=val,
-                code_b=val, truth="same", cond_a=RECORD_COND.name,
-                cond_b=cond.name, ocr_a=_ocr_read(pa), ocr_b=_ocr_read(pb),
-                ocr_collapsed=True, pixel_diff=pixel_diff_fraction(pa, pb),
-                verdict=r["verdict"], raw=r["raw"], latency_s=r["latency_s"],
-                note=f"same value under {cond.name}",
-            ))
+            trials.append(
+                Trial(
+                    suite="same_drift",
+                    collision_class=cond.name,
+                    code_a=val,
+                    code_b=val,
+                    truth="same",
+                    cond_a=RECORD_COND.name,
+                    cond_b=cond.name,
+                    ocr_a=_ocr_read(pa),
+                    ocr_b=_ocr_read(pb),
+                    ocr_collapsed=True,
+                    pixel_diff=pixel_diff_fraction(pa, pb),
+                    verdict=r["verdict"],
+                    raw=r["raw"],
+                    latency_s=r["latency_s"],
+                    note=f"same value under {cond.name}",
+                )
+            )
 
     # Save one drift audit pair.
     pa = _crop(values[0], RECORD_COND)
     (audit_dir / f"drift_{values[0]}_dark.png").write_bytes(
-        compose_pair(pa, _crop(values[0], DRIFT_CONDS[0])))
+        compose_pair(pa, _crop(values[0], DRIFT_CONDS[0]))
+    )
 
     aggregates = _aggregate(trials, cmp, model_name)
     payload = {
@@ -433,7 +476,9 @@ def _aggregate(trials: list[Trial], cmp: Comparator, model_name: str) -> dict[st
         drift_by_cond[cond.name] = {
             "n": len(sub),
             "over_halt_rate": rate(sub, lambda t: t.verdict == "different"),
-            "mean_pixel_diff": round(float(np.mean([t.pixel_diff for t in sub])), 4) if sub else None,
+            "mean_pixel_diff": round(float(np.mean([t.pixel_diff for t in sub])), 4)
+            if sub
+            else None,
         }
 
     return {
@@ -450,8 +495,12 @@ def _aggregate(trials: list[Trial], cmp: Comparator, model_name: str) -> dict[st
             "false_accept_rate_all": rate(collapse, lambda t: t.verdict == "same"),
             "detection_rate_all": rate(collapse, lambda t: t.verdict == "different"),
             "n_ocr_collapsed": len(collapse_ocr),
-            "false_accept_rate_ocr_collapsed": rate(collapse_ocr, lambda t: t.verdict == "same"),
-            "detection_rate_ocr_collapsed": rate(collapse_ocr, lambda t: t.verdict == "different"),
+            "false_accept_rate_ocr_collapsed": rate(
+                collapse_ocr, lambda t: t.verdict == "same"
+            ),
+            "detection_rate_ocr_collapsed": rate(
+                collapse_ocr, lambda t: t.verdict == "different"
+            ),
         },
         "same_clean": {
             "n": len(same_clean),
@@ -476,8 +525,8 @@ def _write_markdown(path: Path, payload: dict[str, Any], trials: list[Trial]) ->
     # Verdict logic: the tier is only safe if false-accept on the genuinely
     # OCR-collapsed pairs is ~0. Value over cheap pixel-compare requires low
     # over-halt under drift.
-    safe = (fa_ocr is not None and fa_ocr == 0.0)
-    robust = (drift_over is not None and drift_over <= 0.10)
+    safe = fa_ocr is not None and fa_ocr == 0.0
+    robust = drift_over is not None and drift_over <= 0.10
     _dark = agg["same_drift"]["by_condition"].get("drift_dark_theme", {})
     dark_over = _dark.get("over_halt_rate")
     dark_px = _dark.get("mean_pixel_diff")
@@ -502,7 +551,9 @@ def _write_markdown(path: Path, payload: dict[str, Any], trials: list[Trial]) ->
     lines.append("")
     lines.append(f"- **Model:** `{payload['model']}` (open weights, MLX, local).")
     fp = agg["model_footprint_gb"]
-    lines.append(f"- **On-disk footprint:** {fp if fp is not None else 'n/a'} GB (4-bit).")
+    lines.append(
+        f"- **On-disk footprint:** {fp if fp is not None else 'n/a'} GB (4-bit)."
+    )
     lines.append(f"- **Load time:** {agg['load_seconds']} s (one-time).")
     lat = agg["latency_s"]
     lines.append(
@@ -529,7 +580,9 @@ def _write_markdown(path: Path, payload: dict[str, Any], trials: list[Trial]) ->
         f"**{pct(fa_ocr)}**, detection {pct(cp['detection_rate_ocr_collapsed'])}."
     )
     lines.append("")
-    lines.append("| class | A | B | OCR(A) | OCR(B) | OCR collapsed | pixel-diff | VLM verdict | correct |")
+    lines.append(
+        "| class | A | B | OCR(A) | OCR(B) | OCR collapsed | pixel-diff | VLM verdict | correct |"
+    )
     lines.append("|---|---|---|---|---|---|---|---|---|")
     for t in trials:
         if t.suite != "collapse":
@@ -567,7 +620,9 @@ def _write_markdown(path: Path, payload: dict[str, Any], trials: list[Trial]) ->
     lines.append("| drift condition | n | over-halt | mean pixel-diff vs record |")
     lines.append("|---|---|---|---|")
     for name, d in agg["same_drift"]["by_condition"].items():
-        lines.append(f"| {name} | {d['n']} | {pct(d['over_halt_rate'])} | {d['mean_pixel_diff']} |")
+        lines.append(
+            f"| {name} | {d['n']} | {pct(d['over_halt_rate'])} | {d['mean_pixel_diff']} |"
+        )
     lines.append("")
     lines.append(
         "> The mean pixel-diff column shows how far each drift moves the pixels: a "

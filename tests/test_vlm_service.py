@@ -32,8 +32,14 @@ class _ScriptedBackend(StubBackend):
 
     name = "scripted"
 
-    def __init__(self, *, identity="DIFFERENT", ground='{"x": null, "y": null}',
-                 state="UNCERTAIN", delay=0.0):
+    def __init__(
+        self,
+        *,
+        identity="DIFFERENT",
+        ground='{"x": null, "y": null}',
+        state="UNCERTAIN",
+        delay=0.0,
+    ):
         super().__init__()
         self._id = identity
         self._ground = ground
@@ -43,6 +49,7 @@ class _ScriptedBackend(StubBackend):
     def generate(self, prompt, images, max_tokens):
         if self._delay:
             import time
+
             time.sleep(self._delay)
         low = prompt.lower()
         if "same sequence of characters" in low:
@@ -72,61 +79,79 @@ def test_health_and_ready_no_auth():
 
 def test_identity_same_and_different():
     with _client(_ScriptedBackend(identity="SAME").load()) as c:
-        r = c.post("/v1/identity/compare",
-                   json={"crop_a": _png(), "crop_b": _png()}, headers=AUTH)
+        r = c.post(
+            "/v1/identity/compare",
+            json={"crop_a": _png(), "crop_b": _png()},
+            headers=AUTH,
+        )
         assert r.status_code == 200 and r.json()["verdict"] == "same"
     with _client(_ScriptedBackend(identity="DIFFERENT").load()) as c:
-        r = c.post("/v1/identity/compare",
-                   json={"crop_a": _png(), "crop_b": _png()}, headers=AUTH)
+        r = c.post(
+            "/v1/identity/compare",
+            json={"crop_a": _png(), "crop_b": _png()},
+            headers=AUTH,
+        )
         assert r.json()["verdict"] == "different"
 
 
 def test_identity_garbled_answer_is_veto():
     # Anything but a clean SAME parses to "different" (veto-only).
     with _client(_ScriptedBackend(identity="hmm not sure").load()) as c:
-        r = c.post("/v1/identity/compare",
-                   json={"crop_a": _png(), "crop_b": _png()}, headers=AUTH)
+        r = c.post(
+            "/v1/identity/compare",
+            json={"crop_a": _png(), "crop_b": _png()},
+            headers=AUTH,
+        )
         assert r.json()["verdict"] == "different"
 
 
 def test_ground_point_and_none():
     with _client(_ScriptedBackend(ground='{"x": 100, "y": 200}').load()) as c:
-        r = c.post("/v1/ground",
-                   json={"screenshot": _png(), "target_description": "Save"},
-                   headers=AUTH)
+        r = c.post(
+            "/v1/ground",
+            json={"screenshot": _png(), "target_description": "Save"},
+            headers=AUTH,
+        )
         assert r.json()["point"] == [100, 200]
     with _client(_ScriptedBackend(ground='{"x": null, "y": null}').load()) as c:
-        r = c.post("/v1/ground",
-                   json={"screenshot": _png(), "target_description": "Save"},
-                   headers=AUTH)
+        r = c.post(
+            "/v1/ground",
+            json={"screenshot": _png(), "target_description": "Save"},
+            headers=AUTH,
+        )
         assert r.json()["point"] is None
 
 
 def test_verify_state_yes_no_uncertain():
     for answer, expected in [("YES", "yes"), ("NO", "no"), ("dunno", "uncertain")]:
         with _client(_ScriptedBackend(state=answer).load()) as c:
-            r = c.post("/v1/verify_state",
-                       json={"screenshot": _png(), "expected_state": "saved dialog"},
-                       headers=AUTH)
+            r = c.post(
+                "/v1/verify_state",
+                json={"screenshot": _png(), "expected_state": "saved dialog"},
+                headers=AUTH,
+            )
             assert r.json()["holds"] == expected
 
 
 def test_auth_rejected_without_token():
     with _client() as c:
-        r = c.post("/v1/identity/compare",
-                   json={"crop_a": _png(), "crop_b": _png()})
+        r = c.post("/v1/identity/compare", json={"crop_a": _png(), "crop_b": _png()})
         assert r.status_code == 401
-        r2 = c.post("/v1/identity/compare",
-                    json={"crop_a": _png(), "crop_b": _png()},
-                    headers={"Authorization": "Bearer wrong"})
+        r2 = c.post(
+            "/v1/identity/compare",
+            json={"crop_a": _png(), "crop_b": _png()},
+            headers={"Authorization": "Bearer wrong"},
+        )
         assert r2.status_code == 401
 
 
 def test_bad_base64_rejected():
     with _client() as c:
-        r = c.post("/v1/ground",
-                   json={"screenshot": "!!notb64!!", "target_description": "x"},
-                   headers=AUTH)
+        r = c.post(
+            "/v1/ground",
+            json={"screenshot": "!!notb64!!", "target_description": "x"},
+            headers=AUTH,
+        )
         assert r.status_code == 422
 
 
@@ -140,11 +165,14 @@ def test_micro_batching_groups_concurrent_requests():
     async def _run():
         transport = httpx.ASGITransport(app=app)
         async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://t") as ac:
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://t"
+            ) as ac:
                 body = {"crop_a": _png(), "crop_b": _png()}
-                tasks = [ac.post("/v1/identity/compare", json=body, headers=AUTH)
-                         for _ in range(12)]
+                tasks = [
+                    ac.post("/v1/identity/compare", json=body, headers=AUTH)
+                    for _ in range(12)
+                ]
                 resps = await asyncio.gather(*tasks)
             return resps, app.state.batcher.max_observed_batch
 

@@ -99,12 +99,19 @@ def _effect_verdict(verifier, before):
     field-equals effects must confirm; the first non-confirmed refutes the
     step (the runtime gate)."""
     written = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
-        risk="irreversible", timeout_s=1.0,
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        expected_count=1,
+        risk="irreversible",
+        timeout_s=1.0,
     )
     field = Effect(
-        kind=EffectKind.FIELD_EQUALS, match=TARGET, field="note", value=NOTE,
-        risk="irreversible", timeout_s=1.0,
+        kind=EffectKind.FIELD_EQUALS,
+        match=TARGET,
+        field="note",
+        value=NOTE,
+        risk="irreversible",
+        timeout_s=1.0,
     )
     v1 = verifier.verify(written, before)
     if not v1.confirmed:
@@ -158,8 +165,11 @@ def test_idempotency_key_neutralizes_duplicate(sor):
     before = verifier.capture_pre_state()
     _drive_persistence_boundary(base, db, "idempotent")
     written = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
-        idempotency_key="run-key", timeout_s=1.0,
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        expected_count=1,
+        idempotency_key="run-key",
+        timeout_s=1.0,
     )
     assert verifier.verify(written, before).verdict is Verdict.CONFIRMED
 
@@ -176,7 +186,9 @@ def test_timeout_effect_verify_is_more_correct_than_screen(sor):
     _drive_persistence_boundary(base, db, "timeout")
     assert SCREEN_SHOWS_SUCCESS["timeout"] is False  # screen: false-abort
     written = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        expected_count=1,
         timeout_s=1.0,
     )
     assert verifier.verify(written, before).verdict is Verdict.CONFIRMED
@@ -192,7 +204,9 @@ def test_session_expiry_both_safe(sor):
     _drive_persistence_boundary(base, db, "session")
     assert SCREEN_SHOWS_SUCCESS["session"] is False
     written = Effect(
-        kind=EffectKind.RECORD_WRITTEN, match=TARGET, expected_count=1,
+        kind=EffectKind.RECORD_WRITTEN,
+        match=TARGET,
+        expected_count=1,
         timeout_s=0.5,
     )
     # Nothing persisted -> record_written refutes (absent); consistent with the

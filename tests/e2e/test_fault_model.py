@@ -112,9 +112,7 @@ class TestClassify:
 
     def test_silently_mishandled_flag(self) -> None:
         assert F.is_silently_mishandled(F.WRONG_ACTION, report_success=True)
-        assert F.is_silently_mishandled(
-            F.UNDETECTED_FAILURE, report_success=True
-        )
+        assert F.is_silently_mishandled(F.UNDETECTED_FAILURE, report_success=True)
         # A halt (report_success False) is never a SILENT mishandle.
         assert not F.is_silently_mishandled(F.FALSE_ABORT, report_success=False)
         assert not F.is_silently_mishandled(F.SUCCESS, report_success=True)
@@ -122,9 +120,7 @@ class TestClassify:
 
 class TestRegistry:
     def test_seven_transactional_classes_present(self) -> None:
-        transactional = [
-            f for f in F.FAULTS if f.fault_class[0].isdigit()
-        ]
+        transactional = [f for f in F.FAULTS if f.fault_class[0].isdigit()]
         # Fault classes 1..7 from the review, each exactly once.
         numbers = sorted(f.fault_class.split(".")[0] for f in transactional)
         assert numbers == ["1", "2", "3", "4", "5", "6", "7"]

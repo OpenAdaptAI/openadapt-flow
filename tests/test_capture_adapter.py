@@ -165,10 +165,22 @@ def make_capture(tmp_path: Path, action_rows: list[dict], screens=None) -> Path:
 def _click_rows(ts: float, x: float, y: float, button: str = "left") -> list[dict]:
     """A press+release pair -> capture merges into one mouse.singleclick."""
     return [
-        {"name": "click", "timestamp": ts, "mouse_x": x, "mouse_y": y,
-         "mouse_button_name": button, "mouse_pressed": True},
-        {"name": "click", "timestamp": ts + 0.01, "mouse_x": x, "mouse_y": y,
-         "mouse_button_name": button, "mouse_pressed": False},
+        {
+            "name": "click",
+            "timestamp": ts,
+            "mouse_x": x,
+            "mouse_y": y,
+            "mouse_button_name": button,
+            "mouse_pressed": True,
+        },
+        {
+            "name": "click",
+            "timestamp": ts + 0.01,
+            "mouse_x": x,
+            "mouse_y": y,
+            "mouse_button_name": button,
+            "mouse_pressed": False,
+        },
     ]
 
 
@@ -260,9 +272,7 @@ def test_frames_selected_from_video(converted: Path) -> None:
         actual = cv2.imdecode(
             np.frombuffer(path.read_bytes(), np.uint8), cv2.IMREAD_COLOR
         ).astype(np.int16)
-        diffs = [
-            float(np.abs(actual - s.astype(np.int16)).mean()) for s in screens
-        ]
+        diffs = [float(np.abs(actual - s.astype(np.int16)).mean()) for s in screens]
         return int(np.argmin(diffs))
 
     frames = converted / "frames"
@@ -280,9 +290,7 @@ def test_converted_recording_compiles(converted: Path, tmp_path: Path) -> None:
     from openadapt_flow.compiler import compile_recording
     from openadapt_flow.ir import ActionKind
 
-    workflow = compile_recording(
-        converted, tmp_path / "bundle", name="capture-bridge"
-    )
+    workflow = compile_recording(converted, tmp_path / "bundle", name="capture-bridge")
     assert [s.action for s in workflow.steps] == [
         ActionKind.CLICK,
         ActionKind.TYPE,
@@ -298,8 +306,14 @@ def test_converted_recording_compiles(converted: Path, tmp_path: Path) -> None:
 def test_scroll_notches_to_pixels_and_sign(tmp_path: Path) -> None:
     # pynput: +dy = scroll up (view up); flow: +dy = view down.
     rows = [
-        {"name": "scroll", "timestamp": T0 + 1.0, "mouse_x": 100.0,
-         "mouse_y": 100.0, "mouse_dx": 0.0, "mouse_dy": -3.0},
+        {
+            "name": "scroll",
+            "timestamp": T0 + 1.0,
+            "mouse_x": 100.0,
+            "mouse_y": 100.0,
+            "mouse_dx": 0.0,
+            "mouse_dy": -3.0,
+        },
     ]
     capture_dir = make_capture(tmp_path, rows, screens=app_screens()[:2])
     recording_dir = tmp_path / "recording"
@@ -326,12 +340,24 @@ def test_no_actions_rejected(tmp_path: Path) -> None:
 def test_drag_rejected_not_dropped(tmp_path: Path) -> None:
     # down -> moves -> up at a far position -> capture emits a mouse.drag.
     rows = [
-        {"name": "click", "timestamp": T0 + 1.0, "mouse_x": 10.0,
-         "mouse_y": 10.0, "mouse_button_name": "left", "mouse_pressed": True},
+        {
+            "name": "click",
+            "timestamp": T0 + 1.0,
+            "mouse_x": 10.0,
+            "mouse_y": 10.0,
+            "mouse_button_name": "left",
+            "mouse_pressed": True,
+        },
         {"name": "move", "timestamp": T0 + 1.1, "mouse_x": 60.0, "mouse_y": 60.0},
         {"name": "move", "timestamp": T0 + 1.2, "mouse_x": 120.0, "mouse_y": 120.0},
-        {"name": "click", "timestamp": T0 + 1.3, "mouse_x": 120.0,
-         "mouse_y": 120.0, "mouse_button_name": "left", "mouse_pressed": False},
+        {
+            "name": "click",
+            "timestamp": T0 + 1.3,
+            "mouse_x": 120.0,
+            "mouse_y": 120.0,
+            "mouse_button_name": "left",
+            "mouse_pressed": False,
+        },
     ]
     capture_dir = make_capture(tmp_path, rows, screens=app_screens()[:1])
     with pytest.raises(ValueError, match="mouse.drag"):

@@ -324,10 +324,7 @@ class InteractiveRecorder:
 
     def _accumulate_input(self, ev: dict[str, Any]) -> None:
         field = ev.get("field")
-        if (
-            self._pending_type is not None
-            and self._pending_type.get("field") != field
-        ):
+        if self._pending_type is not None and self._pending_type.get("field") != field:
             self._flush_type()  # focus moved to a different field
         if self._pending_type is None:
             self._pending_type = {

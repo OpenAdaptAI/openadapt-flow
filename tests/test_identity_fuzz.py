@@ -81,14 +81,20 @@ _BYTE_COLLAPSE_GLYPHS = "Oo0lI1"  # O/o/0 and l/I/1 — read byte-identically
 # canonically equal, raw-unequal — the wrong-patient homonym the gate must
 # refuse via _suspicious_pair.
 _SIBLING_PAIRS = (
-    ("O", "0"), ("o", "0"), ("l", "1"), ("I", "1"),
-    ("s", "5"), ("z", "2"), ("b", "8"), ("g", "9"),
+    ("O", "0"),
+    ("o", "0"),
+    ("l", "1"),
+    ("I", "1"),
+    ("s", "5"),
+    ("z", "2"),
+    ("b", "8"),
+    ("g", "9"),
 )
 
 # CLEAN alphabets: exclude every homoglyph letter/digit so a "clean" identifier
 # is provably NOT glyph-vulnerable and must verify (no-over-halt property).
 _CLEAN_LETTERS = "ABCDEFGHJKMNPQRSTUVWXYZ"  # no I, O, L
-_CLEAN_DIGITS = "23456789"                  # no 0, 1
+_CLEAN_DIGITS = "23456789"  # no 0, 1
 
 
 # --------------------------------------------------------------------------- #
@@ -229,8 +235,7 @@ def test_raw_different_collapsible_sibling_never_verifies(name, dob, mrns):
         f"rec_band={rec!r} live_band={live!r}"
     )
     assert status == "mismatch", (
-        f"expected mismatch, got {status!r} for recorded={rec_mrn!r} "
-        f"live={live_mrn!r}"
+        f"expected mismatch, got {status!r} for recorded={rec_mrn!r} live={live_mrn!r}"
     )
 
 
@@ -244,9 +249,7 @@ def test_clean_identifier_verifies(name, dob, mrn):
     (non-confusable) identifier with a matching name+DOB must VERIFY."""
     band = _band(name, dob, mrn)
     status = I.verify_target_identity(band, band).status
-    assert status == "verified", (
-        f"spurious non-verify {status!r} for clean mrn={mrn!r}"
-    )
+    assert status == "verified", f"spurious non-verify {status!r} for clean mrn={mrn!r}"
 
 
 # --------------------------------------------------------------------------- #

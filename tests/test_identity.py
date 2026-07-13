@@ -314,9 +314,7 @@ class TestBandMatch:
         assert match.max_uncovered_run == len("janeli")
 
     def test_separated_unmatched_tokens_do_not_merge(self):
-        match = band_match(
-            "alpha beta gamma delta", "alpha WRONG gamma NOPE"
-        )
+        match = band_match("alpha beta gamma delta", "alpha WRONG gamma NOPE")
         assert match.max_uncovered_run == max(len("beta"), len("delta"))
 
     def test_short_tokens_match_only_verbatim(self):
@@ -402,9 +400,7 @@ class TestOperatingPoint:
         """The same 4-char gap with a foreign token IN ITS PLACE is a
         replacement — contradiction budget (0) fails it even though
         coverage and run cap alone would pass."""
-        match = band_match(
-            "abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop wxyz"
-        )
+        match = band_match("abcd efgh ijkl mnop qrst", "abcd efgh ijkl mnop wxyz")
         assert match.coverage == pytest.approx(0.8)
         assert match.max_uncovered_run == 4
         assert match.contradicted_chars > 0
@@ -488,8 +484,7 @@ class TestHelpers:
         )
         # Case-insensitive.
         assert (
-            substitute_param("open PHIL chart", "Phil", "Susan")
-            == "open Susan chart"
+            substitute_param("open PHIL chart", "Phil", "Susan") == "open Susan chart"
         )
 
     def test_substitute_param_fallback_drops_value_tokens(self):
@@ -537,7 +532,9 @@ class TestContextFromLines:
             line("Ann Wu Basic metabolic panel", region=(10, 140, 300, 16)),
         ]
         ctx = context_from_lines(
-            lines, exclude_region=(2000, 0, 1, 1), band=self.BAND,
+            lines,
+            exclude_region=(2000, 0, 1, 1),
+            band=self.BAND,
             point=(150, 118),
         )
         assert ctx == "Jane Li Comprehensive panel"
@@ -547,9 +544,7 @@ class TestContextFromLines:
             line("Jane Li Comprehensive panel", region=(10, 110, 300, 16)),
             line("Ann Wu Basic metabolic panel", region=(10, 140, 300, 16)),
         ]
-        ctx = context_from_lines(
-            lines, exclude_region=(2000, 0, 1, 1), band=self.BAND
-        )
+        ctx = context_from_lines(lines, exclude_region=(2000, 0, 1, 1), band=self.BAND)
         assert "Jane Li" in ctx and "Ann Wu" in ctx
 
     def test_timestamp_lines_dropped(self):
@@ -558,7 +553,9 @@ class TestContextFromLines:
             line("DOB 1980-01-01", region=(320, 110, 100, 16)),
         ]
         ctx = context_from_lines(
-            lines, exclude_region=(2000, 0, 1, 1), band=self.BAND,
+            lines,
+            exclude_region=(2000, 0, 1, 1),
+            band=self.BAND,
             point=(150, 118),
         )
         assert ctx == "Jane Li Comprehensive panel"
@@ -567,7 +564,9 @@ class TestContextFromLines:
         lines = [line("Active High 3", region=(10, 110, 100, 16))]
         assert (
             context_from_lines(
-                lines, exclude_region=(2000, 0, 1, 1), band=self.BAND,
+                lines,
+                exclude_region=(2000, 0, 1, 1),
+                band=self.BAND,
                 point=(50, 118),
             )
             is None

@@ -79,9 +79,16 @@ class FakeVision:
         self.text_results: dict = {}
         self.ocr_lines: list = []
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None, scales=(0.85, 1.0, 1.18),
-                      threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         if self.template_results:
             return self.template_results.pop(0)
         return None
@@ -101,8 +108,7 @@ class FakeVision:
     def phash_distance(self, a, b):
         return 0
 
-    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2,
-                     timeout_s=3.0):
+    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2, timeout_s=3.0):
         return backend.screenshot()
 
 
@@ -227,8 +233,7 @@ def test_invariant_noop_on_unarmed_step():
 def test_patch_classifies_identity_vs_locator_changes():
     old = anchor(context_text=ARMED_BAND)
     new = anchor(context_text=None, click_point=(150, 150), ocr_text="Submit")
-    event = HealEvent(step_id="s1", rung_used="ocr", old_anchor=old,
-                      new_anchor=new)
+    event = HealEvent(step_id="s1", rung_used="ocr", old_anchor=old, new_anchor=new)
     patch = HealPatch.from_event(event)
     fields = {c.field: c for c in patch.changes}
     assert fields["context_text"].identity is True
@@ -261,8 +266,7 @@ def test_effect_regression_noop_without_baseline():
 
 
 def test_risk_regression_blocks_downgrade():
-    irr = Step(id="s1", intent="delete", action=ActionKind.CLICK,
-               risk="irreversible")
+    irr = Step(id="s1", intent="delete", action=ActionKind.CLICK, risk="irreversible")
     rev = irr.model_copy(update={"risk": "reversible"})
     assert risk_regression(irr, rev).ok is False
     assert risk_regression(irr, irr).ok is True
@@ -272,11 +276,14 @@ def test_gate_fails_on_identity_and_reports_all_failures():
     old = anchor(context_text=ARMED_BAND)
     new = anchor(context_text=None)
     step = armed_step()
-    event = HealEvent(step_id="s1", rung_used="ocr", old_anchor=old,
-                      new_anchor=new)
+    event = HealEvent(step_id="s1", rung_used="ocr", old_anchor=old, new_anchor=new)
     patch = HealPatch.from_event(event)
     result = RegressionGate().evaluate(
-        patch, old, new, old_step=step, new_step=step,
+        patch,
+        old,
+        new,
+        old_step=step,
+        new_step=step,
     )
     assert result.passed is False
     assert result.identity_ok is False
@@ -323,7 +330,11 @@ def test_pipeline_canary_can_roll_back_a_gate_passing_patch():
         HealEvent(step_id="s1", rung_used="ocr", old_anchor=old, new_anchor=new)
     )
     outcome = run_promotion(
-        patch, old, new, old_step=step, new_step=step,
+        patch,
+        old,
+        new,
+        old_step=step,
+        new_step=step,
         canary=lambda p: (False, "regressed on prior trace #3"),
     )
     assert outcome.promoted is False
@@ -335,8 +346,7 @@ def test_govern_heal_persists_patch_for_both_verdicts(tmp_path):
     old = anchor(context_text=ARMED_BAND)
     new = anchor(context_text=None)
     step = armed_step()
-    event = HealEvent(step_id="s1", rung_used="ocr", old_anchor=old,
-                      new_anchor=new)
+    event = HealEvent(step_id="s1", rung_used="ocr", old_anchor=old, new_anchor=new)
     outcome = govern_heal(step, event, run_dir=tmp_path)
     assert outcome.promoted is False
     assert outcome.event is None
@@ -372,14 +382,16 @@ def test_replay_patch_promotable_when_located_and_verified():
     frame = make_png()
     patch = HealPatch.from_event(
         HealEvent(
-            step_id="s1", rung_used="ocr",
+            step_id="s1",
+            rung_used="ocr",
             old_anchor=anchor(context_text=ARMED_BAND),
             new_anchor=anchor(context_text=ARMED_BAND),
         )
     )
     cases = perturbation_set(frame, anchor())
     report = replay_patch(
-        patch, cases,
+        patch,
+        cases,
         resolve=lambda png: _expected_for(png, cases),
         sample_band=lambda png, pt: ARMED_BAND,
     )
@@ -391,14 +403,16 @@ def test_replay_patch_fails_when_target_not_located():
     frame = make_png()
     patch = HealPatch.from_event(
         HealEvent(
-            step_id="s1", rung_used="ocr",
+            step_id="s1",
+            rung_used="ocr",
             old_anchor=anchor(context_text=ARMED_BAND),
             new_anchor=anchor(context_text=ARMED_BAND),
         )
     )
     cases = perturbation_set(frame, anchor())
     report = replay_patch(
-        patch, cases,
+        patch,
+        cases,
         resolve=lambda png: None,  # target lost under drift
         sample_band=lambda png, pt: ARMED_BAND,
     )
@@ -528,7 +542,9 @@ def test_e2e_unarmed_step_still_heals_without_governance_halt(tmp_path):
 
     vision = _drift_to_ocr_rung([OcrLine("Submit Encounter", confidence=0.95)])
     step = Step(
-        id="s1", intent="click Save", action=ActionKind.CLICK,
+        id="s1",
+        intent="click Save",
+        action=ActionKind.CLICK,
         anchor=anchor(context_text=None),  # UNARMED
     )
     workflow = Workflow(name="wf", viewport=VIEWPORT, steps=[step])
@@ -538,6 +554,7 @@ def test_e2e_unarmed_step_still_heals_without_governance_halt(tmp_path):
     )
     assert report.success is True
     assert report.heal_count == 1
-    assert json.loads(
-        (run_dir / "heals" / "s1" / "patch.json").read_text()
-    )["status"] == "promoted"
+    assert (
+        json.loads((run_dir / "heals" / "s1" / "patch.json").read_text())["status"]
+        == "promoted"
+    )

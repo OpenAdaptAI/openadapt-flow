@@ -106,9 +106,7 @@ def test_type_step_with_literal_text() -> None:
 
 def test_type_step_with_param_yields_valid_placeholder() -> None:
     """A parameterized TYPE step (no literal text) still yields a valid Action."""
-    step = ir.Step(
-        id="s3", intent="type mrn", action=ir.ActionKind.TYPE, param="mrn"
-    )
+    step = ir.Step(id="s3", intent="type mrn", action=ir.ActionKind.TYPE, param="mrn")
     action = interop.step_to_action(step)  # must not raise the TYPE-needs-text error
     assert action.text == "{mrn}"
 
@@ -228,17 +226,13 @@ def test_result_identity_mismatch_maps_to_state_mismatch() -> None:
 def test_reverse_round_trips_shared_vocabulary() -> None:
     from openadapt_types import Action, ActionTarget, ActionType
 
-    action = Action(
-        type=ActionType.TYPE, text="hello", reasoning="type greeting"
-    )
+    action = Action(type=ActionType.TYPE, text="hello", reasoning="type greeting")
     step = interop.action_to_step(action, step_id="ing1")
     assert step.action == ir.ActionKind.TYPE
     assert step.text == "hello"
     assert step.intent == "type greeting"
     # Coordinates are intentionally dropped (flow targets via visual anchors).
-    action2 = Action(
-        type=ActionType.CLICK, target=ActionTarget(x=5, y=6)
-    )
+    action2 = Action(type=ActionType.CLICK, target=ActionTarget(x=5, y=6))
     step2 = interop.action_to_step(action2)
     assert step2.anchor is None
 
@@ -246,9 +240,7 @@ def test_reverse_round_trips_shared_vocabulary() -> None:
 def test_reverse_scroll_round_trips() -> None:
     from openadapt_types import Action, ActionType
 
-    action = Action(
-        type=ActionType.SCROLL, scroll_direction="down", scroll_amount=80
-    )
+    action = Action(type=ActionType.SCROLL, scroll_direction="down", scroll_amount=80)
     step = interop.action_to_step(action)
     assert step.scroll_dy == 80
     assert step.scroll_dx is None
@@ -289,32 +281,44 @@ def test_importing_shim_does_not_import_openadapt_types() -> None:
 
 # --- adversarial-review fixes: param round-trip + timeout error_type ----------
 
+
 def test_param_placeholder_round_trips_back_to_param():
     import pytest
+
     pytest.importorskip("openadapt_types")
     from openadapt_flow import ir
     from openadapt_flow.interop.types import step_to_action, action_to_step
-    s = ir.Step(id="s1", intent="type mrn", action=ir.ActionKind.TYPE,
-                param="mrn", text=None)
+
+    s = ir.Step(
+        id="s1", intent="type mrn", action=ir.ActionKind.TYPE, param="mrn", text=None
+    )
     back = action_to_step(step_to_action(s))
     assert back.param == "mrn" and back.text is None  # not literal "{mrn}"
 
 
 def test_literal_braced_text_on_non_type_stays_literal():
     import pytest
+
     pytest.importorskip("openadapt_types")
     from openadapt_flow import ir
     from openadapt_flow.interop.types import action_to_step
     from openadapt_types import Action, ActionType
+
     a = Action(type=ActionType.KEY, key="{enter}")
     assert action_to_step(a).key == "{enter}"  # untouched (not a TYPE param)
 
 
 def test_timeout_error_maps_to_timeout_error_type():
     import pytest
+
     pytest.importorskip("openadapt_types")
     from openadapt_flow import ir
     from openadapt_flow.interop.types import result_to_action_result
-    r = ir.StepResult(step_id="s1", intent="x", ok=False,
-                      error="Timeout (>600.0s) waiting for postcondition")
+
+    r = ir.StepResult(
+        step_id="s1",
+        intent="x",
+        ok=False,
+        error="Timeout (>600.0s) waiting for postcondition",
+    )
     assert result_to_action_result(r).error_type == "timeout"

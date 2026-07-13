@@ -145,40 +145,211 @@ def corpus_canonical(text: str) -> str:
 # -- fixture data -------------------------------------------------------------
 
 FIRST_NAMES = [
-    "James", "Mary", "Robert", "Patricia", "Michael", "Linda", "David",
-    "Barbara", "William", "Elizabeth", "Richard", "Susan", "Joseph",
-    "Jessica", "Thomas", "Sarah", "Charles", "Karen", "Christopher",
-    "Lisa", "Daniel", "Nancy", "Matthew", "Betty", "Anthony", "Margaret",
-    "Mark", "Sandra", "Donald", "Ashley", "Steven", "Kimberly", "Paul",
-    "Emily", "Andrew", "Donna", "Joshua", "Michelle", "Kenneth", "Carol",
-    "Kevin", "Amanda", "Brian", "Dorothy", "George", "Melissa", "Timothy",
-    "Deborah", "Ronald", "Stephanie", "Edward", "Rebecca", "Jason",
-    "Sharon", "Jeffrey", "Laura", "Ryan", "Cynthia", "Jacob", "Kathleen",
-    "Gary", "Amy", "Nicholas", "Angela", "Eric", "Shirley", "Jonathan",
-    "Anna", "Stephen", "Brenda", "Larry", "Pamela", "Justin", "Emma",
-    "Scott", "Nicole", "Brandon", "Helen", "Benjamin", "Samantha",
-    "Samuel", "Katherine", "Gregory", "Christine", "Alexander", "Debra",
-    "Patrick", "Rachel", "Frank", "Carolyn", "Raymond", "Janet", "Jack",
-    "Catherine", "Dennis", "Maria", "Jerry", "Heather", "Tyler", "Diane",
-    "Aaron", "Ruth", "Jose", "Julie", "Adam", "Olivia", "Nathan", "Joyce",
-    "Henry", "Virginia", "Douglas", "Victoria", "Zachary", "Kelly",
-    "Peter", "Lauren", "Kyle", "Christina", "Ethan", "Joan", "Walter",
+    "James",
+    "Mary",
+    "Robert",
+    "Patricia",
+    "Michael",
+    "Linda",
+    "David",
+    "Barbara",
+    "William",
+    "Elizabeth",
+    "Richard",
+    "Susan",
+    "Joseph",
+    "Jessica",
+    "Thomas",
+    "Sarah",
+    "Charles",
+    "Karen",
+    "Christopher",
+    "Lisa",
+    "Daniel",
+    "Nancy",
+    "Matthew",
+    "Betty",
+    "Anthony",
+    "Margaret",
+    "Mark",
+    "Sandra",
+    "Donald",
+    "Ashley",
+    "Steven",
+    "Kimberly",
+    "Paul",
+    "Emily",
+    "Andrew",
+    "Donna",
+    "Joshua",
+    "Michelle",
+    "Kenneth",
+    "Carol",
+    "Kevin",
+    "Amanda",
+    "Brian",
+    "Dorothy",
+    "George",
+    "Melissa",
+    "Timothy",
+    "Deborah",
+    "Ronald",
+    "Stephanie",
+    "Edward",
+    "Rebecca",
+    "Jason",
+    "Sharon",
+    "Jeffrey",
+    "Laura",
+    "Ryan",
+    "Cynthia",
+    "Jacob",
+    "Kathleen",
+    "Gary",
+    "Amy",
+    "Nicholas",
+    "Angela",
+    "Eric",
+    "Shirley",
+    "Jonathan",
+    "Anna",
+    "Stephen",
+    "Brenda",
+    "Larry",
+    "Pamela",
+    "Justin",
+    "Emma",
+    "Scott",
+    "Nicole",
+    "Brandon",
+    "Helen",
+    "Benjamin",
+    "Samantha",
+    "Samuel",
+    "Katherine",
+    "Gregory",
+    "Christine",
+    "Alexander",
+    "Debra",
+    "Patrick",
+    "Rachel",
+    "Frank",
+    "Carolyn",
+    "Raymond",
+    "Janet",
+    "Jack",
+    "Catherine",
+    "Dennis",
+    "Maria",
+    "Jerry",
+    "Heather",
+    "Tyler",
+    "Diane",
+    "Aaron",
+    "Ruth",
+    "Jose",
+    "Julie",
+    "Adam",
+    "Olivia",
+    "Nathan",
+    "Joyce",
+    "Henry",
+    "Virginia",
+    "Douglas",
+    "Victoria",
+    "Zachary",
+    "Kelly",
+    "Peter",
+    "Lauren",
+    "Kyle",
+    "Christina",
+    "Ethan",
+    "Joan",
+    "Walter",
     "Evelyn",
 ]
 
 LAST_NAMES = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-    "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez",
-    "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson",
-    "Martin", "Lee", "Perez", "Thompson", "White", "Harris", "Sanchez",
-    "Clark", "Ramirez", "Lewis", "Robinson", "Walker", "Young", "Allen",
-    "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
-    "Green", "Adams", "Nelson", "Baker", "Hall", "Rivera", "Campbell",
-    "Mitchell", "Carter", "Roberts", "Gomez", "Phillips", "Evans",
-    "Turner", "Diaz", "Parker", "Cruz", "Edwards", "Collins", "Reyes",
-    "Stewart", "Morris", "Morales", "Murphy", "Cook", "Rogers",
-    "Gutierrez", "Ortiz", "Morgan", "Cooper", "Peterson", "Bailey",
-    "Reed", "Kelly", "Howard", "Ramos", "Kim", "Cox", "Ward", "Belford",
+    "Smith",
+    "Johnson",
+    "Williams",
+    "Brown",
+    "Jones",
+    "Garcia",
+    "Miller",
+    "Davis",
+    "Rodriguez",
+    "Martinez",
+    "Hernandez",
+    "Lopez",
+    "Gonzalez",
+    "Wilson",
+    "Anderson",
+    "Thomas",
+    "Taylor",
+    "Moore",
+    "Jackson",
+    "Martin",
+    "Lee",
+    "Perez",
+    "Thompson",
+    "White",
+    "Harris",
+    "Sanchez",
+    "Clark",
+    "Ramirez",
+    "Lewis",
+    "Robinson",
+    "Walker",
+    "Young",
+    "Allen",
+    "King",
+    "Wright",
+    "Scott",
+    "Torres",
+    "Nguyen",
+    "Hill",
+    "Flores",
+    "Green",
+    "Adams",
+    "Nelson",
+    "Baker",
+    "Hall",
+    "Rivera",
+    "Campbell",
+    "Mitchell",
+    "Carter",
+    "Roberts",
+    "Gomez",
+    "Phillips",
+    "Evans",
+    "Turner",
+    "Diaz",
+    "Parker",
+    "Cruz",
+    "Edwards",
+    "Collins",
+    "Reyes",
+    "Stewart",
+    "Morris",
+    "Morales",
+    "Murphy",
+    "Cook",
+    "Rogers",
+    "Gutierrez",
+    "Ortiz",
+    "Morgan",
+    "Cooper",
+    "Peterson",
+    "Bailey",
+    "Reed",
+    "Kelly",
+    "Howard",
+    "Ramos",
+    "Kim",
+    "Cox",
+    "Ward",
+    "Belford",
 ]
 
 # Prefix-extension families: every member >= 3 chars; each shorter member
@@ -327,9 +498,7 @@ def _band(rng: Random, p: dict, template: int | None = None) -> str:
     if t == 0:
         return f"{p['last']}, {p['first']} {p['dob']} {p['sex']}"
     if t == 1:
-        return (
-            f"{p['last']}, {p['first']} {p['dob']} {p['sex']} MRN {p['mrn']}"
-        )
+        return f"{p['last']}, {p['first']} {p['dob']} {p['sex']} MRN {p['mrn']}"
     if t == 2:
         proc = p.get("procedure") or rng.choice(PROCEDURES)
         pri = p.get("priority") or rng.choice(PRIORITIES)
@@ -364,7 +533,7 @@ def _apply_confusions(text: str, rng: Random, n: int) -> str:
             starts.append(start)
             start = out.find(src, start + 1)
         pos = rng.choice(starts)
-        out = out[:pos] + dst + out[pos + len(src):]
+        out = out[:pos] + dst + out[pos + len(src) :]
     return out
 
 
@@ -377,7 +546,7 @@ def _split_token(text: str, rng: Random, times: int = 1) -> str:
         i = rng.choice(idx)
         tok = tokens[i]
         cut = rng.randint(2, len(tok) - 2)
-        tokens[i: i + 1] = [tok[:cut], tok[cut:]]
+        tokens[i : i + 1] = [tok[:cut], tok[cut:]]
     return " ".join(tokens)
 
 
@@ -387,7 +556,7 @@ def _join_tokens(text: str, rng: Random, times: int = 1) -> str:
         if len(tokens) < 2:
             break
         i = rng.randrange(len(tokens) - 1)
-        tokens[i: i + 2] = [tokens[i] + tokens[i + 1]]
+        tokens[i : i + 2] = [tokens[i] + tokens[i + 1]]
     return " ".join(tokens)
 
 
@@ -480,7 +649,7 @@ def _random_letter_edit(name: str, rng: Random) -> str | None:
         repl = rng.choice(_ALPHABET)
         if repl == name[pos].lower():
             continue
-        variant = name[:pos] + repl + name[pos + 1:]
+        variant = name[:pos] + repl + name[pos + 1 :]
         if _distinct_entities(variant, name):
             return variant
     return None
@@ -496,7 +665,7 @@ def _transpose(name: str, rng: Random) -> str | None:
         a, b = name[pos], name[pos + 1]
         if a.lower() == b.lower():
             continue
-        variant = name[:pos] + b + a + name[pos + 2:]
+        variant = name[:pos] + b + a + name[pos + 2 :]
         if _distinct_entities(variant, name):
             return variant
     return None
@@ -591,9 +760,7 @@ def _gen_same_first_diff_surname(rng: Random) -> tuple[str, str]:
     q["last"] = lb
     p["last"] = la
     template = rng.randint(0, 4)
-    return _band(rng, p, template), _maybe_mild_noise(
-        _band(rng, q, template), rng
-    )
+    return _band(rng, p, template), _maybe_mild_noise(_band(rng, q, template), rng)
 
 
 def _gen_shared_clinical_text(rng: Random) -> tuple[str, str]:
@@ -608,9 +775,7 @@ def _gen_shared_clinical_text(rng: Random) -> tuple[str, str]:
         p["procedure"] = proc
         p["priority"] = pri
     template = rng.choice([2, 3])
-    return _band(rng, a, template), _maybe_mild_noise(
-        _band(rng, b, template), rng
-    )
+    return _band(rng, a, template), _maybe_mild_noise(_band(rng, b, template), rng)
 
 
 def _gen_dob_off_by_one_field(rng: Random) -> tuple[str, str]:
@@ -626,9 +791,7 @@ def _gen_dob_off_by_one_field(rng: Random) -> tuple[str, str]:
     q = dict(p)
     q["dob"] = f"{year:04d}-{month:02d}-{day:02d}"
     template = rng.choice([0, 1, 4])
-    return _band(rng, p, template), _maybe_mild_noise(
-        _band(rng, q, template), rng
-    )
+    return _band(rng, p, template), _maybe_mild_noise(_band(rng, q, template), rng)
 
 
 def _gen_mrn_digit_swap(rng: Random) -> tuple[str, str]:
@@ -648,9 +811,7 @@ def _gen_mrn_digit_swap(rng: Random) -> tuple[str, str]:
         digits[0] = str((int(digits[0]) + 1) % 10)
         q["mrn"] = p["mrn"][0] + "".join(digits)
     template = rng.choice([1, 3])
-    return _band(rng, p, template), _maybe_mild_noise(
-        _band(rng, q, template), rng
-    )
+    return _band(rng, p, template), _maybe_mild_noise(_band(rng, q, template), rng)
 
 
 def _gen_adjacent_row_mixture(rng: Random) -> tuple[str, str]:
@@ -772,9 +933,7 @@ def generate_corpus(seed: int = FROZEN_SEED) -> list[CorpusPair]:
     for category, gen in _DIFFERENT_GENERATORS:
         for _ in range(N_DIFFERENT_PER_CATEGORY):
             recorded, observed = gen(rng)
-            pairs.append(
-                CorpusPair(recorded, observed, LABEL_DIFFERENT, category)
-            )
+            pairs.append(CorpusPair(recorded, observed, LABEL_DIFFERENT, category))
     for category, gen in _SAME_GENERATORS:
         for _ in range(N_SAME_PER_CATEGORY):
             recorded, observed = gen(rng)
@@ -790,9 +949,7 @@ def canonical_serialization(pairs: list[CorpusPair]) -> str:
 
 
 def corpus_sha256(pairs: list[CorpusPair]) -> str:
-    return hashlib.sha256(
-        canonical_serialization(pairs).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(canonical_serialization(pairs).encode("utf-8")).hexdigest()
 
 
 def build_manifest(pairs: list[CorpusPair], seed: int = FROZEN_SEED) -> dict:

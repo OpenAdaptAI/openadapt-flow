@@ -279,6 +279,12 @@ def test_recorder_omits_structural_keys_on_plain_backend(
     rec.click(1, 2)
     rec.finish()
     (event,) = _read_events(tmp_path / "rec")
-    for key in ("url_before", "url_after", "title_before", "title_after",
-                "pages_before", "pages_after"):
+    for key in (
+        "url_before",
+        "url_after",
+        "title_before",
+        "title_after",
+        "pages_before",
+        "pages_after",
+    ):
         assert key not in event

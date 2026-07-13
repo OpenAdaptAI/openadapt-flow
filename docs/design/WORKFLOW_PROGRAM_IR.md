@@ -652,6 +652,16 @@ Agree the target shape. Reversible by definition.
   the largest lift and the one most dependent on a real workflow (§7).
 - Compile-time model use (one-time labeling/risk/param proposal) lands here,
   guarded to preserve the runtime's $0/0-call property.
+- **Status:** §3 step [3] (interactive disambiguation) shipped in
+  `compiler/disambiguation.py`; §3 steps [4]+[5] (multi-trace induction +
+  held-out validation / quarantine) shipped in `compiler/induction.py`
+  (`induce_program` / `validate_held_out` / `reproduction_score`). Structural
+  alignment infers params (values that VARY across traces), loops (a repeated
+  body whose count DIFFERS), branches (a divergent step under a detectable
+  condition — guard proposed/flagged), and optional steps — all deterministic,
+  ZERO model calls; the optional compile-time `Proposer` only PROPOSES (flagged,
+  never trusted). Contradictory / underdetermined traces are QUARANTINED (no
+  program emitted, `certified=False`) and routed to the disambiguation flow.
 
 ### Stays as-is (do not rebuild)
 - The **visual resolution ladder** (`DESIGN.md:152-164`, `resolver.py`) — one

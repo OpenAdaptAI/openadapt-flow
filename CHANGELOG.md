@@ -1,6 +1,120 @@
 # CHANGELOG
 
 
+## v0.13.0 (2026-07-13)
+
+### Continuous Integration
+
+- Fast required gate (e2e post-merge) to unclog the merge queue
+  ([#76](https://github.com/OpenAdaptAI/openadapt-flow/pull/76),
+  [`7e7605e`](https://github.com/OpenAdaptAI/openadapt-flow/commit/7e7605effb8a84f474faf527b45a132f4fa3520c))
+
+* ci: fast required gate (e2e-excluded unit test), PR-only trigger, concurrency-cancel, caching
+
+Extracted from the engineering-hygiene branch so the merge queue benefits now. Required 'test'
+  context stays a single ubuntu/py3.12 job (fast unit suite, e2e excluded); full matrix + e2e run
+  post-merge/nightly. Halves runner load (drops the push+pull_request double-trigger) and cancels
+  superseded runs.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* ci: decouple test gate from lint (main not yet ruff-formatted; #62 restores lint)
+
+* ci: drop --cov (pytest-cov not on main until #62); keep fast e2e-excluded gate
+
+* ci: drop lint job (ruff/mypy + reformat land with #62); keep fast test gate only
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Compiler effect-mining — auto-derive record_written/field_equals from a demo (honest placeholders
+  where customer-specific) ([#75](https://github.com/OpenAdaptAI/openadapt-flow/pull/75),
+  [`1f80080`](https://github.com/OpenAdaptAI/openadapt-flow/commit/1f8008075ddf3c6cccfe918c4e6622e3db04f37a))
+
+Both external reviews flagged the same gap: the compiler emits vision/structural Postconditions but
+  the typed system-of-record Effect contracts (record_written / field_equals) were hand-authored per
+  workflow. This adds a heuristic, zero-model, zero-network miner that derives those contracts from
+  what a demonstration actually observed — honoring the RFC §7 boundary between what is derivable
+  now and what is "irreducibly app-specific".
+
+New openadapt_flow/compiler/effect_mining.py: - Observed /api/db-style SoR delta
+  (sor_before/sor_after on the event) with one new record -> a REAL record_written (identity
+  selector = observed fields minus the surrogate id and the typed payload) plus a field_equals
+  read-back per typed field, plus an idempotency key ONLY when the record actually carries one
+  (never invented). - Structured DOM field map (dom_fields_*) whose field took the typed value -> a
+  form-level field_equals, flagged needs_operator_confirmation (not a record write). - Consequential
+  (irreversible) step with no captured SoR delta -> a flagged PLACEHOLDER record_written with a
+  SENTINEL selector + needs_operator_ confirmation (§7: which API/record/idempotency-key is
+  app-specific) — no fabricated endpoint. - Otherwise -> NO effect and an honest "no verifiable
+  effect derivable" log.
+
+Wiring (small, additive, opt-in): - compile_recording(mine_effects=False) — default off => bundle
+  byte-identical; runs LAST (after risk_overrides) and attaches to Step.effects. +27 lines. -
+  Effect.needs_operator_confirmation flag; replayer._verify_effects fails safe (HALT, never verify a
+  fabricated binding) on a placeholder. - recorder + backend.SystemOfRecordBackend: a demo CAN now
+  capture the SoR snapshot per event (sor_before/sor_after), exactly like url_before/after. -
+  codegen renders mined effects (and loudly flags placeholders) in workflow.py.
+
+Tests (tests/test_effect_mining.py, 13): mined effects CONFIRM on the live MockMed SoR and REFUTE a
+  duplicate; no-delta -> honest gap; placeholder is marked and HALTs the run (not silently trusted);
+  compile wiring + back-compat. Full suite: 1078 passed, 16 skipped.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Interactive disambiguation — Socrates-style compile-time questions → guards/params (ask, don't
+  guess) ([#74](https://github.com/OpenAdaptAI/openadapt-flow/pull/74),
+  [`8c7ec41`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8c7ec41dfb5c41e70f71dd835549bfd9d4e7dbf8))
+
+* feat: workflow-program IR Phase 1 — typed params, guards, wait_until (additive, back-compatible)
+
+Implements the RFC's Phase 1 (docs/design/WORKFLOW_PROGRAM_IR.md): the first additive,
+  backward-compatible step from a linear macro IR toward a parameterized program. Typed parameters
+  on Workflow (substituted at replay), an optional per-step guard (deterministic precondition;
+  fail-safe), and wait_until (bounded readiness predicate that subsumes the SCROLL closed-loop). A
+  bundle with none of these replays byte-identically to today. $0 / zero model calls.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: interactive disambiguation — Socrates-style compile-time questions → guards/params (ask,
+  don't guess)
+
+Implements the RFC (docs/design/WORKFLOW_PROGRAM_IR.md §3 [3]) induction stage: where a single
+  demonstration under-specifies intent, surface CONCRETE multiple-choice questions and apply the
+  answer deterministically as a Phase-1 guard/param — instead of silently freezing an accidental
+  interpretation.
+
+New module openadapt_flow/compiler/disambiguation.py detects three ambiguity kinds structurally
+  (ZERO model calls): - parameter candidate — an untagged typed value → ParamSpec + param binding -
+  absent-result handling — an identity-armed entity selection after a search with no 0/>1-match
+  branch → Guard(ANCHOR_RESOLVES, on_unmet="halt") - optional dialog — a once-handled popup →
+  Guard(TEXT_PRESENT, on_unmet="skip")
+
+Answers map to #71's Guard/Predicate/ParamSpec types verbatim (no new IR fields).
+  Refuse-rather-than-guess (mirrors runtime.identity): an UNANSWERED consequential ambiguity (one
+  gating an irreversible write) is flagged and the resolved skill is marked NOT certified until
+  answered — never silently defaulted. Non-consequential unanswered ambiguities fall back to a safe
+  no-op default.
+
+Core is a pure, testable API — detect_ambiguities(workflow) and apply_answers(workflow, answers) —
+  plus a thin `disambiguate` CLI subcommand (interactive prompt or --answers JSON). compile.py is
+  UNCHANGED; disambiguation is an opt-in pass over a compiled bundle.
+
+Stacks on #71 (feat/workflow-program-ir-phase1); retarget base to main after #71 merges.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.12.0 (2026-07-13)
 
 ### Features

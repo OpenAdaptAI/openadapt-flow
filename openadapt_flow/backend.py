@@ -8,7 +8,10 @@ OS layer (pyautogui/Quartz), or an RDP session.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, TYPE_CHECKING, runtime_checkable
+
+if TYPE_CHECKING:  # pragma: no cover
+    from openadapt_flow.ir import StructuralHandle, StructuralLocator
 
 
 @runtime_checkable
@@ -40,7 +43,6 @@ class SystemOfRecordBackend(Protocol):
         baseline for a first write).
         """
         ...
-
 
 @runtime_checkable
 class StructuralBackend(Protocol):
@@ -122,6 +124,71 @@ class IdentityBackend(Protocol):
         characters, or None when the backend cannot observe structured text at
         that point (pixel-only substrate, no a11y node, or a momentary
         failure -- never raises).
+        """
+        ...
+
+
+@runtime_checkable
+class StructuralActionBackend(Protocol):
+    """Optional STRUCTURAL action capability a backend MAY expose.
+
+    The runtime resolves targets by a LADDER (see
+    :mod:`openadapt_flow.runtime.resolver`). Its top rung is structural: where
+    the backend owns a structured layer (a browser's DOM, a native app's UIA/AX
+    tree) the runtime re-finds the recorded target as an ELEMENT and acts on its
+    center DETERMINISTICALLY, instead of pixel-matching a template that render
+    drift (relabel, theme, zoom, layout shift) can defeat. The desktop benchmark
+    measured UIA execution 21/21 vs compiled visual replay 6/21 under drift.
+
+    This is the thesis shift from "vision-only" to "deterministic compiled
+    automation with visual FALLBACK". It is ADDITIVE and backend-optional: a
+    pixel-only substrate (RDP/Citrix/canvas, or a backend with no structured
+    layer) simply does not implement it, and resolution falls through to the
+    visual rungs (template/ocr/geometry) UNCHANGED -- the healthcare/Citrix
+    floor is never removed.
+
+    Crucially, the structurally-resolved point flows through the IDENTICAL click
+    path as any visual resolution, so the pre-click identity gate and the
+    irreversible risk gate still fire on it: structure makes identity STRONGER
+    (an exact element), it never bypasses it.
+
+    Two methods, mirroring the record/replay split of the identity capability
+    (:class:`IdentityBackend`):
+
+    - ``structural_locator_at`` runs at RECORD time: given the demonstrated
+      click point, return a STABLE structural locator the runtime can re-resolve
+      later (a DOM ``#id`` / role+name, a UIA ``AutomationId`` / role+name).
+    - ``locate_structural`` runs at REPLAY time: given that recorded locator,
+      find the element on the LIVE surface and return its center point.
+
+    Each returns None when the capability is momentarily unavailable, the
+    element is absent/ambiguous, or the substrate has no structured layer at
+    that point (never raises) -- resolution then uses the visual ladder.
+    """
+
+    def structural_locator_at(
+        self, x: int, y: int
+    ) -> Optional["StructuralLocator"]:
+        """Return a stable structural locator for the element at pixel (x, y).
+
+        The coordinate space matches :meth:`Backend.click`. Returns None when
+        the backend cannot derive a stable locator (no structured node under the
+        point, or nothing that identifies the element durably) -- the step then
+        relies on the visual anchor alone.
+        """
+        ...
+
+    def locate_structural(
+        self, locator: "StructuralLocator"
+    ) -> Optional["StructuralHandle"]:
+        """Locate ``locator``'s element on the live surface; return its point.
+
+        Returns a :class:`~openadapt_flow.ir.StructuralHandle` whose ``point``
+        is the element's center (same coordinate space as :meth:`Backend.click`)
+        on a unique, actionable match, or None when the element is absent, not
+        uniquely resolvable, off-screen, or the substrate exposes no structured
+        layer (never raises) -- the resolver then falls through to the visual
+        rungs.
         """
         ...
 

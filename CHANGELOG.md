@@ -1,6 +1,104 @@
 # CHANGELOG
 
 
+## v0.11.0 (2026-07-13)
+
+### Features
+
+- Competitor-drift instrument harness (pluggable external-agent silent-wrong-action-rate runner,
+  cost-capped) ([#73](https://github.com/OpenAdaptAI/openadapt-flow/pull/73),
+  [`fea38e9`](https://github.com/OpenAdaptAI/openadapt-flow/commit/fea38e9075ddbd4ecd6a2ecca2d10918fc5e59ee))
+
+Extend the self-directed silent-wrong-action benchmark (#67) from "our own runtime" to ANY external
+  computer-use agent. A new `openadapt_flow.instrument` package points the #63 EffectVerifier at an
+  arbitrary external agent's runs against the MockMed transactional-fault suite
+  (`mockmed.fault_server`) and measures its silent-wrong-action rate (wrong effect landed while the
+  agent reported success), anonymized by architecture class.
+
+This PR is the HARNESS ONLY: no concrete competitor adapter, no paid API / model call, no vendor
+  name. The real (cost-capped) run against a real competitor is a separate, user-gated step this
+  makes one command away.
+
+- `ExternalAgentAdapter` Protocol: the pluggable seam (run_task + a pre-flight estimate_cost_usd +
+  an anonymized architecture_class). A real adapter wraps a vendor's own entry points behind it, out
+  of this repo (docstring example). - `run_instrument`: drives an adapter through the fault suite,
+  reads the system of record with RestRecordVerifier, and computes the rate — output anonymized by
+  architecture class (Tool A/B/C), structurally enforced; never a vendor. - `CostGuard`: hard
+  max_cost_usd / max_steps / max_runs kill-switch that aborts the WHOLE run the instant a cap would
+  be crossed (pre- and post-flight), plus a dry-run mode that projects cost BEFORE spending. No run
+  can silently exceed. - `StubExternalAgentAdapter`: deterministic, offline, $0 stub (screen-blind
+  and honest modes) proving the harness measures nonzero silent-wrong on the fault classes and zero
+  on clean ones end to end. - 25 tests; reuses the #67 ground-truth judge and #63 effect contract as
+  the single source of truth. No existing files modified.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.10.0 (2026-07-13)
+
+### Features
+
+- Workflow-program IR Phase 1 — typed params, guards, wait_until (additive, back-compatible)
+  ([#71](https://github.com/OpenAdaptAI/openadapt-flow/pull/71),
+  [`8bfcffe`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8bfcffe8d95572dbdf2d96899a29be87ae92d101))
+
+Implements the RFC's Phase 1 (docs/design/WORKFLOW_PROGRAM_IR.md): the first additive,
+  backward-compatible step from a linear macro IR toward a parameterized program. Typed parameters
+  on Workflow (substituted at replay), an optional per-step guard (deterministic precondition;
+  fail-safe), and wait_until (bounded readiness predicate that subsumes the SCROLL closed-loop). A
+  bundle with none of these replays byte-identically to today. $0 / zero model calls.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.9.0 (2026-07-13)
+
+### Features
+
+- Interactive `record --url` + secret-typed parameters (never persisted)
+  ([#64](https://github.com/OpenAdaptAI/openadapt-flow/pull/64),
+  [`7f145f1`](https://github.com/OpenAdaptAI/openadapt-flow/commit/7f145f11845db2ecf3f47aa6949dd6fdaf49636e))
+
+Closes the #1 adoption gap: the README promised "record a GUI workflow once" but the only recorder
+  (`demo-record`) ran the hard-coded MockMed script. There was no way to record your OWN app.
+
+record --url: - New `openadapt-flow record --url <app>` opens a headed browser on the user's own app
+  and watches real clicks/typing/keys/scrolls via in-page capture-phase DOM listeners (installed
+  with add_init_script so they survive navigations), writing the EXACT recording format `compile`
+  already consumes. Stop with Ctrl-C or by closing the window. record -> compile -> replay now
+  closes the self-serve loop for any app, not just the bundled demo. - Architecture: the
+  expose_binding callback only appends raw events to a Python list (calling any page method inside a
+  sync-API binding callback deadlocks the driver); the main loop drains it and does all
+  screenshotting. Each step's before-frame is the previous step's settled frame (no post-navigation
+  race); type/scroll runs capture their after-frame+structural state at the moment they happen so a
+  following navigating click can't corrupt them. Structured DOM identity is captured in-page at
+  click time, arming the identity ladder on interactively-recorded bundles. Reuses the existing
+  Recorder via a new `record_observed` seam — the recording format is not forked.
+
+Secret-typed parameters: - input[type=password] is auto-detected as secret; any field can be marked
+  with `--secret <name>`. A secret's literal value is NEVER read into Python, never written to
+  meta.json / events.jsonl / the compiled bundle, and its field region is redacted (solid black)
+  from the persisted before/after frames. - At replay the value is injected from
+  OPENADAPT_FLOW_SECRET_<PARAM>; a missing secret fails fast with an actionable message naming the
+  env var. - Schema: ir.Step.secret + Workflow.secret_params; compiler carries the secret through
+  with text=None; replayer resolves it from the environment.
+
+Tests: tests/test_secret_params.py (fast unit: recorder redaction/non-persist,
+
+compiler carry-through, replayer env injection + missing-secret error) and
+  tests/test_interactive_recorder.py (headless scripted record -> compile -> replay proving the
+  loop, no secret leak in any artifact, frame redaction, and env injection). Full suite: 962 passed,
+  9 skipped.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.8.0 (2026-07-13)
 
 ### Features

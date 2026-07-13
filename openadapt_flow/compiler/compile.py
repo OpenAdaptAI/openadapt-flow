@@ -24,11 +24,14 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     Landmark,
+    ParamKind,
+    ParamSpec,
     Point,
     Postcondition,
     PostconditionKind,
     Region,
     Step,
+    StructuralLocator,
     Workflow,
 )
 from openadapt_flow.risk import classify_step_risk
@@ -887,6 +890,18 @@ def compile_recording(
             # OCR context band; replay prefers it (no OCR glyph ambiguity) and
             # falls back to the band on pixel-only substrates.
             structured_identity = event.get("structured_identity") or None
+            # Structural locator (DOM selector / role+name, or UIA identifiers)
+            # of the clicked element, captured by the recorder when the
+            # recording backend exposed it (StructuralActionBackend). Drives the
+            # structural ACTION rung at replay -- the SAME element is re-found
+            # deterministically, surviving the render drift the visual template
+            # cannot. The visual anchor above is kept as the fallback floor.
+            structural_raw = event.get("structural") or None
+            structural = (
+                StructuralLocator.model_validate(structural_raw)
+                if structural_raw
+                else None
+            )
             anchor = Anchor(
                 template=template_rel,
                 region=crop_region,
@@ -894,6 +909,7 @@ def compile_recording(
                 ocr_text=ocr_text,
                 context_text=context_text,
                 structured_identity=structured_identity,
+                structural=structural,
                 landmarks=landmarks,
             )
             # Identity-protection audit trail: an UNARMED click proceeds
@@ -942,7 +958,15 @@ def compile_recording(
         elif kind == "type":
             param = event.get("param")
             text = event.get("text")
-            if param:
+            secret = bool(event.get("secret"))
+            if secret:
+                # A secret's literal value is never in the recording, so it
+                # is never in the bundle either: the step carries only the
+                # param name, and the value is injected from the environment
+                # at replay (see ir.Step.secret / runtime.Replayer).
+                text = None
+                intent = f"type <{param}> (secret)"
+            elif param:
                 intent = f"type <{param}>"
             else:
                 intent = f"type '{_text_preview(text or '')}'"
@@ -954,6 +978,7 @@ def compile_recording(
                         action=ActionKind.TYPE,
                         text=text,
                         param=param,
+                        secret=secret,
                     ),
                     before_png,
                     after_png,
@@ -1036,7 +1061,8 @@ def compile_recording(
             # A parameterized TYPE step's changed region is the typed
             # value's own pixels — never assert it (it varies per run).
             include_region_stable=not (
-                step.action is ActionKind.TYPE and step.param is not None
+                step.action is ActionKind.TYPE
+                and (step.param is not None or step.secret)
             ),
             before_lines=(
                 cached_lines(i, "before", step_before)
@@ -1106,6 +1132,19 @@ def compile_recording(
         recording_id=meta.get("id"),
         viewport=tuple(viewport) if viewport else None,
         params=params,
+        # Workflow-program IR, Phase 1: emit a TYPED spec for each recorded
+        # parameter alongside the frozen ``params`` dict -- generalizing the
+        # recorder's single "note value at replay" into a first-class,
+        # typed+required param. Phase 1 types every recorded value as a
+        # string with its demo value as the example/default; richer types
+        # (entity_ref/enum/date) come from disambiguation in a later phase.
+        param_specs={
+            pname: ParamSpec(
+                name=pname, type=ParamKind.STRING, example=value
+            )
+            for pname, value in params.items()
+        },
+        secret_params=list(meta.get("secret_params") or []),
         steps=steps,
     )
 

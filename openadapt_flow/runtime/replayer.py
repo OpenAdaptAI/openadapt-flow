@@ -32,6 +32,7 @@ healed bundle is written.
 from __future__ import annotations
 
 import math
+import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ from openadapt_flow.ir import (
     Anchor,
     IdentityCheck,
     Point,
+    Predicate,
+    PredicateKind,
     Region,
     Resolution,
     RunReport,
@@ -102,6 +105,17 @@ MASKED_REPEAT_FRACTION = 0.66
 # budget of ~2.5x the total recorded distance.
 SCROLL_BUDGET_FACTOR = 2.5
 
+# A secret TYPE step's value is never stored in the bundle; it is read at
+# replay from this environment variable (the param name upper-cased, with
+# non-alphanumeric characters mapped to '_'). See ir.Step.secret.
+SECRET_ENV_PREFIX = "OPENADAPT_FLOW_SECRET_"
+
+
+def secret_env_var(param: str) -> str:
+    """Environment variable a secret parameter's value is read from."""
+    key = "".join(ch if ch.isalnum() else "_" for ch in param).upper()
+    return f"{SECRET_ENV_PREFIX}{key}"
+
 
 class Replayer:
     """Replays a Workflow against a Backend using injected vision.
@@ -148,6 +162,7 @@ class Replayer:
         effect_verifier: Optional[EffectVerifier] = None,
         effect_compensator: Optional[Any] = None,
         poll_interval_s: float = 0.05,
+        use_structural: bool = True,
     ) -> None:
         if vision is None:
             import openadapt_flow.vision as vision  # lazy: heavy OCR deps
@@ -155,6 +170,14 @@ class Replayer:
         self.backend = backend
         self.vision = vision
         self.grounder = grounder
+        # Whether the deterministic structural ACTION rung (top of the ladder)
+        # may run. True (default) = product behavior: on a structure-bearing
+        # backend, resolve the recorded target as a DOM/UIA element. Set False
+        # to force the VISUAL fallback floor even on a structure-bearing
+        # backend -- used to characterize the pixel-only substrate path
+        # (RDP/Citrix/VDI) on a Playwright surface (see the e2e visual-floor
+        # drift/heal suites). Never disables the visual ladder itself.
+        self.use_structural = use_structural
         # System-of-record effect verification (OFF by default). The verifier
         # is bound to the deployment's system of record; the optional
         # compensator undoes a detected duplicate irreversible write. Neither
@@ -212,9 +235,17 @@ class Replayer:
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
-        # Caller-supplied params override the recorded defaults; a bundle
-        # with recorded example values replays without any explicit params.
-        params = {**workflow.params, **(params or {})}
+        # Parameter resolution (Workflow-program IR, Phase 1): recorded defaults
+        # (``params`` dict) plus each TYPED ``param_specs`` example as a default,
+        # with caller-supplied values overriding both. A v0 bundle (empty
+        # ``param_specs``) collapses to exactly the old ``{**workflow.params,
+        # **caller}`` merge.
+        merged: dict[str, str] = {**workflow.params}
+        for pname, spec in workflow.param_specs.items():
+            if spec.example is not None:
+                merged.setdefault(pname, spec.example)
+        merged.update(params or {})
+        params = merged
 
         report = RunReport(
             workflow_name=workflow.name,
@@ -225,6 +256,33 @@ class Replayer:
         new_crops: dict[str, bytes] = {}
         self._last_click_point: Optional[Point] = None
         t_run = time.monotonic()
+
+        # Fail fast, naming them, when a REQUIRED typed parameter has no value
+        # (neither a caller override nor a recorded example) -- never start a
+        # run that will substitute a hole into a step.
+        missing = sorted(
+            pname
+            for pname, spec in workflow.param_specs.items()
+            if spec.required and not params.get(pname)
+        )
+        if missing:
+            report.results.append(
+                StepResult(
+                    step_id="<params>",
+                    intent="validate required workflow parameters",
+                    ok=False,
+                    error=(
+                        "Required workflow parameter(s) not supplied and no "
+                        "recorded example is available: "
+                        + ", ".join(missing)
+                        + " — refusing to run; run aborted"
+                    ),
+                )
+            )
+            report.success = False
+            report.total_ms = (time.monotonic() - t_run) * 1000.0
+            report.save(run_dir)
+            return report
 
         for step_index, step in enumerate(workflow.steps):
             result = self._run_step(
@@ -331,6 +389,30 @@ class Replayer:
         effect_pre_state: Optional[EffectState] = None
 
         try:
+            # Workflow-program IR, Phase 1: evaluate the step's guard
+            # (precondition) then its wait_until (readiness) BEFORE resolving /
+            # acting. Both are model-free. A SCROLL step's wait_until is
+            # consumed by its own closed loop (see _act_scroll), not here.
+            proceed, gate_error, before_png = self._apply_step_gates(
+                step, before_png, bundle_dir, params
+            )
+            if before_png is not last_frame:
+                result.before_png = self._save_step_png(
+                    run_dir, step.id, "before", before_png
+                )
+                last_frame = before_png
+            if not proceed:
+                # gate_error None => guard skipped the step (no-op success);
+                # gate_error set => guard/wait_until HALTed the run.
+                result.skipped = gate_error is None
+                result.ok = gate_error is None
+                result.error = gate_error
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "after", last_frame
+                )
+                result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+                return result
+
             resolution, matched_region, error = self._resolve_step(
                 step, before_png, bundle_dir
             )
@@ -497,16 +579,26 @@ class Replayer:
                 result.ok
                 and resolution is not None
                 and matched_region is not None
-                and resolution.rung != "template"
+                and resolution.rung not in ("template", "structural")
                 and step.anchor is not None
             ):
                 # Heal from the PRE-action frame: that is the frame the
                 # anchor was resolved against (the action may have navigated
                 # to a different screen, where a crop at the old location
-                # would be garbage). The heal is GOVERNED: a patch that would
-                # weaken the step's identity band (the reviewed context-drop
-                # bug), effect coverage, or risk class is quarantined and the
-                # run HALTS rather than silently applying an unverified repair.
+                # would be garbage).
+                #
+                # ``structural`` is exempt alongside ``template``: a
+                # deterministic DOM/UIA locate does NOT signal that the visual
+                # template is stale (structural runs FIRST regardless of visual
+                # drift), so refreshing the crop every run would emit a spurious
+                # reviewable anchor diff and break the zero-heal happy path. The
+                # visual fallback stays as recorded -- still valid for the
+                # substrate it was recorded on.
+                #
+                # The heal is GOVERNED: a patch that would weaken the step's
+                # identity band (the reviewed context-drop bug), effect
+                # coverage, or risk class is quarantined and the run HALTS
+                # rather than silently applying an unverified repair.
                 heal_outcome = self._heal_step(
                     step, resolution, matched_region, before_png, workflow,
                     run_dir, new_crops,
@@ -658,6 +750,16 @@ class Replayer:
         if template_path.is_file():
             template_png = template_path.read_bytes()
 
+        # The structural ACTION rung (top of the ladder) runs only when the
+        # live backend can re-find an element (StructuralActionBackend). A
+        # pixel-only backend (RDP/Citrix) lacks the method, so ``structural``
+        # is None and resolution uses the visual ladder unchanged.
+        structural = (
+            self.backend
+            if self.use_structural
+            and hasattr(self.backend, "locate_structural")
+            else None
+        )
         resolved = resolve(
             step.anchor,
             screen_png,
@@ -666,6 +768,7 @@ class Replayer:
             step.intent,
             template_png=template_png,
             viewport=self.backend.viewport,
+            structural=structural,
         )
         if resolved is None:
             return None, None, (
@@ -707,7 +810,24 @@ class Replayer:
             return None
 
         if step.action is ActionKind.TYPE:
-            if step.param is not None:
+            if step.secret:
+                # Secret value is never in the bundle/params: inject it from
+                # the environment, failing fast with an actionable message.
+                env_var = secret_env_var(step.param or "")
+                text = os.environ.get(env_var, "")
+                if not step.param:
+                    return (
+                        f"Step '{step.id}' ({step.intent}) is marked secret "
+                        "but names no parameter"
+                    )
+                if not text:
+                    return (
+                        f"Step '{step.id}' ({step.intent}) requires secret "
+                        f"parameter '{step.param}', but the environment "
+                        f"variable {env_var} is not set — export it with the "
+                        "secret value and re-run"
+                    )
+            elif step.param is not None:
                 if step.param not in params:
                     return (
                         f"Step '{step.id}' ({step.intent}) requires parameter "
@@ -765,9 +885,150 @@ class Replayer:
                 step_index=step_index,
                 bundle_dir=bundle_dir,
                 before_png=before_png,
+                params=params,
             )
 
         return f"Step '{step.id}' has unsupported action {step.action!r}"
+
+    # -- Workflow-program IR gates: guard + wait_until --------------------------
+
+    def _apply_step_gates(
+        self,
+        step: Step,
+        before_png: bytes,
+        bundle_dir: Path,
+        params: dict[str, str],
+    ) -> tuple[bool, Optional[str], bytes]:
+        """Evaluate the step's guard then its wait_until before acting.
+
+        Returns ``(proceed, error, before_png)``:
+
+        - ``(True, None, frame)`` — proceed to resolve/act (frame may have been
+          re-settled while polling a wait_until predicate).
+        - ``(False, None, frame)`` — the guard was unmet with ``on_unmet="skip"``:
+          the step is a no-op success (caller marks it ``skipped``).
+        - ``(False, error, frame)`` — HALT: an unmet ``halt`` guard, or a
+          ``wait_until`` predicate that never held within its bound (fail-safe;
+          the run NEVER proceeds-anyway on an unmet readiness predicate).
+
+        Model-free: predicates are evaluated by :meth:`_predicate_holds`.
+        """
+        # Guard (precondition) on the entry frame.
+        if step.guard is not None and not self._predicate_holds(
+            step.guard.predicate, before_png, bundle_dir, params
+        ):
+            if step.guard.on_unmet == "skip":
+                return False, None, before_png
+            return False, (
+                f"Guard precondition for step '{step.id}' ({step.intent}) is "
+                f"unmet on the current screen "
+                f"({self._describe_predicate(step.guard.predicate)}) — "
+                "refusing to act; run aborted"
+            ), before_png
+
+        # wait_until (readiness). SCROLL consumes its own predicate as the stop
+        # condition of its closed loop (_act_scroll), so it is skipped here.
+        if step.wait_until is not None and step.action is not ActionKind.SCROLL:
+            pred = step.wait_until
+            deadline = time.monotonic() + pred.timeout_s
+            while True:
+                if self._predicate_holds(pred, before_png, bundle_dir, params):
+                    return True, None, before_png
+                if time.monotonic() >= deadline:
+                    return False, (
+                        f"wait_until predicate for step '{step.id}' "
+                        f"({step.intent}) did not hold within "
+                        f"{pred.timeout_s:.1f}s "
+                        f"({self._describe_predicate(pred)}) — readiness never "
+                        "reached; refusing to proceed-anyway; run aborted"
+                    ), before_png
+                time.sleep(self.poll_interval_s)
+                before_png = self.vision.wait_settled(self.backend)
+
+        return True, None, before_png
+
+    def _predicate_holds(
+        self,
+        pred: Predicate,
+        frame_png: bytes,
+        bundle_dir: Path,
+        params: dict[str, str],
+    ) -> bool:
+        """Evaluate a Predicate against the current frame / run params.
+
+        Deterministic and ZERO model calls (the $0 runtime guarantee):
+        ``anchor_resolves`` runs the resolution ladder with NO grounder,
+        ``text_present`` / ``text_absent`` use the tolerant OCR presence check,
+        ``param_equals`` is a string compare, and ``and`` / ``or`` / ``not``
+        compose. An unknown kind fails safe (does not hold).
+        """
+        kind = pred.kind
+        if kind is PredicateKind.ANCHOR_RESOLVES:
+            if pred.anchor is None:
+                return False
+            template_png: Optional[bytes] = None
+            template_path = Path(bundle_dir) / pred.anchor.template
+            if template_path.is_file():
+                template_png = template_path.read_bytes()
+            return resolve(
+                pred.anchor,
+                frame_png,
+                self.vision,
+                None,  # NEVER ground inside a predicate probe: stay model-free
+                pred.intent or pred.anchor.ocr_text or "",
+                template_png=template_png,
+                viewport=self.backend.viewport,
+            ) is not None
+        if kind is PredicateKind.TEXT_PRESENT:
+            return bool(pred.text) and self.vision.text_present(
+                frame_png, pred.text
+            )
+        if kind is PredicateKind.TEXT_ABSENT:
+            return not (
+                pred.text and self.vision.text_present(frame_png, pred.text)
+            )
+        if kind is PredicateKind.PARAM_EQUALS:
+            return (
+                pred.param is not None
+                and str(params.get(pred.param)) == str(pred.value)
+            )
+        if kind is PredicateKind.AND:
+            return all(
+                self._predicate_holds(op, frame_png, bundle_dir, params)
+                for op in pred.operands
+            )
+        if kind is PredicateKind.OR:
+            return any(
+                self._predicate_holds(op, frame_png, bundle_dir, params)
+                for op in pred.operands
+            )
+        if kind is PredicateKind.NOT:
+            return bool(pred.operands) and not self._predicate_holds(
+                pred.operands[0], frame_png, bundle_dir, params
+            )
+        return False
+
+    @staticmethod
+    def _describe_predicate(pred: Predicate) -> str:
+        """Human-readable one-liner for a predicate (for HALT messages)."""
+        kind = pred.kind.value if hasattr(pred.kind, "value") else pred.kind
+        if kind == "anchor_resolves":
+            label = (
+                pred.intent
+                or (pred.anchor.ocr_text if pred.anchor else None)
+                or "target"
+            )
+            return f"anchor_resolves({label!r})"
+        if kind in ("text_present", "text_absent"):
+            return f"{kind}({pred.text!r})"
+        if kind == "param_equals":
+            return f"param_equals({pred.param!r}=={pred.value!r})"
+        if kind in ("and", "or", "not"):
+            inner = ", ".join(
+                Replayer._describe_predicate(op) for op in pred.operands
+            )
+            return f"{kind}({inner})"
+        return str(kind)
 
     # -- identity verification (pre-click) --------------------------------------
 
@@ -1190,15 +1451,19 @@ class Replayer:
         step_index: int,
         bundle_dir: Path,
         before_png: bytes,
+        params: dict[str, str],
     ) -> Optional[str]:
-        """Execute a SCROLL step as a closed loop on the next anchor.
+        """Execute a SCROLL step as a closed loop on a wait_until predicate.
 
-        A recorded scroll's purpose is to bring the next target into view,
-        so the step scrolls by its recorded delta until the NEXT anchored
-        step's anchor resolves on a settled frame — not a fixed number of
-        times. The step probes BEFORE scrolling (a preceding SCROLL step may
-        already have brought the target into view, making this one a no-op)
-        and stops as soon as a probe resolves.
+        A recorded scroll's purpose is to bring the next target into view, so
+        the step scrolls by its recorded delta until a READINESS predicate holds
+        on a settled frame — not a fixed number of times. That predicate is the
+        step's own ``wait_until`` when set; otherwise it defaults to
+        ``ANCHOR_RESOLVES`` on the NEXT anchored step's anchor — today's closed
+        loop, now expressed as the first concrete ``wait_until`` predicate
+        rather than a special case (RFC §6). The step probes BEFORE scrolling
+        (a preceding SCROLL step may already have brought the target into view,
+        making this one a no-op) and stops as soon as the predicate holds.
 
         The loop is bounded: this step may scroll at most
         ``SCROLL_BUDGET_FACTOR`` times its own recorded distance. On budget
@@ -1206,9 +1471,10 @@ class Replayer:
         step is another SCROLL step, which inherits the loop (so a recorded
         run of N scrolls shares a combined ~2.5x budget).
 
-        Falls back to the fixed recorded delta (open-loop, one gesture) when
-        no later step has an anchor or the recorded delta is zero. Probes
-        never call the grounder: closed-loop scrolling must stay model-free.
+        Falls back to the fixed recorded delta (open-loop, one gesture) when no
+        readiness predicate exists (no ``wait_until`` and no later anchor) or
+        the recorded delta is zero. Predicate probes never call the grounder:
+        closed-loop scrolling must stay model-free.
 
         Returns:
             An error string on budget exhaustion (see above) or None.
@@ -1216,11 +1482,20 @@ class Replayer:
         dx = step.scroll_dx or 0
         dy = step.scroll_dy or 0
         next_step = self._next_anchored_step(workflow, step_index)
-        if next_step is None or (dx == 0 and dy == 0):
+        # The scroll's readiness is a wait_until predicate: an explicit
+        # step.wait_until wins; otherwise the next anchor's ANCHOR_RESOLVES.
+        stop_pred = step.wait_until
+        if stop_pred is None and next_step is not None:
+            stop_pred = Predicate(
+                kind=PredicateKind.ANCHOR_RESOLVES,
+                anchor=next_step.anchor,
+                intent=next_step.intent,
+            )
+        if stop_pred is None or (dx == 0 and dy == 0):
             self.backend.scroll(dx, dy)
             return None
 
-        if self._probe_anchor(next_step, before_png, bundle_dir):
+        if self._predicate_holds(stop_pred, before_png, bundle_dir, params):
             return None  # target already in view; nothing to scroll
 
         increment = math.hypot(dx, dy)
@@ -1230,7 +1505,7 @@ class Replayer:
             self.backend.scroll(dx, dy)
             scrolled += increment
             frame = self.vision.wait_settled(self.backend)
-            if self._probe_anchor(next_step, frame, bundle_dir):
+            if self._predicate_holds(stop_pred, frame, bundle_dir, params):
                 return None
 
         following = (
@@ -1241,12 +1516,16 @@ class Replayer:
         if following is not None and following.action is ActionKind.SCROLL:
             # The next SCROLL step continues the loop with its own budget.
             return None
+        target_desc = (
+            f"the anchor of step '{next_step.id}' ({next_step.intent})"
+            if next_step is not None
+            else self._describe_predicate(stop_pred)
+        )
         return (
             f"Step '{step.id}' ({step.intent}): closed-loop scroll exhausted "
             f"its budget ({scrolled:.0f}px of {budget:.0f}px allowed, "
-            f"{SCROLL_BUDGET_FACTOR}x the recorded distance) without the "
-            f"anchor of step '{next_step.id}' ({next_step.intent}) resolving "
-            "— target never came into view; run aborted"
+            f"{SCROLL_BUDGET_FACTOR}x the recorded distance) without "
+            f"{target_desc} resolving — target never came into view; run aborted"
         )
 
     @staticmethod
@@ -1256,30 +1535,6 @@ class Replayer:
             if candidate.anchor is not None:
                 return candidate
         return None
-
-    def _probe_anchor(
-        self, step: Step, frame_png: bytes, bundle_dir: Path
-    ) -> bool:
-        """Single ladder pass for ``step``'s anchor against ``frame_png``.
-
-        Used by the closed-loop scroll to test whether the scroll target is
-        in view. No timeout retries and no grounder (a probe per scroll
-        gesture must stay fast and model-free).
-        """
-        assert step.anchor is not None  # guaranteed by _next_anchored_step
-        template_png: Optional[bytes] = None
-        template_path = Path(bundle_dir) / step.anchor.template
-        if template_path.is_file():
-            template_png = template_path.read_bytes()
-        return resolve(
-            step.anchor,
-            frame_png,
-            self.vision,
-            None,  # never ground during a scroll probe
-            step.intent,
-            template_png=template_png,
-            viewport=self.backend.viewport,
-        ) is not None
 
     # -- postconditions --------------------------------------------------------
 

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:  # pragma: no cover
     from playwright.sync_api import Page
 
+from openadapt_flow.ir import StructuralHandle, StructuralLocator
+
 VIEWPORT: tuple[int, int] = (1280, 800)
 
 _MODIFIER_ALIASES = {
@@ -202,6 +204,124 @@ class PlaywrightBackend:
         except Exception:
             return None
         return result or None
+
+    # -- structural action (openadapt_flow.backend.StructuralActionBackend) --
+
+    def structural_locator_at(
+        self, x: int, y: int
+    ) -> Optional[StructuralLocator]:
+        """Return a stable DOM locator for the element under (x, y).
+
+        Walks from ``document.elementFromPoint`` to the nearest ACTIONABLE
+        element (the control a user clicks) and derives a stable identity for
+        it: a unique ``#id`` selector when available, else the element's ARIA
+        ``role`` + accessible ``name``. Returns None when neither a unique id
+        nor a role+name can be formed (the step then relies on the visual
+        anchor). Coordinate space matches :meth:`click`.
+        """
+        try:
+            result = self.page.evaluate(
+                """([px, py]) => {
+                    const el = document.elementFromPoint(px, py);
+                    if (!el) return null;
+                    const actionable = el.closest(
+                        'button, a[href], input, select, textarea,' +
+                        ' [role="button"], [role="link"], [role="menuitem"],' +
+                        ' [role="tab"], [role="option"], [onclick], [data-id]'
+                    ) || el;
+                    const tag = actionable.tagName.toLowerCase();
+                    let selector = null;
+                    const id = actionable.id;
+                    if (id && document.querySelectorAll(
+                            '#' + CSS.escape(id)).length === 1) {
+                        selector = '#' + CSS.escape(id);
+                    }
+                    let role = actionable.getAttribute('role');
+                    if (!role) {
+                        const map = {button: 'button', a: 'link',
+                            input: 'textbox', select: 'combobox',
+                            textarea: 'textbox'};
+                        role = map[tag] || null;
+                        if (tag === 'a' &&
+                                !actionable.getAttribute('href')) role = null;
+                    }
+                    let name = actionable.getAttribute('aria-label');
+                    if (!name) {
+                        const t = (actionable.textContent || '')
+                            .replace(/\\s+/g, ' ').trim();
+                        name = t ? t.slice(0, 120) : null;
+                    }
+                    if (!selector && !(role && name)) return null;
+                    return {selector: selector, role: role, name: name};
+                }""",
+                [int(x), int(y)],
+            )
+        except Exception:
+            return None
+        if not result:
+            return None
+        return StructuralLocator(
+            selector=result.get("selector"),
+            role=result.get("role"),
+            name=result.get("name"),
+        )
+
+    def locate_structural(
+        self, locator: StructuralLocator
+    ) -> Optional[StructuralHandle]:
+        """Locate ``locator``'s element in the live DOM; return its center.
+
+        Resolves by the recorded ``selector`` first, else by ``role`` +
+        ``name``. Requires a UNIQUE, on-screen, UNOCCLUDED match: a missing,
+        ambiguous, off-viewport, or COVERED element (a modal / click-shield over
+        it -- the hit test at its center returns another node) returns None so
+        the resolver falls through to the visual ladder (and, for off-screen,
+        its scroll-and-retry; for an opaque cover, a safe halt). The returned
+        point is the element's center in :meth:`click` coordinate space, so the
+        pre-click identity gate re-reads the SAME element there.
+        """
+        try:
+            loc = None
+            if locator.selector:
+                loc = self.page.locator(locator.selector)
+            elif locator.role and locator.name:
+                loc = self.page.get_by_role(
+                    locator.role, name=locator.name, exact=True
+                )
+            if loc is None:
+                return None
+            if loc.count() != 1:
+                return None
+            box = loc.bounding_box()
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                return None
+            cx = int(round(box["x"] + box["width"] / 2))
+            cy = int(round(box["y"] + box["height"] / 2))
+            vw, vh = self.viewport
+            if not (0 <= cx < vw and 0 <= cy < vh):
+                return None
+            # OCCLUSION / actionability gate: a stable DOM identity is NOT a
+            # licence to click something the user could not. If the element is
+            # covered (a modal, an opaque or transparent click-shield), the hit
+            # test at its center returns some OTHER node, and we return None so
+            # resolution falls through to the visual ladder (which also fails on
+            # an opaque cover -> safe halt, no click). Only when the element --
+            # or a descendant of it -- is the topmost node at the action point
+            # do we resolve. This preserves the occlusion-safe-halt invariant
+            # (tests/e2e/test_chaos.py) that structural coordinates would
+            # otherwise bypass.
+            topmost = loc.evaluate(
+                "(el, pt) => {"
+                " const n = document.elementFromPoint(pt[0], pt[1]);"
+                " return !!n && (n === el || el.contains(n));"
+                "}",
+                [cx, cy],
+            )
+            if not topmost:
+                return None
+            return StructuralHandle(point=(cx, cy))
+        except Exception:
+            return None
 
     def screenshot(self) -> bytes:
         """Return the current full-viewport frame as PNG bytes."""

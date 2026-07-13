@@ -3,6 +3,8 @@
 Subcommands (thin wrappers over the module APIs; sibling modules are
 imported lazily inside each handler so ``--help`` always works):
 
+- ``record`` — open a headed browser on your OWN app (``--url``) and
+  record what you do into the format ``compile`` consumes.
 - ``demo-record`` — serve MockMed locally and record the canonical demo.
 - ``compile`` — compile a recording directory into a workflow bundle.
 - ``replay`` — replay a bundle; serves the bundled MockMed demo app when no
@@ -40,6 +42,28 @@ def _with_drift(url: str, drift: str | None) -> str:
     if not drift:
         return url
     return f"{url.rstrip('/')}/?drift={drift}"
+
+
+def _cmd_record(args: argparse.Namespace) -> int:
+    from openadapt_flow.interactive_recorder import record_interactive
+
+    out = record_interactive(
+        args.url,
+        Path(args.out),
+        secret_fields=tuple(args.secret or ()),
+        param_fields=tuple(args.param or ()),
+        headless=args.headless,
+    )
+    print(f"Recording written to {out}")
+    secrets = sorted(args.secret or ())
+    if secrets:
+        print(
+            "Secret field(s) recorded (values NOT stored): "
+            + ", ".join(secrets)
+            + ". At replay, export "
+            + ", ".join(f"OPENADAPT_FLOW_SECRET_{name.upper()}" for name in secrets)
+        )
+    return 0
 
 
 def _cmd_demo_record(args: argparse.Namespace) -> int:
@@ -155,6 +179,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     state_verifier=(
                         appliance.state_verifier if appliance else None
                     ),
+                    # Normal replay prefers the deterministic structural rung.
+                    # ``--drift`` exists to DEMONSTRATE the visual healing ladder
+                    # on the bundled MockMed app, so it forces the visual floor
+                    # (structure would resolve the injected drift and there would
+                    # be nothing to heal -- the very thing the flag shows).
+                    use_structural=not bool(args.drift),
                 ).run(
                     workflow,
                     params=params,
@@ -305,6 +335,44 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser(
+        "record",
+        help="Record YOUR app interactively in a headed browser (--url)",
+    )
+    p.add_argument(
+        "--url", required=True, help="URL of the app to record against"
+    )
+    p.add_argument("--out", required=True, help="Recording output directory")
+    p.add_argument(
+        "--secret",
+        action="append",
+        default=[],
+        metavar="FIELD",
+        help=(
+            "Mark a typed field (by name or id) as a SECRET; its value is "
+            "never persisted and is injected at replay from "
+            "OPENADAPT_FLOW_SECRET_<FIELD>. input[type=password] is always "
+            "treated as secret. Repeatable."
+        ),
+    )
+    p.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="FIELD",
+        help=(
+            "Record a typed field (by name or id) as a PARAMETER; its "
+            "demonstrated value becomes the default, overridable at replay "
+            "with --param. Repeatable."
+        ),
+    )
+    p.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run the browser headless (scripted/CI recording)",
+    )
+    p.set_defaults(func=_cmd_record)
 
     p = sub.add_parser(
         "demo-record",

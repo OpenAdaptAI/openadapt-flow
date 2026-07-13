@@ -51,19 +51,28 @@ no "probably fine."
 
 | Substrate | Verifier | System of record | Status |
 |---|---|---|---|
-| **OpenEMR FHIR R4** (primary; the healthcare wedge) | `FhirEffectVerifier` | `GET {base}/Observation?patient=…` → FHIR `Bundle` search-set of nested resources | **Contract-gated.** CI runs against a byte-faithful fake FHIR R4 server (`tests/_fhir_fake.py`); a live test runs when `OPENEMR_FHIR_BASE_URL` (+ token) is set. |
+| **OpenEMR FHIR R4** (primary; the healthcare wedge) | `FhirEffectVerifier` | `GET {base}/Observation?patient=…` → FHIR `Bundle` search-set of nested resources | **Contract-gated in CI + verified LIVE.** CI runs against a byte-faithful fake FHIR R4 server (`tests/_fhir_fake.py`); a live end-to-end test (`tests/test_effect_fhir_live_openemr.py`) runs against a **real local OpenEMR** stood up by `benchmark/openemr_live/` when `OPENEMR_FHIR_BASE_URL` (+ token) is set. |
 | **REST/JSON** (MockMed transactional back end) | `RestRecordVerifier` | `GET /api/db` on `mockmed.fault_server` — the same in-process HTTP system of record the fault-model study judges by | **Live in CI** (localhost). Drives the proof matrix below. |
 | **Filesystem document store** | `DocumentHashVerifier` | a directory of written documents, verified by SHA-256 content hash | **Live in CI.** A non-HTTP verifier type — proves the protocol is substrate-agnostic, not OpenEMR-shaped. |
 
-**Did OpenEMR run live?** No. The repo's OpenEMR harness
-(`openadapt_flow/benchmark/openemr_benchmark.py`, `scripts/openemr_demo.py`)
-targets the **public demo** (`demo.openemr.io`) **vision-only** — it stands up
-no local instance and exposes no authenticated FHIR endpoint we can safely
-write to and read back in CI. So the FHIR verifier is built against OpenEMR's
-**real, documented FHIR R4 contract** and exercised against a faithful fake
-that mirrors the FHIR wire shape (never MockMed's screen), with the live path
-gated behind `OPENEMR_FHIR_BASE_URL`. Pointing it at a real OpenEMR is a
-matter of supplying a base URL + OAuth token.
+**Did OpenEMR run live?** **Yes.** `benchmark/openemr_live/` stands up a real
+local OpenEMR (OpenEMR + MariaDB via `docker-compose`) with the REST + FHIR R4
+APIs and OAuth2 enabled, and `tests/test_effect_fhir_live_openemr.py` writes a
+real Patient through OpenEMR's FHIR API and has this same verifier
+independently read it back — asserting CONFIRMED (write landed), REFUTED
+(wrong field value; absent record), and INDETERMINATE→HALT (a `401` from a bad
+token is never mistaken for "record absent"). Verified end-to-end against
+`openemr/openemr:7.0.3` (6/6 live tests). The live write is a **FHIR Patient
+POST** — an API write, not a GUI-driven one — because OpenEMR's FHIR API
+exposes Observation as **read-only** (no `user/Observation.write` scope), so
+the note-as-Observation write the fake models cannot be created over FHIR on a
+stock OpenEMR; the property the live test establishes is the one the fake
+could not — the verdicts are correct against a **real FHIR server**, not a
+fake. CI still runs vision-only against the **public demo**
+(`openadapt_flow/benchmark/openemr_benchmark.py`, `scripts/openemr_demo.py`);
+the live FHIR test is gated behind `OPENEMR_FHIR_BASE_URL` and skipped
+otherwise. See `benchmark/openemr_live/README.md` for the one-command
+bring-up.
 
 ## THE PROOF — fault-class matrix (screen-verify vs effect-verify)
 

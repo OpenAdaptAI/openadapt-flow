@@ -87,3 +87,20 @@ packages = ["openadapt_flow"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 600
+
+# Auto-release (matches the other openadapt repos). Python Semantic Release
+# computes the next version from Conventional Commit subjects since the last
+# tag: `feat:` -> minor, `fix:`/`perf:` -> patch, `BREAKING CHANGE` -> major.
+# See .github/workflows/release.yml.
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+commit_message = "chore: release {version}"
+build_command = "pip install uv && uv build"
+
+[tool.semantic_release.branches.main]
+match = "main"
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]

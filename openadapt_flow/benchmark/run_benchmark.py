@@ -372,10 +372,9 @@ def render_chart(results: dict[str, Any], out_png: Path) -> Path:
     Returns:
         The written PNG path.
     """
-    import matplotlib
+    from openadapt_flow.benchmark.chart_fonts import configure_bundled_font
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = configure_bundled_font()
 
     surface = "#fcfcfb"
     ink = "#0b0b0b"
@@ -591,7 +590,9 @@ def write_outputs(results: dict[str, Any], out_dir: Path) -> None:
     (out_dir / "results.json").write_text(
         json.dumps(results, indent=2) + "\n"
     )
-    render_chart(results, out_dir / "latency_cost.png")
+    from openadapt_flow.benchmark.chart_fonts import safe_render
+
+    safe_render(render_chart, results, out_dir / "latency_cost.png")
     (out_dir / "BENCHMARK.md").write_text(render_markdown(results))
 
 

@@ -585,6 +585,35 @@ class TestOrchestrator:
         assert "drift" in md.lower()
         assert "latency_cost.png" in md
 
+    def test_write_outputs_survives_font_lookup_failure(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """A corrupt font cache must skip the chart, not fail the benchmark.
+
+        Simulates the ``ValueError: Failed to find font DejaVu Sans`` that
+        fresh venvs / concurrent runs raise from ``findfont``. The cosmetic
+        PNG may be skipped, but the numeric ``results.json`` -- the product of
+        the benchmark -- must be written intact and the call must not raise.
+        """
+        import json
+
+        from matplotlib import font_manager
+
+        def boom(*args: Any, **kwargs: Any) -> str:
+            raise ValueError("Failed to find font DejaVu Sans")
+
+        monkeypatch.setattr(font_manager.fontManager, "findfont", boom)
+        monkeypatch.setattr(font_manager, "findfont", boom)
+
+        results = self.make_results()
+        write_outputs(results, tmp_path)  # must not raise
+
+        loaded = json.loads((tmp_path / "results.json").read_text())
+        assert loaded["arms"]["agent"]["success_count"] == 3
+        assert loaded["arms"]["compiled"]["success_rate"] == 1.0
+        # BENCHMARK.md (also non-chart) is still written intact.
+        assert "latency_cost.png" in (tmp_path / "BENCHMARK.md").read_text()
+
     def test_markdown_reports_both_arms(self) -> None:
         md = render_markdown(self.make_results())
         assert "100%" in md  # compiled success rate

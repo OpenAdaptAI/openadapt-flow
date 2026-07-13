@@ -441,7 +441,9 @@ def write_openemr_outputs(results: dict[str, Any], out_dir: Path) -> None:
     (out_dir / "results.json").write_text(
         json.dumps(results, indent=2) + "\n"
     )
-    render_chart(results, out_dir / "latency_cost.png")
+    from openadapt_flow.benchmark.chart_fonts import safe_render
+
+    safe_render(render_chart, results, out_dir / "latency_cost.png")
     (out_dir / "BENCHMARK.md").write_text(render_openemr_markdown(results))
 
 

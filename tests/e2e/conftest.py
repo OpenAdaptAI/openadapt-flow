@@ -107,7 +107,14 @@ def replay(_browser, tmp_path_factory: pytest.TempPathFactory) -> ReplayFn:
         params: Optional[dict[str, str]] = None,
         run_dir: Optional[Path] = None,
         save_healed_to: Optional[Path] = None,
+        use_structural: bool = False,
     ) -> tuple[RunReport, Path]:
+        # use_structural defaults False: the record->compile->replay suites
+        # characterize the VISUAL ladder (template/ocr/geometry/heal) and its
+        # drift envelope -- the pixel-only substrate path (RDP/Citrix) the
+        # structural rung sits ON TOP of but never replaces. The structural
+        # default-on product path is covered explicitly by
+        # tests/e2e/test_structural_action.py.
         if run_dir is None:
             run_dir = tmp_path_factory.mktemp("run")
         page = _browser.new_page(viewport=VIEWPORT, device_scale_factor=1)
@@ -115,7 +122,7 @@ def replay(_browser, tmp_path_factory: pytest.TempPathFactory) -> ReplayFn:
             page.goto(url)
             backend = PlaywrightBackend(page)
             workflow = Workflow.load(bundle_dir)
-            report = Replayer(backend).run(
+            report = Replayer(backend, use_structural=use_structural).run(
                 workflow,
                 params=dict(PARAMS if params is None else params),
                 bundle_dir=Path(bundle_dir),

@@ -75,6 +75,7 @@ def replay_on_page(
     viewport: tuple[int, int] = (1280, 800),
     device_scale_factor: int = 1,
     backend_factory: Optional[Callable[[object], PlaywrightBackend]] = None,
+    use_structural: bool = False,
 ) -> tuple[RunReport, dict]:
     """Replay ``bundle_dir`` on a fresh page and observe final app state.
 
@@ -100,7 +101,7 @@ def replay_on_page(
             backend_factory(page) if backend_factory else PlaywrightBackend(page)
         )
         workflow = Workflow.load(bundle_dir)
-        report = Replayer(backend).run(
+        report = Replayer(backend, use_structural=use_structural).run(
             workflow,
             params=params,
             bundle_dir=Path(bundle_dir),
@@ -196,6 +197,7 @@ def replay_cosmetic(
     zoom: Optional[float] = None,
     font_scale: Optional[float] = None,
     font_family: Optional[str] = None,
+    use_structural: bool = False,
 ) -> tuple[RunReport, dict]:
     """Replay ``bundle_dir`` under a cosmetic-only render perturbation.
 
@@ -220,7 +222,7 @@ def replay_cosmetic(
             page.wait_for_timeout(80)  # let the reflow settle
         backend = PlaywrightBackend(page)
         workflow = Workflow.load(bundle_dir)
-        report = Replayer(backend).run(
+        report = Replayer(backend, use_structural=use_structural).run(
             workflow,
             params=params,
             bundle_dir=Path(bundle_dir),

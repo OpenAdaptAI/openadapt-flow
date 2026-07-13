@@ -153,6 +153,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     state_verifier=(
                         appliance.state_verifier if appliance else None
                     ),
+                    # Normal replay prefers the deterministic structural rung.
+                    # ``--drift`` exists to DEMONSTRATE the visual healing ladder
+                    # on the bundled MockMed app, so it forces the visual floor
+                    # (structure would resolve the injected drift and there would
+                    # be nothing to heal -- the very thing the flag shows).
+                    use_structural=not bool(args.drift),
                 ).run(
                     workflow,
                     params=params,

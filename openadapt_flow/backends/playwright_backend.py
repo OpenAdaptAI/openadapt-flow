@@ -354,17 +354,28 @@ class PlaywrightBackend:
 
     @classmethod
     def launch(
-        cls, url: str, headless: bool = True
+        cls,
+        url: str,
+        headless: bool = True,
+        *,
+        record_video_dir: Optional[str] = None,
     ) -> tuple["PlaywrightBackend", Callable[[], None]]:
         """Start Playwright + chromium, open ``url``, and return a backend.
 
         Args:
             url: URL to navigate the new page to.
             headless: Whether to launch chromium headless.
+            record_video_dir: OPT-IN. When set, the page is created inside a
+                browser context that records a WebM video of the session into
+                this directory (one file per page, Playwright-named). ``None``
+                (default) records nothing and has zero effect on normal runs —
+                the page is created directly on the browser as before. The
+                finished video is only flushed to disk after ``close()`` (which
+                closes the context); read its path from ``backend.page.video``.
 
         Returns:
             ``(backend, close)`` where ``close()`` shuts down the browser and
-            the Playwright driver.
+            the Playwright driver (flushing the video first, when recording).
         """
         from playwright.sync_api import sync_playwright
 
@@ -374,15 +385,28 @@ class PlaywrightBackend:
         except Exception:
             pw.stop()
             raise
-        page = browser.new_page(
-            viewport={"width": VIEWPORT[0], "height": VIEWPORT[1]},
-            device_scale_factor=1,
-        )
+        viewport = {"width": VIEWPORT[0], "height": VIEWPORT[1]}
+        context = None
+        if record_video_dir is not None:
+            # Opt-in session video: the page must live in a context so
+            # Playwright can attach the recorder; the video finalizes on
+            # context.close().
+            context = browser.new_context(
+                viewport=viewport,
+                device_scale_factor=1,
+                record_video_dir=record_video_dir,
+                record_video_size=viewport,
+            )
+            page = context.new_page()
+        else:
+            page = browser.new_page(viewport=viewport, device_scale_factor=1)
         page.goto(url)
         backend = cls(page)
 
         def close() -> None:
             try:
+                if context is not None:
+                    context.close()  # flush the recorded video to disk
                 browser.close()
             finally:
                 pw.stop()

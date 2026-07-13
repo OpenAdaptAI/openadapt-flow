@@ -79,6 +79,7 @@ def _cmd_demo_record(args: argparse.Namespace) -> int:
             note_text=args.note_text,
             param_name=args.param_name,
             headed=args.headed,
+            record_video_dir=args.record_video,
         )
         print(f"Recording written to {out}")
     finally:
@@ -136,10 +137,23 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         drift_note = f" (drift: {args.drift})" if args.drift else ""
         print(f"No --url given; replaying against bundled MockMed{drift_note}")
 
+    video_dir = getattr(args, "record_video", None)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not args.headed)
-            page = browser.new_page(viewport=_VIEWPORT)
+            # OPT-IN session video (default off): a recorded replay lives in a
+            # context so Playwright can attach the recorder; None keeps the old
+            # direct-page path with zero effect.
+            context = None
+            if video_dir is not None:
+                context = browser.new_context(
+                    viewport=_VIEWPORT,
+                    record_video_dir=video_dir,
+                    record_video_size=_VIEWPORT,
+                )
+                page = context.new_page()
+            else:
+                page = browser.new_page(viewport=_VIEWPORT)
             page.goto(url)
             try:
                 backend = PlaywrightBackend(page)
@@ -197,7 +211,16 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     ),
                 )
             finally:
+                video_path = None
+                if context is not None:
+                    try:
+                        video_path = page.video.path() if page.video else None
+                    except Exception:
+                        video_path = None
+                    context.close()  # flush the recorded video to disk
                 browser.close()
+                if video_path is not None:
+                    print(f"Session video written to {video_path}")
     finally:
         if stop is not None:
             stop()
@@ -447,6 +470,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--headed", action="store_true", help="Run the browser headed"
     )
+    p.add_argument(
+        "--record-video",
+        default=None,
+        metavar="DIR",
+        help=(
+            "OPT-IN: capture a WebM video of the recording session into DIR "
+            "(default: off; no effect on the recording written to --out)"
+        ),
+    )
     p.set_defaults(func=_cmd_demo_record)
 
     p = sub.add_parser(
@@ -503,6 +535,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--headed", action="store_true", help="Run the browser headed"
+    )
+    p.add_argument(
+        "--record-video",
+        default=None,
+        metavar="DIR",
+        help=(
+            "OPT-IN: capture a WebM video of the replay session into DIR "
+            "(default: off; no effect on the run directory or report)"
+        ),
     )
     p.set_defaults(func=_cmd_replay)
 

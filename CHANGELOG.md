@@ -1,6 +1,235 @@
 # CHANGELOG
 
 
+## v0.18.0 (2026-07-13)
+
+### Features
+
+- Auto-provision Chromium on first browser launch (pip install just works)
+  ([#84](https://github.com/OpenAdaptAI/openadapt-flow/pull/84),
+  [`04ec900`](https://github.com/OpenAdaptAI/openadapt-flow/commit/04ec9003d2fa7e30c955742de4f7b5c5c6e0a3bc))
+
+`pip install openadapt-flow` pulls the Playwright Python package but not the Chromium browser
+  binary, which previously required a separate manual `playwright install chromium` step.
+  Post-install hooks are unreliable for wheels, so provision the browser lazily on first real use
+  instead.
+
+New `openadapt_flow/_browser_setup.ensure_chromium_installed()` probes for the browser binary (via
+  Playwright's reported executable path) and, when missing, runs `python -m playwright install
+  chromium` once with a friendly one-time notice. It is guarded by a module-level flag so it runs at
+  most once per process, is a no-op when the browser is present, idempotent across runs, and has no
+  import-time side effects. `OPENADAPT_FLOW_NO_AUTO_INSTALL=1` opts out for air-gapped /
+  pre-provisioned environments, letting Playwright's own clear "browser not installed" error
+  surface.
+
+Hooked at every real browser-launch chokepoint: PlaywrightBackend.launch (covers demo-record,
+  benchmark, dom-arm, hybrid, structural-action), InteractiveRecorder.start (record), and the CLI
+  replay/bench direct launches in __main__. Updates the README: `pip install openadapt-flow` now
+  suffices, with uvx / uv tool install noted as the fast path and the opt-out documented.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.17.0 (2026-07-13)
+
+### Features
+
+- Continuous skill learning — versioned skill library + governed learn/promote loop (reuses #70
+  promotion gate) ([#83](https://github.com/OpenAdaptAI/openadapt-flow/pull/83),
+  [`642cc75`](https://github.com/OpenAdaptAI/openadapt-flow/commit/642cc7514f5b9cfb1df4c814318779629acdfcec))
+
+* feat: workflow-program IR Phase 2 — loops, branches, subflows, exception paths (the state machine)
+
+Evolve the compiled artifact from a linear action list into a parameterized STATE MACHINE (RFC
+  docs/design/WORKFLOW_PROGRAM_IR.md §2), closing the review's "a workflow is not a list of actions"
+  gap. Phase 1 (typed params, guards, wait_until) added the pieces; Phase 2 adds the control flow a
+  trajectory cannot carry: LOOPS over a worklist, guarded BRANCHES, reusable SUBFLOWS, and
+
+EXCEPTION paths — the program the PBD literature (Rousillon, WebRobot, Skill-DisCo, PROLEX) says a
+  demonstration compiler must express.
+
+IR (openadapt_flow/ir.py), additive and backward-compatible: - State (action | branch | loop |
+  subflow_call | terminal) + Transition (guarded edge) form a ProgramGraph; an action state's
+  payload IS a Phase-1 Step (the unchanged hardened leaf), a transition's guard IS a Phase-1
+  Predicate. - Relation (worklist) + LoopSpec (bounded per-row body subflow); Workflow gains
+  optional program / subflows / data_sources. When program is None the linear steps list runs
+  exactly as today. - lift_to_program: mechanical degenerate lift (RFC §2.6) — a linear bundle is
+  the single-path graph.
+
+Interpreter (runtime/replayer.py): a deterministic graph interpreter ($0, zero model calls) that
+  REUSES the linear per-action pipeline unchanged — every action state runs through _run_step, so
+  identity / effect / risk / heal gates fire identically inside loop bodies and branches. Adds
+  guarded transition selection (first match wins, no-match HALTs fail-safe), bounded worklist loops,
+  subflow dispatch, and on_exception routing (graph try/except); unhandled failures and
+  halt/escalate terminals stop the run. Bounded against non-terminating graphs (step budget +
+  nesting depth). Linear path is byte-for-byte unchanged (program=None branch).
+
+Tests (tests/test_program_ir_phase2.py, 18): loop runs body 3x / 0x / run-time worklist / bound
+  enforced; branch takes each arm (param + screen predicate) and dead-ends HALT; subflow reused as
+  loop body AND direct call; on_exception catches a failed action and continues; identity- and
+  effect-gates fire inside a loop body; the lifted linear graph replays byte-identically to the
+  linear replayer; program round-trips through save/load. Full non-e2e suite green in isolation (859
+  passed; the concurrent-agent FileNotFoundError errors are environmental).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: continuous skill learning — versioned skill library + governed learn/promote loop (reuses
+  #70 promotion gate)
+
+Add openadapt_flow/learning/: orchestration for the review's item 7 — cluster successful/failed
+  traces, revise the inferred Phase-2 state machine, validate a candidate on held-out executions,
+  and promote only verified versions.
+
+- SkillLibrary: skills as versioned ProgramGraphs (id -> ordered versions, each with provenance +
+  validation score + status active/candidate/rolled_back/ superseded), persistent as JSON on disk;
+  promotion retires the prior active, never deletes it (auditable lineage). - learn_from_traces:
+  cluster -> coverage check -> revise (via a thin Inducer Protocol; multi-trace induction is a
+  sibling PR, stubbed here) -> validate -> promote/quarantine. Reuses PR #70's RegressionGate per
+  surviving step (identity/effect/risk may not regress), lifted from one heal to a whole program,
+  then a held-out coverage canary — a candidate is promoted only if it passes BOTH; else the active
+  version is retained and the candidate is quarantined with the reason (never a silent adoption). -
+  Symbolic Phase-2 coverage interpreter: walks a ProgramGraph over a trace's observed facts with the
+  SAME control-flow rules as runtime.replayer (guarded transitions, skip-guards, bounded loops) —
+  deterministic, $0, no backend. - Synthetic drift-stream harness (synth_stream): a MockMed
+  add-patient-note skill drifting over time (a new consent dialog appears mid-stream, a field is
+  renamed) plus a deterministic reference inducer, so the loop is exercised end-to-end with no live
+  app and no model calls.
+
+Tests (tests/test_continuous_learning.py): a new dialog mid-stream is detected, induced, validated,
+  and PROMOTED; noise/failures alone do NOT promote (stability); a rigged inducer that regresses
+  identity/effect/risk is REJECTED by the gate with the active version retained; an uncoverable
+  drift is refused; version history + provenance are correct. No model calls at runtime.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.16.0 (2026-07-13)
+
+### Features
+
+- Durable tiered runtime — checkpoint + pause/approve/resume from last verified state
+  ([#80](https://github.com/OpenAdaptAI/openadapt-flow/pull/80),
+  [`729d9b6`](https://github.com/OpenAdaptAI/openadapt-flow/commit/729d9b650648591fdd8cef4ba2119162ea1fd4fe))
+
+Implement the escalation tier of the Workflow-Program IR runtime (RFC
+  docs/design/WORKFLOW_PROGRAM_IR.md §5, Tier 3). Today the escalation tier just HALTs and a re-run
+  starts from step 0 — unsafe in production because a workflow that already performed consequential
+  writes would re-perform them.
+
+New package openadapt_flow/runtime/durable/ (import-light: pydantic + json + pathlib, zero
+  backend/vision/model):
+
+- checkpoint.py: RunCheckpoint (written to run_dir/checkpoints/ after each VERIFIED step — identity
+  ok + effects CONFIRMED + postconditions ok), PendingEscalation (written to
+  run_dir/pending_escalation.json on a halt, capturing WHY it paused, the proposed operator options,
+  and the checkpoint to resume from), RunManifest, and CheckpointStore. - controller.py: DurableRun
+  (the replayer's per-run hook: verified -> checkpoint, halt -> pending escalation), classify_halt
+  (halt reason -> category + operator options: effect_refuted / effect_indeterminate /
+  effect_escalated / placeholder_effect / effect_unverifiable / unmet_guard / disambiguation /
+  identity / postcondition / resolution), resumed_step_results. - resume.py: resume(run_dir,
+  replayer) — reload the last verified checkpoint and continue from there (paused step onward),
+  NEVER from step 0 and NEVER by handing the remaining workflow to a free-form agent (RFC §5
+  non-goal). Idempotent w.r.t. already-verified steps; the paused step's re-execution is safe by the
+  effect layer's idempotency_key posture.
+
+Minimal, localized replayer touch-points (for Phase-2 state-machine reconciliation — all additive,
+  +60 lines): - Replayer.__init__: new durable: bool = False. - Replayer.run: new resume_from:
+  Optional[int]; construct one DurableRun; skip the already-verified prefix on resume and pre-load
+  its results; call DurableRun.record after each step result is appended.
+
+Tests (tests/test_durable_runtime.py, faked backend/vision + scripted in-memory EffectVerifier — no
+  network, no model): clean run checkpoints each step and completes; a REFUTED effect mid-run writes
+  a PendingEscalation + prior checkpoints; resume continues from the last checkpoint and does NOT
+  re-run confirmed steps; resume does not re-verify confirmed steps (no double write);
+  halt-on-first-step resumes from zero; placeholder-effect pause is classified; durability-off
+  writes no artifacts. Full suite green (1098 passed, 16 skipped).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Multi-trace induction — infer a parameterized program (params/loops/branches) from multiple demos,
+  reject-if-underdetermined ([#81](https://github.com/OpenAdaptAI/openadapt-flow/pull/81),
+  [`76ee70c`](https://github.com/OpenAdaptAI/openadapt-flow/commit/76ee70c5eb95a0163c0468bb0fd4c9ec0f7d9c85))
+
+* feat: workflow-program IR Phase 2 — loops, branches, subflows, exception paths (the state machine)
+
+Evolve the compiled artifact from a linear action list into a parameterized STATE MACHINE (RFC
+  docs/design/WORKFLOW_PROGRAM_IR.md §2), closing the review's "a workflow is not a list of actions"
+  gap. Phase 1 (typed params, guards, wait_until) added the pieces; Phase 2 adds the control flow a
+  trajectory cannot carry: LOOPS over a worklist, guarded BRANCHES, reusable SUBFLOWS, and
+
+EXCEPTION paths — the program the PBD literature (Rousillon, WebRobot, Skill-DisCo, PROLEX) says a
+  demonstration compiler must express.
+
+IR (openadapt_flow/ir.py), additive and backward-compatible: - State (action | branch | loop |
+  subflow_call | terminal) + Transition (guarded edge) form a ProgramGraph; an action state's
+  payload IS a Phase-1 Step (the unchanged hardened leaf), a transition's guard IS a Phase-1
+  Predicate. - Relation (worklist) + LoopSpec (bounded per-row body subflow); Workflow gains
+  optional program / subflows / data_sources. When program is None the linear steps list runs
+  exactly as today. - lift_to_program: mechanical degenerate lift (RFC §2.6) — a linear bundle is
+  the single-path graph.
+
+Interpreter (runtime/replayer.py): a deterministic graph interpreter ($0, zero model calls) that
+  REUSES the linear per-action pipeline unchanged — every action state runs through _run_step, so
+  identity / effect / risk / heal gates fire identically inside loop bodies and branches. Adds
+  guarded transition selection (first match wins, no-match HALTs fail-safe), bounded worklist loops,
+  subflow dispatch, and on_exception routing (graph try/except); unhandled failures and
+  halt/escalate terminals stop the run. Bounded against non-terminating graphs (step budget +
+  nesting depth). Linear path is byte-for-byte unchanged (program=None branch).
+
+Tests (tests/test_program_ir_phase2.py, 18): loop runs body 3x / 0x / run-time worklist / bound
+  enforced; branch takes each arm (param + screen predicate) and dead-ends HALT; subflow reused as
+  loop body AND direct call; on_exception catches a failed action and continues; identity- and
+  effect-gates fire inside a loop body; the lifted linear graph replays byte-identically to the
+  linear replayer; program round-trips through save/load. Full non-e2e suite green in isolation (859
+  passed; the concurrent-agent FileNotFoundError errors are environmental).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* feat: multi-trace induction — infer a parameterized program (params/loops/branches) from multiple
+  demos, reject-if-underdetermined
+
+Implements RFC docs/design/WORKFLOW_PROGRAM_IR.md §3 steps [4]+[5]: the induction loop the PBD
+  lineage (Rousillon, WebRobot, Skill-DisCo, PROLEX) says a demonstration compiler must have. "One
+  demonstration is evidence, not specification."
+
+openadapt_flow/compiler/induction.py: - induce_program(traces) aligns multiple demos structurally
+  and infers a Phase-2 ProgramGraph: PARAMS (values that VARY across traces at an aligned position;
+  constant => literal), LOOPS (a repeated body whose count DIFFERS => LoopSpec over an inferred
+  Relation), BRANCHES (a divergent step under a detectable condition => guarded branch, guard
+  proposed/flagged), and OPTIONAL steps (present in some, absent in others, no condition => guarded
+  skip). All deterministic, ZERO model calls. - validate_held_out / reproduction_score:
+  leave-one-out held-out validation (infer from N-1, check reproduction of the held trace). -
+  Reject-rather-than-guess: contradictory / underdetermined traces are QUARANTINED (no program
+  emitted, certified=False) and routed to the disambiguation flow (#74), mirroring the identity
+  gate's posture. - The optional compile-time Proposer (the #78 StepAnnotator fits behind it) only
+  PROPOSES interpretations — flagged, never silently trusted, never flips an underdetermined point
+  to certified.
+
+Touch-points kept minimal: reuses the Phase-2 IR + Phase-1 ParamSpec/Guard/ Predicate verbatim (no
+  new IR fields), reuses disambiguation's question model, and the emitted program replays through
+  the EXISTING interpreter unchanged (compile.py untouched; compiler/__init__ re-exports the new
+  API).
+
+Tests (tests/test_induction.py, 17 tests): a synthetic MockMed corpus of trace variants covers (a)
+  param, (b) loop, (c) branch/optional, (d) contradiction=> reject; held-out scores a good induction
+  high and an over-specialized one low; underdetermined is flagged not guessed; the induced program
+  round-trips through the real Phase-2 interpreter (faked backend/vision, zero model calls).
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.15.0 (2026-07-13)
 
 ### Features

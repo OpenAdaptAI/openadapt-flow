@@ -128,9 +128,7 @@ def find_template(
         if scale == 1.0:
             scaled = template
         else:
-            scaled = cv2.resize(
-                template, (tw, th), interpolation=cv2.INTER_AREA
-            )
+            scaled = cv2.resize(template, (tw, th), interpolation=cv2.INTER_AREA)
         result = cv2.matchTemplate(haystack, scaled, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
         if best is None or max_val > best[0]:
@@ -144,9 +142,7 @@ def find_template(
         ys, xs = np.where(result >= score - TIE_BREAK_EPS)
         if len(xs) > 1:
             px, py = prefer_near[0] - off_x, prefer_near[1] - off_y
-            d2 = (xs.astype(np.int64) - px) ** 2 + (
-                ys.astype(np.int64) - py
-            ) ** 2
+            d2 = (xs.astype(np.int64) - px) ** 2 + (ys.astype(np.int64) - py) ** 2
             i = int(np.argmin(d2))
             mx, my = int(xs[i]), int(ys[i])
             score = float(result[my, mx])

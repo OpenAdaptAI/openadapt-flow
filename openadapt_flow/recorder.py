@@ -153,9 +153,7 @@ class Recorder:
         # can verify identity against the highest-fidelity signal (no OCR
         # ambiguity). Pointer events only (they carry x/y); absent otherwise.
         if event.get("kind") in ("click", "double_click"):
-            structured = self._structured_identity_at(
-                int(event["x"]), int(event["y"])
-            )
+            structured = self._structured_identity_at(int(event["x"]), int(event["y"]))
             if structured:
                 event = {**event, "structured_identity": structured}
         act()
@@ -223,10 +221,7 @@ class Recorder:
         png = self._backend.screenshot()
         prev = _phash(png)
         consecutive = 1
-        while (
-            consecutive < self._settle_stable_frames
-            and time.monotonic() < deadline
-        ):
+        while consecutive < self._settle_stable_frames and time.monotonic() < deadline:
             time.sleep(self._settle_interval_s)
             png = self._backend.screenshot()
             cur = _phash(png)

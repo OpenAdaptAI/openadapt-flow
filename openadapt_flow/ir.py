@@ -231,9 +231,7 @@ class Workflow(BaseModel):
     @classmethod
     def load(cls, bundle_dir: Path | str) -> "Workflow":
         bundle = Path(bundle_dir)
-        return cls.model_validate(
-            json.loads((bundle / "workflow.json").read_text())
-        )
+        return cls.model_validate(json.loads((bundle / "workflow.json").read_text()))
 
 
 # -- runtime results ---------------------------------------------------------

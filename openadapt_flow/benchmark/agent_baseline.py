@@ -153,12 +153,12 @@ def triage_task_prompt(note_text: str) -> str:
     return (
         "You are looking at MockMed, a demo clinic web app (fake data "
         "only). Complete this task:\n\n"
-        "1. Sign in with username \"nurse.demo\" and password "
-        "\"mockmed-demo-pass\".\n"
+        '1. Sign in with username "nurse.demo" and password '
+        '"mockmed-demo-pass".\n'
         "2. Open the first referral task in the list.\n"
         "3. From the patient's page, create a New Encounter and choose the "
-        "type \"Triage\".\n"
-        f"4. Enter exactly this note in the Note field: \"{note_text}\"\n"
+        'type "Triage".\n'
+        f'4. Enter exactly this note in the Note field: "{note_text}"\n'
         "5. Save the encounter.\n\n"
         "You are done when you are back on the patient's page and see the "
         "'Encounter saved' confirmation. Then stop and reply with a one-line "
@@ -183,14 +183,14 @@ def openemr_task_prompt(note_text: str) -> str:
     return (
         "You are looking at the OpenEMR public demo (a real EMR web app "
         "with fake demo patients only). Complete this task:\n\n"
-        "1. Sign in with username \"admin\" and password \"pass\".\n"
+        '1. Sign in with username "admin" and password "pass".\n'
         "2. Use the patient search box in the top bar to search for "
-        "\"Phil\" and open the chart of the patient \"Belford, Phil\".\n"
+        '"Phil" and open the chart of the patient "Belford, Phil".\n'
         "3. On the patient's dashboard, open the Patient Messages section "
         "(the Messages card — you will likely need to scroll down to "
         "find it).\n"
         "4. Add a new note and enter exactly this text as the note: "
-        f"\"{note_text}\"\n"
+        f'"{note_text}"\n'
         "5. Save it as a new message.\n\n"
         "You are done when you are back on the patient-message list and "
         "can see the new note. Then stop and reply with a one-line "
@@ -464,9 +464,7 @@ def _execute_action(backend: Any, block: Any) -> dict[str, Any]:
     }
 
 
-def _truncate_screenshots(
-    messages: list[dict[str, Any]], keep: int
-) -> None:
+def _truncate_screenshots(messages: list[dict[str, Any]], keep: int) -> None:
     """Replace all but the last ``keep`` screenshot blocks with text stubs.
 
     Walks the ``tool_result`` blocks of user messages (the only place this
@@ -648,9 +646,7 @@ def run_agent(
                 )
                 continue
             actions += 1
-            action_log.append(
-                f"{actions}: {dict(block.input) if block.input else {}}"
-            )
+            action_log.append(f"{actions}: {dict(block.input) if block.input else {}}")
             results.append(_execute_action(backend, block))
         messages.append({"role": "user", "content": results})
         _truncate_screenshots(messages, keep_screenshots)

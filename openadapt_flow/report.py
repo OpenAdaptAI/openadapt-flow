@@ -63,6 +63,7 @@ def _warn_if_plaintext_phi(report: RunReport) -> None:
         stacklevel=2,
     )
 
+
 # Ladder order for the rung histogram (cheapest first).
 _RUNG_ORDER = ("template", "template_global", "ocr", "geometry", "grounder")
 
@@ -167,8 +168,7 @@ def render_run_report(run_dir: Path | str) -> Path:
                 )
     else:
         lines.append(
-            "_No identity-applicable (anchored click/type) steps in this "
-            "workflow._"
+            "_No identity-applicable (anchored click/type) steps in this workflow._"
         )
     lines.append("")
 
@@ -176,17 +176,12 @@ def render_run_report(run_dir: Path | str) -> Path:
     lines.append("## Steps")
     lines.append("")
     lines.append(
-        "| # | Step | Intent | Rung | Confidence | Verified | ms "
-        "| Healed | OK |"
+        "| # | Step | Intent | Rung | Confidence | Verified | ms | Healed | OK |"
     )
     lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for i, result in enumerate(report.results, start=1):
         rung = result.resolution.rung if result.resolution else "&mdash;"
-        conf = (
-            f"{result.resolution.confidence:.2f}"
-            if result.resolution
-            else "&mdash;"
-        )
+        conf = f"{result.resolution.confidence:.2f}" if result.resolution else "&mdash;"
         healed = "\U0001fa79" if result.heal else ""
         status = "✅" if result.ok else "❌"
         # Identity (clicks) / typed-input (TYPE) verification outcome —
@@ -195,8 +190,10 @@ def render_run_report(run_dir: Path | str) -> Path:
         verified_parts = []
         if result.identity is not None:
             marker = {
-                "verified": "id ✓", "mismatch": "id ✗",
-                "abstain": "id ⚠", "unreadable": "id ⚠",
+                "verified": "id ✓",
+                "mismatch": "id ✗",
+                "abstain": "id ⚠",
+                "unreadable": "id ⚠",
             }[result.identity.status]
             verified_parts.append(marker)
         if result.input_verified is not None:
@@ -255,9 +252,7 @@ def render_run_report(run_dir: Path | str) -> Path:
                     lines.append("")
                     lines.append("| Healed frame |")
                     lines.append("| --- |")
-                    lines.append(
-                        f"| {_img(heal.screenshot, f'{heal.step_id} heal')} |"
-                    )
+                    lines.append(f"| {_img(heal.screenshot, f'{heal.step_id} heal')} |")
                 lines.append("")
 
     # -- Rung histogram -----------------------------------------------------
@@ -309,9 +304,7 @@ def render_bench_report(bench_json_path: Path | str, out_path: Path | str) -> Pa
     icon = "✅" if successes == n and n > 0 else "❌"
 
     lines: list[str] = []
-    lines.append(
-        f"# {icon} Bench — {_md_phi(str(bench.get('workflow_name', '')))}"
-    )
+    lines.append(f"# {icon} Bench — {_md_phi(str(bench.get('workflow_name', '')))}")
     lines.append("")
     lines.append(f"- **Bundle:** `{bench.get('bundle', '')}`")
     lines.append(f"- **Iterations:** {n}")
@@ -321,8 +314,7 @@ def render_bench_report(bench_json_path: Path | str, out_path: Path | str) -> Pa
     lines.append(f"- **Heals (total):** {bench.get('heal_count', 0)}")
     lines.append(f"- **model_calls (total):** {bench.get('model_calls', 0)}")
     lines.append(
-        f"- **est_model_cost_usd (total):** "
-        f"${bench.get('est_model_cost_usd', 0.0):.4f}"
+        f"- **est_model_cost_usd (total):** ${bench.get('est_model_cost_usd', 0.0):.4f}"
     )
     lines.append("")
 

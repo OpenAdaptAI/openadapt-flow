@@ -198,9 +198,7 @@ def _landmarks_contradict(
     for landmark in anchor.landmarks:
         if landmark.dx_px is None or landmark.dy_px is None:
             continue
-        match = vision.find_text(
-            screen_png, landmark.ocr_text, min_ratio=OCR_MIN_RATIO
-        )
+        match = vision.find_text(screen_png, landmark.ocr_text, min_ratio=OCR_MIN_RATIO)
         if match is None:
             continue
         estimates.append(
@@ -212,8 +210,7 @@ def _landmarks_contradict(
     if not estimates:
         return False
     return all(
-        math.hypot(ex - point[0], ey - point[1])
-        > GLOBAL_LANDMARK_TOLERANCE_PX
+        math.hypot(ex - point[0], ey - point[1]) > GLOBAL_LANDMARK_TOLERANCE_PX
         for ex, ey in estimates
     )
 
@@ -302,9 +299,7 @@ def resolve(
 
     # Rung 3: OCR text match.
     if anchor.ocr_text:
-        match = vision.find_text(
-            screen_png, anchor.ocr_text, min_ratio=OCR_MIN_RATIO
-        )
+        match = vision.find_text(screen_png, anchor.ocr_text, min_ratio=OCR_MIN_RATIO)
         if match is not None:
             resolution = Resolution(
                 rung="ocr",

@@ -85,12 +85,12 @@ from typing import Callable
 
 from openadapt_flow.validation.adversary_corpus import (
     FIRST_NAMES,
+    LABEL_DIFFERENT,
+    LABEL_SAME,
     LAST_NAMES,
     PRIORITIES,
     PROCEDURES,
     CorpusPair,
-    LABEL_DIFFERENT,
-    LABEL_SAME,
     _band,
     _person,
     _with_first,
@@ -180,7 +180,7 @@ def letter_confusion_variants(name: str) -> list[str]:
             pos = body.find(src, start)
             if pos == -1:
                 break
-            variant = name[0] + body[:pos] + dst + body[pos + len(src):]
+            variant = name[0] + body[:pos] + dst + body[pos + len(src) :]
             start = pos + 1
             if variant.lower() == name.lower():
                 continue
@@ -401,7 +401,7 @@ def _apply_digit_noise(text: str, rng: Random, n: int) -> str:
             starts.append(start)
             start = out.find(src, start + 1)
         pos = rng.choice(starts)
-        out = out[:pos] + dst + out[pos + len(src):]
+        out = out[:pos] + dst + out[pos + len(src) :]
         applied += 1
     return out
 
@@ -444,32 +444,50 @@ def _gen_hyphenated_split(rng: Random) -> tuple[str, str]:
 
 # -- corpus assembly -------------------------------------------------------------
 
-_V2_GENERATORS: list[
-    tuple[str, str, int, Callable[[Random], tuple[str, str]]]
-] = [
-    (LABEL_DIFFERENT, "confusion_collision_name_only", N_COLLISION,
-     _gen_collision_name_only),
-    (LABEL_DIFFERENT, "confusion_collision_ids_differ", N_COLLISION,
-     _gen_collision_ids_differ),
-    (LABEL_DIFFERENT, "confusion_collision_ids_same", N_COLLISION,
-     _gen_collision_ids_same),
+_V2_GENERATORS: list[tuple[str, str, int, Callable[[Random], tuple[str, str]]]] = [
+    (
+        LABEL_DIFFERENT,
+        "confusion_collision_name_only",
+        N_COLLISION,
+        _gen_collision_name_only,
+    ),
+    (
+        LABEL_DIFFERENT,
+        "confusion_collision_ids_differ",
+        N_COLLISION,
+        _gen_collision_ids_differ,
+    ),
+    (
+        LABEL_DIFFERENT,
+        "confusion_collision_ids_same",
+        N_COLLISION,
+        _gen_collision_ids_same,
+    ),
     (LABEL_DIFFERENT, "middle_initial", N_DIFFERENT, _gen_middle_initial),
     (LABEL_DIFFERENT, "sex_column", N_DIFFERENT, _gen_sex_column),
     (LABEL_DIFFERENT, "two_char_name", N_DIFFERENT, _gen_two_char_name),
-    (LABEL_DIFFERENT, "superset_appended_name", N_DIFFERENT,
-     _gen_superset_appended_name),
-    (LABEL_DIFFERENT, "superset_merged_row", N_DIFFERENT,
-     _gen_superset_merged_row),
-    (LABEL_DIFFERENT, "superset_title_mention", N_DIFFERENT,
-     _gen_superset_title_mention),
-    (LABEL_DIFFERENT, "absent_name_token", N_DIFFERENT,
-     _gen_absent_name_token),
-    (LABEL_INDISTINGUISHABLE, "confusion_misread_true_row",
-     N_INDISTINGUISHABLE, _gen_confusion_misread_true_row),
-    (LABEL_SAME, "digit_confusion_true_row", N_SAME,
-     _gen_digit_confusion_true_row),
-    (LABEL_SAME, "adjacent_bleed_lowercase", N_SAME,
-     _gen_adjacent_bleed_lowercase),
+    (
+        LABEL_DIFFERENT,
+        "superset_appended_name",
+        N_DIFFERENT,
+        _gen_superset_appended_name,
+    ),
+    (LABEL_DIFFERENT, "superset_merged_row", N_DIFFERENT, _gen_superset_merged_row),
+    (
+        LABEL_DIFFERENT,
+        "superset_title_mention",
+        N_DIFFERENT,
+        _gen_superset_title_mention,
+    ),
+    (LABEL_DIFFERENT, "absent_name_token", N_DIFFERENT, _gen_absent_name_token),
+    (
+        LABEL_INDISTINGUISHABLE,
+        "confusion_misread_true_row",
+        N_INDISTINGUISHABLE,
+        _gen_confusion_misread_true_row,
+    ),
+    (LABEL_SAME, "digit_confusion_true_row", N_SAME, _gen_digit_confusion_true_row),
+    (LABEL_SAME, "adjacent_bleed_lowercase", N_SAME, _gen_adjacent_bleed_lowercase),
     (LABEL_SAME, "hyphenated_split", N_SAME, _gen_hyphenated_split),
 ]
 

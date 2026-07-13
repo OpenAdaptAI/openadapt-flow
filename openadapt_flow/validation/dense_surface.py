@@ -91,13 +91,38 @@ class CollisionPair:
 
 
 _SURNAMES = [
-    "Harrington", "Okafor", "Delgado", "Bianchi", "Halloran", "Montgomery",
-    "Castellano", "Fitzgerald", "Abernathy", "Whitfield", "Lindqvist",
-    "Nakamura", "Petrov", "Ferreira", "Kowalski", "Underwood",
+    "Harrington",
+    "Okafor",
+    "Delgado",
+    "Bianchi",
+    "Halloran",
+    "Montgomery",
+    "Castellano",
+    "Fitzgerald",
+    "Abernathy",
+    "Whitfield",
+    "Lindqvist",
+    "Nakamura",
+    "Petrov",
+    "Ferreira",
+    "Kowalski",
+    "Underwood",
 ]
 _FIRSTS = [
-    "James", "Maria", "Philip", "Karen", "Daniel", "Susan", "Robert",
-    "Angela", "Thomas", "Patricia", "Edward", "Nancy", "Gregory", "Diane",
+    "James",
+    "Maria",
+    "Philip",
+    "Karen",
+    "Daniel",
+    "Susan",
+    "Robert",
+    "Angela",
+    "Thomas",
+    "Patricia",
+    "Edward",
+    "Nancy",
+    "Gregory",
+    "Diane",
 ]
 _STATUSES = ["Active", "Active", "Active", "Inactive", "Pending"]
 
@@ -121,7 +146,7 @@ def _transpose_two(mrn: str, rng: random.Random) -> str:
     if not cands:
         return mrn[:-2] + mrn[-1] + mrn[-2]
     i = rng.choice(cands)
-    return mrn[:i] + mrn[i + 1] + mrn[i] + mrn[i + 2:]
+    return mrn[:i] + mrn[i + 1] + mrn[i] + mrn[i + 2 :]
 
 
 def _dob_off_by_one(dob: str) -> str:
@@ -134,16 +159,36 @@ def _dob_off_by_one(dob: str) -> str:
 # Name-collision pairs: same phonetic/visual name, DIFFERENT real people.
 # Each entry is (class, target_name, sibling_name, note).
 _NAME_COLLISIONS = [
-    ("near_surname", "Sorensen, Philip", "Sorenson, Philip",
-     "surname e/o swap (Sorensen vs Sorenson) — a/o is NOT an OCR class"),
-    ("nguyen_variant", "Nguyen, Anh", "Ngyuen, Anh",
-     "Nguyen transposition (Nguyen vs Ngyuen)"),
-    ("generational_suffix", "Belford, Philip", "Belford, Philip Jr",
-     "generational suffix present on the sibling only"),
-    ("same_surname_diff_first", "Okafor, James", "Okafor, Janet",
-     "shared surname, different first name (James vs Janet)"),
-    ("letterletter_name", "Nesbitt, Neil", "Nesbitt, Nell",
-     "l/i letter-letter confusion (Neil vs Nell) — the suspect class"),
+    (
+        "near_surname",
+        "Sorensen, Philip",
+        "Sorenson, Philip",
+        "surname e/o swap (Sorensen vs Sorenson) — a/o is NOT an OCR class",
+    ),
+    (
+        "nguyen_variant",
+        "Nguyen, Anh",
+        "Ngyuen, Anh",
+        "Nguyen transposition (Nguyen vs Ngyuen)",
+    ),
+    (
+        "generational_suffix",
+        "Belford, Philip",
+        "Belford, Philip Jr",
+        "generational suffix present on the sibling only",
+    ),
+    (
+        "same_surname_diff_first",
+        "Okafor, James",
+        "Okafor, Janet",
+        "shared surname, different first name (James vs Janet)",
+    ),
+    (
+        "letterletter_name",
+        "Nesbitt, Neil",
+        "Nesbitt, Nell",
+        "l/i letter-letter confusion (Neil vs Nell) — the suspect class",
+    ),
 ]
 
 
@@ -171,9 +216,11 @@ def build_collision_pairs(seed: int) -> list[CollisionPair]:
         name = f"{surname}, {first}"
         t = Row(name, dob, _mrn(rng), rng.choice("MF"), rng.choice(_STATUSES))
         s = Row(name, _dob_off_by_one(dob), _mrn(rng), t.sex, t.status)
-        pairs.append(CollisionPair(
-            "same_name_diff_dob", t, s,
-            "identical name, DOB off by one day"))
+        pairs.append(
+            CollisionPair(
+                "same_name_diff_dob", t, s, "identical name, DOB off by one day"
+            )
+        )
 
     # -- MRN transposition: same name+DOB, MRN two adjacent digits swapped --
     for _ in range(1):
@@ -182,9 +229,14 @@ def build_collision_pairs(seed: int) -> list[CollisionPair]:
         mrn = _mrn(rng)
         t = Row(name, dob, mrn, rng.choice("MF"), rng.choice(_STATUSES))
         s = Row(name, dob, _transpose_two(mrn, rng), t.sex, t.status)
-        pairs.append(CollisionPair(
-            "mrn_transposition", t, s,
-            f"identical name+DOB, MRN digits transposed ({mrn} vs {s.mrn})"))
+        pairs.append(
+            CollisionPair(
+                "mrn_transposition",
+                t,
+                s,
+                f"identical name+DOB, MRN digits transposed ({mrn} vs {s.mrn})",
+            )
+        )
 
     # -- identifier letter/digit confusion (l/1, O/0): same name+DOB --
     for label in ("id_confusion_l1", "id_confusion_O0"):
@@ -198,10 +250,15 @@ def build_collision_pairs(seed: int) -> list[CollisionPair]:
             smrn = mrn.replace("0", "O", 1)
         t = Row(name, dob, mrn, rng.choice("MF"), rng.choice(_STATUSES))
         s = Row(name, dob, smrn, t.sex, t.status)
-        pairs.append(CollisionPair(
-            label, t, s,
-            f"identical name+DOB, MRN one OCR-confusable char apart "
-            f"({mrn} vs {smrn})"))
+        pairs.append(
+            CollisionPair(
+                label,
+                t,
+                s,
+                f"identical name+DOB, MRN one OCR-confusable char apart "
+                f"({mrn} vs {smrn})",
+            )
+        )
 
     # -- PURELY NUMERIC MRN confusion (9th reopening): same name+DOB, an
     # all-digit MRN one O/0 or l/1 glyph apart. The earlier corpus was all
@@ -221,10 +278,15 @@ def build_collision_pairs(seed: int) -> list[CollisionPair]:
             smrn = mrn.replace("1", "l")
         t = Row(name, dob, mrn, rng.choice("MF"), rng.choice(_STATUSES))
         s = Row(name, dob, smrn, t.sex, t.status)
-        pairs.append(CollisionPair(
-            label, t, s,
-            f"identical name+DOB, PURELY NUMERIC MRN one OCR-confusable glyph "
-            f"apart ({mrn} vs {smrn}) -- the 9th-reopening numeric hole"))
+        pairs.append(
+            CollisionPair(
+                label,
+                t,
+                s,
+                f"identical name+DOB, PURELY NUMERIC MRN one OCR-confusable glyph "
+                f"apart ({mrn} vs {smrn}) -- the 9th-reopening numeric hole",
+            )
+        )
 
     # -- SPLIT numeric identifier (9th reopening): the target's numeric MRN, and
     # a sibling one glyph apart, but the recorded/observed MRN is stored with an
@@ -235,14 +297,19 @@ def build_collision_pairs(seed: int) -> list[CollisionPair]:
         name = f"{rng.choice(_SURNAMES)}, {rng.choice(_FIRSTS)}"
         head = f"{rng.randint(1, 9)}0{rng.randint(1, 9)}"
         tail = f"0{rng.randint(10, 99)}"
-        mrn = f"{head} {tail}"           # split into two numeric fragments
-        smrn = mrn.replace("0", "O")     # sibling: letter O in both fragments
+        mrn = f"{head} {tail}"  # split into two numeric fragments
+        smrn = mrn.replace("0", "O")  # sibling: letter O in both fragments
         t = Row(name, dob, mrn, rng.choice("MF"), rng.choice(_STATUSES))
         s = Row(name, dob, smrn, t.sex, t.status)
-        pairs.append(CollisionPair(
-            label, t, s,
-            f"identical name+DOB, SPLIT numeric MRN ({mrn!r} vs {smrn!r}) -- a "
-            f"confusable glyph in a numeric FRAGMENT must still abstain"))
+        pairs.append(
+            CollisionPair(
+                label,
+                t,
+                s,
+                f"identical name+DOB, SPLIT numeric MRN ({mrn!r} vs {smrn!r}) -- a "
+                f"confusable glyph in a numeric FRAGMENT must still abstain",
+            )
+        )
 
     return pairs
 
@@ -296,8 +363,15 @@ def build_dense_table(seed: int, n_rows: int = 40) -> DenseTable:
 # HTML rendering
 # ---------------------------------------------------------------------------
 
-def render_table_html(table: DenseTable, *, font_family: str, font_px: int,
-                      row_pad_px: int, top_offset_px: int) -> str:
+
+def render_table_html(
+    table: DenseTable,
+    *,
+    font_family: str,
+    font_px: int,
+    row_pad_px: int,
+    top_offset_px: int,
+) -> str:
     """A realistic dense clinical record-list page. ``top_offset_px`` shifts
     the whole table down a few px so a 're-visit' render rasterizes slightly
     differently (genuine cross-render OCR jitter even at the same scale)."""
@@ -315,7 +389,7 @@ def render_table_html(table: DenseTable, *, font_family: str, font_px: int,
     tbody tr:nth-child(even) {{ background:#f7f9fb; }}
     .mrn {{ font-variant-numeric: tabular-nums; color:#333; }}
     .open {{ padding:2px 10px; border:1px solid #7a8aa0; border-radius:3px;
-             background:#f0f3f7; font-size:{max(11, font_px-2)}px; cursor:pointer; }}
+             background:#f0f3f7; font-size:{max(11, font_px - 2)}px; cursor:pointer; }}
     #spacer {{ height:{top_offset_px}px; }}
     """
     head = (
@@ -378,6 +452,7 @@ REPLAY_CONDITIONS = [
 # Rendering + click-point extraction via Playwright
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class RenderedFrame:
     png: bytes
@@ -393,8 +468,13 @@ class RenderedFrame:
     structured: dict[int, tuple[Optional[str], Optional[str]]]
 
 
-def render_frame(table: DenseTable, cond: RenderCondition, *,
-                 top_offset_px: int, viewport_w: int = 1120) -> RenderedFrame:
+def render_frame(
+    table: DenseTable,
+    cond: RenderCondition,
+    *,
+    top_offset_px: int,
+    viewport_w: int = 1120,
+) -> RenderedFrame:
     """Render the table under ``cond`` and return the PNG plus per-row click
     points (name-cell centre and Open-button centre) in SCREEN pixels.
 
@@ -404,8 +484,11 @@ def render_frame(table: DenseTable, cond: RenderCondition, *,
     from playwright.sync_api import sync_playwright
 
     html = render_table_html(
-        table, font_family=cond.font_family, font_px=cond.font_px,
-        row_pad_px=cond.row_pad_px, top_offset_px=top_offset_px,
+        table,
+        font_family=cond.font_family,
+        font_px=cond.font_px,
+        row_pad_px=cond.row_pad_px,
+        top_offset_px=top_offset_px,
     )
     dsf = cond.device_scale_factor
     with sync_playwright() as pw:
@@ -451,8 +534,10 @@ def render_frame(table: DenseTable, cond: RenderCondition, *,
             )
             y_center = int((row_bb[1] + row_bb[3] / 2) * dsf)
             row_region = (
-                int(row_bb[0] * dsf), int(row_bb[1] * dsf),
-                int(row_bb[2] * dsf), int(row_bb[3] * dsf),
+                int(row_bb[0] * dsf),
+                int(row_bb[1] * dsf),
+                int(row_bb[2] * dsf),
+                int(row_bb[3] * dsf),
             )
             points[i] = (name_point, open_point, y_center, row_region)
 
@@ -469,11 +554,11 @@ def render_frame(table: DenseTable, cond: RenderCondition, *,
             "([px, py]) => {"
             " const el = document.elementFromPoint(px, py);"
             " if (!el) return null;"
-            " const row = el.closest('tr, [role=\"row\"], li,"
-            " [role=\"listitem\"]');"
+            ' const row = el.closest(\'tr, [role="row"], li,'
+            ' [role="listitem"]\');'
             " if (!row) return null;"
-            " const own = el.closest('td, th, [role=\"cell\"],"
-            " [role=\"gridcell\"]') || el;"
+            ' const own = el.closest(\'td, th, [role="cell"],'
+            ' [role="gridcell"]\') || el;'
             " own.setAttribute('data-oaflow-own', '1');"
             " let body = '';"
             " try {"
@@ -506,13 +591,16 @@ def render_frame(table: DenseTable, cond: RenderCondition, *,
                 " return [r.x, r.y, r.width, r.height]; }",
             )
             name_struct = _struct_at(
-                name_bb[0] + name_bb[2] / 2, name_bb[1] + name_bb[3] / 2)
+                name_bb[0] + name_bb[2] / 2, name_bb[1] + name_bb[3] / 2
+            )
             open_struct = _struct_at(
-                open_bb[0] + open_bb[2] / 2, open_bb[1] + open_bb[3] / 2)
+                open_bb[0] + open_bb[2] / 2, open_bb[1] + open_bb[3] / 2
+            )
             structured[i] = (name_struct, open_struct)
         browser.close()
-    return RenderedFrame(png=png, viewport=(vw, vh), points=points,
-                        structured=structured)
+    return RenderedFrame(
+        png=png, viewport=(vw, vh), points=points, structured=structured
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -541,9 +629,9 @@ from openadapt_flow.vision.ocr import ocr  # noqa: E402
 _TODAY = date.today()
 
 
-def record_context(frame: RenderedFrame, click: Point,
-                   frame_lines: Optional[list] = None
-                   ) -> tuple[Optional[str], Region]:
+def record_context(
+    frame: RenderedFrame, click: Point, frame_lines: Optional[list] = None
+) -> tuple[Optional[str], Region]:
     """Record-time band, mirroring ``compiler.compile`` for a click step.
 
     Returns ``(context_text, crop_region)`` — the anchor's stored identity
@@ -570,18 +658,22 @@ def record_context(frame: RenderedFrame, click: Point,
 class ReplayObservation:
     """What replay-time verification saw at a resolved point."""
 
-    check: Any                       # IdentityCheck (production: row-filtered)
-    observed: str                    # band text after the row filter
-    observed_no_rowfilter: str       # band text BEFORE the row filter
-    status_no_rowfilter: str         # verdict WITHOUT the row filter
-    band_lines: list[tuple[str, Region]]   # raw band lines (post exclude/vol)
+    check: Any  # IdentityCheck (production: row-filtered)
+    observed: str  # band text after the row filter
+    observed_no_rowfilter: str  # band text BEFORE the row filter
+    status_no_rowfilter: str  # verdict WITHOUT the row filter
+    band_lines: list[tuple[str, Region]]  # raw band lines (post exclude/vol)
     row_filtered_lines: list[tuple[str, Region]]  # lines kept by lines_near_point
     used_upscale: bool
 
 
-def _band_attempt(png: bytes, region: Optional[Region], point_y: int,
-                  exclude_region: Region, context_text: str
-                  ) -> tuple[Any, str, Any, str, list[tuple[str, Region]], list[str]]:
+def _band_attempt(
+    png: bytes,
+    region: Optional[Region],
+    point_y: int,
+    exclude_region: Region,
+    context_text: str,
+) -> tuple[Any, str, Any, str, list[tuple[str, Region]], list[str]]:
     """One OCR pass of the band, mirroring ``Replayer._verify_identity.attempt``.
 
     Returns the ROW-FILTERED verdict (production) AND the no-row-filter
@@ -598,18 +690,27 @@ def _band_attempt(png: bytes, region: Optional[Region], point_y: int,
     near = identity_mod.lines_near_point(raw, point_y)
     observed = " ".join(line.text.strip() for line in near)
     observed_nf = " ".join(line.text.strip() for line in raw)
-    check = verify_target_identity(context_text, observed, params={},
-                                   param_examples={})
-    check_nf = verify_target_identity(context_text, observed_nf, params={},
-                                      param_examples={})
-    return (check, observed, check_nf, observed_nf,
-            [(ln.text.strip(), ln.region) for ln in raw],
-            [(ln.text.strip(), ln.region) for ln in near])
+    check = verify_target_identity(context_text, observed, params={}, param_examples={})
+    check_nf = verify_target_identity(
+        context_text, observed_nf, params={}, param_examples={}
+    )
+    return (
+        check,
+        observed,
+        check_nf,
+        observed_nf,
+        [(ln.text.strip(), ln.region) for ln in raw],
+        [(ln.text.strip(), ln.region) for ln in near],
+    )
 
 
-def replay_observe(frame: RenderedFrame, resolved_point: Point,
-                   recorded_click: Point, crop_region: Region,
-                   context_text: str) -> ReplayObservation:
+def replay_observe(
+    frame: RenderedFrame,
+    resolved_point: Point,
+    recorded_click: Point,
+    crop_region: Region,
+    context_text: str,
+) -> ReplayObservation:
     """Replay-time observation at ``resolved_point``, mirroring
     ``Replayer._verify_identity`` including the 2x-upscale retry.
 
@@ -625,15 +726,20 @@ def replay_observe(frame: RenderedFrame, resolved_point: Point,
         crop_region[3],
     )
     check, observed, check_nf, obs_nf, band_lines, near_lines = _band_attempt(
-        frame.png, band, resolved_point[1], exclude, context_text,
+        frame.png,
+        band,
+        resolved_point[1],
+        exclude,
+        context_text,
     )
     used_upscale = False
     if check.status != "verified":
         upscaled = identity_mod.upscale_crop(frame.png, band)
         if upscaled is not None:
-            (retry, r_obs, retry_nf, r_obs_nf, r_lines,
-             r_near) = _band_attempt(
-                upscaled, None, (resolved_point[1] - band[1]) * 2,
+            (retry, r_obs, retry_nf, r_obs_nf, r_lines, r_near) = _band_attempt(
+                upscaled,
+                None,
+                (resolved_point[1] - band[1]) * 2,
                 (
                     (exclude[0] - band[0]) * 2,
                     (exclude[1] - band[1]) * 2,
@@ -644,7 +750,8 @@ def replay_observe(frame: RenderedFrame, resolved_point: Point,
             )
             rank = {"unreadable": 0, "abstain": 1, "mismatch": 2, "verified": 3}
             if (rank[retry.status], retry.coverage) > (
-                rank[check.status], check.coverage
+                rank[check.status],
+                check.coverage,
             ):
                 # The upscaled retry runs in a 2x coordinate space; map its
                 # line regions back to the base frame so geometric row
@@ -652,18 +759,31 @@ def replay_observe(frame: RenderedFrame, resolved_point: Point,
                 def _downscale(lines):
                     out = []
                     for txt, (rx, ry, rw, rh) in lines:
-                        out.append((txt, (band[0] + rx // 2, band[1] + ry // 2,
-                                          rw // 2, rh // 2)))
+                        out.append(
+                            (
+                                txt,
+                                (
+                                    band[0] + rx // 2,
+                                    band[1] + ry // 2,
+                                    rw // 2,
+                                    rh // 2,
+                                ),
+                            )
+                        )
                     return out
-                check, observed, check_nf, obs_nf = (
-                    retry, r_obs, retry_nf, r_obs_nf)
+
+                check, observed, check_nf, obs_nf = (retry, r_obs, retry_nf, r_obs_nf)
                 band_lines = _downscale(r_lines)
                 near_lines = _downscale(r_near)
                 used_upscale = True
     return ReplayObservation(
-        check=check, observed=observed, observed_no_rowfilter=obs_nf,
-        status_no_rowfilter=check_nf.status, band_lines=band_lines,
-        row_filtered_lines=near_lines, used_upscale=used_upscale,
+        check=check,
+        observed=observed,
+        observed_no_rowfilter=obs_nf,
+        status_no_rowfilter=check_nf.status,
+        band_lines=band_lines,
+        row_filtered_lines=near_lines,
+        used_upscale=used_upscale,
     )
 
 
@@ -689,9 +809,13 @@ def _surname_readable(surname: str, band_text: str) -> bool:
 CLICK_CONFIGS = ("click_name", "click_action")
 
 
-def run_trials(seeds: list[int], *, n_rows: int,
-               replay_conditions: Optional[list[RenderCondition]] = None,
-               progress: bool = False) -> dict[str, Any]:
+def run_trials(
+    seeds: list[int],
+    *,
+    n_rows: int,
+    replay_conditions: Optional[list[RenderCondition]] = None,
+    progress: bool = False,
+) -> dict[str, Any]:
     """Render the dense surface for each seed, record each target, and measure
     per-click false-abort (resolve on the true row) and false-accept (resolve
     on the adjacent sibling) across click configs and replay conditions.
@@ -724,12 +848,14 @@ def run_trials(seeds: list[int], *, n_rows: int,
                     rep = replays[cond.name]
                     # False abort: resolver lands on the correct row.
                     fa_point = rep.points[ti][pi]
-                    fa = replay_observe(rep, fa_point, rec_click, crop,
-                                        context_text or "")
+                    fa = replay_observe(
+                        rep, fa_point, rec_click, crop, context_text or ""
+                    )
                     # False accept: resolver lands on the sibling row.
                     ac_point = rep.points[si][pi]
-                    ac = replay_observe(rep, ac_point, rec_click, crop,
-                                        context_text or "")
+                    ac = replay_observe(
+                        rep, ac_point, rec_click, crop, context_text or ""
+                    )
                     # --- Structured-text (DOM) identity path ---------------
                     # The headline: identity verified against the DOM row text
                     # (backend.structured_text_at), NOT OCR. Recorded on the
@@ -747,9 +873,11 @@ def run_trials(seeds: list[int], *, n_rows: int,
                     sv_true = verify_structured_identity(struct_rec, struct_true)
                     sv_sib = verify_structured_identity(struct_rec, struct_sib)
                     struct_fa_status = (
-                        sv_true.status if sv_true is not None else "unavailable")
+                        sv_true.status if sv_true is not None else "unavailable"
+                    )
                     struct_acc_status = (
-                        sv_sib.status if sv_sib is not None else "unavailable")
+                        sv_sib.status if sv_sib is not None else "unavailable"
+                    )
                     # Adjacent-row bleed (measured on the false-abort band),
                     # assigned GEOMETRICALLY (nearest row by y-center) so a
                     # neighbour's 'M'/'Active' token — same value as the
@@ -758,61 +886,72 @@ def run_trials(seeds: list[int], *, n_rows: int,
                     # row-filtered LINE is itself geometrically in a
                     # neighbour row.
                     bleed_neighbors = [
-                        t for t, reg in fa.band_lines
+                        t
+                        for t, reg in fa.band_lines
                         if _nearest_row_index(reg, rep.points) != ti
                     ]
                     bleed_survived = any(
                         _nearest_row_index(reg, rep.points) != ti
                         for _t, reg in fa.row_filtered_lines
                     )
-                    trials.append({
-                        "seed": seed,
-                        "collision_class": pair.collision_class,
-                        "note": pair.note,
-                        "click_config": config,
-                        "replay_condition": cond.name,
-                        "target_name": pair.target.name,
-                        "sibling_name": pair.sibling.name,
-                        "target_mrn": pair.target.mrn,
-                        "sibling_mrn": pair.sibling.mrn,
-                        "target_dob": pair.target.dob,
-                        "sibling_dob": pair.sibling.dob,
-                        "armed": armed,
-                        "context_text": context_text,
-                        # False-abort trial
-                        "fa_status": fa.check.status,
-                        "fa_coverage": fa.check.coverage,
-                        "fa_observed": fa.observed,
-                        "fa_used_upscale": fa.used_upscale,
-                        "fa_surname_readable": _surname_readable(
-                            surname, fa.observed_no_rowfilter),
-                        "fa_status_no_rowfilter": fa.status_no_rowfilter,
-                        "is_false_abort": bool(armed and fa.check.status != "verified"),
-                        # False-accept trial
-                        "acc_status": ac.check.status,
-                        "acc_coverage": ac.check.coverage,
-                        "acc_observed": ac.observed,
-                        "acc_expected": context_text,
-                        "acc_used_upscale": ac.used_upscale,
-                        "is_false_accept": bool(armed and ac.check.status == "verified"),
-                        # Structured-text (DOM) identity path -- both verdicts
-                        "structured_armed": struct_armed,
-                        "structured_recorded": struct_rec,
-                        "structured_true_live": struct_true,
-                        "structured_sibling_live": struct_sib,
-                        "structured_fa_status": struct_fa_status,
-                        "structured_acc_status": struct_acc_status,
-                        "is_structured_false_abort": bool(
-                            struct_armed and struct_fa_status != "verified"),
-                        "is_structured_false_accept": bool(
-                            struct_armed and struct_acc_status == "verified"),
-                        # Bleed
-                        "bleed_neighbor_tokens": bleed_neighbors,
-                        "bleed_present": bool(bleed_neighbors),
-                        "bleed_survived_rowfilter": bool(bleed_survived),
-                        "bleed_changed_fa_verdict": bool(
-                            fa.status_no_rowfilter != fa.check.status),
-                    })
+                    trials.append(
+                        {
+                            "seed": seed,
+                            "collision_class": pair.collision_class,
+                            "note": pair.note,
+                            "click_config": config,
+                            "replay_condition": cond.name,
+                            "target_name": pair.target.name,
+                            "sibling_name": pair.sibling.name,
+                            "target_mrn": pair.target.mrn,
+                            "sibling_mrn": pair.sibling.mrn,
+                            "target_dob": pair.target.dob,
+                            "sibling_dob": pair.sibling.dob,
+                            "armed": armed,
+                            "context_text": context_text,
+                            # False-abort trial
+                            "fa_status": fa.check.status,
+                            "fa_coverage": fa.check.coverage,
+                            "fa_observed": fa.observed,
+                            "fa_used_upscale": fa.used_upscale,
+                            "fa_surname_readable": _surname_readable(
+                                surname, fa.observed_no_rowfilter
+                            ),
+                            "fa_status_no_rowfilter": fa.status_no_rowfilter,
+                            "is_false_abort": bool(
+                                armed and fa.check.status != "verified"
+                            ),
+                            # False-accept trial
+                            "acc_status": ac.check.status,
+                            "acc_coverage": ac.check.coverage,
+                            "acc_observed": ac.observed,
+                            "acc_expected": context_text,
+                            "acc_used_upscale": ac.used_upscale,
+                            "is_false_accept": bool(
+                                armed and ac.check.status == "verified"
+                            ),
+                            # Structured-text (DOM) identity path -- both verdicts
+                            "structured_armed": struct_armed,
+                            "structured_recorded": struct_rec,
+                            "structured_true_live": struct_true,
+                            "structured_sibling_live": struct_sib,
+                            "structured_fa_status": struct_fa_status,
+                            "structured_acc_status": struct_acc_status,
+                            "is_structured_false_abort": bool(
+                                struct_armed and struct_fa_status != "verified"
+                            ),
+                            "is_structured_false_accept": bool(
+                                struct_armed and struct_acc_status == "verified"
+                            ),
+                            # Bleed
+                            "bleed_neighbor_tokens": bleed_neighbors,
+                            "bleed_present": bool(bleed_neighbors),
+                            "bleed_survived_rowfilter": bool(bleed_survived),
+                            "bleed_changed_fa_verdict": bool(
+                                fa.status_no_rowfilter != fa.check.status
+                            ),
+                        }
+                    )
                 if progress:
                     print(f"  seed {seed} {pair.collision_class} {config} done")
     return {
@@ -828,8 +967,7 @@ def run_trials(seeds: list[int], *, n_rows: int,
                 "uncovered_run_cap": identity_mod.UNCOVERED_RUN_CAP,
                 "contradicted_chars_cap": identity_mod.CONTRADICTED_CHARS_CAP,
                 "suspect_chars_cap": identity_mod.SUSPECT_CHARS_CAP,
-                "unexplained_name_tokens_cap":
-                    identity_mod.UNEXPLAINED_NAME_TOKENS_CAP,
+                "unexplained_name_tokens_cap": identity_mod.UNEXPLAINED_NAME_TOKENS_CAP,
                 "absent_name_token_cap": identity_mod.ABSENT_NAME_TOKEN_CAP,
             },
         },
@@ -839,6 +977,7 @@ def run_trials(seeds: list[int], *, n_rows: int,
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
+
 
 def _rate(num: int, den: int) -> float:
     return (num / den) if den else 0.0
@@ -853,14 +992,13 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
         fa = sum(t["is_false_abort"] for t in rows)
         acc = sum(t["is_false_accept"] for t in rows)
         unread = sum(
-            t["is_false_abort"] and t["fa_status"] == "unreadable" for t in rows)
-        mism = sum(
-            t["is_false_abort"] and t["fa_status"] == "mismatch" for t in rows)
+            t["is_false_abort"] and t["fa_status"] == "unreadable" for t in rows
+        )
+        mism = sum(t["is_false_abort"] and t["fa_status"] == "mismatch" for t in rows)
         # 8th reopening: a band resting on a glyph-confusable identifier now
         # ABSTAINS (the honest "OCR cannot certify" verdict) rather than
         # mismatch/verify -- its own false-abort bucket.
-        abst = sum(
-            t["is_false_abort"] and t["fa_status"] == "abstain" for t in rows)
+        abst = sum(t["is_false_abort"] and t["fa_status"] == "abstain" for t in rows)
         return {
             "n": len(rows),
             "false_abort": fa,
@@ -909,7 +1047,8 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
         "by_replay_condition": group(lambda t: t["replay_condition"]),
         "by_click_config": group(lambda t: t["click_config"]),
         "by_class_and_config": group(
-            lambda t: f"{t['collision_class']}::{t['click_config']}"),
+            lambda t: f"{t['collision_class']}::{t['click_config']}"
+        ),
         "bleed": {
             "trials": len(trials),
             "bleed_present": len(bleed_present),
@@ -922,8 +1061,7 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
             "headline": struct_rates(struct_armed),
             "by_collision_class": struct_group(lambda t: t["collision_class"]),
             "by_click_config": struct_group(lambda t: t["click_config"]),
-            "by_replay_condition": struct_group(
-                lambda t: t["replay_condition"]),
+            "by_replay_condition": struct_group(lambda t: t["replay_condition"]),
         },
     }
 
@@ -932,7 +1070,9 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
 # Markdown report
 # ---------------------------------------------------------------------------
 
-SYNTHETIC_FALSE_ABORT = 0.4831   # docs/validation/IDENTITY_ROC.md, v1+v2+v3 (9th reopening)
+SYNTHETIC_FALSE_ABORT = (
+    0.4831  # docs/validation/IDENTITY_ROC.md, v1+v2+v3 (9th reopening)
+)
 SYNTHETIC_FALSE_ACCEPT = 0.0
 
 
@@ -943,9 +1083,12 @@ def _pct(x: float) -> str:
 def _struct_rate_table(title: str, groups: dict[str, dict]) -> list[str]:
     """Rate table for the structured-text path (no OCR mismatch/unreadable
     split -- the DOM compare is a binary verify/mismatch)."""
-    out = [f"### {title}", "",
-           "| group | n | false-abort (over-halt) | false-accept |",
-           "| --- | --- | --- | --- |"]
+    out = [
+        f"### {title}",
+        "",
+        "| group | n | false-abort (over-halt) | false-accept |",
+        "| --- | --- | --- | --- |",
+    ]
     for name, r in groups.items():
         out.append(
             f"| `{name}` | {r['n']} | {_pct(r['false_abort_rate'])} "
@@ -957,9 +1100,12 @@ def _struct_rate_table(title: str, groups: dict[str, dict]) -> list[str]:
 
 
 def _rate_table(title: str, groups: dict[str, dict]) -> list[str]:
-    out = [f"### {title}", "",
-           "| group | n | false-abort | (mismatch / unreadable) | false-accept |",
-           "| --- | --- | --- | --- | --- |"]
+    out = [
+        f"### {title}",
+        "",
+        "| group | n | false-abort | (mismatch / unreadable) | false-accept |",
+        "| --- | --- | --- | --- | --- |",
+    ]
     for name, r in groups.items():
         out.append(
             f"| `{name}` | {r['n']} | {_pct(r['false_abort_rate'])} "
@@ -1016,7 +1162,7 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         "row's Open button — the NAME stays in the band).",
         "- **Replay conditions** (the record frame is always crisp; the RISK "
         "variable is the replay surface): "
-        f"{', '.join('`'+c+'`' for c in meta['replay_conditions'])} "
+        f"{', '.join('`' + c + '`' for c in meta['replay_conditions'])} "
         "(`hi_res_arial` = same crisp dsf2 control; `native_arial` = dsf1; "
         "`small_dense` = dsf1, 12px, tighter rows; `serif_drift` = dsf1, "
         "Georgia — an app font change between record and replay).",
@@ -1044,10 +1190,12 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         f"{_pct(SYNTHETIC_FALSE_ACCEPT)}): the real dense-surface false "
         f"abort is **{_pct(fa_rate)}**, i.e. **{higher}** than the synthetic "
         f"{_pct(SYNTHETIC_FALSE_ABORT)} by {_pct(abs(delta))}. "
-        + ("False accept STAYED 0 on real dense OCR."
-           if h["false_accept"] == 0
-           else f"FALSE ACCEPT DID NOT STAY 0 — {h['false_accept']} sibling "
-                "rows verified as their target (details below).")
+        + (
+            "False accept STAYED 0 on real dense OCR."
+            if h["false_accept"] == 0
+            else f"FALSE ACCEPT DID NOT STAY 0 — {h['false_accept']} sibling "
+            "rows verified as their target (details below)."
+        )
         + "",
         "",
     ]
@@ -1086,14 +1234,16 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
             "#27's over-halt.",
             "",
         ]
-        lines += _struct_rate_table("Structured path -- by collision class",
-                                    sp["by_collision_class"])
-        lines += _struct_rate_table("Structured path -- by click config",
-                                    sp["by_click_config"])
+        lines += _struct_rate_table(
+            "Structured path -- by collision class", sp["by_collision_class"]
+        )
+        lines += _struct_rate_table(
+            "Structured path -- by click config", sp["by_click_config"]
+        )
         lines += [
             "The OCR band path (the pixel-substrate FALLBACK) is measured "
             "below. UPDATED for the 8th wrong-patient reopening: #27's "
-            "\"disclosed digit-flanked residual\" -- a same-name/same-DOB "
+            '"disclosed digit-flanked residual" -- a same-name/same-DOB '
             "homonym whose collapsible MRN OCR-collapses to the target's, "
             "name shown -- was a LIVE wrong-patient VERIFY (proved on the "
             "real replayer in PR #31). The OCR tier now ABSTAINS on ANY "
@@ -1106,28 +1256,35 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
             "",
         ]
 
-    lines += _rate_table("By replay condition (OCR resolution)",
-                         agg["by_replay_condition"])
+    lines += _rate_table(
+        "By replay condition (OCR resolution)", agg["by_replay_condition"]
+    )
     lines += _rate_table("By click config", agg["by_click_config"])
     lines += _rate_table("By collision class", agg["by_collision_class"])
-    lines += _rate_table("By collision class x click config",
-                         agg["by_class_and_config"])
+    lines += _rate_table(
+        "By collision class x click config", agg["by_class_and_config"]
+    )
 
     # Worst collision class
-    worst = max(agg["by_collision_class"].items(),
-                key=lambda kv: kv[1]["false_abort_rate"], default=(None, None))
+    worst = max(
+        agg["by_collision_class"].items(),
+        key=lambda kv: kv[1]["false_abort_rate"],
+        default=(None, None),
+    )
     lines += ["## Worst collision class", ""]
     if worst[0] is not None:
         lines.append(
             f"Highest false-abort collision class: **`{worst[0]}`** at "
             f"{_pct(worst[1]['false_abort_rate'])} "
-            f"({worst[1]['false_abort']}/{worst[1]['n']}).")
+            f"({worst[1]['false_abort']}/{worst[1]['n']})."
+        )
     lines.append("")
 
     # Adjacent-row bleed
     b = agg["bleed"]
     lines += [
-        "## Adjacent-row bleed", "",
+        "## Adjacent-row bleed",
+        "",
         f"- Bands whose raw OCR lines included a token from a NEIGHBOUR row "
         f"(above/below the resolved row): {b['bleed_present']}/{b['trials']} "
         f"({_pct(b['bleed_present_rate'])}).",
@@ -1137,14 +1294,16 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         f"(i.e. bleed would have changed the decision without it): "
         f"{b['bleed_changed_fa_verdict']}.",
         "",
-        ("**Finding:** the `lines_near_point` row refinement absorbs "
-         "adjacent-row bleed — neighbour tokens are picked up in the coarse "
-         "64px band but filtered out before the verdict, and removing the "
-         "filter would change decisions in the count above."
-         if b["bleed_survived_rowfilter"] == 0
-         else "**Finding:** neighbour tokens SURVIVED the row filter in "
-              f"{b['bleed_survived_rowfilter']} trials — adjacent-row bleed "
-              "reaches the verdict on this dense surface."),
+        (
+            "**Finding:** the `lines_near_point` row refinement absorbs "
+            "adjacent-row bleed — neighbour tokens are picked up in the coarse "
+            "64px band but filtered out before the verdict, and removing the "
+            "filter would change decisions in the count above."
+            if b["bleed_survived_rowfilter"] == 0
+            else "**Finding:** neighbour tokens SURVIVED the row filter in "
+            f"{b['bleed_survived_rowfilter']} trials — adjacent-row bleed "
+            "reaches the verdict on this dense surface."
+        ),
         "",
     ]
 
@@ -1162,7 +1321,8 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         lines += [
             f"**{len(fads)} FALSE ACCEPTS.** Each is a wrong-patient verify "
             "on a real rendered, OCR'd sibling row. Exact rows and band "
-            "strings:", "",
+            "strings:",
+            "",
             "| class | config | condition | target -> sibling | recorded "
             "band (expected) | observed band at sibling | cov |",
             "| --- | --- | --- | --- | --- | --- | --- |",
@@ -1183,7 +1343,8 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         # same glyph), so the match is a raw match and the confusion-suspect
         # rule never fires.
         collapse = [
-            t for t in fads
+            t
+            for t in fads
             if squash(t["acc_expected"] or "") == squash(t["acc_observed"] or "")
         ]
         if collapse:
@@ -1226,16 +1387,19 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
 
     # Honest verdict
     lines += [
-        "## Honest verdict (does the product clear the flagship bar?)", "",
+        "## Honest verdict (does the product clear the flagship bar?)",
+        "",
         f"On the dense sibling surface the TRUE per-click false abort is "
         f"**{_pct(fa_rate)}**, {'above' if delta > 0 else 'below'} the "
         f"synthetic {_pct(SYNTHETIC_FALSE_ABORT)}. "
-        + ("False accept stayed at 0 — the catastrophic wrong-patient "
-           "direction held on real dense OCR, which is the number that "
-           "gates the regulated-clinic buyer."
-           if h["false_accept"] == 0 else
-           "False accept did NOT stay 0 — the product does NOT clear the "
-           "safety bar on this surface until the classes below are closed."),
+        + (
+            "False accept stayed at 0 — the catastrophic wrong-patient "
+            "direction held on real dense OCR, which is the number that "
+            "gates the regulated-clinic buyer."
+            if h["false_accept"] == 0
+            else "False accept did NOT stay 0 — the product does NOT clear the "
+            "safety bar on this surface until the classes below are closed."
+        ),
         "",
         "The availability cost (false abort) is a per-click hybrid-fallback "
         "escalation (~$0.10) or a human retry; it is the cheap direction and "
@@ -1253,15 +1417,17 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="benchmark/dense_surface",
-                        help="output directory")
-    parser.add_argument("--seeds", type=int, nargs="+",
-                        default=[1, 2, 3, 4, 5])
+    parser.add_argument(
+        "--out", default="benchmark/dense_surface", help="output directory"
+    )
+    parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     parser.add_argument("--n-rows", type=int, default=40)
-    parser.add_argument("--save-frames", action="store_true",
-                        help="save record+replay PNGs for audit")
+    parser.add_argument(
+        "--save-frames", action="store_true", help="save record+replay PNGs for audit"
+    )
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
 
@@ -1272,8 +1438,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     agg = aggregate(result)
 
     (out / "dense_surface.json").write_text(
-        json.dumps({"meta": result["meta"], "aggregate": agg,
-                    "trials": result["trials"]}, indent=2))
+        json.dumps(
+            {"meta": result["meta"], "aggregate": agg, "trials": result["trials"]},
+            indent=2,
+        )
+    )
     (out / "DENSE_SURFACE.md").write_text(render_markdown(result, agg))
 
     if args.save_frames:
@@ -1286,11 +1455,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             (out / f"replay_{cond.name}_seed{seed}.png").write_bytes(rep.png)
 
     h = agg["headline"]
-    print(f"false abort {_pct(h['false_abort_rate'])} "
-          f"({h['false_abort']}/{h['n']}); "
-          f"false accept {_pct(h['false_accept_rate'])} "
-          f"({h['false_accept']}/{h['n']}); "
-          f"wrote {out}/DENSE_SURFACE.md")
+    print(
+        f"false abort {_pct(h['false_abort_rate'])} "
+        f"({h['false_abort']}/{h['n']}); "
+        f"false accept {_pct(h['false_accept_rate'])} "
+        f"({h['false_accept']}/{h['n']}); "
+        f"wrote {out}/DENSE_SURFACE.md"
+    )
     return 0
 
 

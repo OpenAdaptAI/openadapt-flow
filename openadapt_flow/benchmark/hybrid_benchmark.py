@@ -91,10 +91,26 @@ DRIFT_TYPES = ("notice", "reqfield", "modal-once")
 #: (2 of each drift type) = 30% drift. Every arm sees the SAME condition at
 #: the same slot index.
 SCHEDULE: tuple[str, ...] = (
-    "clean", "clean", "notice", "clean", "clean",
-    "reqfield", "clean", "clean", "modal-once", "clean",
-    "clean", "clean", "notice", "clean", "reqfield",
-    "clean", "clean", "modal-once", "clean", "clean",
+    "clean",
+    "clean",
+    "notice",
+    "clean",
+    "clean",
+    "reqfield",
+    "clean",
+    "clean",
+    "modal-once",
+    "clean",
+    "clean",
+    "clean",
+    "notice",
+    "clean",
+    "reqfield",
+    "clean",
+    "clean",
+    "modal-once",
+    "clean",
+    "clean",
 )
 
 #: Slot indices the paid agent-only arms (B and C) run: a proportional
@@ -187,22 +203,16 @@ def _describe_step(step: Any) -> str:
         verb = "double-click" if action == "double_click" else "click"
         anchor = step.anchor
         if anchor is not None and anchor.ocr_text:
-            return f"{verb} the element labeled \"{anchor.ocr_text}\""
+            return f'{verb} the element labeled "{anchor.ocr_text}"'
         if anchor is not None and anchor.landmarks:
             lm = anchor.landmarks[0]
             where = _INVERSE_RELATION.get(lm.relation, "near")
-            return (
-                f"{verb} the unlabeled control {where} the text "
-                f"\"{lm.ocr_text}\""
-            )
+            return f'{verb} the unlabeled control {where} the text "{lm.ocr_text}"'
         return f"{verb} the recorded target ({step.intent})"
     if action == "type":
         if step.param:
-            return (
-                f"type <{step.param}> — substitute this run's "
-                f"{step.param} value"
-            )
-        return f"type \"{step.text or ''}\""
+            return f"type <{step.param}> — substitute this run's {step.param} value"
+        return f'type "{step.text or ""}"'
     if action == "key":
         return f"press the {step.key} key"
     if action == "scroll":
@@ -228,8 +238,7 @@ def serialize_demo(workflow: Workflow) -> str:
         The serialized demonstration, one step per line.
     """
     return "\n".join(
-        f"{i}. {_describe_step(step)}"
-        for i, step in enumerate(workflow.steps, 1)
+        f"{i}. {_describe_step(step)}" for i, step in enumerate(workflow.steps, 1)
     )
 
 
@@ -286,24 +295,21 @@ def handoff_task_prompt(
             f"complete. The replayer halted at step {completed_steps + 1}"
         )
     else:
-        progress = (
-            f"No steps completed. The replayer halted at step 1 of "
-            f"{total_steps}"
-        )
+        progress = f"No steps completed. The replayer halted at step 1 of {total_steps}"
     return (
         "You are looking at MockMed, a demo clinic web app (fake data "
         "only). The overall task is:\n\n"
-        "1. Sign in with username \"nurse.demo\" and password "
-        "\"mockmed-demo-pass\".\n"
+        '1. Sign in with username "nurse.demo" and password '
+        '"mockmed-demo-pass".\n'
         "2. Open the first referral task in the list.\n"
         "3. From the patient's page, create a New Encounter and choose "
-        "the type \"Triage\".\n"
-        f"4. Enter exactly this note in the Note field: \"{note_text}\"\n"
+        'the type "Triage".\n'
+        f'4. Enter exactly this note in the Note field: "{note_text}"\n'
         "5. Save the encounter.\n\n"
         "A deterministic replayer was executing this recorded "
         "demonstration of the task:\n\n"
         f"{demo_text}\n\n"
-        f"{progress} (\"{halted_step_intent}\") because:\n\n"
+        f'{progress} ("{halted_step_intent}") because:\n\n'
         f"{halt_reason}\n\n"
         "The browser is exactly where the replayer left it — do NOT start "
         "over unless the current screen requires it. Continue from the "
@@ -414,20 +420,17 @@ def verify_hybrid_final(
     hay = "".join(lines)
     banner_needle = _squash("Encounter saved")
     banner_found = any(
-        _longest_run(banner_needle, sq) >= len(banner_needle) - 1
-        for sq in lines
+        _longest_run(banner_needle, sq) >= len(banner_needle) - 1 for sq in lines
     )
     needle = _squash(note_text)
     note_found = any(
-        _longest_run("triage", sq) >= 5
-        and _longest_run(needle, sq) >= _NOTE_LINE_RUN
+        _longest_run("triage", sq) >= 5 and _longest_run(needle, sq) >= _NOTE_LINE_RUN
         for sq in lines
     )
     name = _squash(patient_name)
     right_patient = name in hay or _longest_run(name, hay) >= len(name) - 1
     wrong_type_row = any(
-        _longest_run("consult", sq) >= 6
-        and _longest_run(needle, sq) >= _NOTE_LINE_RUN
+        _longest_run("consult", sq) >= 6 and _longest_run(needle, sq) >= _NOTE_LINE_RUN
         for sq in lines
     )
 
@@ -470,10 +473,7 @@ class SpendLedger:
 
     def can_start(self) -> bool:
         """True when a new paid run may start under the ceiling."""
-        return (
-            self.aborted is None
-            and self.spent + self.per_run_cap <= self.total_cap
-        )
+        return self.aborted is None and self.spent + self.per_run_cap <= self.total_cap
 
     def blocked_reason(self) -> str:
         """Why a paid run may not start right now."""
@@ -613,9 +613,7 @@ def _hybrid_run(
                 completed_steps = len(report.results)
                 halt_step = None
                 halt_intent = "(no failing step recorded)"
-                halt_reason = (
-                    "replayer reported failure without a failing step"
-                )
+                halt_reason = "replayer reported failure without a failing step"
             else:
                 failed = report.results[failed_i]
                 completed_steps = failed_i
@@ -663,9 +661,7 @@ def _hybrid_run(
                     row["cache_creation_input_tokens"] = (
                         usage.cache_creation_input_tokens
                     )
-                    row["cache_read_input_tokens"] = (
-                        usage.cache_read_input_tokens
-                    )
+                    row["cache_read_input_tokens"] = usage.cache_read_input_tokens
                     row["cost_usd"] = usage.cost_usd
                     ledger.record(usage.cost_usd, error=row["error"])
                 else:
@@ -681,9 +677,7 @@ def _hybrid_run(
                     row["cache_creation_input_tokens"] = (
                         result.cache_creation_input_tokens
                     )
-                    row["cache_read_input_tokens"] = (
-                        result.cache_read_input_tokens
-                    )
+                    row["cache_read_input_tokens"] = result.cache_read_input_tokens
                     row["cost_usd"] = result.cost_usd
                     row["wall_s"] = compiled_wall_s + result.wall_s
                     ledger.record(result.cost_usd)
@@ -737,30 +731,20 @@ def hybrid_arm_aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
     agg = _arm_aggregate(rows)
     agg["cost_per_success_usd"] = _cost_per_success(rows)
-    agg["wrong_action_count"] = sum(
-        1 for r in rows if r.get("wrong_action")
-    )
-    agg["clean"] = _split_rate(
-        [r for r in rows if r.get("condition") == "clean"]
-    )
-    agg["drift"] = _split_rate(
-        [r for r in rows if r.get("condition") != "clean"]
-    )
+    agg["wrong_action_count"] = sum(1 for r in rows if r.get("wrong_action"))
+    agg["clean"] = _split_rate([r for r in rows if r.get("condition") == "clean"])
+    agg["drift"] = _split_rate([r for r in rows if r.get("condition") != "clean"])
     fallback_rows = [r for r in rows if r.get("fallback_used")]
     if any("fallback_used" in r for r in rows):
         halted = [r for r in rows if r.get("halted")]
         agg["halt_count"] = len(halted)
         agg["fallback_count"] = len(fallback_rows)
-        agg["fallback_rate"] = (
-            len(fallback_rows) / len(rows) if rows else 0.0
-        )
+        agg["fallback_rate"] = len(fallback_rows) / len(rows) if rows else 0.0
         agg["fallback_success_count"] = sum(
             1 for r in fallback_rows if r.get("success")
         )
         agg["fallback_success_rate"] = (
-            agg["fallback_success_count"] / len(fallback_rows)
-            if fallback_rows
-            else 0.0
+            agg["fallback_success_count"] / len(fallback_rows) if fallback_rows else 0.0
         )
         agg["fallback_actions_mean"] = (
             statistics.fmean(r["fallback_actions"] for r in fallback_rows)
@@ -801,9 +785,7 @@ def aggregate_hybrid_results(
     Returns:
         The results dict serialized to ``results.json``.
     """
-    paid_total = sum(
-        r["cost_usd"] for rows in runs.values() for r in rows
-    )
+    paid_total = sum(r["cost_usd"] for rows in runs.values() for r in rows)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "task": (
@@ -819,8 +801,7 @@ def aggregate_hybrid_results(
             "cache_write": agent_baseline.CACHE_WRITE_USD_PER_MTOK,
             "cache_read": agent_baseline.CACHE_READ_USD_PER_MTOK,
             "note": (
-                "list price; an introductory $2/$10 rate applies through "
-                "2026-08-31"
+                "list price; an introductory $2/$10 rate applies through 2026-08-31"
             ),
         },
         "cost_caps_usd": {
@@ -891,9 +872,7 @@ def render_hybrid_chart(results: dict[str, Any], out_png: Path) -> Path:
     labels = [ARM_LABELS[a] for a in arms]
     colors = [ARM_COLORS[a] for a in arms]
 
-    fig, (ax_sr, ax_cost) = plt.subplots(
-        1, 2, figsize=(9.6, 4.2), facecolor=surface
-    )
+    fig, (ax_sr, ax_cost) = plt.subplots(1, 2, figsize=(9.6, 4.2), facecolor=surface)
     fig.suptitle(
         "Four arms, one mixed clean+drift schedule, one success check",
         color=ink,
@@ -927,9 +906,7 @@ def render_hybrid_chart(results: dict[str, Any], out_png: Path) -> Path:
             color=ink,
         )
 
-    costs = [
-        results["arms"][a]["cost_per_success_usd"] for a in arms
-    ]
+    costs = [results["arms"][a]["cost_per_success_usd"] for a in arms]
     plotted = [c if c is not None else 0.0 for c in costs]
     bars = ax_cost.bar(labels, plotted, color=colors, width=0.55, zorder=2)
     style(ax_cost, "Model cost per successful run", "USD")
@@ -990,15 +967,11 @@ def _verdict(results: dict[str, Any]) -> str:
         if a["cost_per_success_usd"] is not None
     ]
     h_cps = h["cost_per_success_usd"]
-    cheaper = h_cps is not None and (
-        not agent_cps or h_cps < min(agent_cps)
-    )
+    cheaper = h_cps is not None and (not agent_cps or h_cps < min(agent_cps))
     sr_at_least = h["success_rate"] >= best_agent_sr
     # "Within noise": one run's worth of success rate at the smaller N.
     min_agent_n = min(a["n"] for a in agent_arms)
-    sr_close = (
-        best_agent_sr - h["success_rate"] <= 1.0 / max(min_agent_n, 1)
-    )
+    sr_close = best_agent_sr - h["success_rate"] <= 1.0 / max(min_agent_n, 1)
     if sr_at_least and cheaper:
         return (
             "**Supported** (on this schedule): the hybrid matched or beat "
@@ -1030,8 +1003,7 @@ def _demo_conditioning_note(b: dict[str, Any], c: dict[str, Any]) -> str:
     """One computed paragraph answering: did the demo help the agent (C vs B)?"""
     if not b.get("n") or not c.get("n"):
         return (
-            "Demo-conditioning (C vs B): not measurable — a paid arm "
-            "recorded no runs."
+            "Demo-conditioning (C vs B): not measurable — a paid arm recorded no runs."
         )
     delta = c["cost_usd_per_run"] - b["cost_usd_per_run"]
     numbers = (
@@ -1062,10 +1034,7 @@ def _demo_conditioning_note(b: dict[str, Any], c: dict[str, Any]) -> str:
             "made the from-scratch agent cheaper without hurting "
             "reliability."
         )
-    return (
-        f"{numbers} Mixed effect on this schedule — see per-run rows for "
-        "detail."
-    )
+    return f"{numbers} Mixed effect on this schedule — see per-run rows for detail."
 
 
 def _subsample_mix_note(results: dict[str, Any]) -> str:
@@ -1212,9 +1181,7 @@ def render_hybrid_markdown(results: dict[str, Any]) -> str:
         for r in results["runs"]["hybrid"]
         if r.get("fallback_used")
     ]
-    mean_fb_cost = (
-        statistics.fmean(fallback_costs) if fallback_costs else 0.0
-    )
+    mean_fb_cost = statistics.fmean(fallback_costs) if fallback_costs else 0.0
     agent_cpr = b["cost_usd_per_run"] if b["n"] else 0.0
     breakeven = (agent_cpr / mean_fb_cost) if mean_fb_cost else None
 
@@ -1241,26 +1208,26 @@ agent-only reliability at a fraction of agent-only cost.
 
 | | compiled (A) | agent (B) | demo agent (C) | **hybrid (D)** |
 |---|---|---|---|---|
-| runs | {a['n']} | {b['n']} | {c['n']} | {d['n']} |
-| success rate | {a['success_rate']:.0%} ({a['success_count']}/{a['n']}) | {b['success_rate']:.0%} ({b['success_count']}/{b['n']}) | {c['success_rate']:.0%} ({c['success_count']}/{c['n']}) | {d['success_rate']:.0%} ({d['success_count']}/{d['n']}) |
-| success on clean slots | {a['clean']['success_count']}/{a['clean']['n']} | {b['clean']['success_count']}/{b['clean']['n']} | {c['clean']['success_count']}/{c['clean']['n']} | {d['clean']['success_count']}/{d['clean']['n']} |
-| success on drifted slots | {a['drift']['success_count']}/{a['drift']['n']} | {b['drift']['success_count']}/{b['drift']['n']} | {c['drift']['success_count']}/{c['drift']['n']} | {d['drift']['success_count']}/{d['drift']['n']} |
-| wall p50 | {a['wall_s_p50']:.1f} s | {b['wall_s_p50']:.1f} s | {c['wall_s_p50']:.1f} s | {d['wall_s_p50']:.1f} s |
-| wall p95 | {a['wall_s_p95']:.1f} s | {b['wall_s_p95']:.1f} s | {c['wall_s_p95']:.1f} s | {d['wall_s_p95']:.1f} s |
-| model calls (total) | 0 | {b['n'] and sum(r['api_calls'] for r in results['runs']['agent'])} | {c['n'] and sum(r['api_calls'] for r in results['runs']['demo_agent'])} | {sum(r['api_calls'] for r in results['runs']['hybrid'])} |
-| mean cost / run | $0 | ${b['cost_usd_per_run']:.4f} | ${c['cost_usd_per_run']:.4f} | ${d['cost_usd_per_run']:.4f} |
-| total cost | $0 | ${b['cost_usd_total']:.2f} | ${c['cost_usd_total']:.2f} | ${d['cost_usd_total']:.2f} |
-| **cost / successful run** | {_fmt_cps(a['cost_per_success_usd'])} | {_fmt_cps(b['cost_per_success_usd'])} | {_fmt_cps(c['cost_per_success_usd'])} | **{_fmt_cps(d['cost_per_success_usd'])}** |
-| wrong-action events | {a['wrong_action_count']} | {b['wrong_action_count']} | {c['wrong_action_count']} | {d['wrong_action_count']} |
+| runs | {a["n"]} | {b["n"]} | {c["n"]} | {d["n"]} |
+| success rate | {a["success_rate"]:.0%} ({a["success_count"]}/{a["n"]}) | {b["success_rate"]:.0%} ({b["success_count"]}/{b["n"]}) | {c["success_rate"]:.0%} ({c["success_count"]}/{c["n"]}) | {d["success_rate"]:.0%} ({d["success_count"]}/{d["n"]}) |
+| success on clean slots | {a["clean"]["success_count"]}/{a["clean"]["n"]} | {b["clean"]["success_count"]}/{b["clean"]["n"]} | {c["clean"]["success_count"]}/{c["clean"]["n"]} | {d["clean"]["success_count"]}/{d["clean"]["n"]} |
+| success on drifted slots | {a["drift"]["success_count"]}/{a["drift"]["n"]} | {b["drift"]["success_count"]}/{b["drift"]["n"]} | {c["drift"]["success_count"]}/{c["drift"]["n"]} | {d["drift"]["success_count"]}/{d["drift"]["n"]} |
+| wall p50 | {a["wall_s_p50"]:.1f} s | {b["wall_s_p50"]:.1f} s | {c["wall_s_p50"]:.1f} s | {d["wall_s_p50"]:.1f} s |
+| wall p95 | {a["wall_s_p95"]:.1f} s | {b["wall_s_p95"]:.1f} s | {c["wall_s_p95"]:.1f} s | {d["wall_s_p95"]:.1f} s |
+| model calls (total) | 0 | {b["n"] and sum(r["api_calls"] for r in results["runs"]["agent"])} | {c["n"] and sum(r["api_calls"] for r in results["runs"]["demo_agent"])} | {sum(r["api_calls"] for r in results["runs"]["hybrid"])} |
+| mean cost / run | $0 | ${b["cost_usd_per_run"]:.4f} | ${c["cost_usd_per_run"]:.4f} | ${d["cost_usd_per_run"]:.4f} |
+| total cost | $0 | ${b["cost_usd_total"]:.2f} | ${c["cost_usd_total"]:.2f} | ${d["cost_usd_total"]:.2f} |
+| **cost / successful run** | {_fmt_cps(a["cost_per_success_usd"])} | {_fmt_cps(b["cost_per_success_usd"])} | {_fmt_cps(c["cost_per_success_usd"])} | **{_fmt_cps(d["cost_per_success_usd"])}** |
+| wrong-action events | {a["wrong_action_count"]} | {b["wrong_action_count"]} | {c["wrong_action_count"]} | {d["wrong_action_count"]} |
 
-Hybrid fallback detail: {d.get('halt_count', 0)} of {d['n']} runs
-safe-halted ({d.get('fallback_rate', 0):.0%} fallback rate);
-{d.get('fallback_count', 0)} fallbacks fired,
-{d.get('fallback_success_count', 0)} succeeded
-({d.get('fallback_success_rate', 0):.0%} of fallbacks); mean
-{d.get('fallback_actions_mean', 0):.1f} fallback actions and
-${d.get('fallback_cost_usd_mean', 0):.4f} fallback cost;
-{d.get('fallback_skipped_count', 0)} fallbacks skipped by the budget
+Hybrid fallback detail: {d.get("halt_count", 0)} of {d["n"]} runs
+safe-halted ({d.get("fallback_rate", 0):.0%} fallback rate);
+{d.get("fallback_count", 0)} fallbacks fired,
+{d.get("fallback_success_count", 0)} succeeded
+({d.get("fallback_success_rate", 0):.0%} of fallbacks); mean
+{d.get("fallback_actions_mean", 0):.1f} fallback actions and
+${d.get("fallback_cost_usd_mean", 0):.4f} fallback cost;
+{d.get("fallback_skipped_count", 0)} fallbacks skipped by the budget
 guardrail.
 
 {_demo_conditioning_note(b, c)}
@@ -1272,22 +1239,22 @@ Compiled (A) — drifted slots are EXPECTED to fail here; that the failures
 are safe-halts (accurate halt report, no state written) is what the
 hybrid builds on:
 
-{failures('compiled')}
+{failures("compiled")}
 Agent (B):
 
-{failures('agent')}
+{failures("agent")}
 Demo agent (C):
 
-{failures('demo_agent')}
+{failures("demo_agent")}
 Hybrid (D):
 
-{failures('hybrid')}
+{failures("hybrid")}
 ## The drift schedule (designed before spending)
 
-{len(sched['conditions'])} slots, {n_drift} drifted
-({sched['drift_fraction']:.0%}), frozen before any paid run. Arms A and D
-run all slots; arms B and C run the {len(sched['agent_slots'])}-slot
-subsample {sched['agent_slots']} (5 clean + one of each drift type).
+{len(sched["conditions"])} slots, {n_drift} drifted
+({sched["drift_fraction"]:.0%}), frozen before any paid run. Arms A and D
+run all slots; arms B and C run the {len(sched["agent_slots"])}-slot
+subsample {sched["agent_slots"]} (5 clean + one of each drift type).
 Every arm sees the identical condition at the same slot index.
 {mix_note}
 | condition | what changes | compiled halt point (probed free, 3/3 deterministic) | intent-level recovery |
@@ -1335,11 +1302,11 @@ ${mean_fb_cost:.4f}), and `a` = the agent-only mean cost per run
   query flags, so conditions are exactly reproducible.
 - **Same interface.** All arms drive the same `PlaywrightBackend`,
   vision-only: screenshots in; pixel clicks, typed text, key presses out.
-- **Agent arms.** Model `{results['model']}` with the
-  `{results['computer_tool']}` computer-use tool (beta header
-  `{results['beta_header']}`), prompt caching on, history bounded to the
-  last 3 screenshots, {results['agent_max_actions']}-action budget (B, C)
-  and {results['fallback_max_actions']}-action budget for D's mid-workflow
+- **Agent arms.** Model `{results["model"]}` with the
+  `{results["computer_tool"]}` computer-use tool (beta header
+  `{results["beta_header"]}`), prompt caching on, history bounded to the
+  last 3 screenshots, {results["agent_max_actions"]}-action budget (B, C)
+  and {results["fallback_max_actions"]}-action budget for D's mid-workflow
   fallback. Arm B's prompt states user intent only. Arm C's prompt = B's
   plus the serialized demonstration (action type + human-readable target
   per step, `<note>` placeholder, NO coordinates). D's fallback prompt =
@@ -1353,19 +1320,19 @@ ${mean_fb_cost:.4f}), and `a` = the agent-only mean cost per run
 - **Distinct note per (arm, slot)** so a pass proves parameter
   substitution against the run's own value.
 - **Cost** from API `usage` token counts at list pricing
-  (${results['pricing_usd_per_mtok']['input']:.2f} /
-  ${results['pricing_usd_per_mtok']['output']:.2f} per MTok in/out;
+  (${results["pricing_usd_per_mtok"]["input"]:.2f} /
+  ${results["pricing_usd_per_mtok"]["output"]:.2f} per MTok in/out;
   cache writes 1.25x, cache reads 0.1x input). An introductory $2/$10
   rate applies through 2026-08-31, so billed cost today is roughly a
   third lower than reported.
 {identity_block}
 - **Hard cost guardrails.** One shared budget across ALL paid runs (B, C,
   and D's fallbacks): preflight probe before any spend; per-run cap
-  ${caps['per_run']:.2f}; total ceiling ${caps['total']:.2f} enforced
+  ${caps["per_run"]:.2f}; total ceiling ${caps["total"]:.2f} enforced
   before every paid run (trips are disclosed, never raised); two
   consecutive auth/billing errors abort paid spending; every finished run
   appends to `rows.jsonl`. Total recorded spend at list price:
-  **${caps['total_spent_list']:.2f}**.
+  **${caps["total_spent_list"]:.2f}**.
 
 ## Caveats — read before quoting these numbers
 
@@ -1393,7 +1360,7 @@ ${mean_fb_cost:.4f}), and `a` = the agent-only mean cost per run
 - **MockMed is our own app**, built simple and high-contrast; both the
   drift hooks and the workflow are synthetic. Treat this as a controlled
   experiment on the ORCHESTRATION policy, not a field result.
-- **Small agent Ns** ({b['n']} per paid arm; {d.get('fallback_count', 0)}
+- **Small agent Ns** ({b["n"]} per paid arm; {d.get("fallback_count", 0)}
   hybrid fallbacks): success rates carry wide error bars; single-run
   differences are within noise.
 - **The 30% drift fraction is an assumption** — see the sensitivity note
@@ -1401,9 +1368,9 @@ ${mean_fb_cost:.4f}), and `a` = the agent-only mean cost per run
 - **The compiled arm needs a demonstration first** (about a minute of
   human demonstration, one-time). The agent arms need only the prompt;
   arm C and D's fallback also consume the demonstration, serialized.
-- **Model version pinned**: `{results['model']}` with
-  `{results['computer_tool']}` on {date}.
-- Single machine ({results['platform']}); local server; no network
+- **Model version pinned**: `{results["model"]}` with
+  `{results["computer_tool"]}` on {date}.
+- Single machine ({results["platform"]}); local server; no network
   variance except the Anthropic API round trips in paid runs.
 
 ## Reproduce
@@ -1413,7 +1380,7 @@ ${mean_fb_cost:.4f}), and `a` = the agent-only mean cost per run
 ```
 
 Requires `ANTHROPIC_API_KEY` (or `~/.anthropic/api_key`). The paid arms
-cost real money (${caps['total_spent_list']:.2f} at list price when this
+cost real money (${caps["total_spent_list"]:.2f} at list price when this
 was generated; billed cost is lower under the intro rate). The compiled
 arm and the drift probes are free.
 """
@@ -1427,9 +1394,7 @@ def write_hybrid_outputs(results: dict[str, Any], out_dir: Path) -> None:
         out_dir: Output directory (created if needed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n"
-    )
+    (out_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     from openadapt_flow.benchmark.chart_fonts import safe_render
 
     safe_render(render_hybrid_chart, results, out_dir / "success_cost.png")
@@ -1494,9 +1459,7 @@ def run_hybrid_benchmark(
             fh.write(json.dumps(row) + "\n")
 
     ledger = SpendLedger(max_cost_per_run_usd, max_total_cost_usd)
-    arm_notes: dict[str, Optional[str]] = {
-        arm: None for arm in ARM_ORDER
-    }
+    arm_notes: dict[str, Optional[str]] = {arm: None for arm in ARM_ORDER}
 
     if preflight is None:
         preflight = lambda: agent_baseline.preflight_check(  # noqa: E731
@@ -1508,14 +1471,11 @@ def run_hybrid_benchmark(
         for arm in ("agent", "demo_agent"):
             arm_notes[arm] = f"skipped: {ledger.aborted}"
         arm_notes["hybrid"] = (
-            f"fallbacks disabled: {ledger.aborted} (compiled portion "
-            "still ran)"
+            f"fallbacks disabled: {ledger.aborted} (compiled portion still ran)"
         )
         log(f"PAID RUNS DISABLED: {ledger.aborted}")
 
-    runs: dict[str, list[dict[str, Any]]] = {
-        arm: [] for arm in ARM_ORDER
-    }
+    runs: dict[str, list[dict[str, Any]]] = {arm: [] for arm in ARM_ORDER}
 
     url, stop = serve(port=0)
     try:
@@ -1526,9 +1486,7 @@ def run_hybrid_benchmark(
                 url, tmp / "recording", note_text=RECORD_NOTE, headed=headed
             )
             bundle = tmp / "bundle"
-            workflow = compile_recording(
-                recording, bundle, name=WORKFLOW_NAME
-            )
+            workflow = compile_recording(recording, bundle, name=WORKFLOW_NAME)
             demo_text = serialize_demo(workflow)
             log(f"Compiled bundle ({len(workflow.steps)} steps): {bundle}")
             log(f"Serialized demo:\n{demo_text}")
@@ -1549,8 +1507,7 @@ def run_hybrid_benchmark(
                 except Exception as exc:  # noqa: BLE001 - a failed run is data
                     row = _error_row("compiled", exc)
                 row.update(
-                    {"i": slot, "slot": slot, "condition": condition,
-                     "note": note}
+                    {"i": slot, "slot": slot, "condition": condition, "note": note}
                 )
                 runs["compiled"].append(row)
                 persist(row)
@@ -1582,8 +1539,7 @@ def run_hybrid_benchmark(
                 except Exception as exc:  # noqa: BLE001 - a failed run is data
                     row = _error_row("hybrid", exc)
                 row.update(
-                    {"i": slot, "slot": slot, "condition": condition,
-                     "note": note}
+                    {"i": slot, "slot": slot, "condition": condition, "note": note}
                 )
                 runs["hybrid"].append(row)
                 persist(row)
@@ -1594,11 +1550,7 @@ def run_hybrid_benchmark(
                     f"fallback={row.get('fallback_used')} "
                     f"${row['cost_usd']:.4f} {row['wall_s']:.1f}s"
                 )
-            skipped = sum(
-                1
-                for r in runs["hybrid"]
-                if r.get("fallback_skipped_reason")
-            )
+            skipped = sum(1 for r in runs["hybrid"] if r.get("fallback_skipped_reason"))
             if skipped and arm_notes["hybrid"] is None:
                 arm_notes["hybrid"] = (
                     f"{skipped} fallback(s) skipped by the budget "
@@ -1613,9 +1565,7 @@ def run_hybrid_benchmark(
                 ),
                 (
                     "demo_agent",
-                    lambda note: demo_conditioned_task_prompt(
-                        note, demo_text
-                    ),
+                    lambda note: demo_conditioned_task_prompt(note, demo_text),
                 ),
             ):
                 for slot in agent_slots:
@@ -1647,8 +1597,7 @@ def run_hybrid_benchmark(
                         row = _error_row(arm, exc)
                     row["arm"] = arm
                     row.update(
-                        {"i": slot, "slot": slot, "condition": condition,
-                         "note": note}
+                        {"i": slot, "slot": slot, "condition": condition, "note": note}
                     )
                     runs[arm].append(row)
                     persist(row)
@@ -1710,9 +1659,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="benchmark/hybrid",
         help="output directory (default: benchmark/hybrid)",
     )
-    parser.add_argument(
-        "--headed", action="store_true", help="run browsers headed"
-    )
+    parser.add_argument("--headed", action="store_true", help="run browsers headed")
     parser.add_argument(
         "--max-total-cost",
         type=float,

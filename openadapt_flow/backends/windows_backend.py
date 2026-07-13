@@ -398,9 +398,7 @@ class WindowsBackend:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``."""
         keys = normalize_chord(key)
         if len(keys) == 1:
-            self._execute(
-                f"import pyautogui; pyautogui.press({keys[0]!r})"
-            )
+            self._execute(f"import pyautogui; pyautogui.press({keys[0]!r})")
         else:
             args = ", ".join(repr(k) for k in keys)
             self._execute(f"import pyautogui; pyautogui.hotkey({args})")

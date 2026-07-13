@@ -63,9 +63,7 @@ def _cmd_demo_record(args: argparse.Namespace) -> int:
 def _cmd_compile(args: argparse.Namespace) -> int:
     from openadapt_flow.compiler import compile_recording
 
-    workflow = compile_recording(
-        Path(args.recording), Path(args.out), name=args.name
-    )
+    workflow = compile_recording(Path(args.recording), Path(args.out), name=args.name)
     print(
         f"Compiled {len(workflow.steps)} steps into {args.out} "
         f"(workflow: {workflow.name!r})"
@@ -150,18 +148,14 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     backend,
                     grounder=grounder,
                     identity_vlm=appliance.identity_vlm if appliance else None,
-                    state_verifier=(
-                        appliance.state_verifier if appliance else None
-                    ),
+                    state_verifier=(appliance.state_verifier if appliance else None),
                 ).run(
                     workflow,
                     params=params,
                     bundle_dir=bundle,
                     run_dir=run_dir,
                     save_healed_to=(
-                        Path(args.save_healed_to)
-                        if args.save_healed_to
-                        else None
+                        Path(args.save_healed_to) if args.save_healed_to else None
                     ),
                 )
             finally:
@@ -215,9 +209,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     finally:
         stop()
 
-    report_md = render_bench_report(
-        run_root / "bench.json", run_root / "BENCH.md"
-    )
+    report_md = render_bench_report(run_root / "bench.json", run_root / "BENCH.md")
     print(
         f"Bench: {result['success_count']}/{result['n']} succeeded "
         f"(p50 {result['total_ms_p50']:.0f} ms) — {report_md}"
@@ -284,20 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="Follow-up in 2 weeks; BP recheck.",
         help="Note text typed during the demo (recorded as a parameter)",
     )
-    p.add_argument(
-        "--param-name", default="note", help="Parameter name for the note"
-    )
-    p.add_argument(
-        "--drift", default=None, help="Comma-separated MockMed drift modes"
-    )
-    p.add_argument(
-        "--headed", action="store_true", help="Run the browser headed"
-    )
+    p.add_argument("--param-name", default="note", help="Parameter name for the note")
+    p.add_argument("--drift", default=None, help="Comma-separated MockMed drift modes")
+    p.add_argument("--headed", action="store_true", help="Run the browser headed")
     p.set_defaults(func=_cmd_demo_record)
 
-    p = sub.add_parser(
-        "compile", help="Compile a recording into a workflow bundle"
-    )
+    p = sub.add_parser("compile", help="Compile a recording into a workflow bundle")
     p.add_argument("recording", help="Recording directory")
     p.add_argument("--out", required=True, help="Output bundle directory")
     p.add_argument("--name", required=True, help="Workflow name")
@@ -314,10 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--url",
         default=None,
-        help=(
-            "URL of the target app (default: serve the bundled MockMed "
-            "demo app)"
-        ),
+        help=("URL of the target app (default: serve the bundled MockMed demo app)"),
     )
     p.add_argument(
         "--drift",
@@ -347,9 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the healed bundle to this directory",
     )
-    p.add_argument(
-        "--headed", action="store_true", help="Run the browser headed"
-    )
+    p.add_argument("--headed", action="store_true", help="Run the browser headed")
     p.set_defaults(func=_cmd_replay)
 
     p = sub.add_parser(
@@ -362,18 +341,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Comma-separated drift modes forwarded to the MockMed URL",
     )
-    p.add_argument(
-        "--run-root", required=True, help="Directory for per-iteration runs"
-    )
+    p.add_argument("--run-root", required=True, help="Directory for per-iteration runs")
     p.add_argument(
         "--param",
         action="append",
         metavar="K=V",
         help="Parameter substitution (repeatable)",
     )
-    p.add_argument(
-        "--headed", action="store_true", help="Run the browser headed"
-    )
+    p.add_argument("--headed", action="store_true", help="Run the browser headed")
     p.set_defaults(func=_cmd_bench)
 
     p = sub.add_parser(
@@ -390,9 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=100,
         help="Compiled-replay iterations",
     )
-    p.add_argument(
-        "--n-agent", type=int, default=20, help="Agent iterations"
-    )
+    p.add_argument("--n-agent", type=int, default=20, help="Agent iterations")
     p.add_argument(
         "--out",
         default="benchmark/",
@@ -403,27 +376,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="Follow-up in 2 weeks; BP recheck.",
         help="Note text both arms enter",
     )
-    p.add_argument(
-        "--headed", action="store_true", help="Run the browsers headed"
-    )
+    p.add_argument("--headed", action="store_true", help="Run the browsers headed")
     p.set_defaults(func=_cmd_benchmark)
 
-    p = sub.add_parser(
-        "emit-skill", help="Emit an Agent Skills folder for a bundle"
-    )
+    p = sub.add_parser("emit-skill", help="Emit an Agent Skills folder for a bundle")
     p.add_argument("bundle", help="Workflow bundle directory")
-    p.add_argument(
-        "--out", required=True, help="Parent directory for the skill folder"
-    )
+    p.add_argument("--out", required=True, help="Parent directory for the skill folder")
     p.set_defaults(func=_cmd_emit_skill)
 
-    p = sub.add_parser(
-        "emit-mcp", help="Emit a standalone MCP server.py for a bundle"
-    )
+    p = sub.add_parser("emit-mcp", help="Emit a standalone MCP server.py for a bundle")
     p.add_argument("bundle", help="Workflow bundle directory")
-    p.add_argument(
-        "--out", required=True, help="Path for the generated server.py"
-    )
+    p.add_argument("--out", required=True, help="Path for the generated server.py")
     p.set_defaults(func=_cmd_emit_mcp)
 
     return parser

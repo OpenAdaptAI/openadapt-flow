@@ -85,9 +85,7 @@ def render_workflow_py(workflow: Workflow) -> str:
                 f"({landmark.relation}, {landmark.distance_px}px)"
             )
         if step.anchor is not None and step.anchor.context_text:
-            lines.append(
-                f"    # identity context: {step.anchor.context_text!r}"
-            )
+            lines.append(f"    # identity context: {step.anchor.context_text!r}")
         lines.append(_step_call(step))
         lines.extend(_expect_comment(step.expect))
         lines.append("")

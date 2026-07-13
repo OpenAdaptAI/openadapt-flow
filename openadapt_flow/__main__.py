@@ -136,6 +136,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         drift_note = f" (drift: {args.drift})" if args.drift else ""
         print(f"No --url given; replaying against bundled MockMed{drift_note}")
 
+    from openadapt_flow._browser_setup import ensure_chromium_installed
+
+    ensure_chromium_installed()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not args.headed)
@@ -222,10 +225,12 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     def backend_factory():
         from playwright.sync_api import sync_playwright
 
+        from openadapt_flow._browser_setup import ensure_chromium_installed
         from openadapt_flow.backends.playwright_backend import (
             PlaywrightBackend,
         )
 
+        ensure_chromium_installed()
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not args.headed)
             page = browser.new_page(viewport=_VIEWPORT)

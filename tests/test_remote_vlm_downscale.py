@@ -50,6 +50,7 @@ class _StubClient:
 # The helper
 # --------------------------------------------------------------------------
 
+
 def test_large_image_is_downscaled_below_the_ceiling():
     png, scale = _downscale_for_model(_png(2048, 3072))
     w, h = _dims(png)
@@ -73,13 +74,14 @@ def test_malformed_bytes_fail_open_to_original():
 # Grounder: sends a downscaled frame, maps the point back to original pixels
 # --------------------------------------------------------------------------
 
+
 def test_grounder_downscales_and_maps_point_back():
     # 2048 wide -> scaled to 1024 (scale 0.5). A model point at (500, 300) in
     # the downscaled frame is (1000, 600) in the original.
     stub = _StubClient(ground={"point": [500, 300], "confidence": 0.9})
     g = RemoteGrounder(stub)
     m = g.locate(_png(2048, 1024), "click Open", None)
-    assert stub.sent_dims == (1024, 512)          # sent downscaled
+    assert stub.sent_dims == (1024, 512)  # sent downscaled
     assert m is not None and m.point == (1000, 600)  # mapped back to original
 
 
@@ -94,6 +96,7 @@ def test_grounder_no_downscale_leaves_point_unchanged():
 # --------------------------------------------------------------------------
 # State-verifier: downscales transparently, verdict unaffected
 # --------------------------------------------------------------------------
+
 
 def test_state_verifier_downscales_before_sending():
     stub = _StubClient(state={"holds": "yes"})

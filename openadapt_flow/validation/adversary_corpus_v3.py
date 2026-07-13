@@ -114,7 +114,7 @@ def _confusable_variant(identifier: str, rng: Random) -> str | None:
                 repl = a
             else:
                 continue
-            variant = identifier[:pos] + repl + identifier[pos + 1:]
+            variant = identifier[:pos] + repl + identifier[pos + 1 :]
             if variant != identifier:
                 return variant
     return None
@@ -152,11 +152,13 @@ def _gen_id_letter_digit_collision(rng: Random) -> tuple[str, str]:
     return template.format(id=identifier), template.format(id=variant)
 
 
-_V3_GENERATORS: list[
-    tuple[str, str, int, Callable[[Random], tuple[str, str]]]
-] = [
-    (LABEL_DIFFERENT, "id_letter_digit_collision", N_COLLISION,
-     _gen_id_letter_digit_collision),
+_V3_GENERATORS: list[tuple[str, str, int, Callable[[Random], tuple[str, str]]]] = [
+    (
+        LABEL_DIFFERENT,
+        "id_letter_digit_collision",
+        N_COLLISION,
+        _gen_id_letter_digit_collision,
+    ),
 ]
 
 

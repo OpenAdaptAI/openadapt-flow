@@ -128,16 +128,28 @@ _KEY_NAME_MAP = {
 # Bare modifier presses carry no workflow meaning on their own (their effect is
 # only visible combined with another key).
 _MODIFIER_KEY_NAMES = {
-    "shift", "shift_l", "shift_r",
-    "ctrl", "ctrl_l", "ctrl_r",
-    "alt", "alt_l", "alt_r", "alt_gr",
-    "cmd", "cmd_l", "cmd_r",
+    "shift",
+    "shift_l",
+    "shift_r",
+    "ctrl",
+    "ctrl_l",
+    "ctrl_r",
+    "alt",
+    "alt_l",
+    "alt_r",
+    "alt_gr",
+    "cmd",
+    "cmd_l",
+    "cmd_r",
     "caps_lock",
 }
 # Modifiers that, combined with another key, form a shortcut/chord with no flow
 # equivalent (shift is excluded — shift+char is just a shifted character).
 _CHORD_MODIFIER_NAMES = _MODIFIER_KEY_NAMES - {
-    "shift", "shift_l", "shift_r", "caps_lock",
+    "shift",
+    "shift_l",
+    "shift_r",
+    "caps_lock",
 }
 
 
@@ -293,9 +305,7 @@ def _convert_key_type(
     name = non_mods[0]
     mapped = _KEY_NAME_MAP.get(name.lower())
     if mapped is None:
-        raise ValueError(
-            f"unmapped key {name!r} at t={ts:.3f}; extend _KEY_NAME_MAP"
-        )
+        raise ValueError(f"unmapped key {name!r} at t={ts:.3f}; extend _KEY_NAME_MAP")
     flush_text()
     events.append({"kind": "key", "key": mapped, "_ts": ts})
 
@@ -382,9 +392,7 @@ def convert_capture(
             t_after = ts + settle_s
             if i + 1 < len(events):
                 t_after = min(t_after, float(events[i + 1]["_ts"]))
-            after_img = session.get_frame_at(
-                t_after, tolerance=FRAME_TOLERANCE_S
-            )
+            after_img = session.get_frame_at(t_after, tolerance=FRAME_TOLERANCE_S)
 
             if event["kind"] in ("click", "double_click") and before_img is None:
                 raise ValueError(

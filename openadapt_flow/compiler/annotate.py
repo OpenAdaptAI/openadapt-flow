@@ -218,9 +218,7 @@ class AnthropicStepAnnotator:
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = "".join(
-            block.text for block in response.content if block.type == "text"
-        )
+        text = "".join(block.text for block in response.content if block.type == "text")
         return _parse_proposals(text, workflow)
 
 
@@ -248,9 +246,7 @@ def _step_evidence(step: Step) -> dict:
     }
 
 
-def _build_prompt(
-    workflow: Workflow, captured_state: Optional[dict]
-) -> str:
+def _build_prompt(workflow: Workflow, captured_state: Optional[dict]) -> str:
     payload = {
         "workflow_name": workflow.name,
         "declared_params": {
@@ -429,9 +425,7 @@ def apply_annotations(
         if sa.label is not None and sa.label.label.strip():
             result.labels[step.id] = sa.label.label
             result.applied.append(
-                AppliedAnnotation(
-                    kind="label", step_id=step.id, detail=sa.label.label
-                )
+                AppliedAnnotation(kind="label", step_id=step.id, detail=sa.label.label)
             )
 
         # RISK -- upgrade applied (arms a safeguard), downgrade flagged.
@@ -445,14 +439,10 @@ def apply_annotations(
     return result
 
 
-def _apply_risk(
-    step: Step, proposal: RiskProposal, result: AnnotationResult
-) -> None:
+def _apply_risk(step: Step, proposal: RiskProposal, result: AnnotationResult) -> None:
     proposed = proposal.proposed_risk
     if proposed not in ("reversible", "irreversible"):
-        logger.warning(
-            "annotator: ignoring invalid risk %r for %s", proposed, step.id
-        )
+        logger.warning("annotator: ignoring invalid risk %r for %s", proposed, step.id)
         return
     current = step.risk
     if proposed == current:
@@ -464,9 +454,7 @@ def _apply_risk(
         if proposal.rationale:
             detail += f" ({proposal.rationale})"
         result.applied.append(
-            AppliedAnnotation(
-                kind="risk_upgrade", step_id=step.id, detail=detail
-            )
+            AppliedAnnotation(kind="risk_upgrade", step_id=step.id, detail=detail)
         )
     else:
         # DOWNGRADE: would DISARM a safeguard. Never apply silently -- flag.
@@ -477,9 +465,7 @@ def _apply_risk(
         if proposal.rationale:
             detail += f" (model: {proposal.rationale})"
         result.flagged.append(
-            FlaggedAnnotation(
-                kind="risk_downgrade", step_id=step.id, detail=detail
-            )
+            FlaggedAnnotation(kind="risk_downgrade", step_id=step.id, detail=detail)
         )
 
 
@@ -496,9 +482,7 @@ def _apply_param(
     # flagged consequential, or naming a value that is not yet a parameter --
     # would change what the workflow does, so it is flagged, never applied.
     if proposal.consequential or existing is None:
-        detail = (
-            f"model proposed making {name!r} a {proposal.type.value} parameter"
-        )
+        detail = f"model proposed making {name!r} a {proposal.type.value} parameter"
         if existing is None:
             detail += " (would make a demonstrated constant vary per run)"
         if proposal.rationale:

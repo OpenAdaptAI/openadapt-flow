@@ -140,8 +140,7 @@ class FhirEffectVerifier:
 
     def _flatten(self, resource: dict[str, Any]) -> dict[str, Any]:
         flat = {
-            key: extract_path(resource, path)
-            for key, path in self.field_paths.items()
+            key: extract_path(resource, path) for key, path in self.field_paths.items()
         }
         # Always carry a stable id for delta / collateral accounting.
         if "id" not in flat or flat["id"] is None:
@@ -172,10 +171,7 @@ class FhirEffectVerifier:
             bundle = resp.json()
         except Exception:  # noqa: BLE001 - unparseable body is unreadable
             return None
-        if (
-            not isinstance(bundle, dict)
-            or bundle.get("resourceType") != "Bundle"
-        ):
+        if not isinstance(bundle, dict) or bundle.get("resourceType") != "Bundle":
             return None
         entries = bundle.get("entry", [])
         if not isinstance(entries, list):
@@ -212,9 +208,7 @@ class FhirEffectVerifier:
         last: Optional[EffectVerdict] = None
         while True:
             current = self._search()
-            last = judge_records(
-                expected, before, current, substrate=self.substrate
-            )
+            last = judge_records(expected, before, current, substrate=self.substrate)
             if last.confirmed or time.monotonic() >= deadline:
                 return last
             time.sleep(self.poll_interval_s)

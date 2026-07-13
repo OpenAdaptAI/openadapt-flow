@@ -101,25 +101,36 @@ def test_label_proposal_attaches_as_advisory_intent():
     assert result.workflow.steps[0].intent == "click 'Open'"
 
 
-@pytest.mark.parametrize(
-    "kind", [ParamKind.DATE, ParamKind.ENUM, ParamKind.ENTITY_REF]
-)
+@pytest.mark.parametrize("kind", [ParamKind.DATE, ParamKind.ENUM, ParamKind.ENTITY_REF])
 def test_param_type_enrichment_applies_richer_than_phase1_string(kind):
     # Phase 1 types every recorded value as a bare string; the model enriches it.
     wf = _wf(
-        Step(id="step_000", intent="type <dob>", action=ActionKind.TYPE,
-             param="dob", text="1980-02-03"),
+        Step(
+            id="step_000",
+            intent="type <dob>",
+            action=ActionKind.TYPE,
+            param="dob",
+            text="1980-02-03",
+        ),
         params={"dob": "1980-02-03"},
-        param_specs={"dob": ParamSpec(name="dob", type=ParamKind.STRING,
-                                      example="1980-02-03")},
+        param_specs={
+            "dob": ParamSpec(name="dob", type=ParamKind.STRING, example="1980-02-03")
+        },
     )
     choices = ["Triage", "Consult"] if kind is ParamKind.ENUM else []
     ann = FakeStepAnnotator(
-        WorkflowProposals(steps=[StepAnnotation(
-            step_id="step_000",
-            params=[ParamProposal(name="dob", type=kind, choices=choices,
-                                  consequential=False)],
-        )])
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="step_000",
+                    params=[
+                        ParamProposal(
+                            name="dob", type=kind, choices=choices, consequential=False
+                        )
+                    ],
+                )
+            ]
+        )
     )
     result = apply_annotations(wf, ann)
     assert result.workflow.param_specs["dob"].type is kind
@@ -135,11 +146,19 @@ def test_risk_upgrade_the_keyword_heuristic_missed_applies():
     # "Commit charges" is write-shaped but not in the keyword list -> heuristic
     # leaves it reversible; the model upgrades it (safe direction) and it sticks.
     wf = _wf(_click("step_000", risk="reversible", ocr="Commit charges"))
-    ann = FakeStepAnnotator(WorkflowProposals(steps=[StepAnnotation(
-        step_id="step_000",
-        risk=RiskProposal(proposed_risk="irreversible",
-                          rationale="commits a billing write"),
-    )]))
+    ann = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="step_000",
+                    risk=RiskProposal(
+                        proposed_risk="irreversible",
+                        rationale="commits a billing write",
+                    ),
+                )
+            ]
+        )
+    )
     result = apply_annotations(wf, ann)
     assert result.workflow.steps[0].risk == "irreversible"
     assert any(a.kind == "risk_upgrade" for a in result.applied)
@@ -151,11 +170,19 @@ def test_risk_upgrade_the_keyword_heuristic_missed_applies():
 
 def test_risk_downgrade_is_flagged_not_applied():
     wf = _wf(_click("step_000", risk="irreversible", ocr="Delete"))
-    ann = FakeStepAnnotator(WorkflowProposals(steps=[StepAnnotation(
-        step_id="step_000",
-        risk=RiskProposal(proposed_risk="reversible",
-                          rationale="thinks it is a soft delete"),
-    )]))
+    ann = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="step_000",
+                    risk=RiskProposal(
+                        proposed_risk="reversible",
+                        rationale="thinks it is a soft delete",
+                    ),
+                )
+            ]
+        )
+    )
     result = apply_annotations(wf, ann)
     # The safeguard is NEVER silently weakened.
     assert result.workflow.steps[0].risk == "irreversible"
@@ -169,13 +196,31 @@ def test_risk_downgrade_is_flagged_not_applied():
 def test_consequential_param_is_flagged_not_applied():
     # Turning a demonstrated constant into a run-varying parameter changes what
     # the workflow DOES -> flagged, never applied.
-    wf = _wf(Step(id="step_000", intent="type 'Acme Corp'",
-                  action=ActionKind.TYPE, text="Acme Corp"))
-    ann = FakeStepAnnotator(WorkflowProposals(steps=[StepAnnotation(
-        step_id="step_000",
-        params=[ParamProposal(name="company", type=ParamKind.ENTITY_REF,
-                              example="Acme Corp", consequential=True)],
-    )]))
+    wf = _wf(
+        Step(
+            id="step_000",
+            intent="type 'Acme Corp'",
+            action=ActionKind.TYPE,
+            text="Acme Corp",
+        )
+    )
+    ann = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="step_000",
+                    params=[
+                        ParamProposal(
+                            name="company",
+                            type=ParamKind.ENTITY_REF,
+                            example="Acme Corp",
+                            consequential=True,
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     result = apply_annotations(wf, ann)
     assert "company" not in result.workflow.param_specs
     assert result.workflow.params == {}
@@ -188,13 +233,21 @@ def test_consequential_param_is_flagged_not_applied():
 def test_param_naming_a_non_parameter_value_is_flagged_not_applied():
     # Even non-`consequential` flagged, a proposal for a value that is NOT an
     # already-declared parameter cannot be a safe type-enrichment -> flag.
-    wf = _wf(Step(id="step_000", intent="type 'x'", action=ActionKind.TYPE,
-                  text="x"))
-    ann = FakeStepAnnotator(WorkflowProposals(steps=[StepAnnotation(
-        step_id="step_000",
-        params=[ParamProposal(name="new_param", type=ParamKind.DATE,
-                              consequential=False)],
-    )]))
+    wf = _wf(Step(id="step_000", intent="type 'x'", action=ActionKind.TYPE, text="x"))
+    ann = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="step_000",
+                    params=[
+                        ParamProposal(
+                            name="new_param", type=ParamKind.DATE, consequential=False
+                        )
+                    ],
+                )
+            ]
+        )
+    )
     result = apply_annotations(wf, ann)
     assert "new_param" not in result.workflow.param_specs
     assert any(f.kind == "consequential_param" for f in result.flagged)
@@ -205,10 +258,16 @@ def test_param_naming_a_non_parameter_value_is_flagged_not_applied():
 
 def test_original_workflow_is_never_mutated():
     wf = _wf(_click("step_000", risk="reversible", ocr="Save"))
-    ann = FakeStepAnnotator(WorkflowProposals(steps=[StepAnnotation(
-        step_id="step_000",
-        risk=RiskProposal(proposed_risk="irreversible"),
-    )]))
+    ann = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="step_000",
+                    risk=RiskProposal(proposed_risk="irreversible"),
+                )
+            ]
+        )
+    )
     apply_annotations(wf, ann)
     # apply_annotations deep-copies; the caller's workflow is untouched.
     assert wf.steps[0].risk == "reversible"
@@ -216,10 +275,16 @@ def test_original_workflow_is_never_mutated():
 
 def test_unknown_step_id_is_ignored():
     wf = _wf(_click("step_000"))
-    ann = FakeStepAnnotator(WorkflowProposals(steps=[StepAnnotation(
-        step_id="does_not_exist",
-        risk=RiskProposal(proposed_risk="irreversible"),
-    )]))
+    ann = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="does_not_exist",
+                    risk=RiskProposal(proposed_risk="irreversible"),
+                )
+            ]
+        )
+    )
     result = apply_annotations(wf, ann)
     assert result.applied == []
     assert result.flagged == []
@@ -276,15 +341,21 @@ def test_annotate_on_attaches_proposals_and_applies_safe_upgrade(tmp_path):
     # A fake that (a) proposes a richer label for step_000, (b) upgrades the
     # nav click to irreversible (safe), (c) proposes a downgrade for the Save
     # click (flagged, not applied).
-    fake = FakeStepAnnotator(WorkflowProposals(steps=[
-        StepAnnotation(step_id="step_000",
-                       label=LabelProposal(label="open the patient chart"),
-                       risk=RiskProposal(proposed_risk="irreversible")),
-        StepAnnotation(step_id="step_001",
-                       risk=RiskProposal(proposed_risk="reversible")),
-    ]))
-    wf = compile_recording(recording, bundle, name="wf", annotate=True,
-                           annotator=fake)
+    fake = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="step_000",
+                    label=LabelProposal(label="open the patient chart"),
+                    risk=RiskProposal(proposed_risk="irreversible"),
+                ),
+                StepAnnotation(
+                    step_id="step_001", risk=RiskProposal(proposed_risk="reversible")
+                ),
+            ]
+        )
+    )
+    wf = compile_recording(recording, bundle, name="wf", annotate=True, annotator=fake)
     # Safe upgrade landed in the saved workflow.
     assert wf.steps[0].risk == "irreversible"
     # The Save click's heuristic risk (irreversible) was NOT weakened.
@@ -322,13 +393,21 @@ def test_anthropic_annotator_parses_json_with_a_stub_client():
     # Exercises the REAL annotator's prompt + parse path with a stub client --
     # NO network, NO key, NO anthropic import. Proves the wiring, not the model.
     wf = _wf(_click("step_000", ocr="Pay invoice"))
-    reply = json.dumps({"steps": [{
-        "step_id": "step_000",
-        "label": {"label": "pay the outstanding invoice"},
-        "risk": {"proposed_risk": "irreversible", "rationale": "money moves"},
-    }]})
-    annotator = AnthropicStepAnnotator(model="stub-model",
-                                       client=_StubClient(reply))
+    reply = json.dumps(
+        {
+            "steps": [
+                {
+                    "step_id": "step_000",
+                    "label": {"label": "pay the outstanding invoice"},
+                    "risk": {
+                        "proposed_risk": "irreversible",
+                        "rationale": "money moves",
+                    },
+                }
+            ]
+        }
+    )
+    annotator = AnthropicStepAnnotator(model="stub-model", client=_StubClient(reply))
     proposals = annotator.annotate(wf)
     sa = proposals.for_step("step_000")
     assert sa is not None and sa.risk.proposed_risk == "irreversible"
@@ -339,8 +418,9 @@ def test_anthropic_annotator_parses_json_with_a_stub_client():
 
 def test_anthropic_annotator_ignores_a_junk_reply_fail_safe():
     wf = _wf(_click("step_000"))
-    annotator = AnthropicStepAnnotator(model="stub",
-                                       client=_StubClient("sorry, no JSON here"))
+    annotator = AnthropicStepAnnotator(
+        model="stub", client=_StubClient("sorry, no JSON here")
+    )
     proposals = annotator.annotate(wf)
     assert proposals.steps == []
 
@@ -354,25 +434,43 @@ def test_runtime_replay_of_annotated_bundle_makes_zero_model_calls(tmp_path):
     (bundle / "templates" / "btn.png").write_bytes(make_png((50, 20)))
     run_dir = tmp_path / "run"
 
-    wf = Workflow(name="wf", steps=[
-        click_step(expect=[Postcondition(
-            kind=PostconditionKind.TEXT_PRESENT, text="Saved", timeout_s=0.2)]),
-        Step(id="s2", intent="type note", action=ActionKind.TYPE, param="note"),
-    ])
+    wf = Workflow(
+        name="wf",
+        steps=[
+            click_step(
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT, text="Saved", timeout_s=0.2
+                    )
+                ]
+            ),
+            Step(id="s2", intent="type note", action=ActionKind.TYPE, param="note"),
+        ],
+    )
     # Annotate the compiled workflow (label-only: behaviour-preserving) and
     # replay the ANNOTATED workflow -- the replayer must never touch a model.
-    fake = FakeStepAnnotator(WorkflowProposals(steps=[StepAnnotation(
-        step_id="s1", label=LabelProposal(label="save the record"))]))
+    fake = FakeStepAnnotator(
+        WorkflowProposals(
+            steps=[
+                StepAnnotation(
+                    step_id="s1", label=LabelProposal(label="save the record")
+                )
+            ]
+        )
+    )
     annotated = apply_annotations(wf, fake).workflow
 
     vision = FakeVision()
     vision.template_results = [
-        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)]
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    ]
     vision.text_results = {
-        "Saved": Match(point=(50, 10), region=(30, 5, 40, 10), confidence=0.9)}
+        "Saved": Match(point=(50, 10), region=(30, 5, 40, 10), confidence=0.9)
+    }
     backend = FakeBackend()
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
-        annotated, params={"note": "hello"}, bundle_dir=bundle, run_dir=run_dir)
+        annotated, params={"note": "hello"}, bundle_dir=bundle, run_dir=run_dir
+    )
 
     assert report.success is True
     assert report.model_calls == 0

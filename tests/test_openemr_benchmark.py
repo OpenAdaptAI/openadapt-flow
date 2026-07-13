@@ -140,9 +140,7 @@ class FakeBackend:
 
 
 def tool_use(action: dict[str, Any], block_id: str = "tu_1") -> Any:
-    return SimpleNamespace(
-        type="tool_use", id=block_id, name="computer", input=action
-    )
+    return SimpleNamespace(type="tool_use", id=block_id, name="computer", input=action)
 
 
 def response(
@@ -172,9 +170,7 @@ class FakeClient:
     def __init__(self, script: list[Any]) -> None:
         self.script = list(script)
         self.calls: list[dict[str, Any]] = []
-        self.beta = SimpleNamespace(
-            messages=SimpleNamespace(create=self._create)
-        )
+        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs: Any) -> Any:
         import copy
@@ -352,9 +348,7 @@ class TestOpenemrOrchestrator:
         compiled = [compiled_row(i) for i in range(20)]
         compiled[19]["replayer_success"] = False
         compiled[19]["first_failure"] = {"step": "step_017", "error": "drift"}
-        results = aggregate_openemr_results(
-            compiled, [agent_row(i) for i in range(10)]
-        )
+        results = aggregate_openemr_results(compiled, [agent_row(i) for i in range(10)])
         results["pace_s"] = 30.0
         md = render_openemr_markdown(results)
         assert "100% (20/20)" in md  # headline unchanged
@@ -364,9 +358,7 @@ class TestOpenemrOrchestrator:
         assert "arm-independent OCR check" in md
         # No self-flag block when nothing self-flagged (a genuinely failed
         # run belongs in the failed-runs list, not here).
-        assert "self-flagged" not in render_openemr_markdown(
-            self.make_results()
-        )
+        assert "self-flagged" not in render_openemr_markdown(self.make_results())
 
     def test_write_outputs(self, tmp_path: Path) -> None:
         import json
@@ -418,9 +410,7 @@ class TestOpenemrOrchestrator:
             assert note in kwargs["task"]
             return agent_row(0)
 
-        monkeypatch.setattr(
-            openemr_benchmark, "_compiled_run", fake_compiled
-        )
+        monkeypatch.setattr(openemr_benchmark, "_compiled_run", fake_compiled)
         monkeypatch.setattr(openemr_benchmark, "_agent_run", fake_agent)
         results = run_openemr_benchmark(
             tmp_path,
@@ -459,9 +449,7 @@ class TestComputeCostCacheBuckets:
         assert math.isclose(agent_baseline.compute_cost(0, 0, 0, mtok), 0.30)
 
     def test_buckets_sum(self) -> None:
-        cost = agent_baseline.compute_cost(
-            500_000, 100_000, 200_000, 2_000_000
-        )
+        cost = agent_baseline.compute_cost(500_000, 100_000, 200_000, 2_000_000)
         expected = 0.5 * 3.00 + 0.1 * 15.00 + 0.2 * 3.75 + 2.0 * 0.30
         assert abs(cost - expected) < 1e-9
 
@@ -555,7 +543,8 @@ class TestCacheControlPlacement:
 
 def _patch_arms(monkeypatch: Any, agent_fn: Any) -> None:
     monkeypatch.setattr(
-        openemr_benchmark, "_compiled_run",
+        openemr_benchmark,
+        "_compiled_run",
         lambda bundle, url, run_dir, note, **kw: compiled_row(0),
     )
     monkeypatch.setattr(openemr_benchmark, "_agent_run", agent_fn)
@@ -565,9 +554,7 @@ class TestTotalCostCap:
     def test_truncates_arm_and_discloses(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
-        _patch_arms(
-            monkeypatch, lambda url, note, **kw: agent_row(0, cost=3.0)
-        )
+        _patch_arms(monkeypatch, lambda url, note, **kw: agent_row(0, cost=3.0))
         results = run_openemr_benchmark(
             tmp_path,
             tmp_path / "bundle",
@@ -623,9 +610,7 @@ class TestRowsJsonl:
                 raise KeyboardInterrupt  # not caught by the per-run except
             return compiled_row(0)
 
-        monkeypatch.setattr(
-            openemr_benchmark, "_compiled_run", crashing_compiled
-        )
+        monkeypatch.setattr(openemr_benchmark, "_compiled_run", crashing_compiled)
         try:
             run_openemr_benchmark(
                 tmp_path,
@@ -682,7 +667,9 @@ class TestBillingErrorAbort:
         _patch_arms(
             monkeypatch,
             lambda url, note, **kw: agent_row(
-                0, success=False, cost=0.01,
+                0,
+                success=False,
+                cost=0.01,
                 error="TimeoutError: navigation timed out",
             ),
         )
@@ -733,9 +720,7 @@ def _fake_launch(monkeypatch: Any, backend: FakeBackend) -> None:
     monkeypatch.setattr(
         PlaywrightBackend,
         "launch",
-        classmethod(
-            lambda cls, url, headless=True: (backend, lambda: None)
-        ),
+        classmethod(lambda cls, url, headless=True: (backend, lambda: None)),
     )
 
 
@@ -749,25 +734,17 @@ class TestCrashedRunSpendAccounting:
         # list), then the third call raises mid-run.
         return CrashingClient(
             [
-                response(
-                    [tool_use(self.CLICK)], "tool_use", input_tokens=200_000
-                ),
-                response(
-                    [tool_use(self.CLICK)], "tool_use", input_tokens=200_000
-                ),
+                response([tool_use(self.CLICK)], "tool_use", input_tokens=200_000),
+                response([tool_use(self.CLICK)], "tool_use", input_tokens=200_000),
             ],
             RuntimeError("Error code: 529 - overloaded_error"),
         )
 
-    def test_mid_run_crash_row_carries_partial_cost(
-        self, monkeypatch: Any
-    ) -> None:
+    def test_mid_run_crash_row_carries_partial_cost(self, monkeypatch: Any) -> None:
         from openadapt_flow.benchmark.run_benchmark import _agent_run
 
         _fake_launch(monkeypatch, FakeBackend())
-        row = _agent_run(
-            "http://x", NOTE, client=self.crashing_client(), task="task"
-        )
+        row = _agent_run("http://x", NOTE, client=self.crashing_client(), task="task")
         assert row["error"] == "RuntimeError: Error code: 529 - overloaded_error"
         assert row["stopped"] == "error"
         assert not row["success"]
@@ -819,9 +796,7 @@ class TestNoteForBounds:
         with pytest.raises(AssertionError, match="pairwise distinctness"):
             note_for("compiled", len(openemr_benchmark._COMPILED_NOTES))
 
-    def test_orchestrator_rejects_n_beyond_notes(
-        self, tmp_path: Path
-    ) -> None:
+    def test_orchestrator_rejects_n_beyond_notes(self, tmp_path: Path) -> None:
         import pytest
 
         with pytest.raises(ValueError, match="n_agent"):
@@ -916,9 +891,7 @@ class TestPreflight:
                         raise RuntimeError("Error code: 529 - overloaded")
                     return SimpleNamespace()
 
-        ok, err = agent_baseline.preflight_check(
-            client=Flaky(), sleep=sleeps.append
-        )
+        ok, err = agent_baseline.preflight_check(client=Flaky(), sleep=sleeps.append)
         assert ok and err is None
         assert calls["n"] == 2
         assert sleeps == [2.0]
@@ -933,9 +906,7 @@ class TestPreflight:
                     calls["n"] += 1
                     raise RuntimeError("Error code: 500 - server error")
 
-        ok, err = agent_baseline.preflight_check(
-            client=Down(), sleep=lambda _s: None
-        )
+        ok, err = agent_baseline.preflight_check(client=Down(), sleep=lambda _s: None)
         assert not ok
         assert "500" in err
         assert calls["n"] == 2  # exactly one retry, then declared dead
@@ -951,9 +922,7 @@ class TestPreflight:
                     calls["n"] += 1
                     raise RuntimeError("Error code: 401 - invalid x-api-key")
 
-        ok, err = agent_baseline.preflight_check(
-            client=Dead(), sleep=lambda _s: None
-        )
+        ok, err = agent_baseline.preflight_check(client=Dead(), sleep=lambda _s: None)
         assert not ok
         assert "401" in err
         assert calls["n"] == 1

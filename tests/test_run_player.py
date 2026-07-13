@@ -21,7 +21,9 @@ def runs():
     # the halt run has not been generated yet, skip rather than invoke a live
     # replay from a unit test.
     if not (generate.HALT_RUN_DIR / "report.json").is_file():
-        pytest.skip("halt run not generated; run `python -m benchmark.run_player.generate --regen-halt`")
+        pytest.skip(
+            "halt run not generated; run `python -m benchmark.run_player.generate --regen-halt`"
+        )
     return [generate.extract_run(spec) for spec in generate.RUN_SPECS]
 
 
@@ -88,7 +90,7 @@ def test_html_carries_real_step_data():
     # Real embedded frames (before + after for 33 steps across 3 runs).
     assert html.count("data:image/png;base64,") == 66
     # Self-contained: no external asset references (CSP-safe).
-    for bad in ("http://", "https://", "src=\"//"):
+    for bad in ("http://", "https://", 'src="//'):
         assert bad not in html
 
 
@@ -97,5 +99,4 @@ def test_player_data_json_has_no_image_bytes():
     data = generate._strip_images(runs)
     blob = json.dumps(data)
     assert "base64" not in blob
-    assert all("before" not in s and "after" not in s
-               for r in data for s in r["steps"])
+    assert all("before" not in s and "after" not in s for r in data for s in r["steps"])

@@ -99,7 +99,9 @@ class MLXBackend:
 
     name = "mlx"
 
-    def __init__(self, model: str = MLX_DEFAULT_MODEL, tmp_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self, model: str = MLX_DEFAULT_MODEL, tmp_dir: Optional[Path] = None
+    ) -> None:
         self.model = model
         self._model = None
         self._processor = None
@@ -224,7 +226,9 @@ class VLLMBackend:
         return data["choices"][0]["message"]["content"]
 
 
-def build_backend(backend: str, model: Optional[str] = None, **kwargs) -> InferenceBackend:
+def build_backend(
+    backend: str, model: Optional[str] = None, **kwargs
+) -> InferenceBackend:
     """Construct (but do not load) a backend by name."""
     backend = (backend or "stub").lower()
     if backend == "stub":

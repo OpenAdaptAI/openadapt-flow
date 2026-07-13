@@ -53,9 +53,7 @@ def _make_bundle(tmp_path: Path, *, params: dict[str, str] | None = None) -> Pat
         ],
     )
     workflow.save(bundle)
-    Image.new("RGB", (8, 8), (120, 120, 120)).save(
-        bundle / "templates" / "step_0.png"
-    )
+    Image.new("RGB", (8, 8), (120, 120, 120)).save(bundle / "templates" / "step_0.png")
     return bundle
 
 
@@ -95,8 +93,7 @@ def test_emit_skill(tmp_path: Path) -> None:
     assert "## What it does" in md
     assert "click 'Sign In'" in md
     invocation_lines = [
-        line for line in md.splitlines()
-        if line.startswith("openadapt-flow replay ")
+        line for line in md.splitlines() if line.startswith("openadapt-flow replay ")
     ]
     assert len(invocation_lines) == 1
     invocation = invocation_lines[0]
@@ -123,8 +120,7 @@ def test_emit_skill_invocation_is_valid_cli(tmp_path: Path) -> None:
     skill_dir = emit_skill(bundle, tmp_path / "skills")
     md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     invocation = next(
-        line for line in md.splitlines()
-        if line.startswith("openadapt-flow replay ")
+        line for line in md.splitlines() if line.startswith("openadapt-flow replay ")
     )
     argv = shlex.split(invocation)[1:]  # drop the program name
     argv = ["http://localhost:1" if a == "<APP_URL>" else a for a in argv]
@@ -208,8 +204,7 @@ def test_cli_help_works_without_sibling_modules() -> None:
         env=_cli_env(),
     )
     assert proc.returncode == 0
-    for cmd in ("demo-record", "compile", "replay", "bench",
-                "emit-skill", "emit-mcp"):
+    for cmd in ("demo-record", "compile", "replay", "bench", "emit-skill", "emit-mcp"):
         assert cmd in proc.stdout
 
 
@@ -233,8 +228,13 @@ def test_cli_emit_skill_end_to_end(tmp_path: Path) -> None:
     bundle = _make_bundle(tmp_path)
     proc = subprocess.run(
         [
-            sys.executable, "-m", "openadapt_flow", "emit-skill",
-            str(bundle), "--out", str(tmp_path / "skills"),
+            sys.executable,
+            "-m",
+            "openadapt_flow",
+            "emit-skill",
+            str(bundle),
+            "--out",
+            str(tmp_path / "skills"),
         ],
         capture_output=True,
         text=True,
@@ -246,8 +246,13 @@ def test_cli_emit_skill_end_to_end(tmp_path: Path) -> None:
 
     proc = subprocess.run(
         [
-            sys.executable, "-m", "openadapt_flow", "emit-mcp",
-            str(bundle), "--out", str(tmp_path / "server.py"),
+            sys.executable,
+            "-m",
+            "openadapt_flow",
+            "emit-mcp",
+            str(bundle),
+            "--out",
+            str(tmp_path / "server.py"),
         ],
         capture_output=True,
         text=True,

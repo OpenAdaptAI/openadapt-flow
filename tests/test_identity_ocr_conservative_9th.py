@@ -55,15 +55,19 @@ _ROW_K = 2  # the patient row under test (two filler rows precede it)
 
 
 def _filler(i: int) -> Row:
-    return Row(f"Filler{i}, Pat", "1971-02-0%d" % (i % 9 + 1),
-               f"ZZ{1000 + i}", "M", "Active")
+    return Row(
+        f"Filler{i}, Pat", "1971-02-0%d" % (i % 9 + 1), f"ZZ{1000 + i}", "M", "Active"
+    )
 
 
-def _render(mrn: str, cond: RenderCondition, *, name: str = "Smith, John",
-            dob: str = "01/15/1980"):
-    rows = [_filler(0), _filler(1),
-            Row(name, dob, mrn, "M", "Active"),
-            _filler(3)]
+def _render(
+    mrn: str,
+    cond: RenderCondition,
+    *,
+    name: str = "Smith, John",
+    dob: str = "01/15/1980",
+):
+    rows = [_filler(0), _filler(1), Row(name, dob, mrn, "M", "Active"), _filler(3)]
     table = DenseTable(rows=rows, pairs=[], n_rows=len(rows))
     return render_frame(table, cond, top_offset_px=0)
 
@@ -81,7 +85,8 @@ def _processed_context(frame, k: int) -> str:
     band = I.band_region((open_pt[0], open_pt[1]), 24, frame.viewport)
     exclude = (open_pt[0] - 30, open_pt[1] - 12, 60, 24)
     lines = [
-        ln for ln in vision.ocr(frame.png, region=band)
+        ln
+        for ln in vision.ocr(frame.png, region=band)
         if ln.text.strip()
         and not I.regions_intersect(ln.region, exclude)
         and not I.is_volatile_line(ln.text, reference_date=date.today())
@@ -102,9 +107,15 @@ class _PixelOnlyBackend:
         return self._live_png
 
 
-def _verdict(rec_mrn: str, live_mrn: str, cond: RenderCondition, *,
-             rec_name: str = "Smith, John", live_name: str = "Smith, John",
-             dob: str = "01/15/1980"):
+def _verdict(
+    rec_mrn: str,
+    live_mrn: str,
+    cond: RenderCondition,
+    *,
+    rec_name: str = "Smith, John",
+    live_name: str = "Smith, John",
+    dob: str = "01/15/1980",
+):
     """Drive the REAL Replayer._verify_identity for a recorded target row vs a
     live (target or sibling) row rendered under ``cond``."""
     rec = _render(rec_mrn, cond, name=rec_name, dob=dob)
@@ -123,11 +134,20 @@ def _verdict(rec_mrn: str, live_mrn: str, cond: RenderCondition, *,
         context_text=context_text,
         identifier_crop=None,  # pixel-only: no crop -> pixel & vlm tiers abstain
     )
-    step = Step(id="open_patient", intent="open patient chart",
-                action="click", anchor=anchor, risk="irreversible")
+    step = Step(
+        id="open_patient",
+        intent="open patient chart",
+        action="click",
+        anchor=anchor,
+        risk="irreversible",
+    )
     wf = Workflow(name="repro_9th", params={}, steps=[step])
-    res = Resolution(rung="ocr", point=(live_open_pt[0], live_open_pt[1]),
-                     confidence=0.9, elapsed_ms=1.0)
+    res = Resolution(
+        rung="ocr",
+        point=(live_open_pt[0], live_open_pt[1]),
+        confidence=0.9,
+        elapsed_ms=1.0,
+    )
     replayer = Replayer(_PixelOnlyBackend(rec.viewport, live.png), vision=vision)
     check = replayer._verify_identity(step, res, live.png, {}, wf, bundle_dir=None)
     return rec_band, live_band, context_text, check
@@ -160,7 +180,7 @@ def test_numeric_mrn_homonym_never_verifies_real_stack(rec_mrn, sib_mrn, font, p
     _, _, context_text, check = _verdict(rec_mrn, sib_mrn, cond)
     # the discriminative name is really in the recorded band (name-carry path)
     assert "smith" in I.squash(context_text)
-    assert check.status != "verified"          # the safety invariant
+    assert check.status != "verified"  # the safety invariant
 
 
 def test_numeric_100512_collapses_and_abstains_arial():
@@ -169,8 +189,8 @@ def test_numeric_100512_collapses_and_abstains_arial():
     the OCR tier ABSTAINS (the honest 'OCR cannot certify' verdict)."""
     cond = RenderCondition("arial15", "Arial", 15, 2, 6)
     rec_band, live_band, context_text, check = _verdict("100512", "1OO512", cond)
-    assert I.squash(rec_band) == I.squash(live_band)   # byte-identical OCR
-    assert "100512" in I.squash(rec_band)              # letter-O read as digit 0
+    assert I.squash(rec_band) == I.squash(live_band)  # byte-identical OCR
+    assert "100512" in I.squash(rec_band)  # letter-O read as digit 0
     assert "smith" in I.squash(context_text)
     assert check.status == "abstain"
     assert check.mode == "context"
@@ -203,6 +223,7 @@ def test_lowercase_mixed_case_numeric_homonym_never_verifies():
 
 # --- Clean targets STILL VERIFY (no catastrophic over-halt) ------------------
 
+
 def test_clean_nonconfusable_mrn_still_verifies():
     """A clean name+DOB with an identifier containing NONE of {0,1,O,l,I}
     (MRN RC79284) must still VERIFY on the correct row — the conservative rule
@@ -217,8 +238,7 @@ def test_different_name_sibling_mismatches():
     """A different-NAME sibling (even sharing DOB and a clean MRN) is an
     AFFIRMATIVE mismatch, not an abstain — the name budgets still fire."""
     cond = RenderCondition("arial15", "Arial", 15, 2, 6)
-    _, _, _, check = _verdict("RC79284", "RC79284", cond,
-                              live_name="Jones, John")
+    _, _, _, check = _verdict("RC79284", "RC79284", cond, live_name="Jones, John")
     assert check.status == "mismatch"
 
 
@@ -228,6 +248,7 @@ def test_different_name_sibling_mismatches():
 # — the same functions the replayer OCR tier calls), with the recorded
 # identifier stored as fragments (a record-time OCR split) and the live band
 # reading it whole (or vice-versa).
+
 
 class TestSplitIdentifierAbstains:
     def test_numeric_split_recorded_fragments_abstains(self):
@@ -253,11 +274,12 @@ class TestSplitIdentifierAbstains:
         # a name fragment adjacent to the numeric MRN fragment must NOT be
         # mistaken for the identifier; only the '0061'-style fragment flags.
         assert I._is_glyph_vulnerable_identifier("0061") is True
-        assert I._is_glyph_vulnerable_identifier("ac5") is False   # 5 not conf.
+        assert I._is_glyph_vulnerable_identifier("ac5") is False  # 5 not conf.
         assert I._is_glyph_vulnerable_identifier("evelyn") is False
 
 
 # --- Predicate-level pins (numeric / split fragment / lowercase / clean) ------
+
 
 class TestGlyphVulnerablePredicate:
     def test_purely_numeric_with_confusable_is_flagged(self):
@@ -277,8 +299,9 @@ class TestGlyphVulnerablePredicate:
         # a name (pure alpha, even bearing o/l/i) and a separator-bearing date
         # are NOT identifier-shaped.
         for tok in ("smith", "john", "oliver", "01/15/1980", "1985-03-12"):
-            assert I._is_identifier_shaped(tok) in (False,) or not \
-                I._is_glyph_vulnerable_identifier(tok), tok
+            assert I._is_identifier_shaped(tok) in (
+                False,
+            ) or not I._is_glyph_vulnerable_identifier(tok), tok
         assert I._is_glyph_vulnerable_identifier("smith") is False
         assert I._is_glyph_vulnerable_identifier("01/15/1980") is False
 

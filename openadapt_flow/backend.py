@@ -44,6 +44,7 @@ class SystemOfRecordBackend(Protocol):
         """
         ...
 
+
 @runtime_checkable
 class StructuralBackend(Protocol):
     """Optional structural observations a backend MAY expose.
@@ -166,9 +167,7 @@ class StructuralActionBackend(Protocol):
     that point (never raises) -- resolution then uses the visual ladder.
     """
 
-    def structural_locator_at(
-        self, x: int, y: int
-    ) -> Optional["StructuralLocator"]:
+    def structural_locator_at(self, x: int, y: int) -> Optional["StructuralLocator"]:
         """Return a stable structural locator for the element at pixel (x, y).
 
         The coordinate space matches :meth:`Backend.click`. Returns None when

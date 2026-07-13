@@ -92,9 +92,7 @@ _WRITE_STEMS: tuple[str, ...] = (
 # One alternation, word-boundary anchored. `\b` around a leading/trailing
 # non-word char (e.g. "+add") still matches because the boundary sits between
 # the "+" and "a".
-_WRITE_RE = re.compile(
-    r"\b(?:" + "|".join(_WRITE_STEMS) + r")\b", re.IGNORECASE
-)
+_WRITE_RE = re.compile(r"\b(?:" + "|".join(_WRITE_STEMS) + r")\b", re.IGNORECASE)
 
 
 def is_write_shaped(text: str) -> bool:

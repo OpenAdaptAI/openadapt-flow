@@ -263,10 +263,30 @@ ID_CARRY_NAME_MIN = 4
 # the squashed token (see :func:`_is_discriminative_name`).
 _GENERIC_IDENTITY_WORDS = frozenset(
     (
-        "active", "inactive", "pending", "open", "closed", "male", "female",
-        "unknown", "discharged", "admitted", "scheduled", "cancelled",
-        "canceled", "completed", "review", "results", "records", "patient",
-        "status", "search", "demo", "chart", "charts", "appointment",
+        "active",
+        "inactive",
+        "pending",
+        "open",
+        "closed",
+        "male",
+        "female",
+        "unknown",
+        "discharged",
+        "admitted",
+        "scheduled",
+        "cancelled",
+        "canceled",
+        "completed",
+        "review",
+        "results",
+        "records",
+        "patient",
+        "status",
+        "search",
+        "demo",
+        "chart",
+        "charts",
+        "appointment",
     )
 )
 
@@ -309,9 +329,7 @@ GENERATIONAL_SUFFIXES = frozenset({"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"})
 # shapes first (rn->m, cl->d, vv->w), then per-char class representatives.
 _CONFUSION_GROUPS = ("l1i|!", "o0", "s5", "z2", "b8", "g9")
 _CONFUSION_MULTI = (("rn", "m"), ("cl", "d"), ("vv", "w"))
-_CONFUSION_CANON = {
-    ch: group[0] for group in _CONFUSION_GROUPS for ch in group
-}
+_CONFUSION_CANON = {ch: group[0] for group in _CONFUSION_GROUPS for ch in group}
 
 # Param mode: required contiguous run for the run's parameter value, scaled
 # for short values (a full 16-char run cannot exist inside a 5-char name).
@@ -339,9 +357,7 @@ def squash(text: str) -> str:
     return "".join(text.lower().split())
 
 
-def band_region(
-    point: Point, band_height: int, viewport: tuple[int, int]
-) -> Region:
+def band_region(point: Point, band_height: int, viewport: tuple[int, int]) -> Region:
     """Full-width horizontal band centered on ``point``'s row.
 
     Args:
@@ -506,9 +522,7 @@ def coverage(needle: str, hay: str) -> float:
         return 0.0
     if needle in hay:
         return 1.0
-    matched = sum(
-        b.size for b in _matching_blocks(needle, hay) if b.size >= MIN_BLOCK
-    )
+    matched = sum(b.size for b in _matching_blocks(needle, hay) if b.size >= MIN_BLOCK)
     return matched / len(needle)
 
 
@@ -582,8 +596,10 @@ def _is_date_like(token: str) -> bool:
     a, b, c = (int(g) for g in m.groups())
 
     def _plausible(year: int, month: int, day: int) -> bool:
-        return 1 <= month <= 12 and 1 <= day <= 31 and (
-            1900 <= year <= 2100 or 0 <= year <= 99
+        return (
+            1 <= month <= 12
+            and 1 <= day <= 31
+            and (1900 <= year <= 2100 or 0 <= year <= 99)
         )
 
     # Accept if it reads as a real date under any common segment order
@@ -716,16 +732,12 @@ def _name_shaped(raw_token: str, squashed_token: str) -> bool:
     )
 
 
-_GEN_SUFFIX_CANON = frozenset(
-    ocr_canonical(s) for s in GENERATIONAL_SUFFIXES
-)
+_GEN_SUFFIX_CANON = frozenset(ocr_canonical(s) for s in GENERATIONAL_SUFFIXES)
 
 # OCR-canonical forms of the generic record-list column words (see
 # _GENERIC_IDENTITY_WORDS): compared against the canonical form of a band
 # token so 'Act1ve'/'0pen'-style OCR noise still folds to the stop word.
-_GENERIC_IDENTITY_CANON = frozenset(
-    ocr_canonical(w) for w in _GENERIC_IDENTITY_WORDS
-)
+_GENERIC_IDENTITY_CANON = frozenset(ocr_canonical(w) for w in _GENERIC_IDENTITY_WORDS)
 
 
 def _is_generational_suffix(token: str) -> bool:
@@ -954,8 +966,7 @@ def _contradicted(
         for j, o in enumerate(obs)
     )
     obs_suffix_unexplained = any(
-        not explained[j] and _is_generational_suffix(o)
-        for j, o in enumerate(obs)
+        not explained[j] and _is_generational_suffix(o) for j, o in enumerate(obs)
     )
     for i, token in enumerate(exp):
         if matched[i]:
@@ -982,15 +993,11 @@ def _contradicted(
             if (
                 len(shorter) >= MIN_BLOCK
                 and shorter in longer
-                and any(
-                    ch.isalpha() for ch in longer.replace(shorter, "", 1)
-                )
+                and any(ch.isalpha() for ch in longer.replace(shorter, "", 1))
             ):
                 contradicted[i] = True
                 break
-            ratio = difflib.SequenceMatcher(
-                None, ec, oc, autojunk=False
-            ).ratio()
+            ratio = difflib.SequenceMatcher(None, ec, oc, autojunk=False).ratio()
             if ratio >= contradiction_sim:
                 contradicted[i] = True
                 break
@@ -1113,8 +1120,7 @@ def band_match(
     if current_run:
         uncovered_runs.append(current_run)
     if contradicted_chars == 0 and any(
-        not explained[j] and _is_generational_suffix(o)
-        for j, o in enumerate(obs)
+        not explained[j] and _is_generational_suffix(o) for j, o in enumerate(obs)
     ):
         # Fully-matched band plus an unexplained observed Jr/Sr/II: the
         # generation differs even though every recorded token matched.
@@ -1130,23 +1136,14 @@ def band_match(
     # Absence alone (OCR dropped a short token) stays tolerated: a
     # replacement needs a missing copy AND a same-length foreign copy.
     exp_short = Counter(
-        exp_c[i]
-        for i, t in enumerate(exp)
-        if len(t) < MIN_BLOCK and t.isalpha()
+        exp_c[i] for i, t in enumerate(exp) if len(t) < MIN_BLOCK and t.isalpha()
     )
     obs_short = Counter(
-        obs_c_all[j]
-        for j, o in enumerate(obs)
-        if len(o) < MIN_BLOCK and o.isalpha()
+        obs_c_all[j] for j, o in enumerate(obs) if len(o) < MIN_BLOCK and o.isalpha()
     )
     missing_short = exp_short - obs_short
     excess_short = obs_short - exp_short
-    replaced = [
-        a
-        for a in missing_short
-        for b in excess_short
-        if len(a) == len(b)
-    ]
+    replaced = [a for a in missing_short for b in excess_short if len(a) == len(b)]
     if replaced:
         contradicted_chars += max(len(a) for a in replaced)
     # Observed-side superset (Blocker 3): name-shaped observed tokens the
@@ -1183,9 +1180,7 @@ def _token_belongs_to(token: str, value_squashed: str) -> bool:
         return False
     if token in value_squashed or value_squashed in token:
         return True
-    ratio = difflib.SequenceMatcher(
-        None, token, value_squashed, autojunk=False
-    ).ratio()
+    ratio = difflib.SequenceMatcher(None, token, value_squashed, autojunk=False).ratio()
     # Same-token-with-OCR-jitter question ("Phi1" ~ "Phil"): the token
     # similarity tier's threshold applies.
     return ratio >= TOKEN_SIM_RATIO
@@ -1214,9 +1209,7 @@ def substitute_param(band_text: str, example: str, value: str) -> str:
     return " ".join(kept + [value])
 
 
-def embedded_params(
-    context_text: str, param_examples: dict[str, str]
-) -> list[str]:
+def embedded_params(context_text: str, param_examples: dict[str, str]) -> list[str]:
     """Names of parameters whose demonstrated value is embedded in the band.
 
     A parameter's example value counts as embedded when its squashed form is
@@ -1345,9 +1338,7 @@ def verify_target_identity(
         # discarded: a band that merely contains the run's value somewhere
         # (any row mentioning "Susan") must not verify.
         if not hay:
-            return IdentityCheck(
-                status="unreadable", mode="param", expected=expected
-            )
+            return IdentityCheck(status="unreadable", mode="param", expected=expected)
         substituted = context_text
         for name in in_band:
             substituted = substitute_param(
@@ -1570,9 +1561,9 @@ def run_identity_ladder(
 
 # Localized max abs-diff parameters, pinned to the validated probe
 # (benchmark/pixel_identity/pixel_identity.json, method "local_maxdiff").
-PIXEL_CANON = (48, 240)             # (H, W) canonical grayscale canvas
-PIXEL_LOCALMAX_WIN = 24            # sliding-window width (columns)
-PIXEL_SAME_THRESHOLD = 0.0487     # same_max 0.0 vs diff_min ~0.097 -> AUC 1.0
+PIXEL_CANON = (48, 240)  # (H, W) canonical grayscale canvas
+PIXEL_LOCALMAX_WIN = 24  # sliding-window width (columns)
+PIXEL_SAME_THRESHOLD = 0.0487  # same_max 0.0 vs diff_min ~0.097 -> AUC 1.0
 # Mismatch-vs-abstain split (measured across stable/dark/zoom/font renders):
 # a STABLE different-identifier crop is a LOCALIZED change (global L1 <= ~0.025,
 # active-column spread <= ~0.18); render DRIFT is a WHOLE-crop change (global
@@ -1580,7 +1571,7 @@ PIXEL_SAME_THRESHOLD = 0.0487     # same_max 0.0 vs diff_min ~0.097 -> AUC 1.0
 # drift suspected => abstain (fail-safe: prefer fall-through over a halt).
 PIXEL_MISMATCH_GLOBAL_CAP = 0.030
 PIXEL_MISMATCH_SPREAD_CAP = 0.24
-PIXEL_SPREAD_EPS = 0.06           # per-column mean-diff over which a column is "active"
+PIXEL_SPREAD_EPS = 0.06  # per-column mean-diff over which a column is "active"
 
 # --- Blocker 2 (crop-scale sensitivity) -----------------------------------
 # PIXEL_SAME_THRESHOLD above is an ABSOLUTE whole-crop mean-abs-diff on a crop
@@ -1612,10 +1603,14 @@ PIXEL_SPREAD_EPS = 0.06           # per-column mean-diff over which a column is 
 # identifier_crop), so this gate has no production impact -- it prevents a
 # latent false-accept from ever shipping. Disclosed in docs/LIMITS.md.
 PIXEL_VERIFY_ENABLED = False
-PIXEL_SI_HEIGHT = 48              # canonical HEIGHT (aspect preserved)
-PIXEL_SI_WIN_FRAC = 0.55         # sliding window width as a fraction of height (~1 glyph)
-PIXEL_SI_MISMATCH_SPIKE = 0.02   # localized spike above the drift floor => a glyph change
-PIXEL_SI_DRIFT_FLOOR = 0.10      # per-window median at/above this => whole-crop drift => abstain
+PIXEL_SI_HEIGHT = 48  # canonical HEIGHT (aspect preserved)
+PIXEL_SI_WIN_FRAC = 0.55  # sliding window width as a fraction of height (~1 glyph)
+PIXEL_SI_MISMATCH_SPIKE = (
+    0.02  # localized spike above the drift floor => a glyph change
+)
+PIXEL_SI_DRIFT_FLOOR = (
+    0.10  # per-window median at/above this => whole-crop drift => abstain
+)
 
 
 def _pixel_canon(png: bytes) -> Optional[Any]:
@@ -1658,7 +1653,7 @@ def pixel_distances(recorded_gray: Any, live_gray: Any) -> tuple[float, float, f
     win = PIXEL_LOCALMAX_WIN
     local = 0.0
     for x0 in range(0, max(1, w - win + 1), max(1, win // 3)):
-        local = max(local, float(d[:, x0:x0 + win].mean()))
+        local = max(local, float(d[:, x0 : x0 + win].mean()))
     glob = float(d.mean())
     col = d.mean(axis=0)
     spread = float((col > PIXEL_SPREAD_EPS).mean())
@@ -1713,7 +1708,7 @@ def pixel_localized_spike(
     d = np.abs(a[:, :w] - b[:, :w]) / 255.0
     win = max(4, int(PIXEL_SI_WIN_FRAC * PIXEL_SI_HEIGHT))
     means = [
-        float(d[:, x0:x0 + win].mean())
+        float(d[:, x0 : x0 + win].mean())
         for x0 in range(0, max(1, w - win + 1), max(1, win // 4))
     ]
     if not means:
@@ -1766,7 +1761,11 @@ def verify_pixel_identity(
                 f"floor {floor:.3f}) — a different identifier"
             ),
         )
-    if PIXEL_VERIFY_ENABLED and spike < PIXEL_SI_MISMATCH_SPIKE and floor < PIXEL_SI_DRIFT_FLOOR:
+    if (
+        PIXEL_VERIFY_ENABLED
+        and spike < PIXEL_SI_MISMATCH_SPIKE
+        and floor < PIXEL_SI_DRIFT_FLOOR
+    ):
         return IdentityCheck(
             status="verified",
             mode="pixel",
@@ -1803,9 +1802,7 @@ def identity_rests_on_confusable_identifier(text: Optional[str]) -> bool:
     """
     if not text:
         return False
-    return any(
-        _is_glyph_vulnerable_identifier(squash(tok)) for tok in tokenize(text)
-    )
+    return any(_is_glyph_vulnerable_identifier(squash(tok)) for tok in tokenize(text))
 
 
 def verify_vlm_identity(
@@ -1900,8 +1897,6 @@ def upscale_crop(frame_png: bytes, region: Region, factor: int = 2) -> Optional[
     if x1 <= x0 or y1 <= y0:
         return None
     crop = img[y0:y1, x0:x1]
-    up = cv2.resize(
-        crop, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC
-    )
+    up = cv2.resize(crop, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
     ok, buf = cv2.imencode(".png", up)
     return buf.tobytes() if ok else None

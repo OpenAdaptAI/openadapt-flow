@@ -78,9 +78,7 @@ class TestHeuristic:
         )
 
     def test_benign_navigation_is_reversible(self) -> None:
-        assert (
-            classify_step_risk(_click_step("click 'Login'", "Login")) == "reversible"
-        )
+        assert classify_step_risk(_click_step("click 'Login'", "Login")) == "reversible"
         assert (
             classify_step_risk(_click_step("click 'ford,Phil'", "Belford, Phil"))
             == "reversible"
@@ -144,14 +142,26 @@ def two_button_bundle(tmp_path_factory):
     _draw_button(screen0, 560, 400, 200, 48, "Search")
     screen1 = screen0.copy()
     cv2.putText(
-        screen1, "Results loaded", (400, 244), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-        (0, 0, 0), 2, cv2.LINE_AA,
+        screen1,
+        "Results loaded",
+        (400, 244),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
     )
     _draw_button(screen1, 560, 500, 200, 48, "Save")
     screen2 = screen1.copy()
     cv2.putText(
-        screen2, "Encounter Saved OK", (400, 620), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-        (0, 0, 0), 2, cv2.LINE_AA,
+        screen2,
+        "Encounter Saved OK",
+        (400, 620),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
     )
 
     events = [

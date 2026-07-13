@@ -40,8 +40,7 @@ from typing import Optional
 DEFAULT_VM_UUID = "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
 DEFAULT_PRLCTL = "/usr/local/bin/prlctl"
 SHIM_PORT = 5000
-_SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "scripts",
-                           "desktop")
+_SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "desktop")
 # In-guest install locations (forward slashes: Python + curl accept them and
 # they survive the host shell without backslash mangling).
 GUEST_DIR = "C:/oa"
@@ -137,8 +136,9 @@ class ParallelsVM:
 
     def set_pause_idle(self, on: bool) -> None:
         """Toggle Parallels' pause-when-idle (must be OFF for headless runs)."""
-        self._run(["set", self.uuid, "--pause-idle", "on" if on else "off"],
-                  check=False)
+        self._run(
+            ["set", self.uuid, "--pause-idle", "on" if on else "off"], check=False
+        )
 
     def ensure_running(self, *, settle_s: float = 6.0) -> None:
         """Bring the VM to a running state from any state, idempotently.
@@ -206,19 +206,21 @@ class ParallelsVM:
         NOTE: ``prlctl exec`` hangs on very long single arguments — keep
         commands short and move file payloads with :meth:`push_file`.
         """
-        return self._run(["exec", self.uuid, *args], timeout=timeout,
-                         check=check)
+        return self._run(["exec", self.uuid, *args], timeout=timeout, check=check)
 
-    def exec_cmd(self, cmdline: str, *, timeout: float = 120.0
-                 ) -> subprocess.CompletedProcess:
+    def exec_cmd(
+        self, cmdline: str, *, timeout: float = 120.0
+    ) -> subprocess.CompletedProcess:
         """Run ``cmd /c <cmdline>`` in-guest (quoting preserved by cmd)."""
         return self.exec(["cmd", "/c", cmdline], timeout=timeout)
 
-    def exec_ps(self, script: str, *, timeout: float = 120.0
-                ) -> subprocess.CompletedProcess:
+    def exec_ps(
+        self, script: str, *, timeout: float = 120.0
+    ) -> subprocess.CompletedProcess:
         """Run a short PowerShell command in-guest."""
-        return self.exec(["powershell", "-NoProfile", "-Command", script],
-                         timeout=timeout)
+        return self.exec(
+            ["powershell", "-NoProfile", "-Command", script], timeout=timeout
+        )
 
     # -- host-side capture ---------------------------------------------------
 
@@ -297,14 +299,12 @@ class ParallelsVM:
 
     def _shim_paths(self) -> tuple[str, str]:
         shim = os.path.abspath(os.path.join(_SCRIPT_DIR, "waa_shim.py"))
-        launcher = os.path.abspath(os.path.join(_SCRIPT_DIR,
-                                                "session1_launch.py"))
+        launcher = os.path.abspath(os.path.join(_SCRIPT_DIR, "session1_launch.py"))
         return shim, launcher
 
     def kill_shim(self) -> None:
         """Kill any in-guest Python (frees the shim port)."""
-        self.exec_cmd("taskkill /F /IM python.exe /IM pythonw.exe 2>nul & "
-                      "echo done")
+        self.exec_cmd("taskkill /F /IM python.exe /IM pythonw.exe 2>nul & echo done")
 
     def launch_shim(
         self,
@@ -323,18 +323,35 @@ class ParallelsVM:
         shim, launcher = self._shim_paths()
         self.exec_cmd(f"if not exist {GUEST_DIR} mkdir {GUEST_DIR}")
         self.push_file(shim, f"{GUEST_DIR}/waa_shim.py", host_ip=host_ip)
-        self.push_file(launcher, f"{GUEST_DIR}/session1_launch.py",
-                       host_ip=host_ip)
-        self.exec(["netsh", "advfirewall", "firewall", "add", "rule",
-                   "name=OAShim", "dir=in", "action=allow", "protocol=TCP",
-                   f"localport={port}"])
+        self.push_file(launcher, f"{GUEST_DIR}/session1_launch.py", host_ip=host_ip)
+        self.exec(
+            [
+                "netsh",
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=OAShim",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                f"localport={port}",
+            ]
+        )
         self.kill_shim()
         time.sleep(2)
         # Run the launcher as SYSTEM; it CreateProcessAsUser's the shim into
         # the interactive console session so mss/pyautogui address the real
         # desktop. Forward-slash script paths dodge host-shell mangling.
-        self.exec([self.python_guest, f"{GUEST_DIR}/session1_launch.py",
-                   f"{GUEST_DIR}/waa_shim.py", "--port", str(port)])
+        self.exec(
+            [
+                self.python_guest,
+                f"{GUEST_DIR}/session1_launch.py",
+                f"{GUEST_DIR}/waa_shim.py",
+                "--port",
+                str(port),
+            ]
+        )
         url = f"http://{self.guest_ip()}:{port}"
         deadline = time.time() + wait_s
         while time.time() < deadline:

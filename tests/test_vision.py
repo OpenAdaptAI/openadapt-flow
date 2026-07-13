@@ -34,9 +34,7 @@ def blank(w: int = 1280, h: int = 800, gray: int = 245) -> np.ndarray:
     return np.full((h, w, 3), gray, dtype=np.uint8)
 
 
-def draw_button(
-    img: np.ndarray, x: int, y: int, w: int, h: int, label: str
-) -> None:
+def draw_button(img: np.ndarray, x: int, y: int, w: int, h: int, label: str) -> None:
     cv2.rectangle(img, (x, y), (x + w, y + h), (200, 200, 200), -1)
     cv2.rectangle(img, (x, y), (x + w, y + h), (80, 80, 80), 2)
     cv2.putText(
@@ -97,9 +95,7 @@ class TestFindTemplate:
     def test_template_larger_than_search_region(self) -> None:
         # region smaller than the template at every scale: all scales
         # skipped, graceful None (no exception)
-        m = find_template(
-            self.screen, self.template, search_region=(560, 400, 40, 20)
-        )
+        m = find_template(self.screen, self.template, search_region=(560, 400, 40, 20))
         assert m is None
 
     def test_search_region_out_of_bounds_clamped(self) -> None:
@@ -229,9 +225,7 @@ class TestTextPresent:
 
         # One long rendered line: whole-line similarity to the short
         # target is ~0.46, but the target is plainly contained.
-        screen = self.banner_screen(
-            "Encounter saved - E2E triage booking three months"
-        )
+        screen = self.banner_screen("Encounter saved - E2E triage booking three months")
         merged = any(
             "saved" in line.text.lower() and "months" in line.text.lower()
             for line in ocr(screen)
@@ -254,17 +248,35 @@ class TestTextPresent:
         # is what makes the modal scenario fail honestly).
         img = blank()
         cv2.putText(
-            img, "New Encounter", (40, 90),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA,
+            img,
+            "New Encounter",
+            (40, 90),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
         )
         cv2.putText(
-            img, "Encounter Type", (40, 150),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+            img,
+            "Encounter Type",
+            (40, 150),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
         )
         draw_button(img, 700, 380, 220, 48, "Save Encounter")
         cv2.putText(
-            img, "Survey: how did we do?", (400, 300),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA,
+            img,
+            "Survey: how did we do?",
+            (400, 300),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
         )
         screen = to_png(img)
         assert not text_present(screen, "Encounter saved-")
@@ -365,9 +377,7 @@ class TestWaitSettled:
         frames = [frame_with_block(10 * i) for i in range(25)]
         backend = FakeBackend(frames)
         start = time.monotonic()
-        out = wait_settled(
-            backend, interval_s=0.01, stable_frames=3, timeout_s=0.15
-        )
+        out = wait_settled(backend, interval_s=0.01, stable_frames=3, timeout_s=0.15)
         elapsed = time.monotonic() - start
         assert isinstance(out, bytes) and out  # returns *something*
         assert elapsed < 2.0  # bounded by timeout, not the frame count
@@ -377,23 +387,14 @@ class TestWaitSettled:
         """A never-settling screen must be diagnosable: timeout warns."""
         frames = [frame_with_block(10 * i) for i in range(25)]
         backend = FakeBackend(frames)
-        with caplog.at_level(
-            logging.WARNING, logger="openadapt_flow.vision.settle"
-        ):
-            wait_settled(
-                backend, interval_s=0.01, stable_frames=3, timeout_s=0.15
-            )
-        assert any(
-            "did not settle" in record.getMessage()
-            for record in caplog.records
-        )
+        with caplog.at_level(logging.WARNING, logger="openadapt_flow.vision.settle"):
+            wait_settled(backend, interval_s=0.01, stable_frames=3, timeout_s=0.15)
+        assert any("did not settle" in record.getMessage() for record in caplog.records)
 
     def test_no_warning_when_settled(self, caplog) -> None:
         stable = frame_with_block(50)
         backend = FakeBackend([stable, stable])
-        with caplog.at_level(
-            logging.WARNING, logger="openadapt_flow.vision.settle"
-        ):
+        with caplog.at_level(logging.WARNING, logger="openadapt_flow.vision.settle"):
             wait_settled(backend, interval_s=0.01, stable_frames=2)
         assert not [
             record

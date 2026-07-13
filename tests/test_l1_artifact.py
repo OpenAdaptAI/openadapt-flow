@@ -42,9 +42,7 @@ def test_emit_canonical_filename_and_manifest(payload, tmp_path):
     assert prov["tool_name"] == "openadapt-flow"
 
 
-def test_reemit_identical_is_idempotent_but_content_conflict_raises(
-    payload, tmp_path
-):
+def test_reemit_identical_is_idempotent_but_content_conflict_raises(payload, tmp_path):
     out = tmp_path / "extractions"
     kwargs = dict(file_number="P1", date="2026-07-06", doctype="referral")
     emit_l1_artifact(payload, out, **kwargs)
@@ -85,9 +83,7 @@ def test_manifest_appends_across_artifacts(payload, tmp_path):
     )
     second = tmp_path / "note.txt"
     second.write_text("op note body")
-    emit_l1_artifact(
-        second, out, file_number="P2", date="2026-07-05", doctype="opnote"
-    )
+    emit_l1_artifact(second, out, file_number="P2", date="2026-07-05", doctype="opnote")
 
     rows = list(csv.DictReader((out / "manifest.csv").open()))
     assert [r["filename"] for r in rows] == [

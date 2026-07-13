@@ -89,7 +89,9 @@ def _action_state(
         id=sid,
         intent=intent,
         action=action,
-        anchor=None if action in (ActionKind.KEY, ActionKind.WAIT) else _anchor(armed=armed),
+        anchor=None
+        if action in (ActionKind.KEY, ActionKind.WAIT)
+        else _anchor(armed=armed),
         text=text,
         risk=risk,  # type: ignore[arg-type]
         effects=effects or [],
@@ -320,12 +322,14 @@ class StructuralDiffInducer:
         absent from those that do not -- the guard predicate's text."""
         with_step, without_step = [], []
         for trace in successes:
-            (with_step if any(s.intent == new_intent for s in trace.steps) else without_step).append(trace)
+            (
+                with_step
+                if any(s.intent == new_intent for s in trace.steps)
+                else without_step
+            ).append(trace)
         if not with_step:
             return None
-        candidate_facts = {
-            k for t in with_step for k, v in t.facts.items() if v
-        }
+        candidate_facts = {k for t in with_step for k, v in t.facts.items() if v}
         for fact in sorted(candidate_facts):
             if all(t.facts.get(fact, False) for t in with_step) and not any(
                 t.facts.get(fact, False) for t in without_step
@@ -346,7 +350,9 @@ class StructuralDiffInducer:
             and s.step is not None
             and s.step.intent == predecessor
         )
-        old_target = pred_state.transitions[0].target if pred_state.transitions else "__end__"
+        old_target = (
+            pred_state.transitions[0].target if pred_state.transitions else "__end__"
+        )
         new_sid = "s_" + new_intent.lower().replace(" ", "_")[:24]
         guard = Guard(
             predicate=Predicate(
@@ -354,9 +360,7 @@ class StructuralDiffInducer:
             ),
             on_unmet="skip",
         )
-        new_state = _action_state(
-            new_sid, new_intent, old_target, guard=guard
-        )
+        new_state = _action_state(new_sid, new_intent, old_target, guard=guard)
         graph.states[new_sid] = new_state
         pred_state.transitions = [Transition(target=new_sid, label="")]
         return graph

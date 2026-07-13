@@ -48,9 +48,16 @@ class FakeVision:
         self.text_results: dict = {}
         self.text_calls: list = []
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None,
-                      scales=(0.85, 1.0, 1.18), threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         self.template_calls.append(search_region)
         if self.template_results:
             return self.template_results.pop(0)
@@ -96,8 +103,13 @@ def test_template_rung_hit_uses_padded_search_region(screen, anchor):
         Match(point=(125, 110), region=(100, 100, 50, 20), confidence=0.95)
     ]
     resolution, matched = resolve(
-        anchor, screen, vision, None, "click 'Save'",
-        template_png=b"tpl", viewport=VIEWPORT,
+        anchor,
+        screen,
+        vision,
+        None,
+        "click 'Save'",
+        template_png=b"tpl",
+        viewport=VIEWPORT,
     )
     assert resolution.rung == "template"
     # Same region as recorded -> click point identical to the recorded one.
@@ -176,12 +188,13 @@ def test_global_template_rejected_when_landmarks_contradict(screen):
     ]
     # The landmark says the target is at (50, 105) + (60, 0) = (110, 105).
     vision.text_results = {
-        "Messages": Match(
-            point=(50, 105), region=(20, 95, 60, 20), confidence=0.95
-        )
+        "Messages": Match(point=(50, 105), region=(20, 95, 60, 20), confidence=0.95)
     }
     resolution, matched = resolve(
-        _icon_anchor(), screen, vision, template_png=b"tpl",
+        _icon_anchor(),
+        screen,
+        vision,
+        template_png=b"tpl",
         viewport=(300, 500),
     )
     assert resolution is not None
@@ -199,12 +212,13 @@ def test_global_template_accepted_when_landmarks_agree(screen):
         Match(point=(125, 122), region=(100, 112, 50, 20), confidence=0.99),
     ]
     vision.text_results = {
-        "Messages": Match(
-            point=(50, 117), region=(20, 107, 60, 20), confidence=0.95
-        )
+        "Messages": Match(point=(50, 117), region=(20, 107, 60, 20), confidence=0.95)
     }
     resolution, matched = resolve(
-        _icon_anchor(), screen, vision, template_png=b"tpl",
+        _icon_anchor(),
+        screen,
+        vision,
+        template_png=b"tpl",
         viewport=(300, 500),
     )
     assert resolution is not None
@@ -222,7 +236,10 @@ def test_global_template_accepted_when_no_landmark_locatable(screen):
     ]
     vision.text_results = {"Messages": None}
     resolution, matched = resolve(
-        _icon_anchor(), screen, vision, template_png=b"tpl",
+        _icon_anchor(),
+        screen,
+        vision,
+        template_png=b"tpl",
         viewport=(300, 500),
     )
     assert resolution is not None
@@ -316,8 +333,13 @@ def test_grounder_rung_last_and_receives_intent(screen, anchor):
         Match(point=(33, 44), region=(20, 40, 26, 8), confidence=0.5)
     )
     resolution, matched = resolve(
-        anchor, screen, vision, grounder, "click 'Save'",
-        template_png=b"tpl", viewport=VIEWPORT,
+        anchor,
+        screen,
+        vision,
+        grounder,
+        "click 'Save'",
+        template_png=b"tpl",
+        viewport=VIEWPORT,
     )
     assert resolution.rung == "grounder"
     assert resolution.point == (33, 44)
@@ -329,8 +351,9 @@ def test_all_rungs_fail_returns_none(screen, anchor):
     vision = FakeVision()
     grounder = FakeGrounder(None)
     assert (
-        resolve(anchor, screen, vision, grounder,
-                template_png=b"tpl", viewport=VIEWPORT)
+        resolve(
+            anchor, screen, vision, grounder, template_png=b"tpl", viewport=VIEWPORT
+        )
         is None
     )
     assert grounder.calls  # the grounder was consulted last
@@ -340,7 +363,11 @@ def test_ladder_order_is_frozen():
     # ``structural`` (DOM/UIA) is the deterministic TOP rung, above the visual
     # rungs; the visual floor keeps its historical order underneath.
     assert RUNG_ORDER == (
-        "structural", "template", "template_global", "ocr", "geometry",
+        "structural",
+        "template",
+        "template_global",
+        "ocr",
+        "geometry",
         "grounder",
     )
     # Structural is the STRONGEST evidence: it must sit above ocr so the
@@ -375,9 +402,7 @@ class RatioRecordingVision(FakeVision):
 
     def find_text(self, screen_png, text, *, region=None, min_ratio=0.8):
         self.min_ratios[text] = min_ratio
-        return super().find_text(
-            screen_png, text, region=region, min_ratio=min_ratio
-        )
+        return super().find_text(screen_png, text, region=region, min_ratio=min_ratio)
 
 
 def test_ocr_rung_requires_strict_label_ratio(screen, anchor):
@@ -405,8 +430,13 @@ def test_ocr_rung_requires_strict_label_ratio(screen, anchor):
         "Note": Match(point=(70, 105), region=(50, 95, 40, 20), confidence=0.97),
     }
     resolution, _ = resolve(
-        strict_anchor, screen, vision, None, "click 'Save'",
-        template_png=None, viewport=VIEWPORT,
+        strict_anchor,
+        screen,
+        vision,
+        None,
+        "click 'Save'",
+        template_png=None,
+        viewport=VIEWPORT,
     )
     assert resolution is not None
     assert resolution.rung == "geometry"

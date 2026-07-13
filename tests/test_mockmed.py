@@ -92,9 +92,7 @@ def test_login_screen_renders(page: Page, server_url: str) -> None:
     assert page.locator("#password").is_visible()
     assert page.locator("#signin").inner_text() == "Sign In"
     # Font floor: base font is >= 14px.
-    size = page.evaluate(
-        "parseFloat(getComputedStyle(document.body).fontSize)"
-    )
+    size = page.evaluate("parseFloat(getComputedStyle(document.body).fontSize)")
     assert size >= 14
 
 
@@ -155,13 +153,9 @@ def test_no_css_transitions_or_animations(page: Page, server_url: str) -> None:
 
 def test_drift_theme_dark_palette(page: Page, server_url: str) -> None:
     page.goto(server_url)
-    default_bg = page.evaluate(
-        "getComputedStyle(document.body).backgroundColor"
-    )
+    default_bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
     page.goto(server_url + "?drift=theme")
-    themed_bg = page.evaluate(
-        "getComputedStyle(document.body).backgroundColor"
-    )
+    themed_bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
     assert themed_bg != default_bg
     # Dark palette: all RGB channels low.
     channels = [
@@ -193,9 +187,7 @@ def test_drift_move_relocates_buttons(page: Page, server_url: str) -> None:
     assert abs(save_moved["y"] - save_default["y"]) < 2
 
 
-def test_drift_rename_keeps_default_positions(
-    page: Page, server_url: str
-) -> None:
+def test_drift_rename_keeps_default_positions(page: Page, server_url: str) -> None:
     new_default, save_default = _button_boxes(page, server_url, "")
 
     login(page, server_url + "?drift=rename")
@@ -264,9 +256,7 @@ def _sign_in(page: Page, url: str) -> None:
     page.click("#signin")
 
 
-def test_drift_notice_interstitial_until_dismissed(
-    page: Page, server_url: str
-) -> None:
+def test_drift_notice_interstitial_until_dismissed(page: Page, server_url: str) -> None:
     _sign_in(page, server_url + "?drift=notice")
 
     # The tasks screen is replaced by the interstitial...
@@ -280,9 +270,7 @@ def test_drift_notice_interstitial_until_dismissed(
     assert page.locator("#notice-continue").count() == 0
 
 
-def test_drift_modal_once_blocks_first_save_only(
-    page: Page, server_url: str
-) -> None:
+def test_drift_modal_once_blocks_first_save_only(page: Page, server_url: str) -> None:
     login(page, server_url + "?drift=modal-once")
     open_first_patient(page)
     goto_encounter(page)

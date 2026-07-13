@@ -69,30 +69,40 @@ class TestBlocker1ConfusionCollidedNames:
     OCR-confusion-equivalence, the honest outcome is an abort."""
 
     def test_probe_01_neil_vs_nell_i_l(self):
-        assert _status(
-            "Smith, Neil 1985-03-12 M MRN A482913",
-            "Smith, Nell 1985-03-12 M MRN A482913",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Smith, Neil 1985-03-12 M MRN A482913",
+                "Smith, Nell 1985-03-12 M MRN A482913",
+            )
+            == "mismatch"
+        )
 
     def test_probe_02_clay_vs_day_cl_d(self):
-        assert _status(
-            "Clay, Susan 1962-07-04 F MRN B771204",
-            "Day, Susan 1962-07-04 F MRN B771204",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Clay, Susan 1962-07-04 F MRN B771204",
+                "Day, Susan 1962-07-04 F MRN B771204",
+            )
+            == "mismatch"
+        )
 
     def test_probe_03_marnie_vs_mamie_rn_m(self):
-        assert _status(
-            "Baker, Marnie 1990-11-02 F",
-            "Baker, Mamie 1990-11-02 F",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Baker, Marnie 1990-11-02 F",
+                "Baker, Mamie 1990-11-02 F",
+            )
+            == "mismatch"
+        )
 
     def test_probe_04_gail_vs_gall_i_l_shared_clinical_text(self):
-        assert _status(
-            "Gail Turner Comprehensive metabolic panel with lipid"
-            " screening High",
-            "Gall Turner Comprehensive metabolic panel with lipid"
-            " screening High",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Gail Turner Comprehensive metabolic panel with lipid screening High",
+                "Gall Turner Comprehensive metabolic panel with lipid screening High",
+            )
+            == "mismatch"
+        )
 
 
 # -- BLOCKER 2: short tokens invisible to contradiction -----------------------
@@ -103,28 +113,40 @@ class TestBlocker2ShortTokenDiscriminators:
     are affirmative contradiction, not ignorable residue."""
 
     def test_probe_05_middle_initial_changed(self):
-        assert _status(
-            "Smith, John J 1985-03-12 M",
-            "Smith, John K 1985-03-12 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Smith, John J 1985-03-12 M",
+                "Smith, John K 1985-03-12 M",
+            )
+            == "mismatch"
+        )
 
     def test_probe_06_sex_column_flipped(self):
-        assert _status(
-            "Belford, Phil 1985-03-12 M",
-            "Belford, Phil 1985-03-12 F",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M",
+                "Belford, Phil 1985-03-12 F",
+            )
+            == "mismatch"
+        )
 
     def test_probe_07_two_char_name_al_vs_bo(self):
-        assert _status(
-            "Belford, Al 1985-03-12 M",
-            "Belford, Bo 1985-03-12 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Al 1985-03-12 M",
+                "Belford, Bo 1985-03-12 M",
+            )
+            == "mismatch"
+        )
 
     def test_probe_08_two_char_name_jo_vs_ed(self):
-        assert _status(
-            "Smith, Jo 1985-03-12 M",
-            "Smith, Ed 1985-03-12 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Smith, Jo 1985-03-12 M",
+                "Smith, Ed 1985-03-12 M",
+            )
+            == "mismatch"
+        )
 
 
 # -- BLOCKER 3: observed-side superset ----------------------------------------
@@ -136,24 +158,33 @@ class TestBlocker3ObservedSuperset:
     unexplained-observed-token budget (param mode already had one)."""
 
     def test_probe_09_appended_middle_name(self):
-        assert _status(
-            "Belford, Phil 1985-03-12 M",
-            "Belford, Phil James 1985-03-12 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M",
+                "Belford, Phil James 1985-03-12 M",
+            )
+            == "mismatch"
+        )
 
     def test_probe_10_two_row_ocr_merge(self):
-        assert _status(
-            "Belford, Phil 1985-03-12 M",
-            "Belford, Phil 1985-03-12 M Smith, Joan 1962-01-01 F",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M",
+                "Belford, Phil 1985-03-12 M Smith, Joan 1962-01-01 F",
+            )
+            == "mismatch"
+        )
 
     def test_probe_11_wrong_row_mentioning_recorded_patient(self):
         # The realistic shape: a message/cc row about the recorded
         # patient — mentions the whole recorded band, is not the row.
-        assert _status(
-            "Belford, Phil 1985-03-12 M",
-            "Dr. Smith, John re Belford, Phil 1985-03-12 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M",
+                "Dr. Smith, John re Belford, Phil 1985-03-12 M",
+            )
+            == "mismatch"
+        )
 
 
 # -- MAJOR 4: absent identity token at the run cap ----------------------------
@@ -165,20 +196,26 @@ class TestMajor4AbsentNameToken:
     trailing numerics."""
 
     def test_probe_12_absent_four_char_first_name(self):
-        assert _status(
-            "Belford, Phil 1985-03-12 M",
-            "Belford, 1985-03-12 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M",
+                "Belford, 1985-03-12 M",
+            )
+            == "mismatch"
+        )
 
     def test_probe_13_synthetic_pure_alpha_absence_at_run_cap(self):
         # The exact shape previously pinned VERIFIED in
         # tests/test_identity.py::TestOperatingPoint::
         # test_pure_absence_boundary_at_run_cap — a fully absent 4-char
         # alphabetic token, nothing in its place.
-        assert _status(
-            "abcd efgh ijkl mnop qrst",
-            "abcd efgh ijkl mnop",
-        ) == "mismatch"
+        assert (
+            _status(
+                "abcd efgh ijkl mnop qrst",
+                "abcd efgh ijkl mnop",
+            )
+            == "mismatch"
+        )
 
 
 # -- safe direction: shapes that are correct today and must stay so ----------
@@ -188,34 +225,49 @@ class TestSafeDirectionPins:
     """Correct outcomes that the redesign must not regress."""
 
     def test_hyphenated_name_split_by_ocr_verifies(self):
-        assert _status(
-            "Smith-Jones, Carol 1985-03-12 F",
-            "Smith- Jones, Carol 1985-03-12 F",
-        ) == "verified"
+        assert (
+            _status(
+                "Smith-Jones, Carol 1985-03-12 F",
+                "Smith- Jones, Carol 1985-03-12 F",
+            )
+            == "verified"
+        )
 
     def test_bob_vs_robert_mismatches(self):
-        assert _status(
-            "Smith, Bob 1985-03-12 M",
-            "Smith, Robert 1985-03-12 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Smith, Bob 1985-03-12 M",
+                "Smith, Robert 1985-03-12 M",
+            )
+            == "mismatch"
+        )
 
     def test_alison_vs_allison_contradiction_mismatches(self):
-        assert _status(
-            "Smith, Alison 1985-03-12 F",
-            "Smith, Allison 1985-03-12 F",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Smith, Alison 1985-03-12 F",
+                "Smith, Allison 1985-03-12 F",
+            )
+            == "mismatch"
+        )
 
     def test_mrn_edit_mismatches(self):
-        assert _status(
-            "Belford, Phil 1985-03-12 M MRN A123456",
-            "Belford, Phil 1985-03-12 M MRN A123465",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M MRN A123456",
+                "Belford, Phil 1985-03-12 M MRN A123465",
+            )
+            == "mismatch"
+        )
 
     def test_dob_edit_mismatches(self):
-        assert _status(
-            "Belford, Phil 1985-03-12 M",
-            "Belford, Phil 1985-03-13 M",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M",
+                "Belford, Phil 1985-03-13 M",
+            )
+            == "mismatch"
+        )
 
     def test_digit_class_homoglyph_misread_verifies(self):
         # Digit/symbol-involving confusions cannot be a different NAME
@@ -223,16 +275,22 @@ class TestSafeDirectionPins:
         # The MRN here is NON-confusable (no 0/1/O/l/I) so the 8th-reopening
         # abstain does not apply; a CONFUSABLE MRN would abstain instead
         # (see Test8thHomonymCollapse).
-        assert _status(
-            "Belford, Phil 1985-03-12 M MRN A234567",
-            "Be1ford, Phi1 1985-03-12 M MRN A234567",
-        ) == "verified"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M MRN A234567",
+                "Be1ford, Phi1 1985-03-12 M MRN A234567",
+            )
+            == "verified"
+        )
 
     def test_digit_class_jitter_on_non_name_tokens_verifies(self):
-        assert _status(
-            "Jane Sample Knee pain referral High",
-            "Jane 5ample Knee pain referral High",
-        ) == "verified"
+        assert (
+            _status(
+                "Jane Sample Knee pain referral High",
+                "Jane 5ample Knee pain referral High",
+            )
+            == "verified"
+        )
 
     def test_param_mode_raw_run_still_rejects_neil_to_nell(self):
         # Param mode was NOT vulnerable to Blocker 1: the raw
@@ -266,22 +324,31 @@ class TestBlocker5IdentifierLetterDigitCollision:
     verify."""
 
     def test_probe_14_mrn_l_vs_1(self):
-        assert _status(
-            "Belford Jane MRN l482913 Cardiology",
-            "Belford Jane MRN 1482913 Cardiology",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford Jane MRN l482913 Cardiology",
+                "Belford Jane MRN 1482913 Cardiology",
+            )
+            == "mismatch"
+        )
 
     def test_probe_15_mrn_O_vs_0(self):
-        assert _status(
-            "Chen Wei MRN O52133 Neurology",
-            "Chen Wei MRN 052133 Neurology",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Chen Wei MRN O52133 Neurology",
+                "Chen Wei MRN 052133 Neurology",
+            )
+            == "mismatch"
+        )
 
     def test_probe_16_acct_S_vs_5(self):
-        assert _status(
-            "Ramirez Ana Acct S5821 Billing",
-            "Ramirez Ana Acct 55821 Billing",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Ramirez Ana Acct S5821 Billing",
+                "Ramirez Ana Acct 55821 Billing",
+            )
+            == "mismatch"
+        )
 
     def test_probe_17_same_name_mrn_sole_discriminator(self):
         # The canonical clinical case: two same-name patients whose ONLY
@@ -289,10 +356,13 @@ class TestBlocker5IdentifierLetterDigitCollision:
         # the MRN is the sole discriminator; it must abort regardless
         # (this is exactly the case a corroboration-escape design would
         # wrongly allow).
-        assert _status(
-            "Doe John MRN AO1234",
-            "Doe John MRN A01234",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Doe John MRN AO1234",
+                "Doe John MRN A01234",
+            )
+            == "mismatch"
+        )
 
     def test_probe_18_fires_in_param_mode(self):
         # MRN as a parameter: the param-mode raw longest_run tolerated a
@@ -316,20 +386,26 @@ class TestBlocker5Controls:
         # Control: 748291 vs 748292 is NOT a confusion equivalence (2 and
         # 1 are not in one confusion class), so it mismatches via
         # coverage/contradiction, NOT the suspect rule.
-        assert _status(
-            "Doe John MRN 748291",
-            "Doe John MRN 748292",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Doe John MRN 748291",
+                "Doe John MRN 748292",
+            )
+            == "mismatch"
+        )
 
     def test_raw_equal_identifier_still_verifies(self):
         # A raw-identical NON-confusable MRN (no 0/1/O/l/I) with only
         # name-side digit-class noise: not confusion-differing AND not
         # glyph-collapsible, so it verifies. (A raw-identical CONFUSABLE MRN
         # now ABSTAINS under the 8th reopening -- see Test8thHomonymCollapse.)
-        assert _status(
-            "Belford, Phil 1985-03-12 M MRN A234567",
-            "Be1ford, Phi1 1985-03-12 M MRN A234567",
-        ) == "verified"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M MRN A234567",
+                "Be1ford, Phi1 1985-03-12 M MRN A234567",
+            )
+            == "verified"
+        )
 
     def test_true_row_identifier_noise_aborts_availability_cost(self):
         # DOCUMENTED AVAILABILITY COST of the chosen (safety-first)
@@ -338,10 +414,13 @@ class TestBlocker5Controls:
         # identity. Indistinguishable from a different-patient row at
         # band level; the halt is the cheap direction. Disclosed in
         # docs/LIMITS.md.
-        assert _status(
-            "Belford, Phil 1985-03-12 M MRN A01234",
-            "Belford, Phil 1985-03-12 M MRN AO1234",
-        ) == "mismatch"
+        assert (
+            _status(
+                "Belford, Phil 1985-03-12 M MRN A01234",
+                "Belford, Phil 1985-03-12 M MRN AO1234",
+            )
+            == "mismatch"
+        )
 
 
 class TestDisclosedResidualEdges:
@@ -352,10 +431,13 @@ class TestDisclosedResidualEdges:
         # The token-join rule (OCR splits one token into two) cannot
         # distinguish 'Ann Marie' from 'Annmarie' — raw-equal after
         # concatenation. Two real patients with those names verify.
-        assert _status(
-            "Annmarie Cox 1985-03-12 F",
-            "Ann marie Cox 1985-03-12 F",
-        ) == "verified"
+        assert (
+            _status(
+                "Annmarie Cox 1985-03-12 F",
+                "Ann marie Cox 1985-03-12 F",
+            )
+            == "verified"
+        )
 
 
 class TestBlocker6GlyphCollapse:
@@ -384,59 +466,80 @@ class TestBlocker6GlyphCollapse:
         # click_name: the NAME is excluded, so the glyph-confusable MRN is
         # the sole discriminator. The sibling's collapsed band is
         # byte-identical to the recorded target band -> ABSTAIN (halt).
-        assert _status(
-            "COX3834 1944-08-08 F Pending Open",
-            "COX3834 1944-08-08 F Pending Open",
-        ) == "abstain"
+        assert (
+            _status(
+                "COX3834 1944-08-08 F Pending Open",
+                "COX3834 1944-08-08 F Pending Open",
+            )
+            == "abstain"
+        )
 
     def test_o0_collapse_click_action_abstains_despite_name_and_dob(self):
         # click_action: NAME and DOB present and raw-match, yet the MRN
         # carries a homoglyph LETTER O -- a same-name/same-DOB homonym
         # (COX3834 vs C0X3834) cannot be ruled out. name+DOB do NOT license
         # it (8th reopening): ABSTAIN.
-        assert _status(
-            "COX3834 Petrov, Robert 1944-08-08 F Pending",
-            "COX3834 Petrov, Robert 1944-08-08 F Pending",
-        ) == "abstain"
+        assert (
+            _status(
+                "COX3834 Petrov, Robert 1944-08-08 F Pending",
+                "COX3834 Petrov, Robert 1944-08-08 F Pending",
+            )
+            == "abstain"
+        )
 
     def test_l1_collapse_abstains(self):
         # The l/1 class: 'PL16078' (digit 1) vs 'PLl6078' (letter l) collapse
         # to one string -> confusable identifier -> ABSTAIN.
-        assert _status(
-            "PL16078 1940-10-22 F Active Open",
-            "PL16078 1940-10-22 F Active Open",
-        ) == "abstain"
+        assert (
+            _status(
+                "PL16078 1940-10-22 F Active Open",
+                "PL16078 1940-10-22 F Active Open",
+            )
+            == "abstain"
+        )
 
     def test_clean_name_dob_target_still_verifies(self):
         # No glyph-confusable identifier in the discriminating position:
         # identity carried by a clean name + DOB must verify normally.
-        assert _status(
-            "Petrov, Robert 1944-08-08 F Pending Open",
-            "Petrov, Robert 1944-08-08 F Pending Open",
-        ) == "verified"
+        assert (
+            _status(
+                "Petrov, Robert 1944-08-08 F Pending Open",
+                "Petrov, Robert 1944-08-08 F Pending Open",
+            )
+            == "verified"
+        )
 
     def test_plain_numeric_mrn_abstains_and_suspect_edit_mismatches(self):
         # A NAME-EXCLUDED band resting on a digit-body confusable MRN
         # ('MG480312', containing 0/1) -> ABSTAIN (8th reopening: no
         # name+DOB can license a collapsible MRN):
-        assert _status(
-            "MG480312 1975-03-14 M Active Open",
-            "MG480312 1975-03-14 M Active Open",
-        ) == "abstain"
+        assert (
+            _status(
+                "MG480312 1975-03-14 M Active Open",
+                "MG480312 1975-03-14 M Active Open",
+            )
+            == "abstain"
+        )
         # ...a same-patient re-read WITH a discriminative name + DOB but the
         # SAME confusable MRN now ALSO abstains (the honest cost -- OCR alone
         # cannot rule out a same-name/same-DOB homonym):
-        assert _status(
-            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
-            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
-        ) == "abstain"
+        assert (
+            _status(
+                "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+                "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            )
+            == "abstain"
+        )
         # ...and a same-name/DOB DIFFERENT patient MG48O312 (letter O) vs
         # MG480312 is an AFFIRMATIVE confusion difference (raw-unequal,
         # recorded token has a digit) -> suspect -> MISMATCH.
-        assert _status(
-            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
-            "MG48O312 Okonkwo, Daniel 1975-03-14 M Active",
-        ) == "mismatch"
+        assert (
+            _status(
+                "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+                "MG48O312 Okonkwo, Daniel 1975-03-14 M Active",
+            )
+            == "mismatch"
+        )
 
 
 class TestBlocker7NameDobPrimarySupersededBy8th:
@@ -462,19 +565,25 @@ class TestBlocker7NameDobPrimarySupersededBy8th:
         # Even a legitimate same-patient re-read ABSTAINS when the MRN is
         # glyph-confusable (AC50061 has a digit 0): OCR cannot distinguish it
         # from a same-name/same-DOB homonym AC5OO61. The honest over-halt.
-        assert _status(
-            "AC50061 Nakamura, Karen 1947-11-05 M Active",
-            "AC50061 Nakamura, Karen 1947-11-05 M Active",
-        ) == "abstain"
+        assert (
+            _status(
+                "AC50061 Nakamura, Karen 1947-11-05 M Active",
+                "AC50061 Nakamura, Karen 1947-11-05 M Active",
+            )
+            == "abstain"
+        )
 
     def test_digit_flanked_different_name_sibling_row_mismatches(self):
         # Landing on a DIFFERENT-name sibling row: the name discriminates and
         # does NOT match -> affirmative MISMATCH (a different-name sibling
         # still mismatches, per the fix's requirements).
-        assert _status(
-            "AC50061 Nakamura, Karen 1947-11-05 M Active",
-            "AC50072 Okafor, Janet 1961-02-08 M Active",
-        ) == "mismatch"
+        assert (
+            _status(
+                "AC50061 Nakamura, Karen 1947-11-05 M Active",
+                "AC50072 Okafor, Janet 1961-02-08 M Active",
+            )
+            == "mismatch"
+        )
 
     def test_digit_flanked_sole_discriminator_name_excluded_abstains(self):
         # SAME/absent name, digit-flanked confusable MRN the sole basis:
@@ -489,35 +598,50 @@ class TestBlocker7NameDobPrimarySupersededBy8th:
     def test_name_dob_target_with_confusable_digit_mrn_now_abstains(self):
         # #27 verified these (name+DOB carry, digit MRN corroborates); the
         # 8th reopening abstains -- name+DOB cannot license a collapsible MRN.
-        assert _status(
-            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
-            "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
-        ) == "abstain"
-        assert _status(
-            "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
-            "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
-        ) == "abstain"
+        assert (
+            _status(
+                "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+                "MG480312 Okonkwo, Daniel 1975-03-14 M Active",
+            )
+            == "abstain"
+        )
+        assert (
+            _status(
+                "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
+                "RC719284 Fitzgerald, Susan 1958-09-30 F Active",
+            )
+            == "abstain"
+        )
 
     def test_non_confusable_identifier_with_name_dob_still_verifies(self):
         # The "no new over-halt" guarantee: a name+DOB target whose MRN has
         # NO 0/1/O/l/I (a non-confusable identifier) still VERIFIES -- the
         # abstain is confined to collapsible identifiers.
-        assert _status(
-            "MG4478 Okonkwo, Daniel 1975-03-14 M Active",
-            "MG4478 Okonkwo, Daniel 1975-03-14 M Active",
-        ) == "verified"
-        assert _status(
-            "RC72928 Fitzgerald, Susan 1958-09-30 F Active",
-            "RC72928 Fitzgerald, Susan 1958-09-30 F Active",
-        ) == "verified"
+        assert (
+            _status(
+                "MG4478 Okonkwo, Daniel 1975-03-14 M Active",
+                "MG4478 Okonkwo, Daniel 1975-03-14 M Active",
+            )
+            == "verified"
+        )
+        assert (
+            _status(
+                "RC72928 Fitzgerald, Susan 1958-09-30 F Active",
+                "RC72928 Fitzgerald, Susan 1958-09-30 F Active",
+            )
+            == "verified"
+        )
 
     def test_letter_side_same_name_abstains(self):
         # A homoglyph LETTER inside the MRN with a matched name+DOB: ABSTAIN
         # (the 6th-reopening letter-collapse case, now honestly an abstain).
-        assert _status(
-            "COX3834 Petrov, Robert 1944-08-08 F Pending",
-            "COX3834 Petrov, Robert 1944-08-08 F Pending",
-        ) == "abstain"
+        assert (
+            _status(
+                "COX3834 Petrov, Robert 1944-08-08 F Pending",
+                "COX3834 Petrov, Robert 1944-08-08 F Pending",
+            )
+            == "abstain"
+        )
 
     def test_8th_reopening_headline_same_name_dob_name_shown_abstains(self):
         # THE 8th WRONG-PATIENT REOPENING, closed: #27 pinned this as
@@ -525,7 +649,10 @@ class TestBlocker7NameDobPrimarySupersededBy8th:
         # different patient whose digit MRN (MG4408) collapses to the
         # target's (from MG44O8) is band-identical to a legit re-read. It no
         # longer verifies -- it ABSTAINS -> HALT.
-        assert _status(
-            "MG4408 Okafor, Philip 1966-01-17 M Active",
-            "MG4408 Okafor, Philip 1966-01-17 M Active",
-        ) == "abstain"
+        assert (
+            _status(
+                "MG4408 Okafor, Philip 1966-01-17 M Active",
+                "MG4408 Okafor, Philip 1966-01-17 M Active",
+            )
+            == "abstain"
+        )

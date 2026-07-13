@@ -88,9 +88,7 @@ def _downscale_for_model(
         if longest <= max_dim:
             return png, 1.0
         scale = max_dim / longest
-        resized = img.resize(
-            (max(1, round(w * scale)), max(1, round(h * scale)))
-        )
+        resized = img.resize((max(1, round(w * scale)), max(1, round(h * scale))))
         buf = BytesIO()
         resized.save(buf, format="PNG")
         return buf.getvalue(), scale

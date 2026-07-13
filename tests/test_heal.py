@@ -59,9 +59,16 @@ class FakeVision:
         self.ocr_calls: list = []
         self.settle_count = 0
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None,
-                      scales=(0.85, 1.0, 1.18), threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         if self.template_results:
             return self.template_results.pop(0)
         return None
@@ -82,8 +89,7 @@ class FakeVision:
     def phash_distance(self, a, b):
         return 0
 
-    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2,
-                     timeout_s=3.0):
+    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2, timeout_s=3.0):
         self.settle_count += 1
         return backend.screenshot()
 
@@ -191,9 +197,7 @@ def test_heal_artifacts_persisted_under_run_dir(bundle, run_dir):
     assert (heal_dir / "heal.json").is_file()
     assert (heal_dir / "template.png").is_file()
     assert (heal_dir / "screen.png").is_file()
-    event = HealEvent.model_validate(
-        json.loads((heal_dir / "heal.json").read_text())
-    )
+    event = HealEvent.model_validate(json.loads((heal_dir / "heal.json").read_text()))
     assert event.step_id == "s1"
     assert event.rung_used == "ocr"
     assert event.applied is True
@@ -204,8 +208,7 @@ def test_heal_artifacts_persisted_under_run_dir(bundle, run_dir):
     assert png_dims((heal_dir / "screen.png").read_bytes()) == VIEWPORT
 
 
-def test_healed_bundle_written_with_new_and_unchanged_crops(bundle, run_dir,
-                                                            tmp_path):
+def test_healed_bundle_written_with_new_and_unchanged_crops(bundle, run_dir, tmp_path):
     # s1 heals via ocr (its template file is absent from the bundle);
     # s2 resolves via template (its crop must be copied unchanged).
     original_s2 = make_png((50, 20), color=(10, 20, 30))
@@ -230,7 +233,9 @@ def test_healed_bundle_written_with_new_and_unchanged_crops(bundle, run_dir,
     healed_dir = tmp_path / "healed"
 
     report = Replayer(FakeBackend(), vision=vision).run(
-        workflow, bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
         save_healed_to=healed_dir,
     )
 
@@ -289,10 +294,8 @@ def test_build_heal_event_clamps_region_at_frame_edge():
     step = ocr_anchored_step()
     frame = make_png(VIEWPORT)
     vision = FakeVision()  # ocr returns nothing -> old text preserved
-    resolution = Resolution(rung="ocr", point=(5, 5), confidence=0.8,
-                            elapsed_ms=1.0)
-    event, crop = build_heal_event(step, resolution, (0, 0, 12, 8), frame,
-                                   vision)
+    resolution = Resolution(rung="ocr", point=(5, 5), confidence=0.8, elapsed_ms=1.0)
+    event, crop = build_heal_event(step, resolution, (0, 0, 12, 8), frame, vision)
     assert event.new_anchor.region == (0, 0, 50, 20)  # clamped in-bounds
     assert event.new_anchor.click_point == (5, 5)
     assert event.new_anchor.ocr_text == "Save Encounter"  # old text kept
@@ -312,8 +315,7 @@ def test_write_healed_bundle_direct(tmp_path):
     (src / "templates" / "a.png").write_bytes(make_png((10, 10)))
     workflow = Workflow(name="wf", steps=[ocr_anchored_step("s1")])
     new_crop = make_png((50, 20), color=(1, 2, 3))
-    dest = write_healed_bundle(workflow, src, tmp_path / "dest",
-                               {"s1": new_crop})
+    dest = write_healed_bundle(workflow, src, tmp_path / "dest", {"s1": new_crop})
     assert (dest / "workflow.json").is_file()
     assert (dest / "templates" / "a.png").is_file()
     assert (dest / "templates" / "s1.png").read_bytes() == new_crop

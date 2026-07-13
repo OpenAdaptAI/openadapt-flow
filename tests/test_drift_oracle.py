@@ -100,18 +100,21 @@ def _text_present_pc() -> Postcondition:
 
 
 def _check(vision, verifier, pc, tmp_path):
-    rp = Replayer(_Backend(), vision=vision, state_verifier=verifier,
-                  poll_interval_s=0.0)
+    rp = Replayer(
+        _Backend(), vision=vision, state_verifier=verifier, poll_interval_s=0.0
+    )
     result = StepResult(step_id="s1", intent="click Save", ok=False)
     ok, _frame, failed = rp._check_postconditions(
-        _step(pc), _png(), tmp_path, {}, result)
+        _step(pc), _png(), tmp_path, {}, result
+    )
     return ok, failed, result
 
 
 # --------------------------------------------------------------------------
 
+
 def test_confident_yes_rescues_a_drifted_text_postcondition(tmp_path):
-    vision = _Vision(present=set())          # "Saved" not readable (drift)
+    vision = _Vision(present=set())  # "Saved" not readable (drift)
     verifier = _Verifier("yes")
     ok, failed, result = _check(vision, verifier, _text_present_pc(), tmp_path)
     assert ok is True and failed == []
@@ -122,7 +125,8 @@ def test_confident_yes_rescues_a_drifted_text_postcondition(tmp_path):
 
 def test_no_answer_keeps_the_halt(tmp_path):
     ok, failed, result = _check(
-        _Vision(set()), _Verifier("no"), _text_present_pc(), tmp_path)
+        _Vision(set()), _Verifier("no"), _text_present_pc(), tmp_path
+    )
     assert ok is False and failed  # still failed -> halt
     assert result.postcondition_drift_rescues == []
     assert result.drift_oracle_calls == 1
@@ -130,7 +134,8 @@ def test_no_answer_keeps_the_halt(tmp_path):
 
 def test_uncertain_answer_keeps_the_halt(tmp_path):
     ok, failed, result = _check(
-        _Vision(set()), _Verifier("uncertain"), _text_present_pc(), tmp_path)
+        _Vision(set()), _Verifier("uncertain"), _text_present_pc(), tmp_path
+    )
     assert ok is False and failed
     assert result.postcondition_drift_rescues == []
 
@@ -138,7 +143,8 @@ def test_uncertain_answer_keeps_the_halt(tmp_path):
 def test_verifier_error_is_fail_safe_halt(tmp_path):
     # An exception from the verifier must never rescue — it keeps the halt.
     ok, failed, result = _check(
-        _Vision(set()), _Verifier("boom"), _text_present_pc(), tmp_path)
+        _Vision(set()), _Verifier("boom"), _text_present_pc(), tmp_path
+    )
     assert ok is False and failed
     assert result.postcondition_drift_rescues == []
     assert result.drift_oracle_calls == 1
@@ -147,22 +153,23 @@ def test_verifier_error_is_fail_safe_halt(tmp_path):
 def test_text_absent_is_never_rescued(tmp_path):
     # text_absent that FAILS (the text IS present) is a real failure, not
     # render drift: it must not even consult the verifier.
-    pc = Postcondition(
-        kind=PostconditionKind.TEXT_ABSENT, text="Error", timeout_s=0.0)
-    vision = _Vision(present={"Error"})       # "Error" present -> pc fails
-    verifier = _Verifier("yes")               # would rescue if consulted
+    pc = Postcondition(kind=PostconditionKind.TEXT_ABSENT, text="Error", timeout_s=0.0)
+    vision = _Vision(present={"Error"})  # "Error" present -> pc fails
+    verifier = _Verifier("yes")  # would rescue if consulted
     ok, failed, result = _check(vision, verifier, pc, tmp_path)
     assert ok is False and failed
-    assert verifier.calls == 0                # never consulted
+    assert verifier.calls == 0  # never consulted
     assert result.drift_oracle_calls == 0
 
 
 def test_region_stable_is_rescuable(tmp_path):
     pc = Postcondition(
-        kind=PostconditionKind.REGION_STABLE, region=(10, 10, 40, 20),
-        phash="zz", timeout_s=0.0)
-    ok, failed, result = _check(
-        _Vision(set()), _Verifier("yes"), pc, tmp_path)
+        kind=PostconditionKind.REGION_STABLE,
+        region=(10, 10, 40, 20),
+        phash="zz",
+        timeout_s=0.0,
+    )
+    ok, failed, result = _check(_Vision(set()), _Verifier("yes"), pc, tmp_path)
     assert ok is True and failed == []
     assert result.drift_oracle_calls == 1
 
@@ -172,7 +179,8 @@ def test_no_verifier_leaves_behaviour_unchanged(tmp_path):
     rp = Replayer(_Backend(), vision=_Vision(set()), poll_interval_s=0.0)
     result = StepResult(step_id="s1", intent="x", ok=False)
     ok, _f, failed = rp._check_postconditions(
-        _step(_text_present_pc()), _png(), tmp_path, {}, result)
+        _step(_text_present_pc()), _png(), tmp_path, {}, result
+    )
     assert ok is False and failed
     assert result.drift_oracle_calls == 0
     assert result.postcondition_drift_rescues == []

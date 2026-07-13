@@ -71,9 +71,16 @@ class FakeVision:
     def text_present(self, screen_png, text, *, region=None, min_ratio=0.8):
         return text in self.present
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None, scales=(0.85, 1.0, 1.18),
-                      threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         return None
 
     def phash_png(self, png, region=None):
@@ -162,27 +169,39 @@ def test_none_text_vacuous_direction(present):
 # --------------------------------------------------------------------------- #
 @st.composite
 def _any_postcondition(draw):
-    kind = draw(st.sampled_from([
-        PostconditionKind.TEXT_PRESENT,
-        PostconditionKind.TEXT_ABSENT,
-        PostconditionKind.REGION_STABLE,
-    ]))
+    kind = draw(
+        st.sampled_from(
+            [
+                PostconditionKind.TEXT_PRESENT,
+                PostconditionKind.TEXT_ABSENT,
+                PostconditionKind.REGION_STABLE,
+            ]
+        )
+    )
     if kind in (PostconditionKind.TEXT_PRESENT, PostconditionKind.TEXT_ABSENT):
         return Postcondition(kind=kind, text=draw(st.none() | _TOKENS))
-    region = draw(st.none() | st.tuples(
-        st.integers(0, 100), st.integers(0, 100),
-        st.integers(1, 100), st.integers(1, 100),
-    ))
-    phash = draw(st.none() | st.text(alphabet="0123456789abcdef", min_size=2,
-                                     max_size=16))
+    region = draw(
+        st.none()
+        | st.tuples(
+            st.integers(0, 100),
+            st.integers(0, 100),
+            st.integers(1, 100),
+            st.integers(1, 100),
+        )
+    )
+    phash = draw(
+        st.none() | st.text(alphabet="0123456789abcdef", min_size=2, max_size=16)
+    )
     tol = draw(st.integers(0, 32))
-    return Postcondition(kind=kind, region=region, phash=phash,
-                         phash_tolerance=tol)
+    return Postcondition(kind=kind, region=region, phash=phash, phash_tolerance=tol)
 
 
 @settings(max_examples=_MAX, **_COMMON_SETTINGS)
-@given(pc=_any_postcondition(), present=st.sets(_TOKENS, max_size=6),
-       dist=st.integers(0, 64))
+@given(
+    pc=_any_postcondition(),
+    present=st.sets(_TOKENS, max_size=6),
+    dist=st.integers(0, 64),
+)
 def test_evaluation_is_deterministic(pc, present, dist):
     replayer = _replayer(FakeVision(present=present, phash_dist=dist))
     first = _passes(replayer, pc)
@@ -197,19 +216,25 @@ def test_evaluation_is_deterministic(pc, present, dist):
 # --------------------------------------------------------------------------- #
 @settings(max_examples=_MAX, **_COMMON_SETTINGS)
 @given(
-    region=st.none() | st.tuples(
-        st.integers(0, 100), st.integers(0, 100),
-        st.integers(1, 100), st.integers(1, 100),
+    region=st.none()
+    | st.tuples(
+        st.integers(0, 100),
+        st.integers(0, 100),
+        st.integers(1, 100),
+        st.integers(1, 100),
     ),
-    phash=st.none() | st.text(alphabet="0123456789abcdef", min_size=2,
-                              max_size=16),
+    phash=st.none() | st.text(alphabet="0123456789abcdef", min_size=2, max_size=16),
     dist=st.integers(0, 64),
     tol=st.integers(0, 32),
 )
 def test_region_stable_vacuous_only_when_incomplete(region, phash, dist, tol):
     replayer = _replayer(FakeVision(phash_dist=dist))
-    pc = Postcondition(kind=PostconditionKind.REGION_STABLE, region=region,
-                       phash=phash, phash_tolerance=tol)
+    pc = Postcondition(
+        kind=PostconditionKind.REGION_STABLE,
+        region=region,
+        phash=phash,
+        phash_tolerance=tol,
+    )
     verdict = _passes(replayer, pc)
 
     if region is None or phash is None:
@@ -223,6 +248,5 @@ def test_region_stable_vacuous_only_when_incomplete(region, phash, dist, tol):
         # particular it must NOT pass vacuously when the region has drifted
         # beyond tolerance.
         assert verdict is (dist <= tol), (
-            f"region_stable verdict {verdict} != (dist<=tol) for "
-            f"dist={dist} tol={tol}"
+            f"region_stable verdict {verdict} != (dist<=tol) for dist={dist} tol={tol}"
         )

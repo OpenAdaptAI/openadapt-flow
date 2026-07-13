@@ -92,9 +92,7 @@ _DIALOG_STEMS: tuple[str, ...] = (
     r"maybe\s*later",
     r"survey",
 )
-_DIALOG_RE = re.compile(
-    r"\b(?:" + "|".join(_DIALOG_STEMS) + r")\b", re.IGNORECASE
-)
+_DIALOG_RE = re.compile(r"\b(?:" + "|".join(_DIALOG_STEMS) + r")\b", re.IGNORECASE)
 
 
 class AmbiguityKind(str, Enum):
@@ -293,9 +291,7 @@ def _parameter_question(
     )
 
 
-def _absent_result_question(
-    step: Step, consequential: bool
-) -> DisambiguationQuestion:
+def _absent_result_question(step: Step, consequential: bool) -> DisambiguationQuestion:
     entity = None
     if step.anchor is not None:
         entity = step.anchor.context_text or step.anchor.ocr_text
@@ -411,9 +407,7 @@ def detect_ambiguities(workflow: Workflow) -> list[DisambiguationQuestion]:
             base = _slug(step.text)
             name = _unique_param_name(base, taken, f"value_{idx}")
             taken.add(name)
-            questions.append(
-                _parameter_question(step, consequential, name)
-            )
+            questions.append(_parameter_question(step, consequential, name))
 
         # (2) absent-result: an identity-armed entity selection that follows a
         #     typed search query, with no branch for 0/>1 matches yet.
@@ -494,9 +488,7 @@ def _apply_option(
     raise ValueError(f"unhandled option effect {opt.effect!r}")
 
 
-def _guard_predicate(
-    q: DisambiguationQuestion, opt: QuestionOption
-) -> Predicate:
+def _guard_predicate(q: DisambiguationQuestion, opt: QuestionOption) -> Predicate:
     if q.kind is AmbiguityKind.ABSENT_RESULT:
         # The searched entity must RESOLVE on the results screen; on 0 results
         # (or a screen where it does not resolve) the guard is unmet and the

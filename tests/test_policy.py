@@ -116,7 +116,9 @@ class TestLint:
         # A write-shaped label left reversible (e.g. a pre-auto-classify bundle).
         wf = Workflow(
             name="old",
-            steps=[_click("step_000", "click 'Submit'", ocr="Submit", risk="reversible")],
+            steps=[
+                _click("step_000", "click 'Submit'", ocr="Submit", risk="reversible")
+            ],
         )
         report = lint_workflow(wf)
         assert any(f.code == "under_classified_risk" for f in report.findings)

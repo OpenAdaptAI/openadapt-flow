@@ -123,9 +123,7 @@ class RestRecordVerifier:
         last: Optional[EffectVerdict] = None
         while True:
             current = self._fetch_records()
-            last = judge_records(
-                expected, before, current, substrate=self.substrate
-            )
+            last = judge_records(expected, before, current, substrate=self.substrate)
             if last.confirmed or time.monotonic() >= deadline:
                 return last
             time.sleep(self.poll_interval_s)

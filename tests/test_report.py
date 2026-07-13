@@ -158,8 +158,7 @@ def test_run_report_success(tmp_path: Path) -> None:
     assert "no readable text in the target's row band" in md
     # Per-step table columns and rows.
     assert (
-        "| # | Step | Intent | Rung | Confidence | Verified | ms "
-        "| Healed | OK |"
+        "| # | Step | Intent | Rung | Confidence | Verified | ms | Healed | OK |"
     ) in md
     assert "`step_login`" in md and "template" in md and "0.97" in md
     assert "`step_save`" in md and "ocr" in md
@@ -221,8 +220,9 @@ def _fake_runtime(reports: list[RunReport]) -> types.ModuleType:
         def __init__(self, backend, **kwargs) -> None:
             self.backend = backend
 
-        def run(self, workflow, *, params=None, bundle_dir, run_dir,
-                save_healed_to=None):
+        def run(
+            self, workflow, *, params=None, bundle_dir, run_dir, save_healed_to=None
+        ):
             calls.append(
                 {
                     "backend": self.backend,
@@ -250,8 +250,9 @@ def _bench_bundle(tmp_path: Path) -> Path:
     return bundle
 
 
-def _report(success: bool, total_ms: float, rungs: dict[str, int],
-            heals: int = 0) -> RunReport:
+def _report(
+    success: bool, total_ms: float, rungs: dict[str, int], heals: int = 0
+) -> RunReport:
     return RunReport(
         workflow_name="triage note",
         started_at="2026-07-06T12:00:00+00:00",
@@ -299,7 +300,10 @@ def test_run_bench_aggregates(tmp_path: Path, monkeypatch) -> None:
     # Params and per-iteration run dirs forwarded to the Replayer.
     assert fake.calls[0]["params"] == {"note": "hello"}
     assert [c["run_dir"].name for c in fake.calls] == [
-        "iter_000", "iter_001", "iter_002", "iter_003",
+        "iter_000",
+        "iter_001",
+        "iter_002",
+        "iter_003",
     ]
     assert fake.calls[0]["bundle_dir"] == bundle
     # Each iteration must replay a FRESH Workflow loaded from disk:
@@ -343,9 +347,7 @@ def test_run_bench_context_manager_factory(tmp_path: Path, monkeypatch) -> None:
         yield _FakeBackend()
         events.append("exit")
 
-    result = run_bench(
-        bundle, backend_factory, 1, run_root=tmp_path / "cm_runs"
-    )
+    result = run_bench(bundle, backend_factory, 1, run_root=tmp_path / "cm_runs")
     assert result["success_count"] == 1
     assert events == ["enter", "exit"]
 
@@ -373,12 +375,27 @@ def test_render_bench_report(tmp_path: Path) -> None:
         "model_calls": 3,
         "est_model_cost_usd": 0.021,
         "iterations": [
-            {"i": 0, "success": True, "total_ms": 200.0, "heal_count": 0,
-             "run_dir": "runs/iter_000"},
-            {"i": 1, "success": True, "total_ms": 210.0, "heal_count": 1,
-             "run_dir": "runs/iter_001"},
-            {"i": 2, "success": False, "total_ms": 500.0, "heal_count": 0,
-             "run_dir": "runs/iter_002"},
+            {
+                "i": 0,
+                "success": True,
+                "total_ms": 200.0,
+                "heal_count": 0,
+                "run_dir": "runs/iter_000",
+            },
+            {
+                "i": 1,
+                "success": True,
+                "total_ms": 210.0,
+                "heal_count": 1,
+                "run_dir": "runs/iter_001",
+            },
+            {
+                "i": 2,
+                "success": False,
+                "total_ms": 500.0,
+                "heal_count": 0,
+                "run_dir": "runs/iter_002",
+            },
         ],
     }
     bench_json = tmp_path / "bench.json"

@@ -43,6 +43,7 @@ class _StubClient:
 # Only a confident SAME may fail-to-veto; everything else HALTs.
 # --------------------------------------------------------------------------
 
+
 def test_same_verdict_is_only_fail_to_veto():
     vlm = RemoteIdentityVLM(_StubClient(identity={"verdict": "same"}))
     assert vlm.same_or_different(b"a", b"b") == "same"
@@ -68,38 +69,42 @@ def test_appliance_outage_vetoes():
 # The wired tier, exercised through the REAL verify_vlm_identity it feeds.
 # --------------------------------------------------------------------------
 
+
 def test_wired_tier_halts_on_outage_for_confusable_identifier():
     vlm = RemoteIdentityVLM(_StubClient(identity=None))  # appliance down
-    check = I.verify_vlm_identity(
-        b"rec", b"live", verifier=vlm, glyph_confusable=True)
+    check = I.verify_vlm_identity(b"rec", b"live", verifier=vlm, glyph_confusable=True)
     assert check is not None
     assert check.status == "mismatch" and check.mode == "vlm"
 
 
 def test_wired_tier_halts_on_different_for_confusable_identifier():
     vlm = RemoteIdentityVLM(_StubClient(identity={"verdict": "different"}))
-    check = I.verify_vlm_identity(
-        b"rec", b"live", verifier=vlm, glyph_confusable=True)
+    check = I.verify_vlm_identity(b"rec", b"live", verifier=vlm, glyph_confusable=True)
     assert check is not None and check.status == "mismatch"
 
 
 def test_wired_tier_same_abstains_never_grants_pass():
     vlm = RemoteIdentityVLM(_StubClient(identity={"verdict": "same"}))
     # veto-only: a "same" answer folds to abstain (None), never a verified pass
-    assert I.verify_vlm_identity(
-        b"rec", b"live", verifier=vlm, glyph_confusable=True) is None
+    assert (
+        I.verify_vlm_identity(b"rec", b"live", verifier=vlm, glyph_confusable=True)
+        is None
+    )
 
 
 def test_wired_tier_gated_off_for_non_confusable_identifier():
     vlm = RemoteIdentityVLM(_StubClient(identity={"verdict": "different"}))
     # the tier only runs on glyph-confusable identifiers; else it abstains
-    assert I.verify_vlm_identity(
-        b"rec", b"live", verifier=vlm, glyph_confusable=False) is None
+    assert (
+        I.verify_vlm_identity(b"rec", b"live", verifier=vlm, glyph_confusable=False)
+        is None
+    )
 
 
 # --------------------------------------------------------------------------
 # Grounder: only ever proposes; an outage lowers availability, not safety.
 # --------------------------------------------------------------------------
+
 
 def test_grounder_outage_returns_no_proposal():
     g = RemoteGrounder(_StubClient(ground=None))
@@ -117,6 +122,7 @@ def test_grounder_proposes_a_point_when_reachable():
 # Unset => fully local & model-free (the default).
 # --------------------------------------------------------------------------
 
+
 def test_factory_returns_none_when_unconfigured():
     assert appliance_from_env(env={}) is None
     assert appliance_from_env(env={"OPENADAPT_FLOW_VLM_URL": ""}) is None
@@ -124,11 +130,13 @@ def test_factory_returns_none_when_unconfigured():
 
 
 def test_factory_builds_all_handles_when_configured():
-    a = appliance_from_env(env={
-        "OPENADAPT_FLOW_VLM_URL": "http://gpu-box.lan:8077",
-        "OPENADAPT_FLOW_VLM_TOKEN": "secret",
-        "OPENADAPT_FLOW_VLM_TIMEOUT": "1.5",
-    })
+    a = appliance_from_env(
+        env={
+            "OPENADAPT_FLOW_VLM_URL": "http://gpu-box.lan:8077",
+            "OPENADAPT_FLOW_VLM_TOKEN": "secret",
+            "OPENADAPT_FLOW_VLM_TIMEOUT": "1.5",
+        }
+    )
     assert isinstance(a, RemoteAppliance)
     assert isinstance(a.identity_vlm, RemoteIdentityVLM)
     assert isinstance(a.grounder, RemoteGrounder)
@@ -138,8 +146,10 @@ def test_factory_builds_all_handles_when_configured():
 
 
 def test_factory_tolerates_a_bad_timeout():
-    a = appliance_from_env(env={
-        "OPENADAPT_FLOW_VLM_URL": "http://x",
-        "OPENADAPT_FLOW_VLM_TIMEOUT": "not-a-number",
-    })
+    a = appliance_from_env(
+        env={
+            "OPENADAPT_FLOW_VLM_URL": "http://x",
+            "OPENADAPT_FLOW_VLM_TIMEOUT": "not-a-number",
+        }
+    )
     assert a is not None  # falls back to the default timeout, no crash

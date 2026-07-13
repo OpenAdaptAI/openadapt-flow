@@ -78,15 +78,12 @@ NOTE_POOL = [
 # safe-halt there is a FALSE ABORT; data-drift conditions genuinely change the
 # list, so a halt there can be correct caution.
 CONDITIONS: dict[str, dict] = {
-    "clean":         {"cfg": {}, "drift": "none", "cosmetic": True},
-    "render_125":    {"cfg": {"font_scale": 1.25}, "drift": "none",
-                      "cosmetic": True},
-    "render_150":    {"cfg": {"font_scale": 1.5}, "drift": "none",
-                      "cosmetic": True},
-    "theme_dark":    {"cfg": {"theme": "dark"}, "drift": "none",
-                      "cosmetic": True},
-    "data_reorder":  {"cfg": {}, "drift": "reorder", "cosmetic": False},
-    "data_decoy":    {"cfg": {}, "drift": "decoy", "cosmetic": False},
+    "clean": {"cfg": {}, "drift": "none", "cosmetic": True},
+    "render_125": {"cfg": {"font_scale": 1.25}, "drift": "none", "cosmetic": True},
+    "render_150": {"cfg": {"font_scale": 1.5}, "drift": "none", "cosmetic": True},
+    "theme_dark": {"cfg": {"theme": "dark"}, "drift": "none", "cosmetic": True},
+    "data_reorder": {"cfg": {}, "drift": "reorder", "cosmetic": False},
+    "data_decoy": {"cfg": {}, "drift": "decoy", "cosmetic": False},
     "data_siblings": {"cfg": {}, "drift": "siblings", "cosmetic": False},
 }
 
@@ -98,6 +95,7 @@ GUEST_DIR = "C:/oa"
 
 # --- result rows ------------------------------------------------------------
 
+
 @dataclass
 class RunRow:
     """One arm x condition x repeat outcome, judged by the DB."""
@@ -105,10 +103,10 @@ class RunRow:
     arm: str
     condition: str
     i: int
-    outcome: str = "error"       # success|wrong_action|safe_halt|miss|error
+    outcome: str = "error"  # success|wrong_action|safe_halt|miss|error
     wrong_action: bool = False
     false_abort: bool = False
-    completed: bool = False       # arm ran to its end without halting
+    completed: bool = False  # arm ran to its end without halting
     target_note_ok: bool = False
     wrong_patient_id: Optional[int] = None
     # compiled-arm identity telemetry
@@ -127,6 +125,7 @@ class RunRow:
 
 
 # --- live harness (requires a VM; imported lazily by the orchestrator) ------
+
 
 class DesktopHarness:
     """Drives one Parallels VM through the full desktop pipeline.
@@ -179,8 +178,9 @@ class DesktopHarness:
             "'/d','0','/f'],capture_output=True)\n"
         )
         try:
-            requests.post(f"{self.shim_url}/execute_windows",
-                          json={"command": cmd}, timeout=20)
+            requests.post(
+                f"{self.shim_url}/execute_windows", json={"command": cmd}, timeout=20
+            )
         except Exception:  # noqa: BLE001
             pass
 
@@ -193,13 +193,11 @@ class DesktopHarness:
         src = Path(pv._SCRIPT_DIR)
         self.vm.exec_cmd(f"if not exist {GUEST_DIR} mkdir {GUEST_DIR}")
         for name in self._APP_SCRIPTS:
-            self.vm.push_file(str((src / name).resolve()),
-                              f"{GUEST_DIR}/{name}")
+            self.vm.push_file(str((src / name).resolve()), f"{GUEST_DIR}/{name}")
 
     # -- DB ground truth --
     def _py(self, *args: str):
-        return self.vm.exec([GUEST_PY, f"{GUEST_DIR}/pn_db.py", *args],
-                            timeout=60)
+        return self.vm.exec([GUEST_PY, f"{GUEST_DIR}/pn_db.py", *args], timeout=60)
 
     def seed(self, drift: str = "none") -> None:
         self._py("seed", "--drift", drift)
@@ -226,13 +224,17 @@ class DesktopHarness:
     def stop_app(self) -> None:
         self.vm.exec_cmd("taskkill /F /IM powershell.exe 2>nul & echo ok")
 
-    def launch_app(self, cfg: Optional[dict] = None, *, settle_s: float = 6.0
-                   ) -> None:
+    def launch_app(self, cfg: Optional[dict] = None, *, settle_s: float = 6.0) -> None:
         self.stop_app()
         time.sleep(1)
         self.write_cfg(cfg or {})
-        self.vm.exec([GUEST_PY, f"{GUEST_DIR}/session1_launch.py",
-                      f"{GUEST_DIR}/patient_notes.ps1"])
+        self.vm.exec(
+            [
+                GUEST_PY,
+                f"{GUEST_DIR}/session1_launch.py",
+                f"{GUEST_DIR}/patient_notes.ps1",
+            ]
+        )
         time.sleep(settle_s)
 
     def prepare_condition(self, condition: str) -> None:
@@ -254,7 +256,10 @@ class DesktopHarness:
         for n in u.get("nodes", []):
             nums = list(map(int, re.findall(r"-?\d+", n["rect"])))
             if len(nums) >= 4 and n["automation_id"] in (
-                "searchBox", "noteBox", "saveButton", "patientGrid"
+                "searchBox",
+                "noteBox",
+                "saveButton",
+                "patientGrid",
             ):
                 out[n["automation_id"]] = tuple(nums[:4])
         return out
@@ -303,8 +308,7 @@ class DesktopHarness:
         # surname leaves the given name + DOB in the identity band -- exactly
         # what distinguishes siblings (Sorenson vs Sorensen, different DOB).
         gL, gT, gR, gB = c["patientGrid"]
-        row0 = self.data_cell_center("last", 0) or (
-            gL + int((gR - gL) * 0.35), gT + 62)
+        row0 = self.data_cell_center("last", 0) or (gL + int((gR - gL) * 0.35), gT + 62)
 
         rec = work_dir / "recording"
         r = Recorder(self.backend, rec)
@@ -352,15 +356,17 @@ class DesktopHarness:
         cmd = (
             "import json,importlib.util\n"
             "spec=importlib.util.spec_from_file_location('uia_arm', "
-            r"r'C:\oa\uia_arm.py')" "\n"
+            r"r'C:\oa\uia_arm.py')"
+            "\n"
             "m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
             f"res=m.run({DEMO['search']!r},{DEMO['first']!r},{DEMO['last']!r},"
             f"{note!r},{mode!r})\n"
             r"open(r'C:\oa\uia_result.json','w',encoding='utf-8')"
             ".write(json.dumps(res))\n"
         )
-        requests.post(f"{self.shim_url}/execute_windows",
-                      json={"command": cmd}, timeout=60)
+        requests.post(
+            f"{self.shim_url}/execute_windows", json={"command": cmd}, timeout=60
+        )
         out = self.vm.exec_cmd(r"type C:\oa\uia_result.json").stdout.strip()
         return json.loads(out) if out else {"status": "error"}
 
@@ -373,8 +379,11 @@ class DesktopHarness:
         rows = self.db_all()
         target = next((r for r in rows if r["id"] == DEMO["target_id"]), {})
         target_ok = target.get("note", "") == note
-        wrongs = [r for r in rows
-                  if r["id"] != DEMO["target_id"] and r.get("note", "") == note]
+        wrongs = [
+            r
+            for r in rows
+            if r["id"] != DEMO["target_id"] and r.get("note", "") == note
+        ]
         return {
             "target_note_ok": target_ok,
             "wrong_patient_id": wrongs[0]["id"] if wrongs else None,
@@ -383,6 +392,7 @@ class DesktopHarness:
 
 
 # --- orchestrator -----------------------------------------------------------
+
 
 def _classify(judged: dict, completed: bool, cosmetic: bool) -> tuple[str, bool]:
     """Map (DB verdict, completion) to an outcome + false-abort flag."""
@@ -463,8 +473,7 @@ def run_desktop_benchmark(
                         row.identity_mismatch = res["identity"]["mismatch"]
                         row.identity_unreadable = res["identity"]["unreadable"]
                     else:
-                        mode = ("identity" if arm == "uia_identity"
-                                else "positional")
+                        mode = "identity" if arm == "uia_identity" else "positional"
                         res = harness.uia_run(mode, note)
                         row.selected_index = res.get("selected_index")
                         row.selected_name = res.get("selected_name")
@@ -481,10 +490,12 @@ def run_desktop_benchmark(
                     row.outcome = "error"
                 row.wall_s = round(time.time() - t0, 2)
                 rows.append(row)
-                log(f"[bench] {arm:15s} {condition:13s} #{i} -> "
+                log(
+                    f"[bench] {arm:15s} {condition:13s} #{i} -> "
                     f"{row.outcome}"
                     + (" WRONG-ACTION" if row.wrong_action else "")
-                    + (" false-abort" if row.false_abort else ""))
+                    + (" false-abort" if row.false_abort else "")
+                )
 
     results = _aggregate(rows, wf_armed, tree_quality, conditions, arms)
     write_outputs(results, out_dir)
@@ -495,8 +506,7 @@ def _armed_coverage(bundle: Path) -> dict:
     from openadapt_flow.ir import Workflow
 
     wf = Workflow.load(bundle)
-    clicks = [s for s in wf.steps
-              if s.action.value in ("click", "double_click")]
+    clicks = [s for s in wf.steps if s.action.value in ("click", "double_click")]
     armed = [s for s in clicks if s.anchor and s.anchor.context_text]
     return {
         "click_steps": len(clicks),
@@ -520,11 +530,12 @@ def _aggregate(rows, armed, tree_quality, conditions, arms) -> dict:
             "miss": sum(r.outcome == "miss" for r in arm_rows),
             "error": sum(r.outcome == "error" for r in arm_rows),
             "success_rate": round(
-                sum(r.outcome == "success" for r in arm_rows) / max(1, n), 3),
+                sum(r.outcome == "success" for r in arm_rows) / max(1, n), 3
+            ),
             "wrong_action_rate": round(
-                sum(r.wrong_action for r in arm_rows) / max(1, n), 3),
-            "wall_s_mean": round(
-                sum(r.wall_s for r in arm_rows) / max(1, n), 2),
+                sum(r.wrong_action for r in arm_rows) / max(1, n), 3
+            ),
+            "wall_s_mean": round(sum(r.wall_s for r in arm_rows) / max(1, n), 2),
         }
     # per arm x condition outcome matrix
     matrix: dict[str, dict] = {}
@@ -542,11 +553,11 @@ def _aggregate(rows, armed, tree_quality, conditions, arms) -> dict:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "task": "Patient Notes (WinForms) search -> select -> note -> save; "
-                "DB-ground-truth judge; $0 (no model calls)",
+        "DB-ground-truth judge; $0 (no model calls)",
         "substrate": "Parallels Windows 11 ARM VM on Apple M2 Max; "
-                     "WindowsBackend over in-guest WAA HTTP shim (session 1)",
+        "WindowsBackend over in-guest WAA HTTP shim (session 1)",
         "target_app_note": "WinForms substitute for OpenDental (trial not "
-                           "no-touch installable; see PHASE2.md).",
+        "no-touch installable; see PHASE2.md).",
         "identity_armed_coverage": armed,
         "uia_tree_quality": tree_quality,
         "arms": by_arm,
@@ -557,6 +568,7 @@ def _aggregate(rows, armed, tree_quality, conditions, arms) -> dict:
 
 
 # --- output writers ---------------------------------------------------------
+
 
 def render_markdown(results: dict) -> str:
     a = results["arms"]
@@ -591,10 +603,10 @@ def render_markdown(results: dict) -> str:
         "## Identity transfer to desktop-rendered text",
         "",
         f"- Compiled-arm **armed coverage**: "
-        f"{ic.get('armed_clicks','?')}/{ic.get('click_steps','?')} click steps "
+        f"{ic.get('armed_clicks', '?')}/{ic.get('click_steps', '?')} click steps "
         f"carry an identity band ({ic.get('armed_coverage', 0):.0%}).",
         f"- UIA-tree quality: "
-        f"{tq.get('n_usable_id','?')}/{tq.get('n_targets','?')} workflow "
+        f"{tq.get('n_usable_id', '?')}/{tq.get('n_targets', '?')} workflow "
         f"targets expose a usable AutomationId "
         f"({tq.get('usable_fraction', 0):.0%}); the identity-critical patient "
         f"row does **not** "
@@ -716,8 +728,7 @@ def render_chart(results: dict, path: Path) -> None:
     succ = [results["arms"][a]["success"] for a in arms]
     wrong = [results["arms"][a]["wrong_action"] for a in arms]
     halt = [results["arms"][a]["safe_halt"] for a in arms]
-    miss = [results["arms"][a]["miss"] + results["arms"][a]["error"]
-            for a in arms]
+    miss = [results["arms"][a]["miss"] + results["arms"][a]["error"] for a in arms]
     fig, ax = plt.subplots(figsize=(8, 4.5))
     bottom = [0] * len(arms)
     for label, vals, color in [
@@ -757,6 +768,8 @@ if __name__ == "__main__":  # pragma: no cover
     args = ap.parse_args()
     conds = args.conditions.split(",") if args.conditions else None
     run_desktop_benchmark(
-        args.out, n_per=args.n, conditions=conds,
+        args.out,
+        n_per=args.n,
+        conditions=conds,
         arms=tuple(args.arms.split(",")),
     )

@@ -76,7 +76,8 @@ _COUNT_NOUNS = (
 )
 COUNT_RE = re.compile(
     r"(?<!\d)\d[\d,]*\s*(?:to\s*\d[\d,]*\s*)?of\s*\d[\d,]*(?!\d)"  # 1 to 1 of 1, 2 of 9
-    r"|(?<!\d)\d[\d,]*\s*(?:(?:total|new|unread|more)\s*)?" + _COUNT_NOUNS
+    r"|(?<!\d)\d[\d,]*\s*(?:(?:total|new|unread|more)\s*)?"
+    + _COUNT_NOUNS
     + r"(?![a-z\d])"  # 56 total entries, 5 new messages
     r"|\bpage\s*\d+(?!\d)",  # Page 2 (pagination position; see tests)
     re.IGNORECASE,
@@ -148,8 +149,18 @@ MIN_DISTINCT_CHARS = 3
 
 
 _MONTH_NUMBERS = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
 }
 
 
@@ -277,9 +288,7 @@ def _residual_reason(squashed: str) -> Optional[str]:
     return None
 
 
-def classify_text(
-    text: str, *, reference_date: Optional[date] = None
-) -> Optional[str]:
+def classify_text(text: str, *, reference_date: Optional[date] = None) -> Optional[str]:
     """Classify a text fragment's volatility for use as mined evidence.
 
     Args:
@@ -320,17 +329,14 @@ def classify_text(
         # ('Inbox (2)' reads 'Inbox (3)' tomorrow). The label WITHOUT the
         # number may still be mined separately as stable text.
         stripped = COUNTER_PAREN_RE.sub(" ", text).strip()
-        if (
-            classify_text(stripped, reference_date=reference_date)
-            == _residual_reason(squashed)
+        if classify_text(stripped, reference_date=reference_date) == _residual_reason(
+            squashed
         ):
             return "counter"
     return _residual_reason(squashed)
 
 
-def is_volatile_line(
-    text: str, *, reference_date: Optional[date] = None
-) -> bool:
+def is_volatile_line(text: str, *, reference_date: Optional[date] = None) -> bool:
     """Whether a whole OCR line is too volatile to serve as evidence.
 
     Used by the identity-context extractor: a line carrying a clock time
@@ -350,9 +356,7 @@ def is_volatile_line(
     """
     if CLOCK_RE.search(text) or DOT_CLOCK_RE.search(text):
         return True
-    if RELATIVE_TIME_RE.search(text) or _is_standalone_relative_day(
-        _squash(text)
-    ):
+    if RELATIVE_TIME_RE.search(text) or _is_standalone_relative_day(_squash(text)):
         return True
     if COUNT_RE.search(text) or COUNTER_PAREN_RE.search(text):
         return True

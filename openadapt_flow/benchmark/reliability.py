@@ -231,14 +231,11 @@ def evaluate_verify(verify: Verify, page: Any) -> Optional[bool]:
         if verify.kind == "dom_count":
             return page.locator(verify.selector).count() >= verify.count
         if verify.kind == "dom_value_equals":
-            return (
-                page.locator(verify.selector).first.input_value(timeout=2000)
-                == (verify.value or "")
+            return page.locator(verify.selector).first.input_value(timeout=2000) == (
+                verify.value or ""
             )
         if verify.kind == "dom_value_nonempty":
-            return bool(
-                page.locator(verify.selector).first.input_value(timeout=2000)
-            )
+            return bool(page.locator(verify.selector).first.input_value(timeout=2000))
         if verify.kind == "dom_checked":
             return bool(page.locator(verify.selector).first.is_checked())
         if verify.kind == "dom_text_contains":
@@ -520,10 +517,6 @@ def aggregate(results: list[dict]) -> dict:
         "false_halt_count": count(lambda r: r["outcome"] == "false_halt"),
         "crash_count": count(lambda r: r["outcome"] == "crash"),
         "record_error_count": count(lambda r: r["outcome"] == "record_error"),
-        "failure_categories": dict(
-            sorted(categories.items(), key=lambda kv: -kv[1])
-        ),
-        "root_cause_hints": dict(
-            sorted(root_causes.items(), key=lambda kv: -kv[1])
-        ),
+        "failure_categories": dict(sorted(categories.items(), key=lambda kv: -kv[1])),
+        "root_cause_hints": dict(sorted(root_causes.items(), key=lambda kv: -kv[1])),
     }

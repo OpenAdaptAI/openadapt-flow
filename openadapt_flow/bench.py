@@ -45,9 +45,7 @@ def _run_one(
     run_dir: Path,
 ) -> RunReport:
     replayer = replayer_cls(backend)
-    return replayer.run(
-        workflow, params=params, bundle_dir=bundle_dir, run_dir=run_dir
-    )
+    return replayer.run(workflow, params=params, bundle_dir=bundle_dir, run_dir=run_dir)
 
 
 def run_bench(

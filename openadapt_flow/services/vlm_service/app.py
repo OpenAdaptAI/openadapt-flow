@@ -74,7 +74,9 @@ def _decode_png(b64: str, field: str) -> bytes:
     try:
         return base64.b64decode(b64, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=f"invalid base64 for {field}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"invalid base64 for {field}"
+        ) from exc
 
 
 def _extract_json_object(text: str) -> Optional[dict]:

@@ -125,9 +125,7 @@ PRODUCTION_CAPS = dict(
 # -- frozen legacy matcher (pre-2026-07-10), for the before-curve ---------------
 
 
-def _legacy_token_matched(
-    token: str, hay_squashed: str, hay_tokens: list[str]
-) -> bool:
+def _legacy_token_matched(token: str, hay_squashed: str, hay_tokens: list[str]) -> bool:
     """Verbatim / containment(0.8-run) / similarity(0.7) tiers, verbatim
     copy of the matcher that shipped with feat/fix-wrong-actions."""
     if token in hay_tokens:
@@ -160,9 +158,7 @@ def legacy_band_match(expected_text: str, observed_text: str) -> BandMatch:
     current_run = 0
     for token in expected_tokens:
         total_chars += len(token)
-        if hay_squashed and _legacy_token_matched(
-            token, hay_squashed, hay_tokens
-        ):
+        if hay_squashed and _legacy_token_matched(token, hay_squashed, hay_tokens):
             matched_chars += len(token)
             if current_run:
                 uncovered_runs.append(current_run)
@@ -171,9 +167,7 @@ def legacy_band_match(expected_text: str, observed_text: str) -> BandMatch:
             current_run += len(token)
     if current_run:
         uncovered_runs.append(current_run)
-    return BandMatch(
-        matched_chars / total_chars, max(uncovered_runs, default=0), 0
-    )
+    return BandMatch(matched_chars / total_chars, max(uncovered_runs, default=0), 0)
 
 
 # -- evaluation -------------------------------------------------------------------
@@ -264,8 +258,7 @@ def sweep(pairs: list[CorpusPair]) -> list[SweepPoint]:
     points: list[SweepPoint] = []
     for sim in SIM_GRID:
         stats = [
-            band_match(p.recorded, p.observed, contradiction_sim=sim)
-            for p in pairs
+            band_match(p.recorded, p.observed, contradiction_sim=sim) for p in pairs
         ]
         for coverage in COVERAGE_GRID:
             for run_cap in RUN_CAP_GRID:
@@ -285,22 +278,42 @@ def sweep(pairs: list[CorpusPair]) -> list[SweepPoint]:
                                 )
                                 points.append(
                                     SweepPoint(
-                                        "current", sim, coverage, run_cap,
-                                        contra_cap, suspect_cap, name_cap,
-                                        alpha_cap, fa, ab, ja,
+                                        "current",
+                                        sim,
+                                        coverage,
+                                        run_cap,
+                                        contra_cap,
+                                        suspect_cap,
+                                        name_cap,
+                                        alpha_cap,
+                                        fa,
+                                        ab,
+                                        ja,
                                     )
                                 )
     legacy_stats = [legacy_band_match(p.recorded, p.observed) for p in pairs]
     for coverage in COVERAGE_GRID:
         for run_cap in RUN_CAP_GRID:
             fa, ab, ja = _rates(
-                pairs, legacy_stats, coverage=coverage, run_cap=run_cap,
+                pairs,
+                legacy_stats,
+                coverage=coverage,
+                run_cap=run_cap,
                 contra_cap=BIG,
             )
             points.append(
                 SweepPoint(
-                    "legacy", None, coverage, run_cap, BIG, BIG, BIG, BIG,
-                    fa, ab, ja,
+                    "legacy",
+                    None,
+                    coverage,
+                    run_cap,
+                    BIG,
+                    BIG,
+                    BIG,
+                    BIG,
+                    fa,
+                    ab,
+                    ja,
                 )
             )
     return points
@@ -328,10 +341,11 @@ def pareto(points: list[SweepPoint]) -> list[SweepPoint]:
     frontier = []
     for p in points:
         if not any(
-            (q.false_accept <= p.false_accept
-             and q.false_abort <= p.false_abort
-             and (q.false_accept < p.false_accept
-                  or q.false_abort < p.false_abort))
+            (
+                q.false_accept <= p.false_accept
+                and q.false_abort <= p.false_abort
+                and (q.false_accept < p.false_accept or q.false_abort < p.false_abort)
+            )
             for q in points
         ):
             frontier.append(p)
@@ -354,6 +368,7 @@ def occlusion_recount(v1_pairs: list[CorpusPair]) -> dict:
     first two tokens are always the name, so name readability is
     checked by canonical token presence.
     """
+
     def names_readable(p: CorpusPair) -> bool:
         name_tokens = tokenize(" ".join(p.recorded.split()[:2]))
         obs_c = {ocr_canonical(t) for t in tokenize(p.observed)}
@@ -374,9 +389,7 @@ def occlusion_recount(v1_pairs: list[CorpusPair]) -> dict:
     return out
 
 
-def realistic_exposure(
-    v2_pairs: list[CorpusPair], v3_pairs: list[CorpusPair]
-) -> dict:
+def realistic_exposure(v2_pairs: list[CorpusPair], v3_pairs: list[CorpusPair]) -> dict:
     """Exposure analysis: what catches each collision class when the
     SUSPECT rule is disabled, isolating what the suspect rule alone
     defends. Name-collision classes (v2) and the identifier letter/digit
@@ -402,8 +415,7 @@ def realistic_exposure(
             for p in subset
         )
         fa_wo_suspect = sum(
-            _decide(band_match(p.recorded, p.observed), **no_suspect)
-            for p in subset
+            _decide(band_match(p.recorded, p.observed), **no_suspect) for p in subset
         )
         out[category] = {
             "n": n,
@@ -428,25 +440,38 @@ def render_chart(points: list[SweepPoint], out_png: Path) -> None:
     ax.scatter(
         [p.false_accept * 100 for p in legacy],
         [p.false_abort * 100 for p in legacy],
-        s=28, marker="x", color="#c0392b", alpha=0.8,
+        s=28,
+        marker="x",
+        color="#c0392b",
+        alpha=0.8,
         label="legacy matcher (containment + 0.7-similarity tiers)",
     )
     ax.scatter(
         [p.false_accept * 100 for p in current],
         [p.false_abort * 100 for p in current],
-        s=16, marker="o", color="#2c7fb8", alpha=0.35,
+        s=16,
+        marker="o",
+        color="#2c7fb8",
+        alpha=0.35,
         label="redesigned matcher (name+identifier suspect, 2026-07-10)",
     )
     front = pareto(current)
     ax.plot(
         [p.false_accept * 100 for p in front],
         [p.false_abort * 100 for p in front],
-        color="#2c7fb8", linewidth=1.2, alpha=0.9, zorder=3,
+        color="#2c7fb8",
+        linewidth=1.2,
+        alpha=0.9,
+        zorder=3,
     )
     op = _op_point(points)
     ax.scatter(
-        [op.false_accept * 100], [op.false_abort * 100],
-        s=180, marker="*", color="#1a9850", zorder=4,
+        [op.false_accept * 100],
+        [op.false_abort * 100],
+        s=180,
+        marker="*",
+        color="#1a9850",
+        zorder=4,
         label=(
             "chosen operating point "
             f"(FA {op.false_accept:.2%}, FAbort {op.false_abort:.1%})"
@@ -475,13 +500,11 @@ def _matches_op(p: SweepPoint) -> bool:
         and p.contradiction_sim == OPERATING_POINT["contradiction_sim"]
         and p.coverage_threshold == OPERATING_POINT["coverage_threshold"]
         and p.uncovered_run_cap == OPERATING_POINT["uncovered_run_cap"]
-        and p.contradicted_chars_cap
-        == OPERATING_POINT["contradicted_chars_cap"]
+        and p.contradicted_chars_cap == OPERATING_POINT["contradicted_chars_cap"]
         and p.suspect_chars_cap == OPERATING_POINT["suspect_chars_cap"]
         and p.unexplained_name_tokens_cap
         == OPERATING_POINT["unexplained_name_tokens_cap"]
-        and p.absent_name_token_cap
-        == OPERATING_POINT["absent_name_token_cap"]
+        and p.absent_name_token_cap == OPERATING_POINT["absent_name_token_cap"]
     )
 
 
@@ -505,9 +528,9 @@ def _cap_str(v: int) -> str:
 def _corner_paragraph(points: list[SweepPoint]) -> str:
     """Why the minimum-false-abort zero-FA Pareto corner was rejected."""
     zero_fa = [
-        p for p in points
-        if p.matcher == "current" and p.false_accept == 0.0
-        and not _matches_op(p)
+        p
+        for p in points
+        if p.matcher == "current" and p.false_accept == 0.0 and not _matches_op(p)
     ]
     if not zero_fa:
         return (
@@ -549,14 +572,20 @@ def render_markdown(
     op = _op_point(points)
     sim = OPERATING_POINT["contradiction_sim"]
     legacy_prod = next(
-        p for p in points
-        if p.matcher == "legacy" and p.coverage_threshold == 0.80
+        p
+        for p in points
+        if p.matcher == "legacy"
+        and p.coverage_threshold == 0.80
         and p.uncovered_run_cap == 4
     )
     shipped = _find_current(
-        points, contradiction_sim=sim, coverage_threshold=0.80,
-        uncovered_run_cap=4, contradicted_chars_cap=0,
-        suspect_chars_cap=BIG, unexplained_name_tokens_cap=BIG,
+        points,
+        contradiction_sim=sim,
+        coverage_threshold=0.80,
+        uncovered_run_cap=4,
+        contradicted_chars_cap=0,
+        suspect_chars_cap=BIG,
+        unexplained_name_tokens_cap=BIG,
         absent_name_token_cap=BIG,
     )
     occ_ship = occlusion["shipped"]
@@ -567,8 +596,7 @@ def render_markdown(
     exp_id = exposure["id_letter_digit_collision"]
 
     lines = [
-        "# Identity band matcher — held-out adversarial ROC "
-        "(corpora v1+v2+v3)",
+        "# Identity band matcher — held-out adversarial ROC (corpora v1+v2+v3)",
         "",
         "Generated by `python -m openadapt_flow.validation.identity_roc` "
         "from the FROZEN corpora: v1 (4360 pairs, seed 20260710), v2 "
@@ -648,7 +676,7 @@ def render_markdown(
         "",
         "**EIGHTH reopening — the same-name/same-DOB homonym, and the "
         "name-carry rule REVERSED (this branch).** #27's \"disclosed "
-        "residual\" above was a LIVE, production-reachable wrong-patient "
+        'residual" above was a LIVE, production-reachable wrong-patient '
         "VERIFY: an adversarial review of PR #31 drove `AC50061` (recorded) "
         "vs a DIFFERENT same-name/same-DOB patient `AC5OO61` (letter O) "
         "through the REAL replayer — both OCR to `AC50061`, name+DOB "
@@ -681,8 +709,8 @@ def render_markdown(
         "byte-identical string `100512` — the letter+digit predicate never "
         "flagged the all-digit `100512`, so the homonym VERIFIED the wrong "
         "patient on the REAL replayer (also reproduced with `400761`/`4OO761` "
-        "and `417063`/`4l7063`). The scoping to \"alphanumeric MRN/account "
-        "token\" is therefore REMOVED: `_is_glyph_vulnerable_identifier` now "
+        'and `417063`/`4l7063`). The scoping to "alphanumeric MRN/account '
+        'token" is therefore REMOVED: `_is_glyph_vulnerable_identifier` now '
         "flags ANY identifier-shaped token (a bare alphanumeric run ≥ 3 chars "
         "carrying a digit — numeric, alphanumeric, or lowercase; a date/DOB "
         "carries a separator and is excluded, a name carries no digit and is "
@@ -867,8 +895,7 @@ def render_markdown(
         "collision, which the second review then exploited — see the v3 "
         "row.)",
         "",
-        "| collision class | n | FA at production | FA without the "
-        "suspect rule |",
+        "| collision class | n | FA at production | FA without the suspect rule |",
         "| --- | --- | --- | --- |",
         f"| name collision, distinct DOB/MRN present | {exp_diff['n']} | "
         f"{exp_diff['false_accepts_at_production']} | "
@@ -1004,17 +1031,20 @@ def main() -> None:
     cat_tables = {
         "v1_current": per_category(v1, band_match, PRODUCTION_CAPS),
         "v1_legacy": per_category(
-            v1, legacy_band_match,
+            v1,
+            legacy_band_match,
             dict(coverage=0.8, run_cap=4, contra_cap=BIG),
         ),
         "v2_current": per_category(v2, band_match, PRODUCTION_CAPS),
         "v2_legacy": per_category(
-            v2, legacy_band_match,
+            v2,
+            legacy_band_match,
             dict(coverage=0.8, run_cap=4, contra_cap=BIG),
         ),
         "v3_current": per_category(v3, band_match, PRODUCTION_CAPS),
         "v3_legacy": per_category(
-            v3, legacy_band_match,
+            v3,
+            legacy_band_match,
             dict(coverage=0.8, run_cap=4, contra_cap=BIG),
         ),
     }

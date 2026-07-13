@@ -60,9 +60,16 @@ class FakeVision:
         self.pixels_changed_results: list = []
         self.pixels_changed_calls: list = []
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None,
-                      scales=(0.85, 1.0, 1.18), threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         self.template_calls.append(search_region)
         if self.template_results:
             return self.template_results.pop(0)
@@ -79,9 +86,7 @@ class FakeVision:
         # Same script as find_text (postconditions use the tolerant
         # presence check; tests script both through text_results).
         return (
-            self.find_text(
-                screen_png, text, region=region, min_ratio=min_ratio
-            )
+            self.find_text(screen_png, text, region=region, min_ratio=min_ratio)
             is not None
         )
 
@@ -90,8 +95,9 @@ class FakeVision:
             return self.ocr_results.pop(0)
         return self.ocr_lines
 
-    def pixels_changed(self, before_png, after_png, *, region=None,
-                       threshold=20, min_pixels=4):
+    def pixels_changed(
+        self, before_png, after_png, *, region=None, threshold=20, min_pixels=4
+    ):
         self.pixels_changed_calls.append(region)
         if self.pixels_changed_results:
             return self.pixels_changed_results.pop(0)
@@ -103,8 +109,7 @@ class FakeVision:
     def phash_distance(self, a, b):
         return self.phash_dist
 
-    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2,
-                     timeout_s=3.0):
+    def wait_settled(self, backend, *, interval_s=0.1, stable_frames=2, timeout_s=3.0):
         self.settle_count += 1
         return backend.screenshot()
 
@@ -135,9 +140,15 @@ class FakeBackend:
         self.actions.append(("scroll", dx, dy))
 
 
-def click_step(step_id="s1", *, risk="reversible", expect=(),
-               template="templates/btn.png", ocr_text="Save",
-               landmarks=()) -> Step:
+def click_step(
+    step_id="s1",
+    *,
+    risk="reversible",
+    expect=(),
+    template="templates/btn.png",
+    ocr_text="Save",
+    landmarks=(),
+) -> Step:
     return Step(
         id=step_id,
         intent=f"click '{ocr_text or step_id}'",
@@ -179,17 +190,22 @@ def test_happy_path_click_then_param_type(bundle, run_dir):
     workflow = Workflow(
         name="wf",
         steps=[
-            click_step(expect=[Postcondition(
-                kind=PostconditionKind.TEXT_PRESENT, text="Saved", timeout_s=0.2
-            )]),
-            Step(id="s2", intent="type note", action=ActionKind.TYPE,
-                 param="note"),
+            click_step(
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT, text="Saved", timeout_s=0.2
+                    )
+                ]
+            ),
+            Step(id="s2", intent="type note", action=ActionKind.TYPE, param="note"),
         ],
     )
     replayer = Replayer(backend, vision=vision, poll_interval_s=0.01)
     report = replayer.run(
-        workflow, params={"note": "hello world"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"note": "hello world"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert backend.actions == [
@@ -203,9 +219,7 @@ def test_happy_path_click_then_param_type(bundle, run_dir):
     assert report.params == {"note": "hello world"}
     # Run directory artifacts.
     assert (run_dir / "report.json").is_file()
-    loaded = RunReport.model_validate(
-        json.loads((run_dir / "report.json").read_text())
-    )
+    loaded = RunReport.model_validate(json.loads((run_dir / "report.json").read_text()))
     assert loaded.success is True
     for step_id in ("s1", "s2"):
         assert (run_dir / f"steps/{step_id}_before.png").is_file()
@@ -222,10 +236,8 @@ def test_missing_param_fails_step_and_aborts_run(bundle, run_dir):
     workflow = Workflow(
         name="wf",
         steps=[
-            Step(id="t1", intent="type note", action=ActionKind.TYPE,
-                 param="note"),
-            Step(id="k1", intent="press enter", action=ActionKind.KEY,
-                 key="Enter"),
+            Step(id="t1", intent="type note", action=ActionKind.TYPE, param="note"),
+            Step(id="k1", intent="press enter", action=ActionKind.KEY, key="Enter"),
         ],
     )
     report = Replayer(backend, vision=vision).run(
@@ -245,12 +257,21 @@ def test_param_overrides_recorded_literal_text(bundle, run_dir):
     workflow = Workflow(
         name="wf",
         params={"note": "recorded value"},
-        steps=[Step(id="t1", intent="type <note>", action=ActionKind.TYPE,
-                    text="recorded value", param="note")],
+        steps=[
+            Step(
+                id="t1",
+                intent="type <note>",
+                action=ActionKind.TYPE,
+                text="recorded value",
+                param="note",
+            )
+        ],
     )
     report = Replayer(backend, vision=vision).run(
-        workflow, params={"note": "runtime value"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"note": "runtime value"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert backend.actions == [("type", "runtime value")]
@@ -265,8 +286,9 @@ def test_workflow_params_are_replay_defaults(bundle, run_dir):
     workflow = Workflow(
         name="wf",
         params={"note": "recorded default"},
-        steps=[Step(id="t1", intent="type <note>", action=ActionKind.TYPE,
-                    param="note")],
+        steps=[
+            Step(id="t1", intent="type <note>", action=ActionKind.TYPE, param="note")
+        ],
     )
     report = Replayer(backend, vision=vision).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -281,8 +303,14 @@ def test_literal_text_type_step(bundle, run_dir):
     backend = FakeBackend()
     workflow = Workflow(
         name="wf",
-        steps=[Step(id="t1", intent="type literal", action=ActionKind.TYPE,
-                    text="fixed text")],
+        steps=[
+            Step(
+                id="t1",
+                intent="type literal",
+                action=ActionKind.TYPE,
+                text="fixed text",
+            )
+        ],
     )
     report = Replayer(backend, vision=vision).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -303,8 +331,7 @@ def test_risk_gate_blocks_irreversible_step_below_ocr(bundle, run_dir):
         step_id="danger",
         risk="irreversible",
         ocr_text=None,
-        landmarks=[Landmark(relation="left_of", ocr_text="Note",
-                            distance_px=40)],
+        landmarks=[Landmark(relation="left_of", ocr_text="Note", distance_px=40)],
     )
     workflow = Workflow(name="wf", steps=[step])
     report = Replayer(backend, vision=vision).run(
@@ -330,15 +357,20 @@ def test_postcondition_passes_after_resettle_retry(bundle, run_dir):
     # First check fails (timeout_s=0 expires immediately); the single
     # re-settle retry then sees the text.
     vision.text_results = {
-        "Done": [None,
-                 Match(point=(10, 10), region=(5, 5, 20, 8), confidence=0.9)]
+        "Done": [None, Match(point=(10, 10), region=(5, 5, 20, 8), confidence=0.9)]
     }
     backend = FakeBackend()
     workflow = Workflow(
         name="wf",
-        steps=[click_step(expect=[Postcondition(
-            kind=PostconditionKind.TEXT_PRESENT, text="Done", timeout_s=0.0
-        )])],
+        steps=[
+            click_step(
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT, text="Done", timeout_s=0.0
+                    )
+                ]
+            )
+        ],
     )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -355,15 +387,24 @@ def test_postcondition_polling_passes_within_timeout(bundle, run_dir):
         Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     ]
     vision.text_results = {
-        "Done": [None, None,
-                 Match(point=(10, 10), region=(5, 5, 20, 8), confidence=0.9)]
+        "Done": [
+            None,
+            None,
+            Match(point=(10, 10), region=(5, 5, 20, 8), confidence=0.9),
+        ]
     }
     backend = FakeBackend()
     workflow = Workflow(
         name="wf",
-        steps=[click_step(expect=[Postcondition(
-            kind=PostconditionKind.TEXT_PRESENT, text="Done", timeout_s=1.0
-        )])],
+        steps=[
+            click_step(
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT, text="Done", timeout_s=1.0
+                    )
+                ]
+            )
+        ],
     )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -383,12 +424,16 @@ def test_semantic_drift_aborts_run_with_named_step(bundle, run_dir):
     workflow = Workflow(
         name="wf",
         steps=[
-            click_step(expect=[Postcondition(
-                kind=PostconditionKind.TEXT_PRESENT, text="Banner",
-                timeout_s=0.05,
-            )]),
-            Step(id="s2", intent="never runs", action=ActionKind.KEY,
-                 key="Enter"),
+            click_step(
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT,
+                        text="Banner",
+                        timeout_s=0.05,
+                    )
+                ]
+            ),
+            Step(id="s2", intent="never runs", action=ActionKind.KEY, key="Enter"),
         ],
     )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
@@ -419,10 +464,19 @@ def test_region_stable_postcondition_uses_phash(bundle, run_dir):
     backend = FakeBackend()
     workflow = Workflow(
         name="wf",
-        steps=[click_step(expect=[Postcondition(
-            kind=PostconditionKind.REGION_STABLE, region=(0, 0, 40, 30),
-            phash="deadbeef", phash_tolerance=8, timeout_s=0.2,
-        )])],
+        steps=[
+            click_step(
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.REGION_STABLE,
+                        region=(0, 0, 40, 30),
+                        phash="deadbeef",
+                        phash_tolerance=8,
+                        timeout_s=0.2,
+                    )
+                ]
+            )
+        ],
     )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -435,13 +489,25 @@ def test_region_stable_postcondition_uses_phash(bundle, run_dir):
         Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     ]
     vision2.phash_dist = 20
-    report2 = Replayer(FakeBackend(), vision=vision2,
-                       poll_interval_s=0.01).run(
-        Workflow(name="wf", steps=[click_step(expect=[Postcondition(
-            kind=PostconditionKind.REGION_STABLE, region=(0, 0, 40, 30),
-            phash="deadbeef", phash_tolerance=8, timeout_s=0.05,
-        )])]),
-        bundle_dir=bundle, run_dir=run_dir,
+    report2 = Replayer(FakeBackend(), vision=vision2, poll_interval_s=0.01).run(
+        Workflow(
+            name="wf",
+            steps=[
+                click_step(
+                    expect=[
+                        Postcondition(
+                            kind=PostconditionKind.REGION_STABLE,
+                            region=(0, 0, 40, 30),
+                            phash="deadbeef",
+                            phash_tolerance=8,
+                            timeout_s=0.05,
+                        )
+                    ]
+                )
+            ],
+        ),
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report2.success is False
 
@@ -481,8 +547,15 @@ def test_region_stable_template_tolerates_layout_shift(bundle, run_dir):
     )
     workflow = Workflow(
         name="wf",
-        steps=[Step(id="k1", intent="press enter", action=ActionKind.KEY,
-                    key="Enter", expect=[pc])],
+        steps=[
+            Step(
+                id="k1",
+                intent="press enter",
+                action=ActionKind.KEY,
+                key="Enter",
+                expect=[pc],
+            )
+        ],
     )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -507,8 +580,15 @@ def test_region_stable_fails_when_template_and_phash_miss(bundle, run_dir):
     )
     workflow = Workflow(
         name="wf",
-        steps=[Step(id="k1", intent="press enter", action=ActionKind.KEY,
-                    key="Enter", expect=[pc])],
+        steps=[
+            Step(
+                id="k1",
+                intent="press enter",
+                action=ActionKind.KEY,
+                key="Enter",
+                expect=[pc],
+            )
+        ],
     )
     report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -523,10 +603,20 @@ def test_scroll_step_scrolls_backend(bundle, run_dir):
     workflow = Workflow(
         name="wf",
         steps=[
-            Step(id="sc1", intent="scroll by (0, 400)",
-                 action=ActionKind.SCROLL, scroll_dx=0, scroll_dy=400),
-            Step(id="sc2", intent="scroll by (-30, -120)",
-                 action=ActionKind.SCROLL, scroll_dx=-30, scroll_dy=-120),
+            Step(
+                id="sc1",
+                intent="scroll by (0, 400)",
+                action=ActionKind.SCROLL,
+                scroll_dx=0,
+                scroll_dy=400,
+            ),
+            Step(
+                id="sc2",
+                intent="scroll by (-30, -120)",
+                action=ActionKind.SCROLL,
+                scroll_dx=-30,
+                scroll_dy=-120,
+            ),
         ],
     )
     report = Replayer(backend, vision=vision).run(
@@ -540,16 +630,20 @@ def test_scroll_step_scrolls_backend(bundle, run_dir):
 
 
 def scroll_step(step_id="sc1", dx=0, dy=400) -> Step:
-    return Step(id=step_id, intent=f"scroll by ({dx}, {dy})",
-                action=ActionKind.SCROLL, scroll_dx=dx, scroll_dy=dy)
+    return Step(
+        id=step_id,
+        intent=f"scroll by ({dx}, {dy})",
+        action=ActionKind.SCROLL,
+        scroll_dx=dx,
+        scroll_dy=dy,
+    )
 
 
 def test_closed_loop_scroll_stops_when_next_anchor_resolves(bundle, run_dir):
     """A SCROLL step followed by an anchored step scrolls incrementally by
     the recorded delta until that anchor resolves on a settled frame."""
     vision = FakeVision()
-    target = Match(point=(110, 105), region=(100, 100, 50, 20),
-                   confidence=0.95)
+    target = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     # Probe on the pre-scroll frame misses (local+global), the probe after
     # the first scroll resolves; the click step then resolves for itself.
     vision.template_results = [None, None, target, target]
@@ -573,8 +667,7 @@ def test_closed_loop_scroll_noops_when_anchor_already_in_view(bundle, run_dir):
     """The pre-scroll probe resolving means the target is already on screen:
     the SCROLL step must not scroll at all."""
     vision = FakeVision()
-    target = Match(point=(110, 105), region=(100, 100, 50, 20),
-                   confidence=0.95)
+    target = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     vision.template_results = [target, target]  # probe, then click resolve
     backend = FakeBackend()
     workflow = Workflow(name="wf", steps=[scroll_step(), click_step()])
@@ -613,8 +706,7 @@ def test_consecutive_scroll_steps_share_the_loop(bundle, run_dir):
     step is another SCROLL step: that step inherits the loop (probe-first),
     so a recorded run of N scrolls has a combined ~2.5x budget."""
     vision = FakeVision()
-    target = Match(point=(110, 105), region=(100, 100, 50, 20),
-                   confidence=0.95)
+    target = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     # 4 failed probes (2 template calls each: local + global), then the
     # second scroll step's first post-scroll probe resolves, then the click
     # resolves for itself.
@@ -646,9 +738,10 @@ def test_scroll_without_later_anchor_stays_open_loop(bundle, run_dir):
     backend = FakeBackend()
     workflow = Workflow(
         name="wf",
-        steps=[scroll_step(dx=-30, dy=-120),
-               Step(id="k1", intent="press enter", action=ActionKind.KEY,
-                    key="Enter")],
+        steps=[
+            scroll_step(dx=-30, dy=-120),
+            Step(id="k1", intent="press enter", action=ActionKind.KEY, key="Enter"),
+        ],
     )
     report = Replayer(backend, vision=vision).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -663,8 +756,7 @@ def test_key_step_presses_key(bundle, run_dir):
     backend = FakeBackend()
     workflow = Workflow(
         name="wf",
-        steps=[Step(id="k1", intent="press enter", action=ActionKind.KEY,
-                    key="Enter")],
+        steps=[Step(id="k1", intent="press enter", action=ActionKind.KEY, key="Enter")],
     )
     report = Replayer(backend, vision=vision).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -787,12 +879,12 @@ def test_identity_param_mode_reanchors_on_run_value(bundle, run_dir):
     vision.ocr_lines = [OcrLine("Open chart for Susan (active)")]
     backend = FakeBackend()
     step = context_click_step("Open chart for Phil (active)")
-    workflow = Workflow(
-        name="wf", params={"patient": "Phil"}, steps=[step]
-    )
+    workflow = Workflow(name="wf", params={"patient": "Phil"}, steps=[step])
     report = Replayer(backend, vision=vision).run(
-        workflow, params={"patient": "Susan"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"patient": "Susan"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert ("click", 110, 105, False) in backend.actions
@@ -814,12 +906,12 @@ def test_identity_param_mode_value_alone_does_not_verify(bundle, run_dir):
     vision.ocr_lines = [OcrLine("Underwood, Susan Ardmore")]
     backend = FakeBackend()
     step = context_click_step("Belford, Phil MRN A12")
-    workflow = Workflow(
-        name="wf", params={"patient": "Phil"}, steps=[step]
-    )
+    workflow = Workflow(name="wf", params={"patient": "Phil"}, steps=[step])
     report = Replayer(backend, vision=vision).run(
-        workflow, params={"patient": "Susan"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"patient": "Susan"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is False
     assert backend.actions == []  # never clicked
@@ -835,11 +927,8 @@ def test_identity_one_row_off_resolution_mismatches(bundle, run_dir):
     sits one row up (y~75) and the resolved row is a different entity."""
     vision = resolving_vision()
     vision.ocr_lines = [
-        OcrLine(
-            "Jane Sample Knee pain referral High", region=(160, 65, 240, 20)
-        ),
-        OcrLine("Taylor Duplicate Knee pain referral High",
-                region=(160, 95, 240, 20)),
+        OcrLine("Jane Sample Knee pain referral High", region=(160, 65, 240, 20)),
+        OcrLine("Taylor Duplicate Knee pain referral High", region=(160, 95, 240, 20)),
     ]
     backend = FakeBackend()
     step = context_click_step("Jane Sample Knee pain referral High")
@@ -876,12 +965,12 @@ def test_identity_param_mode_mismatch_halts(bundle, run_dir):
     vision.ocr_lines = [OcrLine("Getting, Robert Third")]
     backend = FakeBackend()
     step = context_click_step("Belford, Phil MRN A12")
-    workflow = Workflow(
-        name="wf", params={"patient": "Phil"}, steps=[step]
-    )
+    workflow = Workflow(name="wf", params={"patient": "Phil"}, steps=[step])
     report = Replayer(backend, vision=vision).run(
-        workflow, params={"patient": "Susan"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"patient": "Susan"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is False
     assert backend.actions == []
@@ -901,7 +990,8 @@ def test_identity_abstain_halts_irreversible_step(bundle, run_dir):
     vision.ocr_lines = [OcrLine("MG4408 Okafor, Philip 1966-01-17 M Active")]
     backend = FakeBackend()
     step = context_click_step(
-        "MG4408 Okafor, Philip 1966-01-17 M Active", risk="irreversible")
+        "MG4408 Okafor, Philip 1966-01-17 M Active", risk="irreversible"
+    )
     report = Replayer(backend, vision=vision).run(
         Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
     )
@@ -922,7 +1012,8 @@ def test_identity_abstain_proceeds_flagged_when_reversible(bundle, run_dir):
     vision.ocr_lines = [OcrLine("MG4408 Okafor, Philip 1966-01-17 M Active")]
     backend = FakeBackend()
     step = context_click_step(
-        "MG4408 Okafor, Philip 1966-01-17 M Active", risk="reversible")
+        "MG4408 Okafor, Philip 1966-01-17 M Active", risk="reversible"
+    )
     report = Replayer(backend, vision=vision).run(
         Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
     )
@@ -1016,7 +1107,8 @@ def test_no_identity_check_without_recorded_context(bundle, run_dir):
     backend = FakeBackend()
     report = Replayer(backend, vision=vision).run(
         Workflow(name="wf", steps=[click_step()]),
-        bundle_dir=bundle, run_dir=run_dir,
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert report.results[0].identity is None
@@ -1035,21 +1127,20 @@ def test_type_verification_passes_when_field_changes(bundle, run_dir):
         name="wf",
         steps=[
             click_step(),
-            Step(id="t1", intent="type note", action=ActionKind.TYPE,
-                 param="note"),
+            Step(id="t1", intent="type note", action=ActionKind.TYPE, param="note"),
         ],
     )
     report = Replayer(backend, vision=vision).run(
-        workflow, params={"note": "hello world"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"note": "hello world"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert report.results[1].input_verified is True
     assert report.results[1].input_retried is False
     # The diff was constrained to the field region around the focusing click.
-    assert vision.pixels_changed_calls and (
-        vision.pixels_changed_calls[0] is not None
-    )
+    assert vision.pixels_changed_calls and (vision.pixels_changed_calls[0] is not None)
 
 
 def test_type_verification_refocuses_and_retypes_once(bundle, run_dir):
@@ -1066,13 +1157,14 @@ def test_type_verification_refocuses_and_retypes_once(bundle, run_dir):
         name="wf",
         steps=[
             click_step(),
-            Step(id="t1", intent="type note", action=ActionKind.TYPE,
-                 param="note"),
+            Step(id="t1", intent="type note", action=ActionKind.TYPE, param="note"),
         ],
     )
     report = Replayer(backend, vision=vision).run(
-        workflow, params={"note": "hello world"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"note": "hello world"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert backend.actions == [
@@ -1099,15 +1191,15 @@ def test_type_verification_failure_halts_run(bundle, run_dir):
         name="wf",
         steps=[
             click_step(),
-            Step(id="t1", intent="type note", action=ActionKind.TYPE,
-                 param="note"),
-            Step(id="k1", intent="press enter", action=ActionKind.KEY,
-                 key="Enter"),
+            Step(id="t1", intent="type note", action=ActionKind.TYPE, param="note"),
+            Step(id="k1", intent="press enter", action=ActionKind.KEY, key="Enter"),
         ],
     )
     report = Replayer(backend, vision=vision).run(
-        workflow, params={"note": "hello world"},
-        bundle_dir=bundle, run_dir=run_dir,
+        workflow,
+        params={"note": "hello world"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is False
     assert len(report.results) == 2  # k1 never ran
@@ -1124,8 +1216,7 @@ def _type_workflow() -> Workflow:
         name="wf",
         steps=[
             click_step(),
-            Step(id="t1", intent="type note", action=ActionKind.TYPE,
-                 param="note"),
+            Step(id="t1", intent="type note", action=ActionKind.TYPE, param="note"),
         ],
     )
 
@@ -1145,8 +1236,10 @@ def test_type_verification_ocr_reads_the_value(bundle, run_dir):
     vision.ocr_results = [[OcrLine("hello world")]]
     backend = FakeBackend()
     report = Replayer(backend, vision=vision).run(
-        _type_workflow(), params={"note": "hello world"},
-        bundle_dir=bundle, run_dir=run_dir,
+        _type_workflow(),
+        params={"note": "hello world"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert report.results[1].input_verified is True
@@ -1168,8 +1261,10 @@ def test_type_dialog_over_field_halts_without_retyping(bundle, run_dir):
     vision.pixels_changed_results = [True]
     backend = FakeBackend()
     report = Replayer(backend, vision=vision).run(
-        _type_workflow(), params={"note": "hello world"},
-        bundle_dir=bundle, run_dir=run_dir,
+        _type_workflow(),
+        params={"note": "hello world"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is False
     result = report.results[1]
@@ -1189,8 +1284,10 @@ def test_type_masked_field_accepts_diff_without_new_text(bundle, run_dir):
     vision.pixels_changed_results = [True]
     backend = FakeBackend()
     report = Replayer(backend, vision=vision).run(
-        _type_workflow(), params={"note": "hunter2secret"},
-        bundle_dir=bundle, run_dir=run_dir,
+        _type_workflow(),
+        params={"note": "hunter2secret"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert report.results[1].input_verified is True
@@ -1216,17 +1313,17 @@ def test_type_masked_dots_reading_as_noise_still_accepts(bundle, run_dir):
     vision.pixels_changed_results = [True]
     backend = FakeBackend()
     report = Replayer(backend, vision=vision).run(
-        _type_workflow(), params={"note": "mockmed-demo-pass"},
-        bundle_dir=bundle, run_dir=run_dir,
+        _type_workflow(),
+        params={"note": "mockmed-demo-pass"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert report.results[1].input_verified is True
     assert report.results[1].input_retried is False
 
 
-def test_type_without_known_field_diffs_full_frame_and_cannot_refocus(
-    bundle, run_dir
-):
+def test_type_without_known_field_diffs_full_frame_and_cannot_refocus(bundle, run_dir):
     """A TYPE step not preceded by a click (keyboard-only focus moves) has
     no field point: verification diffs the whole frame, and the retry
     retypes without a refocus click."""
@@ -1235,8 +1332,9 @@ def test_type_without_known_field_diffs_full_frame_and_cannot_refocus(
     backend = FakeBackend()
     workflow = Workflow(
         name="wf",
-        steps=[Step(id="t1", intent="type literal", action=ActionKind.TYPE,
-                    text="North")],
+        steps=[
+            Step(id="t1", intent="type literal", action=ActionKind.TYPE, text="North")
+        ],
     )
     report = Replayer(backend, vision=vision).run(
         workflow, bundle_dir=bundle, run_dir=run_dir
@@ -1297,10 +1395,10 @@ def _resolving_vision() -> "FakeVision":
 def test_url_changed_passes_when_url_differs_from_step_start(bundle, run_dir):
     backend = StructuralFakeBackend()
     backend.on_click = lambda b: setattr(b, "_url", "http://app/#report")
-    report = Replayer(backend, vision=_resolving_vision(),
-                      poll_interval_s=0.01).run(
+    report = Replayer(backend, vision=_resolving_vision(), poll_interval_s=0.01).run(
         _structural_workflow(PostconditionKind.URL_CHANGED),
-        bundle_dir=bundle, run_dir=run_dir,
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
     assert report.results[0].postconditions_ok is True
@@ -1308,10 +1406,10 @@ def test_url_changed_passes_when_url_differs_from_step_start(bundle, run_dir):
 
 def test_url_changed_fails_when_url_static(bundle, run_dir):
     backend = StructuralFakeBackend()  # click changes nothing
-    report = Replayer(backend, vision=_resolving_vision(),
-                      poll_interval_s=0.01).run(
+    report = Replayer(backend, vision=_resolving_vision(), poll_interval_s=0.01).run(
         _structural_workflow(PostconditionKind.URL_CHANGED),
-        bundle_dir=bundle, run_dir=run_dir,
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is False
     assert "url_changed" in (report.results[0].error or "")
@@ -1320,20 +1418,20 @@ def test_url_changed_fails_when_url_static(bundle, run_dir):
 def test_new_tab_opened_passes_when_page_count_grows(bundle, run_dir):
     backend = StructuralFakeBackend()
     backend.on_click = lambda b: setattr(b, "_pages", 2)
-    report = Replayer(backend, vision=_resolving_vision(),
-                      poll_interval_s=0.01).run(
+    report = Replayer(backend, vision=_resolving_vision(), poll_interval_s=0.01).run(
         _structural_workflow(PostconditionKind.NEW_TAB_OPENED),
-        bundle_dir=bundle, run_dir=run_dir,
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
 
 
 def test_new_tab_opened_fails_when_no_tab_appears(bundle, run_dir):
     backend = StructuralFakeBackend()
-    report = Replayer(backend, vision=_resolving_vision(),
-                      poll_interval_s=0.01).run(
+    report = Replayer(backend, vision=_resolving_vision(), poll_interval_s=0.01).run(
         _structural_workflow(PostconditionKind.NEW_TAB_OPENED),
-        bundle_dir=bundle, run_dir=run_dir,
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is False
     assert "new_tab_opened" in (report.results[0].error or "")
@@ -1342,25 +1440,23 @@ def test_new_tab_opened_fails_when_no_tab_appears(bundle, run_dir):
 def test_title_changed_postcondition(bundle, run_dir):
     backend = StructuralFakeBackend()
     backend.on_click = lambda b: setattr(b, "_title", "Report")
-    report = Replayer(backend, vision=_resolving_vision(),
-                      poll_interval_s=0.01).run(
+    report = Replayer(backend, vision=_resolving_vision(), poll_interval_s=0.01).run(
         _structural_workflow(PostconditionKind.TITLE_CHANGED),
-        bundle_dir=bundle, run_dir=run_dir,
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
 
 
-def test_structural_postcondition_passes_unverified_on_plain_backend(
-    bundle, run_dir
-):
+def test_structural_postcondition_passes_unverified_on_plain_backend(bundle, run_dir):
     """A backend without structural observations cannot arbitrate a
     structural postcondition: the step passes, honestly unverified
     (docs/LIMITS.md) — it must never false-halt a native-backend replay."""
     backend = FakeBackend()  # no url/page_title/page_count
-    report = Replayer(backend, vision=_resolving_vision(),
-                      poll_interval_s=0.01).run(
+    report = Replayer(backend, vision=_resolving_vision(), poll_interval_s=0.01).run(
         _structural_workflow(PostconditionKind.URL_CHANGED),
-        bundle_dir=bundle, run_dir=run_dir,
+        bundle_dir=bundle,
+        run_dir=run_dir,
     )
     assert report.success is True
 
@@ -1379,11 +1475,10 @@ def _coverage_workflow() -> Workflow:
         "(icon-only or unlabeled row)"
     )
     legacy_unarmed = click_step("s_legacy")  # pre-metric bundle: fields None
-    keyboard = Step(id="s_key", intent="press Enter", action=ActionKind.KEY,
-                    key="Enter")
-    return Workflow(
-        name="coverage", steps=[armed, unarmed, legacy_unarmed, keyboard]
+    keyboard = Step(
+        id="s_key", intent="press Enter", action=ActionKind.KEY, key="Enter"
     )
+    return Workflow(name="coverage", steps=[armed, unarmed, legacy_unarmed, keyboard])
 
 
 def test_identity_coverage_recorded_on_report():
@@ -1403,17 +1498,19 @@ def test_identity_coverage_recorded_on_report():
 
 def test_identity_coverage_counts_anchored_type_steps():
     type_step = Step(
-        id="s_type", intent="type note", action=ActionKind.TYPE,
+        id="s_type",
+        intent="type note",
+        action=ActionKind.TYPE,
         text="hello",
         anchor=Anchor(
-            template="templates/btn.png", region=(0, 0, 10, 10),
-            click_point=(5, 5), context_text="Notes field row text here",
+            template="templates/btn.png",
+            region=(0, 0, 10, 10),
+            click_point=(5, 5),
+            context_text="Notes field row text here",
         ),
     )
     report = RunReport(workflow_name="coverage", started_at="t")
-    Replayer._record_identity_coverage(
-        Workflow(name="w", steps=[type_step]), report
-    )
+    Replayer._record_identity_coverage(Workflow(name="w", steps=[type_step]), report)
     assert report.identity_applicable_steps == 1
     assert report.identity_armed_steps == 1
     assert report.identity_unarmed == []

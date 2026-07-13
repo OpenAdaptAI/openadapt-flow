@@ -197,8 +197,7 @@ def aggregate_openemr_results(
             "cache_write": agent_baseline.CACHE_WRITE_USD_PER_MTOK,
             "cache_read": agent_baseline.CACHE_READ_USD_PER_MTOK,
             "note": (
-                "list price; an introductory $2/$10 rate applies through "
-                "2026-08-31"
+                "list price; an introductory $2/$10 rate applies through 2026-08-31"
             ),
         },
         "platform": platform.platform(),
@@ -228,34 +227,36 @@ def render_openemr_markdown(results: dict[str, Any]) -> str:
     total_cap = caps.get("total", MAX_TOTAL_COST_USD)
     note = results.get("agent_arm_note")
     note_block = f"\n> **Agent arm disclosure:** {note}\n" if note else ""
-    agent_errors = [
-        r for r in results["runs"]["agent"] if not r["success"]
-    ]
-    failure_lines = "".join(
-        f"- agent run {r['i'] + 1}: {r.get('stopped', '?')}, "
-        f"{r['actions']} actions, {r['wall_s']:.0f}s, "
-        f"${r['cost_usd']:.4f}, "
-        f"OCR matched {r.get('matched_ratio', 0):.0%} of the note"
-        + (f" — {r['error']}" if r.get("error") else "")
-        + "\n"
-        for r in agent_errors
-    ) or "- none\n"
-    compiled_failures = [
-        r for r in results["runs"]["compiled"] if not r["success"]
-    ]
-    compiled_failure_lines = "".join(
-        f"- compiled run {r['i'] + 1}: "
-        + (
-            r["error"]
-            if r.get("error")
-            else f"{r.get('actions', '?')} steps executed, "
-            f"replayer_success={r.get('replayer_success')}, "
-            f"first_failure={r.get('first_failure')}, "
+    agent_errors = [r for r in results["runs"]["agent"] if not r["success"]]
+    failure_lines = (
+        "".join(
+            f"- agent run {r['i'] + 1}: {r.get('stopped', '?')}, "
+            f"{r['actions']} actions, {r['wall_s']:.0f}s, "
+            f"${r['cost_usd']:.4f}, "
             f"OCR matched {r.get('matched_ratio', 0):.0%} of the note"
+            + (f" — {r['error']}" if r.get("error") else "")
+            + "\n"
+            for r in agent_errors
         )
-        + "\n"
-        for r in compiled_failures
-    ) or "- none\n"
+        or "- none\n"
+    )
+    compiled_failures = [r for r in results["runs"]["compiled"] if not r["success"]]
+    compiled_failure_lines = (
+        "".join(
+            f"- compiled run {r['i'] + 1}: "
+            + (
+                r["error"]
+                if r.get("error")
+                else f"{r.get('actions', '?')} steps executed, "
+                f"replayer_success={r.get('replayer_success')}, "
+                f"first_failure={r.get('first_failure')}, "
+                f"OCR matched {r.get('matched_ratio', 0):.0%} of the note"
+            )
+            + "\n"
+            for r in compiled_failures
+        )
+        or "- none\n"
+    )
     compiled_self_flags = [
         r
         for r in results["runs"]["compiled"]
@@ -284,10 +285,10 @@ def render_openemr_markdown(results: dict[str, Any]) -> str:
 
 Date: {date}. Same head-to-head as the [MockMed benchmark](../BENCHMARK.md),
 run against a real third-party application: the official OpenEMR public
-demo (`{results['target']}`, fake patients only, instance resets daily).
+demo (`{results["target"]}`, fake patients only, instance resets daily).
 One task, two ways to automate it, one success check.
 
-**Task** ({results['workflow_steps']} compiled steps): log in as the demo
+**Task** ({results["workflow_steps"]} compiled steps): log in as the demo
 admin, search the demo patient "Phil", open the chart of "Belford, Phil",
 scroll the dense Medical Record Dashboard to the Messages card, open
 Patient Messages, add a note (a distinct parameterized value per run in
@@ -297,18 +298,18 @@ BOTH arms), save.
 
 | | compiled replay | computer-use agent |
 |---|---|---|
-| runs | {c['n']} | {a['n']} |
-| success rate | {c['success_rate']:.0%} ({c['success_count']}/{c['n']}) \
-| {a['success_rate']:.0%} ({a['success_count']}/{a['n']}) |
-| latency p50 | {c['wall_s_p50']:.1f} s | {a['wall_s_p50']:.1f} s |
-| latency p95 | {c['wall_s_p95']:.1f} s | {a['wall_s_p95']:.1f} s |
-| model cost / run | $0 | ${a['cost_usd_per_run']:.4f} |
-| total model cost | $0 | ${a['cost_usd_total']:.2f} |
-| tokens (uncached in / out, total) | 0 / 0 | {a['input_tokens_total']:,} / \
-{a['output_tokens_total']:,} |
+| runs | {c["n"]} | {a["n"]} |
+| success rate | {c["success_rate"]:.0%} ({c["success_count"]}/{c["n"]}) \
+| {a["success_rate"]:.0%} ({a["success_count"]}/{a["n"]}) |
+| latency p50 | {c["wall_s_p50"]:.1f} s | {a["wall_s_p50"]:.1f} s |
+| latency p95 | {c["wall_s_p95"]:.1f} s | {a["wall_s_p95"]:.1f} s |
+| model cost / run | $0 | ${a["cost_usd_per_run"]:.4f} |
+| total model cost | $0 | ${a["cost_usd_total"]:.2f} |
+| tokens (uncached in / out, total) | 0 / 0 | {a["input_tokens_total"]:,} / \
+{a["output_tokens_total"]:,} |
 | cache tokens (write/read, total) | 0 / 0 | \
-{a['cache_creation_input_tokens_total']:,} / \
-{a['cache_read_input_tokens_total']:,} |
+{a["cache_creation_input_tokens_total"]:,} / \
+{a["cache_read_input_tokens_total"]:,} |
 {note_block}
 Failed runs, reported honestly:
 
@@ -338,10 +339,10 @@ below.
   vision-only: PNG screenshots in; pixel-coordinate clicks, typed text,
   key presses, and wheel scrolls out. Neither arm uses DOM selectors at
   run time.
-- **Agent arm.** Model `{results['model']}` with the
-  `{results['computer_tool']}` computer-use tool (beta header
-  `{results['beta_header']}`), a {results['agent_max_actions']}-action
-  budget ({results['workflow_steps']} steps plus headroom for dense,
+- **Agent arm.** Model `{results["model"]}` with the
+  `{results["computer_tool"]}` computer-use tool (beta header
+  `{results["beta_header"]}`), a {results["agent_max_actions"]}-action
+  budget ({results["workflow_steps"]} steps plus headroom for dense,
   slow screens), and history bounded to the last 3 screenshots. The task
   prompt states user intent — credentials as a user would state them, the
   target patient, the exact note text — not steps or coordinates. Every
@@ -356,13 +357,13 @@ below.
   notes share a 16-character squashed substring — unit-tested), so
   success proves parameter substitution against live state and one run's
   note cannot satisfy another run's check.
-- **Pacing.** Runs are spaced ~{results.get('pace_s', 30):.0f}s apart as
+- **Pacing.** Runs are spaced ~{results.get("pace_s", 30):.0f}s apart as
   public-demo courtesy; the pacing gap is excluded from latency.
 - **Latency** is wall-clock around the replay / agent loop only.
 - **Cost** is computed from API `usage` token counts at list pricing
-  (${results['pricing_usd_per_mtok']['input']:.2f} /
-  ${results['pricing_usd_per_mtok']['output']:.2f} per MTok input/output
-  for {results['model']}, plus prompt-cache writes at 1.25x and cache
+  (${results["pricing_usd_per_mtok"]["input"]:.2f} /
+  ${results["pricing_usd_per_mtok"]["output"]:.2f} per MTok input/output
+  for {results["model"]}, plus prompt-cache writes at 1.25x and cache
   reads at 0.1x the input rate). An introductory $2/$10 rate applies
   through 2026-08-31, so billed cost today is about a third lower than
   reported. Compiled replay makes zero model calls.
@@ -393,13 +394,13 @@ below.
 - **Not CI-reproducible.** The numbers depend on the live instance's state
   and load on the day of the run. The MockMed benchmark is the
   reproducible anchor; treat this as a field result.
-- **The agent arm has a small N** ({a['n']}) because agent runs cost real
+- **The agent arm has a small N** ({a["n"]}) because agent runs cost real
   money, real minutes, and real load on a shared public service. Its
   success rate carries wide error bars.
 - **Network variance affects both arms** (live remote server), unlike the
   local MockMed target.
-- **Model version pinned.** Results describe `{results['model']}` with
-  the `{results['computer_tool']}` tool on {date}; newer models will
+- **Model version pinned.** Results describe `{results["model"]}` with
+  the `{results["computer_tool"]}` tool on {date}; newer models will
   differ.
 - **The compiled arm needs a demonstration first.** The one-time
   record + compile step (about a minute of human demonstration) is the
@@ -413,7 +414,7 @@ below.
   and is identical for both arms. Every run's final screenshot is saved
   to `benchmark/openemr/finals/` (local only, not committed) so failed
   verdicts can be audited against what was actually on screen.
-- Single machine ({results['platform']}).
+- Single machine ({results["platform"]}).
 
 ## Reproduce
 
@@ -424,7 +425,7 @@ below.
 Records a fresh demonstration against the public demo, compiles it, then
 runs both arms. Requires network access to the demo and
 `ANTHROPIC_API_KEY` (or `~/.anthropic/api_key`). The agent arm costs real
-money (about ${a['cost_usd_total']:.2f} at list price for {a['n']} runs
+money (about ${a["cost_usd_total"]:.2f} at list price for {a["n"]} runs
 when this was generated) and takes about an hour with pacing. Fake demo
 patients only — never point this at a real OpenEMR install.
 """
@@ -438,9 +439,7 @@ def write_openemr_outputs(results: dict[str, Any], out_dir: Path) -> None:
         out_dir: Output directory (created if needed).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n"
-    )
+    (out_dir / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     from openadapt_flow.benchmark.chart_fonts import safe_render
 
     safe_render(render_chart, results, out_dir / "latency_cost.png")

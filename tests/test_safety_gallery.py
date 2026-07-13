@@ -20,11 +20,17 @@ from benchmark.safety_gallery import generate as gen
 # Fixture (fast)
 # ---------------------------------------------------------------------------
 
+
 def test_cases_cover_every_required_class() -> None:
     ids = {c.id for c in gen.GALLERY_CASES}
     required = {
-        "O0_alphanumeric", "l1_alphanumeric", "numeric", "separator",
-        "sibling", "clean_control", "different_patient",
+        "O0_alphanumeric",
+        "l1_alphanumeric",
+        "numeric",
+        "separator",
+        "sibling",
+        "clean_control",
+        "different_patient",
     }
     assert required <= ids
 
@@ -51,14 +57,14 @@ def test_controls_are_configured_as_controls() -> None:
     assert not (set(by_id["clean_control"].recorded.mrn.lower()) & set("0o1l|!i"))
     assert by_id["different_patient"].kind == gen.CONTROL_MISMATCH
     assert (
-        by_id["different_patient"].recorded.name
-        != by_id["different_patient"].live.name
+        by_id["different_patient"].recorded.name != by_id["different_patient"].live.name
     )
 
 
 # ---------------------------------------------------------------------------
 # Classification logic (fast, pure)
 # ---------------------------------------------------------------------------
+
 
 def test_is_safe_danger_only_verify_is_unsafe() -> None:
     for status in ("mismatch", "abstain", "unreadable"):
@@ -81,6 +87,7 @@ def test_is_safe_rejects_unknown_kind() -> None:
 # ---------------------------------------------------------------------------
 # End-to-end (real render + real OCR + real identity path)
 # ---------------------------------------------------------------------------
+
 
 def test_generator_end_to_end_every_dangerous_case_is_safe(tmp_path) -> None:
     pytest.importorskip("playwright.sync_api")

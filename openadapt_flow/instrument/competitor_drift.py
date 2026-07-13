@@ -351,7 +351,7 @@ class CostGuard:
             )
         if steps_used > self.max_steps:
             return True, (
-                f"run used {steps_used} steps, exceeding max_steps " f"{self.max_steps}"
+                f"run used {steps_used} steps, exceeding max_steps {self.max_steps}"
             )
         return False, ""
 

@@ -301,9 +301,7 @@ class ApiBinding(BaseModel):
             " unknown effect and HALTs -- never GUI-retried)."
         ),
     )
-    timeout_s: float = Field(
-        default=5.0, description="Per-request timeout in seconds"
-    )
+    timeout_s: float = Field(default=5.0, description="Per-request timeout in seconds")
     effects: list["Effect"] = Field(
         default_factory=list,
         description=(
@@ -679,9 +677,7 @@ def lift_to_program(workflow: "Workflow") -> ProgramGraph:
             step=step,
             transitions=[Transition(target=target, label="")],
         )
-    states[end_id] = State(
-        id=end_id, kind=StateKind.TERMINAL, outcome="success"
-    )
+    states[end_id] = State(id=end_id, kind=StateKind.TERMINAL, outcome="success")
     entry = f"s::{steps[0].id}" if steps else end_id
     return ProgramGraph(entry=entry, states=states)
 
@@ -739,9 +735,7 @@ class Workflow(BaseModel):
     @classmethod
     def load(cls, bundle_dir: Path | str) -> "Workflow":
         bundle = Path(bundle_dir)
-        return cls.model_validate(
-            json.loads((bundle / "workflow.json").read_text())
-        )
+        return cls.model_validate(json.loads((bundle / "workflow.json").read_text()))
 
 
 # -- runtime results ---------------------------------------------------------

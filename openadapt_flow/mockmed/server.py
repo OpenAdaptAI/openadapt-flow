@@ -22,9 +22,7 @@ class _QuietHandler(SimpleHTTPRequestHandler):
         pass
 
 
-def serve(
-    port: int = 0, *, host: str = "127.0.0.1"
-) -> tuple[str, Callable[[], None]]:
+def serve(port: int = 0, *, host: str = "127.0.0.1") -> tuple[str, Callable[[], None]]:
     """Serve the MockMed static app in a background thread.
 
     Args:

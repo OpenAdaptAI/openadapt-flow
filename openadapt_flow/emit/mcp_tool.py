@@ -133,9 +133,7 @@ def emit_mcp_server(bundle_dir: Path | str, out_path: Path | str) -> Path:
     if param_names:
         params_dict = (
             "{"
-            + ", ".join(
-                f"{name!r}: {ident}" for name, ident in param_names.items()
-            )
+            + ", ".join(f"{name!r}: {ident}" for name, ident in param_names.items())
             + "}"
         )
         param_docs = "".join(

@@ -383,9 +383,7 @@ class WindowsBackend:
         except Exception:
             return None
 
-    def structural_locator_at(
-        self, x: int, y: int
-    ) -> Optional[StructuralLocator]:
+    def structural_locator_at(self, x: int, y: int) -> Optional[StructuralLocator]:
         """Return a stable UIA locator for the control under (x, y).
 
         Runs a ``uiautomation.ControlFromPoint`` snippet on the VM: it climbs to
@@ -578,9 +576,7 @@ class WindowsBackend:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``."""
         keys = normalize_chord(key)
         if len(keys) == 1:
-            self._execute(
-                f"import pyautogui; pyautogui.press({keys[0]!r})"
-            )
+            self._execute(f"import pyautogui; pyautogui.press({keys[0]!r})")
         else:
             args = ", ".join(repr(k) for k in keys)
             self._execute(f"import pyautogui; pyautogui.hotkey({args})")

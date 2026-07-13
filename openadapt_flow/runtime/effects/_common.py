@@ -173,9 +173,7 @@ def _judge_field_equals(
             matched_records=matched,
         )
     record = matched[0]
-    observed = "" if record.get(effect.field) is None else str(
-        record.get(effect.field)
-    )
+    observed = "" if record.get(effect.field) is None else str(record.get(effect.field))
     if observed == want:
         return EffectVerdict(
             verdict=Verdict.CONFIRMED,

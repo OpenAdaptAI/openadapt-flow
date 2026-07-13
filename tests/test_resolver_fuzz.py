@@ -96,9 +96,16 @@ class FakeVision:
         self.template_results: list = []
         self.text_results: dict = {}
 
-    def find_template(self, screen_png, template_png, *, search_region=None,
-                      prefer_near=None, scales=(0.85, 1.0, 1.18),
-                      threshold=0.82):
+    def find_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.82,
+    ):
         if self.template_results:
             return self.template_results.pop(0)
         return None
@@ -132,8 +139,9 @@ class FakeBackend:
         # Only invoked by _resolve_step when anchor.structural is set (the
         # structural-rung gate case); returns a deterministic in-viewport point.
         vw, vh = self._viewport
-        return StructuralHandle(point=(min(110, vw - 1), min(105, vh - 1)),
-                                confidence=1.0)
+        return StructuralHandle(
+            point=(min(110, vw - 1), min(105, vh - 1)), confidence=1.0
+        )
 
 
 def _png(size) -> bytes:
@@ -222,8 +230,13 @@ def _match_rung_case(draw):
 def test_match_rung_point_within_viewport(case):
     rung, anchor, vision, grounder, template_png, viewport, _matched = case
     resolved = resolve(
-        anchor, _DUMMY_PNG, vision, grounder, "intent",
-        template_png=template_png, viewport=viewport,
+        anchor,
+        _DUMMY_PNG,
+        vision,
+        grounder,
+        "intent",
+        template_png=template_png,
+        viewport=viewport,
     )
     assert resolved is not None, f"expected a {rung} resolution"
     resolution, _region = resolved
@@ -257,8 +270,11 @@ def _geometry_case(draw):
         region=region,
         click_point=click_point,
         ocr_text="Target",
-        landmarks=[Landmark(relation="left_of", ocr_text="Land",
-                            distance_px=50, dx_px=dx, dy_px=dy)],
+        landmarks=[
+            Landmark(
+                relation="left_of", ocr_text="Land", distance_px=50, dx_px=dx, dy_px=dy
+            )
+        ],
     )
     vision = FakeVision()
     vision.text_results = {
@@ -279,8 +295,13 @@ def _region_within_viewport(region, viewport) -> bool:
 def test_matched_region_within_viewport_match_rungs(case):
     _rung, anchor, vision, grounder, template_png, viewport, _matched = case
     resolved = resolve(
-        anchor, _DUMMY_PNG, vision, grounder, "intent",
-        template_png=template_png, viewport=viewport,
+        anchor,
+        _DUMMY_PNG,
+        vision,
+        grounder,
+        "intent",
+        template_png=template_png,
+        viewport=viewport,
     )
     assert resolved is not None
     _resolution, region = resolved
@@ -297,8 +318,13 @@ def test_geometry_region_within_viewport(case):
     the viewport."""
     anchor, vision, viewport = case
     resolved = resolve(
-        anchor, _DUMMY_PNG, vision, None, "intent",
-        template_png=None, viewport=viewport,
+        anchor,
+        _DUMMY_PNG,
+        vision,
+        None,
+        "intent",
+        template_png=None,
+        viewport=viewport,
     )
     assert resolved is not None and resolved[0].rung == "geometry"
     _resolution, region = resolved
@@ -327,8 +353,11 @@ def _gate_case(draw):
         region=region,
         click_point=click_point,
         ocr_text="Target",
-        landmarks=[Landmark(relation="left_of", ocr_text="Land",
-                            distance_px=40, dx_px=40, dy_px=0)],
+        landmarks=[
+            Landmark(
+                relation="left_of", ocr_text="Land", distance_px=40, dx_px=40, dy_px=0
+            )
+        ],
     )
     vision = FakeVision()
     grounder = None
@@ -343,8 +372,10 @@ def _gate_case(draw):
     elif rung == "ocr":
         vision.text_results = {"Target": m}
     elif rung == "geometry":
-        vision.text_results = {"Target": None,
-                               "Land": Match((70, 105), (50, 95, 40, 20), conf)}
+        vision.text_results = {
+            "Target": None,
+            "Land": Match((70, 105), (50, 95, 40, 20), conf),
+        }
     elif rung == "grounder":
         grounder = FakeGrounder(m)
     return rung, risk, conf, anchor, vision, grounder, viewport
@@ -365,8 +396,9 @@ def test_irreversible_gate_blocks_below_ocr_for_any_confidence(case):
 
     backend = FakeBackend(viewport)
     replayer = Replayer(backend, vision=vision, grounder=grounder)
-    step = Step(id="s1", intent="act", action=ActionKind.CLICK,
-                anchor=anchor, risk=risk)
+    step = Step(
+        id="s1", intent="act", action=ActionKind.CLICK, anchor=anchor, risk=risk
+    )
 
     resolution, _region, error = replayer._resolve_step(step, _png(viewport), bundle)
     assert resolution is not None and resolution.rung == rung, (
@@ -374,7 +406,7 @@ def test_irreversible_gate_blocks_below_ocr_for_any_confidence(case):
         f"{resolution.rung if resolution else None!r}"
     )
 
-    should_block = (risk == "irreversible" and is_below_ocr(rung))
+    should_block = risk == "irreversible" and is_below_ocr(rung)
     if should_block:
         assert error is not None, (
             f"RISK-GATE BREACH: irreversible step acted on below-ocr rung "
@@ -383,8 +415,7 @@ def test_irreversible_gate_blocks_below_ocr_for_any_confidence(case):
         assert "irreversible" in error
     else:
         assert error is None, (
-            f"spurious block for rung {rung!r} risk {risk!r} conf {conf!r}: "
-            f"{error!r}"
+            f"spurious block for rung {rung!r} risk {risk!r} conf {conf!r}: {error!r}"
         )
 
 
@@ -410,8 +441,9 @@ def _abstaining_anchor(draw):
         click_point=click_point,
         ocr_text="Target" if has_ocr else None,
         landmarks=[
-            Landmark(relation="left_of", ocr_text=f"L{i}", distance_px=30,
-                     dx_px=10, dy_px=0)
+            Landmark(
+                relation="left_of", ocr_text=f"L{i}", distance_px=30, dx_px=10, dy_px=0
+            )
             for i in range(n_landmarks)
         ],
     )
@@ -426,8 +458,13 @@ def test_all_sources_abstain_returns_none(case):
     anchor, template_png, grounder, viewport = case
     vision = FakeVision()  # find_template / find_text both return None
     resolved = resolve(
-        anchor, _DUMMY_PNG, vision, grounder, "intent",
-        template_png=template_png, viewport=viewport,
+        anchor,
+        _DUMMY_PNG,
+        vision,
+        grounder,
+        "intent",
+        template_png=template_png,
+        viewport=viewport,
     )
     assert resolved is None, (
         f"FABRICATED resolution {resolved!r} when every source abstained "

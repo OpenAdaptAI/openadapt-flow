@@ -121,9 +121,7 @@ class SkillLibrary:
             self._skills[sid] = Skill.model_validate(data)
 
     def save(self) -> Path:
-        payload = {
-            "skills": {sid: s.model_dump() for sid, s in self._skills.items()}
-        }
+        payload = {"skills": {sid: s.model_dump() for sid, s in self._skills.items()}}
         self.path.write_text(json.dumps(payload, indent=2, default=str))
         return self.path
 
@@ -210,9 +208,7 @@ class SkillLibrary:
         self.save()
         return target
 
-    def quarantine(
-        self, skill_id: str, version: int, reason: str
-    ) -> SkillVersion:
+    def quarantine(self, skill_id: str, version: int, reason: str) -> SkillVersion:
         """Mark a candidate ``rolled_back`` with the reason it was refused; the
         active version is untouched (the governed-rejection path)."""
         skill = self.get(skill_id)
@@ -224,9 +220,7 @@ class SkillLibrary:
         self.save()
         return target
 
-    def extend_corpus(
-        self, skill_id: str, traces: list[ExecutionTrace]
-    ) -> None:
+    def extend_corpus(self, skill_id: str, traces: list[ExecutionTrace]) -> None:
         """Append newly observed executions to a skill's running corpus."""
         self.get(skill_id).corpus.extend(traces)
         self.save()

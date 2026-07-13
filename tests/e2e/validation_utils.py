@@ -97,9 +97,7 @@ def replay_on_page(
     )
     try:
         page.goto(url)
-        backend = (
-            backend_factory(page) if backend_factory else PlaywrightBackend(page)
-        )
+        backend = backend_factory(page) if backend_factory else PlaywrightBackend(page)
         workflow = Workflow.load(bundle_dir)
         report = Replayer(backend, use_structural=use_structural).run(
             workflow,
@@ -110,16 +108,13 @@ def replay_on_page(
         state = {
             "hash": page.evaluate("location.hash"),
             "banner": page.evaluate(
-                "(document.getElementById('saved-banner') || {}).textContent"
-                " || null"
+                "(document.getElementById('saved-banner') || {}).textContent || null"
             ),
             "enc_item": page.evaluate(
-                "(document.querySelector('.enc-item') || {}).textContent"
-                " || null"
+                "(document.querySelector('.enc-item') || {}).textContent || null"
             ),
             "status": page.evaluate(
-                "(document.getElementById('status') || {}).textContent"
-                " || null"
+                "(document.getElementById('status') || {}).textContent || null"
             ),
         }
     finally:
@@ -172,15 +167,13 @@ def cosmetic_css(
     if font_scale is not None and abs(font_scale - 1.0) > 1e-9:
         parts.append(
             "\n".join(
-                f"{sel} {{ font-size: {round(base * font_scale)}px"
-                f" !important; }}"
+                f"{sel} {{ font-size: {round(base * font_scale)}px !important; }}"
                 for sel, base in _BASE_FONT_PX.items()
             )
         )
     if font_family:
         parts.append(
-            f"{_FONT_FAMILY_SELECTORS} {{ font-family: {font_family}"
-            " !important; }"
+            f"{_FONT_FAMILY_SELECTORS} {{ font-family: {font_family} !important; }}"
         )
     return "\n".join(parts)
 
@@ -214,9 +207,7 @@ def replay_cosmetic(
     )
     try:
         page.goto(url)
-        css = cosmetic_css(
-            zoom=zoom, font_scale=font_scale, font_family=font_family
-        )
+        css = cosmetic_css(zoom=zoom, font_scale=font_scale, font_family=font_family)
         if css:
             page.add_style_tag(content=css)
             page.wait_for_timeout(80)  # let the reflow settle
@@ -231,8 +222,7 @@ def replay_cosmetic(
         state = {
             "hash": page.evaluate("location.hash"),
             "banner": page.evaluate(
-                "(document.getElementById('saved-banner') || {}).textContent"
-                " || null"
+                "(document.getElementById('saved-banner') || {}).textContent || null"
             ),
         }
     finally:

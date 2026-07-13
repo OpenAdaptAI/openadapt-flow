@@ -150,9 +150,7 @@ class FaultDB:
         """
         with self._lock:
             before = len(self._records)
-            self._records = [
-                r for r in self._records if r["id"] != record_id
-            ]
+            self._records = [r for r in self._records if r["id"] != record_id]
             return len(self._records) != before
 
     def snapshot(self) -> dict:
@@ -217,7 +215,7 @@ def _make_handler(db: FaultDB, directory: str):
             path = urlparse(self.path).path
             prefix = "/api/encounter/"
             if path.startswith(prefix):
-                raw = path[len(prefix):]
+                raw = path[len(prefix) :]
                 try:
                     record_id = int(raw)
                 except ValueError:

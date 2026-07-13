@@ -85,8 +85,7 @@ def run_promotion(
             promoted=False,
             gate=result,
             halt_reason=(
-                f"heal quarantined for step {patch.step_id!r}: "
-                f"{patch.reject_reason}"
+                f"heal quarantined for step {patch.step_id!r}: {patch.reject_reason}"
             ),
         )
 

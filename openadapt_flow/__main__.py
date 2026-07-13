@@ -119,25 +119,36 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 backend = PlaywrightBackend(page)
                 import os
 
+                from openadapt_flow.runtime.grounder import build_grounder
                 from openadapt_flow.runtime.remote_vlm import (
                     appliance_from_env,
                 )
 
                 # An on-prem VLM appliance is opt-in (OPENADAPT_FLOW_VLM_URL).
-                # Unset -> both slots stay None -> the run is fully local and
-                # model-free, exactly as before. Configured -> the grounding
-                # rung and the identity veto tier come online, both fail-safe
-                # (an appliance outage halts the run, never mis-clicks).
+                # Unset -> the identity veto tier stays off. Configured -> the
+                # identity veto tier and the remote-VLM grounder come online,
+                # both fail-safe (an appliance outage halts, never mis-clicks).
                 appliance = appliance_from_env()
                 if appliance is not None:
                     print(
                         "Using on-prem VLM appliance at "
                         f"{os.environ.get('OPENADAPT_FLOW_VLM_URL')} "
-                        "(grounding rung + identity veto tier; fail-safe to halt)"
+                        "(identity veto tier + remote-VLM grounder fallback; "
+                        "fail-safe to halt)"
                     )
+                # Grounding rung: OCR text-anchoring (openadapt-grounding) is
+                # PRIMARY whenever the 'grounding' extra is installed; the
+                # remote-VLM grounder (if an appliance is configured) is the
+                # fallback for text-less surfaces. None when neither is present
+                # (the model-free default; ladder simply has no grounder rung).
+                grounder = build_grounder(
+                    fallback=appliance.grounder if appliance else None
+                )
+                if grounder is not None:
+                    print(f"Grounding rung active: {type(grounder).__name__}")
                 report = Replayer(
                     backend,
-                    grounder=appliance.grounder if appliance else None,
+                    grounder=grounder,
                     identity_vlm=appliance.identity_vlm if appliance else None,
                     state_verifier=(
                         appliance.state_verifier if appliance else None

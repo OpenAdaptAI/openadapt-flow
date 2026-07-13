@@ -4,18 +4,38 @@ A Grounder is the last rung of the resolution ladder: given the current
 screen, a step intent, and optional anchor text, it returns a Match-like
 object (point/region/confidence) or None.
 
-Ships a :class:`NullGrounder` (always None; keeps the ladder wiring uniform)
-and an :class:`AnthropicGrounder` that is import-guarded behind the optional
-``anthropic`` package (the ``grounder`` extra). The Anthropic implementation
-is never exercised in tests and requires an API key at runtime.
+Ships:
+
+* :class:`NullGrounder` — always None; keeps the ladder wiring uniform (the
+  no-dependency default).
+* :class:`OCRAnchorGrounder` — the PRIMARY grounding rung. OCR text-anchoring
+  via ``openadapt-grounding`` (the ``grounding`` extra): OCR the frame, cluster
+  boxes into rows, anchor on the row's unique key (carried in ``intent`` — e.g.
+  patient name/MRN), then take the target control's box on that row. Benchmark
+  #41 (``benchmark/grounding_eval``) measured this at 88-100% on dense EMR lists
+  where the single-shot remote-VLM grounder scored 0/6. Import-guarded and
+  fail-safe: returns None (abstain) if the extra is not installed or nothing is
+  located, so the ladder HALTS rather than mis-clicks.
+* :class:`FallbackGrounder` — chains grounders, returning the first non-None
+  proposal. Used to place OCR text-anchoring first and the remote-VLM grounder
+  behind it, for text-less surfaces (icon toolbars, canvases).
+* :class:`AnthropicGrounder` — import-guarded behind the optional ``anthropic``
+  package (the ``grounder`` extra). Never exercised in tests; needs an API key.
+
+SAFETY INVARIANT (unchanged): a grounder only ever *proposes* a point. The
+deterministic identity band still disposes before any click, and the risk gate
+(:func:`openadapt_flow.runtime.resolver.is_below_ocr`) refuses a grounder
+resolution for irreversible steps.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import json
 import re
-from typing import Optional, Protocol, runtime_checkable
+import statistics
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -68,6 +88,355 @@ class NullGrounder:
     ) -> Optional[GrounderMatch]:
         """Always return None."""
         return None
+
+
+# --------------------------------------------------------------------------
+# OCR text-anchoring grounder (openadapt-grounding) — the PRIMARY rung.
+# --------------------------------------------------------------------------
+
+# Row-anchor scoring weights. A code-like token (the MRN / account number —
+# the row's UNIQUE key) is far more discriminative than a name token, so a
+# match on it dominates. The glyph-collapsed variant scores a little lower
+# than an exact hit (an O/0-collapsed match may be an adjacent sibling — the
+# identity band's job to separate, never the grounder's).
+_MRN_EXACT_WEIGHT = 5.0
+_MRN_GLYPH_WEIGHT = 4.0
+_NAME_TOKEN_WEIGHT = 1.0
+
+# Minimum OCR confidence (percent) for a box to be considered — mirrors the
+# openadapt-grounding _run_ocr default; kept here so an empty label-less frame
+# yields no boxes and the grounder abstains.
+_MIN_ANCHOR_TOKEN_LEN = 3
+
+# Stopwords stripped from a free-text ``intent`` before it is used as an
+# anchor. They are common in "click X in the row for patient Y" phrasings and
+# carry no row-identifying signal.
+_INTENT_STOPWORDS = frozenset(
+    {
+        "the", "for", "row", "click", "select", "open", "in", "on", "of",
+        "patient", "record", "button", "control", "mrn", "id", "and", "to",
+        "a", "an", "at", "this", "that", "with",
+    }
+)
+
+
+def _norm_glyph(s: str) -> str:
+    """Collapse the O/0 and l/1/I confusables (matches benchmark/grounding_eval).
+
+    Lets an OCR-noisy identifier still anchor by content. This deliberately
+    OVER-matches on glyph-confusable siblings — safe, because the grounder only
+    proposes a row band; disambiguating the one-row-away sibling is the identity
+    band's job.
+    """
+    return (
+        s.lower()
+        .replace("o", "0")
+        .replace("l", "1")
+        .replace("i", "1")
+        .replace("|", "1")
+    )
+
+
+class OCRAnchorGrounder:
+    """Grounder backed by ``openadapt-grounding``'s OCR text-anchoring.
+
+    The PRIMARY grounding rung. Given the live frame plus the step's ``intent``
+    (which carries the target row's unique key — patient name / MRN) and the
+    target control's label (``ocr_text``, e.g. ``"Open"``), it:
+
+    1. OCRs the whole frame once (``ElementLocator._run_ocr`` — the shipped
+       openadapt-grounding OCR primitive).
+    2. Clusters the OCR boxes into rows by vertical proximity.
+    3. Scores each row against the anchor tokens extracted from ``intent``
+       (name tokens + the glyph-normalised MRN — the unique key).
+    4. Returns the ``ocr_text`` control box on the winning row.
+
+    When ``intent`` carries no row anchor, it falls back to a *unique* whole-
+    frame match on ``ocr_text`` (a distinctively labelled control). Anything
+    ambiguous or absent yields None.
+
+    Requires the optional ``openadapt-grounding`` package (install the
+    ``grounding`` extra). Import is lazy; :meth:`available` builds an instance
+    only when the dependency is importable.
+
+    SAFE by construction: it only PROPOSES a point. It returns None (abstain,
+    no proposal) whenever the dependency is missing or nothing is located, so
+    the resolution ladder halts rather than mis-clicks, and the deterministic
+    identity band still disposes before any click.
+    """
+
+    def __init__(self) -> None:
+        """Build the grounder, importing openadapt-grounding lazily.
+
+        Raises:
+            ImportError: If the ``openadapt-grounding`` package (the
+                ``grounding`` extra) is not installed.
+        """
+        try:
+            from openadapt_grounding.builder import Registry
+            from openadapt_grounding.locator import ElementLocator
+        except ImportError as exc:  # pragma: no cover - env-dependent
+            raise ImportError(
+                "OCRAnchorGrounder requires the 'openadapt-grounding' package. "
+                "Install it with: pip install 'openadapt-flow[grounding]'"
+            ) from exc
+        # An empty registry is fine: only the OCR primitive (_run_ocr) is used;
+        # find()/registry lookups are not on this path.
+        self._locator = ElementLocator(Registry([]))
+
+    @classmethod
+    def available(cls) -> Optional["OCRAnchorGrounder"]:
+        """Return an instance if openadapt-grounding is installed, else None."""
+        try:
+            return cls()
+        except ImportError:
+            return None
+
+    def locate(
+        self,
+        screen_png: bytes,
+        intent: str,
+        ocr_text: Optional[str] = None,
+    ) -> Optional[GrounderMatch]:
+        """Locate the target control by OCR text-anchoring.
+
+        Args:
+            screen_png: Current frame as PNG bytes.
+            intent: Step intent; its distinctive tokens (patient name, MRN)
+                anchor the correct row.
+            ocr_text: The target control's label (the box to click on the
+                anchored row). Required — without it there is no control to
+                pick, so the grounder abstains.
+
+        Returns:
+            A :class:`GrounderMatch` on the located control box, or None
+            (abstain) if openadapt-grounding is unavailable, the frame yields
+            no OCR, no row anchors, or the control is not on the winning row.
+        """
+        if not ocr_text or not ocr_text.strip():
+            return None
+        img = self._open(screen_png)
+        if img is None:
+            return None
+        boxes = self._ocr_boxes(img)
+        if not boxes:
+            return None
+
+        anchor_tokens = self._anchor_tokens(intent, ocr_text)
+        target_box: Optional[dict] = None
+
+        if anchor_tokens:
+            row = self._best_row(self._cluster_rows(boxes), anchor_tokens)
+            if row is not None:
+                target_box = self._label_box_in_row(row, ocr_text)
+        else:
+            # No row key in the intent: only accept a UNIQUE label match.
+            target_box = self._unique_label_box(boxes, ocr_text)
+
+        if target_box is None:
+            return None
+        return self._to_match(target_box)
+
+    # -- internals ---------------------------------------------------------
+
+    @staticmethod
+    def _open(screen_png: bytes) -> Optional[Any]:
+        """Decode PNG bytes to an RGB PIL image (None on any failure)."""
+        try:
+            from PIL import Image
+
+            return Image.open(io.BytesIO(screen_png)).convert("RGB")
+        except Exception:
+            return None
+
+    def _ocr_boxes(self, img: Any) -> list[dict]:
+        """Run the library OCR primitive; return boxes in pixel space."""
+        w, h = img.size
+        out: list[dict] = []
+        try:
+            elements = self._locator._run_ocr(img)  # noqa: SLF001
+        except Exception:
+            return []
+        for e in elements:
+            x, y, bw, bh = e.bounds
+            out.append(
+                {
+                    "text": e.text or "",
+                    "cx": (x + bw / 2) * w,
+                    "cy": (y + bh / 2) * h,
+                    "x0": x * w,
+                    "y0": y * h,
+                    "w": bw * w,
+                    "h": bh * h,
+                    "conf": float(getattr(e, "confidence", 0.0) or 0.0),
+                }
+            )
+        return out
+
+    @staticmethod
+    def _cluster_rows(boxes: list[dict]) -> list[dict]:
+        """Group OCR boxes into rows by vertical (y) proximity."""
+        if not boxes:
+            return []
+        med_h = statistics.median(b["h"] for b in boxes) or 20.0
+        thresh = med_h * 0.8
+        ordered = sorted(boxes, key=lambda b: b["cy"])
+        rows: list[dict] = []
+        cur: list[dict] = [ordered[0]]
+        cur_y = ordered[0]["cy"]
+        for b in ordered[1:]:
+            if abs(b["cy"] - cur_y) <= thresh:
+                cur.append(b)
+                cur_y = sum(x["cy"] for x in cur) / len(cur)
+            else:
+                rows.append(OCRAnchorGrounder._finish_row(cur))
+                cur = [b]
+                cur_y = b["cy"]
+        rows.append(OCRAnchorGrounder._finish_row(cur))
+        return rows
+
+    @staticmethod
+    def _finish_row(boxes: list[dict]) -> dict:
+        text = " ".join(b["text"] for b in sorted(boxes, key=lambda b: b["cx"]))
+        return {"boxes": boxes, "text": text}
+
+    def _anchor_tokens(self, intent: str, ocr_text: str) -> list[str]:
+        """Extract row-identifying tokens (name words + MRN) from the intent.
+
+        Drops stopwords and the target label's own tokens; keeps words of at
+        least ``_MIN_ANCHOR_TOKEN_LEN`` chars and any code-like token (contains
+        a digit — an MRN/account number).
+        """
+        label_tokens = {t.lower() for t in re.split(r"[\s,]+", ocr_text) if t}
+        out: list[str] = []
+        for raw in re.split(r"[\s,()]+", intent or ""):
+            tok = raw.strip()
+            if not tok:
+                continue
+            low = tok.lower()
+            if low in label_tokens or low in _INTENT_STOPWORDS:
+                continue
+            if any(ch.isdigit() for ch in tok) or len(tok) >= _MIN_ANCHOR_TOKEN_LEN:
+                out.append(tok)
+        return out
+
+    @staticmethod
+    def _score_row(row_text: str, tokens: list[str]) -> float:
+        """Score a row's text against anchor tokens (name + glyph-norm MRN)."""
+        rt = row_text.lower()
+        rt_norm = _norm_glyph(row_text)
+        score = 0.0
+        for tok in tokens:
+            low = tok.lower()
+            if any(ch.isdigit() for ch in tok):  # code-like: the unique key
+                if low in rt:
+                    score += _MRN_EXACT_WEIGHT
+                elif _norm_glyph(tok) in rt_norm:
+                    score += _MRN_GLYPH_WEIGHT
+            elif low in rt:
+                score += _NAME_TOKEN_WEIGHT
+        return score
+
+    def _best_row(self, rows: list[dict], tokens: list[str]) -> Optional[dict]:
+        """Return the highest-scoring row, or None if nothing scores > 0."""
+        best_row: Optional[dict] = None
+        best_score = 0.0
+        for row in rows:
+            score = self._score_row(row["text"], tokens)
+            if score > best_score:
+                best_score = score
+                best_row = row
+        return best_row
+
+    @staticmethod
+    def _label_box_in_row(row: dict, ocr_text: str) -> Optional[dict]:
+        """The control box matching ``ocr_text`` on ``row`` (rightmost if tied)."""
+        needle = ocr_text.lower().strip()
+        cands = [b for b in row["boxes"] if needle in b["text"].lower()]
+        if not cands:
+            return None
+        return max(cands, key=lambda b: b["cx"])
+
+    @staticmethod
+    def _unique_label_box(boxes: list[dict], ocr_text: str) -> Optional[dict]:
+        """Frame-wide match on ``ocr_text``; only if EXACTLY one box matches."""
+        needle = ocr_text.lower().strip()
+        cands = [b for b in boxes if needle in b["text"].lower()]
+        if len(cands) != 1:
+            return None  # 0 => not found; >1 => ambiguous => abstain (safe)
+        return cands[0]
+
+    @staticmethod
+    def _to_match(box: dict) -> GrounderMatch:
+        """Build a GrounderMatch centred on ``box`` with its OCR bounds."""
+        px, py = int(round(box["cx"])), int(round(box["cy"]))
+        region: Region = (
+            max(0, int(round(box["x0"]))),
+            max(0, int(round(box["y0"]))),
+            max(1, int(round(box["w"]))),
+            max(1, int(round(box["h"]))),
+        )
+        # OCR box confidence is 0..1; keep it conservative (grounder resolutions
+        # are risk-gated below the OCR rung regardless).
+        conf = box.get("conf", 0.5)
+        confidence = float(conf) if isinstance(conf, (int, float)) else 0.5
+        return GrounderMatch(point=(px, py), region=region, confidence=confidence)
+
+
+class FallbackGrounder:
+    """Chain grounders; return the first non-None proposal.
+
+    Places a stronger grounder ahead of weaker ones — e.g. OCR text-anchoring
+    first, the remote-VLM grounder behind it for text-less surfaces (icon
+    toolbars, canvases) where OCR anchoring abstains. Still only ever PROPOSES:
+    if every grounder abstains, so does the chain (the ladder halts).
+    """
+
+    def __init__(self, grounders: list[Any]) -> None:
+        """Store the non-None grounders, tried in order."""
+        self._grounders = [g for g in grounders if g is not None]
+
+    def locate(
+        self,
+        screen_png: bytes,
+        intent: str,
+        ocr_text: Optional[str] = None,
+    ) -> Optional[GrounderMatch]:
+        """Return the first grounder's non-None proposal, else None."""
+        for g in self._grounders:
+            match = g.locate(screen_png, intent, ocr_text)
+            if match is not None:
+                return match
+        return None
+
+
+def build_grounder(fallback: Optional[Any] = None) -> Optional[Any]:
+    """Assemble the runtime's preferred grounder.
+
+    Order of preference:
+
+    1. :class:`OCRAnchorGrounder` — the PRIMARY rung, active whenever the
+       ``grounding`` extra (openadapt-grounding) is installed. No appliance,
+       GPU, or paid API needed.
+    2. ``fallback`` — an optional weaker grounder (e.g. the remote-VLM
+       ``RemoteGrounder``) for text-less surfaces. Passed in by the caller so
+       this module stays decoupled from ``runtime.remote_vlm``.
+
+    Returns a single grounder, a :class:`FallbackGrounder` chaining both, or
+    None when neither is available (equivalent to :class:`NullGrounder`: the
+    ladder simply has no grounder rung — the safe, model-free default).
+    """
+    chain: list[Any] = []
+    ocr = OCRAnchorGrounder.available()
+    if ocr is not None:
+        chain.append(ocr)
+    if fallback is not None:
+        chain.append(fallback)
+    if not chain:
+        return None
+    if len(chain) == 1:
+        return chain[0]
+    return FallbackGrounder(chain)
 
 
 _DEFAULT_MODEL = "claude-opus-4-8"

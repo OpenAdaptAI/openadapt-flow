@@ -6,17 +6,21 @@ Public surface:
   for a single anchor against a live frame.
 - :class:`openadapt_flow.runtime.replayer.Replayer` — execute a compiled
   Workflow against a Backend, verifying postconditions and healing drift.
-- :mod:`openadapt_flow.runtime.grounder` — optional model-backed grounding
-  (protocol + NullGrounder + import-guarded AnthropicGrounder).
+- :mod:`openadapt_flow.runtime.grounder` — grounding rungs (protocol +
+  NullGrounder + the PRIMARY OCRAnchorGrounder (openadapt-grounding) +
+  FallbackGrounder + import-guarded AnthropicGrounder + build_grounder).
 - :mod:`openadapt_flow.runtime.heal` — HealEvent construction/persistence and
   healed-bundle writing.
 """
 
 from openadapt_flow.runtime.grounder import (  # noqa: F401
     AnthropicGrounder,
+    FallbackGrounder,
     Grounder,
     GrounderMatch,
     NullGrounder,
+    OCRAnchorGrounder,
+    build_grounder,
 )
 from openadapt_flow.runtime.heal import (  # noqa: F401
     apply_heal,
@@ -33,12 +37,15 @@ from openadapt_flow.runtime.resolver import (  # noqa: F401
 
 __all__ = [
     "AnthropicGrounder",
+    "FallbackGrounder",
     "Grounder",
     "GrounderMatch",
     "NullGrounder",
+    "OCRAnchorGrounder",
     "Replayer",
     "RUNG_ORDER",
     "apply_heal",
+    "build_grounder",
     "build_heal_event",
     "is_below_ocr",
     "persist_heal",

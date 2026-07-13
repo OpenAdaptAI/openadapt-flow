@@ -33,6 +33,7 @@ import imagehash
 from PIL import Image, ImageDraw
 
 from openadapt_flow.backend import Backend
+from openadapt_flow.ir import StructuralLocator
 
 
 def _phash(png: bytes) -> imagehash.ImageHash:
@@ -153,6 +154,20 @@ class Recorder:
         # can verify identity against the highest-fidelity signal (no OCR
         # ambiguity). Pointer events only (they carry x/y); absent otherwise.
         if event.get("kind") in ("click", "double_click"):
+            # Structural locator (DOM selector / role+name, or UIA identifiers)
+            # for the clicked element, when the backend exposes it
+            # (StructuralActionBackend). Stored on the event so the compiler can
+            # put it on the anchor and the replayer's structural ACTION rung can
+            # re-find the SAME element deterministically (no pixel match). Absent
+            # on pixel-only backends; resolution then uses the visual anchor.
+            locator = self._structural_locator_at(
+                int(event["x"]), int(event["y"])
+            )
+            if locator is not None:
+                event = {
+                    **event,
+                    "structural": locator.model_dump(exclude_none=True),
+                }
             structured = self._structured_identity_at(
                 int(event["x"]), int(event["y"])
             )
@@ -267,6 +282,25 @@ class Recorder:
             f.write(json.dumps(line) + "\n")
         self._i += 1
 
+    def _structural_locator_at(
+        self, x: int, y: int
+    ) -> Optional[StructuralLocator]:
+        """Stable structural locator for the element under (x, y), if any.
+
+        Backends MAY expose ``structural_locator_at``
+        (:class:`openadapt_flow.backend.StructuralActionBackend`): a stable DOM
+        selector / role+name (browser) or UIA AutomationId / role+name (native)
+        the replayer can re-resolve to act on the SAME element deterministically.
+        Pixel-only backends (no such method) or a momentary failure yield None,
+        and the step relies on the visual anchor alone.
+        """
+        getter = getattr(self._backend, "structural_locator_at", None)
+        if getter is None:
+            return None
+        try:
+            return getter(int(x), int(y))
+        except Exception:
+            return None
     @staticmethod
     def _redact(
         png: bytes, region: tuple[int, int, int, int]

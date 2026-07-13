@@ -5,10 +5,16 @@ deterministic, vision-anchored script → replay it locally with a resolution
 ladder → when the UI drifts, heal the script (as a reviewable diff) instead of
 re-reasoning every run.
 
-The runtime is **vision-only**: it consumes PNG bytes and emits clicks/keys at
-pixel coordinates through the `Backend` protocol (`openadapt_flow/backend.py`).
-The reference backend is Playwright-driven (headless-capable, CI-friendly,
-permission-free); native OS / RDP backends are future adapters.
+The runtime is **vision-first, not vision-only**: it always CAN operate a pure
+surface — consuming PNG bytes and emitting clicks/keys at pixel coordinates
+through the `Backend` protocol (`openadapt_flow/backend.py`) — but where a
+backend owns a structured layer (a browser DOM, a native UIA/AX tree) the
+resolution ladder's TOP rung re-finds the recorded target as an ELEMENT and
+acts on it deterministically (`StructuralActionBackend`, see Resolution ladder).
+Structure is preferred where present; the visual ladder is the fallback floor
+for pixel-only substrates (RDP/Citrix/canvas). The reference backend is
+Playwright-driven (headless-capable, CI-friendly, permission-free); native OS /
+RDP backends are future adapters.
 
 ## Frozen contracts (do not change without updating this doc)
 
@@ -149,7 +155,27 @@ class Replayer:
 Parameters not supplied in `params` fall back to the recorded example/default
 values in `workflow.params`, so a bundle replays without any explicit params.
 
-Resolution ladder per step with an anchor (record rung + confidence + ms):
+Resolution ladder per step with an anchor (record rung + confidence + ms).
+The full capability hierarchy is API → tool/MCP → DOM/UIA → geometry → OCR →
+template → VLM → human; API and tool/MCP are future placeholders, so the
+implemented rungs are:
+
+0. `structural` — DETERMINISTIC (additive change, structural-rung spike). When
+   the live backend implements `StructuralActionBackend` (a browser DOM, a
+   native UIA/AX tree) AND the anchor carries a `StructuralLocator` the compiler
+   captured (a stable DOM selector / role+name, or a UIA AutomationId /
+   role+name), the runtime re-finds the recorded target as an ELEMENT via
+   `backend.locate_structural(locator)` and acts on its center — no pixel
+   matching. Tried FIRST; a successful locate short-circuits the visual rungs.
+   Pixel-only substrates (RDP/Citrix/canvas) and failed/ambiguous locates fall
+   through to the visual rungs below UNCHANGED. This is the thesis refinement
+   from "vision-only" to "deterministic compiled automation with visual
+   FALLBACK" (desktop benchmark: UIA 21/21 vs compiled visual replay 6/21 under
+   drift; reproduced by `benchmark/structural_action/`). The resolved point
+   flows through the SAME click path, so the pre-click identity gate and the
+   irreversible risk gate still fire on it — structure makes identity STRONGER
+   (an exact element), it never bypasses it. Rungs 1–5 remain the visual
+   FALLBACK floor and are unchanged:
 1. `template` — find_template within anchor.region padded by search_pad
 2. `template_global` — find_template full frame; for UNLABELED anchors
    (no ocr_text) the match is rejected when every locatable landmark places

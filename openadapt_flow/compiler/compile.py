@@ -30,6 +30,7 @@ from openadapt_flow.ir import (
     PostconditionKind,
     Region,
     Step,
+    StructuralLocator,
     Workflow,
 )
 from openadapt_flow.risk import classify_step_risk
@@ -876,6 +877,18 @@ def compile_recording(
             # OCR context band; replay prefers it (no OCR glyph ambiguity) and
             # falls back to the band on pixel-only substrates.
             structured_identity = event.get("structured_identity") or None
+            # Structural locator (DOM selector / role+name, or UIA identifiers)
+            # of the clicked element, captured by the recorder when the
+            # recording backend exposed it (StructuralActionBackend). Drives the
+            # structural ACTION rung at replay -- the SAME element is re-found
+            # deterministically, surviving the render drift the visual template
+            # cannot. The visual anchor above is kept as the fallback floor.
+            structural_raw = event.get("structural") or None
+            structural = (
+                StructuralLocator.model_validate(structural_raw)
+                if structural_raw
+                else None
+            )
             anchor = Anchor(
                 template=template_rel,
                 region=crop_region,
@@ -883,6 +896,7 @@ def compile_recording(
                 ocr_text=ocr_text,
                 context_text=context_text,
                 structured_identity=structured_identity,
+                structural=structural,
                 landmarks=landmarks,
             )
             # Identity-protection audit trail: an UNARMED click proceeds

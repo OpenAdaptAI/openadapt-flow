@@ -162,6 +162,7 @@ class Replayer:
         effect_verifier: Optional[EffectVerifier] = None,
         effect_compensator: Optional[Any] = None,
         poll_interval_s: float = 0.05,
+        use_structural: bool = True,
     ) -> None:
         if vision is None:
             import openadapt_flow.vision as vision  # lazy: heavy OCR deps
@@ -169,6 +170,14 @@ class Replayer:
         self.backend = backend
         self.vision = vision
         self.grounder = grounder
+        # Whether the deterministic structural ACTION rung (top of the ladder)
+        # may run. True (default) = product behavior: on a structure-bearing
+        # backend, resolve the recorded target as a DOM/UIA element. Set False
+        # to force the VISUAL fallback floor even on a structure-bearing
+        # backend -- used to characterize the pixel-only substrate path
+        # (RDP/Citrix/VDI) on a Playwright surface (see the e2e visual-floor
+        # drift/heal suites). Never disables the visual ladder itself.
+        self.use_structural = use_structural
         # System-of-record effect verification (OFF by default). The verifier
         # is bound to the deployment's system of record; the optional
         # compensator undoes a detected duplicate irreversible write. Neither
@@ -570,16 +579,26 @@ class Replayer:
                 result.ok
                 and resolution is not None
                 and matched_region is not None
-                and resolution.rung != "template"
+                and resolution.rung not in ("template", "structural")
                 and step.anchor is not None
             ):
                 # Heal from the PRE-action frame: that is the frame the
                 # anchor was resolved against (the action may have navigated
                 # to a different screen, where a crop at the old location
-                # would be garbage). The heal is GOVERNED: a patch that would
-                # weaken the step's identity band (the reviewed context-drop
-                # bug), effect coverage, or risk class is quarantined and the
-                # run HALTS rather than silently applying an unverified repair.
+                # would be garbage).
+                #
+                # ``structural`` is exempt alongside ``template``: a
+                # deterministic DOM/UIA locate does NOT signal that the visual
+                # template is stale (structural runs FIRST regardless of visual
+                # drift), so refreshing the crop every run would emit a spurious
+                # reviewable anchor diff and break the zero-heal happy path. The
+                # visual fallback stays as recorded -- still valid for the
+                # substrate it was recorded on.
+                #
+                # The heal is GOVERNED: a patch that would weaken the step's
+                # identity band (the reviewed context-drop bug), effect
+                # coverage, or risk class is quarantined and the run HALTS
+                # rather than silently applying an unverified repair.
                 heal_outcome = self._heal_step(
                     step, resolution, matched_region, before_png, workflow,
                     run_dir, new_crops,
@@ -711,6 +730,16 @@ class Replayer:
         if template_path.is_file():
             template_png = template_path.read_bytes()
 
+        # The structural ACTION rung (top of the ladder) runs only when the
+        # live backend can re-find an element (StructuralActionBackend). A
+        # pixel-only backend (RDP/Citrix) lacks the method, so ``structural``
+        # is None and resolution uses the visual ladder unchanged.
+        structural = (
+            self.backend
+            if self.use_structural
+            and hasattr(self.backend, "locate_structural")
+            else None
+        )
         resolved = resolve(
             step.anchor,
             screen_png,
@@ -719,6 +748,7 @@ class Replayer:
             step.intent,
             template_png=template_png,
             viewport=self.backend.viewport,
+            structural=structural,
         )
         if resolved is None:
             return None, None, (

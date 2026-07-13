@@ -56,6 +56,7 @@ from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import identity as identity_mod
 from openadapt_flow.runtime.effects import (
+    Effect,
     EffectState,
     EffectVerifier,
     reconcile_or_escalate,
@@ -133,6 +134,15 @@ class Replayer:
             is REFUTED as a duplicate — deletes the extras and re-verifies
             (RECONCILED continues, else ESCALATE halts). None (default) means
             every refuted/indeterminate effect simply halts.
+        api_actuator: Optional ``ApiActuator`` (``runtime.actuators``) bound to
+            the deployment's API. It is the TOP of the capability ladder: when a
+            step carries an ``ir.Step.api_binding`` and this actuator is set,
+            the step's write is PERFORMED via the API (deterministic, $0, no
+            model), CONFIRMED by the ``effect_verifier``, and the GUI
+            resolve/act is SKIPPED. None (default) disables the API tier -- a
+            step with a binding then actuates through the GUI ladder exactly as
+            today (the API tier is an optimization whose safe fallback IS the
+            GUI). Never makes a model call.
         poll_interval_s: Postcondition polling interval in seconds.
     """
 
@@ -146,6 +156,7 @@ class Replayer:
         state_verifier: Optional[Any] = None,
         effect_verifier: Optional[EffectVerifier] = None,
         effect_compensator: Optional[Any] = None,
+        api_actuator: Optional[Any] = None,
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
     ) -> None:
@@ -161,6 +172,13 @@ class Replayer:
         # makes a model call — the $0 runtime guarantee is preserved.
         self.effect_verifier = effect_verifier
         self.effect_compensator = effect_compensator
+        # API/tool actuator -- the TOP of the capability ladder (RFC section 4
+        # `api` tier). When set, a step carrying an `api_binding` has its write
+        # performed via the API and confirmed by the effect_verifier, SKIPPING
+        # the GUI resolve/act. None (default) = the API tier is off and such a
+        # step falls through to the GUI ladder unchanged. Deterministic; makes
+        # no model call (the $0 runtime guarantee holds on this path too).
+        self.api_actuator = api_actuator
         # Whether the deterministic structural ACTION rung (top of the ladder)
         # may run. True (default) = product behavior: on a structure-bearing
         # backend, resolve the recorded target as a DOM/UIA element. Set False
@@ -250,6 +268,12 @@ class Replayer:
                 report.rung_counts[rung] = report.rung_counts.get(rung, 0) + 1
                 if rung == "grounder":
                     report.model_calls += 1
+            elif result.ok and result.actuation == "api":
+                # API-tier actuation has no visual resolution rung; count it
+                # under "api" so the run report shows the deterministic top of
+                # the ladder in the same place as the visual rungs. Zero model
+                # calls (the $0 guarantee holds on the API path too).
+                report.rung_counts["api"] = report.rung_counts.get("api", 0) + 1
             # Drift-oracle state-verifier calls are model calls too (honest
             # accounting: a rescued run is not a zero-model run).
             report.model_calls += result.drift_oracle_calls
@@ -325,6 +349,20 @@ class Replayer:
         """Execute a single step; never raises (failures land in the result)."""
         t0 = time.monotonic()
         result = StepResult(step_id=step.id, intent=step.intent, ok=False)
+
+        # API/tool tier -- the TOP of the capability ladder. When the step
+        # carries an api_binding and an ApiActuator is configured, PERFORM the
+        # write via the API (deterministic, $0, no GUI), CONFIRM it with the
+        # EffectVerifier, and SKIP the GUI resolve/act entirely. Returns True
+        # when the API tier took responsibility (actuated+verified, or HALTed);
+        # returns False (API tier unavailable -- endpoint unreachable / no
+        # binding param) to fall through to the GUI ladder below with NO write
+        # yet performed (the no-double-write contract). See
+        # openadapt_flow.runtime.actuators.
+        if self.api_actuator is not None and step.api_binding is not None:
+            if self._try_api_tier(step, params, result):
+                result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+                return result
 
         # Settle before the pre-action screenshot.
         before_png = self.vision.wait_settled(self.backend)
@@ -532,6 +570,115 @@ class Replayer:
         result.elapsed_ms = (time.monotonic() - t0) * 1000.0
         return result
 
+    # -- API/tool actuation tier (top of the capability ladder) -----------------
+
+    def _try_api_tier(
+        self,
+        step: Step,
+        params: dict[str, str],
+        result: StepResult,
+    ) -> bool:
+        """Perform ``step.api_binding``'s write via the API and confirm it.
+
+        The TOP of the capability ladder (RFC section 4 ``api`` tier): a
+        deterministic, ``$0``, model-free write, gated by the SAME
+        ``EffectVerifier`` as a GUI write. For an API write the target
+        "identity" is the explicit API parameter -- stronger than a resolved
+        pixel band -- so no identity gate is weakened by skipping the GUI.
+
+        Fail-safe ordering (the no-double-write contract):
+
+        - refuse BEFORE any request when the write could not be confirmed (no
+          effect contract, or no verifier) -- an unverifiable consequential
+          write never proceeds;
+        - snapshot the system of record, then actuate ONCE;
+        - UNAVAILABLE (request never sent) -> return False so the caller falls
+          through to the GUI ladder; nothing was written, so no double-write;
+        - HALT (request sent, outcome unknown / rejected) -> stop the run; the
+          write may have landed, so it is NEVER re-done through the GUI;
+        - ACTUATED (2xx) -> CONFIRM with the EffectVerifier; a non-CONFIRMED
+          verdict HALTs exactly as it would for a GUI write.
+
+        Returns True when the API tier took responsibility for the step (the
+        result is final -- actuated+verified, HALTed, or a config-error HALT),
+        False when the API tier is UNAVAILABLE and the caller must fall through
+        to the GUI resolution ladder.
+        """
+        binding = step.api_binding
+        assert binding is not None  # guaranteed by the caller
+
+        # An API write MUST be confirmable against the system of record --
+        # exactly as a GUI write that declares effects must be. The binding may
+        # carry its own effect contract; the step's own effects take precedence.
+        effects = step.effects or binding.effects
+        if not effects:
+            result.effect_verified = False
+            result.effect_results.append(
+                "API binding declares no effect to confirm the write (neither "
+                "step.effects nor api_binding.effects) -- refusing an "
+                "unverifiable API write (fail-safe HALT)"
+            )
+            result.ok = False
+            result.error = (
+                f"Step '{step.id}' ({step.intent}) has an API binding but no "
+                "system-of-record effect to CONFIRM the write -- an API write "
+                "must be verifiable; refusing to actuate "
+                "(deployment/configuration error); run aborted"
+            )
+            return True
+        if self.effect_verifier is None:
+            result.effect_verified = False
+            result.effect_results.append(
+                "API binding present but no EffectVerifier is configured to "
+                "confirm the write (fail-safe HALT)"
+            )
+            result.ok = False
+            result.error = (
+                f"Step '{step.id}' ({step.intent}) would actuate via the API "
+                "but no EffectVerifier is configured to confirm the write -- "
+                "refusing an unverifiable consequential write; run aborted"
+            )
+            return True
+
+        # Snapshot the system of record BEFORE the write so the verifier counts
+        # only what THIS actuation wrote (delta / at-most-once / collateral
+        # loss), then actuate exactly once.
+        before = self.effect_verifier.capture_pre_state()
+        outcome = self.api_actuator.actuate(binding, params)
+
+        from openadapt_flow.runtime.actuators import ActuationStatus
+
+        if outcome.status == ActuationStatus.UNAVAILABLE:
+            # The request was NEVER sent -- nothing was written. Fall through to
+            # the GUI ladder for this step (no double-write risk). The GUI path
+            # populates the result; leave only an audit breadcrumb here.
+            result.effect_results.append(f"[api] {outcome.reason}")
+            return False
+
+        # From here the request WAS attempted -- this step is API-tier and is
+        # NEVER also GUI-written (the no-double-write contract).
+        result.actuation = "api"
+
+        if outcome.status == ActuationStatus.HALT:
+            result.effect_verified = False
+            result.effect_results.append(f"[api] {outcome.reason}")
+            result.ok = False
+            result.error = (
+                f"API actuation HALTED step '{step.id}' ({step.intent}): "
+                f"{outcome.reason} -- run aborted"
+            )
+            return True
+
+        # ACTUATED (2xx): confirm the write against the system of record with
+        # the same EffectVerifier that gates a GUI write. A non-CONFIRMED
+        # verdict HALTs. The GUI resolve/act (and screen postconditions) are
+        # SKIPPED -- the record, not the screen, is the oracle for an API write.
+        result.effect_results.append(f"[api] actuated {outcome.reason}")
+        error = self._verify_effects(step, before, result, effects=effects)
+        result.ok = error is None
+        result.error = error
+        return True
+
     # -- system-of-record effect verification -----------------------------------
 
     def _verify_effects(
@@ -539,25 +686,37 @@ class Replayer:
         step: Step,
         before: EffectState,
         result: StepResult,
+        effects: Optional[list["Effect"]] = None,
     ) -> Optional[str]:
         """Verify each declared Effect against the system of record; HALT on
         any non-CONFIRMED verdict.
 
-        Runs AFTER the action and its screen postconditions. For each
-        ``step.effects`` entry the configured verifier rules CONFIRMED /
-        REFUTED / INDETERMINATE against the REAL record (an API/DB read, never
-        the screen). A CONFIRMED effect proceeds; a non-CONFIRMED effect halts,
-        except that an IRREVERSIBLE effect is first routed through
-        ``reconcile_or_escalate`` -- a duplicate the configured compensator can
-        undo is RECONCILED (proceed), everything else ESCALATEs (halt). Every
-        verdict is recorded on ``result.effect_results`` for the audit trail.
-        Makes ZERO model calls (the $0 runtime guarantee).
+        Runs AFTER the action and its screen postconditions (for a GUI write),
+        or immediately after an API actuation. For each effect the configured
+        verifier rules CONFIRMED / REFUTED / INDETERMINATE against the REAL
+        record (an API/DB read, never the screen). A CONFIRMED effect proceeds;
+        a non-CONFIRMED effect halts, except that an IRREVERSIBLE effect is
+        first routed through ``reconcile_or_escalate`` -- a duplicate the
+        configured compensator can undo is RECONCILED (proceed), everything else
+        ESCALATEs (halt). Every verdict is recorded on ``result.effect_results``
+        for the audit trail. Makes ZERO model calls (the $0 runtime guarantee).
+
+        Args:
+            step: The step being verified (for the audit/error text).
+            before: The pre-action snapshot of the system of record.
+            result: The step result to record verdicts on.
+            effects: The effects to verify; defaults to ``step.effects`` (the
+                GUI path). The API tier passes ``step.effects or
+                api_binding.effects`` so a self-contained binding carries its
+                own confirmation contract.
 
         Returns an error string (HALT) or None (all effects confirmed or
         reconciled).
         """
         assert self.effect_verifier is not None  # guaranteed by the caller
-        for effect in step.effects:
+        if effects is None:
+            effects = step.effects
+        for effect in effects:
             verdict = self.effect_verifier.verify(effect, before)
             if verdict.confirmed:
                 result.effect_results.append(

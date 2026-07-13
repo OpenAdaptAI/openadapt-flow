@@ -21,6 +21,7 @@ def record_triage_demo(
     note_text: str,
     param_name: str = "note",
     headed: bool = False,
+    record_video_dir: Path | str | None = None,
 ) -> Path:
     """Record the canonical triage demo against a running MockMed app.
 
@@ -33,11 +34,21 @@ def record_triage_demo(
         note_text: The note typed during the demo (recorded as a parameter).
         param_name: Parameter name for the typed note (default ``"note"``).
         headed: Run the browser headed (visible) instead of headless.
+        record_video_dir: OPT-IN (default ``None`` = off, no effect). When set,
+            a WebM video of the recording session is captured into this
+            directory (used to film the canonical demo for the website); it
+            does not change what is recorded to ``out_dir``.
 
     Returns:
         The recording directory (contains meta.json, events.jsonl, frames/).
     """
-    backend, close = PlaywrightBackend.launch(url, headless=not headed)
+    backend, close = PlaywrightBackend.launch(
+        url,
+        headless=not headed,
+        record_video_dir=(
+            str(record_video_dir) if record_video_dir is not None else None
+        ),
+    )
     try:
         page = backend.page
         recorder = Recorder(backend, out_dir, app_url=url)

@@ -1,6 +1,37 @@
 # CHANGELOG
 
 
+## v0.18.0 (2026-07-13)
+
+### Features
+
+- Auto-provision Chromium on first browser launch (pip install just works)
+  ([#84](https://github.com/OpenAdaptAI/openadapt-flow/pull/84),
+  [`04ec900`](https://github.com/OpenAdaptAI/openadapt-flow/commit/04ec9003d2fa7e30c955742de4f7b5c5c6e0a3bc))
+
+`pip install openadapt-flow` pulls the Playwright Python package but not the Chromium browser
+  binary, which previously required a separate manual `playwright install chromium` step.
+  Post-install hooks are unreliable for wheels, so provision the browser lazily on first real use
+  instead.
+
+New `openadapt_flow/_browser_setup.ensure_chromium_installed()` probes for the browser binary (via
+  Playwright's reported executable path) and, when missing, runs `python -m playwright install
+  chromium` once with a friendly one-time notice. It is guarded by a module-level flag so it runs at
+  most once per process, is a no-op when the browser is present, idempotent across runs, and has no
+  import-time side effects. `OPENADAPT_FLOW_NO_AUTO_INSTALL=1` opts out for air-gapped /
+  pre-provisioned environments, letting Playwright's own clear "browser not installed" error
+  surface.
+
+Hooked at every real browser-launch chokepoint: PlaywrightBackend.launch (covers demo-record,
+  benchmark, dom-arm, hybrid, structural-action), InteractiveRecorder.start (record), and the CLI
+  replay/bench direct launches in __main__. Updates the README: `pip install openadapt-flow` now
+  suffices, with uvx / uv tool install noted as the fast path and the opt-out documented.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.17.0 (2026-07-13)
 
 ### Features

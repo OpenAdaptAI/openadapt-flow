@@ -1,47 +1,74 @@
 name: Release and PyPI Publish
 
+# Auto-release on merge to main, driven by Conventional Commits (matches the
+# other openadapt repos, e.g. openadapt-capture). Python Semantic Release reads
+# the commit history since the last tag, computes the next version (feat -> minor,
+# fix/perf -> patch), bumps pyproject, tags, and — only when it actually cuts a
+# release — builds and publishes to PyPI (OIDC) + GitHub Releases.
+#
+# Prerequisites (repo settings, not code):
+#   - secrets.ADMIN_TOKEN: a token allowed to push the release commit/tag past
+#     branch protection (the same secret the other openadapt repos use).
+#   - PyPI Trusted Publishing configured for openadapt-flow with environment
+#     "pypi" (already set up; v0.3.0 published this way).
+
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
+    concurrency: release
     environment: pypi
     permissions:
       id-token: write # PyPI Trusted Publishing (OIDC)
-      contents: write # GitHub Release
+      contents: write # push the version bump commit + tag, create the Release
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.ADMIN_TOKEN }}
+
+      - name: Skip the release commit itself (avoid a loop)
+        id: check_skip
+        run: |
+          author="$(git log -1 --pretty=format:'%an')"
+          subject="$(git log -1 --pretty=format:'%s')"
+          if [ "$author" = "semantic-release" ] || printf '%s' "$subject" | grep -q '^chore: release'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Python
+        if: steps.check_skip.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Verify tag matches package version
-        run: |
-          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match pyproject version $PKG_VERSION" >&2
-            exit 1
-          fi
+      - name: Install uv
+        if: steps.check_skip.outputs.skip != 'true'
+        uses: astral-sh/setup-uv@v4
+
+      - name: Python Semantic Release
+        if: steps.check_skip.outputs.skip != 'true'
+        id: release
+        uses: python-semantic-release/python-semantic-release@v9.15.2
+        with:
+          github_token: ${{ secrets.ADMIN_TOKEN }}
 
       - name: Build package
-        run: |
-          python -m pip install --quiet build
-          python -m build
+        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
+        run: uv build
 
       - name: Publish to PyPI
+        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
 
       - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "$GITHUB_REF_NAME" --generate-notes
+        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
+        uses: python-semantic-release/publish-action@v9.15.2
+        with:
+          github_token: ${{ secrets.ADMIN_TOKEN }}

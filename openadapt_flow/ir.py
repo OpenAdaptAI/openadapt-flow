@@ -33,6 +33,17 @@ if TYPE_CHECKING:
 Region = tuple[int, int, int, int]
 Point = tuple[int, int]
 
+#: Current bundle schema version. v2 adds the bundle manifest (per-asset
+#: hashes, a whole-bundle content digest, and compiler/certification
+#: provenance) and load-time structural + integrity validation, ON TOP of the
+#: v1 semantics. v2 is a strict, ADDITIVE superset of v1: every v2-only field
+#: defaults empty, so a v1 bundle migrates to v2 on read (see
+#: ``openadapt_flow.bundle_validation.migrate_bundle_dict``) and replays
+#: byte-for-byte. Bumped from 1 now that the IR carries ~10x the semantics it
+#: did at v1 (typed params, predicates/guards, a full state-machine program,
+#: system-of-record effects, API bindings, PHI-free identity templates).
+SCHEMA_VERSION = 2
+
 
 class ActionKind(str, Enum):
     CLICK = "click"
@@ -758,8 +769,77 @@ def lift_to_program(workflow: "Workflow") -> ProgramGraph:
     return ProgramGraph(entry=entry, states=states)
 
 
+class BundleProvenance(BaseModel):
+    """Who produced a bundle and, if certified, under what policy (schema v2).
+
+    ``compiler_version`` records the ``openadapt_flow`` version that compiled /
+    last saved the bundle, so an operator inventory can tell which compiler an
+    artifact came from. The certification block is populated only for a bundle
+    that passed a policy certification (see :meth:`Workflow.stamp_certification`
+    / ``openadapt_flow.policy.evaluate_policy``): ``policy_name`` is the policy
+    it was certified against, ``certification_status`` is a short label
+    (``"certified"`` / ``"failed"`` / ``"expired"``), and ``expires_at`` is an
+    optional ISO expiry after which a consumer should re-certify. An
+    uncertified bundle leaves the block at its defaults.
+    """
+
+    compiler_version: str = Field(
+        default="", description="openadapt_flow version that produced the bundle"
+    )
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
+        description="When this manifest/provenance was first sealed (ISO 8601)",
+    )
+    policy_name: Optional[str] = Field(
+        default=None,
+        description="Certified bundle: the policy it was certified against",
+    )
+    certified: bool = Field(
+        default=False, description="Whether the bundle passed policy certification"
+    )
+    certification_status: Optional[str] = Field(
+        default=None,
+        description="Short label: 'certified' | 'failed' | 'expired' | None",
+    )
+    certified_at: Optional[str] = Field(
+        default=None, description="ISO timestamp of the certification, if any"
+    )
+    expires_at: Optional[str] = Field(
+        default=None,
+        description="Optional ISO expiry; a consumer should re-certify after it",
+    )
+
+
+class BundleManifest(BaseModel):
+    """Integrity + provenance manifest for a compiled bundle (schema v2).
+
+    Sealed on :meth:`Workflow.save` and re-verified on :meth:`Workflow.load`
+    (``openadapt_flow.bundle_validation``): ``file_hashes`` is a SHA-256 per
+    template/image asset (bundle-relative path -> hex digest), ``content_digest``
+    is a whole-bundle SHA-256 over the manifest-free ``workflow.json`` content
+    AND those asset hashes (so it changes if any semantic byte changes), and
+    ``provenance`` carries the compiler version + certification block. ``encrypted``
+    mirrors ``Workflow.encrypted`` (at-rest encryption is a later item; the flag
+    is present so the format is ready for it). Additive: a v1 bundle carries no
+    manifest and one is computed on read.
+    """
+
+    schema_version: int = SCHEMA_VERSION
+    content_digest: str = Field(
+        default="", description="whole-bundle SHA-256 (content + asset hashes)"
+    )
+    file_hashes: dict[str, str] = Field(
+        default_factory=dict,
+        description="bundle-relative asset path -> SHA-256 hex digest",
+    )
+    provenance: BundleProvenance = Field(default_factory=BundleProvenance)
+    encrypted: bool = Field(
+        default=False, description="mirrors Workflow.encrypted (at-rest crypto TBD)"
+    )
+
+
 class Workflow(BaseModel):
-    schema_version: int = 1
+    schema_version: int = SCHEMA_VERSION
     name: str
     recording_id: Optional[str] = None
     # -- PHI governance manifest (PHI audit REM-1) --------------------------
@@ -818,23 +898,119 @@ class Workflow(BaseModel):
     program: Optional["ProgramGraph"] = None
     subflows: dict[str, "ProgramGraph"] = Field(default_factory=dict)
     data_sources: dict[str, "Relation"] = Field(default_factory=dict)
+    # -- schema v2 integrity + provenance manifest --------------------------
+    # Sealed on ``save`` (per-asset hashes, a whole-bundle content digest, the
+    # compiler version, and -- for a certified bundle -- the certifying policy +
+    # status + optional expiry) and re-verified on ``load``. Additive and
+    # backward-compatible: a v1 bundle carries no manifest, so one is computed
+    # on read (see ``openadapt_flow.bundle_validation``). Excluded from the
+    # content digest itself (the digest lives INSIDE it).
+    manifest: Optional["BundleManifest"] = None
 
     # -- bundle I/O ---------------------------------------------------------
 
-    def save(self, bundle_dir: Path | str) -> Path:
+    def save(self, bundle_dir: Path | str, *, seal_manifest: bool = True) -> Path:
         """Write workflow.json into bundle_dir (templates are written by the
-        compiler / healer, which own the crop images)."""
+        compiler / healer, which own the crop images).
+
+        Schema v2: unless ``seal_manifest=False``, (re)computes and seals the
+        integrity/provenance manifest (per-asset hashes + whole-bundle content
+        digest + compiler version, carrying over any prior certification) and
+        also writes it to a standalone ``manifest.json`` sidecar for external
+        tooling. The ``schema_version`` is bumped to the current version.
+        """
         bundle = Path(bundle_dir)
         bundle.mkdir(parents=True, exist_ok=True)
         (bundle / "templates").mkdir(exist_ok=True)
+        if self.schema_version < SCHEMA_VERSION:
+            self.schema_version = SCHEMA_VERSION
+        if seal_manifest:
+            from openadapt_flow import bundle_validation as _bv
+
+            self.manifest = _bv.build_manifest(self, bundle)
         path = bundle / "workflow.json"
         path.write_text(self.model_dump_json(indent=2))
+        if self.manifest is not None:
+            (bundle / "manifest.json").write_text(
+                self.manifest.model_dump_json(indent=2)
+            )
         return path
 
     @classmethod
-    def load(cls, bundle_dir: Path | str) -> "Workflow":
+    def load(
+        cls,
+        bundle_dir: Path | str,
+        *,
+        validate: bool = True,
+        verify_integrity: bool = True,
+    ) -> "Workflow":
+        """Load a bundle, migrating v1 -> v2, validating structure, and (for a
+        v2 bundle carrying a sealed digest) verifying integrity.
+
+        - ``validate`` (default True): reject a structurally MALFORMED bundle
+          via ``bundle_validation.validate_workflow`` (missing entry, dangling
+          transition/handler target, kind/payload mismatch, missing subflow,
+          duplicate id, unreachable terminal, unsafe unconditional cycle). Only
+          the *structural* category raises here; the effect-verification safety
+          finding is surfaced by lint/certify, not the load path, so an existing
+          uncertified-but-well-formed bundle still loads.
+        - ``verify_integrity`` (default True): if the bundle carries a sealed
+          manifest digest, recompute it and reject a tampered bundle. A legacy
+          (pre-v2) bundle has no sealed digest, so its manifest is computed
+          fresh and nothing is rejected.
+        """
         bundle = Path(bundle_dir)
-        return cls.model_validate(json.loads((bundle / "workflow.json").read_text()))
+        from openadapt_flow import bundle_validation as _bv
+
+        raw = json.loads((bundle / "workflow.json").read_text())
+        raw = _bv.migrate_bundle_dict(raw)
+        # A manifest may be embedded in workflow.json OR sit in a sidecar; the
+        # embedded one wins, else the sidecar, else it is computed fresh.
+        persisted = raw.get("manifest")
+        wf = cls.model_validate(raw)
+
+        if wf.manifest is None:
+            sidecar = bundle / "manifest.json"
+            if sidecar.is_file():
+                wf.manifest = BundleManifest.model_validate_json(sidecar.read_text())
+                persisted = wf.manifest
+
+        if verify_integrity and persisted is not None and wf.manifest is not None:
+            _bv.verify_integrity(wf, bundle, wf.manifest)
+
+        if wf.manifest is None:
+            wf.manifest = _bv.build_manifest(wf, bundle)
+
+        if validate:
+            report = _bv.validate_workflow(wf)
+            report.raise_if(categories=("structure",))
+
+        return wf
+
+    def stamp_certification(
+        self,
+        policy_name: str,
+        passed: bool,
+        *,
+        expires_at: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> "BundleManifest":
+        """Record a policy-certification result in the bundle manifest (v2).
+
+        Ensures a manifest exists and sets its provenance certification block:
+        the certifying ``policy_name``, whether it ``passed``, a short status
+        label, the certification timestamp, and an optional ISO ``expires_at``.
+        Persisted on the next :meth:`save`. Returns the manifest for convenience.
+        """
+        if self.manifest is None:
+            self.manifest = BundleManifest()
+        prov = self.manifest.provenance
+        prov.policy_name = policy_name
+        prov.certified = passed
+        prov.certification_status = status or ("certified" if passed else "failed")
+        prov.certified_at = datetime.now(timezone.utc).isoformat()
+        prov.expires_at = expires_at
+        return self.manifest
 
 
 # -- runtime results ---------------------------------------------------------

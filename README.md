@@ -111,13 +111,28 @@ pixel-only substrates (RDP, Citrix, canvas). On a desktop drift benchmark the st
 rung resolved 21/21 targets where visual replay alone managed 6/21
 ([`benchmark/structural_action/`](benchmark/structural_action/STRUCTURAL_ACTION.md)).
 Structure never bypasses the identity gate — it makes identity stronger, an
-exact element rather than a pixel guess.
+exact element rather than a pixel guess. But the identity gate only covers
+*armed* steps, and today's bundles arm a subset of clicks (the live OpenEMR
+bundle armed 4-7 of 12) — an **unarmed click has no identity check at all**. The
+per-step coverage is auditable in `workflow.json` and reported in every run;
+see [what it doesn't do yet](docs/LIMITS.md).
 
-It all sits behind a small four-method `Backend` protocol. The reference
-backend is a headless browser (which is why the whole loop runs in CI with no
-OS permissions); a `WindowsBackend` (UI Automation over the WindowsAgentArena
-server) and a FreeRDP-driven RDP backend already exist and are exercised
-against mocked servers in CI — adapters, not rewrites.
+It all sits behind a small four-method `Backend` protocol, and backend maturity
+is uneven — stated plainly rather than blurred together. The **shipped** backend
+is a headless browser (which is why the whole loop runs in CI with no OS
+permissions) and is the only path proven end to end against a real third-party
+app. A `WindowsBackend` (UI Automation over the WindowsAgentArena server) is
+**proven structurally on a local Windows-on-ARM VM** — record → compile → replay,
+judged against the app's own database. A FreeRDP `RDPBackend` and a
+Citrix/remote-display pixel-only backend also exist, but they are **spikes, not
+validated integrations**: they conform to the protocol and pass mocked/offline
+tests, and the Citrix work is a *pixel-only remote-display analog spike*, **not a
+validated Citrix integration**. HDX compression and latency, ICA DPI and
+coordinate mapping, synthetic-input acceptance, lock/credential screens,
+independent effect verification, and the identity over-halt rate on real charts
+are all deferred and unmeasured (see [`docs/backends/RDP.md`](docs/backends/RDP.md)
+and [`docs/desktop/CITRIX_PIXEL.md`](docs/desktop/CITRIX_PIXEL.md)). All are
+adapters onto the one protocol, not rewrites.
 
 ## Proof
 
@@ -166,7 +181,12 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
   zero model calls. A fault-model study found the screen-only oracle silently
   mishandles 5 of 7 transactional fault classes; all five halt through the real
   replayer once effects are declared ([`benchmark/fault_model/`](benchmark/fault_model/FAULT_MODEL.md),
-  [`docs/design/EFFECT_VERIFIER.md`](docs/design/EFFECT_VERIFIER.md)).
+  [`docs/design/EFFECT_VERIFIER.md`](docs/design/EFFECT_VERIFIER.md)). Two honest
+  preconditions bound this: the compiler does **not** yet infer effects from a
+  demonstration — they are authored per deployment against the app's system of
+  record — and a run with **no** verifier configured falls back to the screen
+  oracle. The net exists only when both are supplied; without them the write is
+  exactly as silent as before.
 - **An API actuator tier.** Where the target app exposes a real API, driving its
   GUI to make the write is the wrong tool. A step carrying an `ApiBinding`, with
   an `ApiActuator` configured, performs the write by calling the API
@@ -176,7 +196,11 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
 - **Policy: lint and certify.** `lint` reports a bundle's coverage gaps (unarmed
   clicks, vacuous postconditions, under-classified risk) with a severity each;
   `certify` enforces a policy and exits nonzero, refusing a bundle before it
-  deploys. Runnable is not the same as certified safe.
+  deploys. Runnable is not the same as certified safe. Certification is
+  **optional and opt-in** — an uncertified bundle still runs — and a policy only
+  defines what a bundle must satisfy, so the honest claim is that *a certified
+  workflow can be configured to halt* on the conditions its policy names, not
+  that any workflow always halts.
 - **Governed healing.** Every fix under drift lands in the bundle as a reviewable
   diff, and a step classified irreversible will not act on a low-confidence
   match — structure and the identity gate govern the heal, they are not bypassed
@@ -222,10 +246,16 @@ numbers, methodology, and caveats:
 
 ## Status
 
-v0 for the reference browser backend: solid there, with a drift matrix and a
-broad unit suite in CI (a consistency gate keeps this README honest — see
-`scripts/check_consistency.py`). `DESIGN.md` has the module contracts; the
-Phase-2 workflow-program IR is specified in
+Early, and honest about it — maturity is uneven across the surface. The
+reference **browser** backend is the proven path: solid end to end, with a drift
+matrix and a broad unit suite in CI (a consistency gate keeps this README honest
+— see `scripts/check_consistency.py`). Everything else is earlier. The
+desktop/RDP/Citrix backends are spikes (see the backend status under
+[How it works](#how-it-works)), and the Phase-2 workflow-program IR (induction,
+program graphs, effect verification) is **specified and prototyped against
+synthetic fixtures — no real recording exercises it yet**; treat it as
+experimental, not production. `DESIGN.md` has the module contracts; the Phase-2
+IR is specified in
 [`docs/design/WORKFLOW_PROGRAM_IR.md`](docs/design/WORKFLOW_PROGRAM_IR.md), and
 [`docs/L1_INTEGRATION.md`](docs/L1_INTEGRATION.md) covers feeding layered
 clinical-data platforms.
@@ -246,6 +276,13 @@ The shareable `REPORT.md` and console logs are scrubbed; the compiled bundle and
 and are protected by a documented boundary. Identity crops sent to the on-prem
 VLM appliance are deliberately not scrubbed — the control there is
 on-prem-only + no-retention. Full map: [docs/PRIVACY.md](docs/PRIVACY.md).
+
+At rest, opt-in AES-256-GCM encryption (`OPENADAPT_BUNDLE_KEY`) seals
+`workflow.json` and durable checkpoints, but the **template `templates/*.png`
+crops are not yet sealed inside that encrypted container** — they remain
+governance-guarded (kept out of git) and rely on **operator full-disk
+encryption**. Treat every bundle as PHI. Details and the target envelope-key
+design: [docs/phi_at_rest.md](docs/phi_at_rest.md).
 
 ## Development
 

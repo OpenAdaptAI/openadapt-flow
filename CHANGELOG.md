@@ -1,6 +1,42 @@
 # CHANGELOG
 
 
+## v0.20.0 (2026-07-14)
+
+### Features
+
+- Close the halt→learn→resolve loop (governed, one scenario) — modal-once
+  ([#89](https://github.com/OpenAdaptAI/openadapt-flow/pull/89),
+  [`aad55ee`](https://github.com/OpenAdaptAI/openadapt-flow/commit/aad55ee23cc56cd3c0b86903d74fd8fba6354635))
+
+Today a HALT is a dead stop: the Replayer refuses rather than guessing on an unhandled state, but
+  nothing learns from the operator's post-halt correction. The continuous-learning scaffold
+  (learning/loop.py, gate.py, library.py, the Phase-2 interpreter) and the reference inducer existed
+  but no real run fed them. This wires them for ONE real scenario — the MockMed modal-once drift —
+  end to end, correctness-first, with no ungoverned learning.
+
+- ir.py: add HaltObservation + RunReport.halt (additive/back-compatible). The structured record a
+  halt emits: halt point, observed unexpected on-screen text (PHI-scrubbed), and the completed
+  pre-context — shaped exactly like an ExecutionTrace so the loop consumes it with no reshaping. -
+  runtime/replayer.py: Replayer.run now EMITS report.halt on any unsuccessful run (linear + program
+  paths), probing the frame via the same OCR the runtime uses. Never raises — emission cannot turn a
+  halt into a crash. - learning/halt_loop.py (new): the thin bridge. execution_trace_from_halt lifts
+  a halt into the trace corpus; resolution_demonstration models the operator correction as a
+  demonstration; learn_from_halt runs the UNCHANGED learn_from_traces (induce → RegressionGate →
+  held-out canary → promote/refuse); promoted_workflow materializes the learned ProgramGraph as
+  Workflow.program. - tests/test_halt_learn_loop.py: before(halt+emit) → learn(promote a guarded
+  dismiss branch) → after(no halt) on the SAME scenario, plus a clean run and a DIFFERENT modal
+  still behaving as before; the loop REFUSES an underdetermined correction and the RegressionGate
+  BLOCKS an identity-weakening one.
+
+Deliberately minimal: one scenario, no UI/CLI surface, no multi-scenario generalization. Old
+  behavior intact — a bundle without a learned branch replays exactly as before.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.19.1 (2026-07-14)
 
 ### Bug Fixes

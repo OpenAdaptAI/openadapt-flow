@@ -39,6 +39,7 @@ from openadapt_flow.runtime.effects.effect import (  # noqa: F401
     EffectState,
     EffectVerdict,
     EffectVerifier,
+    ValueExpr,
     Verdict,
     record_matches,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "EffectState",
     "EffectVerdict",
     "EffectVerifier",
+    "ValueExpr",
     "Verdict",
     "record_matches",
     "RestRecordVerifier",

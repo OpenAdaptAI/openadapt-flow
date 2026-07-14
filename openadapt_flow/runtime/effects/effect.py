@@ -37,11 +37,96 @@ Everything here is import-light (pydantic only); concrete substrates
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class ValueExpr(BaseModel):
+    """A single effect-contract value: either a static ``literal`` or a
+    reference to a run ``param`` (P0-3 fix).
+
+    Before this type an :class:`Effect` carried plain static strings, so a
+    PARAMETERIZED workflow verified its effects against the values baked in at
+    DEMONSTRATION time (write patient "Susan" via the GUI, then verify the
+    recorded demo patient "Phil"). ``ValueExpr`` lets a compiled effect declare
+    ``{"param": "patient_id"}`` and have the runtime resolve it against the
+    RUN's params before verification, so the record actually written is the
+    record checked.
+
+    Exactly one of :attr:`literal` / :attr:`param` is meaningful. Old bundles
+    (and hand-authored effects) that pass a bare string are coerced to
+    ``ValueExpr(literal=...)`` by :class:`Effect`'s validators, and this type's
+    ``__eq__`` / ``__str__`` compare/render as that bare string so every
+    existing reader (learning gate signatures, codegen review comments) and the
+    substrate matchers behave BYTE-FOR-BYTE identically for a literal.
+    """
+
+    #: A static value baked into the contract (the v1 form). ``None`` when the
+    #: value comes from a run param instead.
+    literal: Optional[str] = None
+    #: Name of a run parameter to resolve against at run time (``Workflow.params``
+    #: overlaid by the caller's values). ``None`` for a literal.
+    param: Optional[str] = None
+
+    def resolve(self, params: Mapping[str, str]) -> Optional[str]:
+        """Resolve to a concrete string against ``params``.
+
+        A ``param`` reference reads ``params[param]`` (``None`` when the run did
+        not supply it -- fail-safe: an unresolved selector matches nothing, so
+        the effect REFUTEs / HALTs rather than silently confirming the wrong
+        record). A pure literal returns its literal unchanged.
+        """
+        if self.param is not None:
+            return params.get(self.param)
+        return self.literal
+
+    def resolved(self, params: Mapping[str, str]) -> "ValueExpr":
+        """Return a pure-literal copy of this expression bound to ``params``."""
+        return ValueExpr(literal=self.resolve(params))
+
+    # -- transparent str-compatibility (back-compat with the v1 plain-string
+    #    form): a literal ValueExpr compares, hashes, stringifies, and reprs
+    #    exactly as the bare string it replaced, so existing readers and tests
+    #    that treat ``effect.value`` / ``effect.match[k]`` as a string are
+    #    unaffected. ---------------------------------------------------------
+    def __str__(self) -> str:
+        if self.literal is not None:
+            return self.literal
+        if self.param is not None:
+            return "{" + self.param + "}"
+        return ""
+
+    def __repr__(self) -> str:
+        # Mirror ``repr(str)`` for a literal so codegen review comments
+        # (``idempotency_key={eff.idempotency_key!r}``) and ``dict`` reprs of a
+        # ``match`` selector render as they did when values were plain strings.
+        if self.param is None:
+            return repr(self.literal)
+        return repr("{" + self.param + "}")
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ValueExpr):
+            return self.literal == other.literal and self.param == other.param
+        if isinstance(other, str):
+            # A literal expression equals the bare string it stands for.
+            return self.param is None and self.literal == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        # A literal expression must hash IDENTICALLY to the bare string it
+        # stands for, so it collides with that string in sets/dicts (the
+        # hash/eq invariant given ``__eq__`` treats them as equal). Existing
+        # code that keys a set/dict on ``match`` values mixing plain strings
+        # and literal expressions then behaves unchanged.
+        if self.param is None:
+            return hash(self.literal)
+        return hash(("__param__", self.param))
 
 
 class EffectKind(str, Enum):
@@ -80,16 +165,24 @@ class Effect(BaseModel):
     :attr:`field` / :attr:`value`.
     """
 
+    model_config = ConfigDict(validate_assignment=True)
+
     kind: EffectKind
     #: Field -> value selector identifying the INTENDED record in the system
     #: of record (e.g. ``{"patient_id": "p1", "type": "Triage"}``). A verifier
     #: matches a record when every selector pair is satisfied. Values compare
     #: as strings after ``str()`` so numeric ids match across JSON/DB types.
-    match: dict[str, str] = Field(default_factory=dict)
+    #: Each value is a :class:`ValueExpr` -- a literal OR a run-``param``
+    #: reference -- so a PARAMETERIZED workflow verifies the record it actually
+    #: wrote this run, not the demonstration's record (P0-3). A bare string in
+    #: v1 bundles is coerced to ``ValueExpr(literal=...)`` and behaves
+    #: identically.
+    match: dict[str, ValueExpr] = Field(default_factory=dict)
     #: ``field_equals`` only: the record field that must equal :attr:`value`.
     field: Optional[str] = None
-    #: ``field_equals`` only: the required value of :attr:`field`.
-    value: Optional[str] = None
+    #: ``field_equals`` only: the required value of :attr:`field` (literal or a
+    #: run-``param`` reference; see :attr:`match`).
+    value: Optional[ValueExpr] = None
     #: ``record_written`` only: how many matching records must exist. 1 is the
     #: at-most-once contract for a consequential write; 0 asserts absence.
     expected_count: int = 1
@@ -98,7 +191,10 @@ class Effect(BaseModel):
     #: exactly :attr:`expected_count` -- so a duplicate submission that reused
     #: the key collapses to one record and a non-idempotent duplicate (no key,
     #: or a second distinct write) is caught as ``observed_count > expected``.
-    idempotency_key: Optional[str] = None
+    #: A :class:`ValueExpr`: bind it to a run ``param`` (or a stable run
+    #: identity) so the key is PER-RUN, not the frozen demonstration literal
+    #: that would collide across unrelated runs (P0-3).
+    idempotency_key: Optional[ValueExpr] = None
     #: Which record field carries the idempotency key (substrate-specific;
     #: the MockMed system-of-record uses ``"key"``).
     key_field: str = "key"
@@ -129,6 +225,81 @@ class Effect(BaseModel):
     #: verify a fabricated binding — see ``runtime.replayer._verify_effects``)
     #: until an operator completes the binding and clears this flag.
     needs_operator_confirmation: bool = False
+
+    # -- back-compat coercion: accept the v1 plain-string JSON form ----------
+    @staticmethod
+    def _coerce_expr(v: Any) -> Any:
+        """Coerce a bare string / None into a :class:`ValueExpr` shape.
+
+        v1 bundles serialize effect values as plain strings
+        (``"value": "Phil"``); this lets them load into the parameterized
+        ``ValueExpr`` fields unchanged. A ``dict`` (the new serialized form
+        ``{"literal": ...}`` / ``{"param": ...}``) and an existing ``ValueExpr``
+        pass straight through to pydantic.
+        """
+        if isinstance(v, str):
+            return ValueExpr(literal=v)
+        return v
+
+    @field_validator("match", mode="before")
+    @classmethod
+    def _coerce_match(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            return {k: cls._coerce_expr(val) for k, val in v.items()}
+        return v
+
+    @field_validator("value", "idempotency_key", mode="before")
+    @classmethod
+    def _coerce_value(cls, v: Any) -> Any:
+        return cls._coerce_expr(v)
+
+    # -- run-time parameter binding (P0-3) -----------------------------------
+    def resolve(self, params: Mapping[str, str]) -> "Effect":
+        """Return a copy with every :class:`ValueExpr` bound to ``params``.
+
+        The runtime calls this BEFORE snapshotting the pre-state and verifying,
+        so ``match`` / ``value`` / ``idempotency_key`` reflect the RECORD THIS
+        RUN WROTE, not the demonstration's. A pure-literal effect (a v1 bundle)
+        is returned unchanged in value -- ``resolve`` is a no-op for it, which
+        is why an old bundle behaves identically.
+        """
+        return self.model_copy(
+            update={
+                "match": {k: v.resolved(params) for k, v in self.match.items()},
+                "value": None if self.value is None else self.value.resolved(params),
+                "idempotency_key": (
+                    None
+                    if self.idempotency_key is None
+                    else self.idempotency_key.resolved(params)
+                ),
+            }
+        )
+
+    def contract_hash(self) -> str:
+        """A stable, NON-secret-bearing digest of the (resolved) contract.
+
+        Persisted in the RunReport for auditability: two runs whose effect
+        contracts resolved to different records/values (or idempotency keys)
+        have different hashes, and a duplicated run has the same hash. Being a
+        one-way SHA-256 digest it records THAT the contract differed without
+        exposing the underlying value (e.g. a patient identifier).
+        """
+        payload = {
+            "kind": self.kind.value,
+            "match": {k: str(v) for k, v in sorted(self.match.items())},
+            "field": self.field,
+            "value": None if self.value is None else str(self.value),
+            "expected_count": self.expected_count,
+            "idempotency_key": (
+                None if self.idempotency_key is None else str(self.idempotency_key)
+            ),
+            "key_field": self.key_field,
+            "forbid_collateral_loss": self.forbid_collateral_loss,
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return f"sha256:{digest}"
 
 
 class EffectState(BaseModel):

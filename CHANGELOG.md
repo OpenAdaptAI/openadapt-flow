@@ -1,6 +1,97 @@
 # CHANGELOG
 
 
+## v0.25.0 (2026-07-14)
+
+### Bug Fixes
+
+- Desktop e2e targets a reliable app (repeatable structural-rung proof, not flaky Calculator)
+  ([#102](https://github.com/OpenAdaptAI/openadapt-flow/pull/102),
+  [`c19fda1`](https://github.com/OpenAdaptAI/openadapt-flow/commit/c19fda1b31d7cf6026cb9b21fab4c9ab31d8ea43))
+
+The opt-in Parallels desktop e2e drove the built-in UWP Calculator and asserted per-key
+  AutomationIds (num7Button, ...). On Windows 11 ARM the modern Calculator is a packaged UWP app
+  hosted under ApplicationFrameHost whose keypad does not surface as a findable top-level window
+  through the UIA path WindowsBackend.locate_structural walks, so locate_structural returns None and
+  the test fails even though the desktop stack works -- a flaky Calculator test, not a repeatable
+  structural-rung proof.
+
+Retarget the e2e at the in-tree Patient Notes -- Benchmark Harness WinForms app
+  (scripts/desktop/patient_notes.ps1), the same target the desktop benchmark uses. Its controls are
+  classic System.Windows.Forms TextBox (EditControl) / Button (ButtonControl) controls with explicit
+  .Name / .AccessibleName, so WinForms exposes each with a stable AutomationId in the top-level
+  window's UIA tree -- verified live on the Win11-ARM VM
+  (locate_structural(automation_id='searchBox') -> StructuralHandle, conf 1.0). The demo clicks only
+  searchBox/searchButton/noteBox/saveButton (all stable AutomationIds) and deliberately avoids the
+  DataGridView rows, whose WinForms UIA tree is only partially populated -- so every recorded click
+  is structurally armable and armed_coverage == 1.0 / the structural-rung assertion are meaningful
+  and repeatable.
+
+Deploy + seed + launch the app in session 1 via the existing ParallelsVM / session1_launch.py
+  plumbing (no source modules changed). Stays snapshot-safe and OPT-IN (OAFLOW_PARALLELS_E2E=1):
+  collected-but-skipped without the env var; the maintainer runs the live proof. Also corrects the
+  compile -> Workflow.load flow (compile_recording returns a Workflow; the bundle dir is what
+  Workflow.load takes).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Chores
+
+- Type-check the safety-critical modules (compile, identity, replayer) under mypy
+  ([#100](https://github.com/OpenAdaptAI/openadapt-flow/pull/100),
+  [`1d3bd34`](https://github.com/OpenAdaptAI/openadapt-flow/commit/1d3bd348ef6e21c6fbbb29b4c1fe77dfa795a7ed))
+
+External reviews flagged that mypy's ignore_errors debt list excluded the most safety-critical
+  modules. Bring the compiler, the pre-click identity gate, and the replayer under the type checker.
+
+Removed from the [tool.mypy] ignore list and fixed the real errors: - compiler.compile: annotate the
+  landmark `relation` local as its Literal; cast known-valid cv2.imdecode results (Optional stub) to
+  np.ndarray; narrow the validated risk-override value to Step.risk's Literal via cast. -
+  runtime.identity: already clean once un-ignored (no code change needed). - runtime.replayer: type
+  `self.vision` as Any (always defaulted to the vision module in __init__); drop a redundant per-run
+  attribute re-annotation; handle scrub_text's Optional[str] return at two log sites; add caller-
+  guaranteed None asserts for api_actuator / state_verifier (mirroring the existing `assert binding
+  is not None`); use the already-narrowed local `anchor` in the identity attempt closure.
+
+Also tightened classify_step_risk's return type to the reversible/irreversible Literal. No runtime
+  behavior change — typing only.
+
+Documented the remaining, genuinely lower-stakes debt in pyproject.toml and noted that the
+  safety-critical compile/replay path is now fully checked.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Self-serve halt->learn via 'openadapt flow teach' (governed, refuses bad fixes)
+  ([#101](https://github.com/OpenAdaptAI/openadapt-flow/pull/101),
+  [`8e17641`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8e17641c3c9bbd2e610f8d3e082b3bf24503ecbd))
+
+Wire the existing halt->learn library capability into a one-command, operator-facing flow.
+  `openadapt-flow teach <run_dir> --fix <recording_or_spec> --bundle <base> --out <updated_bundle>`
+  loads a halted RunReport, turns a fix demonstration into the operator-correction ExecutionTrace,
+  and drives the UNCHANGED learn_from_halt loop (induce -> RegressionGate -> held-out canary).
+
+An updated, versioned bundle is written ONLY when the correction promotes; an underdetermined or
+  unsafe fix is REFUSED (nonzero exit, base bundle unchanged, still halting) with the reason
+  printed. The fix source is flexible: a recording directory of the resolution (reuses
+  compile_recording) or a scripted correction spec (deterministic, CI-friendly).
+
+New orchestration: openadapt_flow/learning/teach.py (no runtime files touched; reuses halt_loop /
+  loop / gate / library / synth_stream). New CLI verb in __main__.py. New tests drive the modal-once
+  scenario THROUGH the CLI: valid fix (spec + recording) -> updated bundle -> re-run resolves
+  without halting; blind halt -> refusal, nonzero exit, bundle unchanged, re-run still halts; plus
+  --help and input-guard cases.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.24.0 (2026-07-14)
 
 ### Features

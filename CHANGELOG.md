@@ -1,6 +1,74 @@
 # CHANGELOG
 
 
+## v0.22.0 (2026-07-14)
+
+### Features
+
+- Windows desktop parity — interactive-session VM agent, backend hardening, snapshot-safe Parallels
+  e2e ([#95](https://github.com/OpenAdaptAI/openadapt-flow/pull/95),
+  [`781f32c`](https://github.com/OpenAdaptAI/openadapt-flow/commit/781f32c5413274520b92b078cac65a8d12ccc859))
+
+* feat: Windows desktop parity — interactive-session VM agent, backend hardening, snapshot-safe
+  Parallels e2e
+
+Bring the desktop (Windows/Parallels) path to parity with the web path: record -> compile -> replay
+  over the structural (UIA) + vision ladder, with identity and effect verification unchanged and
+  backend-agnostic.
+
+- backends/win_agent: new self-contained, stdlib-only in-guest agent server that runs in the
+  interactive session (session 1) — solves the session-0 screenshot/input problem. Loopback bind by
+  default; optional bearer token (closes the PHI-audit unauthenticated-shim finding). Endpoints
+  match the WindowsBackend contract (/screenshot, /execute_windows, /health). Ships a logon .bat +
+  scheduled-task recipe (README). - windows_backend: send bearer auth when configured; the ACTION
+  path now fails loudly (RuntimeError) on an unreachable/non-2xx agent so a dropped click/keystroke
+  can never be a silent wrong action; read paths still return None (fall through the visual ladder).
+  Confirmed it implements the StructuralActionBackend protocol so the resolver drives it unchanged.
+  - adapters/desktop_recorder: live-record helper that arms a UIA structural locator per click (web
+  parity), plus structural_armed_coverage metric. The offline capture-convert structural gap is
+  documented precisely as a follow-up (no live UIA tree at conversion time). -
+  parallels_vm.launch_agent: deploy + launch the hardened agent in session 1 with optional token;
+  poll /health. - benchmark/desktop_benchmark: DesktopHarness threads an auth token to the backend.
+  - tests/e2e: snapshot-safe, OPT-IN (OAFLOW_PARALLELS_E2E=1) Parallels proof driving the built-in
+  Calculator through record->compile->replay, asserting the UIA structural rung fires;
+  snapshot-first, revert-after, never deletes the VM or its snapshots. Collected-but-skipped
+  everywhere else. - docs/desktop_windows_runbook.md: one-pass operator runbook for the live proof.
+
+Mock-tested end to end on macOS (agent HTTP roundtrip incl. auth, backend error paths, launch_agent,
+  recorder arming). e2e is skipped without the env var. Ruff clean; ruff check openadapt_flow green.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* fix: only send bearer header when a token is set; format e2e
+
+Reconcile CI failure in tests/test_dom_identity.py. The hardening added an unconditional
+  `headers=self._headers()` (None when unauthenticated) to the WindowsBackend request calls; that
+  `headers=` kwarg was swallowed by the pre-existing `_FakeSession.post(url, json=, timeout=)` mock
+  (no `headers` param) -> TypeError -> the tolerant read path returned None, so structured_text_at /
+  structural_locator_at regressed to None.
+
+Fix preserves the safety property and restores backward compat: build request kwargs with `timeout`
+  always and `headers` ONLY when a token is set, so the unauthenticated call shape is byte-for-byte
+  the legacy one and predates-auth mocks/callers are never handed an unexpected kwarg. The bearer
+  header still goes out whenever auth_token is configured (win_agent auth roundtrip test and the
+  header-assertion test both cover it).
+
+Also apply ruff format to the opt-in e2e (CI format gate).
+
+* fix: type-check ctypes.windll access on non-Windows (mypy)
+
+`ctypes.windll` exists only on Windows, so mypy on the Linux CI lint job flagged
+  `_active_console_session` with attr-defined. Access it dynamically via getattr and return -1 when
+  absent — keeps the module importable and type-clean on macOS/Linux while behaving identically
+  in-guest on Windows.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.21.2 (2026-07-14)
 
 ### Bug Fixes

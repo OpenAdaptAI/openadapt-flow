@@ -22,13 +22,31 @@ What it infers, and how (all deterministic + structural -- ZERO model calls):
   :class:`~openadapt_flow.ir.LoopSpec` over an inferred
   :class:`~openadapt_flow.ir.Relation`, its body the repeated subflow
   (Rousillon/Helena "for every row ...").
+
+  **LIMITS (loop inference is a PROTOTYPE -- keep the claim honest).** The only
+  loop shape detected is a *consecutive* repeated sub-sequence
+  (:func:`_reduce_trace`). It does NOT recognize a **search -> process ->
+  return** loop (navigate away and back each iteration), **pagination** (a
+  "next page" step between bodies), or a **per-row conditional body** (the body
+  differs row to row). When the repeated body contains a CONSEQUENTIAL
+  (irreversible / effect-bearing) action, whether those repeats are a
+  data-driven worklist or a fixed unrolled sequence cannot be certified from
+  trace *shape* alone -- inducing the wrong loop would repeat an irreversible
+  action -- so induction emits an :class:`Uncertainty` (``ambiguous_loop``)
+  and REFUSES rather than emit a possibly-wrong loop.
 * **Branches.** A step present/divergent in some traces but not others UNDER A
   DETECTABLE CONDITION is a ``branch`` state with guarded transitions -- the
   guard is *proposed and flagged for confirmation* (Skill-DisCo: divergences
-  localize the branch automatically).
+  localize the branch automatically). When the branch's guarded action is
+  CONSEQUENTIAL the proposed guard is UNCONFIRMED evidence, so induction ALSO
+  emits an :class:`Uncertainty` (operator confirmation required) and leaves
+  ``certified=False`` -- a flagged proposal never auto-certifies (RFC §3 [5]).
 * **Optional steps.** Present in some, absent in others, with NO derivable
   condition -> an optional/guarded step that SKIPS when its own target is
-  absent.
+  absent. But "absent in some traces" must NOT silently become "optional/skip"
+  for a CONSEQUENTIAL step: skipping (or wrongly running) an irreversible
+  action is not a safe default, so such a step becomes an :class:`Uncertainty`
+  (a question), not a silent skip.
 
 **Refuse rather than guess** (RFC §3 [5]; mirrors ``runtime.identity`` and
 ``compiler.disambiguation``). When traces CONTRADICT or intent stays
@@ -63,6 +81,7 @@ Touch-points (kept minimal per the stacking constraint on PR #79):
 from __future__ import annotations
 
 import tempfile
+import warnings
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Optional, Protocol, Union, runtime_checkable
@@ -171,7 +190,8 @@ class Uncertainty(BaseModel):
 
 class ColumnDecision(BaseModel):
     """The induced interpretation of one aligned column, kept for the audit
-    trail AND for held-out reproduction scoring (:func:`reproduction_score`)."""
+    trail AND for structural trace-shape scoring
+    (:func:`structural_trace_coverage`)."""
 
     index: int
     kind: str  # literal | param | loop | branch | optional | divergent
@@ -239,8 +259,13 @@ class InductionResult(BaseModel):
 
 
 class HeldOutValidation(BaseModel):
-    """Leave-one-out held-out validation (RFC §3 [5]): infer from N-1 traces,
-    check the induced program reproduces the held-out trace."""
+    """Leave-one-out held-out STRUCTURAL check (RFC §3 [5]): infer from N-1
+    traces, score how well the induced program's SHAPE covers the held-out
+    trace (:func:`structural_trace_coverage`).
+
+    This is a structural trace-shape signal ONLY -- it executes nothing and
+    verifies no effect / identity, so a high ``mean`` is NOT certification and
+    must not be reported as behavioral held-out validation."""
 
     per_trace: list[float] = Field(default_factory=list)
     mean: float = 0.0
@@ -249,8 +274,9 @@ class HeldOutValidation(BaseModel):
     def render(self) -> str:
         scores = ", ".join(f"{s:.2f}" for s in self.per_trace)
         return (
-            f"Held-out validation ({self.n_traces} folds): "
-            f"mean={self.mean:.2f} [{scores}]"
+            f"Held-out STRUCTURAL coverage ({self.n_traces} folds): "
+            f"mean={self.mean:.2f} [{scores}] "
+            "(trace-shape only -- NOT behavioral validation)"
         )
 
 
@@ -298,6 +324,17 @@ def _field_key(step: Step) -> str:
         return f"key:{step.key}"
     if step.param:
         return step.param
+    if step.action in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK):
+        # A CLICK/selection's field identity is its PURPOSE, not the entity it
+        # landed on: the anchor's ocr_text / structural name is the VALUE that
+        # VARIES (which patient row), so keying on it would make the SAME
+        # selection step in two traces mis-align as a structural change instead
+        # of revealing a selection parameter. Key on the value-free structural
+        # ROLE (a11y/DOM control type) when present, else the value-free intent.
+        struct = step.anchor.structural if step.anchor is not None else None
+        if struct is not None and struct.role:
+            return f"select:{struct.role}"
+        return _norm_intent(step)
     if step.anchor is not None and step.anchor.ocr_text:
         return step.anchor.ocr_text
     return _norm_intent(step)
@@ -308,12 +345,20 @@ def _sig(step: Step) -> tuple[str, str]:
 
 
 def _value(step: Step) -> Optional[str]:
-    """The per-run VALUE a step carries (the thing that varies for a param)."""
+    """The per-run VALUE a step carries (the thing that varies for a param).
+
+    For a CLICK/selection this is the SELECTED ENTITY's identity (which row was
+    clicked) -- the structural name when present (highest fidelity), else the
+    anchor's OCR text -- because that is the dimension a selection parameter
+    varies over."""
     if step.action is ActionKind.TYPE:
         return step.text if step.text is not None else step.param
     if step.action is ActionKind.KEY:
         return step.key
     if step.anchor is not None:
+        struct = step.anchor.structural
+        if struct is not None and struct.name:
+            return struct.name
         return step.anchor.ocr_text
     return None
 
@@ -367,7 +412,19 @@ class _LoopTok:
 def _reduce_trace(steps: list[Step]) -> list:
     """Collapse maximal CONSECUTIVE repeated sub-sequences into ``_LoopTok``s;
     everything else stays a ``_SingleTok``. Smallest repeating block wins (the
-    tightest loop body). Model-free and purely structural."""
+    tightest loop body). Model-free and purely structural.
+
+    LIMITS (loop detection is a PROTOTYPE). This recognizes ONLY a body that
+    repeats BACK-TO-BACK in one trace. It does NOT recognize:
+      * search -> process -> return loops (each iteration navigates away and
+        back, so the body is not literally consecutive);
+      * pagination (a "next page" step separates the per-page bodies);
+      * per-row CONDITIONAL bodies (the body differs from row to row).
+    A repeat is also, on shape alone, indistinguishable from a fixed unrolled
+    sequence of distinct steps. The caller (:func:`_emit_loop`) therefore
+    REFUSES (emits an ``ambiguous_loop`` Uncertainty) rather than emit a loop
+    when the repeated body is CONSEQUENTIAL, where guessing wrong would repeat
+    an irreversible action."""
     sigs = [_sig(s) for s in steps]
     n = len(steps)
     toks: list = []
@@ -485,6 +542,48 @@ def _is_irreversible(col: _Column) -> bool:
     )
 
 
+def _step_consequential(step: Step) -> bool:
+    """True when getting this step wrong risks an IRREVERSIBLE / system-of-record
+    effect -- the class induction must never certify on a mere proposal. A step
+    is consequential when it is ``risk="irreversible"`` OR declares system-of-
+    record ``effects`` (a transactional write). Reversible, effect-free steps
+    are safe to auto-resolve (a wrong guess is recoverable)."""
+    return step.risk == "irreversible" or bool(step.effects)
+
+
+def _confirmation_question(
+    location: str,
+    kind: AmbiguityKind,
+    prompt: str,
+    evidence: str,
+    *,
+    consequential: bool,
+    dialog_text: Optional[str] = None,
+) -> DisambiguationQuestion:
+    """Build the grounded operator question for an UNCONFIRMED inference (a
+    proposed branch guard, an optional-consequential step, a varying selection
+    target). Routed to :mod:`openadapt_flow.compiler.disambiguation` -- the SAME
+    ask-don't-guess flow the divergence path uses. The only Phase-1-safe applied
+    effect is the conservative HALT; the confirming answer is the operator's."""
+    return DisambiguationQuestion(
+        id=f"{kind.value}:{location}",
+        kind=kind,
+        step_id=location,
+        prompt=prompt,
+        options=[
+            QuestionOption(
+                key="halt",
+                label="Halt until confirmed (safe default)",
+                effect=OptionEffect.NONE,
+            ),
+        ],
+        default_key="halt",
+        consequential=consequential,
+        evidence=evidence,
+        dialog_text=dialog_text,
+    )
+
+
 def _param_name_for(field: str, taken: set[str], fallback: str) -> str:
     base = "".join(c if c.isalnum() else "_" for c in field.lower()).strip("_")
     base = "_".join(p for p in base.split("_") if p) or fallback
@@ -580,11 +679,12 @@ def induce_program(
         # --- loop ----------------------------------------------------------
         if col.kind == "loop":
             node, dec = _emit_loop(
-                idx, col, present, n, taken, param_specs, data_sources
+                idx, col, present, n, taken, param_specs, data_sources, result
             )
-            nodes.append(node)
             decisions.append(dec)
-            result.inferred.append(dec.note)
+            if node is not None:
+                nodes.append(node)
+                result.inferred.append(dec.note)
             continue
 
         # --- single step present in ALL traces: literal vs param ----------
@@ -625,11 +725,59 @@ def induce_program(
     return result
 
 
-def _emit_loop(idx, col, present, n, taken, param_specs, data_sources):
+def _emit_loop(idx, col, present, n, taken, param_specs, data_sources, result):
     loop_toks = [col.tokens[t] for t in present]
     body_steps = loop_toks[0].body_steps
     field = _field_key(body_steps[0]) if body_steps else f"row_{idx}"
     counts = [tok.count for tok in loop_toks]
+
+    # LOOP HONESTY (RFC §3 [5]; see module LIMITS). Trace SHAPE alone cannot
+    # certify that a consecutive repeat is a data-driven worklist rather than a
+    # fixed unrolled sequence -- and it recognizes ONLY consecutive repeats (not
+    # search->process->return, pagination, or per-row conditional bodies). When
+    # the repeated body contains a CONSEQUENTIAL action, guessing wrong repeats
+    # an irreversible / effect-bearing write, so REFUSE (emit an Uncertainty)
+    # rather than emit a possibly-wrong loop.
+    if any(_step_consequential(s) for s in body_steps):
+        location = f"loop_{idx}"
+        question = _confirmation_question(
+            location,
+            AmbiguityKind.OPTIONAL_DIALOG,
+            prompt=(
+                f"A consecutive repeat of {counts} step(s) over '{field}' was "
+                "observed, and its body performs a CONSEQUENTIAL (irreversible "
+                "or effect-bearing) action. Is this a data-driven loop over a "
+                "worklist, or a fixed sequence of distinct steps? (Trace shape "
+                "cannot distinguish them, and a wrong loop repeats the "
+                "irreversible action.)"
+            ),
+            evidence=f"repeated consequential body '{field}' x{counts} at column {idx}",
+            consequential=True,
+        )
+        result.uncertainties.append(
+            Uncertainty(
+                kind="ambiguous_loop",
+                location=location,
+                detail=(
+                    f"repeated body '{field}' (counts {counts}) contains a "
+                    "consequential action; a worklist loop vs a fixed unrolled "
+                    "sequence is not distinguishable from trace shape -- "
+                    "refusing to guess a loop over an irreversible step."
+                ),
+                consequential=True,
+                question=question,
+            )
+        )
+        dec = ColumnDecision(
+            index=idx,
+            kind="ambiguous_loop",
+            align_sig=str(col.align_sig),
+            field=field,
+            present_in=present,
+            counts=counts,
+            note=f"underdetermined consequential loop over '{field}' (counts {counts})",
+        )
+        return None, dec
 
     param_name = _param_name_for(field, taken, f"row_{idx}")
     taken.add(param_name)
@@ -718,7 +866,57 @@ def _emit_required_single(idx, col, present, taken, param_specs, result):
     exit_tr = Transition(target="__PATCH__")
 
     varies = len({v for v in values}) > 1
-    if step0.action is ActionKind.TYPE and varies:
+    if step0.action in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK) and varies:
+        # SELECTION PARAMETER (RFC §3 [4]; the "which patient" fix). A CLICK /
+        # selection whose TARGET varies across traces is the most important
+        # real-workflow parameter -- and the wrong-ENTITY failure this repo is
+        # built to avoid. It is NOT a typed string the runtime can substitute:
+        # the runtime clicks the resolved ANCHOR (runtime.replayer clicks
+        # resolution.point, NOT params[step.param]), so freezing this as a baked
+        # literal would SILENTLY re-select the DEMO entity every run. Robust
+        # generalization needs run-time ENTITY_REF re-resolution of the click
+        # target (ParamKind.ENTITY_REF), which is deferred (see PR follow-up).
+        # Until then, induction REFUSES to freeze the demo target: it emits an
+        # Uncertainty (with an advisory entity_ref proposal) so an operator
+        # binds the real entity source. NEVER a silent hardcoded demo entity.
+        location = f"s{idx}"
+        proposal = Proposal(
+            target=location,
+            kind="param",
+            content=(
+                f"selection target '{field}' varies {values} -- make it an "
+                "entity_ref parameter re-resolved by the identity ladder per run"
+            ),
+        )
+        result.proposed.append(proposal)
+        question = _confirmation_question(
+            location,
+            AmbiguityKind.PARAMETER_CANDIDATE,
+            prompt=(
+                f"The selected target for '{field}' VARIES across traces "
+                f"{values}. Which entity should each run act on? This must be a "
+                "parameter re-resolved per run -- the demo's target must NOT be "
+                "frozen."
+            ),
+            evidence=f"selection target '{field}' varies {values} at column {idx}",
+            consequential=True,
+        )
+        result.uncertainties.append(
+            Uncertainty(
+                kind="ambiguous_selection",
+                location=location,
+                detail=(
+                    f"selection target '{field}' varies across traces {values} "
+                    "-- a which-entity parameter, not a fixed target; refusing "
+                    "to freeze the demo entity (needs entity_ref re-resolution)."
+                ),
+                consequential=True,
+                question=question,
+                proposal=proposal,
+            )
+        )
+        kind, param_name, literal = "ambiguous_selection", None, None
+    elif step0.action is ActionKind.TYPE and varies:
         # A value that VARIES across traces at the same field is a PARAMETER
         # (cross-trace evidence makes WebRobot value-speculation determinate).
         name = _param_name_for(field, taken, f"value_{idx}")
@@ -803,13 +1001,46 @@ def _emit_optional_single(idx, col, present, n, result, propose):
         proposed = _maybe_propose(
             propose, branch_id, "guard", {"dialog": dialog_text}, result
         )
-        result.proposed.append(
-            Proposal(
-                target=branch_id,
-                kind="guard",
-                content=(proposed or f"confirm guard: TEXT_PRESENT({dialog_text!r})"),
-            )
+        proposal = Proposal(
+            target=branch_id,
+            kind="guard",
+            content=(proposed or f"confirm guard: TEXT_PRESENT({dialog_text!r})"),
         )
+        result.proposed.append(proposal)
+        # A flagged proposal NEVER auto-certifies (RFC §3 [5]). When the guarded
+        # arm's action is CONSEQUENTIAL, the proposed guard is UNCONFIRMED
+        # evidence -- running (or skipping) an irreversible action on a GUESSED
+        # condition is exactly the failure class to avoid -- so ALSO emit an
+        # Uncertainty requiring operator confirmation (certified stays False).
+        if _step_consequential(do_step):
+            result.uncertainties.append(
+                Uncertainty(
+                    kind="unconfirmed_branch",
+                    location=branch_id,
+                    detail=(
+                        f"optional dialog branch {dialog_text!r} guards a "
+                        "CONSEQUENTIAL action; the guard is PROPOSED, not "
+                        "confirmed -- operator must confirm before certifying."
+                    ),
+                    consequential=True,
+                    question=_confirmation_question(
+                        branch_id,
+                        AmbiguityKind.OPTIONAL_DIALOG,
+                        prompt=(
+                            f"A dialog {dialog_text!r} appeared in some traces "
+                            "and its handling performs a CONSEQUENTIAL action. "
+                            "Confirm the guard condition before this certifies."
+                        ),
+                        evidence=(
+                            f"optional dialog {dialog_text!r} guarding a "
+                            f"consequential action at column {idx}"
+                        ),
+                        consequential=True,
+                        dialog_text=dialog_text,
+                    ),
+                    proposal=proposal,
+                )
+            )
         dec = ColumnDecision(
             index=idx,
             kind="branch",
@@ -844,10 +1075,47 @@ def _emit_optional_single(idx, col, present, n, result, propose):
         id=sid, kind=StateKind.ACTION, step=step, transitions=[exit_tr]
     )
     node.exits = [exit_tr]
-    result.inferred.append(
-        f"optional step '{field}' at column {idx} "
-        f"(present in {present}/{n} traces) -- skip when absent"
-    )
+
+    # "Absent in some traces" must NOT silently become "optional/skip" for a
+    # CONSEQUENTIAL step: whether the demonstrator OMITTED an irreversible /
+    # effect-bearing action deliberately (truly optional) or the traces just did
+    # not cover the case is UNDERDETERMINED, and auto-skipping an irreversible
+    # action on an unconfirmed guard is not a safe default. So it becomes a
+    # QUESTION (Uncertainty), not a silent skip -- certified stays False.
+    if _step_consequential(step0):
+        result.uncertainties.append(
+            Uncertainty(
+                kind="unconfirmed_optional",
+                location=sid,
+                detail=(
+                    f"step '{field}' is present in only {present}/{n} traces and "
+                    "performs a CONSEQUENTIAL action; whether it is truly "
+                    "optional (safe to skip) or under-observed is "
+                    "underdetermined -- refusing to auto-skip an irreversible "
+                    "step."
+                ),
+                consequential=True,
+                question=_confirmation_question(
+                    sid,
+                    AmbiguityKind.ABSENT_RESULT,
+                    prompt=(
+                        f"A CONSEQUENTIAL step '{field}' appeared in only "
+                        f"{present}/{n} traces. Is it genuinely OPTIONAL (skip "
+                        "when its target is absent) or should its absence HALT?"
+                    ),
+                    evidence=(
+                        f"consequential step '{field}' present in {present}/{n} "
+                        f"traces at column {idx}"
+                    ),
+                    consequential=True,
+                ),
+            )
+        )
+    else:
+        result.inferred.append(
+            f"optional step '{field}' at column {idx} "
+            f"(present in {present}/{n} traces) -- skip when absent"
+        )
     dec = ColumnDecision(
         index=idx,
         kind="optional",
@@ -970,23 +1238,46 @@ def _wire(nodes: list[_Node]):
 # ===========================================================================
 
 
-def reproduction_score(result: InductionResult, trace: TraceInput) -> float:
-    """Score how well the induced program would REPRODUCE ``trace`` in [0, 1].
+def structural_trace_coverage(result: InductionResult, trace: TraceInput) -> float:
+    """STRUCTURAL / trace-SHAPE coverage of the induced program against ``trace``,
+    in [0, 1]. This is a WEAK, structural signal -- NOT behavioral held-out
+    validation and NOT certification. Do not treat it, alone, as evidence the
+    program is correct.
 
-    Deterministic and backend-free: it checks each induced column decision
-    against the held-out trace's own tokens. A PARAM column reproduces any value
-    (the run supplies it); a LITERAL column only reproduces the frozen value
-    (so a param wrongly frozen as a constant scores LOW on a trace with a
-    different value); LOOP / BRANCH / OPTIONAL columns reproduce whatever count
-    / presence the trace shows. Extra trace tokens the program cannot account
-    for are penalized. Returns 0.0 for a quarantined (unemitted) program.
+    What it DOES check (deterministic, backend-free -- pure token-shape
+    comparison of column decisions vs the held-out trace's reduced tokens):
+
+    * a PARAM column is given FULL credit for any value (it does not check the
+      value is one the run could actually supply / re-resolve);
+    * a LITERAL column matches only its frozen value (so a param wrongly frozen
+      as a constant scores lower on a trace with a different value);
+    * a LOOP column is credited as "reproduced" whenever the held token is a
+      loop token -- it does NOT check the iteration count, the body, or the
+      worklist binding;
+    * BRANCH / OPTIONAL columns are credited for whatever presence the trace
+      shows; extra held tokens the program cannot account for are penalized.
+
+    What it does NOT do (why it is not certification): it does NOT execute the
+    program against any app, does NOT drive the runtime, does NOT verify EFFECTS
+    (system-of-record writes) or IDENTITY (which entity was acted on), and does
+    NOT confirm the emitted anchors resolve. A high score means "the induced
+    control-flow shape is consistent with the trace's shape", nothing stronger.
+    Behavioral validation is a real replay through ``runtime.replayer`` with
+    effect/identity verification -- a separate, heavier gate.
+
+    Returns 0.0 for a quarantined (unemitted) program.
     """
     if result.program is None or not result.column_decisions:
         return 0.0
     held = _reduce_trace(_as_workflow(trace).steps)
 
-    col_sigs = [d.align_sig for d in result.column_decisions if d.kind != "divergent"]
-    decs = [d for d in result.column_decisions if d.kind != "divergent"]
+    # Only EMITTED columns are scorable; refusal markers (a divergence or an
+    # ambiguous loop/selection) correspond to no emitted state.
+    _refusal_kinds = {"divergent", "ambiguous_loop", "ambiguous_selection"}
+    col_sigs = [
+        d.align_sig for d in result.column_decisions if d.kind not in _refusal_kinds
+    ]
+    decs = [d for d in result.column_decisions if d.kind not in _refusal_kinds]
     held_sigs = [str(tok.align_sig) for tok in held]
 
     sm = SequenceMatcher(a=col_sigs, b=held_sigs, autojunk=False)
@@ -1018,12 +1309,36 @@ def reproduction_score(result: InductionResult, trace: TraceInput) -> float:
     return score / denom
 
 
+def reproduction_score(result: InductionResult, trace: TraceInput) -> float:
+    """DEPRECATED alias for :func:`structural_trace_coverage`.
+
+    The old name over-claimed: it reads like behavioral reproduction, but the
+    metric is a structural trace-SHAPE coverage that executes nothing and checks
+    no effect / identity (see :func:`structural_trace_coverage`). Kept as a
+    thin, warning-emitting alias for backward compatibility; call
+    ``structural_trace_coverage`` in new code.
+    """
+    warnings.warn(
+        "reproduction_score() is deprecated and misleadingly named; it is a "
+        "structural trace-shape coverage, NOT behavioral validation. Use "
+        "structural_trace_coverage().",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return structural_trace_coverage(result, trace)
+
+
 def validate_held_out(
     traces: list[TraceInput], *, propose: Optional[Proposer] = None
 ) -> HeldOutValidation:
-    """Leave-one-out held-out validation (RFC §3 [5]): for each trace, induce a
-    program from the OTHER N-1 traces and score whether it reproduces the held
-    one. Reports the per-fold scores and their mean. Requires >= 2 traces."""
+    """Leave-one-out held-out STRUCTURAL check (RFC §3 [5]): for each trace,
+    induce a program from the OTHER N-1 traces and score how well the induced
+    program's SHAPE covers the held one (:func:`structural_trace_coverage`).
+    Reports the per-fold scores and their mean. Requires >= 2 traces.
+
+    This is a structural signal ONLY -- it executes nothing and verifies no
+    effect / identity, so a high mean is NOT certification (see
+    :func:`structural_trace_coverage` and :class:`HeldOutValidation`)."""
     n = len(traces)
     if n < 2:
         return HeldOutValidation(per_trace=[], mean=0.0, n_traces=n)
@@ -1031,6 +1346,6 @@ def validate_held_out(
     for i in range(n):
         train = traces[:i] + traces[i + 1 :]
         result = induce_program(train, propose=propose)
-        scores.append(reproduction_score(result, traces[i]))
+        scores.append(structural_trace_coverage(result, traces[i]))
     mean = sum(scores) / len(scores) if scores else 0.0
     return HeldOutValidation(per_trace=scores, mean=mean, n_traces=n)

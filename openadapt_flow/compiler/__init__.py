@@ -20,6 +20,7 @@ from openadapt_flow.compiler.induction import (
     Proposer,
     induce_program,
     reproduction_score,
+    structural_trace_coverage,
     validate_held_out,
 )
 
@@ -33,6 +34,9 @@ __all__ = [
     # bootstrap; multiple demos induce a parameterized program or refuse.
     "induce_program",
     "validate_held_out",
+    # Structural trace-shape coverage (NOT behavioral validation). The old name
+    # ``reproduction_score`` is a deprecated alias kept for back-compat.
+    "structural_trace_coverage",
     "reproduction_score",
     "InductionResult",
     "HeldOutValidation",

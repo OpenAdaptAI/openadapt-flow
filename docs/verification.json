@@ -370,6 +370,58 @@
       "errors": []
     },
     {
+      "id": "desktop-recording-validating",
+      "claim": "Recording a desktop workflow through the product CLI is being validated: `record --backend windows|rdp` captures the operator's real demonstration (via openadapt-capture) and emits the compile-ready recording format, so record -> compile -> replay closes on the desktop substrate, not just the browser.",
+      "tier": "validating",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs",
+        "website"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "Offline capture carries NO structural (UIA AutomationId) locator, so replay uses the visual ladder (template/ocr/geometry). The live capture needs a display (openadapt-capture is the optional `capture` extra); the CI proof covers convert -> compile -> replay on the recording format, not a live capture session.",
+        "`--secret` is refused on the pixel/desktop substrate (no field geometry to redact), and `rdp` recording must be captured in the same pixel space the backend replays in (no cross-machine coordinate remap yet)."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_desktop_record.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The live-capture orchestration + CLI wiring (record --backend windows|rdp -> openadapt-capture -> convert_capture), and that a desktop-shaped recording COMPILES into a bundle and REPLAYS to completion through the desktop backend path, resolving each click to its recorded target (runs on default CI)."
+        },
+        {
+          "path": "tests/test_capture_adapter.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The capture->recording bridge over a REAL openadapt-capture session (its own event-processing pipeline + frame extraction) feeding the UNMODIFIED compiler."
+        },
+        {
+          "path": "docs/desktop/RECORDING.md",
+          "kind": "doc",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The precise REAL-vs-deferred map (visual-ladder-only structural rung, secret redaction, rdp coordinate space) and the reuse of openadapt-capture + the capture adapter."
+        }
+      ],
+      "errors": []
+    },
+    {
       "id": "citrix-pixel-validating",
       "claim": "Citrix / remote-display (pixel-only) is a spike being validated with design partners: the compiler's visual floor drives a real remote-display window with the structural rung unavailable, plus identity gate on pixels and halt on ambiguity.",
       "tier": "validating",

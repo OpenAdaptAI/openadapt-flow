@@ -11,7 +11,7 @@
 ## What is CI-proven today vs. being validated
 
 - **CI-proven today (6):** `web-supported`, `deterministic-zero-model-replay`, `effect-verification-silent-writes`, `identity-gate-halt-armed`, `halt-teach-promote`, `mockmed-benchmark-ci-reproducible`
-- **Being validated — opt-in / infra-gated or field (3):** `windows-desktop-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
+- **Being validated — opt-in / infra-gated or field (4):** `windows-desktop-validating`, `desktop-recording-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
 
 ## Claims
 
@@ -136,6 +136,24 @@
 
 - The live desktop e2e is OPT-IN and infra-gated (needs a Parallels Win11-ARM VM; `OAFLOW_PARALLELS_E2E=1`); it never runs on default CI. Only the mocked backend protocol runs in CI.
 - DataGridView rows are only partially UIA-armable (see docs/desktop/LIMITS.md). This harness does not replace third-party design-partner validation.
+
+### `desktop-recording-validating` — validating — opt-in / infra-gated or field test
+
+> Recording a desktop workflow through the product CLI is being validated: `record --backend windows|rdp` captures the operator's real demonstration (via openadapt-capture) and emits the compile-ready recording format, so record -> compile -> replay closes on the desktop substrate, not just the browser.
+
+- Surfaces: README.md, docs, website
+- Strongest evidence strength: **supported** (tier is `validating`)
+
+| Backing evidence | Kind | Gating / CI stage | Strength | Proves |
+|---|---|---|---|---|
+| `tests/test_desktop_record.py` | test | ci (required PR gate (test)) | supported | The live-capture orchestration + CLI wiring (record --backend windows|rdp -> openadapt-capture -> convert_capture), and that a desktop-shaped recording COMPILES into a bundle and REPLAYS to completion through the desktop backend path, resolving each click to its recorded target (runs on default CI). |
+| `tests/test_capture_adapter.py` | test | ci (required PR gate (test)) | supported | The capture->recording bridge over a REAL openadapt-capture session (its own event-processing pipeline + frame extraction) feeding the UNMODIFIED compiler. |
+| `docs/desktop/RECORDING.md` | doc | artifact (doc/benchmark) | roadmap | The precise REAL-vs-deferred map (visual-ladder-only structural rung, secret redaction, rdp coordinate space) and the reuse of openadapt-capture + the capture adapter. |
+
+**Caveats (honest limits):**
+
+- Offline capture carries NO structural (UIA AutomationId) locator, so replay uses the visual ladder (template/ocr/geometry). The live capture needs a display (openadapt-capture is the optional `capture` extra); the CI proof covers convert -> compile -> replay on the recording format, not a live capture session.
+- `--secret` is refused on the pixel/desktop substrate (no field geometry to redact), and `rdp` recording must be captured in the same pixel space the backend replays in (no cross-machine coordinate remap yet).
 
 ### `citrix-pixel-validating` — validating — opt-in / infra-gated or field test
 

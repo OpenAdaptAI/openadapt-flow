@@ -241,14 +241,26 @@ def test_config_backend_used_when_no_flag() -> None:
 # --- record refuses non-web -------------------------------------------------
 
 
-def test_record_desktop_backend_is_refused() -> None:
+def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path) -> None:
+    """`record --backend windows` now records via the desktop capture path
+    (openadapt-capture -> convert_capture), not the old refusal."""
     from openadapt_flow.__main__ import _cmd_record
 
-    args = build_parser().parse_args(
-        ["record", "--url", "http://x", "--out", "o", "--backend", "windows"]
+    captured: dict = {}
+
+    def fake_record(out_dir, *, task_description, params):
+        captured["out"] = out_dir
+        captured["params"] = params
+        return out_dir
+
+    monkeypatch.setattr(
+        "openadapt_flow.desktop_record.record_desktop_capture", fake_record
     )
-    with pytest.raises(SystemExit, match="not supported"):
-        _cmd_record(args)
+    args = build_parser().parse_args(
+        ["record", "--out", str(tmp_path / "rec"), "--backend", "windows"]
+    )
+    assert _cmd_record(args) == 0
+    assert captured["params"] == {}
 
 
 # --- CLI replay drives the desktop backend (no browser, stubbed agent) ------

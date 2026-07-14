@@ -367,18 +367,18 @@ def _replay_desktop(
 
 
 def _cmd_record(args: argparse.Namespace) -> int:
-    # The interactive recorder is browser-only (Playwright): it records DOM
-    # events against a headed page. There is no in-repo desktop recorder, so a
-    # --backend windows/rdp recording is refused LOUDLY (never silently recorded
-    # as web) and the operator is pointed at the desktop harness.
+    # The interactive (web) recorder installs in-page DOM listeners against a
+    # headed Playwright page. The DESKTOP recorder (--backend windows) captures
+    # the operator's native OS input over the win_agent contract; both emit the
+    # SAME compile-ready recording format. Selection is fail-loud (a missing
+    # target for the chosen backend raises rather than silently record web).
     backend = getattr(args, "backend", None) or "web"
-    if backend != "web":
+    if backend in ("windows", "rdp"):
+        return _cmd_record_desktop(args, backend)
+
+    if not args.url:
         raise SystemExit(
-            f"record --backend {backend} is not supported: the interactive "
-            "recorder is browser-only. Record a desktop workflow via the "
-            "evals/Parallels desktop harness (see docs/desktop/), then "
-            "compile/replay it with --backend "
-            f"{backend}."
+            "record --backend web requires --url (the app to record against)."
         )
 
     from openadapt_flow.interactive_recorder import record_interactive
@@ -399,6 +399,62 @@ def _cmd_record(args: argparse.Namespace) -> int:
             + ". At replay, export "
             + ", ".join(f"OPENADAPT_FLOW_SECRET_{name.upper()}" for name in secrets)
         )
+    return 0
+
+
+def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
+    """Record a live desktop demonstration for the windows/rdp backend.
+
+    Reuses the tested capture stack: an ``openadapt-capture`` session captures
+    the operator's real demonstration, then
+    :func:`openadapt_flow.adapters.capture.convert_capture` emits the same
+    compile-ready recording format the browser recorder produces — closing
+    ``record -> compile -> replay`` on the desktop substrate through the CLI.
+
+    The recording is substrate-agnostic (pixel frames + coordinates); the
+    ``--backend`` selects intent and REPLAY wiring. For ``rdp`` (a remote
+    display painted in a client WINDOW), capture must happen in the SAME pixel
+    space the rdp backend replays in — record inside the remote session (or
+    full-screen the client) so coordinates align; a cross-machine coordinate
+    remap is a documented follow-up (docs/desktop/RECORDING.md).
+    """
+    if args.secret:
+        # Field-level secret redaction relies on DOM field geometry (the
+        # browser recorder blacks out the field rect). A pixel/desktop capture
+        # has no such geometry, so we refuse rather than persist an unredacted
+        # secret frame — a silent PHI leak. Deferred (docs/desktop/RECORDING.md).
+        raise SystemExit(
+            f"record --backend {backend}: --secret is not yet supported on the "
+            "pixel/desktop substrate (no field geometry to redact the typed "
+            "value from the captured frames). Use a masked/password field, or "
+            "see docs/desktop/RECORDING.md for the deferred design."
+        )
+
+    # On the desktop substrate there is no field identity, so a parameter is
+    # keyed by its demonstrated VALUE: --param NAME=VALUE (mirrors
+    # convert_capture / the replay --param contract).
+    params = _parse_params(args.param)
+
+    from openadapt_flow.desktop_record import record_desktop_capture
+
+    task = args.task or f"openadapt-flow {backend} recording"
+    out = record_desktop_capture(
+        Path(args.out),
+        task_description=task,
+        params=params,
+    )
+    print(f"Recording written to {out}")
+    if params:
+        print(
+            "Recorded parameter(s): "
+            + ", ".join(f"{k}={v!r}" for k, v in params.items())
+            + ". Override at replay with --param NAME=VALUE."
+        )
+    print(
+        "Compile it:  openadapt-flow compile "
+        f"{out} --out <bundle> --name <workflow>\n"
+        f"Then replay: openadapt-flow replay <bundle> --backend {backend} …"
+    )
     return 0
 
 
@@ -1162,9 +1218,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "record",
-        help="Record YOUR app interactively in a headed browser (--url)",
+        help=(
+            "Record YOUR workflow interactively: a headed browser "
+            "(--backend web --url), or a native Windows desktop "
+            "(--backend windows --agent-url) capturing the operator's real input"
+        ),
     )
-    p.add_argument("--url", required=True, help="URL of the app to record against")
+    p.add_argument(
+        "--url",
+        default=None,
+        help="URL of the app to record against (required for --backend web)",
+    )
     p.add_argument("--out", required=True, help="Recording output directory")
     p.add_argument(
         "--secret",
@@ -1184,9 +1248,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="FIELD",
         help=(
-            "Record a typed field (by name or id) as a PARAMETER; its "
-            "demonstrated value becomes the default, overridable at replay "
-            "with --param. Repeatable."
+            "Record a typed value as a PARAMETER; its demonstrated value "
+            "becomes the default, overridable at replay with --param. For "
+            "--backend web, FIELD is the field name/id. For --backend "
+            "windows/rdp (no field identity on a pixel substrate), use "
+            "NAME=VALUE — the typed value equal to VALUE is marked as parameter "
+            "NAME. Repeatable."
+        ),
+    )
+    p.add_argument(
+        "--task",
+        default=None,
+        help=(
+            "Task description for a desktop (--backend windows/rdp) capture "
+            "session (stored in the recording metadata)."
         ),
     )
     p.add_argument(

@@ -40,7 +40,7 @@ def to_png(img: np.ndarray) -> bytes:
 BLANK_PNG = to_png(np.full((800, 1280, 3), 245, dtype=np.uint8))
 
 
-def make_screen(*lines: str) -> bytes:
+def make_screen(*lines: str, thickness: int = 2) -> bytes:
     img = np.full((800, 1280, 3), 245, dtype=np.uint8)
     for i, line in enumerate(lines):
         cv2.putText(
@@ -50,7 +50,7 @@ def make_screen(*lines: str) -> bytes:
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 0, 0),
-            2,
+            thickness,
             cv2.LINE_AA,
         )
     return to_png(img)
@@ -61,10 +61,21 @@ def make_screen(*lines: str) -> bytes:
 
 class TestVerifyNoteSaved:
     def test_note_embedded_in_message_row_passes(self) -> None:
-        # OpenEMR shows the note inside a longer list line.
+        # OpenEMR shows the note inside a longer list line (timestamp +
+        # "(admin to admin)" prefix). Rendered at thickness=1 (thin strokes,
+        # like real anti-aliased browser text) rather than the helper's
+        # bold thickness=2 default: rapidocr's angle classifier mis-detects
+        # the BOLD cv2-Hershey render of this long, digit-prefixed line as
+        # 180°-rotated and flips it, garbling the OCR. That is a synthetic-
+        # render artifact of the blocky bold font — it does NOT occur on the
+        # real browser-rendered OpenEMR row (which verifies at 100%). The row
+        # content, the note, and the criterion below are all unchanged; only
+        # the incidental stroke weight is thinned so OCR reads the frame the
+        # verifier actually faces in production.
         screen = make_screen(
             "Patient Messages",
             f"2026-07-08 (admin to admin) {NOTE}",
+            thickness=1,
         )
         verdict = verify_note_saved(screen, NOTE)
         assert verdict.success

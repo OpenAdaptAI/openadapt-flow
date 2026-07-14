@@ -39,7 +39,11 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
+
+if TYPE_CHECKING:  # pragma: no cover
+    from openadapt_flow.backend import Backend
+    from openadapt_flow.ir import RunReport
 
 _VIEWPORT = {"width": 1280, "height": 800}
 
@@ -706,12 +710,10 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     # A GUI automation cannot be resumed without a LIVE backend/vision, so build
     # a fresh Replayer here (deployment wiring from --config) and hand it to the
     # durable resume entrypoint, which re-binds params from the run manifest.
-    from playwright.sync_api import sync_playwright
-
-    from openadapt_flow._browser_setup import ensure_chromium_installed
-    from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+    from openadapt_flow.backends.factory import _normalize_kind, build_backend
     from openadapt_flow.report import render_run_report
     from openadapt_flow.runtime import Replayer
+    from openadapt_flow.runtime.durable.approval import ResumeRefused
 
     (
         cfg,
@@ -720,39 +722,66 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         _durable,
         allow_egress,
     ) = _deployment_runtime(args)
-    url = args.url or cfg.backend.url
-    if url is None:
-        raise SystemExit(
-            "resume needs the target app URL to rebuild a live backend — pass "
-            "--url or set backend.url in --config."
+
+    # Route the resumed run through the SAME backend factory as replay/run
+    # (--backend / --agent-url / --rdp-host over --config), so a resume drives
+    # the bundle's real substrate rather than always the browser. The default
+    # (web / no flag) reproduces the historical Playwright path below exactly.
+    backend_cfg = _resolve_backend_config(args, cfg)
+
+    def _resume_with(backend: "Backend") -> "RunReport":
+        replayer = Replayer(
+            backend,
+            effect_verifier=effect_verifier,
+            api_actuator=api_actuator,
+            durable=True,  # resume forces durability so it can pause again
+            checkpoint_key=ckpt_key,
+            allow_model_grounding=allow_egress,
         )
-    headed = args.headed or cfg.backend.headed
+        return resume(run_dir, replayer, key=ckpt_key)
 
-    from openadapt_flow.runtime.durable.approval import ResumeRefused
+    try:
+        if _normalize_kind(backend_cfg.kind) == "web":
+            from playwright.sync_api import sync_playwright
 
-    ensure_chromium_installed()
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed)
-        page = browser.new_page(viewport=_VIEWPORT)
-        page.goto(url)
-        try:
-            replayer = Replayer(
-                PlaywrightBackend(page),
-                effect_verifier=effect_verifier,
-                api_actuator=api_actuator,
-                durable=True,  # resume forces durability so it can pause again
-                checkpoint_key=ckpt_key,
-                allow_model_grounding=allow_egress,
-            )
-            report = resume(run_dir, replayer, key=ckpt_key)
-        except ResumeRefused as refused:
-            # P0-5: the library REFUSED the resume (no valid approval, an expired
-            # pause, a changed bundle, or a diverged app state) — never a silent
-            # proceed. Approve first:  openadapt-flow approve <run_dir>
-            print(f"Resume REFUSED: {refused}")
-            return 3
-        finally:
-            browser.close()
+            from openadapt_flow._browser_setup import ensure_chromium_installed
+
+            url = args.url or cfg.backend.url
+            if url is None:
+                raise SystemExit(
+                    "resume needs the target app URL to rebuild a live backend — "
+                    "pass --url or set backend.url in --config."
+                )
+            headed = args.headed or cfg.backend.headed
+            ensure_chromium_installed()
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=not headed)
+                page = browser.new_page(viewport=_VIEWPORT)
+                page.goto(url)
+                try:
+                    report = _resume_with(build_backend(backend_cfg, page=page))
+                finally:
+                    browser.close()
+        else:
+            # Desktop (windows / rdp): no browser, no --url; the factory builds
+            # the native backend from the resolved config (fail-loud on a missing
+            # required field). RDP transports hold a live socket — close them.
+            try:
+                backend = build_backend(backend_cfg)
+            except ValueError as e:
+                raise SystemExit(str(e))
+            try:
+                report = _resume_with(backend)
+            finally:
+                close = getattr(backend, "close", None)
+                if callable(close):
+                    close()
+    except ResumeRefused as refused:
+        # P0-5: the library REFUSED the resume (no valid approval, an expired
+        # pause, a changed bundle, or a diverged app state) — never a silent
+        # proceed. Approve first:  openadapt-flow approve <run_dir>
+        print(f"Resume REFUSED: {refused}")
+        return 3
 
     report_md = render_run_report(run_dir)
     outcome = "success" if report.success else "FAILED"
@@ -1451,6 +1480,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(see `approve`)"
         ),
     )
+    _add_backend_flags(p)
     _add_deployment_flags(p)
     p.set_defaults(func=_cmd_resume)
 

@@ -1,6 +1,151 @@
 # CHANGELOG
 
 
+## v0.19.1 (2026-07-14)
+
+### Bug Fixes
+
+- Remove plaintext PHI from compiled bundles + scrub/governance/egress guards
+  ([#88](https://github.com/OpenAdaptAI/openadapt-flow/pull/88),
+  [`8b44649`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8b44649828cfb2a87fd7c2cee4c2bdc9f8861e36))
+
+* fix: store identity band as PHI-free salted-hash template (audit REM-2)
+
+The compiled bundle stored patient identifiers verbatim: anchor.context_text (the identity band:
+  name/DOB/MRN), anchor.structured_identity (DOM/a11y text), and workflow.py reprinted the band as a
+  comment. That makes workflow.json an unencrypted PHI-at-rest record (PHI audit GAP-1a / REM-2).
+
+Replace the plaintext with a salted-hash, shape-preserving IdentityTemplate: per-token HMAC hashes
+  (canonical + raw) plus non-identifying shape flags. The wrong-patient guard re-runs the SAME
+  token-level match against the template at replay (runtime/identity_template.py, a faithful
+  key-space port of identity.band_match) — right row verifies, wrong row refuses, with no readable
+  identifier in the artifact. The near-miss ratio/containment contradiction the plaintext matcher
+  does (needs the recorded string) is replaced by the stricter shape-based rules, so template mode
+  is only ever as strict or STRICTER than the plaintext matcher — never a false-accept. Verified by
+  a parity/safety corpus in tests/test_identity_template.py.
+
+Also drop identifier-bearing TEXT_PRESENT postconditions on the compile path via an OPTIONAL
+  openadapt-privacy (Presidio) pass (audit GAP-1b / GAP-3): a scrub that changes a candidate means
+  it carries PII, so the candidate is dropped rather than mining a name into expect[].text. Graceful
+  fallback when the privacy extra is absent (no crash; the governance guard blocks any residual
+  plaintext).
+
+Backward compatible: bundles compiled before this carry the plaintext fields and replay unchanged.
+  New compiles emit context_text=None + identity_template. The heal-governance, policy,
+  learning-gate, and replayer armed/coverage predicates all recognize the template so a
+  template-armed step is never treated as unarmed.
+
+Threat model: a salted hash of a low-entropy identifier is brute-forceable by a holder of the bundle
+  + salt — this removes PLAINTEXT PHI, it is not encryption. Set OPENADAPT_FLOW_IDENTITY_SALT to
+  keep the salt out of the bundle. At-rest encryption is the deferred next step
+  (docs/phi_at_rest.md).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* fix: fail-closed egress guard on the replay path (audit REM-3)
+
+The default compiled replay is genuinely local, but nothing PREVENTED a caller (or the CLI, when
+  OPENADAPT_FLOW_VLM_URL was set) from silently wiring an off-box grounder / identity-VLM /
+  state-verifier that base64-POSTs a live patient screen to a paid API or on-prem appliance.
+
+Add a fail-closed guard: the Replayer refuses to wire any egress-capable model component unless the
+  operator explicitly opts in (allow_model_grounding / CLI --allow-model-grounding), and the run
+  report now carries screenshots_may_leave_box, surfaced in REPORT.md ("Data egress: none" vs a
+  warning). Egress capability is a MAY_EGRESS marker on the component classes (AnthropicGrounder,
+  RemoteGrounder/RemoteIdentityVLM/RemoteStateVerifier = True; NullGrounder/OCRAnchorGrounder =
+  local/False; a FallbackGrounder is egress iff any member is). The CLI no longer wires the
+  appliance without the flag and prints that it is replaying fully local.
+
+test_egress_guard.py is the regression guard on the "stays local" claim: a default
+  Replayer(backend).run(...) with every HTTP transport stubbed to raise completes with ZERO outbound
+  calls, and wiring an egress component without the opt-in raises EgressNotPermitted.
+
+* fix: PHI governance + at-rest classification for bundles (audit REM-1)
+
+A compiled bundle is a HIPAA-designated record, but nothing stopped one from reaching git (the
+  docs/showcase-openemr/bundle precedent) or told a compliance team it is PHI.
+
+- Manifest: add contains_phi / phi_scrubbed / encrypted to Workflow, set by the compiler, so a
+  bundle can be classified and the format is ready for the deferred at-rest encryption
+  (encrypted=false today). - Guard: scripts/check_bundle_phi.py blocks committing any workflow.json
+  whose steps carry a plaintext identity band (structural, no deps) and — with the privacy extra —
+  identifier-bearing postconditions/labels. Wired as a .pre-commit hook and a CI phi-guard job. -
+  .gitignore excludes bundle output dirs (the committed showcase bundle is an explicit
+  synthetic-data exception). - Regenerate the committed OpenEMR showcase bundle through the PHI-free
+  compile path: context_text/structured_identity are now null (salted-hash templates),
+
+workflow.py no longer reprints the band, contains_phi=false, and it passes the guard. Residual UI
+  text is the FAKE OpenEMR public-demo patient (see the bundle README); no git history rewrite
+  (forward-fix only). - docs/phi_at_rest.md: a bundle is a HIPAA record to classify/encrypt; the
+  identity template removes plaintext but is NOT crypto; the template PNGs stay image-PHI protected
+  by the guards + operator disk encryption; and the encrypted-sealed-bundle design is specified as
+  the next step (deferred: encryption needs deployment-time key management that does not exist yet —
+  half-shipped crypto is worse than none).
+
+* style: ruff format + tighten band_verdict return type for the PHI remediation
+
+Formatting-only reflow of the REM-1/REM-2/REM-3 files plus two typing fixes so the lint/type gate
+  stays green: band_verdict now returns the 3-value Literal it always produced (so
+  IdentityCheck.status assignments type-check in the new template verifier), and the heal-governance
+  template branch narrows the Optional identity template before use. No behavior change.
+
+* fix: scrub identifier landmarks + widen the PHI guard (audit REM-2)
+
+A geometry landmark (anchor.landmarks[].ocr_text) is nearby ROW text used to re-locate the target;
+  on a patient list that is frequently the name itself, so it was a residual plaintext-PHI vector
+  alongside the identity band. Drop a landmark whose text the optional Presidio scrub flags as an
+  identifier (geometry is a fallback rung and the identity gate still disposes, so dropping it is
+  safe), and extend scripts/check_bundle_phi.py to flag landmark text too.
+
+With the scrub active a fresh compile is now fully identifier-free (name/DOB/MRN absent from
+  workflow.json); unconditionally, the identity band is hashed regardless of the scrub.
+  docs/phi_at_rest.md records the remaining load-bearing residuals (target label ocr_text, typed
+  literal) and the fix (parameterize the typed identifier as entity_ref).
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Chores
+
+- Engineering hygiene — version-sync, lint/type gate, reformat, supply-chain (final, on settled
+  main) ([#86](https://github.com/OpenAdaptAI/openadapt-flow/pull/86),
+  [`d38dc78`](https://github.com/OpenAdaptAI/openadapt-flow/commit/d38dc788bbcc2f062294021ff01168a599d4ee10))
+
+* chore: engineering hygiene — version-sync, lint/type gate, supply-chain
+
+Regenerated on current (settled) main; supersedes the stale #77 whose reformat was generated on an
+  old main and no longer applies.
+
+- Version-sync (the real bug): openadapt_flow.__version__ was 0.1.0 while the released pyproject
+  version is 0.19.0. Sync __version__ and add version_variables to [tool.semantic_release] so
+  releases keep them in lockstep (the wheel job already asserts they match). - Lint/type gate: add
+  ruff, mypy, pytest-cov to [dev]; add [tool.ruff] (lint+format), [tool.mypy] (core package,
+  ignore_missing_imports, a documented ignore_errors debt list re-derived against current main), and
+  [tool.coverage]. Ship py.typed + wheel force-include (PEP 561). - CI: add a `lint` job (ruff check
+  + ruff format --check + mypy) as its own job; the required `test` gate and the #76 structure are
+  untouched. - Supply chain: SHA-pin the release.yml actions; add .github/dependabot.yml. -
+  Scaffolding (absent on main): CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, CODEOWNERS, issue + PR
+  templates. - Import hygiene: ruff --fix import sorting + 3 dead-import removals so the lint gate
+  is green.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: reformat openadapt_flow and tests with ruff format
+
+Mechanical `ruff format openadapt_flow tests` reflow only — no behavior change. Isolated in its own
+  commit so it is trivially revertable and keeps the chore commit's config/infra diff legible.
+  Regenerated fresh on current main (the stale #77 reformat was generated on an old main).
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.19.0 (2026-07-13)
 
 ### Features

@@ -67,7 +67,9 @@ def is_identity_armed(step: Step) -> bool:
     if step.identity_armed is not None:
         return step.identity_armed
     a = step.anchor
-    return a is not None and bool(a.context_text or a.structured_identity)
+    return a is not None and bool(
+        a.context_text or a.structured_identity or a.identity_template
+    )
 
 
 def expects_effect(step: Step) -> bool:
@@ -103,7 +105,7 @@ def step_confidence(step: Step) -> float:
         score += 0.5
     if a.ocr_text:
         score += 0.3
-    if a.context_text or a.structured_identity:
+    if a.context_text or a.structured_identity or a.identity_template:
         score += 0.2
     return min(1.0, score)
 

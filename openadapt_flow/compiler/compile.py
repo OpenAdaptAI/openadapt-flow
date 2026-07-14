@@ -266,6 +266,14 @@ def _landmarks_for(
             continue
         if volatility.classify_text(text, reference_date=reference_date):
             continue
+        if _text_carries_phi(text):
+            # A landmark is nearby ROW text used by the geometry rung; on a
+            # patient list that is often the name itself. When the optional
+            # Presidio scrub detects an identifier, drop the landmark so no
+            # patient name is mined into the bundle as geometry evidence (audit
+            # REM-2). Geometry is a fallback rung and the identity gate still
+            # disposes, so dropping a PHI landmark is safe (see docs/phi_at_rest).
+            continue
         lx, ly, lw, lh = line.region
         cx, cy = lx + lw // 2, ly + lh // 2
         dx, dy = click[0] - cx, click[1] - cy
@@ -368,6 +376,28 @@ def _matches_label(text: str, labels: tuple[str, ...]) -> bool:
     return False
 
 
+def _text_carries_phi(text: str) -> bool:
+    """Whether the optional Presidio pass flags this text as carrying PII/PHI.
+
+    Wires openadapt-privacy as an OPTIONAL dependency (audit REM-2 / GAP-3):
+    when text scrubbing is active (the ``privacy`` extra is installed and
+    ``OPENADAPT_FLOW_SCRUB`` is ``auto``/``on``) a scrub that CHANGES the text
+    means an identifier was found. Graceful fallback: when the extra is absent
+    under ``auto`` this returns False (no crash — the governance guard blocks
+    committing any residual plaintext identifiers instead); under ``on`` the
+    privacy module fails closed (raises) exactly as elsewhere. Import is lazy so
+    the compiler core never pulls in Presidio/spaCy.
+    """
+    if not text or not text.strip():
+        return False
+    from openadapt_flow import privacy
+
+    if not privacy.text_scrubbing_enabled():
+        return False
+    scrubbed = privacy.scrub_text(text)
+    return bool(scrubbed) and scrubbed != text
+
+
 def _new_text_postcondition(
     before_lines: list[OcrLine],
     after_lines: list[OcrLine],
@@ -451,6 +481,15 @@ def _new_text_postcondition(
         if _contains_excluded(text, exclude_texts):
             continue
         if _matches_label(text, avoid_labels):
+            continue
+        if _text_carries_phi(text):
+            # PHI scrub on the compile path (audit REM-2 / GAP-3): when the
+            # optional openadapt-privacy (Presidio) pass detects a patient
+            # identifier in a candidate assertion, that candidate is DROPPED so
+            # no name / DOB / MRN is mined into ``expect[].text``. A scrubbed
+            # placeholder is NOT substituted — the live screen shows the real
+            # value, so a scrubbed assertion would only fail at replay; the
+            # right move is to not assert on identifier text at all.
             continue
         if next_hay is not None:
             if coverage(_squash(text), next_hay) < PERSISTENCE_RATIO:
@@ -1185,6 +1224,62 @@ def compile_recording(
         for applied in result.applied:
             logger.info("annotation applied %s: %s", applied.step_id, applied.detail)
 
+    # PHI-at-rest remediation (audit REM-2): replace the plaintext identity
+    # band (``anchor.context_text``) and structured identity on every anchor
+    # with a salted-hash, shape-preserving TEMPLATE, so no readable patient
+    # name / DOB / MRN is persisted in ``workflow.json`` (or reprinted into the
+    # human-readable ``workflow.py``). The wrong-patient guard re-runs the SAME
+    # token-level identity check against the template at replay
+    # (openadapt_flow.runtime.identity_template). Runs LAST so param-hygiene
+    # lint and optional model annotation still see the plaintext. Backward
+    # compatible: bundles compiled before this carry the plaintext fields and
+    # replay unchanged.
+    _phi_free_identity(workflow)
+
+    # PHI governance manifest (audit REM-1): classify the bundle so an operator
+    # inventory and the pre-commit/CI guard can act on it.
+    from openadapt_flow import privacy as _privacy
+
+    workflow.phi_scrubbed = _privacy.text_scrubbing_enabled()
+    workflow.contains_phi = any(
+        s.anchor is not None and (s.anchor.context_text or s.anchor.structured_identity)
+        for s in workflow.steps
+    )
+    workflow.encrypted = False
+
     workflow.save(bundle)
     (bundle / "workflow.py").write_text(render_workflow_py(workflow))
     return workflow
+
+
+def _phi_free_identity(workflow: Workflow) -> None:
+    """Convert every anchor's plaintext identity evidence to a PHI-free,
+    salted-hash :class:`~openadapt_flow.ir.IdentityTemplate` in place.
+
+    A single per-bundle salt is used so an external
+    ``OPENADAPT_FLOW_IDENTITY_SALT`` (kept out of the bundle) applies uniformly.
+    Idempotent and safe on anchors that carry no identity evidence.
+    """
+    from openadapt_flow.runtime.identity_template import (
+        build_identity_template,
+        new_salt_hex,
+    )
+
+    salt = new_salt_hex()
+    for step in workflow.steps:
+        anchor = step.anchor
+        if anchor is None or anchor.identity_template is not None:
+            continue
+        if not (anchor.context_text or anchor.structured_identity):
+            continue
+        template = build_identity_template(
+            anchor.context_text,
+            structured_identity=anchor.structured_identity,
+            param_examples=workflow.params,
+            salt_hex=salt,
+        )
+        if template is None:
+            continue
+        anchor.identity_template = template
+        anchor.context_text = None
+        anchor.structured_identity = None

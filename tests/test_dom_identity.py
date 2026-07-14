@@ -549,7 +549,22 @@ def test_compiler_stores_structured_identity_and_arms(tmp_path) -> None:
     )
     wf = compile_recording(rec, tmp_path / "bundle", name="wf")
     step = wf.steps[0]
-    assert step.anchor.structured_identity == struct
+    # PHI-free artifact (audit REM-2): the structured identity is stored as a
+    # salted hash on the identity_template, not as plaintext. No name/MRN/DOB
+    # in the bundle, but the exact-match structured tier still verifies.
+    assert step.anchor.structured_identity is None
+    tmpl = step.anchor.identity_template
+    assert tmpl is not None and tmpl.structured is not None
+    assert struct not in tmpl.model_dump_json()
+    from openadapt_flow.runtime.identity_template import verify_structured_template
+
+    assert verify_structured_template(tmpl, struct).status == "verified"
+    assert (
+        verify_structured_template(
+            tmpl, "MG4408 Okafor, Philip 1966-01-18 M Active"
+        ).status
+        == "mismatch"
+    )
     # Armed on the structured tier even though this blank frame OCRs to no
     # usable context band.
     assert step.identity_armed is True

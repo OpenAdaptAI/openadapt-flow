@@ -112,6 +112,69 @@ class StructuralLocator(BaseModel):
     )
 
 
+class TokenTemplate(BaseModel):
+    """Salted-hash + shape descriptor for one recorded identity-band token.
+
+    Carries NO plaintext (the PHI audit's REM-2): ``c``/``r`` are salted hashes
+    of the token's OCR-canonical and squashed-raw forms; the rest are
+    non-identifying shape flags and a length. Enough to reproduce the
+    wrong-patient guard's per-token budgets at replay
+    (:mod:`openadapt_flow.runtime.identity_template`) without persisting the
+    identifier itself.
+    """
+
+    c: str = Field(description="salted hash of ocr_canonical(squashed token)")
+    r: str = Field(description="salted hash of squashed raw token")
+    n: int = Field(description="squashed length")
+    alpha: bool = False
+    name: bool = False
+    digit: bool = False
+    idsh: bool = False
+    glyph: bool = False
+    gen: bool = False
+
+
+class ConcatTemplate(BaseModel):
+    """Precomputed SPLIT-match key (consecutive recorded tokens the live OCR
+    may glue into one), since hashes cannot be concatenated at replay."""
+
+    i: int
+    size: int
+    c: str
+    r: str
+    digit: bool
+    name: bool
+    n: int
+
+
+class IdentityTemplate(BaseModel):
+    """PHI-free stand-in for ``Anchor.context_text`` / ``structured_identity``.
+
+    A salted-hash, shape-preserving template of the recorded identity band. It
+    lets the runtime re-run the SAME wrong-patient identity check
+    (:mod:`openadapt_flow.runtime.identity_template`) with no readable name /
+    DOB / MRN in the artifact. NOT a cryptographic control (a salted hash of a
+    low-entropy identifier is brute-forceable by a holder of the bundle + salt);
+    it removes *plaintext* PHI. The at-rest control is bundle encryption
+    (docs/phi_at_rest.md, deferred). Set ``OPENADAPT_FLOW_IDENTITY_SALT`` at
+    compile+replay to keep the salt out of the bundle and make the hashes
+    one-way to anyone without the external secret.
+    """
+
+    schema_version: int = 1
+    salt: str = Field(
+        default="", description="per-bundle salt (hex); empty => env salt"
+    )
+    band_len: int = 0
+    tokens: list[TokenTemplate] = Field(default_factory=list)
+    concats: list[ConcatTemplate] = Field(default_factory=list)
+    structured: Optional[str] = Field(
+        default=None, description="salted hash of the structured identity string"
+    )
+    param_token_indices: dict[str, list[int]] = Field(default_factory=dict)
+    rests_on_confusable_identifier: bool = False
+
+
 class Anchor(BaseModel):
     """Redundant evidence for locating a step's target on screen.
 
@@ -166,6 +229,19 @@ class Anchor(BaseModel):
             " identity ladder (see runtime.identity). None on pixel-only"
             " substrates or bundles recorded before this capability; the"
             " ladder then falls back to the OCR context_text tier."
+        ),
+    )
+    identity_template: Optional[IdentityTemplate] = Field(
+        default=None,
+        description=(
+            "PHI-FREE identity template (salted-hash + shape) of the recorded"
+            " context band and structured identity. When present, the runtime"
+            " verifies target identity from THIS (no plaintext name/DOB/MRN in"
+            " the artifact — the PHI audit's REM-2) and ``context_text`` /"
+            " ``structured_identity`` are None. Bundles compiled before this"
+            " capability carry the plaintext fields instead and still replay"
+            " unchanged (backward compatible). See"
+            " openadapt_flow.runtime.identity_template."
         ),
     )
     identifier_crop: Optional[str] = Field(
@@ -686,6 +762,29 @@ class Workflow(BaseModel):
     schema_version: int = 1
     name: str
     recording_id: Optional[str] = None
+    # -- PHI governance manifest (PHI audit REM-1) --------------------------
+    # A compiled bundle is a HIPAA-designated record; these fields let an
+    # operator's compliance inventory classify it, and let the pre-commit / CI
+    # guard (scripts/check_bundle_phi.py) block a bundle that still carries
+    # plaintext identifiers from reaching git.
+    #
+    # ``contains_phi``: True when this bundle still carries a PLAINTEXT identity
+    # band (``anchor.context_text`` / ``structured_identity``) — the flagship
+    # PHI-at-rest leak (GAP-1a). PHI-free bundles store a salted-hash
+    # ``identity_template`` instead and set this False. (It does NOT certify the
+    # absence of every identifier in every free-text postcondition — that needs
+    # the optional Presidio pass; see ``phi_scrubbed``.)
+    contains_phi: bool = False
+    # ``phi_scrubbed``: True when the optional openadapt-privacy (Presidio) pass
+    # was ACTIVE on the compile path, so identifier-bearing TEXT_PRESENT
+    # postconditions were dropped. False = the scrub was unavailable/off (the
+    # bundle may retain identifier text in postconditions / labels).
+    phi_scrubbed: bool = False
+    # ``encrypted``: format-ready flag for the deferred at-rest encryption
+    # (REM-1 crypto, docs/phi_at_rest.md). Always False today — a bundle is
+    # plaintext-serialized JSON + PNGs, protected by the governance guards and
+    # the operator's disk encryption, NOT by bundle encryption yet.
+    encrypted: bool = False
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -898,6 +997,13 @@ class RunReport(BaseModel):
     identity_applicable_steps: int = 0
     identity_armed_steps: int = 0
     identity_unarmed: list[UnarmedStep] = Field(default_factory=list)
+    # Egress transparency (PHI audit REM-3): True when an egress-capable model
+    # component (a paid-API or on-prem-appliance grounder / identity-VLM /
+    # state-verifier) was wired for this run, so a screenshot COULD leave the
+    # box. False for the default local replay (which makes zero outbound calls).
+    # Wiring an egress component requires the operator's explicit opt-in
+    # (Replayer(allow_model_grounding=True) / CLI --allow-model-grounding).
+    screenshots_may_leave_box: bool = False
 
     def save(self, run_dir: Path | str) -> Path:
         run = Path(run_dir)

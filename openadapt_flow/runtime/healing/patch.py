@@ -76,6 +76,10 @@ class IdentitySnapshot(BaseModel):
     structured_identity: Optional[str] = None
     identifier_crop: Optional[str] = None
     identifier_region: Optional[Any] = None
+    # True when the anchor carried a PHI-free salted-hash identity template
+    # (audit REM-2) rather than plaintext identity fields. Recorded for the
+    # audit trail; a template present arms the gate exactly as plaintext does.
+    has_identity_template: bool = False
     armed: bool = False
 
     @classmethod
@@ -85,7 +89,12 @@ class IdentitySnapshot(BaseModel):
             structured_identity=anchor.structured_identity,
             identifier_crop=anchor.identifier_crop,
             identifier_region=anchor.identifier_region,
-            armed=bool(anchor.context_text or anchor.structured_identity),
+            has_identity_template=anchor.identity_template is not None,
+            armed=bool(
+                anchor.context_text
+                or anchor.structured_identity
+                or anchor.identity_template
+            ),
         )
 
 

@@ -77,8 +77,30 @@ class Grounder(Protocol):
         ...
 
 
+# Egress classification (PHI audit REM-3). A component "may egress" when its
+# operation can send a screenshot off the local box (to a paid API or an on-prem
+# appliance). The replayer refuses to wire an egress-capable component unless the
+# operator explicitly opts in (``allow_model_grounding``), and the run report
+# flags any run where a screenshot could leave the box. Local, in-process
+# grounders (Null / OCR-anchoring) carry ``MAY_EGRESS = False``.
+
+
+def component_may_egress(component: object) -> bool:
+    """Whether a grounder / identity-VLM / state-verifier can send a screenshot
+    off the box. Reads the component's ``MAY_EGRESS`` marker (default False for
+    an unmarked stub / local component); a :class:`FallbackGrounder` is egress
+    if ANY chained grounder is."""
+    if component is None:
+        return False
+    if isinstance(component, FallbackGrounder):
+        return any(component_may_egress(g) for g in component._grounders)
+    return bool(getattr(component, "MAY_EGRESS", False))
+
+
 class NullGrounder:
     """Grounder that never locates anything (the safe default)."""
+
+    MAY_EGRESS = False
 
     def locate(
         self,
@@ -184,6 +206,9 @@ class OCRAnchorGrounder:
     the resolution ladder halts rather than mis-clicks, and the deterministic
     identity band still disposes before any click.
     """
+
+    # Local, in-process (OCR on the box); no screenshot ever leaves the machine.
+    MAY_EGRESS = False
 
     def __init__(self) -> None:
         """Build the grounder, importing openadapt-grounding lazily.
@@ -479,6 +504,11 @@ class AnthropicGrounder:
     Requires the optional ``anthropic`` package (install the ``grounder``
     extra). Never used in tests; calls count as model calls in run reports.
     """
+
+    # EGRESS: base64-encodes the full screen PNG and POSTs it to the Anthropic
+    # API. The replayer refuses to wire this unless the operator opts in
+    # (allow_model_grounding) and flags the run (PHI audit REM-3).
+    MAY_EGRESS = True
 
     def __init__(self, model: str = _DEFAULT_MODEL, client: object = None) -> None:
         """Create the grounder.

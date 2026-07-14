@@ -17,6 +17,7 @@ import pytest
 
 from openadapt_flow.compiler import compile_recording, render_workflow_py
 from openadapt_flow.ir import ActionKind, PostconditionKind, Workflow
+from openadapt_flow.runtime.identity_template import token_in_template
 from openadapt_flow.vision.ocr import normalize_text
 
 VIEWPORT = (1280, 800)
@@ -556,13 +557,19 @@ class TestIdentityContext:
         workflow = compile_recording(recording, tmp_path / "bundle", name="row")
         anchor = workflow.steps[0].anchor
         assert anchor is not None
-        assert anchor.context_text is not None
-        context = normalize_text(anchor.context_text)
-        assert "jane" in context and "sample" in context
-        assert "high" in context
-        assert "12:45" not in context  # timestamps are volatile
-        assert "open" not in context  # the target's own (mutable) label
-        assert "alex" not in context  # other rows are outside the band
+        # PHI-free artifact (audit REM-2): the identity band is stored as a
+        # salted-hash template, not plaintext. context_text is None and no
+        # patient identifier is persisted; membership is probed by hash.
+        assert anchor.context_text is None
+        tmpl = anchor.identity_template
+        assert tmpl is not None
+        assert token_in_template(tmpl, "jane") and token_in_template(tmpl, "sample")
+        assert token_in_template(tmpl, "high")
+        assert not token_in_template(tmpl, "12:45")  # timestamps are volatile
+        assert not token_in_template(tmpl, "open")  # target's own (mutable) label
+        assert not token_in_template(tmpl, "alex")  # other rows outside the band
+        # No plaintext identifier anywhere in the serialized bundle.
+        assert "Jane" not in tmpl.model_dump_json()
         # Armed-coverage audit trail in the bundle:
         assert workflow.steps[0].identity_armed is True
         assert workflow.steps[0].identity_unarmed_reason is None
@@ -724,10 +731,23 @@ class TestStabilitySelectedMining:
         _write_recording(recording, events, {0: (before, after)})
         wf = compile_recording(recording, tmp_path / "bundle", name="dobctx")
         anchor = wf.steps[0].anchor
-        assert anchor is not None and anchor.context_text is not None
-        context = normalize_text(anchor.context_text)
-        assert "jane" in context and "sample" in context
-        assert "1980" in context  # the far date is KEPT as identity data
+        assert anchor is not None and anchor.context_text is None
+        tmpl = anchor.identity_template
+        assert tmpl is not None
+        assert token_in_template(tmpl, "jane") and token_in_template(tmpl, "sample")
+        # The far date is KEPT as identity data (retained in the template): the
+        # DOB token verifies, and a DIFFERENT DOB does not.
+        assert token_in_template(tmpl, "1980-01-01")
+        from openadapt_flow.runtime.identity_template import verify_template_identity
+
+        assert (
+            verify_template_identity(tmpl, "Jane Sample 1980-01-01").status
+            == "verified"
+        )
+        assert (
+            verify_template_identity(tmpl, "Jane Sample 1990-01-01").status
+            == "mismatch"
+        )
 
 
 class TestParameterHygiene:

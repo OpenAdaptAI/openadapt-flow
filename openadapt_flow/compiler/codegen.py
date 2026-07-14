@@ -109,7 +109,20 @@ def render_workflow_py(workflow: Workflow) -> str:
                 f"({landmark.relation}, {landmark.distance_px}px)"
             )
         if step.anchor is not None and step.anchor.context_text:
+            # Legacy plaintext bundles only. New (PHI-free) bundles carry a
+            # salted-hash identity_template instead (audit REM-2), so no
+            # patient identifier is ever reprinted into this human-readable
+            # rendering — see the identity-armed note below.
             lines.append(f"    # identity context: {step.anchor.context_text!r}")
+        elif step.anchor is not None and step.anchor.identity_template is not None:
+            n_tokens = len(step.anchor.identity_template.tokens)
+            has_struct = bool(step.anchor.identity_template.structured)
+            lines.append(
+                "    # identity: armed via PHI-free salted-hash template "
+                f"({n_tokens} band tokens"
+                f"{', structured' if has_struct else ''}); "
+                "no patient identifier stored"
+            )
         lines.append(_step_call(step))
         lines.extend(_expect_comment(step.expect))
         lines.extend(_effect_comment(step.effects))

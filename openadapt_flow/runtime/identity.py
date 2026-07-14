@@ -65,7 +65,15 @@ import difflib
 import re
 from collections import Counter
 from datetime import date
-from typing import Any, Iterable, NamedTuple, Optional, Protocol, runtime_checkable
+from typing import (
+    Any,
+    Iterable,
+    Literal,
+    NamedTuple,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 
 from openadapt_flow.ir import IdentityCheck, Point, Region
 from openadapt_flow.volatility import (  # noqa: F401 - TIMESTAMP_RE re-exported
@@ -1254,7 +1262,7 @@ def _band_ok(match: BandMatch) -> bool:
     )
 
 
-def band_verdict(match: BandMatch) -> str:
+def band_verdict(match: BandMatch) -> Literal["verified", "mismatch", "abstain"]:
     """Three-way OCR-tier verdict for a matched band: ``verified`` /
     ``mismatch`` / ``abstain`` (the 8th wrong-patient reopening).
 

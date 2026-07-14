@@ -83,16 +83,32 @@ def identity_preserved(
         A :class:`PreservationVerdict`; ``preserved=False`` means the patch
         must be quarantined and the run halted.
     """
-    old_armed = bool(old_anchor.context_text or old_anchor.structured_identity)
+    # PHI-free bundles (audit REM-2) carry a salted-hash ``identity_template``
+    # in place of the plaintext ``context_text`` / ``structured_identity``. The
+    # gate must treat a template-armed anchor as ARMED (else a heal silently
+    # unprotects a protected step — the very bug this module exists to prevent)
+    # and verify the refreshed band against the template.
+    old_tmpl = old_anchor.identity_template
+    new_tmpl = new_anchor.identity_template
+    old_struct = old_anchor.structured_identity or (
+        old_tmpl.structured if old_tmpl else None
+    )
+    new_struct = new_anchor.structured_identity or (
+        new_tmpl.structured if new_tmpl else None
+    )
+    old_has_band = bool(old_anchor.context_text) or bool(old_tmpl and old_tmpl.tokens)
+    new_has_band = bool(new_anchor.context_text) or bool(new_tmpl and new_tmpl.tokens)
+    old_armed = bool(
+        old_anchor.context_text or old_struct or (old_tmpl and old_tmpl.tokens)
+    )
 
     # (2) structured identity may never be dropped or changed by a heal.
-    if old_anchor.structured_identity and not new_anchor.structured_identity:
+    if old_struct and not new_struct:
         return PreservationVerdict(
             preserved=False,
             reason=(
-                "heal dropped structured_identity "
-                f"({old_anchor.structured_identity!r} -> None): the "
-                "highest-fidelity identity tier would be lost"
+                "heal dropped structured_identity: the highest-fidelity "
+                "identity tier would be lost"
             ),
         )
 
@@ -105,7 +121,9 @@ def identity_preserved(
             preserved=True, reason="pre-heal step was not identity-armed"
         )
 
-    new_armed = bool(new_anchor.context_text or new_anchor.structured_identity)
+    new_armed = bool(
+        new_anchor.context_text or new_struct or (new_tmpl and new_tmpl.tokens)
+    )
     if not new_armed:
         # (1) the reviewed bug: ARMED -> UNARMED.
         return PreservationVerdict(
@@ -120,28 +138,47 @@ def identity_preserved(
     # (3) the refreshed band must still verify the recorded identity. Only
     # meaningful when the old anchor's evidence was the OCR band; a surviving
     # structured identity already satisfied (2).
-    if old_anchor.context_text:
-        if not new_anchor.context_text:
-            # structured_identity survived (else (1) caught it), but the OCR
-            # band -- independent evidence the gate also reads -- was dropped.
+    if old_has_band:
+        if not new_has_band:
+            # structured survived (else (1) caught it), but the OCR band --
+            # independent evidence the gate also reads -- was dropped.
             return PreservationVerdict(
                 preserved=False,
                 reason=(
-                    "heal dropped the recorded context band "
-                    "(context_text -> None); the OCR identity tier would be "
-                    "lost even though structured identity survived"
+                    "heal dropped the recorded context band; the OCR identity "
+                    "tier would be lost even though structured identity survived"
                 ),
             )
-        status = band_verifier(old_anchor.context_text, new_anchor.context_text)
+        # The heal re-derives the new band from LIVE OCR lines, so
+        # ``new_anchor.context_text`` is plaintext at heal time and can be read
+        # as the "observed" band against the old evidence (plaintext or
+        # template). A template-only new band (no plaintext to compare) cannot
+        # be proven to mean the same entity, so it fails safe.
+        observed = new_anchor.context_text
+        if not observed:
+            return PreservationVerdict(
+                preserved=False,
+                reason=(
+                    "heal produced only a hashed identity template with no "
+                    "readable band to verify against the recorded identity"
+                ),
+            )
+        if old_anchor.context_text:
+            status = band_verifier(old_anchor.context_text, observed)
+        else:
+            from openadapt_flow.runtime import identity_template as itmpl
+
+            # old_has_band is True with no plaintext context_text, so the band
+            # evidence is the template (old_tmpl.tokens); narrow for the checker.
+            assert old_tmpl is not None
+            status = itmpl.verify_template_identity(old_tmpl, observed).status
         if status != "verified":
             return PreservationVerdict(
                 preserved=False,
                 band_status=status,
                 reason=(
                     "refreshed context band no longer verifies the recorded "
-                    f"target identity (band verdict {status!r}): expected "
-                    f"{old_anchor.context_text!r}, refreshed to "
-                    f"{new_anchor.context_text!r}"
+                    f"target identity (band verdict {status!r})"
                 ),
             )
         return PreservationVerdict(

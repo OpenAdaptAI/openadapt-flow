@@ -79,7 +79,9 @@ def _salt_bytes(salt_hex: str) -> bytes:
 
 def _hash(salt: bytes, text: str) -> str:
     """Salted one-way key for a string (HMAC-SHA256, truncated hex)."""
-    return hmac.new(salt, text.encode("utf-8"), hashlib.sha256).hexdigest()[:_DIGEST_HEX]
+    return hmac.new(salt, text.encode("utf-8"), hashlib.sha256).hexdigest()[
+        :_DIGEST_HEX
+    ]
 
 
 def new_salt_hex() -> str:
@@ -173,15 +175,11 @@ def build_identity_template(
             if len(ex) < _id.MIN_PARAM_CHARS:
                 continue
             idxs = [
-                j
-                for j, t in enumerate(squashed_tokens)
-                if _id._token_belongs_to(t, ex)
+                j for j, t in enumerate(squashed_tokens) if _id._token_belongs_to(t, ex)
             ]
             if idxs:
                 tmpl.param_token_indices[name] = idxs
-        tmpl.rests_on_confusable_identifier = any(
-            t.glyph for t in tmpl.tokens
-        )
+        tmpl.rests_on_confusable_identifier = any(t.glyph for t in tmpl.tokens)
 
     if not tmpl.tokens and not tmpl.structured:
         return None
@@ -229,7 +227,9 @@ def _match_tokens_template(
         matched[i] = True
         if toks[i].r == obs_raw_key:
             raw_matched[i] = True
-        elif _suspicious_pair_flags(toks[i].digit, toks[i].name, toks[i].n, obs_squashed):
+        elif _suspicious_pair_flags(
+            toks[i].digit, toks[i].name, toks[i].n, obs_squashed
+        ):
             suspect_evidence[i] = True
 
     # single-token equivalence
@@ -397,9 +397,7 @@ def _band_match_template(tmpl: IdentityTemplate, observed_text: str) -> _id.Band
     exp_short = Counter(t.c for t in toks if t.n < _id.MIN_BLOCK and t.alpha)
     # length lookup by canonical-hash key for the same-length pairing.
     exp_short_len = {t.c: t.n for t in toks if t.n < _id.MIN_BLOCK and t.alpha}
-    obs_short = Counter(
-        canon(o) for o in obs if len(o) < _id.MIN_BLOCK and o.isalpha()
-    )
+    obs_short = Counter(canon(o) for o in obs if len(o) < _id.MIN_BLOCK and o.isalpha())
     obs_short_len = {
         canon(o): len(o) for o in obs if len(o) < _id.MIN_BLOCK and o.isalpha()
     }
@@ -456,7 +454,9 @@ def verify_template_identity(
             status="unreadable", expected=marker, observed=observed_text
         )
 
-    in_band = [n for n in tmpl.param_token_indices if n in param_examples or n in params]
+    in_band = [
+        n for n in tmpl.param_token_indices if n in param_examples or n in params
+    ]
     if in_band:
         if not hay:
             return IdentityCheck(status="unreadable", mode="param", expected=marker)

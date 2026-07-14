@@ -98,7 +98,9 @@ def identity_preserved(
     )
     old_has_band = bool(old_anchor.context_text) or bool(old_tmpl and old_tmpl.tokens)
     new_has_band = bool(new_anchor.context_text) or bool(new_tmpl and new_tmpl.tokens)
-    old_armed = bool(old_anchor.context_text or old_struct or (old_tmpl and old_tmpl.tokens))
+    old_armed = bool(
+        old_anchor.context_text or old_struct or (old_tmpl and old_tmpl.tokens)
+    )
 
     # (2) structured identity may never be dropped or changed by a heal.
     if old_struct and not new_struct:
@@ -119,7 +121,9 @@ def identity_preserved(
             preserved=True, reason="pre-heal step was not identity-armed"
         )
 
-    new_armed = bool(new_anchor.context_text or new_struct or (new_tmpl and new_tmpl.tokens))
+    new_armed = bool(
+        new_anchor.context_text or new_struct or (new_tmpl and new_tmpl.tokens)
+    )
     if not new_armed:
         # (1) the reviewed bug: ARMED -> UNARMED.
         return PreservationVerdict(
@@ -164,6 +168,9 @@ def identity_preserved(
         else:
             from openadapt_flow.runtime import identity_template as itmpl
 
+            # old_has_band is True with no plaintext context_text, so the band
+            # evidence is the template (old_tmpl.tokens); narrow for the checker.
+            assert old_tmpl is not None
             status = itmpl.verify_template_identity(old_tmpl, observed).status
         if status != "verified":
             return PreservationVerdict(

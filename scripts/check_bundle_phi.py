@@ -36,9 +36,7 @@ from pathlib import Path
 
 def _git_tracked_workflow_jsons() -> list[Path]:
     try:
-        out = subprocess.check_output(
-            ["git", "ls-files", "*workflow.json"], text=True
-        )
+        out = subprocess.check_output(["git", "ls-files", "*workflow.json"], text=True)
     except Exception:
         return []
     return [Path(p) for p in out.split("\n") if p.strip()]

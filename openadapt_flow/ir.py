@@ -162,7 +162,9 @@ class IdentityTemplate(BaseModel):
     """
 
     schema_version: int = 1
-    salt: str = Field(default="", description="per-bundle salt (hex); empty => env salt")
+    salt: str = Field(
+        default="", description="per-bundle salt (hex); empty => env salt"
+    )
     band_len: int = 0
     tokens: list[TokenTemplate] = Field(default_factory=list)
     concats: list[ConcatTemplate] = Field(default_factory=list)

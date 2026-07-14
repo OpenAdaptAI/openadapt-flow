@@ -168,6 +168,7 @@ class RemoteIdentityVLM:
     Only a confident SAME avoids the veto, and even then it does not by itself
     grant a pass -- it merely declines to halt.
     """
+
     # EGRESS (PHI audit REM-3): sends screenshots/crops to the on-prem VLM
     # appliance over HTTP. Off the local box, so the replayer requires an
     # explicit opt-in (allow_model_grounding) to wire it and flags the run.
@@ -220,6 +221,7 @@ class RemoteGrounder:
     ``NullGrounder`` behaviour, so an appliance outage lowers availability, never
     safety.
     """
+
     # EGRESS (PHI audit REM-3): sends screenshots/crops to the on-prem VLM
     # appliance over HTTP. Off the local box, so the replayer requires an
     # explicit opt-in (allow_model_grounding) to wire it and flags the run.
@@ -266,6 +268,7 @@ class RemoteStateVerifier:
     direction and is returned on ANY failure, so a down appliance means the
     postcondition is treated as unproven (halt), never as satisfied.
     """
+
     # EGRESS (PHI audit REM-3): sends screenshots/crops to the on-prem VLM
     # appliance over HTTP. Off the local box, so the replayer requires an
     # explicit opt-in (allow_model_grounding) to wire it and flags the run.

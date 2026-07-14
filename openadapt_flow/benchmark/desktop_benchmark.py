@@ -510,8 +510,7 @@ def _armed_coverage(bundle: Path) -> dict:
     armed = [
         s
         for s in clicks
-        if s.anchor
-        and (s.anchor.context_text or s.anchor.identity_template)
+        if s.anchor and (s.anchor.context_text or s.anchor.identity_template)
     ]
     return {
         "click_steps": len(clicks),

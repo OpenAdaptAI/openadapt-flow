@@ -146,6 +146,4 @@ def test_committed_showcase_bundle_is_phi_free():
             assert a.context_text is None
             assert a.structured_identity is None
     guard = _load_guard()
-    assert (
-        guard.main([str(repo / "docs/showcase-openemr/bundle/workflow.json")]) == 0
-    )
+    assert guard.main([str(repo / "docs/showcase-openemr/bundle/workflow.json")]) == 0

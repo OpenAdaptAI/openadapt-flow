@@ -102,9 +102,9 @@ def test_component_may_egress_classification():
     assert component_may_egress(_EgressStub()) is True
     # A fallback chain is egress iff ANY member is.
     assert component_may_egress(FallbackGrounder([NullGrounder()])) is False
-    assert component_may_egress(
-        FallbackGrounder([NullGrounder(), _EgressStub()])
-    ) is True
+    assert (
+        component_may_egress(FallbackGrounder([NullGrounder(), _EgressStub()])) is True
+    )
 
 
 def test_egress_optin_flagged_in_report(bundle, run_dir):

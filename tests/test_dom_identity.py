@@ -560,7 +560,9 @@ def test_compiler_stores_structured_identity_and_arms(tmp_path) -> None:
 
     assert verify_structured_template(tmpl, struct).status == "verified"
     assert (
-        verify_structured_template(tmpl, "MG4408 Okafor, Philip 1966-01-18 M Active").status
+        verify_structured_template(
+            tmpl, "MG4408 Okafor, Philip 1966-01-18 M Active"
+        ).status
         == "mismatch"
     )
     # Armed on the structured tier even though this blank frame OCRs to no

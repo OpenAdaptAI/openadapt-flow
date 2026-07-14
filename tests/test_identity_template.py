@@ -36,7 +36,10 @@ from openadapt_flow.runtime.identity_template import (
 # specifically about a glyph-collapse.
 _CORPUS = [
     # right row (clean, non-confusable identifier RC79284)
-    ("Ashford Jane 02/23/1975 RC79284 Active", "Ashford Jane 02/23/1975 RC79284 Active"),
+    (
+        "Ashford Jane 02/23/1975 RC79284 Active",
+        "Ashford Jane 02/23/1975 RC79284 Active",
+    ),
     # replaced name (different patient)
     ("Ashford Jane 02/23/1975 RC79284 Active", "Barnes Mike 04/28/1962 RC33847 Active"),
     # near-name sibling, short (Ted/Tad)
@@ -135,7 +138,9 @@ def test_structured_tier_is_exact_match_over_hash() -> None:
     assert verify_structured_template(tmpl, struct).status == "verified"
     # One-glyph MRN difference is a different patient in the DOM/a11y tree.
     assert (
-        verify_structured_template(tmpl, "MG44O8 Okafor, Philip 1966-01-17 M Active").status
+        verify_structured_template(
+            tmpl, "MG44O8 Okafor, Philip 1966-01-17 M Active"
+        ).status
         == "mismatch"
     )
     # Tier unavailable when there is no live structured text.

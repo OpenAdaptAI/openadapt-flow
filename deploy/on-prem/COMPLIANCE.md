@@ -66,14 +66,15 @@ PHI path beyond the clinic's existing EMR access.
 | The identity band inside `workflow.json` | **Salted-hash `identity_template`** — no plaintext name/DOB/MRN; optionally an external `OPENADAPT_FLOW_IDENTITY_SALT` kept out of the bundle. | REAL — see `docs/phi_at_rest.md`. Reduces exposure; a hash of a low-entropy identifier is brute-forceable by a holder of both bundle and salt, so it is **not** a cryptographic seal. |
 | Identifier-bearing postconditions / landmarks | **Dropped at compile time** when the Presidio scrub is active. | REAL (requires the `privacy` extra). |
 | The shareable `REPORT.md` free text and (opt-in) frames | **Presidio PHI scrubbing / image redaction**, fail-closed under `SCRUB=on`. | REAL (requires `privacy` extra + local NER model). |
-| A single **sealed, encrypted bundle container** (AES/age envelope, decrypt-in-memory) | Target design in `docs/phi_at_rest.md`. | **STUB / DEFERRED** — `openadapt_flow.crypto` does not exist yet; the `encrypted` manifest flag is format-ready but always `false`. **Until it ships, at-rest encryption = operator full-disk encryption, above.** Do not represent bundles as cryptographically sealed. |
-| `templates/*.png` (recorded screen crops) | Full-disk encryption + governance guards (kept out of git); opt-in Presidio image redaction on persisted frames. | REAL for FDE + guard; per-file encryption is part of the deferred sealed-bundle work. |
+| A single **sealed, encrypted bundle container** (AES/age envelope, decrypt-in-memory) | **Opt-in AEAD via `openadapt_flow.crypto`** — `Workflow.save(encrypt=True, key=…)` / `OPENADAPT_BUNDLE_KEY` seals `workflow.json` with **AES-256-GCM** (scrypt-derived key, domain-separated AAD); `encrypted: true` on the manifest + `Workflow.encrypted`. | **REAL (opt-in, shipped)** — see `docs/phi_at_rest.md`. A wrong/missing key or tampered ciphertext fails loud and safe. Unencrypted stays the default, so enable it explicitly for at-rest sealing beyond full-disk encryption. |
+| `templates/*.png` (recorded screen crops) | Full-disk encryption + governance guards (kept out of git); opt-in Presidio image redaction on persisted frames. | REAL for FDE + guard; the per-bundle container ships, but the template crops are **not yet sealed inside it** — they still rely on FDE (`docs/phi_at_rest.md` "not yet done"). |
 
-**Honest bottom line on encryption:** today's at-rest protection is operator
-full-disk encryption + one-way identity hashing + optional scrubbing. Per-bundle
-cryptographic sealing is designed but not implemented. A deployment that needs
-"encrypted at rest" in the cryptographic sense relies on the encrypted volume,
-not on a bundle-level seal.
+**Honest bottom line on encryption:** at-rest protection is operator full-disk
+encryption + one-way identity hashing + optional scrubbing, **plus opt-in
+per-bundle AES-256-GCM sealing** (`OPENADAPT_BUNDLE_KEY`) for `workflow.json` and
+checkpoints. Enable the per-bundle seal for cryptographic at-rest protection that
+does not depend solely on the volume; the template crops are not yet inside the
+sealed container, so they still rely on full-disk encryption.
 
 ## Audit-log contents
 
@@ -97,8 +98,10 @@ For stronger assurance, make the log append-only at the filesystem layer
 - **No BAA / no legal compliance guarantee.** The substrate is here; the
   agreements, DPIA/PIA, breach procedures, staff training, and sign-off are the
   clinic's.
-- **No per-bundle cryptographic seal yet** (see the table) — rely on full-disk
-  encryption for at-rest crypto.
+- **Per-bundle cryptographic seal is opt-in** (AES-256-GCM via
+  `OPENADAPT_BUNDLE_KEY`; see the table). It is off by default and the template
+  crops are not yet sealed inside it, so full-disk encryption remains the baseline
+  at-rest control; enable the seal explicitly for bundle-level crypto.
 - **The engine's own safety limits still apply** — the wrong-patient identity
   ladder, unarmed-step gaps, transactional-write caveats, and OCR ceilings in
   `docs/LIMITS.md` are unchanged by running on-prem. On-prem changes *where* the

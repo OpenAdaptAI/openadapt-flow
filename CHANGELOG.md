@@ -1,6 +1,71 @@
 # CHANGELOG
 
 
+## v0.26.0 (2026-07-14)
+
+### Features
+
+- Integrated OpenEMR end-to-end harness (compiled arm, cost-capped agent arm gated off)
+  ([#104](https://github.com/OpenAdaptAI/openadapt-flow/pull/104),
+  [`25e05ea`](https://github.com/OpenAdaptAI/openadapt-flow/commit/25e05eaf213af84302a0c52f4105e67b614da94f))
+
+Add benchmark/openemr_e2e: one entry point that ties the whole compiled runtime pipeline together
+  against the OpenEMR add-patient-note flagship task, reproducibly and for $0:
+
+compile -> replay -> effect-verify (system of record) -> catch a silent wrong write -> inject drift
+  -> HALT -> teach the fix (governed learn/promote) -> re-run clean
+
+Unlike the existing live-demo OpenEMR benchmark (openemr_benchmark), this orchestrates the runtime
+  components end to end on a deterministic, offline fixture (in-process MockMed fault_server as the
+  system of record) so CI runs the whole loop on every push. Each phase is a real runtime call; all
+  six pass at $0 with zero model calls.
+
+Cost guardrail: the compiled arm is model-free by construction (no API client is ever constructed).
+  The paid computer-use agent arm is wired ONLY as a gate -- requires an explicit --agent-arm opt-in
+  AND a hard --max-cost-usd cap, and even then this harness refuses to invoke it (AgentArmRefused),
+  pointing at the audited paid path `scripts/openemr_demo.py benchmark`. The compiled-vs-agent ratio
+  is reported from previously-recorded numbers, never spent now.
+
+Live vs. fixture is always labelled and never a silent skip: the loop runs on the fixture
+  (CI-reproducible); when OPENEMR_FHIR_BASE_URL is set the harness additionally probes the real FHIR
+  system of record for reachability and records it honestly; --require-live makes an unreachable
+  live SoR a hard error.
+
+14 targeted tests drive the fixture path end to end and assert the wiring, $0, and the gated-off
+  agent arm. ruff + mypy clean on changed files.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Opt-in encryption-at-rest for bundles + checkpoints (AEAD)
+  ([#103](https://github.com/OpenAdaptAI/openadapt-flow/pull/103),
+  [`88623d3`](https://github.com/OpenAdaptAI/openadapt-flow/commit/88623d3a97b7ad3681914d07afef892c74f20564))
+
+Add an opt-in AES-256-GCM encryption layer for compiled bundles and durable checkpoints, the at-rest
+  cryptographic control the PHI story needs (docs/phi_at_rest.md). OFF by default -- the unencrypted
+  path is byte-for-byte unchanged.
+
+- openadapt_flow/crypto.py: audited-library AEAD (cryptography.AESGCM) with a scrypt-KDF'd
+  passphrase (explicit key or OPENADAPT_BUNDLE_KEY), a self-describing JSON container, and
+  domain-separated associated data (bundle vs checkpoint). Wrong/missing key and tampered ciphertext
+  both fail loud (MissingKeyError / DecryptionError) with no partial load. -
+  Workflow.save(encrypt=True, key=…) seals workflow.json as workflow.json.enc; Workflow.load(key=…)
+  decrypts in memory. The schema-v2 integrity manifest is sealed over the plaintext BEFORE
+  encryption, so a decrypted load still verifies content digest + asset hashes + provenance.
+  manifest.json sidecar stays plaintext (encrypted:true) for an opaque compliance inventory. -
+  CheckpointStore(key=…) seals every RunCheckpoint / PendingEscalation / RunManifest /
+  ProgramCheckpoint / approval as …​.json.enc; threaded through DurableRun,
+  Replayer(checkpoint_key=…), resume(…, key=…) and the resume/ approve CLI. bundle_version tolerates
+  an encrypted bundle. - tests/test_encryption_at_rest.py: round-trip, wrong/missing-key failure,
+  tamper detection, domain separation, unencrypted-default-unchanged, and checkpoint +
+  program-checkpoint encryption (22 tests).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.25.0 (2026-07-14)
 
 ### Bug Fixes

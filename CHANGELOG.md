@@ -1,6 +1,66 @@
 # CHANGELOG
 
 
+## v0.20.1 (2026-07-14)
+
+### Bug Fixes
+
+- Policy/lint traverse program graphs + require system-of-record effects (P0)
+  ([#92](https://github.com/OpenAdaptAI/openadapt-flow/pull/92),
+  [`726eff8`](https://github.com/OpenAdaptAI/openadapt-flow/commit/726eff843314216fda34dc7d1860f73ae27f9257))
+
+Two P0 safety holes let clinical-write certify an unsafe bundle.
+
+P0-1 — cert/lint now traverse the program graph + subflows, not just Workflow.steps. A program-mode
+  bundle keeps its actions in program.states and subflows[*].states (kind==ACTION -> state.step),
+  often with an EMPTY Workflow.steps, so evaluate_policy()/lint_workflow() saw "zero steps" and
+  inspected nothing. New canonical generator openadapt_flow/traversal.py (iter_workflow_steps) is
+  now the single source both checks iterate.
+
+P0-2 — "effect verification" now means the system of record, not the screen.
+  require_effect_verification_for only checked step.expect (visual/structural postconditions), so a
+  clinical write certified merely because it had a TEXT_PRESENT assertion — the weak oracle the
+  effect layer replaced. New rules: require_screen_postconditions_for (step.expect),
+  require_system_effects_for (non-empty step.effects), require_idempotency_key_for (effect carries
+  an idempotency key), prohibit_unconfirmed_effect_bindings (no placeholder /
+  needs_operator_confirmation effect). clinical-write.yaml now requires real system-of-record
+  effects + an idempotency key on writes, keeping screen postconditions as an ADDITIONAL
+  requirement. require_effect_verification_for kept as a deprecated alias of
+  require_screen_postconditions_for.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Documentation
+
+- Rewrite README to the current architecture + add a claims-consistency CI gate
+  ([#90](https://github.com/OpenAdaptAI/openadapt-flow/pull/90),
+  [`a3c3e06`](https://github.com/OpenAdaptAI/openadapt-flow/commit/a3c3e06bdd23fb674aafaf03507f71436ae4a837))
+
+The README materially misrepresented the product: it called the runtime "vision-only", claimed "864
+  tests", and said desktop/RDP backends were "adapters to come". Rewrite it to the current
+  architecture (vision-FIRST with a structural DOM/UIA rung; existing WindowsBackend + FreeRDP
+  adapters, mock-tested in CI) and add the marquee capabilities that were absent: the Phase-2
+  workflow-program IR, multi-trace induction with refuse-if-underdetermined, effect verification
+  against the system of record (REST/FHIR/doc-hash), the API actuator tier, policy lint/certify,
+  governed healing, durable checkpoint/resume, and PHI-free identity templates. Fix DESIGN.md's
+  stale "Frozen contracts" section to reflect ir.py's grown types
+  (ParamSpec/Predicate/Guard/ProgramGraph/State/
+  Transition/LoopSpec/Relation/ApiBinding/StructuralLocator + identity templates + effects).
+
+Add scripts/check_consistency.py (run by tests/test_consistency.py and a fast step in ci.yml's
+  required `test` gate) so the claims can't silently drift again. It fails on: a version mismatch
+  between openadapt_flow.__version__ and pyproject; a broken file path in README/DESIGN/LIMITS or a
+  workflow comment; a banned stale phrase in the README; or a hardcoded README test count that
+  disagrees with `pytest --collect-only`. The README deliberately carries no hard test number, so
+  that check is drift-proof by construction while staying enforceable if one is ever reintroduced.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.20.0 (2026-07-14)
 
 ### Features

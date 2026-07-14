@@ -128,6 +128,18 @@ def render_run_report(run_dir: Path | str) -> Path:
     lines.append(f"- **Started:** {report.started_at}")
     lines.append(f"- **Steps:** {ok_count}/{len(report.results)} ok")
     lines.append(f"- **Heals:** {report.heal_count}")
+    # Egress transparency (PHI audit REM-3): make it unmistakable whether a
+    # screenshot could have left the box on this run.
+    if report.screenshots_may_leave_box:
+        lines.append(
+            "- **Data egress:** ⚠️ a model-grounding component was wired — "
+            "screenshots COULD have left the box this run"
+        )
+    else:
+        lines.append(
+            "- **Data egress:** none — fully local replay (zero screenshots "
+            "left the box)"
+        )
     lines.append("")
 
     # -- Parameters -----------------------------------------------------

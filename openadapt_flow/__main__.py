@@ -169,13 +169,29 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 # Unset -> the identity veto tier stays off. Configured -> the
                 # identity veto tier and the remote-VLM grounder come online,
                 # both fail-safe (an appliance outage halts, never mis-clicks).
+                #
+                # EGRESS GUARD (PHI audit REM-3): the appliance grounder /
+                # identity-VLM / state-verifier send screenshots OFF the box, so
+                # they are wired ONLY when the operator explicitly passes
+                # --allow-model-grounding. Without it the replay is fully local
+                # (OCR-anchoring grounder only) and makes zero outbound calls.
+                allow_egress = getattr(args, "allow_model_grounding", False)
                 appliance = appliance_from_env()
+                if appliance is not None and not allow_egress:
+                    print(
+                        "On-prem VLM appliance is configured "
+                        f"({os.environ.get('OPENADAPT_FLOW_VLM_URL')}) but NOT "
+                        "wired: pass --allow-model-grounding to send screenshots "
+                        "to it. Replaying FULLY LOCAL (zero outbound calls)."
+                    )
+                    appliance = None
                 if appliance is not None:
                     print(
                         "Using on-prem VLM appliance at "
                         f"{os.environ.get('OPENADAPT_FLOW_VLM_URL')} "
                         "(identity veto tier + remote-VLM grounder fallback; "
-                        "fail-safe to halt)"
+                        "fail-safe to halt). WARNING: screenshots WILL leave "
+                        "the box for this run (--allow-model-grounding)."
                     )
                 # Grounding rung: OCR text-anchoring (openadapt-grounding) is
                 # PRIMARY whenever the 'grounding' extra is installed; the
@@ -192,6 +208,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     grounder=grounder,
                     identity_vlm=appliance.identity_vlm if appliance else None,
                     state_verifier=(appliance.state_verifier if appliance else None),
+                    allow_model_grounding=allow_egress,
                     # Normal replay prefers the deterministic structural rung.
                     # ``--drift`` exists to DEMONSTRATE the visual healing ladder
                     # on the bundled MockMed app, so it forces the visual floor
@@ -225,6 +242,11 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     report_md = render_run_report(run_dir)
     outcome = "success" if report.success else "FAILED"
     print(f"Replay {outcome}: {report_md}")
+    if report.screenshots_may_leave_box:
+        print(
+            "NOTE: a model-grounding component was wired for this run — "
+            "screenshots could have left the box (see REPORT.md)."
+        )
     return 0 if report.success else 1
 
 
@@ -511,6 +533,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="K=V",
         help="Parameter substitution (repeatable)",
+    )
+    p.add_argument(
+        "--allow-model-grounding",
+        action="store_true",
+        help=(
+            "EGRESS OPT-IN (PHI audit REM-3): permit wiring an off-box model "
+            "grounder / identity-VLM / state-verifier (a paid API or an on-prem "
+            "VLM appliance via OPENADAPT_FLOW_VLM_URL). Screenshots may leave "
+            "the box. Off by default: replay is fully local with zero outbound "
+            "calls."
+        ),
     )
     p.add_argument(
         "--save-healed-to",

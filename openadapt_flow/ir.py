@@ -972,6 +972,13 @@ class RunReport(BaseModel):
     identity_applicable_steps: int = 0
     identity_armed_steps: int = 0
     identity_unarmed: list[UnarmedStep] = Field(default_factory=list)
+    # Egress transparency (PHI audit REM-3): True when an egress-capable model
+    # component (a paid-API or on-prem-appliance grounder / identity-VLM /
+    # state-verifier) was wired for this run, so a screenshot COULD leave the
+    # box. False for the default local replay (which makes zero outbound calls).
+    # Wiring an egress component requires the operator's explicit opt-in
+    # (Replayer(allow_model_grounding=True) / CLI --allow-model-grounding).
+    screenshots_may_leave_box: bool = False
 
     def save(self, run_dir: Path | str) -> Path:
         run = Path(run_dir)

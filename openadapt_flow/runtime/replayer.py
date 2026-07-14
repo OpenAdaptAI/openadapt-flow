@@ -186,6 +186,13 @@ def _all_workflow_steps(workflow: Workflow):
                 yield state.step
 
 
+class EgressNotPermitted(RuntimeError):
+    """Raised when an egress-capable model component (a grounder / identity-VLM
+    / state-verifier that could send a screenshot off the box) is wired without
+    the operator's explicit ``allow_model_grounding`` opt-in (PHI audit REM-3).
+    """
+
+
 class Replayer:
     """Replays a Workflow against a Backend using injected vision.
 
@@ -250,9 +257,39 @@ class Replayer:
         durable: bool = False,
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
+        allow_model_grounding: bool = False,
     ) -> None:
         if vision is None:
             import openadapt_flow.vision as vision  # lazy: heavy OCR deps
+
+        # Egress guard (PHI audit REM-3): a grounder / identity-VLM /
+        # state-verifier that can send a screenshot OFF the box (a paid API or an
+        # on-prem appliance) may only be wired when the operator EXPLICITLY opts
+        # in. Fail closed otherwise, so no caller can silently route a live
+        # patient screen off the machine. The default local replay wires no such
+        # component and makes zero outbound calls (the load-bearing "stays local"
+        # claim, guarded by test_egress_guard).
+        from openadapt_flow.runtime.grounder import component_may_egress
+
+        self.allow_model_grounding = allow_model_grounding
+        egress = [
+            name
+            for name, comp in (
+                ("grounder", grounder),
+                ("identity_vlm", identity_vlm),
+                ("state_verifier", state_verifier),
+            )
+            if component_may_egress(comp)
+        ]
+        self._screenshots_may_leave_box = bool(egress)
+        if egress and not allow_model_grounding:
+            raise EgressNotPermitted(
+                "refusing to wire an egress-capable model component "
+                f"({', '.join(egress)}) that could send a screenshot off the "
+                "box: pass allow_model_grounding=True (CLI: "
+                "--allow-model-grounding) to opt in explicitly. The default "
+                "local replay makes zero outbound calls."
+            )
 
         self.backend = backend
         self.vision = vision
@@ -382,6 +419,7 @@ class Replayer:
             workflow_name=workflow.name,
             started_at=datetime.now(timezone.utc).isoformat(),
             params=params,
+            screenshots_may_leave_box=self._screenshots_may_leave_box,
         )
         self._record_identity_coverage(workflow, report)
         new_crops: dict[str, bytes] = {}

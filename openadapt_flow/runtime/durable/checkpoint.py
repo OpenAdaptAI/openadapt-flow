@@ -44,9 +44,20 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from openadapt_flow.runtime.durable.approval import ApprovalRecord
+from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
+
 CHECKPOINTS_DIRNAME = "checkpoints"
 MANIFEST_FILENAME = "_manifest.json"
 PENDING_FILENAME = "pending_escalation.json"
+APPROVAL_FILENAME = "approval.json"
+#: Prefix of the per-verified-state Phase-2 interpreter checkpoints
+#: (``pstate_0000.json``), written under ``run_dir/checkpoints/`` alongside the
+#: linear ``step_*.json`` checkpoints.
+PROGRAM_CHECKPOINT_PREFIX = "pstate_"
+#: Default stale-pause window: a pause older than this is refused on resume
+#: (the app state a stale checkpoint expects can no longer be trusted). 7 days.
+DEFAULT_STALE_AFTER_S = 7 * 24 * 3600.0
 
 
 def _now() -> str:
@@ -148,6 +159,14 @@ class PendingEscalation(BaseModel):
     #: The run's parameter bindings, so an approved resume re-binds identically.
     params: dict[str, str] = Field(default_factory=dict)
     status: Literal["pending", "approved"] = "pending"
+    #: Stale-pause expiry (RFC §5, P0-5): a resume attempted more than this many
+    #: seconds after ``created_at`` is REFUSED (:class:`~.approval.PauseExpired`)
+    #: -- the app state a stale checkpoint expects can no longer be trusted.
+    #: ``<= 0`` disables expiry.
+    stale_after_s: float = DEFAULT_STALE_AFTER_S
+    #: True when this pause is over a Phase-2 PROGRAM run (its resume point is a
+    #: :class:`~.program_checkpoint.ProgramCheckpoint`, not a linear step index).
+    program: bool = False
     created_at: str = Field(default_factory=_now)
 
 
@@ -239,5 +258,78 @@ class CheckpointStore:
     def clear_pending(self) -> None:
         """Remove a resolved pending escalation (called when a resume starts)."""
         path = self._pending_path()
+        if path.is_file():
+            path.unlink()
+
+    # -- program (Phase-2 state-machine) checkpoints -------------------------
+
+    def _program_checkpoint_path(self, checkpoint: ProgramCheckpoint) -> Path:
+        name = f"{PROGRAM_CHECKPOINT_PREFIX}{checkpoint.seq:04d}.json"
+        return self.checkpoints_dir / name
+
+    def write_program_checkpoint(self, checkpoint: ProgramCheckpoint) -> Path:
+        """Persist a verified-state interpreter checkpoint (Phase-2 program run).
+
+        Idempotent per ``seq``: re-writing the same sequence overwrites the file
+        rather than appending a duplicate."""
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        path = self._program_checkpoint_path(checkpoint)
+        path.write_text(checkpoint.model_dump_json(indent=2))
+        return path
+
+    def program_checkpoints(self) -> list[ProgramCheckpoint]:
+        """All Phase-2 interpreter checkpoints, ordered by ``seq``."""
+        if not self.checkpoints_dir.is_dir():
+            return []
+        out: list[ProgramCheckpoint] = []
+        for path in self.checkpoints_dir.glob(f"{PROGRAM_CHECKPOINT_PREFIX}*.json"):
+            out.append(ProgramCheckpoint.model_validate(json.loads(path.read_text())))
+        out.sort(key=lambda c: c.seq)
+        return out
+
+    def last_program_checkpoint(self) -> Optional[ProgramCheckpoint]:
+        """The highest-``seq`` interpreter checkpoint (the resume point), or None
+        when the run is not a program run / nothing verified yet."""
+        checkpoints = self.program_checkpoints()
+        return checkpoints[-1] if checkpoints else None
+
+    def completed_effect_keys(self) -> list[str]:
+        """Every already-CONFIRMED effect's contract hash across the program run
+        (the union of each checkpoint's ``new_effect_keys``) -- the idempotency
+        ledger a resume consults so it never re-performs a confirmed write."""
+        keys: list[str] = []
+        for cp in self.program_checkpoints():
+            keys.extend(cp.new_effect_keys)
+        return keys
+
+    def completed_effects(self) -> list[dict]:
+        """Every already-CONFIRMED effect contract (resolved ``Effect`` dumps)
+        across the program run -- so a resume can re-verify (read-only) that the
+        already-confirmed writes still hold before restoring the interpreter."""
+        effects: list[dict] = []
+        for cp in self.program_checkpoints():
+            effects.extend(cp.new_effects)
+        return effects
+
+    # -- approval (authenticated resume authorization; P0-5) -----------------
+
+    def _approval_path(self) -> Path:
+        return self.run_dir / APPROVAL_FILENAME
+
+    def write_approval(self, approval: ApprovalRecord) -> Path:
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        path = self._approval_path()
+        path.write_text(approval.model_dump_json(indent=2))
+        return path
+
+    def read_approval(self) -> Optional[ApprovalRecord]:
+        path = self._approval_path()
+        if not path.is_file():
+            return None
+        return ApprovalRecord.model_validate(json.loads(path.read_text()))
+
+    def clear_approval(self) -> None:
+        """Remove a consumed approval (called when a resume completes)."""
+        path = self._approval_path()
         if path.is_file():
             path.unlink()

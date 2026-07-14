@@ -28,7 +28,9 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.runtime.durable import (
+    ApprovalRecord,
     CheckpointStore,
+    bundle_version,
     resume,
     resume_point,
 )
@@ -40,7 +42,6 @@ from openadapt_flow.runtime.effects import (
     Verdict,
 )
 from openadapt_flow.runtime.replayer import Replayer
-
 
 # -- fakes -------------------------------------------------------------------
 
@@ -122,6 +123,17 @@ def _effect(step_id: str, *, needs_operator=False) -> Effect:
 def _dirs(tmp_path):
     bundle = tmp_path / "bundle"
     return bundle, tmp_path / "run"
+
+
+def _approval(bundle) -> ApprovalRecord:
+    """An authenticated approval for the given bundle (P0-5): resume now REQUIRES
+    one, so every legitimate resume in these tests carries an operator identity,
+    a chosen resolution, and the bundle version it was granted against."""
+    return ApprovalRecord(
+        approver="operator@example.com",
+        resolution="verified the system of record; approve resume",
+        bundle_version=bundle_version(bundle),
+    )
 
 
 def _three_step_workflow(*, with_effects: bool) -> Workflow:
@@ -234,7 +246,7 @@ def test_resume_continues_from_last_checkpoint(tmp_path):
         poll_interval_s=0.01,
     )
 
-    resumed = resume(run_dir, resume_replayer)
+    resumed = resume(run_dir, resume_replayer, approval=_approval(bundle))
 
     assert resumed.success is True
     # The already-verified steps were NOT re-executed on the resumed backend...
@@ -267,7 +279,7 @@ def test_resume_does_not_reverify_confirmed_steps(tmp_path):
         effect_verifier=verifier,
         poll_interval_s=0.01,
     )
-    resumed = resume(run_dir, resume_replayer)
+    resumed = resume(run_dir, resume_replayer, approval=_approval(bundle))
 
     assert resumed.success is True
     # Idempotency: the already-confirmed steps' effects are NOT re-verified on
@@ -318,7 +330,7 @@ def test_halt_on_first_step_resumes_from_zero(tmp_path):
         effect_verifier=verifier,
         poll_interval_s=0.01,
     )
-    resumed = resume(run_dir, resume_replayer)
+    resumed = resume(run_dir, resume_replayer, approval=_approval(bundle))
     assert resumed.success is True
     assert ("press", "A") in resume_backend.actions
     assert [c.step_index for c in store.checkpoints()] == [0, 1, 2]

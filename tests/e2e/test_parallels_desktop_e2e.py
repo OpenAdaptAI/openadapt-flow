@@ -128,8 +128,7 @@ def test_desktop_record_compile_replay_structural(tmp_path) -> None:
 
         n_clicks = len(CALC_SEQUENCE)
         assert report.rung_counts.get("structural", 0) >= n_clicks, (
-            "structural (UIA) rung did not fire for every click: "
-            f"{report.rung_counts}"
+            f"structural (UIA) rung did not fire for every click: {report.rung_counts}"
         )
         assert report.success, [r.model_dump() for r in report.results]
         # No click was admitted on an identity MISMATCH.

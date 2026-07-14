@@ -184,11 +184,19 @@ class WindowsBackend:
         self._auth_token = auth_token or None
         self._session = session if session is not None else requests.Session()
 
-    def _headers(self) -> Optional[dict[str, str]]:
-        """Bearer auth header for the in-guest agent, or None when unset."""
-        if not self._auth_token:
-            return None
-        return {"Authorization": f"Bearer {self._auth_token}"}
+    def _request_kwargs(self) -> dict:
+        """Per-request kwargs: always ``timeout``, plus ``headers`` IFF a token
+        is set.
+
+        The bearer header is added ONLY when authenticating so the
+        unauthenticated call shape is byte-for-byte the legacy one
+        (``timeout`` only) -- a caller/mocked session that predates the
+        ``auth_token`` option is never handed an unexpected ``headers`` kwarg.
+        """
+        kwargs: dict = {"timeout": self._timeout_s}
+        if self._auth_token:
+            kwargs["headers"] = {"Authorization": f"Bearer {self._auth_token}"}
+        return kwargs
 
     # -- Backend protocol ----------------------------------------------------
 
@@ -215,8 +223,7 @@ class WindowsBackend:
             try:
                 resp = self._session.get(
                     f"{self.server_url}/screenshot",
-                    headers=self._headers(),
-                    timeout=self._timeout_s,
+                    **self._request_kwargs(),
                 )
                 if resp.status_code != 200:
                     raise RuntimeError(
@@ -352,8 +359,7 @@ class WindowsBackend:
             resp = self._session.post(
                 f"{self.server_url}/execute_windows",
                 json={"command": command},
-                headers=self._headers(),
-                timeout=self._timeout_s,
+                **self._request_kwargs(),
             )
         except Exception:
             return None
@@ -644,8 +650,7 @@ class WindowsBackend:
             resp = self._session.post(
                 f"{self.server_url}/execute_windows",
                 json={"command": command},
-                headers=self._headers(),
-                timeout=self._timeout_s,
+                **self._request_kwargs(),
             )
         except requests.RequestException as e:
             raise RuntimeError(f"execute_windows unreachable: {e}") from e

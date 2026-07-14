@@ -1,6 +1,60 @@
 # CHANGELOG
 
 
+## v0.23.0 (2026-07-14)
+
+### Bug Fixes
+
+- Learning gate compares program semantics, not step IDs (no silent safety regression)
+  ([#97](https://github.com/OpenAdaptAI/openadapt-flow/pull/97),
+  [`f399bbc`](https://github.com/OpenAdaptAI/openadapt-flow/commit/f399bbc0bb48d32acae92975ef075738df4499a8))
+
+* fix: learning gate compares program semantics, not step IDs (Wave 2)
+
+Gate now traverses both programs + subflows and quarantines a candidate that weakens any safety
+  invariant: dropped identity-armed guard, dropped system-of-record effect, new consequential step
+  without effects, risk downgrade, lost approval requirement, or a write made reachable under
+  broader conditions. Matches steps by structural role, not step.id.
+
+* style: ruff format learning-gate files
+
+### Features
+
+- Bundle schema v2 (manifest, digest, provenance) + load-time structural validation
+  ([#98](https://github.com/OpenAdaptAI/openadapt-flow/pull/98),
+  [`88b1fa8`](https://github.com/OpenAdaptAI/openadapt-flow/commit/88b1fa87b64a5bcf97104f36913e7d23d007f170))
+
+Bump Workflow.schema_version 1 -> 2 (SCHEMA_VERSION constant) now that the IR carries ~10x its v1
+  semantics, with a clean v1 -> v2 migration on read so every existing bundle still loads and
+  replays byte-for-byte.
+
+Schema v2 additions (ir.py): - BundleProvenance: compiler version + certification block (policy
+  name, certified flag, status, timestamp, optional expiry). - BundleManifest: per-asset SHA-256
+  file_hashes, a whole-bundle content_digest, provenance, and the encrypted flag (mirrors
+  Workflow.encrypted; at-rest crypto still deferred). - Workflow.manifest field, sealed on save()
+  (also written to a manifest.json sidecar), migrated/verified on load(), plus
+  Workflow.stamp_certification().
+
+New openadapt_flow/bundle_validation.py: - migrate_bundle_dict (v1 -> v2, additive), build_manifest,
+  compute_file_hashes, compute_content_digest, verify_integrity (rejects a tampered workflow.json or
+  sealed template; ignores post-seal template additions). - validate_workflow: structural rules
+  (entry exists, transition/handler targets resolve, kind<->payload match, referenced subflows
+  exist, unique state/step ids, terminals reachable, no unsafe unconditional cycle) plus the safety
+  rule (every consequential/irreversible action carries effect verification). Load raises on
+  structural malformation; the safety finding is surfaced to lint/certify so existing
+  uncertified-but-well-formed bundles still load.
+
+Tests: tests/test_bundle_schema_v2.py (29 cases) covers migration, stable-digest
+
+round-trip, provenance/certification, integrity tampering, every validation rule on a crafted-bad
+  graph, and a good program/linear bundle passing. test_annotate byte-identical assertion now
+  excludes the (per-save-varying) manifest metadata.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.22.0 (2026-07-14)
 
 ### Features

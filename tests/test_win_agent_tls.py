@@ -100,15 +100,34 @@ def test_normalize_rejects_non_hex() -> None:
 # -- handshake + pinning success ----------------------------------------------
 
 
-def test_pinned_client_completes_handshake_and_drives_agent(
+def test_pinned_client_completes_handshake_and_gets_screenshot(
     tls_agent: RunningTLSAgent, cert: CertBundle
 ) -> None:
+    # The PHI screenshot travels over the pinned TLS session and validates as a
+    # PNG -- this is the encrypted-in-transit + pinned-identity assertion. (No
+    # pyautogui: the /screenshot path uses the injected fake grabber.)
     backend = WindowsBackend(tls_agent.url, pin_fingerprint=cert.fingerprint)
-    # screenshot travels over TLS and validates as a PNG
     assert backend.probe() is True
     assert backend.screenshot().startswith(_PNG_SIGNATURE)
-    # command channel also works over TLS (no raise == 200)
-    backend.click(1, 1)
+
+
+def test_pinned_command_channel_works_over_tls(
+    tls_agent: RunningTLSAgent, cert: CertBundle
+) -> None:
+    # The PHI command channel (/execute_windows) also round-trips over the
+    # pinned TLS session. Use a pyautogui-free command (a bare print) so the
+    # assertion is about TLS + pinning, not the Windows automation stack CI
+    # lacks -- the pin is still exact-match enforced by the pinned session.
+    from openadapt_flow.backends.win_agent import pinned_session
+
+    sess = pinned_session(cert.fingerprint)
+    resp = sess.post(
+        f"{tls_agent.url}/execute_windows",
+        json={"command": "print('<<OAFLOW_STRUCTURED>>ok<<END_OAFLOW_STRUCTURED>>')"},
+        timeout=5,
+    )
+    assert resp.status_code == 200
+    assert "<<OAFLOW_STRUCTURED>>ok<<END_OAFLOW_STRUCTURED>>" in resp.json()["output"]
 
 
 def test_plaintext_client_cannot_talk_to_tls_server(

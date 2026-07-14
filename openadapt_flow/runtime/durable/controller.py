@@ -38,9 +38,10 @@ from openadapt_flow.runtime.durable.checkpoint import (
     RunCheckpoint,
     RunManifest,
 )
+from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
 
 
-def classify_halt(step: Step, result: StepResult) -> tuple[str, list[str]]:
+def classify_halt(step: Optional[Step], result: StepResult) -> tuple[str, list[str]]:
     """Categorize a halt and propose operator options.
 
     Maps the replayer's halt reason (``result.error`` plus the
@@ -238,6 +239,56 @@ class DurableRun:
                 resume_from_index=resume_from,
                 resume_from_step_id=(last.step_id if last is not None else None),
                 params=dict(params),
+            )
+        )
+
+    # -- Phase-2 program (state-machine) durability --------------------------
+
+    def record_program_checkpoint(self, checkpoint: ProgramCheckpoint) -> None:
+        """Persist one verified-state interpreter checkpoint (Phase-2 program).
+
+        Called by the program interpreter after each ``action`` state that
+        VERIFIED (identity + effects + postconditions). The checkpoint captures
+        the whole interpreter state (frame stack, loop cursors, bound params,
+        completed effect keys) so a resume RESTORES the interpreter rather than
+        translating to a step index. Idempotent per ``seq``."""
+        self.store.write_program_checkpoint(checkpoint)
+
+    def record_program_halt(
+        self,
+        *,
+        state_id: str,
+        intent: str,
+        result: StepResult,
+        params: dict[str, str],
+    ) -> None:
+        """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
+
+        Mirrors :meth:`record` for the state machine: classify WHY it paused,
+        propose operator options, and point the resume at the last verified
+        interpreter checkpoint (``ProgramCheckpoint``, restored from ``run_dir``
+        by :func:`~.resume.resume`). ``resume_from_index``/``resume_from_step_id``
+        do NOT apply to a program run (the resume point is an interpreter state,
+        not a step index), so they are left at their defaults; ``program=True``
+        marks the pause as a state-machine pause."""
+        last = self.store.last_program_checkpoint()
+        category, options = classify_halt(None, result)
+        self.store.write_pending(
+            PendingEscalation(
+                workflow_name=self.workflow_name,
+                step_index=0,
+                step_id=state_id,
+                intent=intent,
+                state_id=state_id,
+                category=category,
+                reason=result.error or "",
+                detail=list(result.effect_results or []),
+                proposed_options=options,
+                resume_from_step_id=(
+                    last.verified_state_id if last is not None else None
+                ),
+                params=dict(params),
+                program=True,
             )
         )
 

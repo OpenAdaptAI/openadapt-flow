@@ -1,22 +1,28 @@
 """Resume a durably-paused run from its last verified checkpoint (RFC §5).
 
-:func:`resume` is the Tier-3 resume entrypoint. Given a ``run_dir`` that holds
-a :class:`~.checkpoint.PendingEscalation` (and the per-step checkpoints written
-during the original run), it:
+:func:`resume` is the Tier-3 resume entrypoint, and P0-5 makes it an
+AUTHENTICATED APPROVAL workflow. Given a ``run_dir`` that holds a
+:class:`~.checkpoint.PendingEscalation` (and the checkpoints written during the
+original run), it:
 
-1. reads the :class:`~.checkpoint.RunManifest` to recover the bundle and the
-   run's parameter bindings (so the caller need only supply a live
-   ``Replayer`` -- a GUI automation cannot be resumed without a live backend);
-2. determines the resume point = the last verified checkpoint's
-   ``next_step_index`` (0 when nothing verified);
-3. loads the workflow from the bundle and re-runs it **from that index
-   onward** -- the paused step and everything after it, NEVER from step 0.
+1. ENFORCES an authenticated approval (RFC §5, P0-5): an
+   :class:`~.approval.ApprovalRecord` (approver / timestamp / resolution /
+   bundle version) must accompany the resume, the pause must not have expired
+   (stale-pause window), and the approval must match the current bundle version.
+   A caller without a valid approval record CANNOT resume;
+2. reads the :class:`~.checkpoint.RunManifest` to recover the bundle and the
+   run's parameter bindings (so the caller need only supply a live ``Replayer``);
+3. REVALIDATES the live app is still in the checkpoint's expected state (and that
+   the already-confirmed effects still hold) before continuing;
+4. RESTORES the run from its last verified checkpoint and re-drives it from
+   there onward -- NEVER from step 0.
 
-Steps before the resume point are not re-executed, so an already-confirmed
-consequential write is never re-performed. Re-executing the PAUSED step itself
-is safe by the effect layer's idempotency posture: a consequential write should
-carry an ``idempotency_key`` (``runtime.effects.Effect``), so a re-issued write
-that already landed collapses to one record rather than duplicating.
+For a Phase-2 PROGRAM run the resume point is not a step index but the whole
+INTERPRETER STATE (:class:`~.program_checkpoint.ProgramCheckpoint`): the frame
+stack, loop cursors, bound params, and completed effect keys are RESTORED so an
+already-confirmed consequential write is never re-performed and a mid-loop pause
+finishes the in-progress row and runs the remaining rows. For a linear run the
+resume point is the last verified step index (unchanged from before).
 
 Explicit non-goal (RFC §5): resume is DETERMINISTIC. It hands the remaining
 workflow to the SAME deterministic replayer, never to a free-form agent.
@@ -24,18 +30,30 @@ workflow to the SAME deterministic replayer, never to a free-form agent.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from openadapt_flow.ir import RunReport, Workflow
+from openadapt_flow.runtime.durable.approval import (
+    ApprovalRecord,
+    BundleMismatch,
+    enforce_resume_authorization,
+)
 from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    ProgramCheckpoint,
+    bundle_version,
+)
 
 
 def resume_point(run_dir: Path | str) -> int:
-    """The step index a resume would continue from for ``run_dir``.
+    """The step index a resume would continue from for a LINEAR ``run_dir``.
 
     The last verified checkpoint's ``next_step_index``; 0 when nothing has
-    verified yet (a run that halted on its very first step resumes from 0).
+    verified yet (a run that halted on its very first step resumes from 0). Not
+    meaningful for a program run (whose resume point is an interpreter state);
+    use :meth:`CheckpointStore.last_program_checkpoint` there.
     """
     last = CheckpointStore(run_dir).last_checkpoint()
     return last.next_step_index if last is not None else 0
@@ -45,39 +63,48 @@ def resume(
     run_dir: Path | str,
     replayer: Any,
     *,
+    approval: Optional[ApprovalRecord] = None,
     bundle_dir: Optional[Path | str] = None,
     params: Optional[dict[str, str]] = None,
     save_healed_to: Optional[Path | str] = None,
+    now: Optional[datetime] = None,
 ) -> RunReport:
     """Resume a durably-paused run from its last verified checkpoint.
 
     Args:
         run_dir: The original run directory (holds the checkpoints, the
-            manifest, and the pending escalation).
+            manifest, the pending escalation, and any approval record).
         replayer: A live :class:`~openadapt_flow.runtime.replayer.Replayer`
             (its backend/vision cannot be serialized, so the caller provides a
             fresh one bound to the recovered system). Durability is force-
             enabled on it so the resumed leg keeps checkpointing.
+        approval: The authenticated authorization to resume (P0-5). When omitted,
+            an ``approval.json`` written by the ``approve`` command is used. If
+            neither is present (or the record carries no approver), resume is
+            REFUSED with :class:`~.approval.ApprovalRequired`.
         bundle_dir: Override the bundle recorded in the manifest (rarely
             needed); defaults to the manifest's ``bundle_dir``.
         params: Override the parameter bindings recorded in the manifest;
             defaults to the manifest's ``params`` so the resume re-binds
             identically.
         save_healed_to: Override the manifest's healed-bundle path.
+        now: Injectable clock for the stale-pause check (defaults to UTC now).
 
     Returns:
-        The :class:`~openadapt_flow.ir.RunReport` for the resumed leg. Its
-        ``results`` include synthetic entries for the already-verified steps
-        (so ``success`` accounts for the whole workflow) followed by the
-        freshly executed tail.
+        The :class:`~openadapt_flow.ir.RunReport` for the resumed leg.
 
     Raises:
         FileNotFoundError: when ``run_dir`` has no manifest (it was not run
             durably) and no ``bundle_dir`` override is supplied.
+        ResumeRefused: (``ApprovalRequired`` / ``PauseExpired`` /
+            ``BundleMismatch`` / ``StateDiverged``) when the resume is not
+            authorized, the pause expired, the bundle changed, or the live app
+            diverged from the checkpoint's expected state.
     """
     run_dir = Path(run_dir)
     store = CheckpointStore(run_dir)
     manifest = store.read_manifest()
+    pending = store.read_pending()
 
     resolved_bundle = bundle_dir or (manifest.bundle_dir if manifest else None)
     if resolved_bundle is None:
@@ -86,22 +113,94 @@ def resume(
             "bundle_dir was supplied. A resumable run must have been executed "
             "with durability enabled (Replayer(..., durable=True))."
         )
+    resolved_bundle = Path(resolved_bundle)
     resolved_params = (
         params if params is not None else (manifest.params if manifest else {})
     )
     resolved_healed = save_healed_to or (manifest.save_healed_to if manifest else None)
 
-    workflow = Workflow.load(resolved_bundle)
-    start_index = resume_point(run_dir)
+    live_bundle_version = bundle_version(resolved_bundle)
 
-    # Force durability on so the resumed leg keeps advancing the checkpoints
-    # and can itself pause/resume again.
+    # -- P0-5: enforce an authenticated approval before ANYTHING re-executes.
+    # A pending escalation means a human was asked to authorize the resume; no
+    # valid approval => refuse (never a silent proceed). A run_dir with no
+    # pending escalation is not a paused run -- nothing to authorize.
+    if pending is not None:
+        enforce_resume_authorization(
+            pending,
+            approval if approval is not None else store.read_approval(),
+            bundle_version=live_bundle_version,
+            now=now,
+        )
+
+    workflow = Workflow.load(resolved_bundle)
+    program_checkpoint: Optional[ProgramCheckpoint] = store.last_program_checkpoint()
+
+    if program_checkpoint is not None or (pending is not None and pending.program):
+        return _resume_program(
+            store=store,
+            replayer=replayer,
+            workflow=workflow,
+            checkpoint=program_checkpoint,
+            bundle_dir=resolved_bundle,
+            params=resolved_params,
+            save_healed_to=resolved_healed,
+            live_bundle_version=live_bundle_version,
+        )
+
+    # -- linear resume (unchanged control flow; now gated by approval) --------
+    start_index = resume_point(run_dir)
     replayer.durable = True
     return replayer.run(
         workflow,
         params=resolved_params,
-        bundle_dir=Path(resolved_bundle),
+        bundle_dir=resolved_bundle,
         run_dir=run_dir,
         save_healed_to=(Path(resolved_healed) if resolved_healed else None),
         resume_from=start_index,
+    )
+
+
+def _resume_program(
+    *,
+    store: CheckpointStore,
+    replayer: Any,
+    workflow: Workflow,
+    checkpoint: Optional[ProgramCheckpoint],
+    bundle_dir: Path,
+    params: dict[str, str],
+    save_healed_to: Optional[Path | str],
+    live_bundle_version: str,
+) -> RunReport:
+    """Restore and continue a Phase-2 PROGRAM run from its interpreter checkpoint.
+
+    Revalidates the bundle version and the live app state (and re-verifies the
+    already-confirmed effects still hold) BEFORE re-driving, then hands the
+    restored interpreter state to the replayer's program resume path. A program
+    run that halted on its very FIRST state has no checkpoint (``checkpoint`` is
+    None): there is nothing verified to restore, so it resumes from the top.
+    """
+    if checkpoint is not None:
+        if (
+            checkpoint.bundle_version
+            and checkpoint.bundle_version != live_bundle_version
+        ):
+            raise BundleMismatch(
+                "the interpreter checkpoint was captured against bundle version "
+                f"{checkpoint.bundle_version!r} but the bundle being resumed is "
+                f"{live_bundle_version!r} — the program changed; re-run"
+            )
+        # Revalidate the live app is still in the checkpoint's expected state and
+        # the already-confirmed effects still hold (raises StateDiverged).
+        replayer.revalidate_program_checkpoint(checkpoint, store.completed_effects())
+
+    store.clear_pending()
+    replayer.durable = True
+    return replayer.run(
+        workflow,
+        params=params,
+        bundle_dir=bundle_dir,
+        run_dir=store.run_dir,
+        save_healed_to=(Path(save_healed_to) if save_healed_to else None),
+        resume_program=checkpoint,
     )

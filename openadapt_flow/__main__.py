@@ -495,10 +495,15 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         )
         return 3
 
+    where = (
+        f"state '{pending.step_id}'"
+        if pending.program
+        else f"step {pending.step_index} '{pending.step_id}' "
+        f"(from index {resume_point(run_dir)})"
+    )
     print(
-        f"Resuming {run_dir} from step index {resume_point(run_dir)} "
-        f"(paused at step {pending.step_index} '{pending.step_id}': "
-        f"{pending.category}). Steps before the checkpoint are NOT re-run."
+        f"Resuming {run_dir} at {where}: {pending.category}. "
+        "Already-verified work is NOT re-run."
     )
 
     # A GUI automation cannot be resumed without a LIVE backend/vision, so build
@@ -526,6 +531,8 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         )
     headed = args.headed or cfg.backend.headed
 
+    from openadapt_flow.runtime.durable.approval import ResumeRefused
+
     ensure_chromium_installed()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not headed)
@@ -540,6 +547,12 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                 allow_model_grounding=allow_egress,
             )
             report = resume(run_dir, replayer)
+        except ResumeRefused as refused:
+            # P0-5: the library REFUSED the resume (no valid approval, an expired
+            # pause, a changed bundle, or a diverged app state) — never a silent
+            # proceed. Approve first:  openadapt-flow approve <run_dir>
+            print(f"Resume REFUSED: {refused}")
+            return 3
         finally:
             browser.close()
 
@@ -550,17 +563,19 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def _cmd_approve(args: argparse.Namespace) -> int:
-    """Mark a durably-paused run's pending escalation approved.
+    """Record an AUTHENTICATED approval for a durably-paused run (P0-5).
 
-    Uses the CURRENT durable public API: read the ``PendingEscalation``, flip
-    its ``status`` to ``approved`` via the model's own field, write it back.
-    NOTE (blocked-on durable/resume hardening): the durable ``resume``
-    entrypoint does not yet *enforce* approval — approval is recorded as
-    auditable metadata and ``resume --require-approval`` gates on it CLI-side.
-    A full approval store (who / when / signature) is owned by the durable
-    workstream, not synthesized here.
+    Writes an :class:`ApprovalRecord` (approver identity / timestamp / chosen
+    resolution / bundle-version hash) to ``run_dir/approval.json`` — the artifact
+    the durable ``resume`` entrypoint now ENFORCES (a resume with no valid
+    approval is refused). Also flips the pending escalation's ``status`` to
+    ``approved`` for the audit trail / back-compat.
     """
+    import getpass
+
+    from openadapt_flow.runtime.durable.approval import ApprovalRecord
     from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+    from openadapt_flow.runtime.durable.program_checkpoint import bundle_version
 
     run_dir = Path(args.run_dir)
     store = CheckpointStore(run_dir)
@@ -568,13 +583,36 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     if pending is None:
         print(f"No pending escalation at {run_dir} — nothing to approve.")
         return 1
-    if pending.status == "approved":
+    if store.read_approval() is not None:
         print(f"Pending escalation at {run_dir} is already approved.")
         return 0
-    approved = pending.model_copy(update={"status": "approved"})
-    store.write_pending(approved)
+
+    # The approver identity defaults to the invoking OS user (a resume with a
+    # blank approver is refused by the durable library); --approver overrides.
+    approver = args.approver or getpass.getuser()
+    manifest = store.read_manifest()
+    bundle_ver = ""
+    if manifest is not None:
+        try:
+            bundle_ver = bundle_version(manifest.bundle_dir)
+        except OSError:
+            bundle_ver = ""
+    resolution = args.resolution or (
+        pending.proposed_options[0] if pending.proposed_options else "approved"
+    )
+    store.write_approval(
+        ApprovalRecord(
+            approver=approver,
+            resolution=resolution,
+            bundle_version=bundle_ver,
+            workflow_name=pending.workflow_name,
+            run_dir=str(run_dir),
+        )
+    )
+    # Keep the pending status in sync for the audit trail.
+    store.write_pending(pending.model_copy(update={"status": "approved"}))
     print(
-        f"Approved pending escalation at {run_dir} "
+        f"Approved pending escalation at {run_dir} by {approver!r} "
         f"(step {pending.step_index} '{pending.step_id}': {pending.category}).\n"
         f"Resume it with:  openadapt-flow resume {run_dir}"
     )
@@ -1085,9 +1123,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "approve",
-        help="Mark a durably-paused run's pending escalation approved",
+        help=(
+            "Record an authenticated approval (approver / resolution / bundle "
+            "version) authorizing a durably-paused run to resume"
+        ),
     )
     p.add_argument("run_dir", help="The paused run directory (holds the escalation)")
+    p.add_argument(
+        "--approver",
+        default=None,
+        help=(
+            "Approver identity recorded on the approval (defaults to the "
+            "invoking OS user; a blank identity is refused at resume)"
+        ),
+    )
+    p.add_argument(
+        "--resolution",
+        default=None,
+        help=(
+            "The chosen resolution (defaults to the pause's first proposed "
+            "option) — recorded for the audit trail"
+        ),
+    )
     p.set_defaults(func=_cmd_approve)
 
     p = sub.add_parser(

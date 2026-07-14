@@ -16,13 +16,14 @@ Regions are (x, y, w, h). Points are (x, y).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Final, Iterator, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 if TYPE_CHECKING:
     # Type-only import for the Step.effects forward reference. The RUNTIME
@@ -43,6 +44,13 @@ Point = tuple[int, int]
 #: did at v1 (typed params, predicates/guards, a full state-machine program,
 #: system-of-record effects, API bindings, PHI-free identity templates).
 SCHEMA_VERSION = 2
+
+#: AEAD associated-data domain label for sealed ``templates/`` assets. DISTINCT
+#: from :data:`openadapt_flow.crypto.BUNDLE_AAD` (which seals ``workflow.json``),
+#: so a template ciphertext can never be authenticated as -- and substituted for
+#: -- the workflow-json ciphertext (or vice versa) even under the SAME key. This
+#: is the template-domain AAD the at-rest design calls for.
+TEMPLATE_AAD: Final[bytes] = b"openadapt-flow/template"
 
 
 class ActionKind(str, Enum):
@@ -819,10 +827,11 @@ class BundleManifest(BaseModel):
     is a whole-bundle SHA-256 over the manifest-free ``workflow.json`` content
     AND those asset hashes (so it changes if any semantic byte changes), and
     ``provenance`` carries the compiler version + certification block. ``encrypted``
-    mirrors ``Workflow.encrypted`` (at-rest encryption is a later item; the flag
-    mirrors ``Workflow.encrypted``: True when ``workflow.json`` is sealed at rest
-    with AES-256-GCM). Additive: a v1 bundle carries no manifest and one is
-    computed on read.
+    mirrors ``Workflow.encrypted``: True when the bundle is sealed at rest with
+    AES-256-GCM -- both ``workflow.json`` and every ``templates/*.png`` crop.
+    The ``file_hashes`` are always digests over the PLAINTEXT asset (sealed
+    BEFORE encryption), so integrity re-verifies against the decrypted crops.
+    Additive: a v1 bundle carries no manifest and one is computed on read.
     """
 
     schema_version: int = SCHEMA_VERSION
@@ -838,6 +847,108 @@ class BundleManifest(BaseModel):
         default=False,
         description="mirrors Workflow.encrypted (workflow.json sealed at rest)",
     )
+
+
+# -- template-asset sealing (PHI-at-rest: image crops) -----------------------
+#
+# When a bundle is encrypted (``Workflow.save(encrypt=True)``), the ``templates/``
+# PNG crops -- pixels of the recorded (patient) screen, i.e. image PHI -- are
+# sealed with the SAME AES-256-GCM AEAD as ``workflow.json``, under the distinct
+# :data:`TEMPLATE_AAD` domain. Each crop ``templates/<name>.png`` is written as
+# ``templates/<name>.png.enc`` and its plaintext removed, so an encrypted bundle
+# leaves NO cleartext PHI-bearing screenshot on disk. Integrity digests stay over
+# the PLAINTEXT crop (sealed into the manifest before encryption), so a decrypted
+# load re-verifies end-to-end (see docs/phi_at_rest.md).
+
+
+def _iter_plaintext_templates(bundle: Path) -> Iterator[Path]:
+    """Every regular, NON-sealed file under ``<bundle>/templates`` (recursive)."""
+    tdir = bundle / "templates"
+    if not tdir.is_dir():
+        return
+    for p in sorted(tdir.rglob("*")):
+        if p.is_file() and p.suffix != ".enc":
+            yield p
+
+
+def _seal_template_assets(
+    bundle: Path, key: Optional[str], store: dict[str, bytes]
+) -> None:
+    """Seal every plaintext ``templates/`` crop with AES-256-GCM under
+    :data:`TEMPLATE_AAD`, writing ``<crop>.enc`` and REMOVING the plaintext.
+
+    The plaintext bytes are also cached into ``store`` (the workflow's in-memory
+    template map) so the sealing workflow object still carries the crops -- a
+    later plaintext re-save can recover them, mirroring an encrypted ``load``.
+    A missing key raises ``crypto.MissingKeyError`` (never a silent skip)."""
+    from openadapt_flow import crypto as _crypto
+
+    for path in list(_iter_plaintext_templates(bundle)):
+        rel = path.relative_to(bundle).as_posix()
+        data = path.read_bytes()
+        store[rel] = data
+        (bundle / f"{rel}.enc").write_bytes(
+            _crypto.encrypt_bytes(data, key, aad=TEMPLATE_AAD)
+        )
+        path.unlink()
+
+
+def _decrypt_template_assets(bundle: Path, key: Optional[str]) -> dict[str, bytes]:
+    """Decrypt every sealed ``templates/*.enc`` crop IN MEMORY, keyed by the
+    plaintext bundle-relative path (``templates/<name>.png``).
+
+    A wrong/missing key or a tampered ciphertext fails LOUD via
+    ``crypto.DecryptionError`` / ``crypto.MissingKeyError`` (the AEAD tag),
+    exactly as the ``workflow.json`` path does -- no partial materialization."""
+    from openadapt_flow import crypto as _crypto
+
+    out: dict[str, bytes] = {}
+    tdir = bundle / "templates"
+    if not tdir.is_dir():
+        return out
+    for path in sorted(tdir.rglob("*.enc")):
+        if not path.is_file():
+            continue
+        plaintext = _crypto.decrypt_bytes(path.read_bytes(), key, aad=TEMPLATE_AAD)
+        rel = path.relative_to(bundle).as_posix()[: -len(".enc")]
+        out[rel] = plaintext
+    return out
+
+
+def _verify_sealed_template_integrity(
+    workflow: "Workflow", stored: "BundleManifest", decrypted: dict[str, bytes]
+) -> None:
+    """Integrity check for an ENCRYPTED bundle, run against the DECRYPTED crops
+    in memory (the on-disk assets are ciphertext, so the disk-based
+    ``bundle_validation.verify_integrity`` cannot be used directly).
+
+    Two checks mirroring the plaintext path: (1) the workflow content still
+    hashes to the sealed ``content_digest`` over the SEALED plaintext asset
+    hashes, and (2) every sealed asset's decrypted plaintext still hashes to its
+    recorded digest. Raises ``bundle_validation.BundleIntegrityError`` on any
+    mismatch. Skipped for a bundle with no sealed digest."""
+    from openadapt_flow import bundle_validation as _bv
+
+    if not stored.content_digest:
+        return
+    recomputed = _bv.compute_content_digest(workflow, stored.file_hashes)
+    if recomputed != stored.content_digest:
+        raise _bv.BundleIntegrityError(
+            "bundle content digest mismatch on decrypt: expected "
+            f"{stored.content_digest[:16]}..., recomputed {recomputed[:16]}... "
+            "-- the workflow.json was modified after the manifest was sealed"
+        )
+    for rel, expected in stored.file_hashes.items():
+        data = decrypted.get(rel)
+        if data is None:
+            raise _bv.BundleIntegrityError(
+                f"manifest lists sealed asset {rel!r} but its ciphertext "
+                f"({rel}.enc) is missing from the bundle"
+            )
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise _bv.BundleIntegrityError(
+                f"sealed asset {rel!r} plaintext hash mismatch (tampered or corrupted)"
+            )
 
 
 class Workflow(BaseModel):
@@ -862,13 +973,15 @@ class Workflow(BaseModel):
     # postconditions were dropped. False = the scrub was unavailable/off (the
     # bundle may retain identifier text in postconditions / labels).
     phi_scrubbed: bool = False
-    # ``encrypted``: True when this bundle's ``workflow.json`` is sealed at rest
-    # with AES-256-GCM (``save(encrypt=True)`` -> ``workflow.json.enc``; see
-    # openadapt_flow.crypto and docs/phi_at_rest.md). False (default) = the
-    # plaintext-serialized JSON path, protected by the governance guards and the
-    # operator's disk encryption. Sealed INTO the integrity digest, so a decrypt
-    # at load re-verifies against this value. (Template PNGs are still
-    # governance-guarded + disk-encrypted, not yet sealed — see docs/phi_at_rest.md.)
+    # ``encrypted``: True when this bundle is sealed at rest with AES-256-GCM
+    # (``save(encrypt=True)``; see openadapt_flow.crypto and docs/phi_at_rest.md).
+    # BOTH the ``workflow.json`` (-> ``workflow.json.enc``, BUNDLE_AAD) AND every
+    # ``templates/*.png`` image crop (-> ``templates/*.png.enc``, TEMPLATE_AAD)
+    # are sealed, so an encrypted bundle leaves NO cleartext PHI -- neither the
+    # identity band nor the screenshot pixels -- on disk. False (default) = the
+    # plaintext path, protected by the governance guards and the operator's disk
+    # encryption. Sealed INTO the integrity digest, so a decrypt at load
+    # re-verifies against this value.
     encrypted: bool = False
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -912,7 +1025,47 @@ class Workflow(BaseModel):
     # content digest itself (the digest lives INSIDE it).
     manifest: Optional["BundleManifest"] = None
 
+    # In-memory plaintext of the bundle's sealed ``templates/`` crops, keyed by
+    # bundle-relative path (``templates/<name>.png`` -> PNG bytes). Populated on
+    # ``load(key=...)`` of an ENCRYPTED bundle (the crops are decrypted here, in
+    # memory, never written back as cleartext) and on ``save(encrypt=True)`` (so
+    # the sealing object retains the crops for a later plaintext re-save). Empty
+    # for a plaintext bundle, whose crops are read from disk as before. Excluded
+    # from ``model_dump`` / the content digest (a private attribute). The
+    # resolver consumes a decrypted crop via :meth:`decrypted_template`.
+    _decrypted_templates: dict[str, bytes] = PrivateAttr(default_factory=dict)
+
     # -- bundle I/O ---------------------------------------------------------
+
+    def decrypted_template(self, rel: str) -> Optional[bytes]:
+        """Return the in-memory plaintext PNG bytes for a sealed crop at bundle-
+        relative path ``rel`` (e.g. ``anchor.template``), or None when the bundle
+        is not encrypted / the crop was not sealed.
+
+        The consumption seam the resolver uses for an encrypted bundle: instead
+        of reading ``<bundle>/templates/<name>.png`` from disk (which does not
+        exist -- only the ``.enc`` ciphertext does), it pulls the crop that
+        ``load(key=...)`` already decrypted in memory."""
+        return self._decrypted_templates.get(rel)
+
+    def decrypted_templates(self) -> dict[str, bytes]:
+        """A copy of the full in-memory decrypted-crop map (bundle-relative path
+        -> PNG bytes); empty for a plaintext bundle."""
+        return dict(self._decrypted_templates)
+
+    def _sync_disk_templates(self, bundle: Path) -> None:
+        """Materialize any in-memory plaintext crops to disk (removing a stale
+        ``.enc`` sibling) BEFORE the manifest is (re)sealed, so a re-save hashes
+        the plaintext crop and a plaintext re-save recovers the PNGs a prior
+        encrypted save removed from disk. A no-op for a freshly-compiled bundle
+        (no in-memory crops; the compiler already wrote the plaintext PNGs)."""
+        for rel, data in self._decrypted_templates.items():
+            path = bundle / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            enc = bundle / f"{rel}.enc"
+            if enc.exists():
+                enc.unlink()
 
     def save(
         self,
@@ -934,17 +1087,23 @@ class Workflow(BaseModel):
         Encryption-at-rest (opt-in, OFF by default): when ``encrypt=True`` (or a
         ``key`` is supplied), the serialized ``workflow.json`` is sealed with
         AES-256-GCM (``openadapt_flow.crypto``) and written as
-        ``workflow.json.enc`` instead of plaintext ``workflow.json``; the
-        passphrase comes from ``key`` or the ``OPENADAPT_BUNDLE_KEY`` environment
-        variable (a missing key raises ``crypto.MissingKeyError`` -- an encrypt
-        request never silently degrades to plaintext). The integrity manifest is
-        sealed over the PLAINTEXT content BEFORE encryption, so an encrypted
+        ``workflow.json.enc`` instead of plaintext ``workflow.json``, AND every
+        ``templates/*.png`` image crop -- pixels of the recorded screen, i.e.
+        image PHI -- is sealed the same way (under the distinct
+        :data:`TEMPLATE_AAD` domain) as ``templates/*.png.enc`` with its
+        plaintext removed, so an encrypted bundle leaves NO cleartext
+        PHI-bearing screenshot on disk. The passphrase comes from ``key`` or the
+        ``OPENADAPT_BUNDLE_KEY`` environment variable (a missing key raises
+        ``crypto.MissingKeyError`` -- an encrypt request never silently degrades
+        to plaintext). The integrity manifest is sealed over the PLAINTEXT
+        content (workflow AND crop digests) BEFORE encryption, so an encrypted
         bundle keeps every schema-v2 guarantee (content digest, asset hashes,
         provenance) once decrypted at load. The ``manifest.json`` sidecar stays
         plaintext (it carries only hashes + provenance, no PHI) so a compliance
         inventory can read ``encrypted: true`` without the key. When
         ``encrypt=False`` and no key is given, behavior is unchanged: a plaintext
-        ``workflow.json`` is written exactly as before.
+        ``workflow.json`` and plaintext ``templates/*.png`` crops are written
+        exactly as before.
 
         Returns the path actually written (``workflow.json`` or, when encrypted,
         ``workflow.json.enc``).
@@ -953,6 +1112,10 @@ class Workflow(BaseModel):
         bundle = Path(bundle_dir)
         bundle.mkdir(parents=True, exist_ok=True)
         (bundle / "templates").mkdir(exist_ok=True)
+        # Restore any in-memory crops (from a prior encrypted load/save) to disk
+        # as plaintext BEFORE the manifest hashes them; harmless no-op for a
+        # freshly-compiled bundle whose crops are already on disk.
+        self._sync_disk_templates(bundle)
         if self.schema_version < SCHEMA_VERSION:
             self.schema_version = SCHEMA_VERSION
         # Reflect the at-rest state in the workflow BEFORE the manifest is sealed,
@@ -977,6 +1140,10 @@ class Workflow(BaseModel):
             # Never leave a stale plaintext copy alongside the ciphertext.
             if plaintext_path.exists():
                 plaintext_path.unlink()
+            # Seal the image crops too (the manifest already hashed their
+            # plaintext just above), so no cleartext PHI-bearing screenshot is
+            # left on disk. Caches the plaintext into ``_decrypted_templates``.
+            _seal_template_assets(bundle, key, self._decrypted_templates)
             path = encrypted_path
         else:
             plaintext_path.write_text(serialized)
@@ -1014,19 +1181,24 @@ class Workflow(BaseModel):
           fresh and nothing is rejected.
         - ``key`` (default None): decryption passphrase for an ENCRYPTED bundle
           (one saved with ``save(encrypt=True)``, present on disk as
-          ``workflow.json.enc``). Resolved from ``key`` or the
-          ``OPENADAPT_BUNDLE_KEY`` environment variable. A wrong/missing key
-          fails LOUDLY (``crypto.MissingKeyError`` / ``crypto.DecryptionError``)
-          with no partial load; the AEAD tag also catches a tampered ciphertext.
-          Ignored for a plaintext bundle. Integrity + structural validation then
-          run on the decrypted content exactly as for a plaintext bundle.
+          ``workflow.json.enc`` + ``templates/*.png.enc``). Resolved from ``key``
+          or the ``OPENADAPT_BUNDLE_KEY`` environment variable. It decrypts BOTH
+          the ``workflow.json`` AND every sealed image crop IN MEMORY (the crops
+          are exposed to the resolver via :meth:`decrypted_template`, never
+          rewritten as cleartext on disk). A wrong/missing key fails LOUDLY
+          (``crypto.MissingKeyError`` / ``crypto.DecryptionError``) with no
+          partial load; the AEAD tag also catches a tampered ciphertext (of the
+          workflow OR a crop). Ignored for a plaintext bundle. Integrity +
+          structural validation then run on the decrypted content exactly as for
+          a plaintext bundle.
         """
         bundle = Path(bundle_dir)
         from openadapt_flow import bundle_validation as _bv
 
         encrypted_path = bundle / "workflow.json.enc"
         plaintext_path = bundle / "workflow.json"
-        if encrypted_path.is_file():
+        bundle_encrypted = encrypted_path.is_file()
+        if bundle_encrypted:
             from openadapt_flow import crypto as _crypto
 
             decrypted = _crypto.decrypt_bytes(
@@ -1047,8 +1219,21 @@ class Workflow(BaseModel):
                 wf.manifest = BundleManifest.model_validate_json(sidecar.read_text())
                 persisted = wf.manifest
 
+        if bundle_encrypted:
+            # Decrypt the sealed image crops IN MEMORY (fail-loud on wrong key /
+            # tamper, exactly as the workflow.json above). The resolver reads
+            # them via ``decrypted_template``; nothing cleartext lands on disk.
+            wf._decrypted_templates = _decrypt_template_assets(bundle, key)
+
         if verify_integrity and persisted is not None and wf.manifest is not None:
-            _bv.verify_integrity(wf, bundle, wf.manifest)
+            if bundle_encrypted:
+                # On-disk crops are ciphertext, so verify the sealed asset
+                # digests against the decrypted plaintext held in memory.
+                _verify_sealed_template_integrity(
+                    wf, wf.manifest, wf._decrypted_templates
+                )
+            else:
+                _bv.verify_integrity(wf, bundle, wf.manifest)
 
         if wf.manifest is None:
             wf.manifest = _bv.build_manifest(wf, bundle)

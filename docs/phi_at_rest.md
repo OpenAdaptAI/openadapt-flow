@@ -18,7 +18,7 @@ See also [PRIVACY.md](PRIVACY.md) (the in-flight / scrubbing map) and the
 | `workflow.json` postconditions | `TEXT_PRESENT` assertions; identifier-bearing ones **dropped** when the Presidio scrub is active (REM-2/GAP-3) | Compile-time scrub (optional) + governance guard |
 | `workflow.json` landmarks | `anchor.landmarks[].ocr_text` — nearby ROW text used by the geometry rung, often the patient name; identifier-bearing ones **dropped** when the Presidio scrub is active | Compile-time scrub (optional) + governance guard |
 | `workflow.json` labels/typed text | `anchor.ocr_text`, literal `Step.text` — may echo an identifier that is **load-bearing** for replay (the target label / the typed search value) | **Not scrubbed** (scrubbing would break resolution/typing); governance guard flags it; **parameterize** the typed identifier (`entity_ref`) so it is supplied at run time and never stored |
-| `templates/*.png` | Pixel crops of the recorded screen — **image PHI** | **Not encrypted**; governance guards (kept out of git) + operator disk encryption |
+| `templates/*.png` | Pixel crops of the recorded screen — **image PHI** | **Sealed with AES-256-GCM** in an encrypted bundle (`save(encrypt=True)` → `templates/*.png.enc`, no cleartext crop on disk); governance guards + operator disk encryption otherwise |
 | `workflow.py` | Human-readable rendering; identity band is now a PHI-free note (REM-2) | Same as `workflow.json` |
 
 ### The identity template is NOT encryption
@@ -52,10 +52,17 @@ Encryption-at-rest is now available as an **opt-in** layer
 
 - **Bundle.** `Workflow.save(bundle_dir, encrypt=True, key=…)` seals the
   serialized `workflow.json` with **AES-256-GCM** and writes it as
-  `workflow.json.enc` (no plaintext `workflow.json` on disk).
-  `Workflow.load(bundle_dir, key=…)` decrypts it in memory. The passphrase comes
-  from the `key` argument or the **`OPENADAPT_BUNDLE_KEY`** environment variable;
-  a per-bundle random salt + scrypt KDF stretches it to the 256-bit data key.
+  `workflow.json.enc` (no plaintext `workflow.json` on disk), **and seals every
+  `templates/*.png` image crop the same way** — each becomes
+  `templates/*.png.enc` (under a distinct `TEMPLATE_AAD` domain so a crop
+  ciphertext can't be swapped for the workflow-json one) with its plaintext
+  removed, so an encrypted bundle leaves **no cleartext PHI-bearing screenshot**
+  on disk. `Workflow.load(bundle_dir, key=…)` decrypts both `workflow.json` and
+  the crops **in memory** (the resolver reads a decrypted crop via
+  `Workflow.decrypted_template(rel)`; nothing is rewritten as cleartext). The
+  passphrase comes from the `key` argument or the **`OPENADAPT_BUNDLE_KEY`**
+  environment variable; a per-bundle random salt + scrypt KDF stretches it to the
+  256-bit data key.
 - **Durable checkpoints.** `CheckpointStore(run_dir, key=…)` (wired through
   `Replayer(checkpoint_key=…)` and `resume(…, key=…)`) seals every checkpoint /
   pending-escalation / run-manifest / Phase-2 interpreter checkpoint the same
@@ -63,21 +70,32 @@ Encryption-at-rest is now available as an **opt-in** layer
   are ciphertext at rest.
 - **Integrity preserved.** The schema-v2 manifest (content digest + per-asset
   SHA-256 + provenance) is sealed over the **plaintext** content *before*
-  encryption, so a decrypted load still verifies integrity end-to-end. The
-  `encrypted: true` manifest flag is now live (mirrored on `Workflow.encrypted`),
-  and the `manifest.json` sidecar stays plaintext so a compliance inventory can
-  read it without the key.
+  encryption — including the template crops, whose digests stay over the
+  **plaintext** PNG — so a decrypted load still verifies integrity end-to-end
+  (the crop check runs against the decrypted bytes in memory). The
+  `encrypted: true` manifest flag is now live (mirrored on `Workflow.encrypted`)
+  and now covers **both** `workflow.json` and the crops, and the `manifest.json`
+  sidecar stays plaintext so a compliance inventory can read it without the key.
 - **Fails loud + safe.** A **wrong or missing key**, or a **tampered ciphertext**
-  (a flipped byte breaks the GCM tag), raises `crypto.DecryptionError` /
-  `crypto.MissingKeyError` — never a partial or silent load.
+  (a flipped byte breaks the GCM tag — of `workflow.json` *or* a crop), raises
+  `crypto.DecryptionError` / `crypto.MissingKeyError`; a **missing** or
+  **swapped** crop ciphertext raises `BundleIntegrityError`. Never a partial or
+  silent load.
 
-**Scope / not yet done:** the template `templates/*.png` crops are still
-governance-guarded + operator-disk-encrypted, not yet sealed into the container
-(they remain hashed by the manifest for integrity). Deployment-time **key
-management** (OS keychain / KMS / envelope keys, key rotation) is still the
-operator's responsibility — the passphrase is supplied via env/argument; this
-change provides the AEAD substrate, not a KMS. The envelope-key / whole-container
-design below remains the target.
+**Scope / done:** both `workflow.json` **and** the `templates/*.png` image crops
+are now sealed into AES-256-GCM containers in an encrypted bundle — no cleartext
+PHI-bearing screenshot is left on disk. (The COMPLIANCE.md at-rest line for
+`templates/` can therefore flip from "operator-disk-encryption only" to "sealed";
+that file is owned by a separate PR.)
+
+**Scope / not yet done:** the resolver seam that reads a decrypted crop
+(`Workflow.decrypted_template`) is in place, but wiring the live `Replayer` to
+prefer it over the on-disk `templates/*.png` read for an encrypted bundle is a
+follow-up in `runtime/replayer.py` (out of this change's file scope).
+Deployment-time **key management** (OS keychain / KMS / envelope keys, key
+rotation) is still the operator's responsibility — the passphrase is supplied via
+env/argument; this change provides the AEAD substrate, not a KMS. The
+envelope-key / whole-container design below remains the target.
 
 ### Target design (envelope keys / whole-container — future)
 

@@ -310,6 +310,7 @@ def _finish_replay(run_dir: Path, report) -> int:
             "NOTE: a model-grounding component was wired for this run — "
             "screenshots could have left the box (see REPORT.md)."
         )
+    _maybe_report_break(run_dir, report)
     return 0 if report.success else 1
 
 
@@ -1086,6 +1087,129 @@ def _cmd_emit_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_login(args: argparse.Namespace) -> int:
+    """Validate an ingest token against the hosted control plane and store the
+    host (+ token, insecure last-resort) in ``~/.openadapt/config.toml``.
+
+    Token resolution: ``--token`` -> ``OPENADAPT_INGEST_TOKEN`` env ->
+    ``config.toml`` (a bare ``login`` re-validates the stored token). Mint a
+    token in the dashboard at ``<host>/dashboard/settings/ingest``.
+    """
+    from openadapt_flow.hosted import HostedError, login
+
+    try:
+        result = login(token=args.token, host=args.host, save=not args.no_save)
+    except HostedError as e:
+        print(f"login failed: {e}")
+        return 1
+    print(f"Logged in to {result['host']} (token validated).")
+    if result.get("config_path"):
+        print(
+            f"Host + token saved to {result['config_path']} (mode 0600).\n"
+            "NOTE: this is the documented-insecure fallback — the desktop app "
+            "stores the token in your OS keychain instead."
+        )
+    print(f"Manage tokens at {result['settings_url']}")
+    return 0
+
+
+def _cmd_push(args: argparse.Namespace) -> int:
+    """Zip a recording (or bundle) directory and upload it to ``/api/ingest``.
+
+    ``PATH`` defaults to the most-recent recording directory. The directory is
+    zipped to a temp ``.zip`` before the multipart POST; on success the
+    server-assigned ``workflow_id`` and its dashboard URL are printed.
+    """
+    from openadapt_flow.hosted import HostedError, push
+
+    try:
+        result = push(
+            args.path,
+            kind=args.kind,
+            name=args.name,
+            host=args.host,
+            token=args.token,
+        )
+    except HostedError as e:
+        print(f"push failed: {e}")
+        return 1
+    workflow_id = result.get("workflow_id", "<unknown>")
+    compile_status = (result.get("compile") or {}).get("status", "?")
+    print(
+        f"Pushed. workflow_id={workflow_id} "
+        f"(name={result.get('workflow_name')!r}, kind={result.get('kind')}, "
+        f"compile={compile_status})."
+    )
+    if result.get("dashboard_url"):
+        print(f"Dashboard: {result['dashboard_url']}")
+    return 0
+
+
+def _cmd_report_break(args: argparse.Namespace) -> int:
+    """Emit a PHI-free break diagnostic from a halted run's ``report.json``.
+
+    Reads ``run_dir/report.json`` (``RunReport.halt`` / ``HaltObservation``) —
+    halt is read from the report, NOT a process exit code — scrubs it
+    fail-closed, and POSTs it to ``/api/runs/ingest-report`` so the break is
+    triageable centrally. The recording never leaves the machine.
+    """
+    from openadapt_flow.hosted import HostedError, report_break
+
+    try:
+        result = report_break(
+            args.run_dir,
+            workflow_id=args.workflow_id,
+            host=args.host,
+            token=args.token,
+            deployment_kind=args.deployment_kind,
+            org_id=args.org_id,
+        )
+    except HostedError as e:
+        print(f"report-break failed: {e}")
+        return 1
+    if not result.get("emitted"):
+        if result.get("local_only"):
+            print(f"Break kept LOCAL-ONLY: {result.get('reason')}")
+        else:
+            print(f"Nothing emitted: {result.get('reason')}")
+        return 0
+    print(
+        f"Break reported (run_id={result.get('run_id')}, "
+        f"halt_id={result.get('halt_id')}, status={result.get('status')})."
+    )
+    if result.get("teach_url"):
+        print(f"Teach: {result['teach_url']}")
+    return 0
+
+
+def _maybe_report_break(run_dir: Path, report) -> None:
+    """Opt-in post-run hook: emit a break diagnostic when a run halts.
+
+    Off by default and fully best-effort — it only fires when BOTH
+    ``OPENADAPT_FLOW_HOSTED_WORKFLOW_ID`` is set (the hosted workflow id this
+    bundle maps to) and the run carries a halt. Any failure is swallowed so the
+    hook NEVER changes the run's outcome or exit code (WRAP-not-rewrite).
+    """
+    import os
+
+    workflow_id = os.environ.get("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID")
+    if not workflow_id or getattr(report, "halt", None) is None:
+        return
+    try:
+        from openadapt_flow.hosted import report_break
+
+        result = report_break(
+            run_dir,
+            workflow_id=workflow_id,
+            deployment_kind=os.environ.get("OPENADAPT_FLOW_DEPLOYMENT_KIND", "cloud"),
+            org_id=os.environ.get("OPENADAPT_FLOW_ORG_ID"),
+        )
+        if result.get("emitted"):
+            print(f"Break reported to hosted control plane (workflow {workflow_id}).")
+    except Exception as e:  # noqa: BLE001 — a diagnostic hook must never fail a run
+        print(f"(break report skipped: {e})")
+
+
 def _cmd_teach(args: argparse.Namespace) -> int:
     """Self-serve HALT -> LEARN -> RESOLVE for a halted run + a fix demo.
 
@@ -1756,6 +1880,109 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_teach)
+
+    p = sub.add_parser(
+        "login",
+        help=(
+            "Validate an ingest token against the hosted control plane and "
+            "store the host (in ~/.openadapt/config.toml)"
+        ),
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Ingest token (oai_ingest_…). Falls back to OPENADAPT_INGEST_TOKEN, "
+            "then config.toml (a bare `login` re-validates the stored token). "
+            "Mint one at <host>/dashboard/settings/ingest."
+        ),
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Validate only; do not write host/token to config.toml",
+    )
+    p.set_defaults(func=_cmd_login)
+
+    p = sub.add_parser(
+        "push",
+        help=(
+            "Zip a recording (or bundle) directory and upload it to "
+            "/api/ingest; prints the workflow_id + dashboard URL"
+        ),
+    )
+    p.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help=(
+            "Recording (or bundle) directory to push. Default: the most-recent "
+            "recording directory found under the current directory."
+        ),
+    )
+    p.add_argument(
+        "--kind",
+        choices=["recording", "bundle"],
+        default="recording",
+        help="What the directory is (default: recording)",
+    )
+    p.add_argument(
+        "--name",
+        default=None,
+        help="Workflow name (the server auto-suggests one otherwise)",
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Ingest token (default: OPENADAPT_INGEST_TOKEN env, then config.toml)",
+    )
+    p.set_defaults(func=_cmd_push)
+
+    p = sub.add_parser(
+        "report-break",
+        help=(
+            "Emit a PHI-free break diagnostic from a halted run's report.json "
+            "to /api/runs/ingest-report (the recording stays local)"
+        ),
+    )
+    p.add_argument("run_dir", help="The halted run directory (holds report.json)")
+    p.add_argument(
+        "--workflow-id",
+        required=True,
+        help="The hosted workflow id this run belongs to (from `push`/dashboard)",
+    )
+    p.add_argument(
+        "--deployment-kind",
+        choices=["cloud", "byoc"],
+        default="cloud",
+        help="Deployment lane (routes the teach target; default: cloud)",
+    )
+    p.add_argument(
+        "--org-id",
+        default=None,
+        help="Org id, carried in the body until the per-user token store is canonical",
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Ingest token (default: OPENADAPT_INGEST_TOKEN env, then config.toml)",
+    )
+    p.set_defaults(func=_cmd_report_break)
 
     return parser
 

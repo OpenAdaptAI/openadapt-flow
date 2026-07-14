@@ -284,6 +284,40 @@ governance-guarded (kept out of git) and rely on **operator full-disk
 encryption**. Treat every bundle as PHI. Details and the target envelope-key
 design: [docs/phi_at_rest.md](docs/phi_at_rest.md).
 
+## Hosted (cloud connectivity)
+
+Three additive subcommands connect the local loop to the hosted control plane
+(`app.openadapt.ai`) without changing the compile/replay engine. Mint an ingest
+token in the dashboard (`<host>/dashboard/settings/ingest`), then:
+
+```bash
+openadapt-flow login --token oai_ingest_…            # validate + remember host
+openadapt-flow push ./my-recording --name "Triage"   # zip dir → POST /api/ingest
+#   → prints workflow_id + dashboard URL
+openadapt-flow report-break runs/replay-… \          # PHI-free break diagnostic
+    --workflow-id <id> --deployment-kind byoc         #   → POST /api/runs/ingest-report
+```
+
+- **Token resolution** (all outbound calls): `--token` → `OPENADAPT_INGEST_TOKEN`
+  env → `~/.openadapt/config.toml` `[hosted] token`. The desktop app stores the
+  token in the OS keychain; `login` falls back to `config.toml` (mode `0600`,
+  printed warning) as the documented-insecure last resort.
+- **`push`** zips the recording (or, with `--kind bundle`, a compiled bundle)
+  *directory* to a temp `.zip` before the multipart upload — a directory is what
+  the engine emits; a `.zip` is what `/api/ingest` wants.
+- **Halt signaling** is read from **`report.json` (`RunReport.halt` /
+  `HaltObservation`)**, never from a process exit code (`replay`/`run` return
+  `0`/`1` only). `report-break` parses that report, scrubs it fail-closed via the
+  `privacy` extra, and posts a PHI-free descriptor — the recording never leaves
+  the machine. A `422` PHI-boundary rejection retries with a harder scrub, then
+  falls back to local-only.
+- **Opt-in post-run hook:** set `OPENADAPT_FLOW_HOSTED_WORKFLOW_ID` (and
+  optionally `OPENADAPT_FLOW_DEPLOYMENT_KIND` / `OPENADAPT_FLOW_ORG_ID`) and a
+  halting `replay`/`run` emits the break automatically (best-effort; never
+  changes the run's exit code). Off by default.
+
+Only the existing `httpx` dependency is used — no new heavy dependency.
+
 ## Development
 
 ```bash

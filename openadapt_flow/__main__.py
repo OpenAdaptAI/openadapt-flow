@@ -7,13 +7,28 @@ imported lazily inside each handler so ``--help`` always works):
   record what you do into the format ``compile`` consumes.
 - ``demo-record`` — serve MockMed locally and record the canonical demo.
 - ``compile`` — compile a recording directory into a workflow bundle.
+- ``induce`` — induce a parameterized PROGRAM bundle from MULTIPLE recordings
+  (multi-trace induction); refuses (nonzero exit) when intent is
+  underdetermined rather than guessing a branch.
 - ``replay`` — replay a bundle; serves the bundled MockMed demo app when no
   ``--url`` is given (with optional ``--drift`` to demonstrate healing).
+  ``--worklist`` drives a program's loop over a CLI-supplied relation; effect
+  verification and API actuation are wired from ``--config`` / flags.
+- ``run`` — execute a bundle under a deployment config (``--config``): the
+  same replay path, wired for a real deployment (backend / effects / actuation
+  / durable runtime / policy) instead of the demo.
+- ``resume`` — resume a durably-paused run from its last verified checkpoint.
+- ``approve`` — mark a durably-paused run's pending escalation approved.
 - ``bench`` — replay a bundle N times against MockMed and aggregate.
 - ``lint`` — report a bundle's coverage gaps (advice; exit code by severity).
 - ``certify`` — enforce a safety policy on a bundle (refuse it if it fails).
 - ``emit-skill`` — emit an Agent Skills folder for a bundle.
 - ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
+
+A single ``deployment.yaml`` (``--config``; see
+``docs/deployment.example.yaml`` and :mod:`openadapt_flow.deployment`)
+configures backend / actuation / effects / runtime / policy for ``record`` /
+``compile`` / ``certify`` / ``replay`` / ``run`` / ``resume``.
 """
 
 from __future__ import annotations
@@ -42,6 +57,135 @@ def _with_drift(url: str, drift: str | None) -> str:
     if not drift:
         return url
     return f"{url.rstrip('/')}/?drift={drift}"
+
+
+def _load_worklist_file(path: Path) -> list[dict[str, str]]:
+    """Load a CLI worklist file (``.csv`` or ``.json``) into param rows.
+
+    CSV: the header row names the parameters; each subsequent row is one loop
+    iteration's bindings. JSON: either a list of ``{param: value}`` row objects,
+    or a single ``{param: value}`` object (one row). Every value is coerced to a
+    string (the IR's worklist rows are ``dict[str, str]``).
+    """
+    import csv
+    import json
+
+    path = Path(path)
+    if not path.is_file():
+        raise SystemExit(f"--worklist file not found: {path}")
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list) or not all(isinstance(r, dict) for r in data):
+            raise SystemExit(
+                f"--worklist JSON {path} must be a list of row objects (or one "
+                "row object)"
+            )
+        return [{str(k): str(v) for k, v in row.items()} for row in data]
+    if suffix == ".csv":
+        with path.open(newline="") as fh:
+            reader = csv.DictReader(fh)
+            return [
+                {str(k): str(v) for k, v in row.items() if k is not None}
+                for row in reader
+            ]
+    raise SystemExit(
+        f"--worklist file {path} must be .csv or .json (got {suffix!r})"
+    )
+
+
+def _resolve_worklists(
+    specs: Sequence[str] | None, workflow
+) -> dict[str, list[dict[str, str]]]:
+    """Turn ``--worklist`` specs into run-time worklists keyed by relation name.
+
+    Each spec is ``RELATION=path`` (bind the file to that loop relation) or a
+    bare ``path`` (bind to the workflow's SOLE loop relation; an error if the
+    program has zero or several). Program-mode only — a linear bundle ignores
+    worklists, so passing one there is refused loudly.
+    """
+    if not specs:
+        return {}
+    if workflow.program is None:
+        raise SystemExit(
+            "--worklist applies only to a PROGRAM bundle (with a loop over a "
+            "relation); this bundle is linear."
+        )
+    relations = sorted(workflow.data_sources.keys())
+    worklists: dict[str, list[dict[str, str]]] = {}
+    for spec in specs:
+        if "=" in spec:
+            name, _, raw = spec.partition("=")
+            name = name.strip()
+        else:
+            if len(relations) != 1:
+                raise SystemExit(
+                    "bare --worklist <file> needs exactly one loop relation to "
+                    f"bind to; this program declares {relations or 'none'}. Use "
+                    "--worklist RELATION=<file>."
+                )
+            name, raw = relations[0], spec
+        if relations and name not in relations:
+            raise SystemExit(
+                f"--worklist relation {name!r} is not one of this program's "
+                f"relations {relations}"
+            )
+        worklists[name] = _load_worklist_file(Path(raw))
+    return worklists
+
+
+def _deployment_runtime(args: argparse.Namespace):
+    """Resolve the deployment wiring for a replay/run from ``--config`` + flags.
+
+    Returns ``(cfg, effect_verifier, api_actuator, durable, allow_egress)``.
+    A ``--config`` deployment YAML supplies the full surface (records paths,
+    FHIR search params, ...); direct flags override the common fields. With
+    neither, everything is default: no verifier, no actuator, non-durable, and
+    egress only if ``--allow-model-grounding`` was passed (fully back-compatible).
+    """
+    from openadapt_flow.deployment import (
+        DeploymentConfig,
+        build_api_actuator,
+        build_effect_verifier,
+        load_deployment,
+    )
+
+    cfg = (
+        load_deployment(args.config)
+        if getattr(args, "config", None)
+        else DeploymentConfig()
+    )
+
+    effects = cfg.effects
+    if getattr(args, "effects_kind", None):
+        effects = effects.model_copy(update={"kind": args.effects_kind})
+    if getattr(args, "effects_base_url", None):
+        effects = effects.model_copy(update={"base_url": args.effects_base_url})
+    if getattr(args, "effects_root", None):
+        effects = effects.model_copy(update={"root": args.effects_root})
+
+    actuation = cfg.actuation
+    if getattr(args, "api_base_url", None):
+        actuation = actuation.model_copy(
+            update={"api": True, "base_url": args.api_base_url}
+        )
+    elif getattr(args, "api_actuator", False):
+        actuation = actuation.model_copy(update={"api": True})
+
+    try:
+        effect_verifier = build_effect_verifier(effects)
+        api_actuator = build_api_actuator(actuation)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+    durable = bool(cfg.runtime.durable or getattr(args, "durable", False))
+    allow_egress = bool(
+        cfg.runtime.allow_model_grounding
+        or getattr(args, "allow_model_grounding", False)
+    )
+    return cfg, effect_verifier, api_actuator, durable, allow_egress
 
 
 def _cmd_record(args: argparse.Namespace) -> int:
@@ -98,6 +242,52 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_induce(args: argparse.Namespace) -> int:
+    from openadapt_flow.compiler.induction import induce_program, validate_held_out
+    from openadapt_flow.ir import Workflow
+
+    # Accept both RECORDING directories (compiled via the single-trace
+    # bootstrap by induce_program) and already-compiled BUNDLE directories
+    # (a dir containing workflow.json -> loaded as a Workflow). Detecting the
+    # bundle case CLI-side keeps induce usable on artifacts the operator
+    # already has, without touching the library API.
+    traces: list = []
+    for d in args.recording:
+        path = Path(d)
+        if (path / "workflow.json").is_file():
+            traces.append(Workflow.load(path))
+        else:
+            traces.append(path)
+
+    result = induce_program(traces)
+    print(result.render())
+
+    if args.held_out and len(traces) >= 2:
+        print(validate_held_out(traces).render())
+
+    if not result.certified or result.workflow is None:
+        # Refuse rather than guess: surface the uncertainties honestly and exit
+        # nonzero so a CI / deploy gate refuses the underdetermined program.
+        print(
+            "\nNOT CERTIFIED — no program bundle written. Resolve the point(s) "
+            "above (e.g. via `disambiguate`) or supply more/consistent traces."
+        )
+        return 2
+
+    workflow = result.workflow
+    if args.name:
+        workflow = workflow.model_copy(update={"name": args.name})
+    out = Path(args.out)
+    workflow.save(out)
+    print(
+        f"\nCERTIFIED — induced program bundle written to {out} "
+        f"(workflow: {workflow.name!r}, "
+        f"{len(result.param_specs)} param(s), "
+        f"{len(result.column_decisions)} column decision(s))."
+    )
+    return 0
+
+
 def _default_run_dir() -> Path:
     """Timestamped default run directory under ``runs/``."""
     from datetime import datetime, timezone
@@ -119,14 +309,27 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     workflow = Workflow.load(bundle)
     params = _parse_params(args.param)
 
-    if args.url and args.drift:
+    # Deployment wiring (from --config and/or direct flags): a system-of-record
+    # EffectVerifier, an ApiActuator, durable-runtime, and the egress opt-in.
+    # All default to off, so an unconfigured replay behaves exactly as before.
+    (
+        cfg,
+        effect_verifier,
+        api_actuator,
+        durable,
+        allow_egress,
+    ) = _deployment_runtime(args)
+    worklists = _resolve_worklists(getattr(args, "worklist", None), workflow)
+
+    headed = args.headed or cfg.backend.headed
+    url = args.url or cfg.backend.url
+    if url and args.drift:
         raise SystemExit(
             "--drift only applies to the bundled MockMed demo app; "
             "omit --url to use it (drift your own app for real)."
         )
 
     stop = None
-    url = args.url
     if url is None:
         from openadapt_flow.mockmed.server import serve
 
@@ -141,7 +344,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     ensure_chromium_installed()
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=not args.headed)
+            browser = p.chromium.launch(headless=not headed)
             # OPT-IN session video (default off): a recorded replay lives in a
             # context so Playwright can attach the recorder; None keeps the old
             # direct-page path with zero effect.
@@ -175,7 +378,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 # they are wired ONLY when the operator explicitly passes
                 # --allow-model-grounding. Without it the replay is fully local
                 # (OCR-anchoring grounder only) and makes zero outbound calls.
-                allow_egress = getattr(args, "allow_model_grounding", False)
+                # ``allow_egress`` was resolved above from --config/flags.
                 appliance = appliance_from_env()
                 if appliance is not None and not allow_egress:
                     print(
@@ -209,6 +412,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     identity_vlm=appliance.identity_vlm if appliance else None,
                     state_verifier=(appliance.state_verifier if appliance else None),
                     allow_model_grounding=allow_egress,
+                    # Deployment wiring resolved from --config / flags: verify
+                    # consequential writes against the system of record, actuate
+                    # bound steps via the API tier, and checkpoint for resume.
+                    effect_verifier=effect_verifier,
+                    api_actuator=api_actuator,
+                    durable=durable,
                     # Normal replay prefers the deterministic structural rung.
                     # ``--drift`` exists to DEMONSTRATE the visual healing ladder
                     # on the bundled MockMed app, so it forces the visual floor
@@ -218,6 +427,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 ).run(
                     workflow,
                     params=params,
+                    worklists=worklists,
                     bundle_dir=bundle,
                     run_dir=run_dir,
                     save_healed_to=(
@@ -248,6 +458,129 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             "screenshots could have left the box (see REPORT.md)."
         )
     return 0 if report.success else 1
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    """Execute a bundle under a deployment config.
+
+    The SAME code path as ``replay`` (backend + effect verification + API
+    actuation + durable runtime, all wired from ``--config``), framed for a
+    real deployment rather than the demo: ``--drift`` (a MockMed-only teaching
+    aid) is not offered here. ``--config`` supplies the backend URL, the system
+    of record, the actuation tier, durability, and the policy.
+    """
+    # A deployment run is not the drift-demo; force it off and delegate to the
+    # shared replay executor (which reads all deployment wiring from --config).
+    args.drift = None
+    return _cmd_replay(args)
+
+
+def _cmd_resume(args: argparse.Namespace) -> int:
+    from openadapt_flow.runtime.durable import resume, resume_point
+    from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+
+    run_dir = Path(args.run_dir)
+    store = CheckpointStore(run_dir)
+    pending = store.read_pending()
+    if pending is None:
+        print(
+            f"No pending escalation at {run_dir} — nothing to resume "
+            "(a run only durably pauses when executed with a durable "
+            "deployment; see --config runtime.durable / --durable)."
+        )
+        return 1
+    if args.require_approval and pending.status != "approved":
+        print(
+            f"Pending escalation at {run_dir} is {pending.status!r}, not "
+            "'approved'. Re-run without --require-approval to resume anyway, "
+            f"or approve it first:\n    openadapt-flow approve {run_dir}"
+        )
+        return 3
+
+    print(
+        f"Resuming {run_dir} from step index {resume_point(run_dir)} "
+        f"(paused at step {pending.step_index} '{pending.step_id}': "
+        f"{pending.category}). Steps before the checkpoint are NOT re-run."
+    )
+
+    # A GUI automation cannot be resumed without a LIVE backend/vision, so build
+    # a fresh Replayer here (deployment wiring from --config) and hand it to the
+    # durable resume entrypoint, which re-binds params from the run manifest.
+    from playwright.sync_api import sync_playwright
+
+    from openadapt_flow._browser_setup import ensure_chromium_installed
+    from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+    from openadapt_flow.report import render_run_report
+    from openadapt_flow.runtime import Replayer
+
+    (
+        cfg,
+        effect_verifier,
+        api_actuator,
+        _durable,
+        allow_egress,
+    ) = _deployment_runtime(args)
+    url = args.url or cfg.backend.url
+    if url is None:
+        raise SystemExit(
+            "resume needs the target app URL to rebuild a live backend — pass "
+            "--url or set backend.url in --config."
+        )
+    headed = args.headed or cfg.backend.headed
+
+    ensure_chromium_installed()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not headed)
+        page = browser.new_page(viewport=_VIEWPORT)
+        page.goto(url)
+        try:
+            replayer = Replayer(
+                PlaywrightBackend(page),
+                effect_verifier=effect_verifier,
+                api_actuator=api_actuator,
+                durable=True,  # resume forces durability so it can pause again
+                allow_model_grounding=allow_egress,
+            )
+            report = resume(run_dir, replayer)
+        finally:
+            browser.close()
+
+    report_md = render_run_report(run_dir)
+    outcome = "success" if report.success else "FAILED"
+    print(f"Resume {outcome}: {report_md}")
+    return 0 if report.success else 1
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    """Mark a durably-paused run's pending escalation approved.
+
+    Uses the CURRENT durable public API: read the ``PendingEscalation``, flip
+    its ``status`` to ``approved`` via the model's own field, write it back.
+    NOTE (blocked-on durable/resume hardening): the durable ``resume``
+    entrypoint does not yet *enforce* approval — approval is recorded as
+    auditable metadata and ``resume --require-approval`` gates on it CLI-side.
+    A full approval store (who / when / signature) is owned by the durable
+    workstream, not synthesized here.
+    """
+    from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+
+    run_dir = Path(args.run_dir)
+    store = CheckpointStore(run_dir)
+    pending = store.read_pending()
+    if pending is None:
+        print(f"No pending escalation at {run_dir} — nothing to approve.")
+        return 1
+    if pending.status == "approved":
+        print(f"Pending escalation at {run_dir} is already approved.")
+        return 0
+    approved = pending.model_copy(update={"status": "approved"})
+    store.write_pending(approved)
+    print(
+        f"Approved pending escalation at {run_dir} "
+        f"(step {pending.step_index} '{pending.step_id}': {pending.category}).\n"
+        f"Resume it with:  openadapt-flow resume {run_dir}"
+    )
+    return 0
 
 
 def _cmd_bench(args: argparse.Namespace) -> int:
@@ -340,8 +673,20 @@ def _cmd_certify(args: argparse.Namespace) -> int:
     from openadapt_flow.policy import evaluate_policy, load_policy
 
     workflow = Workflow.load(Path(args.bundle))
+    # Policy source: explicit --policy, else the deployment config's policy
+    # section (so one deployment.yaml certifies AND runs the bundle).
+    policy_source = args.policy
+    if policy_source is None and getattr(args, "config", None):
+        from openadapt_flow.deployment import load_deployment
+
+        policy_source = load_deployment(args.config).policy.policy
+    if policy_source is None:
+        raise SystemExit(
+            "certify needs a policy: pass --policy <name-or-path> or set "
+            "policy.policy in --config."
+        )
     try:
-        policy = load_policy(args.policy)
+        policy = load_policy(policy_source)
     except (FileNotFoundError, ValueError) as e:
         raise SystemExit(str(e))
     report = evaluate_policy(workflow, policy)
@@ -419,6 +764,75 @@ def _cmd_emit_mcp(args: argparse.Namespace) -> int:
     server_path = emit_mcp_server(Path(args.bundle), Path(args.out))
     print(f"MCP server written to {server_path}")
     return 0
+
+
+def _add_deployment_flags(p: argparse.ArgumentParser, *, worklist: bool = False) -> None:
+    """Add the shared deployment-wiring flags (config + effects + actuation +
+    durable, optionally a worklist) to a replay-family subparser."""
+    p.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help=(
+            "Deployment config YAML wiring backend / actuation / effects / "
+            "runtime / policy (see docs/deployment.example.yaml). Direct flags "
+            "below override individual fields."
+        ),
+    )
+    p.add_argument(
+        "--effects-kind",
+        choices=["none", "rest", "fhir", "document-hash"],
+        default=None,
+        help=(
+            "System-of-record EffectVerifier to wire so consequential writes "
+            "are verified against the real record (not the screen)"
+        ),
+    )
+    p.add_argument(
+        "--effects-base-url",
+        default=None,
+        help="Base URL for the rest / fhir effect verifier",
+    )
+    p.add_argument(
+        "--effects-root",
+        default=None,
+        help="Document-store root for the document-hash effect verifier",
+    )
+    p.add_argument(
+        "--api-actuator",
+        action="store_true",
+        help=(
+            "Wire the API/tool actuation tier: a step carrying an ApiBinding is "
+            "performed via the API (deterministic, $0) and confirmed by the "
+            "effect verifier, skipping the GUI"
+        ),
+    )
+    p.add_argument(
+        "--api-base-url",
+        default=None,
+        help="Base URL for the API actuator (implies --api-actuator)",
+    )
+    p.add_argument(
+        "--durable",
+        action="store_true",
+        help=(
+            "Enable the Tier-3 durable runtime: checkpoint each verified step "
+            "and durably PAUSE on halt, so the run is resumable via `resume` "
+            "(never re-performing a confirmed write)"
+        ),
+    )
+    if worklist:
+        p.add_argument(
+            "--worklist",
+            action="append",
+            metavar="[RELATION=]FILE",
+            help=(
+                "CSV/JSON worklist of parameter rows driving a PROGRAM bundle's "
+                "loop over a relation (repeatable). 'RELATION=FILE' binds the "
+                "file to that relation; a bare 'FILE' binds to the program's "
+                "sole loop relation."
+            ),
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -499,6 +913,42 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_compile)
 
     p = sub.add_parser(
+        "induce",
+        help=(
+            "Induce a parameterized PROGRAM bundle from MULTIPLE recordings "
+            "(multi-trace induction: infer params / loops / branches). REFUSES "
+            "(nonzero exit, no bundle) when intent is underdetermined"
+        ),
+    )
+    p.add_argument(
+        "recording",
+        nargs="+",
+        help=(
+            "Two or more recording directories (or already-compiled bundle "
+            "directories) of the SAME task"
+        ),
+    )
+    p.add_argument(
+        "--out",
+        required=True,
+        help="Output program-bundle directory (written only when CERTIFIED)",
+    )
+    p.add_argument(
+        "--name",
+        default=None,
+        help="Name for the induced workflow (default: 'induced-program')",
+    )
+    p.add_argument(
+        "--held-out",
+        action="store_true",
+        help=(
+            "Also run leave-one-out held-out validation and print the per-fold "
+            "reproduction scores (needs >= 2 traces)"
+        ),
+    )
+    p.set_defaults(func=_cmd_induce)
+
+    p = sub.add_parser(
         "replay",
         help=(
             "Replay a bundle (serves the bundled MockMed demo app when "
@@ -560,7 +1010,83 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: off; no effect on the run directory or report)"
         ),
     )
+    _add_deployment_flags(p, worklist=True)
     p.set_defaults(func=_cmd_replay)
+
+    p = sub.add_parser(
+        "run",
+        help=(
+            "Execute a bundle under a deployment config (--config): the replay "
+            "path wired for a real deployment (backend / effects / actuation / "
+            "durable / policy) instead of the demo"
+        ),
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--url",
+        default=None,
+        help="Target app URL (default: backend.url from --config)",
+    )
+    p.add_argument(
+        "--run-dir",
+        default=None,
+        help="Run output directory (default: runs/replay-<UTC timestamp>)",
+    )
+    p.add_argument(
+        "--param",
+        action="append",
+        metavar="K=V",
+        help="Parameter substitution (repeatable)",
+    )
+    p.add_argument(
+        "--allow-model-grounding",
+        action="store_true",
+        help=(
+            "EGRESS OPT-IN (PHI audit REM-3): permit wiring an off-box model "
+            "component (also settable via runtime.allow_model_grounding)"
+        ),
+    )
+    p.add_argument(
+        "--save-healed-to",
+        default=None,
+        help="Write the healed bundle to this directory",
+    )
+    p.add_argument("--headed", action="store_true", help="Run the browser headed")
+    p.add_argument("--record-video", default=None, metavar="DIR", help=argparse.SUPPRESS)
+    _add_deployment_flags(p, worklist=True)
+    p.set_defaults(func=_cmd_run)
+
+    p = sub.add_parser(
+        "resume",
+        help=(
+            "Resume a durably-paused run from its last verified checkpoint "
+            "(never re-running an already-confirmed write)"
+        ),
+    )
+    p.add_argument("run_dir", help="The paused run directory (holds checkpoints)")
+    p.add_argument(
+        "--url",
+        default=None,
+        help="Target app URL to rebuild a live backend (default: backend.url)",
+    )
+    p.add_argument("--headed", action="store_true", help="Run the browser headed")
+    p.add_argument(
+        "--require-approval",
+        action="store_true",
+        help=(
+            "Refuse to resume unless the pending escalation is 'approved' "
+            "(see `approve`)"
+        ),
+    )
+    _add_deployment_flags(p)
+    p.set_defaults(func=_cmd_resume)
+
+    p = sub.add_parser(
+        "approve",
+        help="Mark a durably-paused run's pending escalation approved",
+    )
+    p.add_argument("run_dir", help="The paused run directory (holds the escalation)")
+    p.set_defaults(func=_cmd_approve)
 
     p = sub.add_parser(
         "bench", help="Replay a bundle N times against MockMed and aggregate"
@@ -635,8 +1161,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("bundle", help="Workflow bundle directory")
     p.add_argument(
         "--policy",
-        required=True,
-        help=("Policy YAML path, or a built-in name (permissive, clinical-write)"),
+        default=None,
+        help=(
+            "Policy YAML path, or a built-in name (permissive, clinical-write). "
+            "Defaults to policy.policy from --config."
+        ),
+    )
+    p.add_argument(
+        "--config",
+        default=None,
+        metavar="YAML",
+        help="Deployment config YAML to read the policy from when --policy is omitted",
     )
     p.set_defaults(func=_cmd_certify)
 

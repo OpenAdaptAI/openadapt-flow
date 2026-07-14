@@ -93,7 +93,9 @@ def test_resolve_worklists_unknown_relation(tmp_path: Path) -> None:
 
 
 def test_resolve_worklists_linear_bundle_refused(tmp_path: Path) -> None:
-    lin = Workflow(name="lin", steps=[Step(id="a", intent="c", action=ActionKind.CLICK)])
+    lin = Workflow(
+        name="lin", steps=[Step(id="a", intent="c", action=ActionKind.CLICK)]
+    )
     with pytest.raises(SystemExit, match="only to a PROGRAM bundle"):
         _resolve_worklists(["/x.csv"], lin)
 
@@ -142,7 +144,9 @@ def test_deployment_runtime_reads_config_file(tmp_path: Path) -> None:
         "effects:\n  kind: document-hash\n  root: /tmp/store\n"
         "runtime:\n  durable: true\n"
     )
-    cfg, ev, act, durable, egress = _deployment_runtime(_replay_ns(config=str(cfg_file)))
+    cfg, ev, act, durable, egress = _deployment_runtime(
+        _replay_ns(config=str(cfg_file))
+    )
     assert type(ev).__name__ == "DocumentHashVerifier"
     assert durable is True
 
@@ -385,7 +389,9 @@ def test_run_delegates_to_replay_with_config(tmp_path: Path, monkeypatch) -> Non
     captured: dict = {}
     _install_fake_browser(monkeypatch, captured)
 
-    rc = main(["run", str(bundle), "--config", str(cfg), "--run-dir", str(tmp_path / "r")])
+    rc = main(
+        ["run", str(bundle), "--config", str(cfg), "--run-dir", str(tmp_path / "r")]
+    )
     assert rc == 0
     # backend.url from config was used; effects + durable wired from config.
     assert type(captured["ctor"]["effect_verifier"]).__name__ == "RestRecordVerifier"

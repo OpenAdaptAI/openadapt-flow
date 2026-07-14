@@ -21,7 +21,9 @@ def _bundle(tmp: Path, name: str, steps: list[Step]) -> str:
 
 def _dose_trace(patient: str) -> list[Step]:
     return [
-        Step(id="s_patient", intent="type patient", action=ActionKind.TYPE, text=patient),
+        Step(
+            id="s_patient", intent="type patient", action=ActionKind.TYPE, text=patient
+        ),
         Step(id="s_dose", intent="type dose", action=ActionKind.TYPE, text="5mg"),
     ]
 
@@ -44,18 +46,30 @@ def test_induce_certified_writes_program_bundle(tmp_path: Path, capsys) -> None:
     assert "patient" in workflow.param_specs  # the varying value became a param
 
 
-def test_induce_refuses_contradiction_nonzero_no_bundle(
-    tmp_path: Path, capsys
-) -> None:
+def test_induce_refuses_contradiction_nonzero_no_bundle(tmp_path: Path, capsys) -> None:
     b1 = _bundle(
         tmp_path,
         "c1",
-        [Step(id="a", intent="click approve", action=ActionKind.CLICK, risk="irreversible")],
+        [
+            Step(
+                id="a",
+                intent="click approve",
+                action=ActionKind.CLICK,
+                risk="irreversible",
+            )
+        ],
     )
     b2 = _bundle(
         tmp_path,
         "c2",
-        [Step(id="b", intent="click reject", action=ActionKind.CLICK, risk="irreversible")],
+        [
+            Step(
+                id="b",
+                intent="click reject",
+                action=ActionKind.CLICK,
+                risk="irreversible",
+            )
+        ],
     )
     out = tmp_path / "should_not_exist"
 
@@ -76,9 +90,7 @@ def test_induce_held_out_flag_prints_validation(tmp_path: Path, capsys) -> None:
 
 
 def test_induce_parser_accepts_multiple_recordings() -> None:
-    args = build_parser().parse_args(
-        ["induce", "r1", "r2", "r3", "--out", "bundle"]
-    )
+    args = build_parser().parse_args(["induce", "r1", "r2", "r3", "--out", "bundle"])
     assert args.command == "induce"
     assert args.recording == ["r1", "r2", "r3"]
     assert args.out == "bundle"

@@ -128,9 +128,7 @@ def load_deployment(source: str | Path) -> DeploymentConfig:
 
     path = Path(source)
     if not path.is_file():
-        raise FileNotFoundError(
-            f"deployment config {source!r} is not an existing file"
-        )
+        raise FileNotFoundError(f"deployment config {source!r} is not an existing file")
     try:
         data = yaml.safe_load(path.read_text()) or {}
     except yaml.YAMLError as e:  # pragma: no cover - passthrough
@@ -188,9 +186,7 @@ def build_effect_verifier(cfg: EffectsConfig) -> Optional[Any]:
 
     if kind in ("document-hash", "document_hash", "doc-hash"):
         if not cfg.root:
-            raise ValueError(
-                "effects.kind 'document-hash' requires effects.root"
-            )
+            raise ValueError("effects.kind 'document-hash' requires effects.root")
         from openadapt_flow.runtime.effects import DocumentHashVerifier
 
         return DocumentHashVerifier(cfg.root, glob=cfg.glob)

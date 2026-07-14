@@ -91,9 +91,7 @@ def _load_worklist_file(path: Path) -> list[dict[str, str]]:
                 {str(k): str(v) for k, v in row.items() if k is not None}
                 for row in reader
             ]
-    raise SystemExit(
-        f"--worklist file {path} must be .csv or .json (got {suffix!r})"
-    )
+    raise SystemExit(f"--worklist file {path} must be .csv or .json (got {suffix!r})")
 
 
 def _resolve_worklists(
@@ -766,7 +764,9 @@ def _cmd_emit_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
-def _add_deployment_flags(p: argparse.ArgumentParser, *, worklist: bool = False) -> None:
+def _add_deployment_flags(
+    p: argparse.ArgumentParser, *, worklist: bool = False
+) -> None:
     """Add the shared deployment-wiring flags (config + effects + actuation +
     durable, optionally a worklist) to a replay-family subparser."""
     p.add_argument(
@@ -1052,7 +1052,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the healed bundle to this directory",
     )
     p.add_argument("--headed", action="store_true", help="Run the browser headed")
-    p.add_argument("--record-video", default=None, metavar="DIR", help=argparse.SUPPRESS)
+    p.add_argument(
+        "--record-video", default=None, metavar="DIR", help=argparse.SUPPRESS
+    )
     _add_deployment_flags(p, worklist=True)
     p.set_defaults(func=_cmd_run)
 

@@ -1,0 +1,75 @@
+# openadapt-flow deployment configuration.
+#
+# ONE file wires a full deployment. It is read by:
+#   record | compile | certify | replay | run | resume   (via --config)
+# so the same backend / actuation / effects / runtime / policy configuration
+# drives every stage.
+#
+# Every section is OPTIONAL. An empty file is a valid deployment: fully local,
+# GUI-only, no effect verification, non-durable, zero outbound calls. Add only
+# the sections your deployment needs.
+#
+# Loader + schema: openadapt_flow/deployment.py (DeploymentConfig).
+
+name: mockmed-triage-demo
+
+# -- backend: where/how to drive the target application's GUI ----------------
+backend:
+  # The GUI URL under automation. Omit to let the command choose its default
+  # (replay/run serve the bundled MockMed demo app when no url is given).
+  url: http://localhost:8080
+  headed: false            # true => a visible browser (demo / debugging)
+
+# -- actuation: the API/tool tier (top of the capability ladder) -------------
+# When api=true, a step carrying an ir.ApiBinding is PERFORMED via the API
+# (deterministic, $0, no GUI) and confirmed by the effects verifier below;
+# the GUI resolve/act is skipped for that step. Disabled => GUI ladder only.
+actuation:
+  api: false
+  base_url: http://localhost:8080   # base for relative ApiBinding url_templates
+  timeout_s: 5.0
+
+# -- effects: the system of record consequential writes are verified against -
+# kind: none | rest | fhir | document-hash
+#   none          -> no verifier (a bundle with effects then HALTs, fail-safe)
+#   rest          -> JSON REST SoR (e.g. MockMed /api/db)
+#   fhir          -> FHIR R4 search (e.g. OpenEMR)
+#   document-hash -> a filesystem document store
+effects:
+  kind: rest
+
+  # rest ---------------------------------------------------------------------
+  base_url: http://localhost:8080
+  records_path: /api/db
+  records_key: records
+
+  # fhir (used when kind: fhir) ----------------------------------------------
+  # base_url: https://openemr.example.org/apis/default/fhir
+  # resource_type: Observation
+  # search_params: { patient: "Patient/123", category: vital-signs }
+  # access_token: "${OPENEMR_FHIR_TOKEN}"   # set via env in real deployments
+  # verify_tls: true
+
+  # document-hash (used when kind: document-hash) ----------------------------
+  # root: /var/lib/exports
+  # glob: "**/*.pdf"
+
+  timeout_s: 5.0
+  poll_interval_s: 0.2
+
+# -- runtime: durability + model-egress posture ------------------------------
+runtime:
+  # Tier-3 durable runtime: checkpoint each verified step, durably PAUSE on a
+  # halt (never re-perform a confirmed write), resume via `openadapt-flow
+  # resume <run_dir>`. Off by default.
+  durable: true
+
+  # EGRESS OPT-IN (PHI audit REM-3). Off => fully local, zero outbound calls.
+  # true => permit wiring an off-box model grounder / identity-VLM / state
+  # verifier (screenshots may leave the box). Leave false unless required.
+  allow_model_grounding: false
+
+# -- policy: the safety policy that certifies this bundle --------------------
+policy:
+  # A policy YAML path, or a shipped built-in name (permissive, clinical-write).
+  policy: clinical-write

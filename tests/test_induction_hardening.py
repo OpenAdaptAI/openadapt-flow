@@ -53,7 +53,9 @@ def _type(step_id: str, field: str, value: str, *, risk: str = "reversible") -> 
     )
 
 
-def _key(step_id: str, key: str, *, intent: str | None = None, risk="reversible") -> Step:
+def _key(
+    step_id: str, key: str, *, intent: str | None = None, risk="reversible"
+) -> Step:
     return Step(
         id=step_id,
         intent=intent or f"press {key}",
@@ -254,9 +256,7 @@ def test_structural_coverage_is_not_certification():
     assert frozen.certified is True
     # ...yet structural coverage against a DIFFERENT value is < 1.0: coverage is
     # not what certifies, and does not claim behavioral correctness.
-    other = Workflow(
-        name="w", steps=[_type("a", "patient", "Zoe"), _key("b", "Enter")]
-    )
+    other = Workflow(name="w", steps=[_type("a", "patient", "Zoe"), _key("b", "Enter")])
     assert structural_trace_coverage(frozen, other) < 1.0
 
 
@@ -270,7 +270,9 @@ def test_varying_selection_target_is_never_a_frozen_demo_entity():
     literal that silently re-selects the demo entity. It becomes a parameter OR
     an Uncertainty -- never a frozen ``literal`` of the demo's entity."""
     traces = [
-        Workflow(name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]),
+        Workflow(
+            name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]
+        ),
         Workflow(name="chart", steps=[_select("s_row", "Bob"), _key("s_ok", "Enter")]),
     ]
     result = induce_program(traces)
@@ -297,8 +299,12 @@ def test_varying_selection_quarantines_rather_than_freezing():
     and an advisory entity_ref proposal -- so no program silently ships the demo
     entity."""
     traces = [
-        Workflow(name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]),
-        Workflow(name="chart", steps=[_select("s_row", "Carol"), _key("s_ok", "Enter")]),
+        Workflow(
+            name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]
+        ),
+        Workflow(
+            name="chart", steps=[_select("s_row", "Carol"), _key("s_ok", "Enter")]
+        ),
     ]
     result = induce_program(traces)
     assert result.certified is False
@@ -313,8 +319,12 @@ def test_constant_selection_target_still_certifies():
     target (a stable button) and still certifies -- the hardening only fires on
     a VARYING selection."""
     traces = [
-        Workflow(name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]),
-        Workflow(name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]),
+        Workflow(
+            name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]
+        ),
+        Workflow(
+            name="chart", steps=[_select("s_row", "Alice"), _key("s_ok", "Enter")]
+        ),
     ]
     result = induce_program(traces)
     assert result.certified is True

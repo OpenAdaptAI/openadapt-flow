@@ -122,7 +122,12 @@ def _active_console_session() -> int:
     try:
         import ctypes  # noqa: PLC0415
 
-        return int(ctypes.windll.kernel32.WTSGetActiveConsoleSessionId())
+        # ``ctypes.windll`` exists only on Windows; access it dynamically so
+        # this stays importable + type-checkable on macOS/Linux CI.
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return -1
+        return int(windll.kernel32.WTSGetActiveConsoleSessionId())
     except Exception:  # noqa: BLE001 - non-Windows / probe failure
         return -1
 

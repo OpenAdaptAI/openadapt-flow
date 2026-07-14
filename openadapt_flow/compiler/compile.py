@@ -1228,6 +1228,17 @@ def compile_recording(
     # replay unchanged.
     _phi_free_identity(workflow)
 
+    # PHI governance manifest (audit REM-1): classify the bundle so an operator
+    # inventory and the pre-commit/CI guard can act on it.
+    from openadapt_flow import privacy as _privacy
+
+    workflow.phi_scrubbed = _privacy.text_scrubbing_enabled()
+    workflow.contains_phi = any(
+        s.anchor is not None and (s.anchor.context_text or s.anchor.structured_identity)
+        for s in workflow.steps
+    )
+    workflow.encrypted = False
+
     workflow.save(bundle)
     (bundle / "workflow.py").write_text(render_workflow_py(workflow))
     return workflow

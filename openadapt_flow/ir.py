@@ -760,6 +760,29 @@ class Workflow(BaseModel):
     schema_version: int = 1
     name: str
     recording_id: Optional[str] = None
+    # -- PHI governance manifest (PHI audit REM-1) --------------------------
+    # A compiled bundle is a HIPAA-designated record; these fields let an
+    # operator's compliance inventory classify it, and let the pre-commit / CI
+    # guard (scripts/check_bundle_phi.py) block a bundle that still carries
+    # plaintext identifiers from reaching git.
+    #
+    # ``contains_phi``: True when this bundle still carries a PLAINTEXT identity
+    # band (``anchor.context_text`` / ``structured_identity``) — the flagship
+    # PHI-at-rest leak (GAP-1a). PHI-free bundles store a salted-hash
+    # ``identity_template`` instead and set this False. (It does NOT certify the
+    # absence of every identifier in every free-text postcondition — that needs
+    # the optional Presidio pass; see ``phi_scrubbed``.)
+    contains_phi: bool = False
+    # ``phi_scrubbed``: True when the optional openadapt-privacy (Presidio) pass
+    # was ACTIVE on the compile path, so identifier-bearing TEXT_PRESENT
+    # postconditions were dropped. False = the scrub was unavailable/off (the
+    # bundle may retain identifier text in postconditions / labels).
+    phi_scrubbed: bool = False
+    # ``encrypted``: format-ready flag for the deferred at-rest encryption
+    # (REM-1 crypto, docs/phi_at_rest.md). Always False today — a bundle is
+    # plaintext-serialized JSON + PNGs, protected by the governance guards and
+    # the operator's disk encryption, NOT by bundle encryption yet.
+    encrypted: bool = False
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

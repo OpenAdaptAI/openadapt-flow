@@ -29,3 +29,16 @@ benchmark/cosmetic_drift/_recording/
 benchmark/fault_model/runs/
 benchmark/fault_model/_bundle/
 benchmark/fault_model/_recording/
+.venv-phi/
+
+# --- PHI governance (audit REM-1): keep compiled bundles out of git ---
+# A compiled bundle (workflow.json + templates/*.png) is a HIPAA-designated
+# record. Do NOT commit bundles produced against real patient data. The
+# committed docs/showcase-openemr/bundle is an explicit, PHI-free exception
+# (synthetic OpenEMR public-demo data; see that dir's README).
+/bundles/
+bundle/
+!docs/showcase-openemr/bundle/
+*.bundle/
+# Local scrub/regeneration scratch venvs
+.venv-phi/

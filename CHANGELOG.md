@@ -1,6 +1,42 @@
 # CHANGELOG
 
 
+## v0.24.0 (2026-07-14)
+
+### Features
+
+- Durable checkpoint/resume for ProgramGraph + authenticated approval on resume (P0)
+  ([#99](https://github.com/OpenAdaptAI/openadapt-flow/pull/99),
+  [`2bc2807`](https://github.com/OpenAdaptAI/openadapt-flow/commit/2bc2807ffba3d0548d4efc386a3534a641685053))
+
+* feat: durable checkpoint/resume for ProgramGraph + authenticated approval on resume (P0)
+
+P0-4 — durable ProgramGraph checkpoint/resume: the Phase-2 state-machine interpreter now checkpoints
+  its whole INTERPRETER STATE after each verified action state (frame/subflow/loop stack, loop
+  cursors, bound params, completed effect keys, expected on-screen text, transition-history hash,
+  bundle version) via a new ProgramCheckpoint (in runtime/durable/, not ir.py). On a halt it durably
+  PAUSES; resume RESTORES the interpreter from that state — re-entering each subflow/loop graph at
+  the paused state, finishing the in-progress loop row and running the remaining rows — never
+  restarting from the graph entry / a step index, and never re-performing an already-confirmed
+  write. Linear-mode durability is unchanged.
+
+P0-5 — resume as an authenticated approval workflow: resume() now REQUIRES an ApprovalRecord
+  (approver identity + timestamp + chosen resolution + bundle version hash) before continuing a
+  paused run; revalidates the live app is still in the checkpoint's expected state and that
+  already-confirmed effects still hold; and refuses a stale (expired) pause. A caller with no valid
+  approval cannot resume. The CLI approve/resume commands record and enforce it.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format durable files; merge main (schema-v2)
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.23.0 (2026-07-14)
 
 ### Bug Fixes

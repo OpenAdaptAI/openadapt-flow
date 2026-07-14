@@ -44,6 +44,7 @@ when they matter.
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from openadapt_flow.ir import ActionKind, Step
 
@@ -111,7 +112,7 @@ def step_text(step: Step) -> str:
     return " ".join(parts)
 
 
-def classify_step_risk(step: Step) -> str:
+def classify_step_risk(step: Step) -> Literal["reversible", "irreversible"]:
     """Infer ``"irreversible"`` or ``"reversible"`` for a step.
 
     Only CLICK / DOUBLE_CLICK steps can classify irreversible (they are the

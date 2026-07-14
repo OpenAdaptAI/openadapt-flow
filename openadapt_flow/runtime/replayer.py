@@ -294,7 +294,10 @@ class Replayer:
             )
 
         self.backend = backend
-        self.vision = vision
+        # Defaulted to the ``openadapt_flow.vision`` module above when None, so it
+        # is always populated by the time replay runs; typed Any (a namespace-like
+        # facade exposing find_template/ocr/wait_settled/...).
+        self.vision: Any = vision
         self.grounder = grounder
         # Whether the deterministic structural ACTION rung (top of the ladder)
         # may run. True (default) = product behavior: on a structure-bearing
@@ -427,7 +430,8 @@ class Replayer:
         )
         self._record_identity_coverage(workflow, report)
         new_crops: dict[str, bytes] = {}
-        self._last_click_point: Optional[Point] = None
+        # Per-run reset; the attribute is declared in __init__.
+        self._last_click_point = None
         t_run = time.monotonic()
 
         # Fail fast, naming them, when a REQUIRED typed parameter has no value
@@ -648,7 +652,9 @@ class Replayer:
             text = getattr(line, "text", None)
             if not text:
                 continue
-            scrubbed = _scrub_phi(text).strip()
+            # ``text`` is truthy here, so scrub_text returns a str; ``or ""``
+            # only satisfies its Optional[str] return signature.
+            scrubbed = (_scrub_phi(text) or "").strip()
             if scrubbed and scrubbed not in seen:
                 seen.add(scrubbed)
                 out.append(scrubbed)
@@ -1323,7 +1329,10 @@ class Replayer:
                     # (postcondition literals) — scrub PHI before it hits the
                     # console log (see openadapt_flow.privacy).
                     rescued = "; ".join(
-                        _scrub_phi(r) for r in result.postcondition_drift_rescues
+                        # Rescues are non-empty descriptions, so scrub_text returns
+                        # a str; ``or ""`` only satisfies its Optional[str] return.
+                        _scrub_phi(r) or ""
+                        for r in result.postcondition_drift_rescues
                     )
                     print(
                         f"  drift-oracle: {len(result.postcondition_drift_rescues)}"
@@ -1434,6 +1443,7 @@ class Replayer:
         """
         binding = step.api_binding
         assert binding is not None  # guaranteed by the caller
+        assert self.api_actuator is not None  # guaranteed by the caller (line ~1140)
 
         # An API write MUST be confirmable against the system of record --
         # exactly as a GUI write that declares effects must be. The binding may
@@ -2236,8 +2246,12 @@ class Replayer:
                     params=params,
                     param_examples=workflow.params,
                 )
+            # This branch means no identity_template, so the constructor-time
+            # assert (step.anchor.context_text OR identity_template) guarantees a
+            # non-None context band. Use the already-narrowed local ``anchor``.
+            assert anchor.context_text is not None
             return identity_mod.verify_target_identity(
-                step.anchor.context_text,
+                anchor.context_text,
                 observed,
                 params=params,
                 param_examples=workflow.params,
@@ -2628,6 +2642,7 @@ class Replayer:
 
         Returns the postconditions that remain failed after the pass.
         """
+        assert self.state_verifier is not None  # guaranteed by the caller (line ~2618)
         survivors: list[Any] = []
         for pc in failed_pcs:
             expected = self._expected_state_text(pc)

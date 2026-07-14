@@ -376,14 +376,61 @@ def test_replay_injects_effects_actuator_durable_and_worklist(
 
 
 def test_run_delegates_to_replay_with_config(tmp_path: Path, monkeypatch) -> None:
-    wf = Workflow(name="lin", steps=[Step(id="a", intent="c", action=ActionKind.CLICK)])
+    # ``run`` is now FAIL-CLOSED (openadapt_flow.run_gate): it executes only an
+    # ADMISSIBLE bundle. So this delegation/wiring test uses a bundle that passes
+    # every gate (certified clinical-write, armed, effect-covered, encrypted,
+    # sealed) and asserts the config wiring reaches the shared executor.
+    from openadapt_flow.ir import Anchor, Postcondition, PostconditionKind
+    from openadapt_flow.runtime.effects import Effect, EffectKind
+
+    key = "cli-wiring-key"
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", key)
+
+    def _armed_click(sid, ocr, *, risk="reversible", effects=None):
+        return Step(
+            id=sid,
+            intent=f"click {ocr}",
+            action=ActionKind.CLICK,
+            risk=risk,
+            anchor=Anchor(
+                template=f"{sid}.png",
+                region=(0, 0, 10, 10),
+                click_point=(5, 5),
+                ocr_text=ocr,
+                context_text="Row 42 Jane Doe",
+            ),
+            identity_armed=True,
+            effects=list(effects or []),
+            expect=[Postcondition(kind=PostconditionKind.TEXT_PRESENT, text="OK")],
+        )
+
+    wf = Workflow(
+        name="lin",
+        steps=[
+            _armed_click("a", "Open"),
+            _armed_click(
+                "b",
+                "Save",
+                risk="irreversible",
+                effects=[
+                    Effect(
+                        kind=EffectKind.RECORD_WRITTEN,
+                        match={"patient_id": "p1"},
+                        idempotency_key="run-1",
+                        risk="irreversible",
+                    )
+                ],
+            ),
+        ],
+    )
     bundle = tmp_path / "bundle"
-    wf.save(bundle)
+    wf.save(bundle, encrypt=True, key=key)
     cfg = tmp_path / "d.yaml"
     cfg.write_text(
         "backend:\n  url: http://from-config\n"
         "effects:\n  kind: rest\n  base_url: http://sor\n"
         "runtime:\n  durable: true\n"
+        "policy:\n  policy: clinical-write\n"
     )
 
     captured: dict = {}
@@ -393,6 +440,7 @@ def test_run_delegates_to_replay_with_config(tmp_path: Path, monkeypatch) -> Non
         ["run", str(bundle), "--config", str(cfg), "--run-dir", str(tmp_path / "r")]
     )
     assert rc == 0
-    # backend.url from config was used; effects + durable wired from config.
+    # The bundle was ADMITTED and delegated: backend.url from config was used;
+    # effects + durable wired from config.
     assert type(captured["ctor"]["effect_verifier"]).__name__ == "RestRecordVerifier"
     assert captured["ctor"]["durable"] is True

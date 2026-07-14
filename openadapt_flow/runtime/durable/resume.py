@@ -47,15 +47,16 @@ from openadapt_flow.runtime.durable.program_checkpoint import (
 )
 
 
-def resume_point(run_dir: Path | str) -> int:
+def resume_point(run_dir: Path | str, *, key: Optional[str] = None) -> int:
     """The step index a resume would continue from for a LINEAR ``run_dir``.
 
     The last verified checkpoint's ``next_step_index``; 0 when nothing has
     verified yet (a run that halted on its very first step resumes from 0). Not
     meaningful for a program run (whose resume point is an interpreter state);
-    use :meth:`CheckpointStore.last_program_checkpoint` there.
+    use :meth:`CheckpointStore.last_program_checkpoint` there. ``key`` decrypts
+    encrypted checkpoints (see :class:`CheckpointStore`).
     """
-    last = CheckpointStore(run_dir).last_checkpoint()
+    last = CheckpointStore(run_dir, key=key).last_checkpoint()
     return last.next_step_index if last is not None else 0
 
 
@@ -68,6 +69,7 @@ def resume(
     params: Optional[dict[str, str]] = None,
     save_healed_to: Optional[Path | str] = None,
     now: Optional[datetime] = None,
+    key: Optional[str] = None,
 ) -> RunReport:
     """Resume a durably-paused run from its last verified checkpoint.
 
@@ -89,6 +91,10 @@ def resume(
             identically.
         save_healed_to: Override the manifest's healed-bundle path.
         now: Injectable clock for the stale-pause check (defaults to UTC now).
+        key: At-rest passphrase for an ENCRYPTED run (its checkpoints and/or its
+            bundle). Resolved from ``key`` or ``OPENADAPT_BUNDLE_KEY``. Used to
+            decrypt the durable checkpoints, load an encrypted bundle, and keep
+            the resumed leg sealing new checkpoints. None => plaintext.
 
     Returns:
         The :class:`~openadapt_flow.ir.RunReport` for the resumed leg.
@@ -101,8 +107,11 @@ def resume(
             authorized, the pause expired, the bundle changed, or the live app
             diverged from the checkpoint's expected state.
     """
+    from openadapt_flow import crypto as _crypto
+
+    key = _crypto.resolve_key(key)
     run_dir = Path(run_dir)
-    store = CheckpointStore(run_dir)
+    store = CheckpointStore(run_dir, key=key)
     manifest = store.read_manifest()
     pending = store.read_pending()
 
@@ -133,7 +142,9 @@ def resume(
             now=now,
         )
 
-    workflow = Workflow.load(resolved_bundle)
+    workflow = Workflow.load(resolved_bundle, key=key)
+    # Keep the resumed leg sealing new checkpoints with the same key.
+    replayer.checkpoint_key = key
     program_checkpoint: Optional[ProgramCheckpoint] = store.last_program_checkpoint()
 
     if program_checkpoint is not None or (pending is not None and pending.program):
@@ -149,7 +160,7 @@ def resume(
         )
 
     # -- linear resume (unchanged control flow; now gated by approval) --------
-    start_index = resume_point(run_dir)
+    start_index = resume_point(run_dir, key=key)
     replayer.durable = True
     return replayer.run(
         workflow,

@@ -178,8 +178,11 @@ class DurableRun:
         bundle_dir: Path | str,
         params: dict[str, str],
         save_healed_to: Optional[Path | str] = None,
+        key: Optional[str] = None,
     ) -> None:
-        self.store = CheckpointStore(run_dir)
+        # ``key`` (None by default) opts the durable artifacts into AES-256-GCM
+        # encryption-at-rest; unset => plaintext, exactly as before.
+        self.store = CheckpointStore(run_dir, key=key)
         self.workflow_name = workflow_name
         self.store.write_manifest(
             RunManifest(
@@ -294,7 +297,11 @@ class DurableRun:
 
 
 def resumed_step_results(
-    run_dir: Path | str, workflow: Workflow, resume_from: int
+    run_dir: Path | str,
+    workflow: Workflow,
+    resume_from: int,
+    *,
+    key: Optional[str] = None,
 ) -> list[StepResult]:
     """Synthesize ``StepResult``s for the already-verified steps of a resume.
 
@@ -305,7 +312,7 @@ def resumed_step_results(
     the workflow definition for any checkpoint the operator pruned). Each is
     marked ``ok=True`` and annotated as resumed, for an honest audit trail.
     """
-    store = CheckpointStore(run_dir)
+    store = CheckpointStore(run_dir, key=key)
     by_index = {c.step_index: c for c in store.checkpoints()}
     results: list[StepResult] = []
     for index in range(min(resume_from, len(workflow.steps))):

@@ -43,8 +43,18 @@ def bundle_version(bundle_dir: Path | str) -> str:
     a bundle edited between pause and resume changes this digest, so resume can
     REFUSE to restore an interpreter state captured against a different program
     (RFC §5: resume is deterministic against the SAME compiled program).
+
+    For an ENCRYPTED bundle (``workflow.json.enc``, no plaintext ``workflow.json``)
+    the digest is taken over the on-disk ciphertext container: it is stable for
+    an unchanged bundle across a pause/resume cycle (nothing re-saves it in
+    between), and any re-save -- which is the only way the program changes --
+    reseals it to a new container, so the change-detection semantics hold without
+    needing the decryption key here.
     """
-    path = Path(bundle_dir) / "workflow.json"
+    bundle = Path(bundle_dir)
+    path = bundle / "workflow.json"
+    if not path.is_file():
+        path = bundle / "workflow.json.enc"
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 

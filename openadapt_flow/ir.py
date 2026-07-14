@@ -820,8 +820,9 @@ class BundleManifest(BaseModel):
     AND those asset hashes (so it changes if any semantic byte changes), and
     ``provenance`` carries the compiler version + certification block. ``encrypted``
     mirrors ``Workflow.encrypted`` (at-rest encryption is a later item; the flag
-    is present so the format is ready for it). Additive: a v1 bundle carries no
-    manifest and one is computed on read.
+    mirrors ``Workflow.encrypted``: True when ``workflow.json`` is sealed at rest
+    with AES-256-GCM). Additive: a v1 bundle carries no manifest and one is
+    computed on read.
     """
 
     schema_version: int = SCHEMA_VERSION
@@ -834,7 +835,8 @@ class BundleManifest(BaseModel):
     )
     provenance: BundleProvenance = Field(default_factory=BundleProvenance)
     encrypted: bool = Field(
-        default=False, description="mirrors Workflow.encrypted (at-rest crypto TBD)"
+        default=False,
+        description="mirrors Workflow.encrypted (workflow.json sealed at rest)",
     )
 
 
@@ -860,10 +862,13 @@ class Workflow(BaseModel):
     # postconditions were dropped. False = the scrub was unavailable/off (the
     # bundle may retain identifier text in postconditions / labels).
     phi_scrubbed: bool = False
-    # ``encrypted``: format-ready flag for the deferred at-rest encryption
-    # (REM-1 crypto, docs/phi_at_rest.md). Always False today — a bundle is
-    # plaintext-serialized JSON + PNGs, protected by the governance guards and
-    # the operator's disk encryption, NOT by bundle encryption yet.
+    # ``encrypted``: True when this bundle's ``workflow.json`` is sealed at rest
+    # with AES-256-GCM (``save(encrypt=True)`` -> ``workflow.json.enc``; see
+    # openadapt_flow.crypto and docs/phi_at_rest.md). False (default) = the
+    # plaintext-serialized JSON path, protected by the governance guards and the
+    # operator's disk encryption. Sealed INTO the integrity digest, so a decrypt
+    # at load re-verifies against this value. (Template PNGs are still
+    # governance-guarded + disk-encrypted, not yet sealed — see docs/phi_at_rest.md.)
     encrypted: bool = False
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -909,7 +914,14 @@ class Workflow(BaseModel):
 
     # -- bundle I/O ---------------------------------------------------------
 
-    def save(self, bundle_dir: Path | str, *, seal_manifest: bool = True) -> Path:
+    def save(
+        self,
+        bundle_dir: Path | str,
+        *,
+        seal_manifest: bool = True,
+        encrypt: bool = False,
+        key: Optional[str] = None,
+    ) -> Path:
         """Write workflow.json into bundle_dir (templates are written by the
         compiler / healer, which own the crop images).
 
@@ -918,18 +930,59 @@ class Workflow(BaseModel):
         digest + compiler version, carrying over any prior certification) and
         also writes it to a standalone ``manifest.json`` sidecar for external
         tooling. The ``schema_version`` is bumped to the current version.
+
+        Encryption-at-rest (opt-in, OFF by default): when ``encrypt=True`` (or a
+        ``key`` is supplied), the serialized ``workflow.json`` is sealed with
+        AES-256-GCM (``openadapt_flow.crypto``) and written as
+        ``workflow.json.enc`` instead of plaintext ``workflow.json``; the
+        passphrase comes from ``key`` or the ``OPENADAPT_BUNDLE_KEY`` environment
+        variable (a missing key raises ``crypto.MissingKeyError`` -- an encrypt
+        request never silently degrades to plaintext). The integrity manifest is
+        sealed over the PLAINTEXT content BEFORE encryption, so an encrypted
+        bundle keeps every schema-v2 guarantee (content digest, asset hashes,
+        provenance) once decrypted at load. The ``manifest.json`` sidecar stays
+        plaintext (it carries only hashes + provenance, no PHI) so a compliance
+        inventory can read ``encrypted: true`` without the key. When
+        ``encrypt=False`` and no key is given, behavior is unchanged: a plaintext
+        ``workflow.json`` is written exactly as before.
+
+        Returns the path actually written (``workflow.json`` or, when encrypted,
+        ``workflow.json.enc``).
         """
+        do_encrypt = encrypt or key is not None
         bundle = Path(bundle_dir)
         bundle.mkdir(parents=True, exist_ok=True)
         (bundle / "templates").mkdir(exist_ok=True)
         if self.schema_version < SCHEMA_VERSION:
             self.schema_version = SCHEMA_VERSION
+        # Reflect the at-rest state in the workflow BEFORE the manifest is sealed,
+        # so the sealed content digest (and the mirrored manifest.encrypted flag)
+        # cover the true value and integrity re-verifies after a decrypt.
+        self.encrypted = do_encrypt
         if seal_manifest:
             from openadapt_flow import bundle_validation as _bv
 
             self.manifest = _bv.build_manifest(self, bundle)
-        path = bundle / "workflow.json"
-        path.write_text(self.model_dump_json(indent=2))
+        serialized = self.model_dump_json(indent=2)
+        plaintext_path = bundle / "workflow.json"
+        encrypted_path = bundle / "workflow.json.enc"
+        if do_encrypt:
+            from openadapt_flow import crypto as _crypto
+
+            encrypted_path.write_bytes(
+                _crypto.encrypt_bytes(
+                    serialized.encode("utf-8"), key, aad=_crypto.BUNDLE_AAD
+                )
+            )
+            # Never leave a stale plaintext copy alongside the ciphertext.
+            if plaintext_path.exists():
+                plaintext_path.unlink()
+            path = encrypted_path
+        else:
+            plaintext_path.write_text(serialized)
+            if encrypted_path.exists():
+                encrypted_path.unlink()
+            path = plaintext_path
         if self.manifest is not None:
             (bundle / "manifest.json").write_text(
                 self.manifest.model_dump_json(indent=2)
@@ -943,6 +996,7 @@ class Workflow(BaseModel):
         *,
         validate: bool = True,
         verify_integrity: bool = True,
+        key: Optional[str] = None,
     ) -> "Workflow":
         """Load a bundle, migrating v1 -> v2, validating structure, and (for a
         v2 bundle carrying a sealed digest) verifying integrity.
@@ -958,11 +1012,29 @@ class Workflow(BaseModel):
           manifest digest, recompute it and reject a tampered bundle. A legacy
           (pre-v2) bundle has no sealed digest, so its manifest is computed
           fresh and nothing is rejected.
+        - ``key`` (default None): decryption passphrase for an ENCRYPTED bundle
+          (one saved with ``save(encrypt=True)``, present on disk as
+          ``workflow.json.enc``). Resolved from ``key`` or the
+          ``OPENADAPT_BUNDLE_KEY`` environment variable. A wrong/missing key
+          fails LOUDLY (``crypto.MissingKeyError`` / ``crypto.DecryptionError``)
+          with no partial load; the AEAD tag also catches a tampered ciphertext.
+          Ignored for a plaintext bundle. Integrity + structural validation then
+          run on the decrypted content exactly as for a plaintext bundle.
         """
         bundle = Path(bundle_dir)
         from openadapt_flow import bundle_validation as _bv
 
-        raw = json.loads((bundle / "workflow.json").read_text())
+        encrypted_path = bundle / "workflow.json.enc"
+        plaintext_path = bundle / "workflow.json"
+        if encrypted_path.is_file():
+            from openadapt_flow import crypto as _crypto
+
+            decrypted = _crypto.decrypt_bytes(
+                encrypted_path.read_bytes(), key, aad=_crypto.BUNDLE_AAD
+            )
+            raw = json.loads(decrypted)
+        else:
+            raw = json.loads(plaintext_path.read_text())
         raw = _bv.migrate_bundle_dict(raw)
         # A manifest may be embedded in workflow.json OR sit in a sidecar; the
         # embedded one wins, else the sidecar, else it is computed fresh.

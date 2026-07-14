@@ -46,8 +46,8 @@ The integration philosophy that follows from this:
 3. **Never put a heavy dependency on the replay hot path.** The replay loop is the
    moat. Recording, grounding, and privacy are *edges* (compile-time or opt-in); the
    core stays `pydantic + opencv + rapidocr + pillow`.
-4. **Prefer additive interop over swaps.** flow ships v0.3.0 and moves fast. `ir.py` is
-   imported by **44 files** and marked FROZEN in `DESIGN.md`. A schema swap has blast
+4. **Prefer additive interop over swaps.** flow moves fast and its schema is load-bearing.
+   `ir.py` is imported by **44 files** and marked FROZEN in `DESIGN.md`. A schema swap has blast
    radius across the whole compiler, runtime, and benchmark surface; an interop shim has
    none.
 
@@ -151,9 +151,9 @@ Do **not** replace `ir.ActionKind` / `ir.Step` with `openadapt_types.Action`. Re
   different layers; forcing flow's IR to be the canonical `Action` would either bloat the
   canonical schema with compiler internals or strip flow's evidence out of its own IR.
 - **Blast radius.** `ir` is imported by 44 files and 27 `ActionKind.` call-sites, and is
-  marked **FROZEN** in `DESIGN.md` ("additive changes only, and only by the integrator").
+  marked **FROZEN** in `DESIGN.md` (additive changes only).
   A swap touches the compiler, every runtime rung, the healer, the benchmark harness, and
-  the emit/skill + MCP surfaces at once. That is a v0.4 refactor, not a v0.3 dependency.
+  the emit/skill + MCP surfaces at once. That is a major refactor, not an additive dependency.
 
 **Recommended concrete shape** (optional, additive):
 
@@ -177,7 +177,7 @@ openadapt_flow/interop/types.py   # new, optional
 trivially revertible. The only ongoing cost is keeping the field map in sync if
 `ActionType` gains members flow starts using — a one-function maintenance surface.
 
-> If a future v0.4 wants tighter alignment, the safe next step is to make
+> If a future release wants tighter alignment, the safe next step is to make
 > `ir.ActionKind`'s **values** authoritative-compatible (they already are) and add a CI
 > test asserting `set(ActionKind) ⊆ set(ActionType)`, so drift is caught without a swap.
 
@@ -342,7 +342,7 @@ privacy/grounding/umbrella owned by other workstreams):
 
 - **types first** because it's the cheapest and it's a *precondition for clean interop* on
   everything downstream (emit, benchmark, evals). It also has zero effect on the hot path,
-  so it can't destabilize v0.3.
+  so it can't destabilize the current release.
 - **privacy before desktop capture** because desktop capture is precisely where
   PHI-bearing pixels and keystrokes enter the system. Recording a clinic desktop without a
   scrub step is the one integration ordering that is *unsafe* to get wrong.

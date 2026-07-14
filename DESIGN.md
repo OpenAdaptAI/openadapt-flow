@@ -12,16 +12,23 @@ backend owns a structured layer (a browser DOM, a native UIA/AX tree) the
 resolution ladder's TOP rung re-finds the recorded target as an ELEMENT and
 acts on it deterministically (`StructuralActionBackend`, see Resolution ladder).
 Structure is preferred where present; the visual ladder is the fallback floor
-for pixel-only substrates (RDP/Citrix/canvas). The reference backend is
-Playwright-driven (headless-capable, CI-friendly, permission-free); native OS /
-RDP backends are future adapters.
+for pixel-only substrates (RDP/Citrix/canvas). Backend maturity is uneven and
+stated honestly: the **shipped, end-to-end-exercised** backend is
+Playwright-driven (headless-capable, CI-friendly, permission-free) and is the
+only path proven against a real third-party app. Beyond it, a `WindowsBackend`
+(UI Automation over the WindowsAgentArena server) is **proven structurally on a
+local Windows-on-ARM VM** (record → compile → replay, DB-judged), and a FreeRDP
+`RDPBackend` plus a Citrix/remote-display pixel-only backend exist as
+**spikes, not validated integrations** — their live behavior is unmeasured to
+the degree disclosed in `docs/backends/RDP.md` and `docs/desktop/CITRIX_PIXEL.md`.
+They are adapters onto the one protocol, not rewrites.
 
 ## Core contracts (additive-only; do not change without updating this doc)
 
 - `openadapt_flow/ir.py` — the schema. The **v0 core** — `Workflow` (a flat
   `list[Step]`), `Step`, `Anchor`, `Postcondition`, and the runtime result
   models (`RunReport`/`StepResult`/`HealEvent`) — is STABLE and changed only
-  additively, by the integrator. It has since grown additively, and the linear
+  additively. It has since grown additively, and the linear
   `Workflow` remains the degenerate case of everything below (so bundles stay
   backward-compatible):
   - **SCROLL** (OpenEMR spike): `ActionKind.SCROLL` plus optional
@@ -82,17 +89,17 @@ RDP backends are future adapters.
   heals/{step_id}/…  # heal crops + heal.json per heal event
 ```
 
-## Module ownership (build phase — do not edit files outside your area)
+## Module map
 
-| Area | Owner | Files |
-|---|---|---|
-| Mock app + backend + recorder | Agent A | `openadapt_flow/mockmed/**`, `openadapt_flow/backends/playwright_backend.py`, `openadapt_flow/recorder.py`, `openadapt_flow/demo_driver.py`, `tests/test_mockmed.py`, `tests/test_recorder.py` |
-| Vision + compiler | Agent B | `openadapt_flow/vision/**`, `openadapt_flow/compiler/**`, `tests/test_vision.py`, `tests/test_compiler.py` |
-| Runtime (ladder/heal/verify) | Agent C | `openadapt_flow/runtime/**`, `tests/test_resolver.py`, `tests/test_replayer.py`, `tests/test_heal.py` |
-| Report, emit, CLI, bench, CI | Agent D | `openadapt_flow/report.py`, `openadapt_flow/bench.py`, `openadapt_flow/emit/**`, `openadapt_flow/__main__.py`, `.github/workflows/ci.yml`, `tests/test_report.py`, `tests/test_emit.py` |
-| E2E integration | Integrator | `tests/e2e/**`, cross-module fixes anywhere |
+| Area | Files |
+|---|---|
+| Mock app + backend + recorder | `openadapt_flow/mockmed/**`, `openadapt_flow/backends/playwright_backend.py`, `openadapt_flow/recorder.py`, `openadapt_flow/demo_driver.py`, `tests/test_mockmed.py`, `tests/test_recorder.py` |
+| Vision + compiler | `openadapt_flow/vision/**`, `openadapt_flow/compiler/**`, `tests/test_vision.py`, `tests/test_compiler.py` |
+| Runtime (ladder/heal/verify) | `openadapt_flow/runtime/**`, `tests/test_resolver.py`, `tests/test_replayer.py`, `tests/test_heal.py` |
+| Report, emit, CLI, bench, CI | `openadapt_flow/report.py`, `openadapt_flow/bench.py`, `openadapt_flow/emit/**`, `openadapt_flow/__main__.py`, `.github/workflows/ci.yml`, `tests/test_report.py`, `tests/test_emit.py` |
+| E2E integration | `tests/e2e/**` |
 
-## Vision API (Agent B implements; Agent C consumes via injection)
+## Vision API
 
 `openadapt_flow/vision/__init__.py` re-exports:
 
@@ -127,7 +134,7 @@ def wait_settled(backend, *, interval_s: float = 0.1,
     # return the last PNG
 ```
 
-## Compiler (Agent B)
+## Compiler
 
 `openadapt_flow.compiler.compile_recording(recording_dir, out_bundle_dir, *, name) -> Workflow`
 
@@ -161,7 +168,7 @@ design for it, don't call any API).
 Also emit a readable Python *rendering* of the workflow (`workflow.py` in the
 bundle, generated, not parsed back) so humans can code-review the automation.
 
-## Runtime (Agent C)
+## Runtime
 
 ```python
 class Replayer:
@@ -254,7 +261,7 @@ new crops). Record heal crops + heal.json under `run_dir/heals/<step_id>/`.
 Irreversible steps: if resolution needed a rung below `ocr`, do NOT act — fail
 with a clear "needs human confirmation" error (v0 policy).
 
-## MockMed (Agent A)
+## MockMed
 
 Static single-page app (`openadapt_flow/mockmed/static/index.html` + app.js +
 styles.css, no external resources, no CSS transitions/animations, font-size
@@ -296,7 +303,7 @@ after frame).
 with the same action methods plus `type_text(text, param=None)` and
 `finish() -> recording dir`.
 
-## Report / emit / CLI / bench / CI (Agent D)
+## Report / emit / CLI / bench / CI
 
 - `report.py`: `render_run_report(run_dir) -> Path` — REPORT.md in run_dir:
   outcome, per-step table (intent, rung, confidence, ms, heal?), embedded
@@ -324,12 +331,12 @@ with the same action methods plus `type_text(text, param=None)` and
 
 ## Test policy
 
-- Unit tests per module, cross-module deps faked/injected (Agent C must not
-  import Agent B's vision in unit tests — inject fakes; the integrator wires
-  real parts in `tests/e2e/`).
+- Unit tests per module, cross-module deps faked/injected (the runtime must
+  not import the vision module in unit tests — inject fakes; real parts are
+  wired in `tests/e2e/`).
 - Deterministic: no sleeps besides settle polling; server on ephemeral port.
 - No network beyond localhost. No API keys required anywhere in tests.
-- E2E matrix (integrator): baseline ×3 all-template zero-heal; theme / move /
+- E2E matrix: baseline ×3 all-template zero-heal; theme / move /
   rename each succeed WITH heals then replay-healed all-template; modal fails
   gracefully naming the step; params substitution verified via banner OCR
   with a note value DIFFERENT from the recorded one (the identity case

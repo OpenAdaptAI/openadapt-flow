@@ -201,7 +201,7 @@ class RunGateReport(BaseModel):
         if not self.passed:
             names = ", ".join(g.title for g in self.refusals if not g.warning)
             lines.append(
-                f"  -> RUN REFUSED (fail-closed): {names}. " "Nothing was executed."
+                f"  -> RUN REFUSED (fail-closed): {names}. Nothing was executed."
             )
         else:
             lines.append("  -> ADMITTED: all fail-closed gates satisfied.")
@@ -306,8 +306,7 @@ def _gate_certification(workflow: Workflow, policy_name: str) -> GateResult:
         return _result(
             GATE_CERTIFICATION,
             True,
-            f"certified under {policy_name!r} ({report.n_steps} steps, "
-            "0 violations)",
+            f"certified under {policy_name!r} ({report.n_steps} steps, 0 violations)",
         )
     offenders = [v.step_id for v in report.violations if v.step_id]
     return _result(
@@ -329,8 +328,7 @@ def _gate_identity(steps: list[Step]) -> GateResult:
         return _result(
             GATE_IDENTITY,
             True,
-            f"{total}/{total} entity-sensitive/consequential action(s) "
-            "identity-armed",
+            f"{total}/{total} entity-sensitive/consequential action(s) identity-armed",
         )
     return _result(
         GATE_IDENTITY,

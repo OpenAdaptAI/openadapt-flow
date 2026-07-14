@@ -29,12 +29,16 @@ import functools
 import http.server
 import os
 import re
+import shutil
 import socketserver
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from openadapt_flow.backends.windows_backend import WindowsBackend
 
 # The user's existing VM (see docs/desktop/PHASE2.md). Overridable per call.
 DEFAULT_VM_UUID = "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
@@ -54,6 +58,55 @@ class SnapshotInfo:
     snapshot_id: str
     current: bool
     name: str = ""
+
+
+@dataclass(frozen=True)
+class AgentEndpoint:
+    """A launched ``win_agent`` endpoint, wired for an encrypted+pinned client.
+
+    Returned by :meth:`ParallelsVM.launch_agent`. It carries everything the
+    client needs to talk to the agent **end to end secure with no manual step**:
+    the base ``url`` (``https://`` when TLS was auto-provisioned), the per-run
+    bearer ``token`` (independent authorization factor), and the ``pin_fingerprint``
+    of the per-run self-signed cert the control plane minted and provisioned into
+    the guest. Hand it to :meth:`backend` (or splat the fields into
+    :class:`~openadapt_flow.backends.windows_backend.WindowsBackend`) and the
+    channel is encrypted + fingerprint-pinned, fail-closed.
+
+    Args:
+        url: Agent base URL. ``https://<guest-ip>:<port>`` for the default secure
+            launch; ``http://<guest-ip>:<port>`` only for the ``tls=False``
+            loopback/dev escape.
+        token: Per-run bearer token (None when the launch was tokenless).
+        pin_fingerprint: SHA-256 fingerprint of the agent's per-run certificate
+            the client pins. None only for the plaintext ``tls=False`` escape.
+        require_tls: Value to pass ``WindowsBackend(require_tls=...)`` — True for
+            the secure default (fail closed on any plaintext downgrade), False
+            for the explicit dev escape.
+    """
+
+    url: str
+    token: Optional[str] = None
+    pin_fingerprint: Optional[str] = None
+    require_tls: bool = True
+
+    def backend(self, **kwargs: object) -> "WindowsBackend":
+        """Construct a :class:`WindowsBackend` wired to this endpoint.
+
+        The client is encrypted (HTTPS) and **pinned** to the per-run cert, and
+        carries the bearer token — the full end-to-end secure channel with no
+        manual provisioning. Extra ``kwargs`` (viewport, timeouts, an injected
+        ``session``) pass straight through.
+        """
+        from openadapt_flow.backends.windows_backend import WindowsBackend
+
+        return WindowsBackend(
+            server_url=self.url,
+            auth_token=self.token,
+            pin_fingerprint=self.pin_fingerprint,
+            require_tls=self.require_tls,
+            **kwargs,  # type: ignore[arg-type]
+        )
 
 
 class ParallelsError(RuntimeError):
@@ -389,7 +442,9 @@ class ParallelsVM:
         token: Optional[str] = None,
         host_ip: Optional[str] = None,
         wait_s: float = 25.0,
-    ) -> str:
+        tls: bool = True,
+        tls_hostnames: Optional[list[str]] = None,
+    ) -> AgentEndpoint:
         """Deploy + start the hardened ``win_agent`` server in session 1.
 
         The successor to :meth:`launch_shim`: it ships the dependency-free,
@@ -398,12 +453,35 @@ class ParallelsVM:
         ``session1_launch.py``, so ``mss``/``pyautogui`` address the real
         desktop. ``host`` defaults to ``0.0.0.0`` because a host->guest
         ``WindowsBackend`` must reach it over the shared network; pass a
-        ``token`` (strongly recommended when exposed like this) and give the
-        SAME token to ``WindowsBackend(auth_token=...)``.
+        ``token`` (strongly recommended when exposed like this).
 
-        Returns the guest URL once ``/health`` reports ok (raises on timeout).
+        **TLS is auto-provisioned by default** (``tls=True``): this control
+        plane mints a fresh per-run self-signed cert for the guest IP
+        (``win_agent.tls.generate_self_signed_cert``), provisions the cert + key
+        into the guest, starts the agent serving **HTTPS** with them, and returns
+        the cert **fingerprint** on the :class:`AgentEndpoint` so the client pins
+        it. A launched desktop session is therefore encrypted **and** pinned end
+        to end with **no manual step** — the PHI-in-transit control (see
+        ``docs/phi_in_transit.md``). The minted host-side key/cert are deleted
+        once provisioned into the guest.
+
+        Set ``tls=False`` for the documented **loopback/dev escape**: the agent
+        serves plaintext HTTP and the returned endpoint carries
+        ``require_tls=False`` so the client does not fail closed. Never carry
+        real PHI over that path.
+
+        Args:
+            tls: Auto-provision TLS (default True, secure). False = plaintext
+                dev escape.
+            tls_hostnames: Extra SANs the per-run cert must be valid for, on top
+                of the guest IP and loopback (e.g. a DNS name the client uses).
+
+        Returns:
+            An :class:`AgentEndpoint` (url + token + pin fingerprint) once
+            ``/health`` reports ok. Raises :class:`ParallelsError` on timeout.
         """
         host_ip = host_ip or self.host_ip()
+        guest_ip = self.guest_ip()
         server = self._agent_server_path()
         launcher = os.path.abspath(os.path.join(_SCRIPT_DIR, "session1_launch.py"))
         self.exec_cmd(f"if not exist {GUEST_DIR} mkdir {GUEST_DIR}")
@@ -423,6 +501,16 @@ class ParallelsVM:
                 f"localport={port}",
             ]
         )
+
+        # Auto-provision the per-run cert BEFORE launching so the agent can serve
+        # HTTPS from the first request (no plaintext window). Minting happens on
+        # this control plane (cryptography); the guest only needs stdlib ssl.
+        fingerprint: Optional[str] = None
+        if tls:
+            fingerprint = self._provision_agent_cert(
+                guest_ip, host_ip=host_ip, extra_hostnames=tls_hostnames
+            )
+
         self.kill_shim()
         time.sleep(2)
         launch_args = [
@@ -436,21 +524,78 @@ class ParallelsVM:
         ]
         if token:
             launch_args += ["--token", token]
+        if tls:
+            launch_args += [
+                "--certfile",
+                f"{GUEST_DIR}/agent-cert.pem",
+                "--keyfile",
+                f"{GUEST_DIR}/agent-key.pem",
+            ]
         self.exec(launch_args)
-        url = f"http://{self.guest_ip()}:{port}"
+
+        scheme = "https" if tls else "http"
+        url = f"{scheme}://{guest_ip}:{port}"
         deadline = time.time() + wait_s
         while time.time() < deadline:
-            if self._agent_alive(url):
-                return url
+            if self._agent_alive(url, fingerprint=fingerprint):
+                return AgentEndpoint(
+                    url=url,
+                    token=token,
+                    pin_fingerprint=fingerprint,
+                    require_tls=tls,
+                )
             time.sleep(1.5)
         raise ParallelsError(f"win_agent did not come up at {url}")
 
-    def _agent_alive(self, url: str) -> bool:
-        """True when the agent's unauthenticated ``/health`` reports ok."""
+    def _provision_agent_cert(
+        self,
+        guest_ip: str,
+        *,
+        host_ip: Optional[str] = None,
+        extra_hostnames: Optional[list[str]] = None,
+    ) -> str:
+        """Mint a per-run self-signed cert and push it into the guest.
+
+        Runs on the control plane (uses ``cryptography``). The cert's SAN covers
+        the guest IP the client reaches (plus loopback and any
+        ``extra_hostnames``). The cert + key are copied into ``GUEST_DIR`` so the
+        agent can serve HTTPS with them, then the host-side copies (the private
+        key is a secret) are deleted. Returns the cert's SHA-256 fingerprint for
+        the client to pin.
+        """
+        from openadapt_flow.backends.win_agent.tls import generate_self_signed_cert
+
+        hostnames = [guest_ip, *(extra_hostnames or [])]
+        bundle = generate_self_signed_cert(hostnames)
+        try:
+            self.push_file(
+                bundle.certfile, f"{GUEST_DIR}/agent-cert.pem", host_ip=host_ip
+            )
+            self.push_file(
+                bundle.keyfile, f"{GUEST_DIR}/agent-key.pem", host_ip=host_ip
+            )
+        finally:
+            # The host copies (esp. the private key) are secrets and no longer
+            # needed once in the guest -- never leave them on the control plane.
+            shutil.rmtree(os.path.dirname(bundle.certfile), ignore_errors=True)
+        return bundle.fingerprint
+
+    def _agent_alive(self, url: str, *, fingerprint: Optional[str] = None) -> bool:
+        """True when the agent's unauthenticated ``/health`` reports ok.
+
+        Over HTTPS the per-run cert is self-signed, so the liveness probe must
+        pin ``fingerprint`` too (system-CA validation would reject it) -- the
+        same pin the client will use, verified here before we hand it back.
+        """
         try:
             import requests
 
-            r = requests.get(f"{url}/health", timeout=8)
+            if fingerprint:
+                from openadapt_flow.backends.win_agent.tls import pinned_session
+
+                r = pinned_session(fingerprint).get(f"{url}/health", timeout=8)
+            else:
+                r = requests.get(f"{url}/health", timeout=8)
             return r.status_code == 200 and r.json().get("status") == "ok"
         except Exception:  # noqa: BLE001
             return False

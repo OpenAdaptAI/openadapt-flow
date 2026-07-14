@@ -66,9 +66,13 @@ def test_windows_builds_windows_backend() -> None:
 
 
 def test_windows_threads_auth_token() -> None:
+    # Loopback URL: this asserts token-threading only, NOT the TLS guard. A
+    # non-loopback ``http://`` would (correctly) be refused by WindowsBackend's
+    # fail-closed require_tls default (#112); loopback plaintext is the sanctioned
+    # dev channel, so the token assertion runs without tripping that guard.
     backend = build_backend(
         BackendConfig(
-            kind="windows", agent_url="http://host:5001", agent_token="s3cr3t"
+            kind="windows", agent_url="http://localhost:5001", agent_token="s3cr3t"
         )
     )
     assert backend._auth_token == "s3cr3t"

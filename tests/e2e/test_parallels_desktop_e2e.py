@@ -157,7 +157,6 @@ def test_desktop_record_compile_replay_structural(tmp_path) -> None:
         record_desktop_demo,
         structural_armed_coverage,
     )
-    from openadapt_flow.backends import WindowsBackend
     from openadapt_flow.backends.parallels_vm import DEFAULT_VM_UUID, ParallelsVM
     from openadapt_flow.compiler import compile_recording
     from openadapt_flow.ir import Workflow
@@ -173,12 +172,13 @@ def test_desktop_record_compile_replay_structural(tmp_path) -> None:
         f"oaflow-e2e-{int(time.time())}", description="openadapt-flow desktop e2e"
     )
     try:
-        url = vm.launch_agent(token=token)
-        # Synthetic-app e2e over the private Parallels host<->guest network
-        # (``url`` is the guest IP, non-loopback) with token auth, no PHI --
-        # opt out of the fail-closed require_tls default. Real PHI lanes use
-        # https:// + pin_fingerprint (docs/phi_in_transit.md).
-        backend = WindowsBackend(server_url=url, auth_token=token, require_tls=False)
+        endpoint = vm.launch_agent(token=token)
+        # launch_agent auto-provisions the per-run TLS cert into the guest and
+        # returns the pin fingerprint, so the client is encrypted + pinned end to
+        # end with no manual step (docs/phi_in_transit.md). ``endpoint.backend()``
+        # wires https:// + pin_fingerprint + require_tls + token in one call.
+        backend = endpoint.backend()
+        assert endpoint.url.startswith("https://")
         assert backend.probe(), "win_agent screenshot probe failed"
 
         # Deploy + seed + launch the RELIABLE WinForms target in session 1.

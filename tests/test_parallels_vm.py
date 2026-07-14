@@ -140,22 +140,71 @@ def _stub_agent_deps(monkeypatch, vm, exec_calls, *, alive=True):
         return _completed("")
 
     monkeypatch.setattr(vm, "exec", fake_exec)
-    monkeypatch.setattr(vm, "_agent_alive", lambda url: alive)
+    monkeypatch.setattr(vm, "_agent_alive", lambda url, **k: alive)
 
 
-def test_launch_agent_deploys_and_returns_guest_url(monkeypatch):
+def test_launch_agent_autoprovisions_tls_and_returns_pinned_endpoint(monkeypatch):
     vm = ParallelsVM(UUID)
     exec_calls: list[list] = []
+    pushed: list[str] = []
     _stub_agent_deps(monkeypatch, vm, exec_calls)
+    # Record what gets provisioned into the guest (cert + key land here).
+    monkeypatch.setattr(vm, "push_file", lambda local, guest, **k: pushed.append(guest))
 
-    url = vm.launch_agent(port=5000, token="tok-xyz")
-    assert url == "http://10.211.55.3:5000"
+    ep = vm.launch_agent(port=5000, token="tok-xyz")
+
+    # Secure by default: HTTPS URL, a real pin fingerprint, fail-closed client.
+    assert ep.url == "https://10.211.55.3:5000"
+    assert ep.require_tls is True
+    assert ep.token == "tok-xyz"
+    assert ep.pin_fingerprint and len(ep.pin_fingerprint) == 64  # SHA-256 hex
+    # The per-run cert + key were provisioned into the guest.
+    assert f"{pv.GUEST_DIR}/agent-cert.pem" in pushed
+    assert f"{pv.GUEST_DIR}/agent-key.pem" in pushed
 
     launch = next(
         a for a in exec_calls if any("win_agent_server.py" in str(x) for x in a)
     )
     assert "--host" in launch and "0.0.0.0" in launch
     assert "--token" in launch and "tok-xyz" in launch
+    # The agent is told to serve HTTPS with the provisioned material.
+    assert "--certfile" in launch and f"{pv.GUEST_DIR}/agent-cert.pem" in launch
+    assert "--keyfile" in launch and f"{pv.GUEST_DIR}/agent-key.pem" in launch
+
+
+def test_launch_agent_endpoint_builds_pinned_backend(monkeypatch):
+    vm = ParallelsVM(UUID)
+    exec_calls: list[list] = []
+    _stub_agent_deps(monkeypatch, vm, exec_calls)
+
+    ep = vm.launch_agent(port=5000, token="tok-xyz")
+    backend = ep.backend()
+    # End-to-end: the client is wired https + pinned + tokened with no manual step.
+    assert type(backend).__name__ == "WindowsBackend"
+    assert backend.server_url == "https://10.211.55.3:5000"
+    assert backend._pin_fingerprint == ep.pin_fingerprint
+    assert backend._auth_token == "tok-xyz"
+    assert backend._require_tls is True and backend._tls is True
+
+
+def test_launch_agent_tls_false_is_plaintext_dev_escape(monkeypatch):
+    vm = ParallelsVM(UUID)
+    exec_calls: list[list] = []
+    pushed: list[str] = []
+    _stub_agent_deps(monkeypatch, vm, exec_calls)
+    monkeypatch.setattr(vm, "push_file", lambda local, guest, **k: pushed.append(guest))
+
+    ep = vm.launch_agent(port=5000, token="tok-xyz", tls=False)
+
+    assert ep.url == "http://10.211.55.3:5000"
+    assert ep.require_tls is False
+    assert ep.pin_fingerprint is None
+    # No cert material minted or provisioned on the dev escape.
+    assert not any("agent-cert.pem" in p or "agent-key.pem" in p for p in pushed)
+    launch = next(
+        a for a in exec_calls if any("win_agent_server.py" in str(x) for x in a)
+    )
+    assert "--certfile" not in launch and "--keyfile" not in launch
 
 
 def test_launch_agent_omits_token_when_none(monkeypatch):

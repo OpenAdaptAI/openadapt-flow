@@ -207,13 +207,30 @@ follow_imports_for_stubs = true
 # code changes to resolve; they're excluded from the gate for now so the
 # checker is green while still covering the other modules. Remove entries here
 # as the annotations are hardened.
+#
+# The SAFETY-CRITICAL compile/replay path is NOT in this list: the compiler
+# (compiler.compile), the pre-click identity gate (runtime.identity), and the
+# replayer (runtime.replayer) are fully type-checked. What remains is genuinely
+# lower-stakes, harder-to-annotate debt:
+#   - CLI / reporting surface: __main__, report
+#   - alternate backends: backends.playwright_backend, backends.rdp_backend
+#   - benchmark & interactive tooling: benchmark.desktop_benchmark,
+#     interactive_recorder
+#   - learning-loop synthesis: learning.synth_stream
+#   - disambiguation heuristics: compiler.disambiguation
+#   - runtime helpers still on untyped deps: runtime.effects._common,
+#     runtime.grounder, runtime.healing.perturbation
+#   - the VLM microservice (FastAPI, dynamic): services.vlm_service.*
+#   - offline validation harnesses (not on the runtime path):
+#     validation.* (adversary_corpus, dense_surface, identity_ladder,
+#     identity_roc, pixel_identity_probe, vlm_identity_probe)
+#   - perceptual hashing on numpy internals: vision.hashing
 [[tool.mypy.overrides]]
 module = [
     "openadapt_flow.__main__",
     "openadapt_flow.backends.playwright_backend",
     "openadapt_flow.backends.rdp_backend",
     "openadapt_flow.benchmark.desktop_benchmark",
-    "openadapt_flow.compiler.compile",
     "openadapt_flow.compiler.disambiguation",
     "openadapt_flow.interactive_recorder",
     "openadapt_flow.learning.synth_stream",
@@ -221,8 +238,6 @@ module = [
     "openadapt_flow.runtime.effects._common",
     "openadapt_flow.runtime.grounder",
     "openadapt_flow.runtime.healing.perturbation",
-    "openadapt_flow.runtime.identity",
-    "openadapt_flow.runtime.replayer",
     "openadapt_flow.services.vlm_service.app",
     "openadapt_flow.services.vlm_service.backends",
     "openadapt_flow.services.vlm_service.batching",

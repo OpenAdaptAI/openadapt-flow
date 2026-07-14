@@ -79,13 +79,25 @@ silently opens the channel.
 - **Second factor retained.** The bearer token still gates `/screenshot` and
   `/execute_windows` over TLS.
 
+**Auto-provisioned on the Parallels launch path**
+
+`ParallelsVM.launch_agent()` closes the manual step end to end: it mints the
+per-run cert on this control plane, provisions the cert + key into the guest,
+starts the agent serving **HTTPS**, deletes the host-side key, and returns an
+`AgentEndpoint` carrying the URL, token, and **pin fingerprint**. Call
+`endpoint.backend()` (or splat its fields into `WindowsBackend`) and the client
+is encrypted + pinned + fail-closed with **no manual provisioning**. The
+documented dev escape is `launch_agent(tls=False)`, which serves plaintext and
+returns `require_tls=False` — never for real PHI.
+
 **Residual / operator responsibility**
 
-- **Cert/key distribution & lifecycle.** Minting is provided; **provisioning the
-  cert into the guest and delivering the fingerprint to the client** is the
-  control plane's job. Treat the private key like any secret (never commit it —
-  `generate_self_signed_cert` writes the key `0600`; keys/certs live in tmp/run
-  dirs, not git).
+- **Cert/key distribution & lifecycle.** On the Parallels launch path this is
+  automatic (above). For other control planes, minting is provided but
+  **provisioning the cert into the guest and delivering the fingerprint to the
+  client** is the control plane's job. Treat the private key like any secret
+  (never commit it — `generate_self_signed_cert` writes the key `0600`;
+  keys/certs live in tmp/run dirs, not git).
 - **Rotation.** Certs are per-run and short-lived by design; there is no
   long-lived cert to rotate, but a long-running agent should be restarted with a
   fresh cert per session.

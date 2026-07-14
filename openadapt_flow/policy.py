@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from openadapt_flow.ir import ActionKind, Step, Workflow
 from openadapt_flow.risk import classify_step_risk, step_text
+from openadapt_flow.traversal import iter_workflow_steps
 
 # Action kinds that a pre-click / pre-type identity check applies to — kept in
 # lockstep with Replayer._record_identity_coverage (anchored click/type).
@@ -82,6 +83,39 @@ def is_vacuous(step: Step) -> bool:
     """True when an effect-expecting step asserts NOTHING (empty ``expect``) —
     it will pass vacuously at replay (``docs/LIMITS.md``)."""
     return expects_effect(step) and not step.expect
+
+
+def has_screen_postcondition(step: Step) -> bool:
+    """True when the step carries at least one SCREEN postcondition
+    (``step.expect``) — a visual/structural assertion about what the frame
+    should look like. A weak oracle: it cannot see a partial / phantom /
+    duplicate write to the system of record (``docs/LIMITS.md``)."""
+    return bool(step.expect)
+
+
+def has_system_effect(step: Step) -> bool:
+    """True when the step declares at least one SYSTEM-OF-RECORD effect
+    (``step.effects``) — a typed contract verified against the real system of
+    record (an API/DB read), NOT the screen. This is the oracle the ``expect``
+    postconditions are blind to (the "5 of 7 silent" transactional faults)."""
+    return bool(step.effects)
+
+
+def effect_has_idempotency_key(step: Step) -> bool:
+    """True when at least one of the step's system-of-record effects carries a
+    non-empty idempotency / at-most-once key — the guard that collapses a
+    retried or double-delivered submission to a single record instead of a
+    silent duplicate write."""
+    return any(getattr(e, "idempotency_key", None) for e in step.effects)
+
+
+def has_unconfirmed_effect_binding(step: Step) -> bool:
+    """True when any of the step's effects is a PLACEHOLDER whose
+    system-of-record binding was NOT derivable from the demonstration
+    (``Effect.needs_operator_confirmation``). Such an effect names a write the
+    compiler refused to invent an endpoint for; certifying it would bless a
+    fabricated/unconfirmed binding (the replayer HALTs on it at run time)."""
+    return any(getattr(e, "needs_operator_confirmation", False) for e in step.effects)
 
 
 def step_confidence(step: Step) -> float:
@@ -183,12 +217,33 @@ class Policy(BaseModel):
         require_identity_for: Every step matching one of these tokens (a
             :func:`step_tags` tag such as ``entity_navigation`` / ``write``, or
             a keyword) MUST be identity-armed.
-        require_effect_verification_for: Every step matching one of these
-            tokens (e.g. ``save``, ``submit``, ``create``, or the ``write``
-            tag) MUST carry at least one postcondition. Names the requirement
-            even though today's only effect verifier is the vision
-            postconditions (system-of-record verification is future work; see
-            ``docs/LIMITS.md``).
+        require_screen_postconditions_for: Every step matching one of these
+            tokens MUST carry at least one SCREEN postcondition (``step.expect``
+            — a visual/structural frame assertion). A necessary-but-weak oracle
+            (blind to partial/phantom/duplicate system-of-record writes); pair
+            it with ``require_system_effects_for`` for writes.
+        require_system_effects_for: Every step matching one of these tokens
+            (e.g. the ``write`` tag) MUST declare at least one SYSTEM-OF-RECORD
+            effect (``step.effects``) — a typed contract verified against the
+            real system of record, not the screen. This is the check a clinical
+            write needs: a screen assertion alone is the exact weak oracle the
+            effect layer replaced.
+        require_idempotency_key_for: Every step matching one of these tokens
+            (e.g. ``irreversible``) MUST carry a system-of-record effect bearing
+            an idempotency / at-most-once key, so a retried or double-delivered
+            submission cannot land as a silent duplicate write.
+        prohibit_unconfirmed_effect_bindings: Fail on any step carrying a
+            PLACEHOLDER effect whose system-of-record binding was NOT derivable
+            from the demonstration (``Effect.needs_operator_confirmation``) —
+            an unconfirmed/fabricated binding must never be certified.
+        require_effect_verification_for: DEPRECATED — retained for backward
+            compatibility. Historically named "effect verification" but only
+            ever checked the SCREEN postconditions (``step.expect``), NOT the
+            system of record. It is now an alias of
+            ``require_screen_postconditions_for`` (same check, same field). New
+            policies should use ``require_system_effects_for`` (system of
+            record) and/or ``require_screen_postconditions_for`` (screen)
+            explicitly.
         max_unverified_steps: Maximum number of vacuous (effect-expecting,
             no-postcondition) steps allowed. ``None`` = unlimited.
         require_human_approval_below_confidence: Any step whose compile-time
@@ -205,6 +260,11 @@ class Policy(BaseModel):
     prohibit_unarmed_clicks: bool = False
     prohibit_vacuous_postconditions: bool = False
     require_identity_for: list[str] = Field(default_factory=list)
+    require_screen_postconditions_for: list[str] = Field(default_factory=list)
+    require_system_effects_for: list[str] = Field(default_factory=list)
+    require_idempotency_key_for: list[str] = Field(default_factory=list)
+    prohibit_unconfirmed_effect_bindings: bool = False
+    # DEPRECATED alias of require_screen_postconditions_for (see docstring).
     require_effect_verification_for: list[str] = Field(default_factory=list)
     max_unverified_steps: Optional[int] = None
     require_human_approval_below_confidence: Optional[float] = None
@@ -307,7 +367,14 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
     """
     violations: list[Violation] = []
 
-    for step in workflow.steps:
+    # Traverse EVERY action the bundle can execute — the linear ``steps`` list
+    # for a v0 bundle, or every ACTION state across ``program`` + ``subflows``
+    # for a program-mode bundle (whose ``steps`` is typically empty). Iterating
+    # ``workflow.steps`` alone would certify a state-machine bundle full of
+    # unsafe writes as vacuously clean (P0). See ``traversal.iter_workflow_steps``.
+    steps = list(iter_workflow_steps(workflow))
+
+    for step in steps:
         if policy.prohibit_unarmed_clicks and is_identity_applicable(step):
             if not is_identity_armed(step):
                 violations.append(
@@ -354,20 +421,97 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
                     )
                 )
 
+        # SCREEN postconditions (step.expect): a visual/structural frame
+        # assertion. ``require_effect_verification_for`` is the DEPRECATED name
+        # for this same check (it never inspected the system of record); it is
+        # honoured as an alias so old policies keep working.
+        if policy.require_screen_postconditions_for and step_matches_any(
+            step, policy.require_screen_postconditions_for
+        ):
+            if not has_screen_postcondition(step):
+                violations.append(
+                    Violation(
+                        rule="require_screen_postconditions_for",
+                        step_id=step.id,
+                        reason=(
+                            "step matches require_screen_postconditions_for but "
+                            "carries no screen postcondition (step.expect) to "
+                            "verify what appeared on screen"
+                        ),
+                    )
+                )
+
         if policy.require_effect_verification_for and step_matches_any(
             step, policy.require_effect_verification_for
         ):
-            if not step.expect:
+            if not has_screen_postcondition(step):
                 violations.append(
                     Violation(
                         rule="require_effect_verification_for",
                         step_id=step.id,
                         reason=(
-                            "step matches require_effect_verification_for but "
-                            "carries no postcondition to verify its effect"
+                            "step matches require_effect_verification_for "
+                            "(DEPRECATED: checks the SCREEN postcondition only, "
+                            "not the system of record — use "
+                            "require_system_effects_for) but carries no "
+                            "screen postcondition"
                         ),
                     )
                 )
+
+        # SYSTEM-OF-RECORD effects (step.effects): the real oracle a
+        # consequential write needs. A screen postcondition alone cannot see a
+        # partial / phantom / duplicate / lost-update write (P0-2).
+        if policy.require_system_effects_for and step_matches_any(
+            step, policy.require_system_effects_for
+        ):
+            if not has_system_effect(step):
+                violations.append(
+                    Violation(
+                        rule="require_system_effects_for",
+                        step_id=step.id,
+                        reason=(
+                            "step matches require_system_effects_for but "
+                            "declares no system-of-record effect (step.effects) "
+                            "— a screen postcondition cannot verify the write "
+                            "actually landed in the system of record"
+                        ),
+                    )
+                )
+
+        if policy.require_idempotency_key_for and step_matches_any(
+            step, policy.require_idempotency_key_for
+        ):
+            if not effect_has_idempotency_key(step):
+                violations.append(
+                    Violation(
+                        rule="require_idempotency_key_for",
+                        step_id=step.id,
+                        reason=(
+                            "step matches require_idempotency_key_for but no "
+                            "declared system-of-record effect carries an "
+                            "idempotency key — a retried/duplicated submission "
+                            "could land as a silent duplicate write"
+                        ),
+                    )
+                )
+
+        if (
+            policy.prohibit_unconfirmed_effect_bindings
+            and has_unconfirmed_effect_binding(step)
+        ):
+            violations.append(
+                Violation(
+                    rule="prohibit_unconfirmed_effect_bindings",
+                    step_id=step.id,
+                    reason=(
+                        "step carries a PLACEHOLDER effect whose "
+                        "system-of-record binding was not derivable from the "
+                        "demonstration (needs_operator_confirmation) — an "
+                        "unconfirmed/fabricated binding must not be certified"
+                    ),
+                )
+            )
 
         thr = policy.require_human_approval_below_confidence
         if thr is not None:
@@ -385,7 +529,7 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
                 )
 
     if policy.max_unverified_steps is not None:
-        vacuous = [s.id for s in workflow.steps if is_vacuous(s)]
+        vacuous = [s.id for s in steps if is_vacuous(s)]
         if len(vacuous) > policy.max_unverified_steps:
             violations.append(
                 Violation(
@@ -403,7 +547,7 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
         policy_name=policy.name,
         workflow_name=workflow.name,
         passed=not violations,
-        n_steps=len(workflow.steps),
+        n_steps=len(steps),
         violations=violations,
     )
 
@@ -481,7 +625,10 @@ def lint_workflow(workflow: Workflow) -> LintReport:
       classification; recompile or set ``risk_overrides``). Always ``warn``.
     """
     findings: list[Finding] = []
-    for step in workflow.steps:
+    # Same canonical traversal the certifier uses: lint a program-mode bundle's
+    # graph/subflow action states, not just its (often empty) linear steps.
+    steps = list(iter_workflow_steps(workflow))
+    for step in steps:
         irreversible = step.risk == "irreversible"
 
         if is_identity_applicable(step) and not is_identity_armed(step):
@@ -531,6 +678,6 @@ def lint_workflow(workflow: Workflow) -> LintReport:
 
     return LintReport(
         workflow_name=workflow.name,
-        n_steps=len(workflow.steps),
+        n_steps=len(steps),
         findings=findings,
     )

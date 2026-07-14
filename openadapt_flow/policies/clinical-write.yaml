@@ -9,8 +9,9 @@ name: clinical-write
 description: >-
   Strict gate for irreversible writes against a system of record: no unarmed
   clicks, no vacuous steps, identity required on every entity-navigation and
-  write step, effect verification required on every write, and human sign-off
-  for any thinly-evidenced step.
+  write step, a real SYSTEM-OF-RECORD effect (not just a screen assertion) plus
+  an idempotency key required on every write, no unconfirmed effect bindings,
+  and human sign-off for any thinly-evidenced step.
 
 # No click may act without a verified target identity.
 prohibit_unarmed_clicks: true
@@ -24,8 +25,28 @@ require_identity_for:
   - entity_navigation
   - write
 
-# Every consequential write must verify its effect landed on screen.
-require_effect_verification_for:
+# Every consequential write must verify its effect against the SYSTEM OF
+# RECORD (step.effects), not merely the screen. A TEXT_PRESENT assertion on the
+# frame is the exact weak oracle the effect layer replaced — it cannot see a
+# partial, phantom, duplicate, or lost-update write. So a clinical write is
+# certified only when it declares a real system-of-record effect.
+require_system_effects_for:
+  - write
+
+# ...AND that irreversible write must carry an idempotency / at-most-once key,
+# so a retried or double-delivered submission collapses to a single record
+# instead of a silent duplicate.
+require_idempotency_key_for:
+  - write
+
+# A placeholder effect whose system-of-record binding was not derivable from
+# the demonstration (needs_operator_confirmation) must never be certified — an
+# operator has to complete the binding first.
+prohibit_unconfirmed_effect_bindings: true
+
+# Screen postconditions are still required, as an ADDITIONAL (not substitute)
+# check on top of the system-of-record effect above.
+require_screen_postconditions_for:
   - write
   - save
   - submit

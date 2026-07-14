@@ -444,3 +444,104 @@ def test_run_delegates_to_replay_with_config(tmp_path: Path, monkeypatch) -> Non
     # effects + durable wired from config.
     assert type(captured["ctor"]["effect_verifier"]).__name__ == "RestRecordVerifier"
     assert captured["ctor"]["durable"] is True
+
+
+# ---------------------------------------------------------------------------
+# resume routed through the backend factory (openadapt-flow#115 seam)
+# ---------------------------------------------------------------------------
+
+
+def test_resume_parser_has_backend_flags() -> None:
+    args = build_parser().parse_args(
+        ["resume", "run_dir", "--backend", "windows", "--agent-url", "http://a:5001"]
+    )
+    assert args.backend == "windows"
+    assert args.agent_url == "http://a:5001"
+
+
+def test_resume_web_backend_still_requires_url(tmp_path: Path) -> None:
+    # The web default is unchanged: with no --url and no backend.url the web
+    # path still fails loud on the missing target URL (it must launch a browser
+    # and navigate a page). --backend web is the explicit form of the default.
+    run = _paused_run(tmp_path)
+    main(["approve", str(run)])
+    with pytest.raises(SystemExit, match="needs the target app URL"):
+        main(["resume", str(run), "--require-approval", "--backend", "web"])
+
+
+def test_resume_web_default_builds_playwright_backend(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The default (web / no --backend) still drives the browser: it launches
+    # Playwright, builds the PlaywrightBackend via the factory, and hands it to
+    # the durable resume entrypoint — byte-for-byte the historical path.
+    run = _paused_run(tmp_path)
+    main(["approve", str(run)])
+
+    captured: dict = {}
+    _install_fake_browser(monkeypatch, captured)
+
+    import openadapt_flow.runtime.durable as durable_mod
+
+    seen: dict = {}
+
+    def _fake_resume(run_dir, replayer, key=None):
+        seen["called"] = True
+        return _FakeReport()
+
+    monkeypatch.setattr(durable_mod, "resume", _fake_resume)
+
+    rc = main(
+        [
+            "resume",
+            str(run),
+            "--require-approval",
+            "--url",
+            "http://app.example",
+        ]
+    )
+    assert rc == 0
+    assert seen["called"] is True
+    # The factory built the browser-backed backend (the fake returns "backend").
+    assert captured["ctor"]  # Replayer was constructed for the web path
+
+
+def test_resume_windows_config_builds_windows_backend(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A windows-kind resume builds a real WindowsBackend from the factory with
+    # NO browser and NO --url, and hands it to the durable resume entrypoint.
+    run = _paused_run(tmp_path)
+    main(["approve", str(run)])
+
+    captured: dict = {}
+
+    class _CapturingReplayer:
+        def __init__(self, backend, **kwargs):
+            captured["backend"] = backend
+
+    import openadapt_flow.report as report_mod
+    import openadapt_flow.runtime as runtime_mod
+    import openadapt_flow.runtime.durable as durable_mod
+
+    monkeypatch.setattr(runtime_mod, "Replayer", _CapturingReplayer)
+    monkeypatch.setattr(
+        durable_mod, "resume", lambda run_dir, replayer, key=None: _FakeReport()
+    )
+    monkeypatch.setattr(report_mod, "render_run_report", lambda run_dir: "REPORT.md")
+
+    rc = main(
+        [
+            "resume",
+            str(run),
+            "--require-approval",
+            "--backend",
+            "windows",
+            "--agent-url",
+            "http://localhost:5001",
+        ]
+    )
+    assert rc == 0
+    backend = captured["backend"]
+    assert type(backend).__name__ == "WindowsBackend"
+    assert backend.server_url == "http://localhost:5001"

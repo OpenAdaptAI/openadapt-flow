@@ -1714,7 +1714,7 @@ class Replayer:
                 return result
 
             resolution, matched_region, error = self._resolve_step(
-                step, before_png, bundle_dir
+                step, before_png, bundle_dir, workflow
             )
             # Retry ladder failures with fresh settled frames until
             # ``step.timeout_s``: a remote app can present a settled-looking
@@ -1735,7 +1735,7 @@ class Replayer:
                 )
                 last_frame = before_png
                 resolution, matched_region, error = self._resolve_step(
-                    step, before_png, bundle_dir
+                    step, before_png, bundle_dir, workflow
                 )
             result.resolution = resolution
             if (
@@ -2190,6 +2190,7 @@ class Replayer:
         step: Step,
         screen_png: bytes,
         bundle_dir: Path,
+        workflow: Workflow,
     ) -> tuple[Optional[Resolution], Optional[Region], Optional[str]]:
         """Resolve the step's anchor, applying the irreversible risk gate.
 
@@ -2211,10 +2212,22 @@ class Replayer:
                 )
             return None, None, None
 
+        # Template-crop bytes for the visual ``template`` rung. An ENCRYPTED
+        # bundle (openadapt-flow#113) has NO cleartext ``templates/*.png`` on
+        # disk -- only sealed ``.enc`` ciphertext -- so its crops are pulled
+        # from the in-memory plaintext that ``Workflow.load(key=...)`` already
+        # decrypted, via ``decrypted_template``. A plaintext bundle reads the
+        # PNG straight from disk exactly as before (the fallback also covers an
+        # encrypted bundle whose crop wasn't sealed, keeping ``template_png``
+        # None rather than erroring).
         template_png: Optional[bytes] = None
-        template_path = Path(bundle_dir) / step.anchor.template
-        if template_path.is_file():
-            template_png = template_path.read_bytes()
+        rel = step.anchor.template
+        if workflow.encrypted:
+            template_png = workflow.decrypted_template(rel)
+        if template_png is None:
+            template_path = Path(bundle_dir) / rel
+            if template_path.is_file():
+                template_png = template_path.read_bytes()
 
         # The structural ACTION rung (top of the ladder) runs only when the
         # live backend can re-find an element (StructuralActionBackend). A

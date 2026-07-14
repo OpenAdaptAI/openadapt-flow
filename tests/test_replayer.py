@@ -46,6 +46,9 @@ class FakeVision:
     def __init__(self):
         self.template_results: list = []
         self.template_calls: list = []
+        # Template-crop bytes the resolver handed each find_template call
+        # (the decrypted in-memory crop for an encrypted bundle).
+        self.template_png_calls: list = []
         self.text_results: dict = {}
         self.text_calls: list = []
         self.ocr_lines: list = []
@@ -71,6 +74,7 @@ class FakeVision:
         threshold=0.82,
     ):
         self.template_calls.append(search_region)
+        self.template_png_calls.append(template_png)
         if self.template_results:
             return self.template_results.pop(0)
         return None
@@ -1514,3 +1518,77 @@ def test_identity_coverage_counts_anchored_type_steps():
     assert report.identity_applicable_steps == 1
     assert report.identity_armed_steps == 1
     assert report.identity_unarmed == []
+
+
+def test_encrypted_bundle_replays_from_in_memory_templates(tmp_path):
+    """An ENCRYPTED bundle (openadapt-flow#113) has no cleartext
+    ``templates/*.png`` on disk — only sealed ``.enc`` ciphertext — so the
+    replayer must resolve the ``template`` rung from the crops
+    ``Workflow.load(key=...)`` decrypted in memory (``decrypted_template``),
+    not from a disk read that would find nothing. This proves the resolver
+    receives those exact decrypted bytes and the click still lands.
+    """
+    key = "correct horse battery staple"
+    crop_png = make_png((50, 20), color=(12, 34, 56))
+
+    bundle_dir = tmp_path / "bundle"
+    (bundle_dir / "templates").mkdir(parents=True)
+    (bundle_dir / "templates" / "btn.png").write_bytes(crop_png)
+
+    workflow = Workflow(name="wf-enc", steps=[click_step()])
+    workflow.save(bundle_dir, encrypt=True, key=key)
+
+    # After sealing, no cleartext crop remains — only the .enc ciphertext.
+    assert not (bundle_dir / "templates" / "btn.png").is_file()
+    assert (bundle_dir / "templates" / "btn.png.enc").is_file()
+
+    loaded = Workflow.load(bundle_dir, key=key)
+    assert loaded.encrypted is True
+    assert loaded.decrypted_template("templates/btn.png") == crop_png
+
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    ]
+    backend = FakeBackend()
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        loaded,
+        params={},
+        bundle_dir=bundle_dir,
+        run_dir=tmp_path / "run",
+    )
+
+    assert report.success is True
+    assert report.rung_counts == {"template": 1}
+    assert backend.actions == [("click", 110, 105, False)]
+    # The resolver was handed the DECRYPTED in-memory crop, not None (which is
+    # all a disk read of the .enc-only bundle could have produced).
+    assert crop_png in vision.template_png_calls
+
+
+def test_unencrypted_bundle_still_reads_template_from_disk(tmp_path):
+    """The plaintext path is unchanged: a non-encrypted bundle's crop is read
+    straight from ``templates/*.png`` on disk (``decrypted_template`` is never
+    consulted), so the resolver gets the on-disk bytes exactly as before."""
+    crop_png = make_png((50, 20), color=(9, 9, 9))
+    bundle_dir = tmp_path / "bundle"
+    (bundle_dir / "templates").mkdir(parents=True)
+    (bundle_dir / "templates" / "btn.png").write_bytes(crop_png)
+
+    workflow = Workflow(name="wf-plain", steps=[click_step()])
+    assert workflow.encrypted is False
+
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    ]
+    backend = FakeBackend()
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        workflow,
+        params={},
+        bundle_dir=bundle_dir,
+        run_dir=tmp_path / "run",
+    )
+
+    assert report.success is True
+    assert crop_png in vision.template_png_calls

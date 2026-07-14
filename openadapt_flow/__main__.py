@@ -18,6 +18,9 @@ imported lazily inside each handler so ``--help`` always works):
   same replay path, wired for a real deployment (backend / effects / actuation
   / durable runtime / policy) instead of the demo.
 - ``resume`` — resume a durably-paused run from its last verified checkpoint.
+- ``teach`` runs self-serve HALT -> LEARN: resolve a halted run from a fix
+  demonstration (induce + gate + validate the correction, promote only a
+  verified revision), writing an updated bundle. Refuses bad fixes.
 - ``approve`` — mark a durably-paused run's pending escalation approved.
 - ``bench`` — replay a bundle N times against MockMed and aggregate.
 - ``lint`` — report a bundle's coverage gaps (advice; exit code by severity).
@@ -802,6 +805,45 @@ def _cmd_emit_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_teach(args: argparse.Namespace) -> int:
+    """Self-serve HALT -> LEARN -> RESOLVE for a halted run + a fix demo.
+
+    Drives the governed halt->learn loop (induce the operator resolution as a
+    guarded exception branch, gate it, validate it on held-out coverage) and
+    writes an UPDATED bundle ONLY when it promotes. On a governed refusal
+    (underdetermined or unsafe correction) nothing is written, the base bundle
+    stays halting, and this exits nonzero.
+    """
+    from openadapt_flow.learning.teach import TeachError, teach
+
+    try:
+        result = teach(
+            Path(args.run_dir),
+            Path(args.fix),
+            Path(args.out),
+            bundle=Path(args.bundle),
+            skill_id=args.skill_id,
+            library_dir=Path(args.library) if args.library else None,
+        )
+    except TeachError as e:
+        print(f"teach cannot run: {e}")
+        return 2
+
+    print(result.summary())
+    if result.promoted:
+        print(
+            "\nLEARNED. Re-run the updated bundle and the workflow no longer "
+            f"halts on this situation:\n    openadapt-flow replay {args.out}"
+        )
+        return 0
+    print(
+        "\nREFUSED (governed): the correction was underdetermined or would "
+        "weaken a safety invariant, so nothing was promoted and the base bundle "
+        "is unchanged (it still halts here). Supply a clearer or safer fix."
+    )
+    return 1
+
+
 def _add_deployment_flags(
     p: argparse.ArgumentParser, *, worklist: bool = False
 ) -> None:
@@ -1267,6 +1309,57 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("bundle", help="Workflow bundle directory")
     p.add_argument("--out", required=True, help="Path for the generated server.py")
     p.set_defaults(func=_cmd_emit_mcp)
+
+    p = sub.add_parser(
+        "teach",
+        help=(
+            "Self-serve HALT -> LEARN: resolve a halted run from a fix "
+            "demonstration. Induces the correction as a guarded exception "
+            "branch, gates + validates it, and writes an updated bundle ONLY "
+            "if it passes (governed refusal otherwise; nonzero exit)"
+        ),
+    )
+    p.add_argument(
+        "run_dir",
+        help="The HALTED run directory (holds report.json with a halt)",
+    )
+    p.add_argument(
+        "--fix",
+        required=True,
+        help=(
+            "The fix demonstration: a RECORDING directory of the resolution "
+            "(record ONLY the corrective actions, e.g. dismiss the dialog), or "
+            "a .json correction spec (scripted / CI: resolution_steps, optional "
+            "tail_intents / facts / params)"
+        ),
+    )
+    p.add_argument(
+        "--bundle",
+        required=True,
+        help="The base bundle that halted (seeds the skill's active version)",
+    )
+    p.add_argument(
+        "--out",
+        required=True,
+        help=(
+            "Output directory for the UPDATED bundle (written only when the "
+            "correction is promoted)"
+        ),
+    )
+    p.add_argument(
+        "--skill-id",
+        default=None,
+        help="Skill id in the library (default: the run's workflow name)",
+    )
+    p.add_argument(
+        "--library",
+        default=None,
+        help=(
+            "Directory for the versioned skill library that keeps the "
+            "promotion lineage (default: <out>.skills)"
+        ),
+    )
+    p.set_defaults(func=_cmd_teach)
 
     return parser
 

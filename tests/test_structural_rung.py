@@ -31,7 +31,6 @@ from PIL import Image
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
-    Resolution,
     Step,
     StructuralHandle,
     StructuralLocator,
@@ -264,7 +263,9 @@ def test_structural_resolution_still_faces_identity_gate() -> None:
         anchor=_anchor(structured_identity=recorded),
     )
     # 1) resolution comes from the structural rung...
-    resolution, region, err = rp._resolve_step(step, make_png(), Path("."))
+    resolution, region, err = rp._resolve_step(
+        step, make_png(), Path("."), Workflow(name="wf", steps=[step])
+    )
     assert err is None
     assert resolution is not None and resolution.rung == "structural"
     assert resolution.point == (207, 133)

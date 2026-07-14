@@ -43,24 +43,25 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from hypothesis import HealthCheck, assume, given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from PIL import Image
 
 from openadapt_flow.ir import (
-    Anchor,
     ActionKind,
+    Anchor,
     Landmark,
     Step,
     StructuralHandle,
     StructuralLocator,
+    Workflow,
 )
+from openadapt_flow.runtime.replayer import Replayer
 from openadapt_flow.runtime.resolver import (
     RUNG_ORDER,
     is_below_ocr,
     resolve,
 )
-from openadapt_flow.runtime.replayer import Replayer
 
 # Heavy fuzz search; match the repo convention of a generous timeout marker.
 pytestmark = pytest.mark.timeout(600)
@@ -400,7 +401,9 @@ def test_irreversible_gate_blocks_below_ocr_for_any_confidence(case):
         id="s1", intent="act", action=ActionKind.CLICK, anchor=anchor, risk=risk
     )
 
-    resolution, _region, error = replayer._resolve_step(step, _png(viewport), bundle)
+    resolution, _region, error = replayer._resolve_step(
+        step, _png(viewport), bundle, Workflow(name="wf", steps=[step])
+    )
     assert resolution is not None and resolution.rung == rung, (
         f"expected resolution at rung {rung!r}, got "
         f"{resolution.rung if resolution else None!r}"

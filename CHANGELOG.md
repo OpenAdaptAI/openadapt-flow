@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.21.2 (2026-07-14)
+
+### Bug Fixes
+
+- Reconcile induce --held-out test with honest 'STRUCTURAL coverage' header
+  ([#96](https://github.com/OpenAdaptAI/openadapt-flow/pull/96),
+  [`8d99247`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8d992472674f7333bf133c73994bdcf39769bdd4))
+
+Cross-PR regression on main: #91 (CLI) asserted the induce --held-out output says 'Held-out
+  validation', but #93 (induction hardening) renamed it to 'Held-out STRUCTURAL coverage' (the
+  honest naming -- it is structural trace-shape coverage, not behavioral validation). Each PR passed
+  alone; together they broke main. Update the test to the honest header.
+
+
 ## v0.21.1 (2026-07-14)
 
 ### Bug Fixes

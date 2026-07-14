@@ -251,6 +251,74 @@ def test_no_structural_observations(backend: WindowsBackend) -> None:
         assert not hasattr(backend, attr)
 
 
+def test_implements_structural_action_protocol(backend: WindowsBackend) -> None:
+    # The backend-agnostic resolver drives the UIA structural rung through this
+    # protocol; conformance means the ladder needs zero changes for desktop.
+    from openadapt_flow.backend import StructuralActionBackend
+
+    assert isinstance(backend, StructuralActionBackend)
+
+
+# -- hardening: unreachable / non-2xx / empty UIA (never a silent wrong action) --
+
+
+def test_execute_unreachable_raises_runtime_error() -> None:
+    # An action against a dead endpoint must FAIL LOUDLY (a dropped click is a
+    # silent wrong action), not raise a bare transport error or no-op.
+    backend = WindowsBackend("http://127.0.0.1:9", timeout_s=0.5)
+    with pytest.raises(RuntimeError, match="unreachable"):
+        backend.click(1, 1)
+
+
+def test_structural_locator_unreachable_returns_none() -> None:
+    # The READ path is tolerant: a dead agent yields None so resolution falls
+    # through to the visual ladder (never raises, never a wrong locator).
+    from openadapt_flow.ir import StructuralLocator
+
+    backend = WindowsBackend("http://127.0.0.1:9", timeout_s=0.5)
+    assert backend.structural_locator_at(10, 10) is None
+    assert backend.structured_text_at(10, 10) is None
+    assert backend.locate_structural(StructuralLocator(automation_id="x")) is None
+
+
+def test_structural_locator_empty_uia_returns_none(
+    waa: MockWaa, backend: WindowsBackend
+) -> None:
+    # The mock server does not echo the UIA sentinel, so the read decodes to
+    # nothing -> None (empty UIA result is not a silent wrong locator).
+    assert backend.structural_locator_at(10, 10) is None
+
+
+def test_auth_header_sent_when_token_set() -> None:
+    seen: dict[str, str] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a: object) -> None:
+            pass
+
+        def do_POST(self) -> None:  # noqa: N802
+            seen["auth"] = self.headers.get("Authorization", "")
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            body = json.dumps({"status": "ok"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        WindowsBackend(url, auth_token="tok-123").click(1, 1)
+        assert seen["auth"] == "Bearer tok-123"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 # -- screenshot / viewport -------------------------------------------------------
 
 

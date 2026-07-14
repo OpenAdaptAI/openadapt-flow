@@ -155,6 +155,11 @@ class WindowsBackend:
         screenshot_max_retries: Screenshot retry attempts (server may be
             momentarily unready).
         screenshot_retry_delay_s: Delay between screenshot retries.
+        auth_token: Optional bearer token. When the in-guest agent
+            (``openadapt_flow.backends.win_agent``) is started with a token,
+            every request must carry ``Authorization: Bearer <token>``; set it
+            here to talk to an authenticated agent. None (default) sends no
+            auth header (the loopback-only / legacy unauthenticated shim).
         session: Optional ``requests.Session`` (injected in tests).
     """
 
@@ -167,6 +172,7 @@ class WindowsBackend:
         timeout_s: float = 30.0,
         screenshot_max_retries: int = SCREENSHOT_MAX_RETRIES,
         screenshot_retry_delay_s: float = SCREENSHOT_RETRY_DELAY_S,
+        auth_token: Optional[str] = None,
         session: Optional[requests.Session] = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
@@ -175,7 +181,14 @@ class WindowsBackend:
         self._timeout_s = timeout_s
         self._screenshot_max_retries = max(1, int(screenshot_max_retries))
         self._screenshot_retry_delay_s = screenshot_retry_delay_s
+        self._auth_token = auth_token or None
         self._session = session if session is not None else requests.Session()
+
+    def _headers(self) -> Optional[dict[str, str]]:
+        """Bearer auth header for the in-guest agent, or None when unset."""
+        if not self._auth_token:
+            return None
+        return {"Authorization": f"Bearer {self._auth_token}"}
 
     # -- Backend protocol ----------------------------------------------------
 
@@ -201,7 +214,9 @@ class WindowsBackend:
         for attempt in range(1, self._screenshot_max_retries + 1):
             try:
                 resp = self._session.get(
-                    f"{self.server_url}/screenshot", timeout=self._timeout_s
+                    f"{self.server_url}/screenshot",
+                    headers=self._headers(),
+                    timeout=self._timeout_s,
                 )
                 if resp.status_code != 200:
                     raise RuntimeError(
@@ -337,6 +352,7 @@ class WindowsBackend:
             resp = self._session.post(
                 f"{self.server_url}/execute_windows",
                 json={"command": command},
+                headers=self._headers(),
                 timeout=self._timeout_s,
             )
         except Exception:
@@ -612,14 +628,27 @@ class WindowsBackend:
     def _execute(self, command: str) -> None:
         """POST bare Python statements to WAA's ``/execute_windows``.
 
+        This is the ACTION path (click/type/press/scroll): unlike the tolerant
+        read path (:meth:`_execute_read`, which returns None so resolution
+        falls through the ladder), an action that cannot be confirmed to have
+        run must FAIL LOUDLY -- a silently dropped click/keystroke is a silent
+        wrong action. So a transport failure (agent unreachable, timeout,
+        connection reset) and any non-200 (a 401 from a token mismatch, a 500
+        carrying the in-guest traceback) both raise ``RuntimeError``; the
+        replayer treats the raise as a halt, never a no-op success.
+
         Raises:
-            RuntimeError: On a non-200 response.
+            RuntimeError: On a transport failure or a non-200 response.
         """
-        resp = self._session.post(
-            f"{self.server_url}/execute_windows",
-            json={"command": command},
-            timeout=self._timeout_s,
-        )
+        try:
+            resp = self._session.post(
+                f"{self.server_url}/execute_windows",
+                json={"command": command},
+                headers=self._headers(),
+                timeout=self._timeout_s,
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"execute_windows unreachable: {e}") from e
         if resp.status_code != 200:
             raise RuntimeError(
                 f"execute_windows HTTP {resp.status_code}: {resp.text[:200]}"

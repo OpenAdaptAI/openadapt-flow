@@ -134,13 +134,20 @@ class DesktopHarness:
     imports are local so this module imports without a VM (CI / mocked tests).
     """
 
-    def __init__(self, vm, shim_url: str, *, log: Callable = print) -> None:
+    def __init__(
+        self,
+        vm,
+        shim_url: str,
+        *,
+        log: Callable = print,
+        auth_token: Optional[str] = None,
+    ) -> None:
         self.vm = vm
         self.shim_url = shim_url
         self.log = log
         from openadapt_flow.backends import WindowsBackend
 
-        self.backend = WindowsBackend(server_url=shim_url)
+        self.backend = WindowsBackend(server_url=shim_url, auth_token=auth_token)
 
     @classmethod
     def connect(

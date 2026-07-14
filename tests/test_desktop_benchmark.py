@@ -229,3 +229,12 @@ def test_markdown_renders_headline_and_matrix(tmp_path):
     assert "Desktop Benchmark" in md
     assert "`compiled`" in md
     assert "vision is necessary" in md
+
+
+def test_harness_threads_auth_token_to_backend():
+    # The auth_token plumbing lets the harness drive an authenticated in-guest
+    # agent; the WindowsBackend must carry the token.
+    harness = db.DesktopHarness(object(), "http://10.211.55.3:5000", auth_token="tok")
+    assert harness.backend._auth_token == "tok"
+    plain = db.DesktopHarness(object(), "http://10.211.55.3:5000")
+    assert plain.backend._auth_token is None

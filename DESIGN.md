@@ -16,12 +16,31 @@ for pixel-only substrates (RDP/Citrix/canvas). The reference backend is
 Playwright-driven (headless-capable, CI-friendly, permission-free); native OS /
 RDP backends are future adapters.
 
-## Frozen contracts (do not change without updating this doc)
+## Core contracts (additive-only; do not change without updating this doc)
 
-- `openadapt_flow/ir.py` — Workflow/Step/Anchor/Postcondition + runtime result
-  models. FROZEN for v0. Additive changes only, and only by the integrator.
-  Additive change (OpenEMR spike): `ActionKind.SCROLL` plus optional
-  `Step.scroll_dx`/`Step.scroll_dy` wheel deltas.
+- `openadapt_flow/ir.py` — the schema. The **v0 core** — `Workflow` (a flat
+  `list[Step]`), `Step`, `Anchor`, `Postcondition`, and the runtime result
+  models (`RunReport`/`StepResult`/`HealEvent`) — is STABLE and changed only
+  additively, by the integrator. It has since grown additively, and the linear
+  `Workflow` remains the degenerate case of everything below (so bundles stay
+  backward-compatible):
+  - **SCROLL** (OpenEMR spike): `ActionKind.SCROLL` plus optional
+    `Step.scroll_dx`/`Step.scroll_dy` wheel deltas.
+  - **Structural rung**: `StructuralLocator` (DOM selector / role+name, or UIA
+    AutomationId / role+name) on the anchor — the top, deterministic ladder rung.
+  - **PHI-free identity**: `IdentityTemplate` / `TokenTemplate` / `ConcatTemplate`
+    — a salted-hash, shape-preserving stand-in for the plaintext identity band,
+    so a bundle can enforce the wrong-patient check with no readable PHI.
+  - **Effect verification**: `Step.effects` typed system-of-record contracts
+    (checked by an `EffectVerifier` against a REST / FHIR / document-hash record,
+    not the pixels) and `ApiBinding` (the API-actuator leaf of the capability
+    ladder — perform the write via a declared API call instead of the GUI).
+  - **Workflow-program IR** (RFC `docs/design/WORKFLOW_PROGRAM_IR.md`): a
+    parameterized state machine layered over the trajectory — `ProgramGraph`,
+    `State`, `Transition`, `LoopSpec`, `Relation`, `Guard`, `Predicate`,
+    `ParamSpec`. Induced from one or more traces
+    (`openadapt_flow/compiler/induction.py`) and quarantined when intent stays
+    underdetermined.
 - `openadapt_flow/backend.py` — Backend protocol. FROZEN. Additive change
   (OpenEMR spike): `scroll(dx, dy)` — a wheel gesture at the current pointer
   position, so it scrolls whatever container is under the pointer (iframes

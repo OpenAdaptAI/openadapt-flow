@@ -1,6 +1,61 @@
 # CHANGELOG
 
 
+## v0.21.1 (2026-07-14)
+
+### Bug Fixes
+
+- Bind runtime params into effect contracts + idempotency keys (P0)
+  ([#94](https://github.com/OpenAdaptAI/openadapt-flow/pull/94),
+  [`35c4530`](https://github.com/OpenAdaptAI/openadapt-flow/commit/35c45309286de2a4cc32b911715f0ae3167aa66a))
+
+* fix: bind runtime params into effect contracts + idempotency keys (P0)
+
+A parameterized workflow verified its system-of-record effects against the values baked in at
+  DEMONSTRATION time: Effect.match/value/idempotency_key were plain static strings and the replayer
+  passed the effect to the verifier unchanged. So a run could write patient "Susan" via the GUI yet
+  verify the recorded demo patient "Phil", check the demonstrated note instead of the run's, reuse
+  ONE frozen idempotency key across unrelated runs, confirm an unrelated pre-existing record, or
+  false-halt every non-demo run.
+
+Fix: - ir/effects: add ValueExpr (literal | param) and make Effect.match values and Effect.value /
+  idempotency_key ValueExpr. Back-compat is exact: a before validator coerces the v1 bare-string
+  JSON form to ValueExpr(literal=...), and ValueExpr's __eq__/__hash__/__str__/__repr__ make a
+  literal transparently string-compatible, so every existing reader (learning-gate signatures,
+  codegen review comments) and matcher behaves byte-for-byte identically. validate_assignment keeps
+  the compiler's raw-string assignment consistent. - replayer: resolve each effect's contract
+  against the run's params (plus a reserved __run_id__ stable-per-run identity) BEFORE
+  capture_pre_state and verify, on both the GUI and API-actuator paths, mirroring how ApiBinding
+  {param} templates are filled. Pass the RESOLVED effect to the verifier. - idempotency key is now
+  per-run: bind it to a run param (or __run_id__) so it no longer collides across unrelated runs; a
+  literal (v1) key is unchanged. - persist a non-secret SHA-256 digest of each resolved contract in
+  StepResult.effect_contract_hashes for auditability. - dedupe the double self.use_structural
+  assignment in Replayer.__init__.
+
+Tests: new test_value_expr.py (type contract + coercion) and
+
+test_replayer_effect_param_binding.py (resolves to the run's patient/value not the demo's; v1
+  plain-string effect loads + verifies identically; idempotency key differs across runs;
+  resolved-contract hash recorded; end-to-end CONFIRM vs. frozen-demo-literal REFUTE against the
+  real MockMed system of record).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* fix: effect_mining emits ValueExpr (mypy) after Effect param-binding
+
+Effect.match/value/idempotency_key are now ValueExpr; the runtime validator coerces bare strings at
+  runtime (tests pass) but mypy flagged effect_mining passing raw str. Wrap mined literals in
+  ValueExpr(literal=...) at the seven construction sites so the compiler is type-clean too.
+
+* fix: silent_wrong_action emits ValueExpr (mypy) after Effect param-binding
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.21.0 (2026-07-14)
 
 ### Bug Fixes

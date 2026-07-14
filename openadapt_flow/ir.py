@@ -946,6 +946,13 @@ class StepResult(BaseModel):
     # calls on this path — effect verification reads the system of record.
     effect_verified: Optional[bool] = None
     effect_results: list[str] = Field(default_factory=list)
+    # One stable, NON-secret-bearing SHA-256 digest per verified effect, taken
+    # AFTER the effect's ValueExpr contract was bound to THIS run's params
+    # (P0-3). Records THAT a parameterized run verified against its own resolved
+    # record/value/idempotency-key (and lets an auditor confirm two runs
+    # resolved differently) without persisting the underlying value (e.g. a
+    # patient identifier). Empty when the step declared no effects.
+    effect_contract_hashes: list[str] = Field(default_factory=list)
     # How this step's write was PERFORMED: "api" when actuated via an
     # ApiBinding (GUI resolve/act skipped), None when it went through the GUI
     # resolution ladder (the default). Diagnostic/audit — lets an operator see

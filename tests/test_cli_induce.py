@@ -86,7 +86,9 @@ def test_induce_held_out_flag_prints_validation(tmp_path: Path, capsys) -> None:
     b2 = _bundle(tmp_path, "t2", _dose_trace("Bob"))
     rc = main(["induce", b1, b2, "--out", str(tmp_path / "o"), "--held-out"])
     assert rc == 0
-    assert "Held-out validation" in capsys.readouterr().out
+    # The held-out check reports STRUCTURAL trace-shape coverage (honest naming
+    # from the induction-hardening pass), not behavioral "validation".
+    assert "Held-out STRUCTURAL coverage" in capsys.readouterr().out
 
 
 def test_induce_parser_accepts_multiple_recordings() -> None:

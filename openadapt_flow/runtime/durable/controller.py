@@ -41,9 +41,7 @@ from openadapt_flow.runtime.durable.checkpoint import (
 from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
 
 
-def classify_halt(
-    step: Optional[Step], result: StepResult
-) -> tuple[str, list[str]]:
+def classify_halt(step: Optional[Step], result: StepResult) -> tuple[str, list[str]]:
     """Categorize a halt and propose operator options.
 
     Maps the replayer's halt reason (``result.error`` plus the

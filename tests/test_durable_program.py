@@ -118,9 +118,7 @@ def _branch_loop_workflow(patients: list[str]) -> Workflow:
         program=program,
         subflows={"body": body},
         data_sources={
-            "queue": Relation(
-                name="queue", rows=[{"patient": p} for p in patients]
-            )
+            "queue": Relation(name="queue", rows=[{"patient": p} for p in patients])
         },
     )
 
@@ -378,9 +376,7 @@ def test_program_resume_refused_when_pause_expired(tmp_path):
     # longer be trusted). Expiry is checked before the approval.
     far_future = datetime.now(timezone.utc) + timedelta(days=365)
     with pytest.raises(PauseExpired):
-        resume(
-            run_dir, resume_replayer, approval=_approval(bundle), now=far_future
-        )
+        resume(run_dir, resume_replayer, approval=_approval(bundle), now=far_future)
 
 
 # -- 6. clean durable program run: checkpoints every verified state, no pause -

@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 import os
 import time
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -323,14 +324,6 @@ class Replayer:
         # openadapt_flow.runtime.durable and run()'s ``resume_from``). Pure
         # bookkeeping over the StepResult; no backend/vision/model involvement.
         self.durable = durable
-        # Whether the deterministic structural ACTION rung (top of the ladder)
-        # may run. True (default) = product behavior: on a structure-bearing
-        # backend, resolve the recorded target as a DOM/UIA element. Set False
-        # to force the VISUAL fallback floor even on a structure-bearing
-        # backend -- used to characterize the pixel-only substrate path
-        # (RDP/Citrix/VDI) on a Playwright surface (see the e2e visual-floor
-        # drift/heal suites). Never disables the visual ladder itself.
-        self.use_structural = use_structural
         # Optional local-VLM identity veto (tier 3 of the identity ladder),
         # OFF by default like the grounder: an IdentityVLM verifier or None.
         # When None the ladder runs structured-text + pixel-compare + OCR +
@@ -347,6 +340,10 @@ class Replayer:
         # Point of the most recent successful click (the focusing click for
         # a following TYPE step); reset per run.
         self._last_click_point: Optional[Point] = None
+        # Stable-per-run identity; (re)assigned at the top of run(). Present as
+        # an empty default so a direct _execute_step call (tests) still resolves
+        # effect contracts (a literal effect ignores it).
+        self._run_id: str = ""
 
     # -- public API ----------------------------------------------------------
 
@@ -404,6 +401,12 @@ class Replayer:
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
+        # Stable-per-run identity (P0-3): distinct across runs, constant within
+        # one. Exposed to effect-contract resolution under the reserved
+        # ``__run_id__`` param so an idempotency key can be bound PER-RUN (via
+        # ``ValueExpr(param="__run_id__")``) instead of reusing a frozen demo
+        # literal across unrelated runs.
+        self._run_id = uuid.uuid4().hex
         # Parameter resolution (Workflow-program IR, Phase 1): recorded defaults
         # (``params`` dict) plus each TYPED ``param_specs`` example as a default,
         # with caller-supplied values overriding both. A v0 bundle (empty
@@ -1150,6 +1153,10 @@ class Replayer:
         # System-of-record pre-state, snapshotted just before the action when
         # the step declares effects (see the block guarding self._act below).
         effect_pre_state: Optional[EffectState] = None
+        # The step's effect contracts with every ValueExpr bound to THIS run's
+        # params (P0-3); resolved BEFORE the pre-state snapshot so verification
+        # targets the record this run wrote, not the demonstration's.
+        resolved_effects: Optional[list["Effect"]] = None
 
         try:
             # Workflow-program IR, Phase 1: evaluate the step's guard
@@ -1285,6 +1292,10 @@ class Replayer:
                         "effects (fail-safe HALT)"
                     )
                 else:
+                    # Bind the effect contracts to this run's params BEFORE the
+                    # pre-state snapshot (P0-3): match/value/idempotency_key must
+                    # describe the record THIS run writes, not the demo's.
+                    resolved_effects = self._resolve_effects(step.effects, params)
                     effect_pre_state = self.effect_verifier.capture_pre_state()
 
             if error is None:
@@ -1333,7 +1344,9 @@ class Replayer:
             # lost update -- the EffectVerifier reads the REAL record and HALTs
             # on any non-CONFIRMED verdict (docs/design/EFFECT_VERIFIER.md).
             if error is None and effect_pre_state is not None:
-                error = self._verify_effects(step, effect_pre_state, result)
+                error = self._verify_effects(
+                    step, effect_pre_state, result, effects=resolved_effects
+                )
 
             result.ok = error is None
             result.error = error
@@ -1455,6 +1468,13 @@ class Replayer:
             )
             return True
 
+        # Bind the effect contracts to this run's params BEFORE snapshotting the
+        # pre-state (P0-3): the same {param} substitution the ApiActuator applies
+        # to the URL/query/body must apply to what the write is verified against,
+        # or an API write for patient "Susan" would be confirmed against the
+        # demonstration's patient "Phil".
+        effects = self._resolve_effects(effects, params)
+
         # Snapshot the system of record BEFORE the write so the verifier counts
         # only what THIS actuation wrote (delta / at-most-once / collateral
         # loss), then actuate exactly once.
@@ -1496,6 +1516,21 @@ class Replayer:
 
     # -- system-of-record effect verification -----------------------------------
 
+    def _resolve_effects(
+        self, effects: list["Effect"], params: dict[str, str]
+    ) -> list["Effect"]:
+        """Bind each effect's ``ValueExpr`` contract to THIS run's params (P0-3).
+
+        Mirrors how an ``ApiBinding``'s ``{param}`` templates are filled at
+        actuation time: the effect a PARAMETERIZED workflow verifies must
+        describe the record IT WROTE THIS RUN, not the demonstration's. The
+        reserved ``__run_id__`` param exposes the stable-per-run identity so an
+        idempotency key can be bound per-run. A pure-literal (v1) effect is
+        returned value-identical -- ``resolve`` is a no-op for it.
+        """
+        namespace = {**params, "__run_id__": self._run_id}
+        return [effect.resolve(namespace) for effect in effects]
+
     def _verify_effects(
         self,
         step: Step,
@@ -1532,6 +1567,10 @@ class Replayer:
         if effects is None:
             effects = step.effects
         for effect in effects:
+            # Audit trail (P0-3): persist a NON-secret digest of the RESOLVED
+            # contract this run actually verified against, before any verdict —
+            # so a halted/placeholder effect is recorded too.
+            result.effect_contract_hashes.append(effect.contract_hash())
             # A compiler-mined PLACEHOLDER effect (binding not derivable from
             # the demonstration — see compiler.effect_mining) carries a
             # sentinel selector, NOT a real one. Never verify it against the

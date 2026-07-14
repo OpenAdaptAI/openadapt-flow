@@ -67,6 +67,7 @@ from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
     RestRecordVerifier,
+    ValueExpr,
 )
 
 #: The recorded target the whole suite attacks (mirrors the fault matrix).
@@ -285,17 +286,17 @@ def _effect_verify(
     """
     written = Effect(
         kind=EffectKind.RECORD_WRITTEN,
-        match=TARGET,
+        match={k: ValueExpr(literal=v) for k, v in TARGET.items()},
         expected_count=1,
-        idempotency_key=IDEMPOTENCY_KEY if keyed else None,
+        idempotency_key=ValueExpr(literal=IDEMPOTENCY_KEY) if keyed else None,
         risk="irreversible",
         timeout_s=EFFECT_TIMEOUT_S,
     )
     field = Effect(
         kind=EffectKind.FIELD_EQUALS,
-        match=TARGET,
+        match={k: ValueExpr(literal=v) for k, v in TARGET.items()},
         field="note",
-        value=NOTE,
+        value=ValueExpr(literal=NOTE),
         risk="irreversible",
         timeout_s=EFFECT_TIMEOUT_S,
     )

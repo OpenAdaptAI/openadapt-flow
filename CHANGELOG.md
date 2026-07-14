@@ -1,6 +1,220 @@
 # CHANGELOG
 
 
+## v0.21.1 (2026-07-14)
+
+### Bug Fixes
+
+- Bind runtime params into effect contracts + idempotency keys (P0)
+  ([#94](https://github.com/OpenAdaptAI/openadapt-flow/pull/94),
+  [`35c4530`](https://github.com/OpenAdaptAI/openadapt-flow/commit/35c45309286de2a4cc32b911715f0ae3167aa66a))
+
+* fix: bind runtime params into effect contracts + idempotency keys (P0)
+
+A parameterized workflow verified its system-of-record effects against the values baked in at
+  DEMONSTRATION time: Effect.match/value/idempotency_key were plain static strings and the replayer
+  passed the effect to the verifier unchanged. So a run could write patient "Susan" via the GUI yet
+  verify the recorded demo patient "Phil", check the demonstrated note instead of the run's, reuse
+  ONE frozen idempotency key across unrelated runs, confirm an unrelated pre-existing record, or
+  false-halt every non-demo run.
+
+Fix: - ir/effects: add ValueExpr (literal | param) and make Effect.match values and Effect.value /
+  idempotency_key ValueExpr. Back-compat is exact: a before validator coerces the v1 bare-string
+  JSON form to ValueExpr(literal=...), and ValueExpr's __eq__/__hash__/__str__/__repr__ make a
+  literal transparently string-compatible, so every existing reader (learning-gate signatures,
+  codegen review comments) and matcher behaves byte-for-byte identically. validate_assignment keeps
+  the compiler's raw-string assignment consistent. - replayer: resolve each effect's contract
+  against the run's params (plus a reserved __run_id__ stable-per-run identity) BEFORE
+  capture_pre_state and verify, on both the GUI and API-actuator paths, mirroring how ApiBinding
+  {param} templates are filled. Pass the RESOLVED effect to the verifier. - idempotency key is now
+  per-run: bind it to a run param (or __run_id__) so it no longer collides across unrelated runs; a
+  literal (v1) key is unchanged. - persist a non-secret SHA-256 digest of each resolved contract in
+  StepResult.effect_contract_hashes for auditability. - dedupe the double self.use_structural
+  assignment in Replayer.__init__.
+
+Tests: new test_value_expr.py (type contract + coercion) and
+
+test_replayer_effect_param_binding.py (resolves to the run's patient/value not the demo's; v1
+  plain-string effect loads + verifies identically; idempotency key differs across runs;
+  resolved-contract hash recorded; end-to-end CONFIRM vs. frozen-demo-literal REFUTE against the
+  real MockMed system of record).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* fix: effect_mining emits ValueExpr (mypy) after Effect param-binding
+
+Effect.match/value/idempotency_key are now ValueExpr; the runtime validator coerces bare strings at
+  runtime (tests pass) but mypy flagged effect_mining passing raw str. Wrap mined literals in
+  ValueExpr(literal=...) at the seven construction sites so the compiler is type-clean too.
+
+* fix: silent_wrong_action emits ValueExpr (mypy) after Effect param-binding
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.21.0 (2026-07-14)
+
+### Bug Fixes
+
+- Induction refuses to over-certify (uncertainty on flagged proposals, entity params, honest
+  coverage naming) ([#93](https://github.com/OpenAdaptAI/openadapt-flow/pull/93),
+  [`5557c53`](https://github.com/OpenAdaptAI/openadapt-flow/commit/5557c53751d9d3c9e0d8abdc9ceadb50e3a12e6e))
+
+* fix: induction refuses to over-certify (uncertainty on flagged proposals, entity params, honest
+  coverage naming)
+
+Multi-trace induction is a useful PROTOTYPE whose output could over-claim. Both external reviews
+  flagged this. Hardens the safety posture so certification matches what was actually verified. All
+  changes are within induction.py logic (no ir.py / runtime changes); compiler/__init__.py
+  re-exports the new name.
+
+1. A flagged Proposal no longer auto-certifies. When an inferred branch or an OPTIONAL step over a
+  CONSEQUENTIAL action (irreversible or effect-bearing) is proposed, induction ALSO emits an
+  Uncertainty requiring operator confirmation, so certified=False until resolved. "Absent in some
+  traces" is no longer a silent optional/skip for a consequential step -- it is a question routed to
+  the disambiguation flow.
+
+2. reproduction_score() renamed to structural_trace_coverage() (deprecated, warning-emitting alias
+  kept). It is a structural trace-SHAPE score -- gives params full credit, treats loop tokens as
+  reproduced, executes no app and checks no effect/identity -- so its docstring now states exactly
+  what it does and does NOT verify, and nothing treats it alone as behavioral validation /
+  certification (HeldOutValidation reworded to match).
+
+3. Entity/selection generalization: a CLICK/selection whose target VARIES across traces is no longer
+  frozen as a literal that silently re-selects the demo entity (the runtime clicks the resolved
+  anchor, not a param). Click field-keys are now value-free so varying selections align; a varying
+  selection becomes an ambiguous_selection Uncertainty with an advisory entity_ref proposal -- never
+  a hardcoded demo entity.
+
+4. Loop honesty: documented (module + _reduce_trace docstrings, in-file LIMITS) that only
+  consecutive-repeated-subsequence loops are detected -- NOT search->process->return, pagination, or
+  per-row conditional bodies. A repeated CONSEQUENTIAL body yields an ambiguous_loop Uncertainty
+  instead of a possibly-wrong loop over an irreversible action.
+
+Adds tests/test_induction_hardening.py (13 tests). Existing test_induction.py (17) unchanged and
+  green.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format induction-hardening files
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Expose induce / worklist / effects / resume / deployment-config via the CLI
+  ([#91](https://github.com/OpenAdaptAI/openadapt-flow/pull/91),
+  [`428ed49`](https://github.com/OpenAdaptAI/openadapt-flow/commit/428ed496452c3b0356adc71c01bbc8638f0e690c))
+
+* feat: expose induce / worklist / effects / resume / deployment-config via the CLI
+
+The library gained program IR, multi-trace induction, effect verification, API actuation, a durable
+  runtime, and a skill library, but the installable CLI could still only do the old linear
+  record->compile->replay. Surface the new capabilities so they are usable (and auditable) product,
+  not test fixture.
+
+New / extended subcommands (thin wrappers over existing library APIs; no library behavior changed):
+
+- induce: multi-trace induction over MULTIPLE recording (or bundle) dirs into a program bundle via
+  compiler.induction.induce_program; prints the audit trail, honestly refuses (nonzero exit, no
+  bundle written) when intent is underdetermined, optional --held-out leave-one-out validation. -
+  replay --worklist [RELATION=]FILE: load a CSV/JSON worklist of param rows and drive a program's
+  loop over a relation (wired into Replayer.run worklists=). - replay/run effect + actuator wiring:
+  --config / --effects-* / --api-* build and inject an EffectVerifier (rest/fhir/document-hash) and
+  an ApiActuator, plus --durable for the Tier-3 durable runtime. All default off, so an unconfigured
+  replay is byte-for-byte unchanged. - run: deployment-config-driven execution (the replay path
+  wired for a real deployment instead of the MockMed demo). - resume <run_dir> / approve <run_dir>:
+  surface the durable pause/resume + approval path via the current durable public API
+  (CheckpointStore + resume). - deployment.py + docs/deployment.example.yaml: one canonical
+  deployment config (backend / actuation / effects / runtime / policy) read by record / compile /
+  certify / replay / run / resume.
+
+Tests: tests/test_cli_{deployment,induce,new_commands}.py cover config load +
+
+verifier/actuator construction, induce end-to-end (certified + refuse + held-out), worklist
+  loaders/binding, approve/resume paths, and a fake-browser replay proving the deployment objects
+  reach the Replayer. 95 relevant tests green (incl. existing
+  induction/durable/effects/actuator/emit suites).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format CLI + deployment files
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.20.1 (2026-07-14)
+
+### Bug Fixes
+
+- Policy/lint traverse program graphs + require system-of-record effects (P0)
+  ([#92](https://github.com/OpenAdaptAI/openadapt-flow/pull/92),
+  [`726eff8`](https://github.com/OpenAdaptAI/openadapt-flow/commit/726eff843314216fda34dc7d1860f73ae27f9257))
+
+Two P0 safety holes let clinical-write certify an unsafe bundle.
+
+P0-1 — cert/lint now traverse the program graph + subflows, not just Workflow.steps. A program-mode
+  bundle keeps its actions in program.states and subflows[*].states (kind==ACTION -> state.step),
+  often with an EMPTY Workflow.steps, so evaluate_policy()/lint_workflow() saw "zero steps" and
+  inspected nothing. New canonical generator openadapt_flow/traversal.py (iter_workflow_steps) is
+  now the single source both checks iterate.
+
+P0-2 — "effect verification" now means the system of record, not the screen.
+  require_effect_verification_for only checked step.expect (visual/structural postconditions), so a
+  clinical write certified merely because it had a TEXT_PRESENT assertion — the weak oracle the
+  effect layer replaced. New rules: require_screen_postconditions_for (step.expect),
+  require_system_effects_for (non-empty step.effects), require_idempotency_key_for (effect carries
+  an idempotency key), prohibit_unconfirmed_effect_bindings (no placeholder /
+  needs_operator_confirmation effect). clinical-write.yaml now requires real system-of-record
+  effects + an idempotency key on writes, keeping screen postconditions as an ADDITIONAL
+  requirement. require_effect_verification_for kept as a deprecated alias of
+  require_screen_postconditions_for.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Documentation
+
+- Rewrite README to the current architecture + add a claims-consistency CI gate
+  ([#90](https://github.com/OpenAdaptAI/openadapt-flow/pull/90),
+  [`a3c3e06`](https://github.com/OpenAdaptAI/openadapt-flow/commit/a3c3e06bdd23fb674aafaf03507f71436ae4a837))
+
+The README materially misrepresented the product: it called the runtime "vision-only", claimed "864
+  tests", and said desktop/RDP backends were "adapters to come". Rewrite it to the current
+  architecture (vision-FIRST with a structural DOM/UIA rung; existing WindowsBackend + FreeRDP
+  adapters, mock-tested in CI) and add the marquee capabilities that were absent: the Phase-2
+  workflow-program IR, multi-trace induction with refuse-if-underdetermined, effect verification
+  against the system of record (REST/FHIR/doc-hash), the API actuator tier, policy lint/certify,
+  governed healing, durable checkpoint/resume, and PHI-free identity templates. Fix DESIGN.md's
+  stale "Frozen contracts" section to reflect ir.py's grown types
+  (ParamSpec/Predicate/Guard/ProgramGraph/State/
+  Transition/LoopSpec/Relation/ApiBinding/StructuralLocator + identity templates + effects).
+
+Add scripts/check_consistency.py (run by tests/test_consistency.py and a fast step in ci.yml's
+  required `test` gate) so the claims can't silently drift again. It fails on: a version mismatch
+  between openadapt_flow.__version__ and pyproject; a broken file path in README/DESIGN/LIMITS or a
+  workflow comment; a banned stale phrase in the README; or a hardcoded README test count that
+  disagrees with `pytest --collect-only`. The README deliberately carries no hard test number, so
+  that check is drift-proof by construction while staying enforceable if one is ever reintroduced.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.20.0 (2026-07-14)
 
 ### Features

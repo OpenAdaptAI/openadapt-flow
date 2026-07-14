@@ -82,6 +82,19 @@ while the flow recording stores *pixels* with positive ``dy`` = view down
 openadapt-capture is an **optional** dependency (the ``capture`` extra:
 ``pip install 'openadapt-flow[capture]'``); it is imported lazily so the flow
 core never pulls it onto the replay hot path.
+
+Structural-identity gap (desktop→web parity). This offline conversion produces
+a recording of the SAME shape as a web recording, and it compiles into a valid
+bundle, but it CANNOT carry the ``structural`` locator (UIA ``AutomationId`` /
+role+name) that a DOM-armed web bundle gets: capture records only
+mouse/keyboard/video, so there is no live accessibility tree at conversion time
+to read an element identity from. Every ``anchor.structural`` is therefore None
+and replay uses the VISUAL ladder (template/ocr/geometry). To get the
+deterministic structural top rung on desktop, record LIVE over ``WindowsBackend``
+via :func:`openadapt_flow.adapters.desktop_recorder.record_desktop_demo` (the
+recorder arms UIA locators per click). Re-arming an already-converted capture
+session against a live UIA tree is a separate follow-up documented in
+``desktop_recorder`` — it is not done here.
 """
 
 from __future__ import annotations

@@ -372,3 +372,85 @@ class ParallelsVM:
     def shim_url(self, *, port: int = SHIM_PORT) -> str:
         """URL WindowsBackend should target (``http://<guest-ip>:<port>``)."""
         return f"http://{self.guest_ip()}:{port}"
+
+    # -- the hardened win_agent (session 1, optional bearer token) -----------
+
+    def _agent_server_path(self) -> str:
+        """Host path to the packaged win_agent server (self-contained script)."""
+        return os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "win_agent", "server.py")
+        )
+
+    def launch_agent(
+        self,
+        *,
+        port: int = SHIM_PORT,
+        host: str = "0.0.0.0",
+        token: Optional[str] = None,
+        host_ip: Optional[str] = None,
+        wait_s: float = 25.0,
+    ) -> str:
+        """Deploy + start the hardened ``win_agent`` server in session 1.
+
+        The successor to :meth:`launch_shim`: it ships the dependency-free,
+        auth-capable ``openadapt_flow.backends.win_agent.server`` into the guest
+        and runs it in the interactive console session (session 1) via
+        ``session1_launch.py``, so ``mss``/``pyautogui`` address the real
+        desktop. ``host`` defaults to ``0.0.0.0`` because a host->guest
+        ``WindowsBackend`` must reach it over the shared network; pass a
+        ``token`` (strongly recommended when exposed like this) and give the
+        SAME token to ``WindowsBackend(auth_token=...)``.
+
+        Returns the guest URL once ``/health`` reports ok (raises on timeout).
+        """
+        host_ip = host_ip or self.host_ip()
+        server = self._agent_server_path()
+        launcher = os.path.abspath(os.path.join(_SCRIPT_DIR, "session1_launch.py"))
+        self.exec_cmd(f"if not exist {GUEST_DIR} mkdir {GUEST_DIR}")
+        self.push_file(server, f"{GUEST_DIR}/win_agent_server.py", host_ip=host_ip)
+        self.push_file(launcher, f"{GUEST_DIR}/session1_launch.py", host_ip=host_ip)
+        self.exec(
+            [
+                "netsh",
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                "name=OAAgent",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                f"localport={port}",
+            ]
+        )
+        self.kill_shim()
+        time.sleep(2)
+        launch_args = [
+            self.python_guest,
+            f"{GUEST_DIR}/session1_launch.py",
+            f"{GUEST_DIR}/win_agent_server.py",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        if token:
+            launch_args += ["--token", token]
+        self.exec(launch_args)
+        url = f"http://{self.guest_ip()}:{port}"
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            if self._agent_alive(url):
+                return url
+            time.sleep(1.5)
+        raise ParallelsError(f"win_agent did not come up at {url}")
+
+    def _agent_alive(self, url: str) -> bool:
+        """True when the agent's unauthenticated ``/health`` reports ok."""
+        try:
+            import requests
+
+            r = requests.get(f"{url}/health", timeout=8)
+            return r.status_code == 200 and r.json().get("status") == "ok"
+        except Exception:  # noqa: BLE001
+            return False

@@ -72,6 +72,46 @@ def test_scrub_drops_identifier_postcondition_when_active(monkeypatch):
     assert pc.text == "Chart synchronization complete"
 
 
+def test_scrub_drops_identifier_landmark_when_active(tmp_path):
+    # A patient-name row next to the click target would otherwise be mined as a
+    # geometry LANDMARK (plaintext). With the scrub active it must be dropped.
+    from test_compiler import blank, draw_button, draw_text, write_frame
+
+    privacy.set_text_scrubber(_FakeScrubber())
+    rec = tmp_path / "rec"
+    (rec / "frames").mkdir(parents=True)
+    before = blank()
+    draw_text(before, 40, 430, "Belford, Phil")  # the identifier, nearest text
+    draw_button(before, 560, 400, 160, 48, "Open")
+    after = before.copy()
+    draw_text(after, 420, 244, "Patient Chart Overview")
+    write_frame(rec, 0, "before", before)
+    write_frame(rec, 0, "after", after)
+    (rec / "events.jsonl").write_text(
+        json.dumps({"i": 0, "kind": "click", "x": 640, "y": 424, "t": 1.0}) + "\n"
+    )
+    (rec / "meta.json").write_text(
+        json.dumps(
+            {
+                "id": "lm",
+                "created_at": "2026-07-06T00:00:00+00:00",
+                "viewport": [1280, 800],
+                "app_url": "http://x/",
+                "params": {},
+            }
+        )
+    )
+    from openadapt_flow.compiler import compile_recording
+
+    wf = compile_recording(rec, tmp_path / "bundle", name="lm")
+    blob = (tmp_path / "bundle" / "workflow.json").read_text()
+    assert "Belford" not in blob
+    for step in wf.steps:
+        if step.anchor:
+            for lm in step.anchor.landmarks:
+                assert "Belford" not in lm.ocr_text
+
+
 def test_scrub_inactive_is_a_noop(monkeypatch):
     # Default auto + no scrubber installed => nothing is treated as PHI.
     privacy.set_text_scrubber(None)

@@ -111,6 +111,8 @@ def _presidio_violations(path: Path, workflow: dict, scrubber) -> list[str]:
         flag(step_id, "text (TYPE literal)", step.get("text"))
         anchor = step.get("anchor") or {}
         flag(step_id, "anchor.ocr_text", anchor.get("ocr_text"))
+        for lm in anchor.get("landmarks", []) or []:
+            flag(step_id, "landmark.ocr_text", lm.get("ocr_text"))
         for pc in step.get("expect", []) or []:
             flag(step_id, "postcondition.text", pc.get("text"))
     return out

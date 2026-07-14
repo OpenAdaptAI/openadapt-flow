@@ -266,6 +266,14 @@ def _landmarks_for(
             continue
         if volatility.classify_text(text, reference_date=reference_date):
             continue
+        if _text_carries_phi(text):
+            # A landmark is nearby ROW text used by the geometry rung; on a
+            # patient list that is often the name itself. When the optional
+            # Presidio scrub detects an identifier, drop the landmark so no
+            # patient name is mined into the bundle as geometry evidence (audit
+            # REM-2). Geometry is a fallback rung and the identity gate still
+            # disposes, so dropping a PHI landmark is safe (see docs/phi_at_rest).
+            continue
         lx, ly, lw, lh = line.region
         cx, cy = lx + lw // 2, ly + lh // 2
         dx, dy = click[0] - cx, click[1] - cy

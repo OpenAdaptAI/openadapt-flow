@@ -16,7 +16,8 @@ See also [PRIVACY.md](PRIVACY.md) (the in-flight / scrubbing map) and the
 | --- | --- | --- |
 | `workflow.json` identity band | **Salted-hash `identity_template`** — no plaintext name/DOB/MRN (REM-2) | One-way hash + governance guard + operator disk encryption |
 | `workflow.json` postconditions | `TEXT_PRESENT` assertions; identifier-bearing ones **dropped** when the Presidio scrub is active (REM-2/GAP-3) | Compile-time scrub (optional) + governance guard |
-| `workflow.json` labels/typed text | `anchor.ocr_text`, literal `Step.text` — may echo an identifier that is load-bearing for replay | **Not scrubbed** (would break replay); operator disk encryption + governance guard |
+| `workflow.json` landmarks | `anchor.landmarks[].ocr_text` — nearby ROW text used by the geometry rung, often the patient name; identifier-bearing ones **dropped** when the Presidio scrub is active | Compile-time scrub (optional) + governance guard |
+| `workflow.json` labels/typed text | `anchor.ocr_text`, literal `Step.text` — may echo an identifier that is **load-bearing** for replay (the target label / the typed search value) | **Not scrubbed** (scrubbing would break resolution/typing); governance guard flags it; **parameterize** the typed identifier (`entity_ref`) so it is supplied at run time and never stored |
 | `templates/*.png` | Pixel crops of the recorded screen — **image PHI** | **Not encrypted**; governance guards (kept out of git) + operator disk encryption |
 | `workflow.py` | Human-readable rendering; identity band is now a PHI-free note (REM-2) | Same as `workflow.json` |
 

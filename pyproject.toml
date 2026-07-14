@@ -28,6 +28,12 @@ dependencies = [
     # shipped example policies load them. Tiny, pure-Python, core so `certify`
     # works out of the box.
     "pyyaml>=6.0",
+    # Opt-in encryption-at-rest for compiled bundles and durable checkpoints
+    # (openadapt_flow.crypto: AES-256-GCM sealed containers). Core so
+    # Workflow.save(encrypt=True) / load(key=...) and encrypted checkpoints work
+    # out of the box in a regulated/PHI deployment; the audited AEAD substrate
+    # for docs/phi_at_rest.md. Imported lazily, only on the encryption path.
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

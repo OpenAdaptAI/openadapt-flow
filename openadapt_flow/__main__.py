@@ -477,11 +477,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_resume(args: argparse.Namespace) -> int:
+    from openadapt_flow import crypto
     from openadapt_flow.runtime.durable import resume, resume_point
     from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 
     run_dir = Path(args.run_dir)
-    store = CheckpointStore(run_dir)
+    # Encrypted runs (OPENADAPT_BUNDLE_KEY set) need the key to read the pause;
+    # unset => None => plaintext, unchanged.
+    ckpt_key = crypto.resolve_key(None)
+    store = CheckpointStore(run_dir, key=ckpt_key)
     pending = store.read_pending()
     if pending is None:
         print(
@@ -502,7 +506,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         f"state '{pending.step_id}'"
         if pending.program
         else f"step {pending.step_index} '{pending.step_id}' "
-        f"(from index {resume_point(run_dir)})"
+        f"(from index {resume_point(run_dir, key=ckpt_key)})"
     )
     print(
         f"Resuming {run_dir} at {where}: {pending.category}. "
@@ -547,9 +551,10 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                 effect_verifier=effect_verifier,
                 api_actuator=api_actuator,
                 durable=True,  # resume forces durability so it can pause again
+                checkpoint_key=ckpt_key,
                 allow_model_grounding=allow_egress,
             )
-            report = resume(run_dir, replayer)
+            report = resume(run_dir, replayer, key=ckpt_key)
         except ResumeRefused as refused:
             # P0-5: the library REFUSED the resume (no valid approval, an expired
             # pause, a changed bundle, or a diverged app state) — never a silent
@@ -576,12 +581,13 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     """
     import getpass
 
+    from openadapt_flow import crypto
     from openadapt_flow.runtime.durable.approval import ApprovalRecord
     from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
     from openadapt_flow.runtime.durable.program_checkpoint import bundle_version
 
     run_dir = Path(args.run_dir)
-    store = CheckpointStore(run_dir)
+    store = CheckpointStore(run_dir, key=crypto.resolve_key(None))
     pending = store.read_pending()
     if pending is None:
         print(f"No pending escalation at {run_dir} — nothing to approve.")

@@ -1,0 +1,51 @@
+# openadapt-flow on-prem local runner (systemd).
+#
+# Watches the local job inbox and runs compiled bundles through the
+# deterministic engine. NO network egress is required or granted: the sandbox
+# directives below deny it at the kernel level as defence-in-depth on top of the
+# site firewall. Placeholders (@STORAGE_ROOT@ etc.) are filled by install.sh.
+#
+# This unit is Type=oneshot and is triggered by openadapt-flow-runner.path when
+# a job appears (event-driven). For continuous polling instead, change ExecStart
+# to `run-queue.sh watch` and use Type=simple + Restart=always.
+
+[Unit]
+Description=openadapt-flow on-prem local run queue (air-gapped)
+After=local-fs.target
+# No After=network-online.target on purpose — this service needs no network.
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+WorkingDirectory=@STORAGE_ROOT@
+
+# Fail-closed PHI scrubbing + local storage/audit wiring.
+Environment=OPENADAPT_FLOW_SCRUB=on
+Environment=OPENADAPT_FLOW_SCRUB_IMAGES=1
+Environment=OPENADAPT_ONPREM_ROOT=@STORAGE_ROOT@
+Environment=OPENADAPT_ONPREM_CONFIG=@STORAGE_ROOT@/deployment.yaml
+Environment=OPENADAPT_ONPREM_AUDIT_LOG=@STORAGE_ROOT@/audit/audit.log
+# Put the engine venv on PATH so `openadapt-flow` resolves.
+Environment=PATH=@STORAGE_ROOT@/venv/bin:/usr/local/bin:/usr/bin:/bin
+
+ExecStart=@HERE@/bin/run-queue.sh once
+
+# --- Egress denial + hardening (defence-in-depth; the firewall is primary) ---
+# IPAddressDeny=any drops ALL outbound/inbound IP traffic for this unit. A
+# LAN-only VLM appliance or EMR API, if used, must be allow-listed here
+# explicitly (e.g. IPAddressAllow=192.168.10.0/24) — otherwise the runner is
+# fully offline.
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=@STORAGE_ROOT@
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

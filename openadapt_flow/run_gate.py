@@ -201,8 +201,7 @@ class RunGateReport(BaseModel):
         if not self.passed:
             names = ", ".join(g.title for g in self.refusals if not g.warning)
             lines.append(
-                f"  -> RUN REFUSED (fail-closed): {names}. "
-                "Nothing was executed."
+                f"  -> RUN REFUSED (fail-closed): {names}. " "Nothing was executed."
             )
         else:
             lines.append("  -> ADMITTED: all fail-closed gates satisfied.")
@@ -273,8 +272,12 @@ def evaluate_run_gate(
 
 
 def _result(
-    gate: str, passed: bool, detail: str, offenders: Optional[list[str]] = None,
-    *, warning: bool = False,
+    gate: str,
+    passed: bool,
+    detail: str,
+    offenders: Optional[list[str]] = None,
+    *,
+    warning: bool = False,
 ) -> GateResult:
     return GateResult(
         gate=gate,

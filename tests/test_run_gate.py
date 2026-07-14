@@ -97,7 +97,9 @@ def _good_workflow(name: str = "good") -> Workflow:
     )
 
 
-def _seal(wf: Workflow, tmp_path: Path, *, encrypt: bool = True) -> tuple[Workflow, Path]:
+def _seal(
+    wf: Workflow, tmp_path: Path, *, encrypt: bool = True
+) -> tuple[Workflow, Path]:
     """Save ``wf`` (optionally encrypted), then load it back so it carries a
     sealed manifest and the real at-rest ``encrypted`` flag."""
     bundle = tmp_path / wf.name
@@ -110,7 +112,9 @@ def _seal(wf: Workflow, tmp_path: Path, *, encrypt: bool = True) -> tuple[Workfl
     return loaded, bundle
 
 
-def _deployment(*, verifier: bool = True, policy: str = "clinical-write") -> DeploymentConfig:
+def _deployment(
+    *, verifier: bool = True, policy: str = "clinical-write"
+) -> DeploymentConfig:
     effects = (
         EffectsConfig(kind="rest", base_url="http://sor.local")
         if verifier
@@ -436,7 +440,9 @@ def test_cli_run_encryption_key_required_for_encrypted_bundle(
     import openadapt_flow.__main__ as main
 
     _no_execute(monkeypatch)
-    wf, bundle = _seal(_good_workflow(f"cli_key_{int(encrypt)}"), tmp_path, encrypt=encrypt)
+    wf, bundle = _seal(
+        _good_workflow(f"cli_key_{int(encrypt)}"), tmp_path, encrypt=encrypt
+    )
     monkeypatch.delenv("OPENADAPT_BUNDLE_KEY", raising=False)
 
     parser = main.build_parser()

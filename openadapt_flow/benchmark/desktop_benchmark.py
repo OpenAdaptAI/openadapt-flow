@@ -507,7 +507,12 @@ def _armed_coverage(bundle: Path) -> dict:
 
     wf = Workflow.load(bundle)
     clicks = [s for s in wf.steps if s.action.value in ("click", "double_click")]
-    armed = [s for s in clicks if s.anchor and s.anchor.context_text]
+    armed = [
+        s
+        for s in clicks
+        if s.anchor
+        and (s.anchor.context_text or s.anchor.identity_template)
+    ]
     return {
         "click_steps": len(clicks),
         "armed_clicks": len(armed),

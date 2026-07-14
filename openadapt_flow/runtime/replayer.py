@@ -507,7 +507,11 @@ class Replayer:
             ):
                 continue
             report.identity_applicable_steps += 1
-            if step.anchor.context_text or step.anchor.structured_identity:
+            if (
+                step.anchor.context_text
+                or step.anchor.structured_identity
+                or step.anchor.identity_template
+            ):
                 report.identity_armed_steps += 1
             else:
                 report.identity_unarmed.append(
@@ -1082,6 +1086,7 @@ class Replayer:
                 and (
                     step.anchor.context_text
                     or step.anchor.structured_identity
+                    or step.anchor.identity_template
                     or step.anchor.identifier_crop
                 )
             ):
@@ -1878,8 +1883,13 @@ class Replayer:
         assert anchor is not None
 
         def structured_tier() -> Optional[IdentityCheck]:
+            # PHI-free bundles carry a salted-hash identity_template instead of
+            # the plaintext structured_identity; older bundles carry the
+            # plaintext. Prefer whichever is present (audit REM-2).
+            tmpl = anchor.identity_template
+            has_template_structured = tmpl is not None and tmpl.structured
             recorded = anchor.structured_identity
-            if not recorded:
+            if not recorded and not has_template_structured:
                 return None
             getter = getattr(self.backend, "structured_text_at", None)
             if getter is None:
@@ -1888,6 +1898,10 @@ class Replayer:
                 live = getter(int(resolution.point[0]), int(resolution.point[1]))
             except Exception:
                 live = None
+            if has_template_structured:
+                from openadapt_flow.runtime import identity_template as itmpl
+
+                return itmpl.verify_structured_template(tmpl, live)
             return identity_mod.verify_structured_identity(recorded, live)
 
         # Recorded + live identifier crops, shared by the pixel and VLM tiers.
@@ -1910,10 +1924,15 @@ class Replayer:
         def vlm_tier() -> Optional[IdentityCheck]:
             recorded_png, live_png = identifier_crops()
             # Only spend the VLM where identity rests on a glyph-confusable
-            # identifier -- read from whatever identity text the bundle has.
-            confusable = identity_mod.identity_rests_on_confusable_identifier(
-                anchor.structured_identity or anchor.context_text
-            )
+            # identifier -- read from whatever identity evidence the bundle has
+            # (the PHI-free template precomputes this flag; older bundles read
+            # it from the plaintext identity text).
+            if anchor.identity_template is not None:
+                confusable = anchor.identity_template.rests_on_confusable_identifier
+            else:
+                confusable = identity_mod.identity_rests_on_confusable_identifier(
+                    anchor.structured_identity or anchor.context_text
+                )
             return identity_mod.verify_vlm_identity(
                 recorded_png,
                 live_png,
@@ -1922,7 +1941,9 @@ class Replayer:
             )
 
         def ocr_tier() -> Optional[IdentityCheck]:
-            if not anchor.context_text:
+            tmpl = anchor.identity_template
+            has_template_band = tmpl is not None and bool(tmpl.tokens)
+            if not anchor.context_text and not has_template_band:
                 return None
             return self._verify_identity_ocr(
                 step, resolution, before_png, params, workflow
@@ -1996,7 +2017,13 @@ class Replayer:
         Returns:
             The best :class:`IdentityCheck` across the two attempts.
         """
-        assert step.anchor is not None and step.anchor.context_text
+        assert step.anchor is not None and (
+            step.anchor.context_text
+            or (
+                step.anchor.identity_template is not None
+                and step.anchor.identity_template.tokens
+            )
+        )
         anchor = step.anchor
         band = identity_mod.band_region(
             resolution.point, anchor.region[3], self.backend.viewport
@@ -2035,6 +2062,17 @@ class Replayer:
             ]
             lines = identity_mod.lines_near_point(lines, point_y)
             observed = " ".join(line.text.strip() for line in lines)
+            if anchor.identity_template is not None and anchor.identity_template.tokens:
+                # PHI-free path: verify against the salted-hash template (audit
+                # REM-2). Same three-way verdict, no plaintext band stored.
+                from openadapt_flow.runtime import identity_template as itmpl
+
+                return itmpl.verify_template_identity(
+                    anchor.identity_template,
+                    observed,
+                    params=params,
+                    param_examples=workflow.params,
+                )
             return identity_mod.verify_target_identity(
                 step.anchor.context_text,
                 observed,

@@ -190,7 +190,7 @@ def program_regression_gate(
         sid
         for sid in removed
         if (a := active_steps[sid].anchor) is not None
-        and bool(a.context_text or a.structured_identity)
+        and bool(a.context_text or a.structured_identity or a.identity_template)
     ]
 
     return ProgramGateReport(

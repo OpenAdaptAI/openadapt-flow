@@ -295,9 +295,7 @@ def _run_damaged_loop(tmp_path, base: ProgramGraph, damage):
     library = SkillLibrary(tmp_path / "skills")
     library.create_skill("mockmed", base)
     stream = generate_stream(n_baseline=5, n_drift=5, drift=Drift.CONSENT_DIALOG)
-    out = learn_from_traces(
-        library, "mockmed", stream, inducer=_DamageInducer(damage)
-    )
+    out = learn_from_traces(library, "mockmed", stream, inducer=_DamageInducer(damage))
     return library, out
 
 

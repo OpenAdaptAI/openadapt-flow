@@ -1,0 +1,476 @@
+{
+  "generated_at": "committed registry state (regenerate: scripts/validate_claims.py --report)",
+  "green_check_run": false,
+  "ok": true,
+  "claims": [
+    {
+      "id": "web-supported",
+      "claim": "Web (browser) workflows are supported today: record a GUI workflow once, then replay it deterministically and locally.",
+      "tier": "supported",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "website",
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "\"Supported\" is scoped to the reference headless-browser backend (the v0 surface). Desktop (Windows) and Citrix are NOT supported \u2014 see their own `validating` claims below.",
+        "The full record->compile->replay e2e runs in the post-merge/nightly full suite; the fast required PR gate covers the replayer + demo units."
+      ],
+      "evidence": [
+        {
+          "path": "tests/e2e/test_record_compile_replay.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (post-merge/nightly full suite)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Records the MockMed browser demo once, compiles it, and replays it under baseline + theme/move/rename drift and parameter substitution through the headless-browser Backend."
+        },
+        {
+          "path": "tests/test_mockmed.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The reference browser demo app and its drift screens render deterministically (no CSS transitions), so replay is repeatable."
+        },
+        {
+          "path": "tests/test_replayer.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The deterministic replayer resolves steps, substitutes parameters, enforces postconditions and the risk gate \u2014 no model in the loop."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "deterministic-zero-model-replay",
+      "claim": "Replay is deterministic, local, and $0 \u2014 zero model calls on either the record or the replay side.",
+      "tier": "supported",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "website",
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "A VLM rung exists as the lowest fallback of the ladder; it is not invoked on a clean deterministic replay, and never on the record side."
+      ],
+      "evidence": [
+        {
+          "path": "tests/e2e/test_record_compile_replay.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (post-merge/nightly full suite)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Baseline replay x3 resolves every step on the `template` rung with 0 heals and 0 model calls; healed bundles replay clean afterward."
+        },
+        {
+          "path": "tests/test_replayer.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The replayer is a deterministic resolution ladder; the VLM rung is a fallback, not on the default path \u2014 the core runtime is model-free."
+        },
+        {
+          "path": "benchmark/BENCHMARK.md",
+          "kind": "benchmark",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "CI-reproducible MockMed run artifact: 100/100 compiled replays at 4.9s p50 with zero model calls (field/artifact reference)."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "effect-verification-silent-writes",
+      "claim": "Effect verification against the system of record catches silent wrong writes the screen-only oracle misses (5 of 7 transactional fault classes).",
+      "tier": "supported",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "Verification requires the step to DECLARE typed `effects` AND a configured EffectVerifier. Without a real system-of-record verifier, on-screen read-back is SAME-SURFACE and not independent."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_effect_verifier.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The REST/FHIR/document-hash verifiers confirm exactly-one write and refute duplicate / missing / partial / collateral-loss writes."
+        },
+        {
+          "path": "tests/test_silent_wrong_action_benchmark.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Each silent-wrong-action class is silent under the screen-only oracle and is CAUGHT once effects are declared and verified."
+        },
+        {
+          "path": "tests/test_effect_fhir.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The FHIR effect verifier's read/confirm/refute/indeterminate contract (the live-OpenEMR smoke is a separate opt-in function in this file)."
+        },
+        {
+          "path": "benchmark/fault_model/FAULT_MODEL.md",
+          "kind": "benchmark",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The 7-class transactional fault-model study: 5/7 classes silently mishandled by screen-only, all 5 halt through the real replayer."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "identity-gate-halt-armed",
+      "claim": "On ambiguity the runtime halts instead of guessing, and an identity gate refuses a wrong-entity (wrong-patient) click \u2014 on ARMED steps only.",
+      "tier": "supported",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "Identity verification covers ONLY armed steps. Real bundles arm a MINORITY of clicks (4 of 12 on a recent live OpenEMR bundle); an UNARMED click proceeds with no identity check whatsoever. Coverage is an auditable per-step metric, but disclosure does not close the gap."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_identity.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Wrong-entity / near-name sibling / generic-band / param-in-band probes: the identity check refuses to verify a mismatched target and never arms on non-discriminative bands."
+        },
+        {
+          "path": "tests/test_disambiguation.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Underdetermined targets surface as explicit disambiguation rather than a guessed click."
+        },
+        {
+          "path": "tests/test_identity_corpus_rates.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Held-out identity corpus rates (the ROC / false-accept guard behind the gate)."
+        },
+        {
+          "path": "tests/test_identity_ladder.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The identity resolution ladder (structural/template/OCR) escalation."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "halt-teach-promote",
+      "claim": "A halt is learnable: halt -> teach a correction -> promote a guarded branch, refusing underdetermined fixes.",
+      "tier": "supported",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "Promotion is governed by a regression gate that blocks identity- weakening corrections; the loop refuses to guess when the fix is underdetermined."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_halt_learn_loop.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "A surprise modal halts and emits a learnable trace; teaching promotes a guarded dismiss branch that replays without regression; an underdetermined correction is refused."
+        },
+        {
+          "path": "tests/test_teach_cli.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The `teach` CLI resolves a halt via a correction spec or a recording, refuses an underdetermined fix, and errors on a non-halted run."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "mockmed-benchmark-ci-reproducible",
+      "claim": "The MockMed benchmark is CI-reproducible: compiled replay finishes ~4.9s p50 with zero model calls versus ~37.5s p50 (~$0.27/run) for the agent.",
+      "tier": "supported",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "The published latency/cost figures come from a dated run artifact; the app is intentionally simple, so success rate (100/100 vs 20/20) is not the story \u2014 the standing cost/latency delta is. Agent cost is a list-price estimate."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_mockmed.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The MockMed app + drift screens are deterministic and reachable, the substrate the benchmark replays against."
+        },
+        {
+          "path": "tests/test_benchmark.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The benchmark harness / report accounting that produces the numbers."
+        },
+        {
+          "path": "benchmark/BENCHMARK.md",
+          "kind": "benchmark",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Full numbers, methodology, and caveats for the CI-reproducible MockMed comparison (dated run artifact)."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "windows-desktop-validating",
+      "claim": "Windows desktop workflows are being validated with design partners (not a supported surface yet): the deterministic structural (UIA) rung resolves recorded clicks by AutomationId on a real Windows app.",
+      "tier": "validating",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs",
+        "website"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "The live desktop e2e is OPT-IN and infra-gated (needs a Parallels Win11-ARM VM; `OAFLOW_PARALLELS_E2E=1`); it never runs on default CI. Only the mocked backend protocol runs in CI.",
+        "DataGridView rows are only partially UIA-armable (see docs/desktop/LIMITS.md). This harness does not replace third-party design-partner validation."
+      ],
+      "evidence": [
+        {
+          "path": "tests/e2e/test_parallels_desktop_e2e.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "validating",
+          "gating": "opt-in (OAFLOW_PARALLELS_E2E)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "OPT-IN live proof on a real Win11-ARM VM: record->compile->replay through WindowsBackend with the structural rung resolving every click by AutomationId (armed_coverage == 1.0)."
+        },
+        {
+          "path": "tests/test_windows_backend.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The 4-method Backend protocol on Windows against a MOCKED WAA server (runs in CI post-merge; proves the wire, not a live desktop)."
+        },
+        {
+          "path": "benchmark/structural_action/STRUCTURAL_ACTION.md",
+          "kind": "benchmark",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Desktop drift benchmark: the structural rung resolved 21/21 targets where visual replay alone managed 6/21."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "citrix-pixel-validating",
+      "claim": "Citrix / remote-display (pixel-only) is a spike being validated with design partners: the compiler's visual floor drives a real remote-display window with the structural rung unavailable, plus identity gate on pixels and halt on ambiguity.",
+      "tier": "validating",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs",
+        "website"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "PIXEL-ONLY: no UIA/DOM crosses to the driver. On-screen OCR read-back is SAME-SURFACE, not an independent system-of-record check.",
+        "A Parallels VM window is a Citrix ANALOG; real HDX/latency/DPI/lock- screen drift is not simulated. OPT-IN + infra-gated (`OAFLOW_CITRIX_PIXEL_E2E=1`, macOS screen-recording + accessibility); never runs on default CI, and does not replace design-partner validation."
+      ],
+      "evidence": [
+        {
+          "path": "tests/e2e/test_citrix_pixel_e2e.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "validating",
+          "gating": "opt-in (OAFLOW_CITRIX_PIXEL_E2E)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "OPT-IN pixel-only proof: structural_armed_coverage == 0, replay resolves on template/ocr/geometry only, on-screen OCR read-back verifies the write, the identity gate HALTs on a look-alike patient, and render drift triggers halt-on-ambiguity."
+        },
+        {
+          "path": "tests/test_pixel_identity_probe.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The pixel-substrate identity probe behind the on-pixels identity gate."
+        },
+        {
+          "path": "docs/desktop/CITRIX_PIXEL.md",
+          "kind": "doc",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The Citrix-analog methodology and the honest gaps (HDX compression, latency, DPI/credential/lock-screen drift NOT simulated)."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "openemr-field-benchmark",
+      "claim": "On the real third-party OpenEMR public demo, compiled replay went 20/20 versus 10/10 for a computer-use agent, faster and with zero model calls.",
+      "tier": "validating",
+      "reproducibility": "field",
+      "surfaces": [
+        "README.md",
+        "docs",
+        "website"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "FIELD TEST, NOT CI-reproducible: the head-to-head ran against a SHARED public demo that other users mutate and that resets daily; the sample is small (10 agent runs). Only the verifier + task-prompt units run in CI. `reproducibility: field` forbids ever labeling this `supported`."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_openemr_benchmark.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The CI-reproducible half: the note-saved verifier and the intent-not-coordinates task prompt that both benchmark arms use."
+        },
+        {
+          "path": "benchmark/openemr/BENCHMARK.md",
+          "kind": "benchmark",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The field-test numbers, methodology, and cost caps for the 20-vs-10 head-to-head run."
+        },
+        {
+          "path": "docs/showcase-openemr/FINDINGS.md",
+          "kind": "doc",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The correctness-only field findings (fresh browsers, zero model calls, closed-loop scrolling)."
+        }
+      ],
+      "errors": []
+    }
+  ]
+}

@@ -14,7 +14,7 @@ import logging
 import math
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from openadapt_flow.compiler.annotate import StepAnnotator
@@ -278,6 +278,7 @@ def _landmarks_for(
         cx, cy = lx + lw // 2, ly + lh // 2
         dx, dy = click[0] - cx, click[1] - cy
         dist = math.hypot(dx, dy)
+        relation: Literal["left_of", "right_of", "above", "below"]
         if abs(dx) >= abs(dy):
             # Target is to the landmark's right -> the landmark is left_of it.
             relation = "left_of" if dx >= 0 else "right_of"
@@ -574,7 +575,13 @@ def _postconditions(
         else None
     )
     if changed is not None:
-        after = cv2.imdecode(np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR)
+        # ``after_png`` was already decoded successfully upstream (it produced
+        # ``changed``), so the re-decode here is known-valid; cv2's stub types
+        # the result as Optional, hence the cast.
+        after = cast(
+            np.ndarray,
+            cv2.imdecode(np.frombuffer(after_png, dtype=np.uint8), cv2.IMREAD_COLOR),
+        )
         frame_h, frame_w = after.shape[:2]
         x, y, w, h = changed
         x0 = max(0, x - REGION_STABLE_PAD)
@@ -894,8 +901,13 @@ def compile_recording(
                     f"missing before frame for {kind} event {i} in {recording}"
                 )
             click: Point = (int(event["x"]), int(event["y"]))
-            frame = cv2.imdecode(
-                np.frombuffer(before_png, dtype=np.uint8), cv2.IMREAD_COLOR
+            # ``before_png`` is a captured frame we already hold; the decode is
+            # known-valid. cv2's stub types imdecode as Optional, hence the cast.
+            frame = cast(
+                np.ndarray,
+                cv2.imdecode(
+                    np.frombuffer(before_png, dtype=np.uint8), cv2.IMREAD_COLOR
+                ),
             )
             crop_region = _discriminative_crop_region(frame, click)
             template_bytes = _crop_png(before_png, crop_region)
@@ -1151,7 +1163,9 @@ def compile_recording(
                     f"invalid risk {risk!r} for {step_id!r} (use "
                     "'reversible' or 'irreversible')"
                 )
-            by_id[step_id].risk = risk
+            # Validated against the two legal values just above, so this narrows
+            # the free-form ``dict[str, str]`` override value to Step.risk's Literal.
+            by_id[step_id].risk = cast(Literal["reversible", "irreversible"], risk)
 
     # System-of-record effect mining (opt-in). Runs LAST, after risk_overrides,
     # so each step's `risk` (the consequential-write signal) is final. Attaches

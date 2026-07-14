@@ -1,6 +1,519 @@
 # CHANGELOG
 
 
+## v0.25.0 (2026-07-14)
+
+### Bug Fixes
+
+- Desktop e2e targets a reliable app (repeatable structural-rung proof, not flaky Calculator)
+  ([#102](https://github.com/OpenAdaptAI/openadapt-flow/pull/102),
+  [`c19fda1`](https://github.com/OpenAdaptAI/openadapt-flow/commit/c19fda1b31d7cf6026cb9b21fab4c9ab31d8ea43))
+
+The opt-in Parallels desktop e2e drove the built-in UWP Calculator and asserted per-key
+  AutomationIds (num7Button, ...). On Windows 11 ARM the modern Calculator is a packaged UWP app
+  hosted under ApplicationFrameHost whose keypad does not surface as a findable top-level window
+  through the UIA path WindowsBackend.locate_structural walks, so locate_structural returns None and
+  the test fails even though the desktop stack works -- a flaky Calculator test, not a repeatable
+  structural-rung proof.
+
+Retarget the e2e at the in-tree Patient Notes -- Benchmark Harness WinForms app
+  (scripts/desktop/patient_notes.ps1), the same target the desktop benchmark uses. Its controls are
+  classic System.Windows.Forms TextBox (EditControl) / Button (ButtonControl) controls with explicit
+  .Name / .AccessibleName, so WinForms exposes each with a stable AutomationId in the top-level
+  window's UIA tree -- verified live on the Win11-ARM VM
+  (locate_structural(automation_id='searchBox') -> StructuralHandle, conf 1.0). The demo clicks only
+  searchBox/searchButton/noteBox/saveButton (all stable AutomationIds) and deliberately avoids the
+  DataGridView rows, whose WinForms UIA tree is only partially populated -- so every recorded click
+  is structurally armable and armed_coverage == 1.0 / the structural-rung assertion are meaningful
+  and repeatable.
+
+Deploy + seed + launch the app in session 1 via the existing ParallelsVM / session1_launch.py
+  plumbing (no source modules changed). Stays snapshot-safe and OPT-IN (OAFLOW_PARALLELS_E2E=1):
+  collected-but-skipped without the env var; the maintainer runs the live proof. Also corrects the
+  compile -> Workflow.load flow (compile_recording returns a Workflow; the bundle dir is what
+  Workflow.load takes).
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Chores
+
+- Type-check the safety-critical modules (compile, identity, replayer) under mypy
+  ([#100](https://github.com/OpenAdaptAI/openadapt-flow/pull/100),
+  [`1d3bd34`](https://github.com/OpenAdaptAI/openadapt-flow/commit/1d3bd348ef6e21c6fbbb29b4c1fe77dfa795a7ed))
+
+External reviews flagged that mypy's ignore_errors debt list excluded the most safety-critical
+  modules. Bring the compiler, the pre-click identity gate, and the replayer under the type checker.
+
+Removed from the [tool.mypy] ignore list and fixed the real errors: - compiler.compile: annotate the
+  landmark `relation` local as its Literal; cast known-valid cv2.imdecode results (Optional stub) to
+  np.ndarray; narrow the validated risk-override value to Step.risk's Literal via cast. -
+  runtime.identity: already clean once un-ignored (no code change needed). - runtime.replayer: type
+  `self.vision` as Any (always defaulted to the vision module in __init__); drop a redundant per-run
+  attribute re-annotation; handle scrub_text's Optional[str] return at two log sites; add caller-
+  guaranteed None asserts for api_actuator / state_verifier (mirroring the existing `assert binding
+  is not None`); use the already-narrowed local `anchor` in the identity attempt closure.
+
+Also tightened classify_step_risk's return type to the reversible/irreversible Literal. No runtime
+  behavior change — typing only.
+
+Documented the remaining, genuinely lower-stakes debt in pyproject.toml and noted that the
+  safety-critical compile/replay path is now fully checked.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Self-serve halt->learn via 'openadapt flow teach' (governed, refuses bad fixes)
+  ([#101](https://github.com/OpenAdaptAI/openadapt-flow/pull/101),
+  [`8e17641`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8e17641c3c9bbd2e610f8d3e082b3bf24503ecbd))
+
+Wire the existing halt->learn library capability into a one-command, operator-facing flow.
+  `openadapt-flow teach <run_dir> --fix <recording_or_spec> --bundle <base> --out <updated_bundle>`
+  loads a halted RunReport, turns a fix demonstration into the operator-correction ExecutionTrace,
+  and drives the UNCHANGED learn_from_halt loop (induce -> RegressionGate -> held-out canary).
+
+An updated, versioned bundle is written ONLY when the correction promotes; an underdetermined or
+  unsafe fix is REFUSED (nonzero exit, base bundle unchanged, still halting) with the reason
+  printed. The fix source is flexible: a recording directory of the resolution (reuses
+  compile_recording) or a scripted correction spec (deterministic, CI-friendly).
+
+New orchestration: openadapt_flow/learning/teach.py (no runtime files touched; reuses halt_loop /
+  loop / gate / library / synth_stream). New CLI verb in __main__.py. New tests drive the modal-once
+  scenario THROUGH the CLI: valid fix (spec + recording) -> updated bundle -> re-run resolves
+  without halting; blind halt -> refusal, nonzero exit, bundle unchanged, re-run still halts; plus
+  --help and input-guard cases.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.24.0 (2026-07-14)
+
+### Features
+
+- Durable checkpoint/resume for ProgramGraph + authenticated approval on resume (P0)
+  ([#99](https://github.com/OpenAdaptAI/openadapt-flow/pull/99),
+  [`2bc2807`](https://github.com/OpenAdaptAI/openadapt-flow/commit/2bc2807ffba3d0548d4efc386a3534a641685053))
+
+* feat: durable checkpoint/resume for ProgramGraph + authenticated approval on resume (P0)
+
+P0-4 — durable ProgramGraph checkpoint/resume: the Phase-2 state-machine interpreter now checkpoints
+  its whole INTERPRETER STATE after each verified action state (frame/subflow/loop stack, loop
+  cursors, bound params, completed effect keys, expected on-screen text, transition-history hash,
+  bundle version) via a new ProgramCheckpoint (in runtime/durable/, not ir.py). On a halt it durably
+  PAUSES; resume RESTORES the interpreter from that state — re-entering each subflow/loop graph at
+  the paused state, finishing the in-progress loop row and running the remaining rows — never
+  restarting from the graph entry / a step index, and never re-performing an already-confirmed
+  write. Linear-mode durability is unchanged.
+
+P0-5 — resume as an authenticated approval workflow: resume() now REQUIRES an ApprovalRecord
+  (approver identity + timestamp + chosen resolution + bundle version hash) before continuing a
+  paused run; revalidates the live app is still in the checkpoint's expected state and that
+  already-confirmed effects still hold; and refuses a stale (expired) pause. A caller with no valid
+  approval cannot resume. The CLI approve/resume commands record and enforce it.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format durable files; merge main (schema-v2)
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.23.0 (2026-07-14)
+
+### Bug Fixes
+
+- Learning gate compares program semantics, not step IDs (no silent safety regression)
+  ([#97](https://github.com/OpenAdaptAI/openadapt-flow/pull/97),
+  [`f399bbc`](https://github.com/OpenAdaptAI/openadapt-flow/commit/f399bbc0bb48d32acae92975ef075738df4499a8))
+
+* fix: learning gate compares program semantics, not step IDs (Wave 2)
+
+Gate now traverses both programs + subflows and quarantines a candidate that weakens any safety
+  invariant: dropped identity-armed guard, dropped system-of-record effect, new consequential step
+  without effects, risk downgrade, lost approval requirement, or a write made reachable under
+  broader conditions. Matches steps by structural role, not step.id.
+
+* style: ruff format learning-gate files
+
+### Features
+
+- Bundle schema v2 (manifest, digest, provenance) + load-time structural validation
+  ([#98](https://github.com/OpenAdaptAI/openadapt-flow/pull/98),
+  [`88b1fa8`](https://github.com/OpenAdaptAI/openadapt-flow/commit/88b1fa87b64a5bcf97104f36913e7d23d007f170))
+
+Bump Workflow.schema_version 1 -> 2 (SCHEMA_VERSION constant) now that the IR carries ~10x its v1
+  semantics, with a clean v1 -> v2 migration on read so every existing bundle still loads and
+  replays byte-for-byte.
+
+Schema v2 additions (ir.py): - BundleProvenance: compiler version + certification block (policy
+  name, certified flag, status, timestamp, optional expiry). - BundleManifest: per-asset SHA-256
+  file_hashes, a whole-bundle content_digest, provenance, and the encrypted flag (mirrors
+  Workflow.encrypted; at-rest crypto still deferred). - Workflow.manifest field, sealed on save()
+  (also written to a manifest.json sidecar), migrated/verified on load(), plus
+  Workflow.stamp_certification().
+
+New openadapt_flow/bundle_validation.py: - migrate_bundle_dict (v1 -> v2, additive), build_manifest,
+  compute_file_hashes, compute_content_digest, verify_integrity (rejects a tampered workflow.json or
+  sealed template; ignores post-seal template additions). - validate_workflow: structural rules
+  (entry exists, transition/handler targets resolve, kind<->payload match, referenced subflows
+  exist, unique state/step ids, terminals reachable, no unsafe unconditional cycle) plus the safety
+  rule (every consequential/irreversible action carries effect verification). Load raises on
+  structural malformation; the safety finding is surfaced to lint/certify so existing
+  uncertified-but-well-formed bundles still load.
+
+Tests: tests/test_bundle_schema_v2.py (29 cases) covers migration, stable-digest
+
+round-trip, provenance/certification, integrity tampering, every validation rule on a crafted-bad
+  graph, and a good program/linear bundle passing. test_annotate byte-identical assertion now
+  excludes the (per-save-varying) manifest metadata.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.22.0 (2026-07-14)
+
+### Features
+
+- Windows desktop parity — interactive-session VM agent, backend hardening, snapshot-safe Parallels
+  e2e ([#95](https://github.com/OpenAdaptAI/openadapt-flow/pull/95),
+  [`781f32c`](https://github.com/OpenAdaptAI/openadapt-flow/commit/781f32c5413274520b92b078cac65a8d12ccc859))
+
+* feat: Windows desktop parity — interactive-session VM agent, backend hardening, snapshot-safe
+  Parallels e2e
+
+Bring the desktop (Windows/Parallels) path to parity with the web path: record -> compile -> replay
+  over the structural (UIA) + vision ladder, with identity and effect verification unchanged and
+  backend-agnostic.
+
+- backends/win_agent: new self-contained, stdlib-only in-guest agent server that runs in the
+  interactive session (session 1) — solves the session-0 screenshot/input problem. Loopback bind by
+  default; optional bearer token (closes the PHI-audit unauthenticated-shim finding). Endpoints
+  match the WindowsBackend contract (/screenshot, /execute_windows, /health). Ships a logon .bat +
+  scheduled-task recipe (README). - windows_backend: send bearer auth when configured; the ACTION
+  path now fails loudly (RuntimeError) on an unreachable/non-2xx agent so a dropped click/keystroke
+  can never be a silent wrong action; read paths still return None (fall through the visual ladder).
+  Confirmed it implements the StructuralActionBackend protocol so the resolver drives it unchanged.
+  - adapters/desktop_recorder: live-record helper that arms a UIA structural locator per click (web
+  parity), plus structural_armed_coverage metric. The offline capture-convert structural gap is
+  documented precisely as a follow-up (no live UIA tree at conversion time). -
+  parallels_vm.launch_agent: deploy + launch the hardened agent in session 1 with optional token;
+  poll /health. - benchmark/desktop_benchmark: DesktopHarness threads an auth token to the backend.
+  - tests/e2e: snapshot-safe, OPT-IN (OAFLOW_PARALLELS_E2E=1) Parallels proof driving the built-in
+  Calculator through record->compile->replay, asserting the UIA structural rung fires;
+  snapshot-first, revert-after, never deletes the VM or its snapshots. Collected-but-skipped
+  everywhere else. - docs/desktop_windows_runbook.md: one-pass operator runbook for the live proof.
+
+Mock-tested end to end on macOS (agent HTTP roundtrip incl. auth, backend error paths, launch_agent,
+  recorder arming). e2e is skipped without the env var. Ruff clean; ruff check openadapt_flow green.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* fix: only send bearer header when a token is set; format e2e
+
+Reconcile CI failure in tests/test_dom_identity.py. The hardening added an unconditional
+  `headers=self._headers()` (None when unauthenticated) to the WindowsBackend request calls; that
+  `headers=` kwarg was swallowed by the pre-existing `_FakeSession.post(url, json=, timeout=)` mock
+  (no `headers` param) -> TypeError -> the tolerant read path returned None, so structured_text_at /
+  structural_locator_at regressed to None.
+
+Fix preserves the safety property and restores backward compat: build request kwargs with `timeout`
+  always and `headers` ONLY when a token is set, so the unauthenticated call shape is byte-for-byte
+  the legacy one and predates-auth mocks/callers are never handed an unexpected kwarg. The bearer
+  header still goes out whenever auth_token is configured (win_agent auth roundtrip test and the
+  header-assertion test both cover it).
+
+Also apply ruff format to the opt-in e2e (CI format gate).
+
+* fix: type-check ctypes.windll access on non-Windows (mypy)
+
+`ctypes.windll` exists only on Windows, so mypy on the Linux CI lint job flagged
+  `_active_console_session` with attr-defined. Access it dynamically via getattr and return -1 when
+  absent — keeps the module importable and type-clean on macOS/Linux while behaving identically
+  in-guest on Windows.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.21.2 (2026-07-14)
+
+### Bug Fixes
+
+- Reconcile induce --held-out test with honest 'STRUCTURAL coverage' header
+  ([#96](https://github.com/OpenAdaptAI/openadapt-flow/pull/96),
+  [`8d99247`](https://github.com/OpenAdaptAI/openadapt-flow/commit/8d992472674f7333bf133c73994bdcf39769bdd4))
+
+Cross-PR regression on main: #91 (CLI) asserted the induce --held-out output says 'Held-out
+  validation', but #93 (induction hardening) renamed it to 'Held-out STRUCTURAL coverage' (the
+  honest naming -- it is structural trace-shape coverage, not behavioral validation). Each PR passed
+  alone; together they broke main. Update the test to the honest header.
+
+
+## v0.21.1 (2026-07-14)
+
+### Bug Fixes
+
+- Bind runtime params into effect contracts + idempotency keys (P0)
+  ([#94](https://github.com/OpenAdaptAI/openadapt-flow/pull/94),
+  [`35c4530`](https://github.com/OpenAdaptAI/openadapt-flow/commit/35c45309286de2a4cc32b911715f0ae3167aa66a))
+
+* fix: bind runtime params into effect contracts + idempotency keys (P0)
+
+A parameterized workflow verified its system-of-record effects against the values baked in at
+  DEMONSTRATION time: Effect.match/value/idempotency_key were plain static strings and the replayer
+  passed the effect to the verifier unchanged. So a run could write patient "Susan" via the GUI yet
+  verify the recorded demo patient "Phil", check the demonstrated note instead of the run's, reuse
+  ONE frozen idempotency key across unrelated runs, confirm an unrelated pre-existing record, or
+  false-halt every non-demo run.
+
+Fix: - ir/effects: add ValueExpr (literal | param) and make Effect.match values and Effect.value /
+  idempotency_key ValueExpr. Back-compat is exact: a before validator coerces the v1 bare-string
+  JSON form to ValueExpr(literal=...), and ValueExpr's __eq__/__hash__/__str__/__repr__ make a
+  literal transparently string-compatible, so every existing reader (learning-gate signatures,
+  codegen review comments) and matcher behaves byte-for-byte identically. validate_assignment keeps
+  the compiler's raw-string assignment consistent. - replayer: resolve each effect's contract
+  against the run's params (plus a reserved __run_id__ stable-per-run identity) BEFORE
+  capture_pre_state and verify, on both the GUI and API-actuator paths, mirroring how ApiBinding
+  {param} templates are filled. Pass the RESOLVED effect to the verifier. - idempotency key is now
+  per-run: bind it to a run param (or __run_id__) so it no longer collides across unrelated runs; a
+  literal (v1) key is unchanged. - persist a non-secret SHA-256 digest of each resolved contract in
+  StepResult.effect_contract_hashes for auditability. - dedupe the double self.use_structural
+  assignment in Replayer.__init__.
+
+Tests: new test_value_expr.py (type contract + coercion) and
+
+test_replayer_effect_param_binding.py (resolves to the run's patient/value not the demo's; v1
+  plain-string effect loads + verifies identically; idempotency key differs across runs;
+  resolved-contract hash recorded; end-to-end CONFIRM vs. frozen-demo-literal REFUTE against the
+  real MockMed system of record).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* fix: effect_mining emits ValueExpr (mypy) after Effect param-binding
+
+Effect.match/value/idempotency_key are now ValueExpr; the runtime validator coerces bare strings at
+  runtime (tests pass) but mypy flagged effect_mining passing raw str. Wrap mined literals in
+  ValueExpr(literal=...) at the seven construction sites so the compiler is type-clean too.
+
+* fix: silent_wrong_action emits ValueExpr (mypy) after Effect param-binding
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.21.0 (2026-07-14)
+
+### Bug Fixes
+
+- Induction refuses to over-certify (uncertainty on flagged proposals, entity params, honest
+  coverage naming) ([#93](https://github.com/OpenAdaptAI/openadapt-flow/pull/93),
+  [`5557c53`](https://github.com/OpenAdaptAI/openadapt-flow/commit/5557c53751d9d3c9e0d8abdc9ceadb50e3a12e6e))
+
+* fix: induction refuses to over-certify (uncertainty on flagged proposals, entity params, honest
+  coverage naming)
+
+Multi-trace induction is a useful PROTOTYPE whose output could over-claim. Both external reviews
+  flagged this. Hardens the safety posture so certification matches what was actually verified. All
+  changes are within induction.py logic (no ir.py / runtime changes); compiler/__init__.py
+  re-exports the new name.
+
+1. A flagged Proposal no longer auto-certifies. When an inferred branch or an OPTIONAL step over a
+  CONSEQUENTIAL action (irreversible or effect-bearing) is proposed, induction ALSO emits an
+  Uncertainty requiring operator confirmation, so certified=False until resolved. "Absent in some
+  traces" is no longer a silent optional/skip for a consequential step -- it is a question routed to
+  the disambiguation flow.
+
+2. reproduction_score() renamed to structural_trace_coverage() (deprecated, warning-emitting alias
+  kept). It is a structural trace-SHAPE score -- gives params full credit, treats loop tokens as
+  reproduced, executes no app and checks no effect/identity -- so its docstring now states exactly
+  what it does and does NOT verify, and nothing treats it alone as behavioral validation /
+  certification (HeldOutValidation reworded to match).
+
+3. Entity/selection generalization: a CLICK/selection whose target VARIES across traces is no longer
+  frozen as a literal that silently re-selects the demo entity (the runtime clicks the resolved
+  anchor, not a param). Click field-keys are now value-free so varying selections align; a varying
+  selection becomes an ambiguous_selection Uncertainty with an advisory entity_ref proposal -- never
+  a hardcoded demo entity.
+
+4. Loop honesty: documented (module + _reduce_trace docstrings, in-file LIMITS) that only
+  consecutive-repeated-subsequence loops are detected -- NOT search->process->return, pagination, or
+  per-row conditional bodies. A repeated CONSEQUENTIAL body yields an ambiguous_loop Uncertainty
+  instead of a possibly-wrong loop over an irreversible action.
+
+Adds tests/test_induction_hardening.py (13 tests). Existing test_induction.py (17) unchanged and
+  green.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format induction-hardening files
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Expose induce / worklist / effects / resume / deployment-config via the CLI
+  ([#91](https://github.com/OpenAdaptAI/openadapt-flow/pull/91),
+  [`428ed49`](https://github.com/OpenAdaptAI/openadapt-flow/commit/428ed496452c3b0356adc71c01bbc8638f0e690c))
+
+* feat: expose induce / worklist / effects / resume / deployment-config via the CLI
+
+The library gained program IR, multi-trace induction, effect verification, API actuation, a durable
+  runtime, and a skill library, but the installable CLI could still only do the old linear
+  record->compile->replay. Surface the new capabilities so they are usable (and auditable) product,
+  not test fixture.
+
+New / extended subcommands (thin wrappers over existing library APIs; no library behavior changed):
+
+- induce: multi-trace induction over MULTIPLE recording (or bundle) dirs into a program bundle via
+  compiler.induction.induce_program; prints the audit trail, honestly refuses (nonzero exit, no
+  bundle written) when intent is underdetermined, optional --held-out leave-one-out validation. -
+  replay --worklist [RELATION=]FILE: load a CSV/JSON worklist of param rows and drive a program's
+  loop over a relation (wired into Replayer.run worklists=). - replay/run effect + actuator wiring:
+  --config / --effects-* / --api-* build and inject an EffectVerifier (rest/fhir/document-hash) and
+  an ApiActuator, plus --durable for the Tier-3 durable runtime. All default off, so an unconfigured
+  replay is byte-for-byte unchanged. - run: deployment-config-driven execution (the replay path
+  wired for a real deployment instead of the MockMed demo). - resume <run_dir> / approve <run_dir>:
+  surface the durable pause/resume + approval path via the current durable public API
+  (CheckpointStore + resume). - deployment.py + docs/deployment.example.yaml: one canonical
+  deployment config (backend / actuation / effects / runtime / policy) read by record / compile /
+  certify / replay / run / resume.
+
+Tests: tests/test_cli_{deployment,induce,new_commands}.py cover config load +
+
+verifier/actuator construction, induce end-to-end (certified + refuse + held-out), worklist
+  loaders/binding, approve/resume paths, and a fake-browser replay proving the deployment objects
+  reach the Replayer. 95 relevant tests green (incl. existing
+  induction/durable/effects/actuator/emit suites).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format CLI + deployment files
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.20.1 (2026-07-14)
+
+### Bug Fixes
+
+- Policy/lint traverse program graphs + require system-of-record effects (P0)
+  ([#92](https://github.com/OpenAdaptAI/openadapt-flow/pull/92),
+  [`726eff8`](https://github.com/OpenAdaptAI/openadapt-flow/commit/726eff843314216fda34dc7d1860f73ae27f9257))
+
+Two P0 safety holes let clinical-write certify an unsafe bundle.
+
+P0-1 — cert/lint now traverse the program graph + subflows, not just Workflow.steps. A program-mode
+  bundle keeps its actions in program.states and subflows[*].states (kind==ACTION -> state.step),
+  often with an EMPTY Workflow.steps, so evaluate_policy()/lint_workflow() saw "zero steps" and
+  inspected nothing. New canonical generator openadapt_flow/traversal.py (iter_workflow_steps) is
+  now the single source both checks iterate.
+
+P0-2 — "effect verification" now means the system of record, not the screen.
+  require_effect_verification_for only checked step.expect (visual/structural postconditions), so a
+  clinical write certified merely because it had a TEXT_PRESENT assertion — the weak oracle the
+  effect layer replaced. New rules: require_screen_postconditions_for (step.expect),
+  require_system_effects_for (non-empty step.effects), require_idempotency_key_for (effect carries
+  an idempotency key), prohibit_unconfirmed_effect_bindings (no placeholder /
+  needs_operator_confirmation effect). clinical-write.yaml now requires real system-of-record
+  effects + an idempotency key on writes, keeping screen postconditions as an ADDITIONAL
+  requirement. require_effect_verification_for kept as a deprecated alias of
+  require_screen_postconditions_for.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Documentation
+
+- Rewrite README to the current architecture + add a claims-consistency CI gate
+  ([#90](https://github.com/OpenAdaptAI/openadapt-flow/pull/90),
+  [`a3c3e06`](https://github.com/OpenAdaptAI/openadapt-flow/commit/a3c3e06bdd23fb674aafaf03507f71436ae4a837))
+
+The README materially misrepresented the product: it called the runtime "vision-only", claimed "864
+  tests", and said desktop/RDP backends were "adapters to come". Rewrite it to the current
+  architecture (vision-FIRST with a structural DOM/UIA rung; existing WindowsBackend + FreeRDP
+  adapters, mock-tested in CI) and add the marquee capabilities that were absent: the Phase-2
+  workflow-program IR, multi-trace induction with refuse-if-underdetermined, effect verification
+  against the system of record (REST/FHIR/doc-hash), the API actuator tier, policy lint/certify,
+  governed healing, durable checkpoint/resume, and PHI-free identity templates. Fix DESIGN.md's
+  stale "Frozen contracts" section to reflect ir.py's grown types
+  (ParamSpec/Predicate/Guard/ProgramGraph/State/
+  Transition/LoopSpec/Relation/ApiBinding/StructuralLocator + identity templates + effects).
+
+Add scripts/check_consistency.py (run by tests/test_consistency.py and a fast step in ci.yml's
+  required `test` gate) so the claims can't silently drift again. It fails on: a version mismatch
+  between openadapt_flow.__version__ and pyproject; a broken file path in README/DESIGN/LIMITS or a
+  workflow comment; a banned stale phrase in the README; or a hardcoded README test count that
+  disagrees with `pytest --collect-only`. The README deliberately carries no hard test number, so
+  that check is drift-proof by construction while staying enforceable if one is ever reintroduced.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.20.0 (2026-07-14)
+
+### Features
+
+- Close the halt→learn→resolve loop (governed, one scenario) — modal-once
+  ([#89](https://github.com/OpenAdaptAI/openadapt-flow/pull/89),
+  [`aad55ee`](https://github.com/OpenAdaptAI/openadapt-flow/commit/aad55ee23cc56cd3c0b86903d74fd8fba6354635))
+
+Today a HALT is a dead stop: the Replayer refuses rather than guessing on an unhandled state, but
+  nothing learns from the operator's post-halt correction. The continuous-learning scaffold
+  (learning/loop.py, gate.py, library.py, the Phase-2 interpreter) and the reference inducer existed
+  but no real run fed them. This wires them for ONE real scenario — the MockMed modal-once drift —
+  end to end, correctness-first, with no ungoverned learning.
+
+- ir.py: add HaltObservation + RunReport.halt (additive/back-compatible). The structured record a
+  halt emits: halt point, observed unexpected on-screen text (PHI-scrubbed), and the completed
+  pre-context — shaped exactly like an ExecutionTrace so the loop consumes it with no reshaping. -
+  runtime/replayer.py: Replayer.run now EMITS report.halt on any unsuccessful run (linear + program
+  paths), probing the frame via the same OCR the runtime uses. Never raises — emission cannot turn a
+  halt into a crash. - learning/halt_loop.py (new): the thin bridge. execution_trace_from_halt lifts
+  a halt into the trace corpus; resolution_demonstration models the operator correction as a
+  demonstration; learn_from_halt runs the UNCHANGED learn_from_traces (induce → RegressionGate →
+  held-out canary → promote/refuse); promoted_workflow materializes the learned ProgramGraph as
+  Workflow.program. - tests/test_halt_learn_loop.py: before(halt+emit) → learn(promote a guarded
+  dismiss branch) → after(no halt) on the SAME scenario, plus a clean run and a DIFFERENT modal
+  still behaving as before; the loop REFUSES an underdetermined correction and the RegressionGate
+  BLOCKS an identity-weakening one.
+
+Deliberately minimal: one scenario, no UI/CLI surface, no multi-scenario generalization. Old
+  behavior intact — a bundle without a learned branch replays exactly as before.
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.19.1 (2026-07-14)
 
 ### Bug Fixes

@@ -5,23 +5,35 @@ The escalation tier of the Workflow-Program IR runtime
 and the bounded local recovery cannot safely proceed, a production run must not
 just die: it must **durably pause at the last verified checkpoint, persist why
 it paused and the proposed operator options, and RESUME from that checkpoint**
-after approval -- never from step 0, and never by handing the remaining
-workflow to a free-form agent.
+after AUTHENTICATED approval -- never from step 0, and never by handing the
+remaining workflow to a free-form agent.
 
-Public surface:
+Two checkpoint flavors:
 
-- Persistence models: :class:`RunCheckpoint`, :class:`PendingEscalation`,
-  :class:`RunManifest`, and the :class:`CheckpointStore` that reads/writes them
-  under a run directory.
-- Runtime hook: :class:`DurableRun` (the replayer's per-run controller),
-  :func:`classify_halt` (halt -> category + proposed operator options), and
-  :func:`resumed_step_results` (reconstruct already-verified steps on resume).
-- Resume: :func:`resume` and :func:`resume_point`.
+- Linear ``steps`` runs checkpoint on a step index (:class:`RunCheckpoint`).
+- Phase-2 PROGRAM runs checkpoint the whole INTERPRETER STATE -- the frame
+  stack, loop cursors, bound params, and completed effect keys
+  (:class:`ProgramCheckpoint`) -- so a resume RESTORES the interpreter rather
+  than translating to a step index (which cannot express a loop cursor).
+
+Resume is an authenticated approval workflow (P0-5): it requires an
+:class:`ApprovalRecord` (approver / timestamp / resolution / bundle version),
+revalidates the live app is still in the checkpoint's expected state, and
+refuses a stale (expired) pause.
 
 Import-light by design (pydantic + json + pathlib): no vision, no backend, no
 model call.
 """
 
+from openadapt_flow.runtime.durable.approval import (  # noqa: F401
+    ApprovalRecord,
+    ApprovalRequired,
+    BundleMismatch,
+    PauseExpired,
+    ResumeRefused,
+    StateDiverged,
+    enforce_resume_authorization,
+)
 from openadapt_flow.runtime.durable.checkpoint import (  # noqa: F401
     CheckpointStore,
     PendingEscalation,
@@ -33,6 +45,13 @@ from openadapt_flow.runtime.durable.controller import (  # noqa: F401
     classify_halt,
     resumed_step_results,
 )
+from openadapt_flow.runtime.durable.program_checkpoint import (  # noqa: F401
+    TOP_GRAPH_ID,
+    GraphFrame,
+    LoopCursor,
+    ProgramCheckpoint,
+    bundle_version,
+)
 from openadapt_flow.runtime.durable.resume import (  # noqa: F401
     resume,
     resume_point,
@@ -43,6 +62,18 @@ __all__ = [
     "PendingEscalation",
     "RunCheckpoint",
     "RunManifest",
+    "ProgramCheckpoint",
+    "GraphFrame",
+    "LoopCursor",
+    "TOP_GRAPH_ID",
+    "bundle_version",
+    "ApprovalRecord",
+    "ApprovalRequired",
+    "BundleMismatch",
+    "PauseExpired",
+    "ResumeRefused",
+    "StateDiverged",
+    "enforce_resume_authorization",
     "DurableRun",
     "classify_halt",
     "resumed_step_results",

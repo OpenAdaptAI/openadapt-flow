@@ -53,7 +53,23 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from openadapt_flow.ir import Step
-from openadapt_flow.runtime.effects.effect import Effect, EffectKind, stable_id
+from openadapt_flow.runtime.effects.effect import (
+    Effect,
+    EffectKind,
+    ValueExpr,
+    stable_id,
+)
+
+
+def _ve(value: str) -> ValueExpr:
+    """Wrap a mined literal as a :class:`ValueExpr` (the demonstrated example)."""
+    return ValueExpr(literal=value)
+
+
+def _vemap(selector: dict[str, str]) -> dict[str, ValueExpr]:
+    """Wrap a mined selector's literal values as :class:`ValueExpr`."""
+    return {k: ValueExpr(literal=v) for k, v in selector.items()}
+
 
 # Event keys carrying a captured system-of-record snapshot (list of record
 # dicts) before / after the step. Written by the recorder from a
@@ -207,7 +223,7 @@ def _mine_from_sor_delta(
 
     written = Effect(
         kind=EffectKind.RECORD_WRITTEN,
-        match=selector,
+        match=_vemap(selector),
         expected_count=1,
         risk=step.risk,
         probe=(
@@ -221,7 +237,7 @@ def _mine_from_sor_delta(
     # one. Never invented — §7 names the idempotency key as app-specific.
     key_val = record.get(IDEMPOTENCY_KEY_FIELD)
     if key_val is not None and str(key_val) != "":
-        written.idempotency_key = str(key_val)
+        written.idempotency_key = _ve(str(key_val))
         written.key_field = IDEMPOTENCY_KEY_FIELD
     effects.append(written)
 
@@ -233,9 +249,9 @@ def _mine_from_sor_delta(
         effects.append(
             Effect(
                 kind=EffectKind.FIELD_EQUALS,
-                match=selector,
+                match=_vemap(selector),
                 field=fname,
-                value=fval,
+                value=_ve(fval),
                 risk=step.risk,
                 probe=(
                     f"field {fname!r} of the written record equals the "
@@ -292,9 +308,9 @@ def _mine_from_dom_delta(
         effects.append(
             Effect(
                 kind=EffectKind.FIELD_EQUALS,
-                match={"field": fname},
+                match=_vemap({"field": fname}),
                 field="value",
-                value=str(new_val),
+                value=_ve(str(new_val)),
                 risk=step.risk,
                 needs_operator_confirmation=True,
                 probe=(
@@ -332,7 +348,7 @@ def _placeholder(step: Step) -> StepEffectMining:
     """
     effect = Effect(
         kind=EffectKind.RECORD_WRITTEN,
-        match=dict(PLACEHOLDER_MATCH),
+        match=_vemap(dict(PLACEHOLDER_MATCH)),
         expected_count=1,
         risk=step.risk,
         needs_operator_confirmation=True,

@@ -93,6 +93,14 @@ jobs:
       - name: Install
         run: pip install -e .[dev]
 
+      # Fast claims-consistency gate (no browser, sub-second): fails the PR if
+      # the docs drift from the code -- a stale version, a broken file path in
+      # README/DESIGN/LIMITS or a workflow comment, or a banned stale phrase
+      # ("vision-only", "adapters to come", "864 tests"). See
+      # scripts/check_consistency.py.
+      - name: Consistency gate (docs vs. code)
+        run: python scripts/check_consistency.py
+
       # Cache the Playwright browser binaries (chromium) so the lightweight
       # browser-backed unit tests don't re-download ~150MB every run. Keyed on
       # the resolved playwright version so a dependency bump busts the cache.

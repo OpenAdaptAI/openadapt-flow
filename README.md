@@ -90,21 +90,34 @@ wrong one for the 500th referral this month. openadapt-flow compiles the
 demonstration instead.
 
 Each compiled step carries a template crop, an OCR label, geometry landmarks,
-and postconditions derived from what the demo actually changed on screen. At
-replay time a resolution ladder tries them in order: local template match,
-global template match, OCR, landmark geometry, then (optionally) a grounding
-model. Healthy scripts never leave the first rung. Milliseconds, no model
-calls, no per-run cost.
+a structural locator, and postconditions derived from what the demo actually
+changed on screen. At replay time a resolution ladder tries them in order: a
+structural element match where the backend owns a DOM/UIA tree, then local
+template match, global template match, OCR, landmark geometry, then
+(optionally) a grounding model. Healthy scripts never leave the first rung.
+Milliseconds, no model calls, no per-run cost.
 
 When the UI drifts, a lower rung still finds the target and the fix lands in
 the bundle as a diff you can review. When the screen stops matching
 expectations entirely, the run halts with a report instead of guessing, and
 steps tagged irreversible won't act on a low-confidence match at all.
 
-The runtime is vision-only (PNG in, clicks and keys out) behind a small
-`Backend` protocol. The reference backend is a headless browser, which is why
-the whole loop runs in CI with no OS permissions. Desktop and RDP backends
-are adapters to come, not rewrites.
+The runtime is **vision-first**: it can always operate a pure pixel surface
+(PNG in, clicks and keys out), but it is not limited to pixels. Where a backend
+owns a structured layer — a browser DOM, a native UI Automation / accessibility
+tree — the ladder's top rung re-finds the recorded target as an *element* and
+acts on it deterministically; the visual rungs are the fallback floor for
+pixel-only substrates (RDP, Citrix, canvas). On a desktop drift benchmark the structural
+rung resolved 21/21 targets where visual replay alone managed 6/21
+([`benchmark/structural_action/`](benchmark/structural_action/STRUCTURAL_ACTION.md)).
+Structure never bypasses the identity gate — it makes identity stronger, an
+exact element rather than a pixel guess.
+
+It all sits behind a small four-method `Backend` protocol. The reference
+backend is a headless browser (which is why the whole loop runs in CI with no
+OS permissions); a `WindowsBackend` (UI Automation over the WindowsAgentArena
+server) and a FreeRDP-driven RDP backend already exist and are exercised
+against mocked servers in CI — adapters, not rewrites.
 
 ## Proof
 
@@ -124,6 +137,58 @@ Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) ·
 
 Compiled workflows can also be emitted as Agent Skills or MCP servers
 (`emit-skill` / `emit-mcp`), so other agents can invoke them.
+
+## From trace to program
+
+A single demonstration under-specifies intent, so openadapt-flow does not stop
+at replaying one. These capabilities layer onto the same $0, model-free runtime:
+
+- **A workflow *program*, not just a line of steps.** Beyond the linear v0
+  bundle, the IR (`openadapt_flow/ir.py`) expresses a parameterized program:
+  states and guarded transitions, loops over worklists, subflows, typed
+  parameters, predicates, and exception paths (`ProgramGraph` / `State` /
+  `Transition` / `LoopSpec` / `Guard` / `Predicate` / `ParamSpec`). The flat
+  trajectory is the degenerate case, so the migration is backward-compatible.
+  Design: [`docs/design/WORKFLOW_PROGRAM_IR.md`](docs/design/WORKFLOW_PROGRAM_IR.md).
+- **Multi-trace induction that refuses when it isn't sure.** `induce_program`
+  aligns several demonstrations of the same task to recover the shared
+  parameters, loops, and branches — deterministic and model-free at its core.
+  When a branch condition or a value stays underdetermined it *quarantines* the
+  program (`certified` is `False`) instead of guessing, and `disambiguate`
+  surfaces the ambiguity as concrete multiple-choice questions rather than
+  inventing an answer.
+- **Effect verification against the system of record.** The screen can lie: an
+  optimistic UI, a duplicate submit, a partial save all read as success. A step
+  may declare typed `effects`, and when a run is given an `EffectVerifier` the
+  replayer checks the *real* record — REST (`RestRecordVerifier`), FHIR
+  (`FhirEffectVerifier`), or a document hash (`DocumentHashVerifier`) — before
+  and after the action, halting on a refuted or unverifiable write, still with
+  zero model calls. A fault-model study found the screen-only oracle silently
+  mishandles 5 of 7 transactional fault classes; all five halt through the real
+  replayer once effects are declared ([`benchmark/fault_model/`](benchmark/fault_model/FAULT_MODEL.md),
+  [`docs/design/EFFECT_VERIFIER.md`](docs/design/EFFECT_VERIFIER.md)).
+- **An API actuator tier.** Where the target app exposes a real API, driving its
+  GUI to make the write is the wrong tool. A step carrying an `ApiBinding`, with
+  an `ApiActuator` configured, performs the write by calling the API
+  deterministically and confirms it with the same `EffectVerifier` — the `api`
+  leaf of the capability ladder (API → DOM/UIA → geometry → OCR → template → VLM
+  → human). It is an optimization whose safe fallback is always the GUI.
+- **Policy: lint and certify.** `lint` reports a bundle's coverage gaps (unarmed
+  clicks, vacuous postconditions, under-classified risk) with a severity each;
+  `certify` enforces a policy and exits nonzero, refusing a bundle before it
+  deploys. Runnable is not the same as certified safe.
+- **Governed healing.** Every fix under drift lands in the bundle as a reviewable
+  diff, and a step classified irreversible will not act on a low-confidence
+  match — structure and the identity gate govern the heal, they are not bypassed
+  by it.
+- **Durable checkpoint / resume.** A run checkpoints verified progress
+  (`openadapt_flow/runtime/durable/`) so a halt becomes a durable pause the
+  operator can approve and resume from the last verified state — not a restart,
+  and explicitly not "hand the rest to a free-form agent."
+- **PHI-free identity.** The wrong-patient identity check can run against a
+  salted-hash, shape-preserving `IdentityTemplate` instead of a plaintext
+  name / DOB / MRN band, so a compiled bundle need carry no readable PHI while
+  still enforcing identity (`openadapt_flow/runtime/identity_template.py`).
 
 ## Benchmark
 
@@ -157,9 +222,13 @@ numbers, methodology, and caveats:
 
 ## Status
 
-v0: 864 tests, drift matrix in CI. Solid for the reference browser backend.
-`DESIGN.md` has the module contracts; `docs/L1_INTEGRATION.md` covers feeding
-layered clinical-data platforms.
+v0 for the reference browser backend: solid there, with a drift matrix and a
+broad unit suite in CI (a consistency gate keeps this README honest — see
+`scripts/check_consistency.py`). `DESIGN.md` has the module contracts; the
+Phase-2 workflow-program IR is specified in
+[`docs/design/WORKFLOW_PROGRAM_IR.md`](docs/design/WORKFLOW_PROGRAM_IR.md), and
+[`docs/L1_INTEGRATION.md`](docs/L1_INTEGRATION.md) covers feeding layered
+clinical-data platforms.
 
 ## Privacy (PHI)
 

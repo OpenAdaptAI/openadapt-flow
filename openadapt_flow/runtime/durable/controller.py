@@ -38,9 +38,10 @@ from openadapt_flow.runtime.durable.checkpoint import (
     RunCheckpoint,
     RunManifest,
 )
+from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
 
 
-def classify_halt(step: Step, result: StepResult) -> tuple[str, list[str]]:
+def classify_halt(step: Optional[Step], result: StepResult) -> tuple[str, list[str]]:
     """Categorize a halt and propose operator options.
 
     Maps the replayer's halt reason (``result.error`` plus the
@@ -177,8 +178,11 @@ class DurableRun:
         bundle_dir: Path | str,
         params: dict[str, str],
         save_healed_to: Optional[Path | str] = None,
+        key: Optional[str] = None,
     ) -> None:
-        self.store = CheckpointStore(run_dir)
+        # ``key`` (None by default) opts the durable artifacts into AES-256-GCM
+        # encryption-at-rest; unset => plaintext, exactly as before.
+        self.store = CheckpointStore(run_dir, key=key)
         self.workflow_name = workflow_name
         self.store.write_manifest(
             RunManifest(
@@ -241,9 +245,63 @@ class DurableRun:
             )
         )
 
+    # -- Phase-2 program (state-machine) durability --------------------------
+
+    def record_program_checkpoint(self, checkpoint: ProgramCheckpoint) -> None:
+        """Persist one verified-state interpreter checkpoint (Phase-2 program).
+
+        Called by the program interpreter after each ``action`` state that
+        VERIFIED (identity + effects + postconditions). The checkpoint captures
+        the whole interpreter state (frame stack, loop cursors, bound params,
+        completed effect keys) so a resume RESTORES the interpreter rather than
+        translating to a step index. Idempotent per ``seq``."""
+        self.store.write_program_checkpoint(checkpoint)
+
+    def record_program_halt(
+        self,
+        *,
+        state_id: str,
+        intent: str,
+        result: StepResult,
+        params: dict[str, str],
+    ) -> None:
+        """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
+
+        Mirrors :meth:`record` for the state machine: classify WHY it paused,
+        propose operator options, and point the resume at the last verified
+        interpreter checkpoint (``ProgramCheckpoint``, restored from ``run_dir``
+        by :func:`~.resume.resume`). ``resume_from_index``/``resume_from_step_id``
+        do NOT apply to a program run (the resume point is an interpreter state,
+        not a step index), so they are left at their defaults; ``program=True``
+        marks the pause as a state-machine pause."""
+        last = self.store.last_program_checkpoint()
+        category, options = classify_halt(None, result)
+        self.store.write_pending(
+            PendingEscalation(
+                workflow_name=self.workflow_name,
+                step_index=0,
+                step_id=state_id,
+                intent=intent,
+                state_id=state_id,
+                category=category,
+                reason=result.error or "",
+                detail=list(result.effect_results or []),
+                proposed_options=options,
+                resume_from_step_id=(
+                    last.verified_state_id if last is not None else None
+                ),
+                params=dict(params),
+                program=True,
+            )
+        )
+
 
 def resumed_step_results(
-    run_dir: Path | str, workflow: Workflow, resume_from: int
+    run_dir: Path | str,
+    workflow: Workflow,
+    resume_from: int,
+    *,
+    key: Optional[str] = None,
 ) -> list[StepResult]:
     """Synthesize ``StepResult``s for the already-verified steps of a resume.
 
@@ -254,7 +312,7 @@ def resumed_step_results(
     the workflow definition for any checkpoint the operator pruned). Each is
     marked ``ok=True`` and annotated as resumed, for an honest audit trail.
     """
-    store = CheckpointStore(run_dir)
+    store = CheckpointStore(run_dir, key=key)
     by_index = {c.step_index: c for c in store.checkpoints()}
     results: list[StepResult] = []
     for index in range(min(resume_from, len(workflow.steps))):

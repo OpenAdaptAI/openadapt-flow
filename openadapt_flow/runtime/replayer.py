@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 import os
 import time
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -42,9 +43,11 @@ from openadapt_flow.backend import Backend
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    HaltObservation,
     IdentityCheck,
     LoopSpec,
     Point,
+    PostconditionKind,
     Predicate,
     PredicateKind,
     ProgramGraph,
@@ -63,6 +66,19 @@ from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import healing as healing_mod
 from openadapt_flow.runtime import identity as identity_mod
+from openadapt_flow.runtime.durable.approval import StateDiverged
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    TOP_GRAPH_ID,
+    GraphFrame,
+    LoopCursor,
+    ProgramCheckpoint,
+)
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    bundle_version as _bundle_version,
+)
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    history_hash as _history_hash,
+)
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectState,
@@ -255,6 +271,7 @@ class Replayer:
         effect_compensator: Optional[Any] = None,
         api_actuator: Optional[Any] = None,
         durable: bool = False,
+        checkpoint_key: Optional[str] = None,
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
         allow_model_grounding: bool = False,
@@ -292,7 +309,10 @@ class Replayer:
             )
 
         self.backend = backend
-        self.vision = vision
+        # Defaulted to the ``openadapt_flow.vision`` module above when None, so it
+        # is always populated by the time replay runs; typed Any (a namespace-like
+        # facade exposing find_template/ocr/wait_settled/...).
+        self.vision: Any = vision
         self.grounder = grounder
         # Whether the deterministic structural ACTION rung (top of the ladder)
         # may run. True (default) = product behavior: on a structure-bearing
@@ -322,14 +342,11 @@ class Replayer:
         # openadapt_flow.runtime.durable and run()'s ``resume_from``). Pure
         # bookkeeping over the StepResult; no backend/vision/model involvement.
         self.durable = durable
-        # Whether the deterministic structural ACTION rung (top of the ladder)
-        # may run. True (default) = product behavior: on a structure-bearing
-        # backend, resolve the recorded target as a DOM/UIA element. Set False
-        # to force the VISUAL fallback floor even on a structure-bearing
-        # backend -- used to characterize the pixel-only substrate path
-        # (RDP/Citrix/VDI) on a Playwright surface (see the e2e visual-floor
-        # drift/heal suites). Never disables the visual ladder itself.
-        self.use_structural = use_structural
+        # Encryption-at-rest for the durable checkpoints (opt-in, OFF by
+        # default). A passphrase (explicit, or from OPENADAPT_BUNDLE_KEY) seals
+        # every checkpoint / pending-escalation / manifest with AES-256-GCM
+        # (openadapt_flow.crypto). None => plaintext checkpoints, unchanged.
+        self.checkpoint_key = checkpoint_key
         # Optional local-VLM identity veto (tier 3 of the identity ladder),
         # OFF by default like the grounder: an IdentityVLM verifier or None.
         # When None the ladder runs structured-text + pixel-compare + OCR +
@@ -346,6 +363,10 @@ class Replayer:
         # Point of the most recent successful click (the focusing click for
         # a following TYPE step); reset per run.
         self._last_click_point: Optional[Point] = None
+        # Stable-per-run identity; (re)assigned at the top of run(). Present as
+        # an empty default so a direct _execute_step call (tests) still resolves
+        # effect contracts (a literal effect ignores it).
+        self._run_id: str = ""
 
     # -- public API ----------------------------------------------------------
 
@@ -359,6 +380,7 @@ class Replayer:
         run_dir: Path,
         save_healed_to: Optional[Path] = None,
         resume_from: Optional[int] = None,
+        resume_program: Optional[ProgramCheckpoint] = None,
     ) -> RunReport:
         """Execute the workflow and write a run directory.
 
@@ -387,12 +409,19 @@ class Replayer:
                 (``steps/``), and heal artifacts (``heals/``).
             save_healed_to: When set, write a full healed bundle (updated
                 workflow.json + new and unchanged template crops) here.
-            resume_from: Tier-3 durable resume (RFC §5). When set, steps with
-                index ``< resume_from`` are treated as already verified: they
-                are NOT re-executed (so an already-confirmed consequential write
-                is never re-performed) and their results are reconstructed from
-                the persisted checkpoints. Execution begins at ``resume_from``
-                (the previously-paused step). Normally supplied by
+            resume_from: Tier-3 durable resume (RFC §5), LINEAR mode. When set,
+                steps with index ``< resume_from`` are treated as already
+                verified: they are NOT re-executed (so an already-confirmed
+                consequential write is never re-performed) and their results are
+                reconstructed from the persisted checkpoints. Execution begins at
+                ``resume_from`` (the previously-paused step). Normally supplied by
+                ``openadapt_flow.runtime.durable.resume``, not by hand.
+            resume_program: Tier-3 durable resume (RFC §5), PROGRAM mode. The last
+                verified :class:`ProgramCheckpoint`; when set, the interpreter's
+                state is RESTORED from it (frame stack, loop cursors, bound
+                params, completed effect keys) and the run continues from the
+                paused state -- never from the graph entry, never re-performing an
+                already-confirmed write. Supplied by
                 ``openadapt_flow.runtime.durable.resume``, not by hand.
 
         Returns:
@@ -403,6 +432,12 @@ class Replayer:
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
+        # Stable-per-run identity (P0-3): distinct across runs, constant within
+        # one. Exposed to effect-contract resolution under the reserved
+        # ``__run_id__`` param so an idempotency key can be bound PER-RUN (via
+        # ``ValueExpr(param="__run_id__")``) instead of reusing a frozen demo
+        # literal across unrelated runs.
+        self._run_id = uuid.uuid4().hex
         # Parameter resolution (Workflow-program IR, Phase 1): recorded defaults
         # (``params`` dict) plus each TYPED ``param_specs`` example as a default,
         # with caller-supplied values overriding both. A v0 bundle (empty
@@ -423,7 +458,8 @@ class Replayer:
         )
         self._record_identity_coverage(workflow, report)
         new_crops: dict[str, bytes] = {}
-        self._last_click_point: Optional[Point] = None
+        # Per-run reset; the attribute is declared in __init__.
+        self._last_click_point = None
         t_run = time.monotonic()
 
         # Fail fast, naming them, when a REQUIRED typed parameter has no value
@@ -463,18 +499,25 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 params=params,
                 save_healed_to=save_healed_to,
+                key=self.checkpoint_key,
             )
         if resume_from:
             from openadapt_flow.runtime.durable import resumed_step_results
 
-            report.results.extend(resumed_step_results(run_dir, workflow, resume_from))
+            report.results.extend(
+                resumed_step_results(
+                    run_dir, workflow, resume_from, key=self.checkpoint_key
+                )
+            )
             if durable_run is not None:
                 durable_run.store.clear_pending()
 
         if workflow.program is not None:
             # Workflow-program IR, Phase 2: interpret the STATE MACHINE (loops /
-            # branches / subflows / exception paths). Durable checkpointing of
-            # the graph path is future work; state_id is carried for it.
+            # branches / subflows / exception paths). When durability is enabled
+            # the interpreter checkpoints its whole state after each verified
+            # state and, on a halt, durably PAUSES; ``resume_program`` RESTORES
+            # that interpreter state instead of restarting from the graph entry.
             self._interpret_program(
                 workflow,
                 params=params,
@@ -483,6 +526,8 @@ class Replayer:
                 run_dir=run_dir,
                 report=report,
                 new_crops=new_crops,
+                durable_run=durable_run,
+                resume_checkpoint=resume_program,
             )
         else:
             for step_index, step in enumerate(workflow.steps):
@@ -512,6 +557,12 @@ class Replayer:
                 result.ok for result in report.results
             )
         report.total_ms = (time.monotonic() - t_run) * 1000.0
+
+        # Emit the structured HALT record on any unsuccessful run, so the
+        # halt->learn loop (openadapt_flow.learning.halt_loop) can lift it into
+        # the trace corpus. No-op on a successful run.
+        if not report.success:
+            self._emit_halt(report)
 
         if save_healed_to is not None:
             heal_mod.write_healed_bundle(
@@ -565,6 +616,87 @@ class Replayer:
                     )
                 )
 
+    def _emit_halt(self, report: RunReport) -> None:
+        """Populate ``report.halt`` with the structured HALT record.
+
+        Captures WHERE the run stopped (the last failed step / the program
+        terminal), WHAT unexpected on-screen text was observed there (probed from
+        the current frame, PHI-scrubbed), and the PRE-context (the intents that
+        completed before the halt). This is the ONLY thing the runtime does with
+        the learning loop: it emits an audit record shaped exactly like an
+        ExecutionTrace's (intents + observed facts); the learning bridge decides
+        what to do with it (openadapt_flow.learning.halt_loop). Never raises —
+        an emission failure must not turn a halt into a crash.
+        """
+        try:
+            results = report.results
+            # The halted step: the last executed step that FAILED (skip the
+            # synthetic <terminal>/<params> markers the interpreter appends).
+            failed = [
+                r
+                for r in results
+                if not r.ok
+                and not r.skipped
+                and r.step_id not in ("<terminal>", "<params>")
+            ]
+            halted = failed[-1] if failed else (results[-1] if results else None)
+            completed = [r.intent for r in results if r.ok and not r.skipped]
+            reason = ""
+            state_id = ""
+            intent = ""
+            if halted is not None:
+                reason = halted.error or ""
+                state_id = halted.step_id
+                intent = halted.intent
+            # If a program terminal recorded the reason, prefer its text.
+            for r in results:
+                if r.step_id == "<terminal>" and r.error:
+                    reason = reason or r.error
+            observed = self._observe_screen_texts()
+            report.halt = HaltObservation(
+                state_id=state_id,
+                intent=intent,
+                reason=reason,
+                outcome=report.terminal_outcome or "halt",
+                observed_texts=observed,
+                completed_intents=completed,
+            )
+        except Exception:  # pragma: no cover - emission must never crash a run
+            pass
+
+    def _observe_screen_texts(self) -> list[str]:
+        """Read the on-screen text at the halt point (PHI-scrubbed).
+
+        The unexpected UI state the compiled program had no branch for — the
+        text a learned branch's ``TEXT_PRESENT`` guard will key on. Uses the
+        backend's current frame through the SAME OCR the runtime already uses
+        for text presence; returns [] when OCR is unavailable (pixel-only
+        substrate / a vision stub without ocr)."""
+        try:
+            frame = self.backend.screenshot()
+        except Exception:
+            return []
+        ocr = getattr(self.vision, "ocr", None)
+        if ocr is None:
+            return []
+        try:
+            lines = ocr(frame)
+        except Exception:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for line in lines or []:
+            text = getattr(line, "text", None)
+            if not text:
+                continue
+            # ``text`` is truthy here, so scrub_text returns a str; ``or ""``
+            # only satisfies its Optional[str] return signature.
+            scrubbed = (_scrub_phi(text) or "").strip()
+            if scrubbed and scrubbed not in seen:
+                seen.add(scrubbed)
+                out.append(scrubbed)
+        return out
+
     @staticmethod
     def _account_result(report: RunReport, result: StepResult) -> None:
         """Fold one StepResult's rung / model-call / heal counts into the
@@ -608,6 +740,8 @@ class Replayer:
         run_dir: Path,
         report: RunReport,
         new_crops: dict[str, bytes],
+        durable_run: Optional[Any] = None,
+        resume_checkpoint: Optional[ProgramCheckpoint] = None,
     ) -> None:
         """Interpret ``workflow.program`` as a state machine, writing results
         and the terminal outcome onto ``report``.
@@ -617,22 +751,60 @@ class Replayer:
         -- an unhandled action failure, a dead-end branch, a ``halt`` /
         ``escalate`` terminal, or a safety bound exceeded -- stops the whole run
         with ``success = False`` and records the reason.
+
+        Durability (RFC §5, Tier 3): when ``durable_run`` is supplied, the
+        interpreter checkpoints its whole state (frame stack, loop cursors, bound
+        params, completed effect keys) after each verified ``action`` state and,
+        on a halt, writes a durable PAUSE. When ``resume_checkpoint`` is supplied
+        the interpreter state is RESTORED from it and execution continues from the
+        paused state -- never from the graph entry.
         """
         assert workflow.program is not None
         self._prev_action: Optional[ActionKind] = None
         self._program_step_budget = PROGRAM_MAX_STEPS
+        # -- durable interpreter state (Phase-2, RFC §5) ---------------------
+        self._program_durable = durable_run
+        self._frame_stack: list[dict] = []
+        # Where the interpreter currently is (for a durable pause record).
+        self._current_state_id: str = ""
+        self._current_intent: str = ""
+        self._current_params: dict[str, str] = dict(params)
+        if durable_run is not None:
+            store = durable_run.store
+            # Continue the checkpoint sequence and the completed-effect ledger on
+            # a resume (the store already holds the pre-pause checkpoints).
+            self._program_seq = len(store.program_checkpoints())
+            self._completed_effect_keys = list(store.completed_effect_keys())
+            self._bundle_version = _bundle_version(bundle_dir)
+        else:
+            self._program_seq = 0
+            self._completed_effect_keys = []
+            self._bundle_version = ""
         try:
-            self._walk_graph(
-                workflow.program,
-                workflow=workflow,
-                params=params,
-                worklists=worklists,
-                bundle_dir=bundle_dir,
-                run_dir=run_dir,
-                report=report,
-                new_crops=new_crops,
-                depth=0,
-            )
+            if resume_checkpoint is not None:
+                # RESTORE the interpreter state and continue from the pause.
+                self._resume_program_state(
+                    resume_checkpoint,
+                    workflow=workflow,
+                    worklists=worklists,
+                    bundle_dir=bundle_dir,
+                    run_dir=run_dir,
+                    report=report,
+                    new_crops=new_crops,
+                )
+            else:
+                self._walk_graph(
+                    workflow.program,
+                    graph_id=TOP_GRAPH_ID,
+                    workflow=workflow,
+                    params=params,
+                    worklists=worklists,
+                    bundle_dir=bundle_dir,
+                    run_dir=run_dir,
+                    report=report,
+                    new_crops=new_crops,
+                    depth=0,
+                )
             report.success = True
             if report.terminal_outcome is None:
                 # Fell off the top graph with no explicit terminal: a clean,
@@ -641,6 +813,10 @@ class Replayer:
         except _ProgramHalt as halt:
             report.success = False
             report.terminal_outcome = halt.outcome
+            # Durably PAUSE (never just die): capture WHERE we stopped so an
+            # approved resume can RESTORE the interpreter from here.
+            if self._program_durable is not None:
+                self._record_program_pause(halt, report)
             report.results.append(
                 StepResult(
                     step_id="<terminal>",
@@ -654,6 +830,7 @@ class Replayer:
         self,
         graph: ProgramGraph,
         *,
+        graph_id: str,
         workflow: Workflow,
         params: dict[str, str],
         worklists: dict[str, list[dict[str, str]]],
@@ -662,8 +839,17 @@ class Replayer:
         report: RunReport,
         new_crops: dict[str, bytes],
         depth: int,
+        start: Optional[str] = None,
+        loop_cursor: Optional[LoopCursor] = None,
     ) -> None:
-        """Walk one graph from ``entry`` to a terminal / fall-off.
+        """Walk one graph from ``start`` (default ``entry``) to a terminal /
+        fall-off.
+
+        Pushes a durable :class:`GraphFrame`-shaped entry onto ``_frame_stack``
+        for the whole walk (so a checkpoint written inside captures this level of
+        the subflow/loop nesting) and pops it on the way out. ``graph_id`` is the
+        durable id of this graph (``TOP_GRAPH_ID`` or a subflow name);
+        ``loop_cursor`` is set for a loop-body iteration.
 
         Returns normally on completion (a ``success`` terminal RETURNS to the
         caller -- for a subflow that means "continue after the call"; for the
@@ -676,7 +862,51 @@ class Replayer:
                 f"program nesting exceeded {PROGRAM_MAX_DEPTH} levels "
                 "(possible unbounded recursion) — run aborted",
             )
-        state_id: Optional[str] = graph.entry
+        frame = {
+            "graph_id": graph_id,
+            "state_id": start if start is not None else graph.entry,
+            "params": params,
+            "loop": loop_cursor,
+        }
+        self._frame_stack.append(frame)
+        try:
+            self._run_states_from(
+                graph,
+                frame,
+                workflow=workflow,
+                params=params,
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+                depth=depth,
+            )
+        finally:
+            self._frame_stack.pop()
+
+    def _run_states_from(
+        self,
+        graph: ProgramGraph,
+        frame: dict,
+        *,
+        workflow: Workflow,
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+        depth: int,
+    ) -> None:
+        """Run ``frame``'s graph from ``frame['state_id']`` to a terminal /
+        fall-off, keeping ``frame['state_id']`` pointed at the current state.
+
+        Split out of :meth:`_walk_graph` so a RESUME can drive an
+        already-pushed frame from a restored state (rather than always from
+        ``entry``). Raises ``_ProgramHalt`` to stop the entire run.
+        """
+        state_id: Optional[str] = frame["state_id"]
         while state_id is not None:
             self._program_step_budget -= 1
             if self._program_step_budget <= 0:
@@ -685,6 +915,7 @@ class Replayer:
                     f"program exceeded {PROGRAM_MAX_STEPS} state transitions "
                     "(possible non-terminating graph) — run aborted",
                 )
+            frame["state_id"] = state_id
             state = graph.states.get(state_id)
             if state is None:
                 raise _ProgramHalt(
@@ -692,6 +923,11 @@ class Replayer:
                     f"program references undefined state '{state_id}' — run aborted",
                 )
             report.visited_states.append(state.id)
+            self._current_state_id = state.id
+            self._current_intent = (
+                state.step.intent if state.step is not None else state.id
+            )
+            self._current_params = params
 
             if state.kind is StateKind.TERMINAL:
                 outcome = state.outcome or "success"
@@ -784,6 +1020,7 @@ class Replayer:
                 )
             self._walk_graph(
                 sub,
+                graph_id=state.subflow or "",
                 workflow=workflow,
                 params=params,
                 worklists=worklists,
@@ -816,6 +1053,12 @@ class Replayer:
         ``on_exception`` (recorded as handled) or HALTs the run."""
         if state.step is None:
             raise _ProgramHalt("halt", f"action state '{state.id}' carries no step")
+        # Idempotency (RFC §5): on a RESUME, an action whose declared effects were
+        # ALL already CONFIRMED in the pre-pause leg is NOT re-executed -- a
+        # confirmed consequential write is never re-performed. Keyed on the
+        # resolved effect contract hashes recorded in the completed-effect ledger.
+        if self._skip_completed_effect_state(state, params, report):
+            return self._select_transition(state, params=params, bundle_dir=bundle_dir)
         ctx = self._build_graph_ctx(state, graph)
         result = self._run_step(
             state.step,
@@ -844,7 +1087,12 @@ class Replayer:
                 "halt",
                 result.error or f"action state '{state.id}' failed — run aborted",
             )
-        return self._select_transition(state, params=params, bundle_dir=bundle_dir)
+        nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
+        # Tier-3 durable checkpoint: this action state VERIFIED (identity +
+        # effects + postconditions); capture the whole interpreter state so an
+        # approved resume can RESTORE it from exactly here.
+        self._record_program_checkpoint(state, result, params, report)
+        return nxt
 
     def _exec_loop_state(
         self,
@@ -882,10 +1130,11 @@ class Replayer:
                 f"loop state '{state.id}' worklist has {len(rows)} rows, "
                 f"exceeding max_iterations={loop.max_iterations} — run aborted",
             )
-        for row in rows:
+        for i, row in enumerate(rows):
             iter_params = {**params, **row}
             self._walk_graph(
                 body,
+                graph_id=loop.body,
                 workflow=workflow,
                 params=iter_params,
                 worklists=worklists,
@@ -894,6 +1143,12 @@ class Replayer:
                 report=report,
                 new_crops=new_crops,
                 depth=depth + 1,
+                loop_cursor=LoopCursor(
+                    loop_state_id=state.id,
+                    relation=loop.relation,
+                    row_index=i,
+                    rows=rows,
+                ),
             )
         return self._select_transition(state, params=params, bundle_dir=bundle_dir)
 
@@ -965,6 +1220,370 @@ class Replayer:
             )
             + ") — run aborted",
         )
+
+    # -- Tier-3 durable checkpoint / pause / resume (program mode, RFC §5) ----
+
+    def _frame_to_model(self, frame: dict) -> GraphFrame:
+        """Snapshot one live interpreter frame as a durable :class:`GraphFrame`."""
+        return GraphFrame(
+            graph_id=frame["graph_id"],
+            state_id=frame["state_id"],
+            params=dict(frame["params"]),
+            loop=frame["loop"],
+        )
+
+    def _skip_completed_effect_state(
+        self, state: State, params: dict[str, str], report: RunReport
+    ) -> bool:
+        """Idempotency guard: skip an action state whose declared effects were
+        ALL already CONFIRMED (in the completed-effect ledger).
+
+        Belt-and-suspenders for a resume that re-reaches an already-verified
+        consequential write: the write is NOT re-performed (no backend action, no
+        effect re-verification). A verified result is synthesized so the report
+        still accounts for the state. Returns True when it skipped."""
+        if not self._completed_effect_keys:
+            return False
+        step = state.step
+        if step is None or not step.effects:
+            return False
+        try:
+            resolved = self._resolve_effects(step.effects, params)
+            keys = [e.contract_hash() for e in resolved]
+        except Exception:
+            return False
+        if not keys or not all(k in self._completed_effect_keys for k in keys):
+            return False
+        result = StepResult(
+            step_id=step.id,
+            intent=step.intent,
+            ok=True,
+            effect_verified=True,
+            effect_contract_hashes=keys,
+        )
+        report.results.append(result)
+        self._account_result(report, result)
+        return True
+
+    def _record_program_checkpoint(
+        self,
+        state: State,
+        result: StepResult,
+        params: dict[str, str],
+        report: RunReport,
+    ) -> None:
+        """Persist a verified-state interpreter checkpoint (Tier-3, program mode).
+
+        Captures the whole interpreter state -- the frame stack (subflow / loop
+        nesting), each loop's cursor, the bound params, the effects CONFIRMED at
+        this state (both their hashes, for the idempotency ledger, and their
+        resolved contracts, for the resume-time re-verification), the expected
+        on-screen text (for the resume-time state revalidation), and the bundle
+        version -- so an approved resume RESTORES the interpreter from here."""
+        durable = self._program_durable
+        if durable is None:
+            return
+        step = state.step
+        new_keys = list(result.effect_contract_hashes)
+        new_effects = (
+            [
+                e.model_dump(mode="json")
+                for e in self._resolve_effects(step.effects, params)
+            ]
+            if step is not None and step.effects
+            else []
+        )
+        # Extend the live ledger so a later state in the SAME leg (and the next
+        # checkpoint's union) sees these as already-confirmed.
+        self._completed_effect_keys.extend(new_keys)
+        expected = (
+            [
+                pc.text
+                for pc in step.expect
+                if pc.kind is PostconditionKind.TEXT_PRESENT and pc.text
+            ]
+            if step is not None
+            else []
+        )
+        self._program_seq += 1
+        checkpoint = ProgramCheckpoint(
+            workflow_name=durable.workflow_name,
+            seq=self._program_seq,
+            verified_state_id=state.id,
+            intent=step.intent if step is not None else "",
+            frames=[self._frame_to_model(f) for f in self._frame_stack],
+            bound_params=dict(params),
+            new_effect_keys=new_keys,
+            new_effects=new_effects,
+            expected_texts=expected,
+            transition_history_hash=_history_hash(report.visited_states),
+            bundle_version=self._bundle_version,
+        )
+        durable.record_program_checkpoint(checkpoint)
+
+    def _record_program_pause(self, halt: "_ProgramHalt", report: RunReport) -> None:
+        """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
+
+        Uses the last executed state's failing result (an action failure) or, for
+        a non-action halt (dead-end branch, unmet guard, terminal), a synthesized
+        result carrying the halt reason -- so :func:`classify_halt` can categorize
+        the pause and propose operator options."""
+        durable = self._program_durable
+        if durable is None:
+            return
+        failing = next((r for r in reversed(report.results) if not r.ok), None)
+        if failing is None:
+            failing = StepResult(
+                step_id=self._current_state_id or "<program>",
+                intent=self._current_intent,
+                ok=False,
+                error=halt.reason,
+            )
+        elif failing.error is None:
+            failing = failing.model_copy(update={"error": halt.reason})
+        durable.record_program_halt(
+            state_id=self._current_state_id or failing.step_id,
+            intent=self._current_intent or failing.intent,
+            result=failing,
+            params=self._current_params,
+        )
+
+    def revalidate_program_checkpoint(
+        self, checkpoint: ProgramCheckpoint, completed_effects: list[dict]
+    ) -> None:
+        """Revalidate the live app before RESTORING a program checkpoint (RFC §5).
+
+        Two checks, both raising :class:`StateDiverged` (refuse -- never re-drive
+        from a state the checkpoint was not captured against):
+
+        1. the live app must still show the checkpoint's expected on-screen text
+           (the state the interpreter paused at);
+        2. every already-confirmed effect must STILL hold (a read-only re-verify
+           against the system of record -- an already-landed write that has since
+           been reverted / deleted means the world moved under the checkpoint).
+        """
+        if checkpoint.expected_texts:
+            frame = self.vision.wait_settled(self.backend)
+            missing = [
+                text
+                for text in checkpoint.expected_texts
+                if not self.vision.text_present(frame, text)
+            ]
+            if missing:
+                raise StateDiverged(
+                    "the live app is not in the checkpoint's expected state "
+                    "(missing on-screen text: "
+                    + ", ".join(repr(m) for m in missing)
+                    + ") — refusing to resume a run whose app state diverged "
+                    "from the checkpoint"
+                )
+        if self.effect_verifier is not None and completed_effects:
+            before = self.effect_verifier.capture_pre_state()
+            for dump in completed_effects:
+                try:
+                    effect = Effect.model_validate(dump)
+                except Exception:
+                    continue
+                verdict = self.effect_verifier.verify(effect, before)
+                if not verdict.confirmed:
+                    raise StateDiverged(
+                        "an already-confirmed effect no longer holds "
+                        f"({effect.kind.value}: {verdict.verdict.value}) — "
+                        "refusing to resume; the system of record diverged from "
+                        "the checkpoint"
+                    )
+
+    def _resolve_graph(self, workflow: Workflow, graph_id: str) -> ProgramGraph:
+        """Resolve a durable ``graph_id`` back to a :class:`ProgramGraph`
+        (``TOP_GRAPH_ID`` -> ``workflow.program``, else a named subflow)."""
+        if graph_id == TOP_GRAPH_ID:
+            assert workflow.program is not None
+            return workflow.program
+        sub = workflow.subflows.get(graph_id)
+        if sub is None:
+            raise _ProgramHalt(
+                "halt",
+                f"resume references undefined graph '{graph_id}' — run aborted",
+            )
+        return sub
+
+    def _resume_program_state(
+        self,
+        checkpoint: ProgramCheckpoint,
+        *,
+        workflow: Workflow,
+        worklists: dict[str, list[dict[str, str]]],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+    ) -> None:
+        """RESTORE the interpreter from a checkpoint's frame stack and continue.
+
+        Re-descends the recorded frames (outer -> inner), re-entering each
+        subflow / loop-body graph at the state it was in, and drives the run to
+        completion from the paused state -- never from the graph entry, so an
+        already-confirmed consequential write is never re-performed and a
+        mid-loop pause finishes the in-progress row and runs the remaining rows.
+        """
+        assert workflow.program is not None
+        if not checkpoint.frames:
+            # Nothing verified pre-pause (halted on the very first state): there
+            # is no interpreter state to restore, so re-walk from the top.
+            self._walk_graph(
+                workflow.program,
+                graph_id=TOP_GRAPH_ID,
+                workflow=workflow,
+                params=dict(checkpoint.bound_params),
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+                depth=0,
+            )
+            return
+        self._resume_descend(
+            checkpoint.frames,
+            0,
+            workflow=workflow,
+            worklists=worklists,
+            bundle_dir=bundle_dir,
+            run_dir=run_dir,
+            report=report,
+            new_crops=new_crops,
+        )
+
+    def _resume_descend(
+        self,
+        frames: list[GraphFrame],
+        depth: int,
+        *,
+        workflow: Workflow,
+        worklists: dict[str, list[dict[str, str]]],
+        bundle_dir: Path,
+        run_dir: Path,
+        report: RunReport,
+        new_crops: dict[str, bytes],
+    ) -> None:
+        """Restore one frame of the interpreter stack and continue it.
+
+        The LEAF frame (``depth == len-1``) is the last verified state: continue
+        from its successor transition. An ANCESTOR frame is a ``subflow_call`` /
+        ``loop`` state whose body is mid-flight: finish the child (recurse), then
+        -- for a loop -- run the REMAINING rows, then continue the parent after
+        the call/loop state. The live ``_frame_stack`` mirrors the descent so any
+        checkpoint written during the resumed leg captures the full nesting."""
+        frame_model = frames[depth]
+        graph = self._resolve_graph(workflow, frame_model.graph_id)
+        params = dict(frame_model.params)
+        is_leaf = depth == len(frames) - 1
+        live = {
+            "graph_id": frame_model.graph_id,
+            "state_id": frame_model.state_id,
+            "params": params,
+            "loop": frame_model.loop,
+        }
+        self._frame_stack.append(live)
+        try:
+            state = graph.states.get(frame_model.state_id)
+            if state is None:
+                raise _ProgramHalt(
+                    "halt",
+                    f"resume references undefined state '{frame_model.state_id}' "
+                    "— run aborted",
+                )
+
+            if is_leaf:
+                # The verified state: re-drive from its SUCCESSOR (never re-run
+                # the verified state itself).
+                nxt = self._select_transition(
+                    state, params=params, bundle_dir=bundle_dir
+                )
+                if nxt is not None:
+                    live["state_id"] = nxt
+                    self._run_states_from(
+                        graph,
+                        live,
+                        workflow=workflow,
+                        params=params,
+                        worklists=worklists,
+                        bundle_dir=bundle_dir,
+                        run_dir=run_dir,
+                        report=report,
+                        new_crops=new_crops,
+                        depth=depth,
+                    )
+                return
+
+            # Ancestor: finish the in-progress child, then continue this graph.
+            self._resume_descend(
+                frames,
+                depth + 1,
+                workflow=workflow,
+                worklists=worklists,
+                bundle_dir=bundle_dir,
+                run_dir=run_dir,
+                report=report,
+                new_crops=new_crops,
+            )
+            if state.kind is StateKind.LOOP:
+                loop = state.loop
+                assert loop is not None
+                body = workflow.subflows.get(loop.body)
+                if body is None:
+                    raise _ProgramHalt(
+                        "halt",
+                        f"resume loop body subflow '{loop.body}' is not defined "
+                        "— run aborted",
+                    )
+                cursor = frames[depth + 1].loop
+                rows = cursor.rows if cursor is not None else []
+                start_i = (cursor.row_index + 1) if cursor is not None else 0
+                for i in range(start_i, len(rows)):
+                    iter_params = {**params, **rows[i]}
+                    self._walk_graph(
+                        body,
+                        graph_id=loop.body,
+                        workflow=workflow,
+                        params=iter_params,
+                        worklists=worklists,
+                        bundle_dir=bundle_dir,
+                        run_dir=run_dir,
+                        report=report,
+                        new_crops=new_crops,
+                        depth=depth + 1,
+                        loop_cursor=LoopCursor(
+                            loop_state_id=state.id,
+                            relation=loop.relation,
+                            row_index=i,
+                            rows=rows,
+                        ),
+                    )
+                nxt = self._select_transition(
+                    state, params=params, bundle_dir=bundle_dir
+                )
+            else:
+                # subflow_call: continue after the call once the child returned.
+                nxt = self._select_transition(
+                    state, params=params, bundle_dir=bundle_dir
+                )
+            if nxt is not None:
+                live["state_id"] = nxt
+                self._run_states_from(
+                    graph,
+                    live,
+                    workflow=workflow,
+                    params=params,
+                    worklists=worklists,
+                    bundle_dir=bundle_dir,
+                    run_dir=run_dir,
+                    report=report,
+                    new_crops=new_crops,
+                    depth=depth,
+                )
+        finally:
+            self._frame_stack.pop()
 
     def _build_graph_ctx(self, state: State, graph: ProgramGraph) -> _GraphStepContext:
         """Assemble the ``_GraphStepContext`` for an action state: the previously
@@ -1064,6 +1683,10 @@ class Replayer:
         # System-of-record pre-state, snapshotted just before the action when
         # the step declares effects (see the block guarding self._act below).
         effect_pre_state: Optional[EffectState] = None
+        # The step's effect contracts with every ValueExpr bound to THIS run's
+        # params (P0-3); resolved BEFORE the pre-state snapshot so verification
+        # targets the record this run wrote, not the demonstration's.
+        resolved_effects: Optional[list["Effect"]] = None
 
         try:
             # Workflow-program IR, Phase 1: evaluate the step's guard
@@ -1199,6 +1822,10 @@ class Replayer:
                         "effects (fail-safe HALT)"
                     )
                 else:
+                    # Bind the effect contracts to this run's params BEFORE the
+                    # pre-state snapshot (P0-3): match/value/idempotency_key must
+                    # describe the record THIS run writes, not the demo's.
+                    resolved_effects = self._resolve_effects(step.effects, params)
                     effect_pre_state = self.effect_verifier.capture_pre_state()
 
             if error is None:
@@ -1226,7 +1853,10 @@ class Replayer:
                     # (postcondition literals) — scrub PHI before it hits the
                     # console log (see openadapt_flow.privacy).
                     rescued = "; ".join(
-                        _scrub_phi(r) for r in result.postcondition_drift_rescues
+                        # Rescues are non-empty descriptions, so scrub_text returns
+                        # a str; ``or ""`` only satisfies its Optional[str] return.
+                        _scrub_phi(r) or ""
+                        for r in result.postcondition_drift_rescues
                     )
                     print(
                         f"  drift-oracle: {len(result.postcondition_drift_rescues)}"
@@ -1247,7 +1877,9 @@ class Replayer:
             # lost update -- the EffectVerifier reads the REAL record and HALTs
             # on any non-CONFIRMED verdict (docs/design/EFFECT_VERIFIER.md).
             if error is None and effect_pre_state is not None:
-                error = self._verify_effects(step, effect_pre_state, result)
+                error = self._verify_effects(
+                    step, effect_pre_state, result, effects=resolved_effects
+                )
 
             result.ok = error is None
             result.error = error
@@ -1335,6 +1967,7 @@ class Replayer:
         """
         binding = step.api_binding
         assert binding is not None  # guaranteed by the caller
+        assert self.api_actuator is not None  # guaranteed by the caller (line ~1140)
 
         # An API write MUST be confirmable against the system of record --
         # exactly as a GUI write that declares effects must be. The binding may
@@ -1368,6 +2001,13 @@ class Replayer:
                 "refusing an unverifiable consequential write; run aborted"
             )
             return True
+
+        # Bind the effect contracts to this run's params BEFORE snapshotting the
+        # pre-state (P0-3): the same {param} substitution the ApiActuator applies
+        # to the URL/query/body must apply to what the write is verified against,
+        # or an API write for patient "Susan" would be confirmed against the
+        # demonstration's patient "Phil".
+        effects = self._resolve_effects(effects, params)
 
         # Snapshot the system of record BEFORE the write so the verifier counts
         # only what THIS actuation wrote (delta / at-most-once / collateral
@@ -1410,6 +2050,21 @@ class Replayer:
 
     # -- system-of-record effect verification -----------------------------------
 
+    def _resolve_effects(
+        self, effects: list["Effect"], params: dict[str, str]
+    ) -> list["Effect"]:
+        """Bind each effect's ``ValueExpr`` contract to THIS run's params (P0-3).
+
+        Mirrors how an ``ApiBinding``'s ``{param}`` templates are filled at
+        actuation time: the effect a PARAMETERIZED workflow verifies must
+        describe the record IT WROTE THIS RUN, not the demonstration's. The
+        reserved ``__run_id__`` param exposes the stable-per-run identity so an
+        idempotency key can be bound per-run. A pure-literal (v1) effect is
+        returned value-identical -- ``resolve`` is a no-op for it.
+        """
+        namespace = {**params, "__run_id__": self._run_id}
+        return [effect.resolve(namespace) for effect in effects]
+
     def _verify_effects(
         self,
         step: Step,
@@ -1446,6 +2101,10 @@ class Replayer:
         if effects is None:
             effects = step.effects
         for effect in effects:
+            # Audit trail (P0-3): persist a NON-secret digest of the RESOLVED
+            # contract this run actually verified against, before any verdict —
+            # so a halted/placeholder effect is recorded too.
+            result.effect_contract_hashes.append(effect.contract_hash())
             # A compiler-mined PLACEHOLDER effect (binding not derivable from
             # the demonstration — see compiler.effect_mining) carries a
             # sentinel selector, NOT a real one. Never verify it against the
@@ -2111,8 +2770,12 @@ class Replayer:
                     params=params,
                     param_examples=workflow.params,
                 )
+            # This branch means no identity_template, so the constructor-time
+            # assert (step.anchor.context_text OR identity_template) guarantees a
+            # non-None context band. Use the already-narrowed local ``anchor``.
+            assert anchor.context_text is not None
             return identity_mod.verify_target_identity(
-                step.anchor.context_text,
+                anchor.context_text,
                 observed,
                 params=params,
                 param_examples=workflow.params,
@@ -2503,6 +3166,7 @@ class Replayer:
 
         Returns the postconditions that remain failed after the pass.
         """
+        assert self.state_verifier is not None  # guaranteed by the caller (line ~2618)
         survivors: list[Any] = []
         for pc in failed_pcs:
             expected = self._expected_state_text(pc)

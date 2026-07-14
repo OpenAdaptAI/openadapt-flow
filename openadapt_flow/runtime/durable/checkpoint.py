@@ -44,9 +44,20 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from openadapt_flow.runtime.durable.approval import ApprovalRecord
+from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
+
 CHECKPOINTS_DIRNAME = "checkpoints"
 MANIFEST_FILENAME = "_manifest.json"
 PENDING_FILENAME = "pending_escalation.json"
+APPROVAL_FILENAME = "approval.json"
+#: Prefix of the per-verified-state Phase-2 interpreter checkpoints
+#: (``pstate_0000.json``), written under ``run_dir/checkpoints/`` alongside the
+#: linear ``step_*.json`` checkpoints.
+PROGRAM_CHECKPOINT_PREFIX = "pstate_"
+#: Default stale-pause window: a pause older than this is refused on resume
+#: (the app state a stale checkpoint expects can no longer be trusted). 7 days.
+DEFAULT_STALE_AFTER_S = 7 * 24 * 3600.0
 
 
 def _now() -> str:
@@ -148,13 +159,27 @@ class PendingEscalation(BaseModel):
     #: The run's parameter bindings, so an approved resume re-binds identically.
     params: dict[str, str] = Field(default_factory=dict)
     status: Literal["pending", "approved"] = "pending"
+    #: Stale-pause expiry (RFC §5, P0-5): a resume attempted more than this many
+    #: seconds after ``created_at`` is REFUSED (:class:`~.approval.PauseExpired`)
+    #: -- the app state a stale checkpoint expects can no longer be trusted.
+    #: ``<= 0`` disables expiry.
+    stale_after_s: float = DEFAULT_STALE_AFTER_S
+    #: True when this pause is over a Phase-2 PROGRAM run (its resume point is a
+    #: :class:`~.program_checkpoint.ProgramCheckpoint`, not a linear step index).
+    program: bool = False
     created_at: str = Field(default_factory=_now)
+
+
+#: Suffix appended to a durable artifact's filename when it is encrypted at
+#: rest, so a plaintext and an encrypted store never collide and a reader can
+#: tell them apart on disk.
+ENC_SUFFIX = ".enc"
 
 
 class CheckpointStore:
     """Read/write the durable artifacts under a run directory.
 
-    Layout::
+    Layout (plaintext)::
 
         run_dir/
           checkpoints/
@@ -162,25 +187,72 @@ class CheckpointStore:
             step_0000_<id>.json       # RunCheckpoint (one per verified step)
             step_0001_<id>.json
           pending_escalation.json     # PendingEscalation (present iff paused)
+
+    Encryption-at-rest (opt-in, OFF by default): when a ``key`` passphrase is
+    supplied (explicitly or via ``OPENADAPT_BUNDLE_KEY``), every artifact is
+    sealed with AES-256-GCM (``openadapt_flow.crypto``) and written with a
+    trailing ``.enc`` (``step_0000_<id>.json.enc`` etc.). A durable checkpoint
+    carries the run's parameter bindings and verification evidence, so the same
+    at-rest control the compiled bundle gets applies here. Reads transparently
+    decrypt an ``.enc`` artifact (a wrong/missing key fails LOUDLY via
+    ``crypto.DecryptionError`` / ``crypto.MissingKeyError``). With no key the
+    behavior is byte-for-byte unchanged from before.
     """
 
-    def __init__(self, run_dir: Path | str) -> None:
+    def __init__(self, run_dir: Path | str, *, key: Optional[str] = None) -> None:
         self.run_dir = Path(run_dir)
         self.checkpoints_dir = self.run_dir / CHECKPOINTS_DIRNAME
+        # None => plaintext (unchanged default). A non-empty passphrase turns on
+        # AEAD sealing for writes and decryption for reads.
+        self.key = key
+
+    # -- (de)serialization seam ---------------------------------------------
+
+    def _write_model(self, path: Path, model: BaseModel) -> Path:
+        """Serialize ``model`` to ``path`` (``.json``), or to ``path`` + ``.enc``
+        sealed with AES-256-GCM when a key is configured. Returns the path
+        actually written; removes the counterpart form if it lingers."""
+        data = model.model_dump_json(indent=2).encode("utf-8")
+        if self.key:
+            from openadapt_flow import crypto as _crypto
+
+            target = path.with_name(path.name + ENC_SUFFIX)
+            target.write_bytes(
+                _crypto.encrypt_bytes(data, self.key, aad=_crypto.CHECKPOINT_AAD)
+            )
+            if path.exists():
+                path.unlink()
+            return target
+        path.write_bytes(data)
+        enc = path.with_name(path.name + ENC_SUFFIX)
+        if enc.exists():
+            enc.unlink()
+        return path
+
+    def _read_json(self, path: Path) -> Optional[dict]:
+        """Read a plaintext ``path`` or its ``.enc`` sibling (decrypting the
+        latter), returning the parsed dict or None when neither exists."""
+        enc = path.with_name(path.name + ENC_SUFFIX)
+        if enc.is_file():
+            from openadapt_flow import crypto as _crypto
+
+            decrypted = _crypto.decrypt_bytes(
+                enc.read_bytes(), self.key, aad=_crypto.CHECKPOINT_AAD
+            )
+            return json.loads(decrypted)  # type: ignore[no-any-return]
+        if path.is_file():
+            return json.loads(path.read_text())  # type: ignore[no-any-return]
+        return None
 
     # -- manifest ------------------------------------------------------------
 
     def write_manifest(self, manifest: RunManifest) -> Path:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        path = self.checkpoints_dir / MANIFEST_FILENAME
-        path.write_text(manifest.model_dump_json(indent=2))
-        return path
+        return self._write_model(self.checkpoints_dir / MANIFEST_FILENAME, manifest)
 
     def read_manifest(self) -> Optional[RunManifest]:
-        path = self.checkpoints_dir / MANIFEST_FILENAME
-        if not path.is_file():
-            return None
-        return RunManifest.model_validate(json.loads(path.read_text()))
+        raw = self._read_json(self.checkpoints_dir / MANIFEST_FILENAME)
+        return RunManifest.model_validate(raw) if raw is not None else None
 
     # -- checkpoints ---------------------------------------------------------
 
@@ -200,17 +272,28 @@ class CheckpointStore:
         cannot produce two checkpoints for it.
         """
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        path = self._checkpoint_path(checkpoint)
-        path.write_text(checkpoint.model_dump_json(indent=2))
-        return path
+        return self._write_model(self._checkpoint_path(checkpoint), checkpoint)
 
     def checkpoints(self) -> list[RunCheckpoint]:
-        """All checkpoints, ordered by step index."""
+        """All checkpoints, ordered by step index (plaintext or encrypted)."""
         if not self.checkpoints_dir.is_dir():
             return []
         out: list[RunCheckpoint] = []
-        for path in self.checkpoints_dir.glob("step_*.json"):
-            out.append(RunCheckpoint.model_validate(json.loads(path.read_text())))
+        seen: set[str] = set()
+        for path in sorted(self.checkpoints_dir.glob("step_*.json*")):
+            # A step's plaintext base name; the .enc sibling maps to the same
+            # base so _read_json picks whichever exists (no double-counting).
+            base = (
+                path.name[: -len(ENC_SUFFIX)]
+                if path.name.endswith(ENC_SUFFIX)
+                else path.name
+            )
+            if base in seen:
+                continue
+            seen.add(base)
+            raw = self._read_json(self.checkpoints_dir / base)
+            if raw is not None:
+                out.append(RunCheckpoint.model_validate(raw))
         out.sort(key=lambda c: c.step_index)
         return out
 
@@ -226,18 +309,103 @@ class CheckpointStore:
 
     def write_pending(self, pending: PendingEscalation) -> Path:
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        path = self._pending_path()
-        path.write_text(pending.model_dump_json(indent=2))
-        return path
+        return self._write_model(self._pending_path(), pending)
 
     def read_pending(self) -> Optional[PendingEscalation]:
-        path = self._pending_path()
-        if not path.is_file():
-            return None
-        return PendingEscalation.model_validate(json.loads(path.read_text()))
+        raw = self._read_json(self._pending_path())
+        return PendingEscalation.model_validate(raw) if raw is not None else None
 
     def clear_pending(self) -> None:
         """Remove a resolved pending escalation (called when a resume starts)."""
-        path = self._pending_path()
-        if path.is_file():
-            path.unlink()
+        for path in (
+            self._pending_path(),
+            self._pending_path().with_name(PENDING_FILENAME + ENC_SUFFIX),
+        ):
+            if path.is_file():
+                path.unlink()
+
+    # -- program (Phase-2 state-machine) checkpoints -------------------------
+
+    def _program_checkpoint_path(self, checkpoint: ProgramCheckpoint) -> Path:
+        name = f"{PROGRAM_CHECKPOINT_PREFIX}{checkpoint.seq:04d}.json"
+        return self.checkpoints_dir / name
+
+    def write_program_checkpoint(self, checkpoint: ProgramCheckpoint) -> Path:
+        """Persist a verified-state interpreter checkpoint (Phase-2 program run).
+
+        Idempotent per ``seq``: re-writing the same sequence overwrites the file
+        rather than appending a duplicate. Sealed at rest when a key is
+        configured (the interpreter frame carries run params + effect contracts,
+        so it gets the same AEAD control as the linear checkpoints)."""
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        return self._write_model(self._program_checkpoint_path(checkpoint), checkpoint)
+
+    def program_checkpoints(self) -> list[ProgramCheckpoint]:
+        """All Phase-2 interpreter checkpoints, ordered by ``seq`` (plaintext or
+        encrypted)."""
+        if not self.checkpoints_dir.is_dir():
+            return []
+        out: list[ProgramCheckpoint] = []
+        seen: set[str] = set()
+        for path in sorted(
+            self.checkpoints_dir.glob(f"{PROGRAM_CHECKPOINT_PREFIX}*.json*")
+        ):
+            base = (
+                path.name[: -len(ENC_SUFFIX)]
+                if path.name.endswith(ENC_SUFFIX)
+                else path.name
+            )
+            if base in seen:
+                continue
+            seen.add(base)
+            raw = self._read_json(self.checkpoints_dir / base)
+            if raw is not None:
+                out.append(ProgramCheckpoint.model_validate(raw))
+        out.sort(key=lambda c: c.seq)
+        return out
+
+    def last_program_checkpoint(self) -> Optional[ProgramCheckpoint]:
+        """The highest-``seq`` interpreter checkpoint (the resume point), or None
+        when the run is not a program run / nothing verified yet."""
+        checkpoints = self.program_checkpoints()
+        return checkpoints[-1] if checkpoints else None
+
+    def completed_effect_keys(self) -> list[str]:
+        """Every already-CONFIRMED effect's contract hash across the program run
+        (the union of each checkpoint's ``new_effect_keys``) -- the idempotency
+        ledger a resume consults so it never re-performs a confirmed write."""
+        keys: list[str] = []
+        for cp in self.program_checkpoints():
+            keys.extend(cp.new_effect_keys)
+        return keys
+
+    def completed_effects(self) -> list[dict]:
+        """Every already-CONFIRMED effect contract (resolved ``Effect`` dumps)
+        across the program run -- so a resume can re-verify (read-only) that the
+        already-confirmed writes still hold before restoring the interpreter."""
+        effects: list[dict] = []
+        for cp in self.program_checkpoints():
+            effects.extend(cp.new_effects)
+        return effects
+
+    # -- approval (authenticated resume authorization; P0-5) -----------------
+
+    def _approval_path(self) -> Path:
+        return self.run_dir / APPROVAL_FILENAME
+
+    def write_approval(self, approval: ApprovalRecord) -> Path:
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        return self._write_model(self._approval_path(), approval)
+
+    def read_approval(self) -> Optional[ApprovalRecord]:
+        raw = self._read_json(self._approval_path())
+        return ApprovalRecord.model_validate(raw) if raw is not None else None
+
+    def clear_approval(self) -> None:
+        """Remove a consumed approval (called when a resume completes)."""
+        for path in (
+            self._approval_path(),
+            self._approval_path().with_name(APPROVAL_FILENAME + ENC_SUFFIX),
+        ):
+            if path.is_file():
+                path.unlink()

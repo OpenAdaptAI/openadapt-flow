@@ -45,15 +45,41 @@ one-way to anyone without the external secret. Manage that secret like any other
   bundle whose steps carry a plaintext identity band (always), and — with the
   `privacy` extra installed — an identifier-bearing postcondition / label.
 
-## Deferred: encrypted sealed bundle (REM-1 crypto — NOT in this change)
+## Shipped: opt-in AEAD encryption (REM-1 crypto)
 
-Encryption-at-rest is **intentionally deferred**: correct encryption needs
-deployment-time **key management** (OS keychain / KMS / envelope keys) that does
-not exist in this project yet, and a half-shipped scheme (a hardcoded or
-in-bundle key) is worse than none — it implies a protection it does not provide.
-The `encrypted: false` manifest field makes the format **ready** for it.
+Encryption-at-rest is now available as an **opt-in** layer
+(`openadapt_flow.crypto`), OFF by default so nothing breaks:
 
-### Target design
+- **Bundle.** `Workflow.save(bundle_dir, encrypt=True, key=…)` seals the
+  serialized `workflow.json` with **AES-256-GCM** and writes it as
+  `workflow.json.enc` (no plaintext `workflow.json` on disk).
+  `Workflow.load(bundle_dir, key=…)` decrypts it in memory. The passphrase comes
+  from the `key` argument or the **`OPENADAPT_BUNDLE_KEY`** environment variable;
+  a per-bundle random salt + scrypt KDF stretches it to the 256-bit data key.
+- **Durable checkpoints.** `CheckpointStore(run_dir, key=…)` (wired through
+  `Replayer(checkpoint_key=…)` and `resume(…, key=…)`) seals every checkpoint /
+  pending-escalation / run-manifest / Phase-2 interpreter checkpoint the same
+  way (`…​.json.enc`), so a resumable run's persisted params + effect contracts
+  are ciphertext at rest.
+- **Integrity preserved.** The schema-v2 manifest (content digest + per-asset
+  SHA-256 + provenance) is sealed over the **plaintext** content *before*
+  encryption, so a decrypted load still verifies integrity end-to-end. The
+  `encrypted: true` manifest flag is now live (mirrored on `Workflow.encrypted`),
+  and the `manifest.json` sidecar stays plaintext so a compliance inventory can
+  read it without the key.
+- **Fails loud + safe.** A **wrong or missing key**, or a **tampered ciphertext**
+  (a flipped byte breaks the GCM tag), raises `crypto.DecryptionError` /
+  `crypto.MissingKeyError` — never a partial or silent load.
+
+**Scope / not yet done:** the template `templates/*.png` crops are still
+governance-guarded + operator-disk-encrypted, not yet sealed into the container
+(they remain hashed by the manifest for integrity). Deployment-time **key
+management** (OS keychain / KMS / envelope keys, key rotation) is still the
+operator's responsibility — the passphrase is supplied via env/argument; this
+change provides the AEAD substrate, not a KMS. The envelope-key / whole-container
+design below remains the target.
+
+### Target design (envelope keys / whole-container — future)
 
 1. **Sealed container.** Serialize `workflow.json` + `templates/` into a single
    encrypted container (e.g. an [age](https://github.com/FiloSottile/age) /

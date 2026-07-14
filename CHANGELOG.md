@@ -1,6 +1,105 @@
 # CHANGELOG
 
 
+## v0.21.0 (2026-07-14)
+
+### Bug Fixes
+
+- Induction refuses to over-certify (uncertainty on flagged proposals, entity params, honest
+  coverage naming) ([#93](https://github.com/OpenAdaptAI/openadapt-flow/pull/93),
+  [`5557c53`](https://github.com/OpenAdaptAI/openadapt-flow/commit/5557c53751d9d3c9e0d8abdc9ceadb50e3a12e6e))
+
+* fix: induction refuses to over-certify (uncertainty on flagged proposals, entity params, honest
+  coverage naming)
+
+Multi-trace induction is a useful PROTOTYPE whose output could over-claim. Both external reviews
+  flagged this. Hardens the safety posture so certification matches what was actually verified. All
+  changes are within induction.py logic (no ir.py / runtime changes); compiler/__init__.py
+  re-exports the new name.
+
+1. A flagged Proposal no longer auto-certifies. When an inferred branch or an OPTIONAL step over a
+  CONSEQUENTIAL action (irreversible or effect-bearing) is proposed, induction ALSO emits an
+  Uncertainty requiring operator confirmation, so certified=False until resolved. "Absent in some
+  traces" is no longer a silent optional/skip for a consequential step -- it is a question routed to
+  the disambiguation flow.
+
+2. reproduction_score() renamed to structural_trace_coverage() (deprecated, warning-emitting alias
+  kept). It is a structural trace-SHAPE score -- gives params full credit, treats loop tokens as
+  reproduced, executes no app and checks no effect/identity -- so its docstring now states exactly
+  what it does and does NOT verify, and nothing treats it alone as behavioral validation /
+  certification (HeldOutValidation reworded to match).
+
+3. Entity/selection generalization: a CLICK/selection whose target VARIES across traces is no longer
+  frozen as a literal that silently re-selects the demo entity (the runtime clicks the resolved
+  anchor, not a param). Click field-keys are now value-free so varying selections align; a varying
+  selection becomes an ambiguous_selection Uncertainty with an advisory entity_ref proposal -- never
+  a hardcoded demo entity.
+
+4. Loop honesty: documented (module + _reduce_trace docstrings, in-file LIMITS) that only
+  consecutive-repeated-subsequence loops are detected -- NOT search->process->return, pagination, or
+  per-row conditional bodies. A repeated CONSEQUENTIAL body yields an ambiguous_loop Uncertainty
+  instead of a possibly-wrong loop over an irreversible action.
+
+Adds tests/test_induction_hardening.py (13 tests). Existing test_induction.py (17) unchanged and
+  green.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format induction-hardening files
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Expose induce / worklist / effects / resume / deployment-config via the CLI
+  ([#91](https://github.com/OpenAdaptAI/openadapt-flow/pull/91),
+  [`428ed49`](https://github.com/OpenAdaptAI/openadapt-flow/commit/428ed496452c3b0356adc71c01bbc8638f0e690c))
+
+* feat: expose induce / worklist / effects / resume / deployment-config via the CLI
+
+The library gained program IR, multi-trace induction, effect verification, API actuation, a durable
+  runtime, and a skill library, but the installable CLI could still only do the old linear
+  record->compile->replay. Surface the new capabilities so they are usable (and auditable) product,
+  not test fixture.
+
+New / extended subcommands (thin wrappers over existing library APIs; no library behavior changed):
+
+- induce: multi-trace induction over MULTIPLE recording (or bundle) dirs into a program bundle via
+  compiler.induction.induce_program; prints the audit trail, honestly refuses (nonzero exit, no
+  bundle written) when intent is underdetermined, optional --held-out leave-one-out validation. -
+  replay --worklist [RELATION=]FILE: load a CSV/JSON worklist of param rows and drive a program's
+  loop over a relation (wired into Replayer.run worklists=). - replay/run effect + actuator wiring:
+  --config / --effects-* / --api-* build and inject an EffectVerifier (rest/fhir/document-hash) and
+  an ApiActuator, plus --durable for the Tier-3 durable runtime. All default off, so an unconfigured
+  replay is byte-for-byte unchanged. - run: deployment-config-driven execution (the replay path
+  wired for a real deployment instead of the MockMed demo). - resume <run_dir> / approve <run_dir>:
+  surface the durable pause/resume + approval path via the current durable public API
+  (CheckpointStore + resume). - deployment.py + docs/deployment.example.yaml: one canonical
+  deployment config (backend / actuation / effects / runtime / policy) read by record / compile /
+  certify / replay / run / resume.
+
+Tests: tests/test_cli_{deployment,induce,new_commands}.py cover config load +
+
+verifier/actuator construction, induce end-to-end (certified + refuse + held-out), worklist
+  loaders/binding, approve/resume paths, and a fake-browser replay proving the deployment objects
+  reach the Replayer. 95 relevant tests green (incl. existing
+  induction/durable/effects/actuator/emit suites).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01CKrVJJy5jWVCkXAqgUqtqZ
+
+* style: ruff format CLI + deployment files
+
+---------
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.20.1 (2026-07-14)
 
 ### Bug Fixes

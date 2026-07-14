@@ -271,6 +271,7 @@ class Replayer:
         effect_compensator: Optional[Any] = None,
         api_actuator: Optional[Any] = None,
         durable: bool = False,
+        checkpoint_key: Optional[str] = None,
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
         allow_model_grounding: bool = False,
@@ -341,6 +342,11 @@ class Replayer:
         # openadapt_flow.runtime.durable and run()'s ``resume_from``). Pure
         # bookkeeping over the StepResult; no backend/vision/model involvement.
         self.durable = durable
+        # Encryption-at-rest for the durable checkpoints (opt-in, OFF by
+        # default). A passphrase (explicit, or from OPENADAPT_BUNDLE_KEY) seals
+        # every checkpoint / pending-escalation / manifest with AES-256-GCM
+        # (openadapt_flow.crypto). None => plaintext checkpoints, unchanged.
+        self.checkpoint_key = checkpoint_key
         # Optional local-VLM identity veto (tier 3 of the identity ladder),
         # OFF by default like the grounder: an IdentityVLM verifier or None.
         # When None the ladder runs structured-text + pixel-compare + OCR +
@@ -493,11 +499,16 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 params=params,
                 save_healed_to=save_healed_to,
+                key=self.checkpoint_key,
             )
         if resume_from:
             from openadapt_flow.runtime.durable import resumed_step_results
 
-            report.results.extend(resumed_step_results(run_dir, workflow, resume_from))
+            report.results.extend(
+                resumed_step_results(
+                    run_dir, workflow, resume_from, key=self.checkpoint_key
+                )
+            )
             if durable_run is not None:
                 durable_run.store.clear_pending()
 

@@ -147,7 +147,16 @@ class DesktopHarness:
         self.log = log
         from openadapt_flow.backends import WindowsBackend
 
-        self.backend = WindowsBackend(server_url=shim_url, auth_token=auth_token)
+        # This is the desktop BENCHMARK harness: it drives synthetic apps in a
+        # Parallels VM over the private host<->guest network (``shim_url`` is the
+        # guest IP, non-loopback) with token auth, and carries NO PHI. So opt
+        # out of the fail-closed ``require_tls`` default here. A real PHI lane
+        # must instead provision a per-run cert and construct WindowsBackend
+        # with ``https://`` + ``pin_fingerprint`` (docs/phi_in_transit.md) --
+        # that default stays fail-closed for those callers.
+        self.backend = WindowsBackend(
+            server_url=shim_url, auth_token=auth_token, require_tls=False
+        )
 
     @classmethod
     def connect(

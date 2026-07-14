@@ -22,5 +22,21 @@ from openadapt_flow.backends.win_agent.server import (
     create_server,
     make_handler_class,
 )
+from openadapt_flow.backends.win_agent.tls import (
+    CertBundle,
+    fingerprint_from_pem_file,
+    generate_self_signed_cert,
+    normalize_fingerprint,
+    pinned_session,
+)
 
-__all__ = ["AgentConfig", "create_server", "make_handler_class"]
+__all__ = [
+    "AgentConfig",
+    "CertBundle",
+    "create_server",
+    "fingerprint_from_pem_file",
+    "generate_self_signed_cert",
+    "make_handler_class",
+    "normalize_fingerprint",
+    "pinned_session",
+]

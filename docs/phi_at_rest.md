@@ -7,7 +7,9 @@ classified, access-controlled, retention-managed, and **encrypted at rest** by
 the operator. This page states the current at-rest posture, what each
 remediation does, and the design for the deferred encryption step.
 
-See also [PRIVACY.md](PRIVACY.md) (the in-flight / scrubbing map) and the
+See also [PRIVACY.md](PRIVACY.md) (the in-flight / scrubbing map),
+[phi_in_transit.md](phi_in_transit.md) (PHI **on the wire** — the win_agent
+control channel is now TLS-encrypted with certificate pinning), and the
 `openadapt_flow.ir.Workflow` manifest fields.
 
 ## What is in a bundle, and how it is protected today

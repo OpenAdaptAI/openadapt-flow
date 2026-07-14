@@ -174,7 +174,11 @@ def test_desktop_record_compile_replay_structural(tmp_path) -> None:
     )
     try:
         url = vm.launch_agent(token=token)
-        backend = WindowsBackend(server_url=url, auth_token=token)
+        # Synthetic-app e2e over the private Parallels host<->guest network
+        # (``url`` is the guest IP, non-loopback) with token auth, no PHI --
+        # opt out of the fail-closed require_tls default. Real PHI lanes use
+        # https:// + pin_fingerprint (docs/phi_in_transit.md).
+        backend = WindowsBackend(server_url=url, auth_token=token, require_tls=False)
         assert backend.probe(), "win_agent screenshot probe failed"
 
         # Deploy + seed + launch the RELIABLE WinForms target in session 1.

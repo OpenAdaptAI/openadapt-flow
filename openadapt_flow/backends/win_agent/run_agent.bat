@@ -10,9 +10,11 @@ REM `prlctl exec`) or screenshots and input address a blank desktop.
 REM
 REM Env:
 REM   OAFLOW_AGENT_PY    full path to the guest python.exe (optional)
-REM   OAFLOW_AGENT_HOST  bind address   (default 127.0.0.1; 0.0.0.0 to expose)
-REM   OAFLOW_AGENT_PORT  TCP port       (default 5000)
-REM   OAFLOW_AGENT_TOKEN bearer token   (recommended when HOST is 0.0.0.0)
+REM   OAFLOW_AGENT_HOST     bind address (default 127.0.0.1; 0.0.0.0 to expose)
+REM   OAFLOW_AGENT_PORT     TCP port     (default 5000)
+REM   OAFLOW_AGENT_TOKEN    bearer token (REQUIRED when HOST is 0.0.0.0)
+REM   OAFLOW_AGENT_CERTFILE PEM cert; with KEYFILE serves HTTPS (PHI in transit)
+REM   OAFLOW_AGENT_KEYFILE  PEM private key matching CERTFILE
 REM ---------------------------------------------------------------------------
 setlocal
 

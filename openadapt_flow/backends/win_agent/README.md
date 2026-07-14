@@ -20,20 +20,34 @@ Only the Python **standard library** is imported at load; `mss`/Pillow (for the
 screenshot) and `pyautogui`/`uiautomation` (used by the exec'd commands) import
 lazily. No Flask required in the guest.
 
-## Security (loopback default + optional bearer token)
+## Security (TLS in transit + loopback default + bearer token)
 
-`/execute_windows` is arbitrary remote code execution *by contract*, so:
+`/screenshot` returns a PNG of the live patient chart and `/execute_windows` is
+arbitrary remote code execution *by contract* — both carry **PHI**. So:
 
+- **TLS in transit (encrypt PHI on the wire).** The 2026 HIPAA Security Rule
+  makes encryption in transit mandatory. Pass a per-run cert/key
+  (`--certfile` / `--keyfile`, or `OAFLOW_AGENT_CERTFILE` /
+  `OAFLOW_AGENT_KEYFILE`) and the listener serves **HTTPS**. The control plane
+  mints the cert with `win_agent.tls.generate_self_signed_cert(...)`, provisions
+  it into the guest, and hands the client the cert's SHA-256 **fingerprint**;
+  the client **pins** it (`WindowsBackend(pin_fingerprint=...)`). A wrong or
+  MITM cert is rejected at the handshake. Full trust model: `tls.py`, and
+  [`docs/phi_in_transit.md`](../../../docs/phi_in_transit.md). Cert minting needs
+  `cryptography` (control plane); the guest only needs stdlib `ssl`.
 - **Default bind is `127.0.0.1`** — reachable only from inside the guest. Expose
   it to the Parallels host (`WindowsBackend` over the shared network) only with
   an explicit `--host 0.0.0.0`.
-- **Optional bearer token** (the PHI audit flagged the original shim as
-  unauthenticated). Set `--token <secret>` or the `OAFLOW_AGENT_TOKEN` env var;
-  then `/screenshot` and `/execute_windows` require
+- **Bearer token (independent second factor).** Set `--token <secret>` or the
+  `OAFLOW_AGENT_TOKEN` env var; then `/screenshot` and `/execute_windows` require
   `Authorization: Bearer <secret>` (constant-time compare) or return `401`.
-  `WindowsBackend(server_url=..., auth_token=<secret>)` sends the header.
+  `WindowsBackend(server_url=..., auth_token=<secret>)` sends the header. TLS and
+  the token are independent: TLS encrypts + proves server identity, the token
+  authorizes the caller.
 
-**Whenever you set `--host 0.0.0.0`, set a token.**
+**Whenever you set `--host 0.0.0.0`: serve TLS (`--certfile`/`--keyfile`) AND set
+a token.** The client refuses plaintext to a non-loopback host by default
+(`require_tls`) — no silent downgrade.
 
 ## Launching it in session 1
 

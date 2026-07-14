@@ -462,16 +462,59 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """Execute a bundle under a deployment config.
+    """Execute a bundle under a deployment config -- FAIL-CLOSED.
 
-    The SAME code path as ``replay`` (backend + effect verification + API
-    actuation + durable runtime, all wired from ``--config``), framed for a
-    real deployment rather than the demo: ``--drift`` (a MockMed-only teaching
-    aid) is not offered here. ``--config`` supplies the backend URL, the system
-    of record, the actuation tier, durability, and the policy.
+    Unlike ``replay`` (the permissive demo path, where certification / identity
+    arming / effect verification / encryption are all OPTIONAL), ``run`` REFUSES
+    to execute unless every fail-closed admission gate holds
+    (:mod:`openadapt_flow.run_gate`): the bundle is certified, every
+    entity-sensitive / consequential action is identity-armed, every write has a
+    verifiable (or explicitly approved) effect contract, the bundle is encrypted
+    at rest, and its integrity manifest re-verifies. On any refusal it prints the
+    coverage report naming the failing gate and exits nonzero WITHOUT executing.
+    ``--dry-run`` / ``--explain`` print the coverage report and stop before
+    execution. Once admitted, it delegates to the shared executor (the same
+    backend / effect / actuation / durable runtime as ``replay``), with
+    ``--drift`` (a MockMed-only teaching aid) forced off.
     """
-    # A deployment run is not the drift-demo; force it off and delegate to the
-    # shared replay executor (which reads all deployment wiring from --config).
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.run_gate import evaluate_run_gate
+
+    bundle = Path(args.bundle)
+    # Load the bundle first (decrypting if encrypted -- the key comes from
+    # --config/env via OPENADAPT_BUNDLE_KEY); a missing/wrong key fails LOUDLY.
+    try:
+        workflow = Workflow.load(bundle)
+    except Exception as e:  # crypto / integrity / structural errors -> fail closed
+        print(f"run REFUSED: bundle could not be loaded safely: {e}")
+        return 2
+
+    cfg, effect_verifier, _api, _durable, _egress = _deployment_runtime(args)
+    policy_source = args.policy or cfg.policy.policy
+
+    report = evaluate_run_gate(
+        workflow,
+        bundle_dir=bundle,
+        deployment=cfg,
+        effect_verifier=effect_verifier,
+        policy_source=policy_source,
+        approval_available=bool(getattr(args, "approve_unverified_writes", False)),
+        strict_templates=bool(getattr(args, "strict_templates", False)),
+        require_encryption=not bool(getattr(args, "allow_unencrypted", False)),
+        pinned_content_digest=getattr(args, "pin_digest", None),
+        pinned_compiler_version=getattr(args, "pin_version", None),
+    )
+    print(report.render())
+
+    if getattr(args, "dry_run", False) or getattr(args, "explain", False):
+        # Report-only: never execute, regardless of the verdict.
+        return 0 if report.passed else 2
+    if not report.passed:
+        # Fail closed: refuse execution and exit nonzero.
+        return 2
+
+    # Admitted. A deployment run is not the drift-demo; force it off and delegate
+    # to the shared replay executor (which reads all deployment wiring itself).
     args.drift = None
     return _cmd_replay(args)
 
@@ -1142,6 +1185,60 @@ def build_parser() -> argparse.ArgumentParser:
         "--record-video", default=None, metavar="DIR", help=argparse.SUPPRESS
     )
     _add_deployment_flags(p, worklist=True)
+    # Fail-closed admission-gate controls (see openadapt_flow.run_gate).
+    p.add_argument(
+        "--policy",
+        default=None,
+        metavar="NAME-OR-PATH",
+        help=(
+            "Certifying policy the bundle must PASS to run (default: the "
+            "deployment config's policy, else 'clinical-write')"
+        ),
+    )
+    p.add_argument(
+        "--approve-unverified-writes",
+        action="store_true",
+        help=(
+            "APPROVAL FALLBACK: explicitly approve executing writes whose "
+            "effects cannot be independently verified in this deployment (no "
+            "verifier configured). Without it such a bundle is refused"
+        ),
+    )
+    p.add_argument(
+        "--strict-templates",
+        action="store_true",
+        help=(
+            "Refuse (not just warn) when template/screenshot assets are unsealed "
+            "(plaintext at rest)"
+        ),
+    )
+    p.add_argument(
+        "--allow-unencrypted",
+        action="store_true",
+        help=(
+            "Escape hatch: permit running a bundle whose workflow.json is NOT "
+            "encrypted at rest (disables the encryption gate). Discouraged"
+        ),
+    )
+    p.add_argument(
+        "--pin-digest",
+        default=None,
+        metavar="SHA256",
+        help="Refuse unless the bundle's sealed content digest equals this",
+    )
+    p.add_argument(
+        "--pin-version",
+        default=None,
+        metavar="VERSION",
+        help="Refuse unless the bundle's compiler version equals this",
+    )
+    p.add_argument(
+        "--dry-run",
+        "--explain",
+        dest="dry_run",
+        action="store_true",
+        help="Print the fail-closed coverage report and exit WITHOUT executing",
+    )
     p.set_defaults(func=_cmd_run)
 
     p = sub.add_parser(

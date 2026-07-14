@@ -124,3 +124,56 @@ def test_run_raises_on_nonzero(monkeypatch):
 def test_shim_url_uses_guest_ip(monkeypatch):
     _mock_run(monkeypatch, {"exec": _completed("   IPv4 Address. . . : 10.211.55.3\n")})
     assert ParallelsVM(UUID).shim_url() == "http://10.211.55.3:5000"
+
+
+def _stub_agent_deps(monkeypatch, vm, exec_calls, *, alive=True):
+    """Neutralize the network/file side effects of launch_agent for unit tests."""
+    monkeypatch.setattr(pv.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(vm, "host_ip", lambda *a, **k: "10.211.55.2")
+    monkeypatch.setattr(vm, "guest_ip", lambda *a, **k: "10.211.55.3")
+    monkeypatch.setattr(vm, "push_file", lambda *a, **k: None)
+    monkeypatch.setattr(vm, "exec_cmd", lambda *a, **k: _completed(""))
+    monkeypatch.setattr(vm, "kill_shim", lambda: None)
+
+    def fake_exec(args, **k):
+        exec_calls.append(list(args))
+        return _completed("")
+
+    monkeypatch.setattr(vm, "exec", fake_exec)
+    monkeypatch.setattr(vm, "_agent_alive", lambda url: alive)
+
+
+def test_launch_agent_deploys_and_returns_guest_url(monkeypatch):
+    vm = ParallelsVM(UUID)
+    exec_calls: list[list] = []
+    _stub_agent_deps(monkeypatch, vm, exec_calls)
+
+    url = vm.launch_agent(port=5000, token="tok-xyz")
+    assert url == "http://10.211.55.3:5000"
+
+    launch = next(
+        a for a in exec_calls if any("win_agent_server.py" in str(x) for x in a)
+    )
+    assert "--host" in launch and "0.0.0.0" in launch
+    assert "--token" in launch and "tok-xyz" in launch
+
+
+def test_launch_agent_omits_token_when_none(monkeypatch):
+    vm = ParallelsVM(UUID)
+    exec_calls: list[list] = []
+    _stub_agent_deps(monkeypatch, vm, exec_calls)
+
+    vm.launch_agent(port=5000)
+    launch = next(
+        a for a in exec_calls if any("win_agent_server.py" in str(x) for x in a)
+    )
+    assert "--token" not in launch
+
+
+def test_launch_agent_raises_when_agent_never_comes_up(monkeypatch):
+    vm = ParallelsVM(UUID)
+    exec_calls: list[list] = []
+    _stub_agent_deps(monkeypatch, vm, exec_calls, alive=False)
+
+    with pytest.raises(ParallelsError, match="did not come up"):
+        vm.launch_agent(port=5000, wait_s=0.05)

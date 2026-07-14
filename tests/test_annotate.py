@@ -331,7 +331,11 @@ def test_default_off_is_byte_identical_and_writes_no_sidecar(tmp_path):
     # off changes nothing about compilation (heuristic-only, no model).
     a = off.model_dump()
     b = default.model_dump()
+    # created_at and the schema-v2 manifest (per-save provenance timestamp +
+    # content digest that hashes created_at) always vary between two compiles;
+    # they are integrity/provenance metadata, not compiled semantics.
     a.pop("created_at"), b.pop("created_at")
+    a.pop("manifest", None), b.pop("manifest", None)
     assert a == b
 
 

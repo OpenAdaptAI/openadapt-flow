@@ -971,6 +971,39 @@ class UnarmedStep(BaseModel):
     reason: str = ""
 
 
+class HaltObservation(BaseModel):
+    """The structured record a HALT emits — the substrate the halt->learn loop
+    consumes (``openadapt_flow.learning.halt_loop``).
+
+    When ``Replayer.run`` stops on an unhandled state (a resolution failure, a
+    dead-end branch, an unmet ``halt`` guard, a non-CONFIRMED effect, a ``halt``
+    terminal), it records WHERE it stopped (``state_id`` / ``intent`` /
+    ``reason``), WHAT unexpected state it observed there (``observed_texts`` — the
+    on-screen text the compiled program had no branch for, PHI-scrubbed), and the
+    PRE-context needed to learn a resolution (``completed_intents`` — the steps
+    that succeeded before the halt). This is deliberately the SAME shape a
+    :class:`~openadapt_flow.learning.trace.ExecutionTrace` carries (ordered
+    intents + observed screen facts), so the learning bridge lifts it into the
+    trace corpus with no reshaping — it is a report/audit field, NOT a parallel
+    learning system.
+
+    Additive and backward-compatible: ``RunReport.halt`` defaults to None, so a
+    successful run (or a consumer that ignores it) is unaffected.
+    """
+
+    state_id: str = ""
+    intent: str = ""
+    reason: str = ""
+    outcome: str = "halt"
+    #: On-screen text observed at the halt point (PHI-scrubbed) — the unexpected
+    #: UI state the program was not demonstrated to handle. Keyed later as the
+    #: ``TEXT_PRESENT`` facts a learned branch guard tests.
+    observed_texts: list[str] = Field(default_factory=list)
+    #: Intents of the steps that completed successfully BEFORE the halt (the
+    #: pre-context a resolution demonstration extends).
+    completed_intents: list[str] = Field(default_factory=list)
+
+
 class RunReport(BaseModel):
     workflow_name: str
     started_at: str
@@ -985,6 +1018,11 @@ class RunReport(BaseModel):
     # additive and empty/None on a linear run.
     terminal_outcome: Optional[str] = None
     visited_states: list[str] = Field(default_factory=list)
+    # The structured HALT record (see HaltObservation): populated by
+    # Replayer.run when the run stops on an unhandled state, so the halt->learn
+    # loop can lift it into the trace corpus. None on a successful run (and on
+    # any run whose halt path predates this field) — additive/back-compatible.
+    halt: Optional["HaltObservation"] = None
     rung_counts: dict[str, int] = Field(default_factory=dict)
     heal_count: int = 0
     model_calls: int = 0

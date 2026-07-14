@@ -32,6 +32,12 @@ from openadapt_flow.learning.gate import (  # noqa: F401
     StepGateVerdict,
     program_regression_gate,
 )
+from openadapt_flow.learning.halt_loop import (  # noqa: F401
+    execution_trace_from_halt,
+    learn_from_halt,
+    promoted_workflow,
+    resolution_demonstration,
+)
 from openadapt_flow.learning.interpreter import (  # noqa: F401
     ReproResult,
     predicate_holds,
@@ -79,4 +85,9 @@ __all__ = [
     "LearnOutcome",
     "Inducer",
     "CanaryContext",
+    # halt->learn loop
+    "execution_trace_from_halt",
+    "resolution_demonstration",
+    "learn_from_halt",
+    "promoted_workflow",
 ]

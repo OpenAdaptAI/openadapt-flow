@@ -42,6 +42,7 @@ from openadapt_flow.backend import Backend
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    HaltObservation,
     IdentityCheck,
     LoopSpec,
     Point,
@@ -513,6 +514,12 @@ class Replayer:
             )
         report.total_ms = (time.monotonic() - t_run) * 1000.0
 
+        # Emit the structured HALT record on any unsuccessful run, so the
+        # halt->learn loop (openadapt_flow.learning.halt_loop) can lift it into
+        # the trace corpus. No-op on a successful run.
+        if not report.success:
+            self._emit_halt(report)
+
         if save_healed_to is not None:
             heal_mod.write_healed_bundle(
                 workflow, bundle_dir, Path(save_healed_to), new_crops
@@ -564,6 +571,85 @@ class Replayer:
                         ),
                     )
                 )
+
+    def _emit_halt(self, report: RunReport) -> None:
+        """Populate ``report.halt`` with the structured HALT record.
+
+        Captures WHERE the run stopped (the last failed step / the program
+        terminal), WHAT unexpected on-screen text was observed there (probed from
+        the current frame, PHI-scrubbed), and the PRE-context (the intents that
+        completed before the halt). This is the ONLY thing the runtime does with
+        the learning loop: it emits an audit record shaped exactly like an
+        ExecutionTrace's (intents + observed facts); the learning bridge decides
+        what to do with it (openadapt_flow.learning.halt_loop). Never raises —
+        an emission failure must not turn a halt into a crash.
+        """
+        try:
+            results = report.results
+            # The halted step: the last executed step that FAILED (skip the
+            # synthetic <terminal>/<params> markers the interpreter appends).
+            failed = [
+                r
+                for r in results
+                if not r.ok
+                and not r.skipped
+                and r.step_id not in ("<terminal>", "<params>")
+            ]
+            halted = failed[-1] if failed else (results[-1] if results else None)
+            completed = [r.intent for r in results if r.ok and not r.skipped]
+            reason = ""
+            state_id = ""
+            intent = ""
+            if halted is not None:
+                reason = halted.error or ""
+                state_id = halted.step_id
+                intent = halted.intent
+            # If a program terminal recorded the reason, prefer its text.
+            for r in results:
+                if r.step_id == "<terminal>" and r.error:
+                    reason = reason or r.error
+            observed = self._observe_screen_texts()
+            report.halt = HaltObservation(
+                state_id=state_id,
+                intent=intent,
+                reason=reason,
+                outcome=report.terminal_outcome or "halt",
+                observed_texts=observed,
+                completed_intents=completed,
+            )
+        except Exception:  # pragma: no cover - emission must never crash a run
+            pass
+
+    def _observe_screen_texts(self) -> list[str]:
+        """Read the on-screen text at the halt point (PHI-scrubbed).
+
+        The unexpected UI state the compiled program had no branch for — the
+        text a learned branch's ``TEXT_PRESENT`` guard will key on. Uses the
+        backend's current frame through the SAME OCR the runtime already uses
+        for text presence; returns [] when OCR is unavailable (pixel-only
+        substrate / a vision stub without ocr)."""
+        try:
+            frame = self.backend.screenshot()
+        except Exception:
+            return []
+        ocr = getattr(self.vision, "ocr", None)
+        if ocr is None:
+            return []
+        try:
+            lines = ocr(frame)
+        except Exception:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for line in lines or []:
+            text = getattr(line, "text", None)
+            if not text:
+                continue
+            scrubbed = _scrub_phi(text).strip()
+            if scrubbed and scrubbed not in seen:
+                seen.add(scrubbed)
+                out.append(scrubbed)
+        return out
 
     @staticmethod
     def _account_result(report: RunReport, result: StepResult) -> None:

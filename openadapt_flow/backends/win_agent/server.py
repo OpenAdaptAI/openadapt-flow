@@ -41,6 +41,15 @@ Hardening (vs the original ``scripts/desktop/waa_shim.py``)
   request must carry ``Authorization: Bearer <token>`` or is rejected 401. The
   comparison is constant-time. ``/health`` stays unauthenticated (liveness only,
   no desktop bytes, no exec).
+* **TLS in transit (encryption + pinned server identity).** The channel carries
+  PHI (screenshots of the patient chart, the commands that read/write it), so
+  the 2026 HIPAA Security Rule requires it be encrypted. When a cert/key pair is
+  configured (``--certfile`` / ``--keyfile``, provisioned per run by the control
+  plane) the listener serves **HTTPS**; the client pins the certificate's
+  SHA-256 fingerprint (see ``tls.py`` for the trust model). Encryption and
+  token-auth are independent factors -- ``--token`` is still required to expose
+  the channel off loopback. Cert minting lives on the control plane
+  (``cryptography``); the guest needs only stdlib ``ssl`` to wrap its socket.
 
 Self-contained by construction
 ------------------------------
@@ -71,6 +80,10 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 # secret off the process command line / argv where feasible).
 TOKEN_ENV_VAR = "OAFLOW_AGENT_TOKEN"
 
+# Env vars the TLS cert/key paths are read from when the flags are not passed.
+CERTFILE_ENV_VAR = "OAFLOW_AGENT_CERTFILE"
+KEYFILE_ENV_VAR = "OAFLOW_AGENT_KEYFILE"
+
 GrabFn = Callable[[], bytes]
 
 
@@ -87,15 +100,34 @@ class AgentConfig:
             ``/execute_windows`` require ``Authorization: Bearer <token>``.
             When None the server is unauthenticated (loopback-only is then the
             only safeguard).
+        certfile: PEM certificate path. When set (with ``keyfile``) the listener
+            serves **HTTPS** -- the PHI-bearing channel is encrypted in transit
+            and the client pins this cert's fingerprint. Provisioned per run by
+            the control plane (``win_agent.tls.generate_self_signed_cert``).
+        keyfile: PEM private-key path matching ``certfile``. Required with it.
     """
 
     host: str = "127.0.0.1"
     port: int = 5000
     token: Optional[str] = None
+    certfile: Optional[str] = None
+    keyfile: Optional[str] = None
 
     def authed(self) -> bool:
         """True when a bearer token is required."""
         return bool(self.token)
+
+    def tls_enabled(self) -> bool:
+        """True when the listener serves HTTPS (a cert/key pair is set)."""
+        return bool(self.certfile and self.keyfile)
+
+    def __post_init__(self) -> None:
+        """Reject a half-configured TLS pair (fail closed, never silent HTTP)."""
+        if bool(self.certfile) != bool(self.keyfile):
+            raise ValueError(
+                "TLS needs BOTH certfile and keyfile (got only one) -- refusing "
+                "to fall back to plaintext HTTP for a PHI channel"
+            )
 
 
 def _grab_desktop_png() -> bytes:
@@ -291,13 +323,25 @@ def create_server(
             tests).
 
     Returns:
-        A ``ThreadingHTTPServer`` bound to ``config.host:config.port``. Call
-        ``serve_forever()`` (usually on a daemon thread) to run it, or use it
-        as a context manager.
+        A ``ThreadingHTTPServer`` bound to ``config.host:config.port``. When
+        ``config`` carries a cert/key pair the listening socket is wrapped in
+        TLS (the server speaks HTTPS). Call ``serve_forever()`` (usually on a
+        daemon thread) to run it, or use it as a context manager.
     """
     config = config or AgentConfig()
     handler = make_handler_class(config, grab_fn)
-    return ThreadingHTTPServer((config.host, config.port), handler)
+    server = ThreadingHTTPServer((config.host, config.port), handler)
+    if config.tls_enabled():
+        # Import lazily so the plaintext/loopback path (and CI import) never
+        # touches the TLS helper; wrap the already-bound socket in place.
+        from openadapt_flow.backends.win_agent.tls import (  # noqa: PLC0415
+            server_ssl_context,
+        )
+
+        assert config.certfile is not None and config.keyfile is not None
+        ctx = server_ssl_context(config.certfile, config.keyfile)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    return server
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -319,12 +363,33 @@ def main(argv: Optional[list[str]] = None) -> None:
             f"/execute_windows (falls back to ${TOKEN_ENV_VAR})"
         ),
     )
+    parser.add_argument(
+        "--certfile",
+        default=os.environ.get(CERTFILE_ENV_VAR),
+        help=(
+            "PEM certificate; with --keyfile serves HTTPS (encrypt PHI in "
+            f"transit). Falls back to ${CERTFILE_ENV_VAR}."
+        ),
+    )
+    parser.add_argument(
+        "--keyfile",
+        default=os.environ.get(KEYFILE_ENV_VAR),
+        help=f"PEM private key matching --certfile (falls back to ${KEYFILE_ENV_VAR})",
+    )
     args = parser.parse_args(argv)
-    config = AgentConfig(host=args.host, port=args.port, token=args.token)
+    config = AgentConfig(
+        host=args.host,
+        port=args.port,
+        token=args.token,
+        certfile=args.certfile,
+        keyfile=args.keyfile,
+    )
     server = create_server(config)
+    scheme = "https" if config.tls_enabled() else "http"
     print(
-        f"[win-agent] listening on http://{config.host}:{config.port} "
-        f"(auth={'on' if config.authed() else 'OFF'}, "
+        f"[win-agent] listening on {scheme}://{config.host}:{config.port} "
+        f"(tls={'on' if config.tls_enabled() else 'OFF'}, "
+        f"auth={'on' if config.authed() else 'OFF'}, "
         f"session={_active_console_session()})",
         flush=True,
     )

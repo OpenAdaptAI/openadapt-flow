@@ -37,13 +37,19 @@ from __future__ import annotations
 
 import base64
 import struct
+import warnings
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
 from openadapt_flow.ir import StructuralHandle, StructuralLocator
 
 DEFAULT_SERVER_URL = "http://localhost:5001"
+
+# Hosts treated as loopback: plaintext HTTP to these never leaves the machine,
+# so it is permitted in dev (with a warning) even when TLS is not required.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", ""})
 
 # Screenshot retry defaults (mirrors WAADirect in openadapt-evals).
 SCREENSHOT_MAX_RETRIES = 3
@@ -160,7 +166,21 @@ class WindowsBackend:
             every request must carry ``Authorization: Bearer <token>``; set it
             here to talk to an authenticated agent. None (default) sends no
             auth header (the loopback-only / legacy unauthenticated shim).
-        session: Optional ``requests.Session`` (injected in tests).
+        pin_fingerprint: SHA-256 fingerprint of the agent's per-run certificate,
+            as provisioned by the control plane. When ``server_url`` is
+            ``https://`` and this is set, the client **pins** it: the TLS
+            session is accepted only if the server presents exactly that
+            certificate (see ``win_agent.tls`` for the trust model). A
+            wrong/unpinned cert is rejected at handshake. This is the
+            PHI-in-transit control -- encryption + server identity; the bearer
+            token remains the independent authorization factor.
+        require_tls: Fail-closed switch. When True the client REFUSES a
+            plaintext ``http://`` ``server_url`` (raises rather than silently
+            downgrade). When None (default) it is inferred: **required** for a
+            non-loopback host, **relaxed** for loopback (dev may use plaintext
+            with a warning). No silent downgrade in any case.
+        session: Optional ``requests.Session`` (injected in tests). When a
+            ``pin_fingerprint`` is set the pinning adapter is mounted onto it.
     """
 
     def __init__(
@@ -173,6 +193,8 @@ class WindowsBackend:
         screenshot_max_retries: int = SCREENSHOT_MAX_RETRIES,
         screenshot_retry_delay_s: float = SCREENSHOT_RETRY_DELAY_S,
         auth_token: Optional[str] = None,
+        pin_fingerprint: Optional[str] = None,
+        require_tls: Optional[bool] = None,
         session: Optional[requests.Session] = None,
     ) -> None:
         self.server_url = server_url.rstrip("/")
@@ -182,7 +204,54 @@ class WindowsBackend:
         self._screenshot_max_retries = max(1, int(screenshot_max_retries))
         self._screenshot_retry_delay_s = screenshot_retry_delay_s
         self._auth_token = auth_token or None
+        self._pin_fingerprint = pin_fingerprint or None
+
+        scheme = urlparse(self.server_url).scheme.lower()
+        host = urlparse(self.server_url).hostname or ""
+        is_loopback = host in _LOOPBACK_HOSTS
+        self._require_tls = (not is_loopback) if require_tls is None else require_tls
+        self._tls = scheme == "https"
+
+        # Fail closed: a required-TLS channel must NOT run over plaintext. No
+        # silent downgrade -- refuse at construction so a misconfigured PHI lane
+        # cannot send a single cleartext screenshot/command.
+        if self._require_tls and not self._tls:
+            raise ValueError(
+                f"require_tls: refusing plaintext {scheme or 'http'}:// to "
+                f"non-loopback host {host!r}; use https:// with a pinned "
+                "per-run certificate (win_agent.tls). Set require_tls=False "
+                "only for a loopback dev channel."
+            )
+        if not self._tls and not is_loopback:
+            # Reachable only when require_tls was explicitly forced False.
+            warnings.warn(
+                f"win_agent channel to {host!r} is PLAINTEXT (PHI in the "
+                "clear); TLS explicitly disabled. Do not use for real PHI.",
+                stacklevel=2,
+            )
+        elif not self._tls:
+            warnings.warn(
+                "win_agent channel is plaintext HTTP (loopback dev). Provision "
+                "a per-run cert + https:// before carrying PHI off-host.",
+                stacklevel=2,
+            )
+
         self._session = session if session is not None else requests.Session()
+        if self._tls and self._pin_fingerprint:
+            from openadapt_flow.backends.win_agent.tls import pinned_session
+
+            pinned_session(self._pin_fingerprint, session=self._session)
+        elif self._tls and not self._pin_fingerprint:
+            # HTTPS with no pin: still encrypted, but a per-run self-signed cert
+            # will not validate against system CAs -- surface the gap loudly
+            # rather than let requests raise an opaque SSLError at first call.
+            warnings.warn(
+                "win_agent https:// channel has no pin_fingerprint; server "
+                "identity falls back to system-CA validation, which a per-run "
+                "self-signed agent cert will fail. Provide the fingerprint the "
+                "control plane minted.",
+                stacklevel=2,
+            )
 
     def _request_kwargs(self) -> dict:
         """Per-request kwargs: always ``timeout``, plus ``headers`` IFF a token

@@ -39,7 +39,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 _VIEWPORT = {"width": 1280, "height": 800}
 
@@ -189,7 +189,198 @@ def _deployment_runtime(args: argparse.Namespace):
     return cfg, effect_verifier, api_actuator, durable, allow_egress
 
 
+def _resolve_backend_config(args: argparse.Namespace, cfg):
+    """Merge the ``--backend`` family of CLI flags over ``cfg.backend``.
+
+    A deployment ``--config`` supplies the backend section; direct flags
+    (``--backend`` / ``--agent-url`` / ``--rdp-host``) override individual
+    fields, exactly as the effects/actuation flags override their sections. With
+    no flags the config's backend (default ``web``) is returned unchanged, so an
+    unflagged web replay behaves precisely as before.
+    """
+    backend = cfg.backend
+    if getattr(args, "backend", None):
+        backend = backend.model_copy(update={"kind": args.backend})
+    if getattr(args, "agent_url", None):
+        backend = backend.model_copy(update={"agent_url": args.agent_url})
+    if getattr(args, "rdp_host", None):
+        backend = backend.model_copy(update={"rdp_host": args.rdp_host})
+    return backend
+
+
+def _build_and_run_replayer(
+    backend,
+    *,
+    workflow,
+    params: dict[str, str],
+    worklists: dict[str, list[dict[str, str]]],
+    bundle: Path,
+    run_dir: Path,
+    save_healed_to: Optional[Path],
+    allow_egress: bool,
+    effect_verifier,
+    api_actuator,
+    durable: bool,
+    use_structural: bool,
+):
+    """Wire the grounding / identity-VLM ladder and run the replayer.
+
+    Backend-agnostic: the on-prem VLM appliance (opt-in, egress-guarded), the
+    OCR grounding rung, and the deployment wiring (effect verifier / API
+    actuator / durable runtime) are identical whether the backend is the
+    browser, the Windows agent, or an RDP/remote-display session. Returns the
+    run report. Extracted verbatim from the historical inline web path so the
+    web behavior is unchanged and every backend shares one code path.
+    """
+    import os
+
+    from openadapt_flow.runtime import Replayer
+    from openadapt_flow.runtime.grounder import build_grounder
+    from openadapt_flow.runtime.remote_vlm import appliance_from_env
+
+    # An on-prem VLM appliance is opt-in (OPENADAPT_FLOW_VLM_URL). Unset -> the
+    # identity veto tier stays off. Configured -> the identity veto tier and the
+    # remote-VLM grounder come online, both fail-safe (an appliance outage halts,
+    # never mis-clicks).
+    #
+    # EGRESS GUARD (PHI audit REM-3): the appliance grounder / identity-VLM /
+    # state-verifier send screenshots OFF the box, so they are wired ONLY when
+    # the operator explicitly passes --allow-model-grounding. Without it the
+    # replay is fully local and makes zero outbound calls.
+    appliance = appliance_from_env()
+    if appliance is not None and not allow_egress:
+        print(
+            "On-prem VLM appliance is configured "
+            f"({os.environ.get('OPENADAPT_FLOW_VLM_URL')}) but NOT "
+            "wired: pass --allow-model-grounding to send screenshots "
+            "to it. Replaying FULLY LOCAL (zero outbound calls)."
+        )
+        appliance = None
+    if appliance is not None:
+        print(
+            "Using on-prem VLM appliance at "
+            f"{os.environ.get('OPENADAPT_FLOW_VLM_URL')} "
+            "(identity veto tier + remote-VLM grounder fallback; "
+            "fail-safe to halt). WARNING: screenshots WILL leave "
+            "the box for this run (--allow-model-grounding)."
+        )
+    # Grounding rung: OCR text-anchoring (openadapt-grounding) is PRIMARY
+    # whenever the 'grounding' extra is installed; the remote-VLM grounder (if
+    # an appliance is configured) is the fallback for text-less surfaces. None
+    # when neither is present (the model-free default).
+    grounder = build_grounder(fallback=appliance.grounder if appliance else None)
+    if grounder is not None:
+        print(f"Grounding rung active: {type(grounder).__name__}")
+    return Replayer(
+        backend,
+        grounder=grounder,
+        identity_vlm=appliance.identity_vlm if appliance else None,
+        state_verifier=(appliance.state_verifier if appliance else None),
+        allow_model_grounding=allow_egress,
+        # Deployment wiring resolved from --config / flags: verify consequential
+        # writes against the system of record, actuate bound steps via the API
+        # tier, and checkpoint for resume.
+        effect_verifier=effect_verifier,
+        api_actuator=api_actuator,
+        durable=durable,
+        use_structural=use_structural,
+    ).run(
+        workflow,
+        params=params,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        save_healed_to=save_healed_to,
+    )
+
+
+def _finish_replay(run_dir: Path, report) -> int:
+    """Render the run report, print the outcome, and map it to an exit code."""
+    from openadapt_flow.report import render_run_report
+
+    report_md = render_run_report(run_dir)
+    outcome = "success" if report.success else "FAILED"
+    print(f"Replay {outcome}: {report_md}")
+    if report.screenshots_may_leave_box:
+        print(
+            "NOTE: a model-grounding component was wired for this run — "
+            "screenshots could have left the box (see REPORT.md)."
+        )
+    return 0 if report.success else 1
+
+
+def _replay_desktop(
+    args: argparse.Namespace,
+    backend_cfg,
+    *,
+    workflow,
+    params: dict[str, str],
+    worklists: dict[str, list[dict[str, str]]],
+    bundle: Path,
+    run_dir: Path,
+    allow_egress: bool,
+    effect_verifier,
+    api_actuator,
+    durable: bool,
+) -> int:
+    """Replay against a NON-browser backend (windows / rdp) built by the factory.
+
+    No Playwright browser, no bundled MockMed, no session video — those are
+    web-only. ``--drift`` (a MockMed teaching aid) is refused. The backend is
+    built from the resolved ``BackendConfig`` and the shared replayer wiring runs
+    exactly as it does for the web path.
+    """
+    from openadapt_flow.backends.factory import build_backend
+
+    if args.drift:
+        raise SystemExit(
+            "--drift only demonstrates healing on the bundled MockMed web demo; "
+            f"it does not apply to the {backend_cfg.kind!r} backend."
+        )
+    try:
+        backend = build_backend(backend_cfg)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+    try:
+        report = _build_and_run_replayer(
+            backend,
+            workflow=workflow,
+            params=params,
+            worklists=worklists,
+            bundle=bundle,
+            run_dir=run_dir,
+            save_healed_to=(Path(args.save_healed_to) if args.save_healed_to else None),
+            allow_egress=allow_egress,
+            effect_verifier=effect_verifier,
+            api_actuator=api_actuator,
+            durable=durable,
+            # No MockMed drift here, so the deterministic structural rung is
+            # preferred exactly as in a non-drift web replay.
+            use_structural=True,
+        )
+    finally:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            close()  # RDP transports hold a live socket; browsers/agents don't
+    return _finish_replay(run_dir, report)
+
+
 def _cmd_record(args: argparse.Namespace) -> int:
+    # The interactive recorder is browser-only (Playwright): it records DOM
+    # events against a headed page. There is no in-repo desktop recorder, so a
+    # --backend windows/rdp recording is refused LOUDLY (never silently recorded
+    # as web) and the operator is pointed at the desktop harness.
+    backend = getattr(args, "backend", None) or "web"
+    if backend != "web":
+        raise SystemExit(
+            f"record --backend {backend} is not supported: the interactive "
+            "recorder is browser-only. Record a desktop workflow via the "
+            "evals/Parallels desktop harness (see docs/desktop/), then "
+            "compile/replay it with --backend "
+            f"{backend}."
+        )
+
     from openadapt_flow.interactive_recorder import record_interactive
 
     out = record_interactive(
@@ -300,10 +491,8 @@ def _default_run_dir() -> Path:
 def _cmd_replay(args: argparse.Namespace) -> int:
     from playwright.sync_api import sync_playwright
 
-    from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+    from openadapt_flow.backends.factory import _normalize_kind, build_backend
     from openadapt_flow.ir import Workflow
-    from openadapt_flow.report import render_run_report
-    from openadapt_flow.runtime import Replayer
 
     bundle = Path(args.bundle)
     run_dir = Path(args.run_dir) if args.run_dir else _default_run_dir()
@@ -321,6 +510,25 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         allow_egress,
     ) = _deployment_runtime(args)
     worklists = _resolve_worklists(getattr(args, "worklist", None), workflow)
+
+    # Backend selection (--backend web|windows|rdp, overriding --config). A
+    # non-web backend drives a native desktop / RDP / remote-display session with
+    # no browser: delegate to the desktop path. Default web is unchanged below.
+    backend_cfg = _resolve_backend_config(args, cfg)
+    if _normalize_kind(backend_cfg.kind) != "web":
+        return _replay_desktop(
+            args,
+            backend_cfg,
+            workflow=workflow,
+            params=params,
+            worklists=worklists,
+            bundle=bundle,
+            run_dir=run_dir,
+            allow_egress=allow_egress,
+            effect_verifier=effect_verifier,
+            api_actuator=api_actuator,
+            durable=durable,
+        )
 
     headed = args.headed or cfg.backend.headed
     url = args.url or cfg.backend.url
@@ -361,79 +569,26 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 page = browser.new_page(viewport=_VIEWPORT)
             page.goto(url)
             try:
-                backend = PlaywrightBackend(page)
-                import os
-
-                from openadapt_flow.runtime.grounder import build_grounder
-                from openadapt_flow.runtime.remote_vlm import (
-                    appliance_from_env,
-                )
-
-                # An on-prem VLM appliance is opt-in (OPENADAPT_FLOW_VLM_URL).
-                # Unset -> the identity veto tier stays off. Configured -> the
-                # identity veto tier and the remote-VLM grounder come online,
-                # both fail-safe (an appliance outage halts, never mis-clicks).
-                #
-                # EGRESS GUARD (PHI audit REM-3): the appliance grounder /
-                # identity-VLM / state-verifier send screenshots OFF the box, so
-                # they are wired ONLY when the operator explicitly passes
-                # --allow-model-grounding. Without it the replay is fully local
-                # (OCR-anchoring grounder only) and makes zero outbound calls.
-                # ``allow_egress`` was resolved above from --config/flags.
-                appliance = appliance_from_env()
-                if appliance is not None and not allow_egress:
-                    print(
-                        "On-prem VLM appliance is configured "
-                        f"({os.environ.get('OPENADAPT_FLOW_VLM_URL')}) but NOT "
-                        "wired: pass --allow-model-grounding to send screenshots "
-                        "to it. Replaying FULLY LOCAL (zero outbound calls)."
-                    )
-                    appliance = None
-                if appliance is not None:
-                    print(
-                        "Using on-prem VLM appliance at "
-                        f"{os.environ.get('OPENADAPT_FLOW_VLM_URL')} "
-                        "(identity veto tier + remote-VLM grounder fallback; "
-                        "fail-safe to halt). WARNING: screenshots WILL leave "
-                        "the box for this run (--allow-model-grounding)."
-                    )
-                # Grounding rung: OCR text-anchoring (openadapt-grounding) is
-                # PRIMARY whenever the 'grounding' extra is installed; the
-                # remote-VLM grounder (if an appliance is configured) is the
-                # fallback for text-less surfaces. None when neither is present
-                # (the model-free default; ladder simply has no grounder rung).
-                grounder = build_grounder(
-                    fallback=appliance.grounder if appliance else None
-                )
-                if grounder is not None:
-                    print(f"Grounding rung active: {type(grounder).__name__}")
-                report = Replayer(
-                    backend,
-                    grounder=grounder,
-                    identity_vlm=appliance.identity_vlm if appliance else None,
-                    state_verifier=(appliance.state_verifier if appliance else None),
-                    allow_model_grounding=allow_egress,
-                    # Deployment wiring resolved from --config / flags: verify
-                    # consequential writes against the system of record, actuate
-                    # bound steps via the API tier, and checkpoint for resume.
-                    effect_verifier=effect_verifier,
-                    api_actuator=api_actuator,
-                    durable=durable,
-                    # Normal replay prefers the deterministic structural rung.
-                    # ``--drift`` exists to DEMONSTRATE the visual healing ladder
-                    # on the bundled MockMed app, so it forces the visual floor
-                    # (structure would resolve the injected drift and there would
-                    # be nothing to heal -- the very thing the flag shows).
-                    use_structural=not bool(args.drift),
-                ).run(
-                    workflow,
+                # The browser backend is built through the same factory as the
+                # desktop backends; the grounding / identity / deployment wiring
+                # and the run are shared (see _build_and_run_replayer). ``--drift``
+                # (a MockMed teaching aid) forces the visual floor so the healing
+                # ladder is exercised instead of the structural rung resolving it.
+                report = _build_and_run_replayer(
+                    build_backend(backend_cfg, page=page),
+                    workflow=workflow,
                     params=params,
                     worklists=worklists,
-                    bundle_dir=bundle,
+                    bundle=bundle,
                     run_dir=run_dir,
                     save_healed_to=(
                         Path(args.save_healed_to) if args.save_healed_to else None
                     ),
+                    allow_egress=allow_egress,
+                    effect_verifier=effect_verifier,
+                    api_actuator=api_actuator,
+                    durable=durable,
+                    use_structural=not bool(args.drift),
                 )
             finally:
                 video_path = None
@@ -450,15 +605,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if stop is not None:
             stop()
 
-    report_md = render_run_report(run_dir)
-    outcome = "success" if report.success else "FAILED"
-    print(f"Replay {outcome}: {report_md}")
-    if report.screenshots_may_leave_box:
-        print(
-            "NOTE: a model-grounding component was wired for this run — "
-            "screenshots could have left the box (see REPORT.md)."
-        )
-    return 0 if report.success else 1
+    return _finish_replay(run_dir, report)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -893,6 +1040,44 @@ def _cmd_teach(args: argparse.Namespace) -> int:
     return 1
 
 
+def _add_backend_flags(p: argparse.ArgumentParser) -> None:
+    """Add the backend-selector flags (``--backend`` + targets) to a subparser.
+
+    These override the ``backend`` section of a deployment ``--config``. Default
+    (``web`` / no flag) reproduces the historical browser behavior byte-for-byte.
+    """
+    p.add_argument(
+        "--backend",
+        choices=["web", "windows", "rdp"],
+        default=None,
+        help=(
+            "Backend to drive: 'web' (default; Playwright/Chromium), 'windows' "
+            "(native Windows via the WAA HTTP agent — needs --agent-url), or "
+            "'rdp' (pixel-only remote desktop / Citrix — needs --rdp-host or a "
+            "configured rdp_window). Overrides backend.kind from --config."
+        ),
+    )
+    p.add_argument(
+        "--agent-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Base URL of the in-guest Windows (WAA) agent for --backend windows "
+            "(e.g. http://localhost:5001). Overrides backend.agent_url."
+        ),
+    )
+    p.add_argument(
+        "--rdp-host",
+        default=None,
+        metavar="HOST",
+        help=(
+            "RDP host/IP for --backend rdp (network RDP via FreeRDP). Overrides "
+            "backend.rdp_host. For the local Citrix/Parallels window path set "
+            "backend.rdp_window in --config instead."
+        ),
+    )
+
+
 def _add_deployment_flags(
     p: argparse.ArgumentParser, *, worklist: bool = False
 ) -> None:
@@ -1009,6 +1194,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the browser headless (scripted/CI recording)",
     )
+    _add_backend_flags(p)
     p.set_defaults(func=_cmd_record)
 
     p = sub.add_parser(
@@ -1139,6 +1325,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: off; no effect on the run directory or report)"
         ),
     )
+    _add_backend_flags(p)
     _add_deployment_flags(p, worklist=True)
     p.set_defaults(func=_cmd_replay)
 
@@ -1184,6 +1371,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--record-video", default=None, metavar="DIR", help=argparse.SUPPRESS
     )
+    _add_backend_flags(p)
     _add_deployment_flags(p, worklist=True)
     # Fail-closed admission-gate controls (see openadapt_flow.run_gate).
     p.add_argument(

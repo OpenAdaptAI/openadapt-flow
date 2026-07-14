@@ -28,13 +28,68 @@ from pydantic import BaseModel, Field
 
 
 class BackendConfig(BaseModel):
-    """Where and how to drive the target application's GUI."""
+    """Where and how to drive the target application's GUI.
+
+    ``kind`` selects the concrete :class:`~openadapt_flow.backend.Backend` the
+    CLI drives (built by :func:`openadapt_flow.backends.factory.build_backend`):
+
+    - ``web`` (default) — the Playwright/Chromium browser backend. Reproduces
+      the historical behavior exactly (``url`` / ``headed`` are browser fields);
+      every other field here is ignored.
+    - ``windows`` — the WAA (Windows Agent Arena) HTTP backend for native
+      Windows desktops. Requires ``agent_url`` (the in-guest agent's base URL);
+      ``agent_token`` authenticates a token-protected agent.
+    - ``rdp`` — a pixel-only remote-desktop backend for the Citrix/legacy-EMR
+      wedge. ``rdp_host`` drives a network RDP session (FreeRDP/aardwolf);
+      ``rdp_window`` instead drives a local remote-display CLIENT WINDOW (the
+      faithful Citrix analog — a Citrix Workspace / Parallels window captured
+      and injected at the host OS level).
+
+    Every non-``web`` field is optional and defaults to None, so an existing
+    ``web`` deployment (or an empty config) is byte-for-byte unchanged.
+    """
+
+    #: Which backend to drive: ``web`` (default) | ``windows`` | ``rdp``.
+    kind: str = "web"
 
     #: The GUI URL to drive (the app under automation). None => the caller's
     #: own default (e.g. ``replay`` serves the bundled MockMed demo).
+    #: ``web`` only.
     url: Optional[str] = None
-    #: Run the browser headed (visible). Default headless.
+    #: Run the browser headed (visible). Default headless. ``web`` only.
     headed: bool = False
+
+    # -- windows (WAA HTTP agent) --------------------------------------------
+    #: Base URL of the in-guest WAA agent (e.g. ``http://localhost:5001`` over
+    #: the standard SSH tunnel). REQUIRED for ``kind: windows``.
+    agent_url: Optional[str] = None
+    #: Optional bearer token for a token-authenticated WAA agent (sent as
+    #: ``Authorization: Bearer <token>``). None => no auth header (loopback).
+    agent_token: Optional[str] = None
+    #: Placeholder for the agent's pinned TLS certificate fingerprint. RESERVED
+    #: for the in-flight TLS-pin work (openadapt-flow#112); NOT wired into the
+    #: backend on this branch (main's WindowsBackend has no TLS-pin parameter),
+    #: so setting it today has no effect. Documented follow-up.
+    agent_tls_pin: Optional[str] = None
+
+    # -- rdp (network RDP via FreeRDP/aardwolf) ------------------------------
+    #: RDP host/IP for a network RDP session. REQUIRED for ``kind: rdp`` unless
+    #: ``rdp_window`` is given instead (the local remote-display path).
+    rdp_host: Optional[str] = None
+    rdp_username: Optional[str] = None
+    rdp_password: Optional[str] = None
+    rdp_domain: Optional[str] = None
+    rdp_port: int = 3389
+
+    # -- rdp (local remote-display client window — the Citrix analog) --------
+    #: Owner-app substring of the local client WINDOW to drive (e.g.
+    #: ``"Citrix"`` / ``"Parallels"``). When set (and ``rdp_host`` is not), the
+    #: ``rdp`` backend captures and injects into that on-screen window instead
+    #: of opening a network RDP session (macOS host).
+    rdp_window: Optional[str] = None
+    #: Optional window-title substring disambiguating multiple windows of the
+    #: same owner (used with ``rdp_window``).
+    rdp_window_title: Optional[str] = None
 
 
 class EffectsConfig(BaseModel):

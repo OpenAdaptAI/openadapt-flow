@@ -186,7 +186,25 @@ quote-style = "double"
 indent-style = "space"
 
 # --------------------------------------------------------------------------
-# Type checking (mypy). Lenient by design and green today; tighten over time.
+# Type checking (mypy). TWO gates, both required on PRs (see
+# .github/workflows/ci.yml):
+#
+#   1. `lint` job -> plain `mypy` with THIS config: LENIENT, whole-package.
+#      Green today; catches import/name/obvious-signature errors everywhere.
+#      Tighten the knobs below over time (they are deliberately off to start).
+#
+#   2. `mypy-strict-safety` job -> a STRICT run scoped to the safety-critical
+#      path ONLY (compiler, identity, effects, policy, replayer, resolver).
+#      It turns ON the highest-value strict knob this config leaves off --
+#      `--check-untyped-defs` (type-check the BODIES of un-annotated functions,
+#      where real safety bugs hide) -- plus no-implicit-optional, strict
+#      equality, redundant-cast / unused-ignore / untyped-decorator checks and
+#      --extra-checks. The full `--strict` superset (disallow-untyped-defs,
+#      disallow-any-generics, warn-return-any, warn-unreachable) is NOT yet
+#      green on these files without source changes; those remain the ratchet to
+#      flip as annotations harden. The strict file list lives in the workflow
+#      and mirrors the CODEOWNERS safety path -- keep the three in sync.
+#
 # Scoped to the core package (not tests, not the benchmark harness).
 # --------------------------------------------------------------------------
 [tool.mypy]
@@ -260,7 +278,24 @@ module = [
 ignore_errors = true
 
 # --------------------------------------------------------------------------
-# Coverage (visibility only — no hard floor yet).
+# Coverage. Whole-package measurement stays a VISIBILITY number, but the
+# safety-critical path now has an ENFORCED, required floor on PRs.
+#
+# The `test` job (see .github/workflows/ci.yml) runs the fast unit suite under
+# coverage, then enforces a ratchet with a SCOPED report:
+#
+#     coverage report --fail-under=85 \
+#       --include='openadapt_flow/compiler/*,openadapt_flow/runtime/identity*,\
+#                  openadapt_flow/runtime/replayer.py,\
+#                  openadapt_flow/runtime/resolver.py,openadapt_flow/policy.py,\
+#                  openadapt_flow/runtime/effects/*'
+#
+# 85% is the ratchet floor: it sits just under the fast-suite's measured
+# branch-inclusive coverage of that path (~88% locally, higher in CI where the
+# FHIR-effect + replayer-dependent tests that collide with a sibling repo's
+# `tests` package locally also run). NEVER decrease it -- raise it as coverage
+# climbs. Keep the --include globs in sync with the mypy strict scope above and
+# with CODEOWNERS.
 # --------------------------------------------------------------------------
 [tool.coverage.run]
 source = ["openadapt_flow"]
@@ -269,3 +304,4 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
+precision = 2

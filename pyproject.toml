@@ -89,8 +89,17 @@ privacy = ["openadapt-privacy[presidio]>=1.0.0"]
 hosted = ["keyring>=25"]
 # On-prem VLM inference service (the GPU-box appliance side).
 service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
-# Apple-Silicon dev backend for the VLM service (local model, no GPU box).
-service-mlx = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "mlx-vlm>=0.1"]
+# Apple-Silicon Research backend for the VLM service (local model, no GPU box).
+# mlx-vlm 0.6.4 is the first release that requires the Transformers versions
+# containing fixes for GHSA-69w3-r845-3855, GHSA-29pf-2h5f-8g72, and
+# GHSA-fgcw-684q-jj6r. Keep the direct constraint as defense in depth in case a
+# future transitive requirement is loosened.
+service-mlx = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "mlx-vlm>=0.6.4,<0.7",
+    "transformers>=5.5,<5.13",
+]
 # Cross-platform desktop recording on-ramp: convert an openadapt-capture
 # session into a flow recording (openadapt_flow.adapters.capture). Optional and
 # imported lazily — the flow core never pulls it onto the replay hot path. Note:

@@ -8,7 +8,11 @@ version = "1.7.0"
 description = "Compile demonstrated GUI workflows into deterministic local replay with governed repair and refusal"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+# rapidocr-onnxruntime is part of the validated identity/OCR path and does not
+# publish Python 3.13-compatible releases. Keep the package boundary aligned
+# with the runtime we actually qualify; migrating OCR engines requires rerunning
+# the identity and dense-surface safety evidence first.
+requires-python = ">=3.10,<3.13"
 authors = [{ name = "OpenAdapt.AI" }]
 dependencies = [
     "pydantic>=2.5",

@@ -76,14 +76,26 @@ runner:
 # -- updates: OFFLINE, operator-pulled, signed -------------------------------
 # The clinic NEVER auto-updates over the internet. An engineer prepares a signed
 # release bundle out-of-band; the operator copies it in on removable media and
-# install.sh --update verifies the signature before applying. See ON_PREM.md
-# "Offline updates".
+# `install.sh --update` VERIFIES it (checksum + signature) and SMOKE-TESTS the
+# new release BEFORE it atomically flips the `current` symlink. A bad release is
+# discarded and the box stays on the running one. `install.sh --rollback`
+# reverts to the previous release instantly. See deploy/on-prem/UPDATE.md.
 updates:
   channel: offline
-  # Path (on removable media) to the signed engine/bundle archive + its
-  # detached signature. Left blank until an update is staged.
+  # Path (on removable media) to the release archive (a .tar.gz containing a
+  # VERSION file + a wheels/ offline wheelhouse). Left blank until staged.
   release_archive: ""
+  # Detached signature over release_archive (AUTHENTICITY). Optional but
+  # STRONGLY recommended for a regulated box. Left blank => integrity relies on
+  # the checksum alone.
   release_signature: ""
-  # The vendor public key used to verify a release signature (minisign/age/GPG
-  # public key — a PUBLIC key, safe to store here).
+  # sha256 checksum sidecar over release_archive (INTEGRITY). Leave blank to
+  # auto-detect "<release_archive>.sha256". A checksum OR a verifiable signature
+  # MUST succeed or the update aborts (fail-closed).
+  release_checksum: ""
+  # The vendor PUBLIC key used to verify release_signature (minisign / signify /
+  # GPG / an openssl PEM public key — a PUBLIC key, safe to store here).
   vendor_pubkey: /srv/openadapt/keys/vendor.pub
+  # Which tool verifies the signature: minisign | signify | gpg | openssl.
+  # Leave blank to infer from the signature file extension.
+  signature_tool: ""

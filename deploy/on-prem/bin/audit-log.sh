@@ -11,7 +11,8 @@
 #
 # Fields (all non-PHI):
 #   ts          UTC ISO-8601 timestamp
-#   event       queued | started | verified | halted | failed | resumed
+#   event       queued | started | verified | halted | failed | resumed |
+#               updated | rolledback   (release lifecycle; see lib-release.sh)
 #   job         opaque job id (operator-chosen; MUST NOT be a patient id)
 #   bundle      bundle directory basename (not its contents)
 #   run_dir     run output directory (path only)

@@ -5,9 +5,9 @@ The README once claimed "vision-only", "864 tests", and "adapters to come"
 long after each became false. This script makes those drifts a hard CI failure
 instead of a thing a reader eventually notices. It enforces four invariants:
 
-* **version** — ``openadapt_flow.__version__`` equals the version in
-  ``pyproject.toml`` (the drift the clean-wheel job catches at runtime, caught
-  here at doc/lint speed too).
+* **version** — ``openadapt_flow.__version__`` and the editable root package in
+  ``uv.lock`` equal the version in ``pyproject.toml`` (the drift the clean-wheel
+  job catches at runtime, caught here at doc/lint speed too).
 * **paths** — every local file path referenced by a markdown link or a
   backticked ``a/b.ext`` token in ``README.md`` / ``DESIGN.md`` /
   ``docs/LIMITS.md``, and every such path in a ``.github/workflows/*.yml``
@@ -95,12 +95,40 @@ def package_version() -> str:
     return m.group(1)
 
 
+def lock_version() -> str:
+    data = tomllib.loads(read("uv.lock"))
+    roots = [
+        package
+        for package in data.get("package", [])
+        if package.get("name") == "openadapt-flow"
+        and package.get("source") == {"editable": "."}
+    ]
+    if len(roots) != 1:
+        raise AssertionError(
+            "uv.lock must contain exactly one editable openadapt-flow root package"
+        )
+    return roots[0]["version"]
+
+
 def check_version(pkg: Optional[str] = None, toml: Optional[str] = None) -> list[str]:
     pkg = package_version() if pkg is None else pkg
     toml = pyproject_version() if toml is None else toml
     if pkg != toml:
         return [
             f"version drift: openadapt_flow.__version__={pkg!r} != "
+            f"pyproject [project].version={toml!r}"
+        ]
+    return []
+
+
+def check_lock_version(
+    lock: Optional[str] = None, toml: Optional[str] = None
+) -> list[str]:
+    lock = lock_version() if lock is None else lock
+    toml = pyproject_version() if toml is None else toml
+    if lock != toml:
+        return [
+            f"version drift: uv.lock editable openadapt-flow={lock!r} != "
             f"pyproject [project].version={toml!r}"
         ]
     return []
@@ -255,6 +283,7 @@ def check_paths() -> list[str]:
 def run_all_checks() -> list[str]:
     errors: list[str] = []
     errors += check_version()
+    errors += check_lock_version()
     errors += check_banned_phrases()
     errors += check_test_count()
     errors += check_paths()
@@ -268,7 +297,7 @@ def main() -> int:
         for e in errors:
             print(f"  - {e}")
         return 1
-    print("Consistency gate passed: version, paths, phrases, and test count OK.")
+    print("Consistency gate passed: versions, paths, phrases, and test count OK.")
     return 0
 
 

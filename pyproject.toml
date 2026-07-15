@@ -151,7 +151,10 @@ version_toml = ["pyproject.toml:project.version"]
 # released pyproject version).
 version_variables = ["openadapt_flow/__init__.py:__version__"]
 commit_message = "chore: release {version}"
-build_command = "pip install uv && uv build"
+# Refresh the editable root package after semantic-release changes the version.
+# ``--offline`` keeps release resolution bound to the reviewed lock instead of
+# silently upgrading dependencies during publication.
+build_command = "pip install uv && uv lock --offline && uv build"
 
 [tool.semantic_release.branches.main]
 match = "main"

@@ -86,6 +86,8 @@ what protects it.
 | 9 | `runtime/remote_vlm.py` clients | `identifier_crop` bytes, full `screenshot` bytes, `target_description`/`intent`, `ocr_text`, `expected_state` (embeds postcondition literal) | **Boundary policy, NOT scrubbing** — see [ON_PREM_VLM.md](deployment/ON_PREM_VLM.md#phi-data-flow-boundary). The identity crop *must* contain the identifier to verify the patient; scrubbing it would defeat the check. Control = on-prem-only destination + no-retention. Client side writes nothing to disk or logs. |
 | 10 | `services/vlm_service/app.py` | receives crops/screenshots | In-memory inference only; **no logging or persistence** of image bytes. |
 | 11 | `services/vlm_service/backends.py` MLXBackend | crop bytes transit disk (mlx-vlm needs file paths) | **No-retention fix** — private per-instance scratch dir (mode `0700`), files `chmod 0600` and deleted in a `finally` (cleaned up even if inference raises). Production `VLLMBackend` sends base64 inline — no disk. |
+| 12 | `sanitized_artifact.py` + hosted `push` | approved derivative of a recording/bundle | **Scrubbed and reviewed derivative** — text and still images are transformed on a copy, rescanned, inventoried, locally reviewed by default, and frozen to exact approved archive bytes. The original remains in its boundary. Unsupported types refuse the entire derivative. |
+| 13 | hosted `report-break` | hashed/coarse halt descriptor | **Schema-minimal** — no intent, reason, error, screenshots, DOM, field values, or report body. Free text is not auto-uploaded even when a scrubber is available. |
 
 ## The VLM identity-crop boundary (why it is not scrubbed)
 
@@ -114,6 +116,13 @@ through. The control is therefore a **data-flow boundary**, stated in full in
   the frame; it can miss non-textual PHI or unusual layouts. It is opt-in under
   `auto` (off by default) and implied under `SCRUB=on`. Treat persisted frames
   as PHI unless you have verified redaction on your app.
+- **Outbound sanitization currently supports UTF-8 text and still images only.**
+  SQLite/databases, video, audio, nested archives, encrypted/executable files,
+  symlinks, and unknown types fail closed. They are never copied into a
+  derivative or counted as complete coverage.
+- **Runtime PHI is a separate boundary.** A clean design-time artifact does not
+  sanitize live screenshots or values observed during execution. Workflows that
+  must see PHI at runtime need a declared trusted execution boundary.
 - **Console paths** (`__main__.py`) print run-dir paths and the appliance URL;
   these are not identifiers but avoid pasting them into shared channels for a
   patient-specific run dir.

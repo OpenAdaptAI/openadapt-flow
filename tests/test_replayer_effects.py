@@ -20,7 +20,7 @@ import requests
 
 # Reuse the scripted fakes from the main replayer unit tests (pytest's
 # prepend import mode puts tests/ on sys.path).
-from test_replayer import FakeBackend, FakeVision, Match
+from tests.test_replayer import FakeBackend, FakeVision, Match
 
 from openadapt_flow.ir import (
     ActionKind,

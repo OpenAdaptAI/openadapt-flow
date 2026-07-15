@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from openadapt_flow.backend import Backend
+from openadapt_flow.bundle_validation import compute_parameter_schema_digest
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
@@ -381,6 +382,8 @@ class Replayer:
         save_healed_to: Optional[Path] = None,
         resume_from: Optional[int] = None,
         resume_program: Optional[ProgramCheckpoint] = None,
+        execution_origin: Optional[str] = None,
+        execution_entry_url: Optional[str] = None,
     ) -> RunReport:
         """Execute the workflow and write a run directory.
 
@@ -423,6 +426,12 @@ class Replayer:
                 paused state -- never from the graph entry, never re-performing an
                 already-confirmed write. Supplied by
                 ``openadapt_flow.runtime.durable.resume``, not by hand.
+            execution_origin: Actual browser origin loaded before replay. It is
+                evidence metadata only; hosted validation requires an exact
+                match to its signed target origin.
+            execution_entry_url: Browser URL requested before replay. Hosted
+                validation binds this to the runner's entry URL so workflows
+                that start below `/` retain their required path.
 
         Returns:
             The RunReport (also saved as ``run_dir/report.json``). A linear run
@@ -453,6 +462,17 @@ class Replayer:
         report = RunReport(
             workflow_name=workflow.name,
             started_at=datetime.now(timezone.utc).isoformat(),
+            execution_origin=execution_origin,
+            execution_entry_url=execution_entry_url,
+            bundle_content_digest=(
+                workflow.manifest.content_digest if workflow.manifest else None
+            ),
+            source_recording_sha256=(
+                workflow.manifest.provenance.source_recording_sha256
+                if workflow.manifest
+                else None
+            ),
+            parameter_schema_sha256=(compute_parameter_schema_digest(workflow)),
             params=params,
             screenshots_may_leave_box=self._screenshots_may_leave_box,
         )

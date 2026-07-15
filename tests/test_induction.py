@@ -38,7 +38,7 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.runtime.replayer import Replayer
-from test_replayer import FakeBackend, FakeVision, Match, make_png
+from tests.test_replayer import FakeBackend, FakeVision, Match, make_png
 
 
 # ===========================================================================

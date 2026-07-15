@@ -9,6 +9,7 @@ The engine internals (compiler / IR / replay) are untouched; only the new
 
 from __future__ import annotations
 
+import base64
 import json
 import stat
 import zipfile
@@ -27,6 +28,16 @@ def _isolate_home(tmp_path, monkeypatch):
     """Root config.toml under a tmp dir and clear the token env for every test."""
     monkeypatch.setenv("OPENADAPT_HOME", str(tmp_path / "home"))
     monkeypatch.delenv(hosted.TOKEN_ENV, raising=False)
+    monkeypatch.setenv(hosted.DESTINATION_KIND_ENV, "customer-managed")
+    monkeypatch.setenv(hosted.TRUSTED_HOSTS_ENV, "https://h.test")
+    monkeypatch.setenv(hosted.AUTO_APPROVE_ENV, "true")
+    monkeypatch.setenv("OPENADAPT_SANITIZATION_POLICY_KEY_ID", "test-policy-key")
+    monkeypatch.setenv(
+        "OPENADAPT_SANITIZATION_POLICY_KEY",
+        base64.b64encode(b"test-policy-secret-material-32-bytes!!").decode(),
+    )
+    monkeypatch.setattr(hosted, "_keyring_token", lambda host: None)
+    monkeypatch.setattr(hosted, "_store_keyring_token", lambda host, token: False)
     yield
     privacy.reset_scrubbers()
 
@@ -45,6 +56,30 @@ def test_resolve_host_precedence(monkeypatch):
     assert hosted.resolve_host("https://arg.test") == "https://arg.test"
 
 
+def test_resolve_host_canonicalizes_the_policy_and_request_origin():
+    assert hosted.resolve_host("HTTPS://B\u00dcCHER.example:443/") == (
+        "https://xn--bcher-kva.example"
+    )
+    assert hosted.resolve_host("http://LOCALHOST:80") == "http://localhost"
+    assert hosted.resolve_host("http://[0:0:0:0:0:0:0:1]:8080") == ("http://[::1]:8080")
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "ftp://localhost",
+        "https://user:password@example.test",
+        "https://example.test/api",
+        "https://example.test?next=evil",
+        "https://example.test.",
+        "https://example.test:99999",
+    ],
+)
+def test_resolve_host_refuses_ambiguous_or_unsafe_origins(host):
+    with pytest.raises(hosted.HostedError):
+        hosted.resolve_host(host)
+
+
 def test_resolve_token_precedence(monkeypatch):
     with pytest.raises(hosted.HostedError):
         hosted.resolve_token()
@@ -53,6 +88,12 @@ def test_resolve_token_precedence(monkeypatch):
     monkeypatch.setenv(hosted.TOKEN_ENV, "from_env")
     assert hosted.resolve_token() == "from_env"
     assert hosted.resolve_token("from_arg") == "from_arg"
+
+
+def test_resolve_token_prefers_keyring_over_legacy_config(monkeypatch):
+    hosted._update_hosted_config({"token": "legacy"})
+    monkeypatch.setattr(hosted, "_keyring_token", lambda host: "from_keyring")
+    assert hosted.resolve_token(host="https://h.test") == "from_keyring"
 
 
 def test_config_toml_roundtrip_and_perms():
@@ -130,10 +171,34 @@ def test_login_success_saves_config(monkeypatch):
     monkeypatch.setattr(
         httpx, "get", lambda url, **kw: httpx.Response(200, json={"count": 0})
     )
-    result = hosted.login(token="tok", host="https://h.test")
+    result = hosted.login(
+        token="tok", host="https://h.test", allow_plaintext_token=True
+    )
     assert result["valid"] is True
     assert result["host"] == "https://h.test"
     assert hosted._hosted_config()["token"] == "tok"
+
+
+def test_login_sends_token_only_to_canonical_policy_checked_origin(monkeypatch):
+    captured: dict = {}
+
+    def get(url, **kwargs):
+        captured.update(url=url, kwargs=kwargs)
+        return httpx.Response(200, json={"count": 0})
+
+    monkeypatch.setattr(httpx, "get", get)
+    result = hosted.login(
+        token="tok",
+        host="HTTPS://H.TEST:443/",
+        save=False,
+        destination_kind="customer-managed",
+        trusted_hosts=["https://h.test"],
+    )
+
+    assert result["host"] == "https://h.test"
+    assert captured["url"] == "https://h.test/api/needs-attention/count"
+    assert captured["kwargs"]["headers"]["Authorization"] == "Bearer tok"
+    assert captured["kwargs"]["follow_redirects"] is False
 
 
 def test_login_no_save(monkeypatch):
@@ -142,6 +207,32 @@ def test_login_no_save(monkeypatch):
     )
     result = hosted.login(token="tok", host="https://h.test", save=False)
     assert result["config_path"] is None
+    assert "token" not in hosted._hosted_config()
+
+
+def test_login_requires_explicit_plaintext_fallback(monkeypatch):
+    monkeypatch.setattr(
+        httpx, "get", lambda url, **kw: httpx.Response(200, json={"count": 0})
+    )
+    with pytest.raises(hosted.HostedError, match="allow-plaintext-token"):
+        hosted.login(token="tok", host="https://h.test")
+    assert "token" not in hosted._hosted_config()
+
+
+def test_login_prefers_keyring(monkeypatch):
+    stored: dict = {}
+    hosted._update_hosted_config({"token": "legacy-plaintext"})
+    monkeypatch.setattr(
+        httpx, "get", lambda url, **kw: httpx.Response(200, json={"count": 0})
+    )
+    monkeypatch.setattr(
+        hosted,
+        "_store_keyring_token",
+        lambda host, token: stored.update(host=host, token=token) or True,
+    )
+    result = hosted.login(token="tok", host="https://h.test")
+    assert result["token_storage"] == "keyring"
+    assert stored == {"host": "https://h.test", "token": "tok"}
     assert "token" not in hosted._hosted_config()
 
 
@@ -211,7 +302,13 @@ def test_push_success(tmp_path, monkeypatch):
     assert result["workflow_id"] == "wf_123"
     assert result["dashboard_url"] == "https://h.test/dashboard/workflows/wf_123"
     assert recorder["url"] == "https://h.test/api/ingest"
-    assert recorder["kw"]["data"] == {"kind": "recording", "name": "My flow"}
+    assert recorder["kw"]["data"]["kind"] == "recording"
+    assert recorder["kw"]["data"]["name"] == "My flow"
+    assert "workflow_id" not in recorder["kw"]["data"]
+    manifest = json.loads(recorder["kw"]["data"]["sanitization_manifest"])
+    assert manifest["schema"] == "openadapt.sanitization/v1"
+    assert manifest["approval"]["status"] == "approved"
+    assert recorder["kw"]["files"]["file"][0].startswith("openadapt-sanitized-")
     assert recorder["kw"]["headers"]["Authorization"] == "Bearer tok"
     assert "file" in recorder["kw"]["files"]
 
@@ -235,6 +332,59 @@ def test_push_bad_kind(tmp_path):
         hosted.push(tmp_path, kind="nonsense", token="tok", host="https://h.test")
 
 
+@pytest.mark.parametrize(
+    ("kind", "workflow_id", "message"),
+    [
+        ("recording", "ec726a3e-dcaf-40cf-870a-867d104002dd", "bundle"),
+        ("bundle", "not-a-uuid", "valid UUID"),
+    ],
+)
+def test_push_refuses_invalid_existing_workflow_binding(
+    tmp_path, monkeypatch, kind, workflow_id, message
+):
+    monkeypatch.setattr(
+        httpx, "post", lambda *args, **kwargs: pytest.fail("must not upload")
+    )
+    with pytest.raises(hosted.HostedError, match=message):
+        hosted.push(
+            tmp_path,
+            kind=kind,
+            workflow_id=workflow_id,
+            token="tok",
+            host="https://h.test",
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "workflow_id", "run_id", "message"),
+    [
+        ("recording", None, "d3ecf64d-0d25-4df7-9264-77bf7d266d77", "requires"),
+        ("bundle", None, "d3ecf64d-0d25-4df7-9264-77bf7d266d77", "requires"),
+        (
+            "bundle",
+            "ec726a3e-dcaf-40cf-870a-867d104002dd",
+            "not-a-uuid",
+            "valid UUID",
+        ),
+    ],
+)
+def test_push_refuses_invalid_halt_resolution_binding(
+    tmp_path, monkeypatch, kind, workflow_id, run_id, message
+):
+    monkeypatch.setattr(
+        httpx, "post", lambda *args, **kwargs: pytest.fail("must not upload")
+    )
+    with pytest.raises(hosted.HostedError, match=message):
+        hosted.push(
+            tmp_path,
+            kind=kind,
+            workflow_id=workflow_id,
+            resolves_run_id=run_id,
+            token="tok",
+            host="https://h.test",
+        )
+
+
 def test_push_non_201(tmp_path, monkeypatch):
     rec = _make_recording(tmp_path, "rec")
     privacy.set_text_scrubber(_FakeScrubber())
@@ -253,30 +403,114 @@ def test_push_401(tmp_path, monkeypatch):
         hosted.push(rec, token="tok", host="https://h.test")
 
 
-def test_push_bundle_uploads_without_scrubber(tmp_path, monkeypatch):
-    """A GENUINE compiled bundle (workflow.json present) is PHI-free by
-    construction, so it uploads directly even with no scrubber available and on
-    a regulated/byoc lane."""
+def test_push_bundle_requires_verified_sanitization_not_attestation(
+    tmp_path, monkeypatch
+):
+    """A declaration cannot replace a verified, approved derivative."""
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "workflow.json").write_text("{}")
     privacy.set_text_scrubber(None)  # no capability
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload by default")
+    )
+    with pytest.raises(hosted.HostedError, match="no longer bypasses sanitization"):
+        hosted.push(
+            bundle,
+            kind="bundle",
+            deployment_kind="cloud",
+            host="https://h.test",
+            token="tok",
+            attest_non_phi=True,
+        )
+
+
+def test_push_attested_non_phi_bundle_on_cloud_is_refused(tmp_path, monkeypatch):
+    """Synthetic assertions still pass through the sanitizer contract."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "workflow.json").write_text("{}")
+    privacy.set_text_scrubber(None)
     recorder: dict = {}
     monkeypatch.setattr(
         httpx, "post", _capture_post(recorder, 201, {"ingest": {"workflow_id": "wf_b"}})
     )
-    result = hosted.push(
-        bundle,
-        kind="bundle",
-        deployment_kind="byoc",
-        host="https://h.test",
-        token="tok",
+    with pytest.raises(hosted.HostedError, match="no longer bypasses sanitization"):
+        hosted.push(
+            bundle,
+            kind="bundle",
+            deployment_kind="cloud",
+            host="https://h.test",
+            token="tok",
+            attest_non_phi=True,
+        )
+
+
+def test_push_attestation_cannot_bypass_regulated_boundary(tmp_path, monkeypatch):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "workflow.json").write_text("{}")
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload on regulated")
     )
-    assert result["workflow_id"] == "wf_b"
-    assert recorder["kw"]["data"] == {"kind": "bundle"}
+    with pytest.raises(hosted.HostedError, match="no longer bypasses sanitization"):
+        hosted.push(
+            bundle,
+            kind="bundle",
+            deployment_kind="regulated",
+            host="https://h.test",
+            token="tok",
+            attest_non_phi=True,
+        )
 
 
-def test_push_recording_mislabeled_as_bundle_refused_on_regulated(tmp_path, monkeypatch):
+def test_push_attestation_cannot_bypass_phi_mode(tmp_path, monkeypatch):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "workflow.json").write_text("{}")
+    monkeypatch.setenv("OPENADAPT_FLOW_SCRUB", "on")
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload in PHI mode")
+    )
+    with pytest.raises(hosted.HostedError, match="no longer bypasses sanitization"):
+        hosted.push(
+            bundle,
+            kind="bundle",
+            deployment_kind="cloud",
+            host="https://h.test",
+            token="tok",
+            attest_non_phi=True,
+        )
+
+
+def test_push_refuses_unknown_lane_from_configuration(tmp_path, monkeypatch):
+    rec = _make_recording(tmp_path, "rec")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("must not upload"))
+    with pytest.raises(hosted.HostedError, match="Unknown deployment lane"):
+        hosted.push(
+            rec,
+            deployment_kind="production",
+            host="https://h.test",
+            token="tok",
+        )
+
+
+def test_push_rejects_non_phi_attestation_for_recording(tmp_path, monkeypatch):
+    rec = _make_recording(tmp_path, "rec")
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("must not upload"))
+    with pytest.raises(hosted.HostedError, match="no longer bypasses sanitization"):
+        hosted.push(
+            rec,
+            deployment_kind="cloud",
+            host="https://h.test",
+            token="tok",
+            attest_non_phi=True,
+        )
+
+
+def test_push_recording_mislabeled_as_bundle_refused_on_regulated(
+    tmp_path, monkeypatch
+):
     """Fail closed: a raw recording dir mislabeled ``--kind bundle`` (no
     workflow.json[.enc]) must NOT skip the PHI gate. On a regulated lane it is
     treated as a recording and REFUSED, never egressed."""
@@ -295,47 +529,55 @@ def test_push_recording_mislabeled_as_bundle_refused_on_regulated(tmp_path, monk
         )
 
 
-def test_push_recording_mislabeled_as_bundle_scrubbed_on_cloud(tmp_path, monkeypatch):
-    """A recording dir mislabeled ``--kind bundle`` on the cloud lane is routed
-    through the recording gate: it is scrubbed and uploaded as a RECORDING (the
-    wire declares what actually left), never egressed raw as a bundle."""
+def test_push_recording_mislabeled_as_bundle_is_refused(tmp_path, monkeypatch):
+    """Artifact kind must match the reviewed source; it is never inferred on wire."""
     rec = _make_recording(tmp_path, "rec")
     privacy.set_text_scrubber(_FakeScrubber())
     recorder: dict = {}
     monkeypatch.setattr(
         httpx, "post", _capture_post(recorder, 201, {"ingest": {"workflow_id": "wf_r"}})
     )
-    result = hosted.push(
-        rec,
-        kind="bundle",
-        deployment_kind="cloud",
-        host="https://h.test",
-        token="tok",
-    )
-    assert result["workflow_id"] == "wf_r"
-    assert recorder["kw"]["data"] == {"kind": "recording"}
+    with pytest.raises(hosted.HostedError, match="not a compiled bundle"):
+        hosted.push(
+            rec,
+            kind="bundle",
+            deployment_kind="cloud",
+            host="https://h.test",
+            token="tok",
+        )
 
 
-def test_push_recording_refused_on_byoc_lane(tmp_path, monkeypatch):
-    """A raw recording must never leave the machine on a regulated/byoc lane."""
+def test_push_recording_on_byoc_is_sanitized_before_upload(tmp_path, monkeypatch):
+    """BYOC describes execution; destination trust + sanitization govern upload."""
     rec = _make_recording(tmp_path, "rec")
     privacy.set_text_scrubber(_FakeScrubber())  # even WITH a scrubber, refuse
     monkeypatch.setattr(
-        httpx, "post", lambda *a, **k: pytest.fail("must not upload on byoc")
+        httpx,
+        "post",
+        lambda *a, **k: httpx.Response(201, json={"ingest": {"workflow_id": "wf"}}),
     )
-    with pytest.raises(hosted.HostedError, match="byoc"):
-        hosted.push(rec, deployment_kind="byoc", host="https://h.test", token="tok")
+    result = hosted.push(
+        rec, deployment_kind="byoc", host="https://h.test", token="tok"
+    )
+    assert result["uploaded"] is True
 
 
-def test_push_recording_refused_under_phi_mode(tmp_path, monkeypatch):
-    """PHI mode (SCRUB=on) refuses a raw recording upload even on the cloud lane."""
+def test_push_recording_under_phi_mode_is_sanitized_before_upload(
+    tmp_path, monkeypatch
+):
+    """PHI mode never permits raw egress but does permit an approved derivative."""
     rec = _make_recording(tmp_path, "rec")
     monkeypatch.setenv("OPENADAPT_FLOW_SCRUB", "on")
+    privacy.set_text_scrubber(_FakeScrubber())
     monkeypatch.setattr(
-        httpx, "post", lambda *a, **k: pytest.fail("must not upload under PHI mode")
+        httpx,
+        "post",
+        lambda *a, **k: httpx.Response(201, json={"ingest": {"workflow_id": "wf"}}),
     )
-    with pytest.raises(hosted.HostedError, match="PHI"):
-        hosted.push(rec, deployment_kind="cloud", host="https://h.test", token="tok")
+    result = hosted.push(
+        rec, deployment_kind="cloud", host="https://h.test", token="tok"
+    )
+    assert result["uploaded"] is True
 
 
 def test_push_recording_refused_when_scrubber_unavailable(tmp_path, monkeypatch):
@@ -346,7 +588,7 @@ def test_push_recording_refused_when_scrubber_unavailable(tmp_path, monkeypatch)
     monkeypatch.setattr(
         httpx, "post", lambda *a, **k: pytest.fail("must not upload unscrubbed")
     )
-    with pytest.raises(hosted.HostedError, match="no PHI scrubber"):
+    with pytest.raises(hosted.HostedError, match="No PHI scrubber"):
         hosted.push(rec, deployment_kind="cloud", host="https://h.test", token="tok")
 
 
@@ -381,7 +623,7 @@ def test_push_recording_scrubs_before_upload(tmp_path, monkeypatch):
     assert result["workflow_id"] == "wf_s"
     # scrub path ran: text + image scrubbers were both invoked.
     assert fake.text_calls >= 1
-    assert fake.image_calls == 1
+    assert fake.image_calls == 3  # transform, stable second pass, approval rescan
     # the uploaded zip carries the SCRUBBED artifact, not raw PHI.
     import io as _io
 
@@ -391,6 +633,31 @@ def test_push_recording_scrubs_before_upload(tmp_path, monkeypatch):
     assert "<PERSON>" in meta
     # original on disk is untouched.
     assert "Jane Doe" in (rec / "meta.json").read_text()
+
+
+def test_push_recording_refuses_unsupported_binary_artifact(tmp_path, monkeypatch):
+    rec = _make_recording(tmp_path, "rec")
+    (rec / "recording.db").write_bytes(b"SQLite format 3\x00Jane Doe")
+    privacy.set_text_scrubber(_FakeScrubber())
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload raw database")
+    )
+    with pytest.raises(hosted.HostedError, match="recording.db"):
+        hosted.push(rec, host="https://h.test", token="tok")
+
+
+def test_push_refuses_symlinked_artifact(tmp_path, monkeypatch):
+    rec = _make_recording(tmp_path, "rec")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("Jane Doe")
+    try:
+        (rec / "linked.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform")
+    privacy.set_text_scrubber(_FakeScrubber())
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: pytest.fail("must not upload"))
+    with pytest.raises(hosted.HostedError, match="symlink"):
+        hosted.push(rec, host="https://h.test", token="tok")
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +723,7 @@ def test_report_break_success(tmp_path, monkeypatch):
     assert posted["status"] == "halt"
     assert posted["resolver_rung"] == "ocr"
     assert posted["metrics"] == {"steps": 1, "duration_s": 2.5}
-    assert posted["report_path"].endswith("report.json")
+    assert "report_path" not in posted
     assert len(posted["drift_signature"]) == 16
     # no screenshots / dom / field values leak
     assert "screenshots" not in posted
@@ -477,7 +744,10 @@ def test_report_break_scrubs_phi(tmp_path, monkeypatch):
     posted = recorder["kw"]["json"]
     assert "Jane Doe" not in json.dumps(posted)
     assert "12345" not in json.dumps(posted)
-    assert "<PERSON>" in posted["step_intent"]
+    assert posted["phi_minimal"] is True
+    assert "step_intent" not in posted
+    assert "reason" not in posted
+    assert "error" not in posted
 
 
 def test_report_break_422_falls_back_local(tmp_path, monkeypatch):
@@ -533,7 +803,7 @@ def test_report_break_missing_report(tmp_path):
         )
 
 
-def test_report_break_scrubber_unavailable_fails_closed(tmp_path, monkeypatch):
+def test_report_break_scrubber_unavailable_still_emits_minimal(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "r1"
     _halted_run(run_dir)
     monkeypatch.setenv("OPENADAPT_FLOW_SCRUB", "on")
@@ -544,10 +814,13 @@ def test_report_break_scrubber_unavailable_fails_closed(tmp_path, monkeypatch):
         raise privacy.PrivacyNotAvailable("missing")
 
     monkeypatch.setattr(privacy, "scrub_text", boom)
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
     result = hosted.report_break(
         run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
     )
-    assert result["local_only"] is True
+    assert result["emitted"] is True
+    assert recorder["kw"]["json"]["phi_minimal"] is True
 
 
 def test_report_break_omits_free_text_when_scrub_unavailable(tmp_path, monkeypatch):
@@ -588,15 +861,37 @@ def test_report_break_omits_free_text_when_scrub_unavailable(tmp_path, monkeypat
 def test_parser_has_new_commands():
     parser = build_parser()
     # smoke: each subcommand parses to its handler
-    for cmd in ("login", "push", "report-break"):
+    for cmd in (
+        "login",
+        "sanitize",
+        "review-sanitized",
+        "approve-sanitized",
+        "validate-hosted",
+        "push",
+        "report-break",
+    ):
         assert cmd in parser._subparsers._group_actions[0].choices
 
 
 def test_cli_login_dispatch(monkeypatch, capsys):
     called: dict = {}
 
-    def fake_login(token=None, host=None, save=True):
-        called.update(token=token, host=host, save=save)
+    def fake_login(
+        token=None,
+        host=None,
+        save=True,
+        allow_plaintext_token=False,
+        destination_kind=None,
+        trusted_hosts=None,
+    ):
+        called.update(
+            token=token,
+            host=host,
+            save=save,
+            allow_plaintext_token=allow_plaintext_token,
+            destination_kind=destination_kind,
+            trusted_hosts=trusted_hosts,
+        )
         return {
             "host": host or "https://h.test",
             "valid": True,
@@ -605,9 +900,32 @@ def test_cli_login_dispatch(monkeypatch, capsys):
         }
 
     monkeypatch.setattr(hosted, "login", fake_login)
-    rc = main(["login", "--token", "tok", "--host", "https://h.test"])
+    rc = main(
+        [
+            "login",
+            "--token",
+            "tok",
+            "--host",
+            "https://h.test",
+            "--destination-kind",
+            "customer-managed",
+            "--trusted-host",
+            "https://h.test",
+            "--trusted-host",
+            "https://backup.test",
+            "--no-save",
+            "--allow-plaintext-token",
+        ]
+    )
     assert rc == 0
-    assert called == {"token": "tok", "host": "https://h.test", "save": True}
+    assert called == {
+        "token": "tok",
+        "host": "https://h.test",
+        "save": False,
+        "allow_plaintext_token": True,
+        "destination_kind": "customer-managed",
+        "trusted_hosts": ["https://h.test", "https://backup.test"],
+    }
     assert "Logged in" in capsys.readouterr().out
 
 
@@ -615,9 +933,25 @@ def test_cli_push_dispatch(monkeypatch, capsys):
     captured: dict = {}
 
     def fake_push(
-        path, kind="recording", name=None, host=None, token=None, deployment_kind=None
+        path,
+        kind="recording",
+        name=None,
+        host=None,
+        token=None,
+        deployment_kind=None,
+        attest_non_phi=False,
+        **kwargs,
     ):
-        captured.update(deployment_kind=deployment_kind)
+        captured.update(
+            path=path,
+            name=name,
+            host=host,
+            token=token,
+            kind=kind,
+            deployment_kind=deployment_kind,
+            attest_non_phi=attest_non_phi,
+            **kwargs,
+        )
         return {
             "workflow_id": "wf_7",
             "workflow_name": "n",
@@ -627,17 +961,63 @@ def test_cli_push_dispatch(monkeypatch, capsys):
         }
 
     monkeypatch.setattr(hosted, "push", fake_push)
-    rc = main(["push", "some/rec", "--kind", "bundle", "--deployment-kind", "byoc"])
+    rc = main(
+        [
+            "push",
+            "some/rec",
+            "--kind",
+            "bundle",
+            "--deployment-kind",
+            "cloud",
+            "--attest-non-phi",
+            "--name",
+            "Demo",
+            "--workflow-id",
+            "ec726a3e-dcaf-40cf-870a-867d104002dd",
+            "--resolves-run-id",
+            "d3ecf64d-0d25-4df7-9264-77bf7d266d77",
+            "--host",
+            "https://h.test",
+            "--token",
+            "tok",
+            "--destination-kind",
+            "customer-managed",
+            "--trusted-host",
+            "https://h.test",
+            "--sanitized-out",
+            "derived",
+            "--auto-approve",
+            "--validation-attestation",
+            "validation.json",
+        ]
+    )
     assert rc == 0
-    assert captured["deployment_kind"] == "byoc"
+    assert captured == {
+        "path": "some/rec",
+        "name": "Demo",
+        "workflow_id": "ec726a3e-dcaf-40cf-870a-867d104002dd",
+        "resolves_run_id": "d3ecf64d-0d25-4df7-9264-77bf7d266d77",
+        "host": "https://h.test",
+        "token": "tok",
+        "kind": "bundle",
+        "deployment_kind": "cloud",
+        "attest_non_phi": True,
+        "destination_kind": "customer-managed",
+        "trusted_hosts": ["https://h.test"],
+        "sanitized_out": "derived",
+        "auto_approve": True,
+        "validation_attestation": "validation.json",
+    }
     out = capsys.readouterr().out
     assert "wf_7" in out
     assert "Dashboard" in out
 
 
 def test_cli_report_break_dispatch(monkeypatch, capsys):
+    captured: dict = {}
+
     def fake_report_break(run_dir, **kw):
-        assert kw["workflow_id"] == "wf_1"
+        captured.update(run_dir=run_dir, **kw)
         return {
             "emitted": True,
             "run_id": "r",
@@ -647,9 +1027,119 @@ def test_cli_report_break_dispatch(monkeypatch, capsys):
         }
 
     monkeypatch.setattr(hosted, "report_break", fake_report_break)
-    rc = main(["report-break", "runs/r1", "--workflow-id", "wf_1"])
+    rc = main(
+        [
+            "report-break",
+            "runs/r1",
+            "--workflow-id",
+            "wf_1",
+            "--deployment-kind",
+            "byoc",
+            "--org-id",
+            "org_1",
+            "--host",
+            "https://h.test",
+            "--destination-kind",
+            "customer-managed",
+            "--trusted-host",
+            "https://h.test",
+            "--token",
+            "tok",
+        ]
+    )
     assert rc == 0
+    assert captured == {
+        "run_dir": "runs/r1",
+        "workflow_id": "wf_1",
+        "deployment_kind": "byoc",
+        "org_id": "org_1",
+        "host": "https://h.test",
+        "destination_kind": "customer-managed",
+        "trusted_hosts": ["https://h.test"],
+        "token": "tok",
+    }
     assert "Break reported" in capsys.readouterr().out
+
+
+def test_cli_validate_hosted_dispatches_every_contract_flag(
+    tmp_path, monkeypatch, capsys
+):
+    from openadapt_flow import runtime_validation
+
+    compiler_config = tmp_path / "compiler.json"
+    compiler_config.write_text('{"mode":"strict"}')
+    captured: dict = {}
+    expected = {"schema": runtime_validation.SCHEMA, "signature": "a" * 64}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    def fake_save(attestation, path):
+        assert attestation is expected
+        assert path == tmp_path / "validation.json"
+        return path
+
+    monkeypatch.setattr(
+        runtime_validation, "create_runtime_validation_attestation", fake_create
+    )
+    monkeypatch.setattr(
+        runtime_validation, "save_runtime_validation_attestation", fake_save
+    )
+
+    rc = main(
+        [
+            "validate-hosted",
+            "--recording",
+            "recording-reviewed",
+            "--bundle",
+            "bundle-reviewed",
+            "--run-dir",
+            "run-1",
+            "--policy",
+            "permissive",
+            "--risk-class",
+            "low",
+            "--environment",
+            "clean-room-v1",
+            "--target-url",
+            "https://app.example/login",
+            "--allowed-host",
+            "cdn.example",
+            "--allowed-host",
+            "api.example",
+            "--compiler-config",
+            str(compiler_config),
+            "--out",
+            str(tmp_path / "validation.json"),
+            "--host",
+            "https://h.test",
+            "--destination-kind",
+            "customer-managed",
+            "--trusted-host",
+            "https://h.test",
+            "--token",
+            "tok",
+        ]
+    )
+
+    assert rc == 0
+    assert captured == {
+        "recording_derivative": Path("recording-reviewed"),
+        "bundle_derivative": Path("bundle-reviewed"),
+        "run_dir": Path("run-1"),
+        "policy_source": "permissive",
+        "risk_class": "low",
+        "environment": "clean-room-v1",
+        "target_url": "https://app.example/login",
+        "allowed_hosts": ["cdn.example", "api.example"],
+        "compiler_config": {"mode": "strict"},
+        "host": "https://h.test",
+        "token": "tok",
+        "destination_kind": "customer-managed",
+        "trusted_hosts": ["https://h.test"],
+    }
+    assert "attestation written" in capsys.readouterr().out
 
 
 def test_cli_push_error_returns_1(monkeypatch, capsys):

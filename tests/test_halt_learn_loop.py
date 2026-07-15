@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import Optional
 
 import pytest
-from test_replayer import FakeBackend, FakeVision, Match, make_png
+from tests.test_replayer import FakeBackend, FakeVision, Match, make_png
 
 from openadapt_flow.ir import (
     ActionKind,

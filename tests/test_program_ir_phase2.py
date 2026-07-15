@@ -36,7 +36,7 @@ from openadapt_flow.ir import (
 )
 from openadapt_flow.runtime.effects import Effect, EffectKind
 from openadapt_flow.runtime.replayer import Replayer
-from test_replayer import (
+from tests.test_replayer import (
     FakeBackend,
     FakeVision,
     Match,

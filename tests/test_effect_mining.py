@@ -22,7 +22,7 @@ import requests
 
 # Reuse the scripted fakes + fault-server helpers from the replayer-effects
 # tests (pytest prepend import mode puts tests/ on sys.path).
-from test_replayer_effects import (
+from tests.test_replayer_effects import (
     WritingBackend,
     _dirs,
     _fault_server,

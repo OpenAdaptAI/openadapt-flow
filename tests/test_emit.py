@@ -270,3 +270,18 @@ def test_parse_params() -> None:
     assert _parse_params(["a=1", "b=x=y"]) == {"a": "1", "b": "x=y"}
     with pytest.raises(SystemExit):
         _parse_params(["missing_equals"])
+
+
+def test_replay_params_file_keeps_values_out_of_argv(tmp_path: Path) -> None:
+    from openadapt_flow.__main__ import _replay_params, build_parser
+
+    params_file = tmp_path / "params.json"
+    params_file.write_text('{"patient_id":"synthetic-001","count":2}')
+    assert _replay_params(["count=3"], str(params_file)) == {
+        "patient_id": "synthetic-001",
+        "count": "3",
+    }
+    args = build_parser().parse_args(
+        ["replay", "bundle", "--params-file", str(params_file)]
+    )
+    assert args.params_file == str(params_file)

@@ -794,6 +794,16 @@ class BundleProvenance(BaseModel):
     compiler_version: str = Field(
         default="", description="openadapt_flow version that produced the bundle"
     )
+    source_recording_sha256: Optional[str] = Field(
+        default=None,
+        description="Exact approved sanitized recording archive used for compilation",
+        pattern="^[a-f0-9]{64}$",
+    )
+    compiler_config_sha256: Optional[str] = Field(
+        default=None,
+        description="Canonical digest of the compiler options used for this bundle",
+        pattern="^[a-f0-9]{64}$",
+    )
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(),
         description="When this manifest/provenance was first sealed (ISO 8601)",
@@ -1447,6 +1457,27 @@ class HaltObservation(BaseModel):
 class RunReport(BaseModel):
     workflow_name: str
     started_at: str
+    execution_origin: Optional[str] = Field(
+        default=None,
+        description=(
+            "Actual browser origin loaded before replay. Hosted validation "
+            "requires this to match its signed target boundary."
+        ),
+    )
+    execution_entry_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Browser entry URL requested before replay. Hosted validation "
+            "binds this separately from the resulting browser origin."
+        ),
+    )
+    bundle_content_digest: Optional[str] = Field(default=None, pattern="^[a-f0-9]{64}$")
+    source_recording_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    parameter_schema_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
     params: dict[str, str] = Field(default_factory=dict)
     results: list[StepResult] = Field(default_factory=list)
     success: bool = False

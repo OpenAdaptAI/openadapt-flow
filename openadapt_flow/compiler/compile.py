@@ -9,6 +9,7 @@ Input is a recording directory (``meta.json`` + ``events.jsonl`` +
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import logging
 import math
@@ -26,6 +27,8 @@ from openadapt_flow import volatility
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    BundleManifest,
+    BundleProvenance,
     Landmark,
     ParamKind,
     ParamSpec,
@@ -1198,6 +1201,39 @@ def compile_recording(
         },
         secret_params=list(meta.get("secret_params") or []),
         steps=steps,
+    )
+
+    source_recording_sha256: Optional[str] = None
+    if (recording / ".openadapt-approval.json").is_file():
+        from openadapt_flow.sanitized_artifact import load_valid_approval
+
+        source_recording_sha256 = load_valid_approval(recording)[
+            "approved_derivative_sha256"
+        ]
+    compiler_config = {
+        "annotate": annotate,
+        "annotator": (
+            f"{type(annotator).__module__}.{type(annotator).__name__}"
+            if annotator is not None
+            else None
+        ),
+        "mine_effects": mine_effects,
+        "name": name,
+        "risk_overrides": dict(sorted((risk_overrides or {}).items())),
+    }
+    compiler_config_sha256 = hashlib.sha256(
+        json.dumps(
+            compiler_config,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    workflow.manifest = BundleManifest(
+        provenance=BundleProvenance(
+            source_recording_sha256=source_recording_sha256,
+            compiler_config_sha256=compiler_config_sha256,
+        )
     )
 
     # Parameter-hygiene lint: a demo parameter value baked in as a literal

@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 # Reuse the modal-once scenario fixtures/helpers verbatim (no re-derivation).
-from test_halt_learn_loop import (
+from tests.test_halt_learn_loop import (
     DISMISS_POINT,
     INTENT_DISMISS,
     INTENT_SAVE,
@@ -30,7 +30,7 @@ from test_halt_learn_loop import (
     _base_workflow,
     _replay,
 )
-from test_replayer import make_png
+from tests.test_replayer import make_png
 
 from openadapt_flow.__main__ import main
 from openadapt_flow.ir import HaltObservation, RunReport, Workflow

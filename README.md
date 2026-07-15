@@ -5,8 +5,10 @@
 [![Python](https://img.shields.io/pypi/pyversions/openadapt-flow)](https://pypi.org/project/openadapt-flow/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Record a GUI workflow once. Replay it deterministically, locally, for free.
-A model only touches the script to repair it.
+OpenAdapt compiles a demonstrated GUI workflow into a deterministic, locally
+executable program. Healthy runs make no model calls. When an interface drifts,
+it re-resolves from recorded evidence or proposes a governed repair, and halts
+when verification fails.
 
 ![One demonstration, two UIs, same compiled workflow — the right side self-heals under a theme it has never seen](docs/showcase/demo.gif)
 
@@ -28,10 +30,12 @@ pip install openadapt-flow
 
 openadapt-flow demo-record --out rec                     # record a demonstration
 openadapt-flow compile rec --out bundle --name my-task   # compile it
-openadapt-flow lint bundle                               # report coverage gaps
-openadapt-flow certify bundle --policy clinical-write    # refuse it if unsafe
+openadapt-flow lint bundle                               # expected: finds demo gaps
+openadapt-flow certify bundle --policy permissive        # smoke-policy pass
+openadapt-flow certify bundle --policy clinical-write    # expected: strict refusal
 openadapt-flow replay bundle                             # replay: local, $0
-openadapt-flow replay bundle --drift theme               # drift the UI, watch it heal
+openadapt-flow replay bundle --drift theme \
+  --save-healed-to healed                                # deterministic repair
 ```
 
 On the first command that needs a browser, openadapt-flow downloads the
@@ -41,8 +45,18 @@ Chromium build Playwright needs (a one-time ~150MB fetch) — no separate
 or CI environments that pre-provision the browser, set
 `OPENADAPT_FLOW_NO_AUTO_INSTALL=1` to disable the auto-download.
 
-The last two commands serve the bundled MockMed demo app and write an
-illustrated `REPORT.md` per run.
+The bundled MockMed tutorial is intentionally **runnable but not certified for
+clinical writes**. `lint` exits nonzero because its irreversible final click is
+unarmed, and `clinical-write` refuses additional identity, system-effect, and
+idempotency gaps. That is the safety boundary working, not a setup failure. The
+permissive policy is only a smoke gate. Replay serves MockMed and writes
+`report.json`, an illustrated `REPORT.md`, and reviewable repair patches under
+`heals/`.
+
+The nightly clean-machine test runs this complete install-to-uninstall journey
+on Linux, macOS, and Windows. See the
+[product maturity matrix](docs/PRODUCT_STATUS.md) for what each result does and
+does not establish.
 
 ### Record your own app
 
@@ -97,8 +111,11 @@ template match, global template match, OCR, landmark geometry, then
 (optionally) a grounding model. Healthy scripts never leave the first rung.
 Milliseconds, no model calls, no per-run cost.
 
-When the UI drifts, a lower rung still finds the target and the fix lands in
-the bundle as a diff you can review. When the screen stops matching
+When bounded UI drift preserves enough evidence, a lower rung can find the same
+target and the fix lands in the bundle as a diff you can review. An optional
+model may propose a repair only when explicitly enabled; a human can teach a
+guarded correction after a halt. These are different modes, not a blanket
+promise of adaptation. When the screen stops matching
 expectations entirely, the run halts with a report instead of guessing, and
 steps tagged irreversible won't act on a low-confidence match at all.
 
@@ -240,7 +257,9 @@ success check: 100 compiled replays against 20 runs of the same agent.
 Both arms went 100 for 100 and 20 for 20, so on an app this simple the
 story isn't success rate. It's that a compiled replay finishes in 4.9s
 (p50; 5.1s p95) with zero model calls, while the agent takes 37.5s (p50;
-43.4s p95) at about $0.27 per run at list price, every run, forever. Full
+43.4s p95). The measured agent sample cost about $0.27 per run at the model's
+then-current list price; repeat-run figures are projections and exclude
+authoring, maintenance, and infrastructure. Full
 numbers, methodology, and caveats:
 [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md).
 
@@ -260,6 +279,13 @@ IR is specified in
 [`docs/L1_INTEGRATION.md`](docs/L1_INTEGRATION.md) covers feeding layered
 clinical-data platforms.
 
+The integrated status of the engine, browser, desktop, remote-display, safety,
+GUI, hosted, and deployment surfaces is published in
+[`docs/PRODUCT_STATUS.md`](docs/PRODUCT_STATUS.md). Security reviewers should
+start with [`docs/ENTERPRISE_ARCHITECTURE.md`](docs/ENTERPRISE_ARCHITECTURE.md),
+which maps screenshot/credential flows, cryptographic guarantees, hosted
+boundaries, and unmet controls.
+
 ## Privacy (PHI)
 
 For regulated deployments, PHI scrubbing on the persist/log paths is provided by
@@ -278,45 +304,112 @@ VLM appliance are deliberately not scrubbed — the control there is
 on-prem-only + no-retention. Full map: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 At rest, opt-in AES-256-GCM encryption (`OPENADAPT_BUNDLE_KEY`) seals
-`workflow.json` and durable checkpoints, but the **template `templates/*.png`
-crops are not yet sealed inside that encrypted container** — they remain
-governance-guarded (kept out of git) and rely on **operator full-disk
-encryption**. Treat every bundle as PHI. Details and the target envelope-key
-design: [docs/phi_at_rest.md](docs/phi_at_rest.md).
+`workflow.json`, template crops, and durable checkpoints. KMS integration and
+key rotation remain operator responsibilities, and full-disk encryption is
+still required. Treat every source bundle as PHI. Details:
+[docs/phi_at_rest.md](docs/phi_at_rest.md).
 
 ## Hosted (cloud connectivity)
 
-Three additive subcommands connect the local loop to the hosted control plane
-(`app.openadapt.ai`) without changing the compile/replay engine. Mint an ingest
-token in the dashboard (`<host>/dashboard/settings/ingest`), then:
+Hosted commands connect the locally executed compiler/runtime to the launched
+control plane at `app.openadapt.ai`: authentication, governed artifact ingest,
+and PHI-minimal break reporting. Mint an ingest token in the dashboard
+(`<host>/dashboard/settings/ingest`), then:
 
 ```bash
-openadapt-flow login --token oai_ingest_…            # validate + remember host
-openadapt-flow push ./my-recording --name "Triage"   # zip dir → POST /api/ingest
-#   → prints workflow_id + dashboard URL
+pip install 'openadapt-flow[privacy,hosted]'
+openadapt-flow login --token oai_ingest_…
+openadapt-flow sanitize ./my-recording --kind recording --out ./triage.sanitized
+openadapt-flow review-sanitized ./triage.sanitized --original ./my-recording
+# add missed redactions locally, then approve in the viewer or CLI:
+openadapt-flow approve-sanitized ./triage.sanitized --original ./my-recording \
+  --reviewer operator@example.com
+openadapt-flow push ./triage.sanitized --kind recording
+
+# Compile only from the approved sanitized recording, then validate locally.
+openadapt-flow compile ./triage.sanitized --out ./triage.bundle --name triage
+openadapt-flow lint ./triage.bundle --strict
+openadapt-flow certify ./triage.bundle --policy permissive
+openadapt-flow replay ./triage.bundle --url https://example.internal/login \
+  --run-dir ./triage.run --param patient_id=example
+
+# Privacy-review the executable bytes. A changed executable is refused.
+openadapt-flow sanitize ./triage.bundle --kind bundle --out ./triage.bundle.sanitized
+openadapt-flow review-sanitized ./triage.bundle.sanitized --original ./triage.bundle
+openadapt-flow approve-sanitized ./triage.bundle.sanitized \
+  --original ./triage.bundle --reviewer operator@example.com
+
+# Bind exact artifacts and local evidence to a one-time Cloud challenge.
+openadapt-flow validate-hosted \
+  --recording ./triage.sanitized --bundle ./triage.bundle.sanitized \
+  --run-dir ./triage.run --policy permissive --risk-class low \
+  --environment staging-v1 --target-url https://example.internal/login \
+  --out triage.validation.json
+openadapt-flow push ./triage.bundle.sanitized --kind bundle \
+  --validation-attestation triage.validation.json
+
+# To activate this as a new version of an existing workflow, add:
+#   --workflow-id 00000000-0000-0000-0000-000000000000
+# To bind that replacement to the exact halted run it repairs, also add:
+#   --resolves-run-id 00000000-0000-0000-0000-000000000000
+
 openadapt-flow report-break runs/replay-… \          # PHI-free break diagnostic
     --workflow-id <id> --deployment-kind byoc         #   → POST /api/runs/ingest-report
 ```
 
 - **Token resolution** (all outbound calls): `--token` → `OPENADAPT_INGEST_TOKEN`
-  env → `~/.openadapt/config.toml` `[hosted] token`. The desktop app stores the
-  token in the OS keychain; `login` falls back to `config.toml` (mode `0600`,
-  printed warning) as the documented-insecure last resort.
-- **`push`** zips the recording (or, with `--kind bundle`, a compiled bundle)
-  *directory* to a temp `.zip` before the multipart upload — a directory is what
-  the engine emits; a `.zip` is what `/api/ingest` wants.
+  env → OS keychain → existing `~/.openadapt/config.toml` token (migration
+  read). Install the `hosted` extra for keychain storage. New plaintext
+  mode-`0600` storage is refused unless `login --allow-plaintext-token` makes the
+  insecure fallback explicit.
+- **Sanitization never mutates the original.** It inventories every file,
+  applies type-specific text/image handlers to a copy, requires a stable second
+  scrub pass, and writes per-file source/derivative hashes and coverage to
+  `.openadapt-sanitization.json`.
+- **Review is local-only by default.** `review-sanitized` binds to `127.0.0.1`,
+  loads no remote assets, presents original and derivative side by side, accepts
+  additional literal/rectangle redactions, and invalidates prior approval after
+  every change. Administrators may opt into policy approval only for fully
+  covered, stable derivatives. Automatic hosted approval additionally requires
+  a deployment-allowlisted HMAC signing key; an ingest token cannot self-assert
+  that policy.
+- **Approval freezes exact bytes.** It creates a deterministic immutable archive
+  and binds reviewer, policy, timestamp, SHA-256, and byte size. `push` sends
+  those exact bytes plus the `openadapt.sanitization/v1` manifest; it never
+  re-zips after approval.
+- **Destination trust is independent of deployment lane.** OpenAdapt's managed
+  origin is recognized explicitly. A customer-managed/BYOC endpoint requires
+  HTTPS plus an exact-origin allowlist. Sanitized artifacts may upload from
+  cloud, BYOC, regulated, or PHI-mode lanes; unknown destinations are refused.
+- **Current coverage is text and still images.** Symlinks and database, video,
+  audio, nested archive, encrypted, executable, or unknown files are refused,
+  never copied through or reported as covered. See
+  [docs/SANITIZED_ARTIFACTS.md](docs/SANITIZED_ARTIFACTS.md).
+- **Sanitizing a bundle can break execution.** If a load-bearing target, typed
+  value, identity crop, or postcondition changes, the manifest marks runtime
+  semantics unvalidated and `push --kind bundle` refuses it. Parameterize PHI
+  before compilation or execute the original inside its trusted boundary.
+- **Runtime validation is separate from privacy approval.** It binds the exact
+  approved recording and bundle, compiler configuration, parameter schema,
+  strict lint, named certification, derived `low`/`consequential` risk class,
+  successful report, and exact HTTPS target/host boundary to a short-lived,
+  one-time tenant/token challenge. Cloud also requires exact deployment
+  allowlist membership for certification policy, derived risk class, and a
+  compiler version actually deployed by the runner. The HMAC proves token
+  possession and envelope integrity; it is not independent observation, a
+  compliance certification, or a safety SLA.
 - **Halt signaling** is read from **`report.json` (`RunReport.halt` /
   `HaltObservation`)**, never from a process exit code (`replay`/`run` return
-  `0`/`1` only). `report-break` parses that report, scrubs it fail-closed via the
-  `privacy` extra, and posts a PHI-free descriptor — the recording never leaves
-  the machine. A `422` PHI-boundary rejection retries with a harder scrub, then
-  falls back to local-only.
+  `0`/`1` only). `report-break` posts only a schema-minimal descriptor: hashes,
+  status, resolver rung, and numeric metrics. Free text, screenshots, DOM, and
+  field values never enter the automatic payload. A `422` boundary rejection
+  retries the same minimal shape, then falls back to local-only.
 - **Opt-in post-run hook:** set `OPENADAPT_FLOW_HOSTED_WORKFLOW_ID` (and
   optionally `OPENADAPT_FLOW_DEPLOYMENT_KIND` / `OPENADAPT_FLOW_ORG_ID`) and a
   halting `replay`/`run` emits the break automatically (best-effort; never
   changes the run's exit code). Off by default.
 
-Only the existing `httpx` dependency is used — no new heavy dependency.
+The sanitizer uses the optional `privacy` extra. Hosted transport uses `httpx`.
 
 ## Development
 

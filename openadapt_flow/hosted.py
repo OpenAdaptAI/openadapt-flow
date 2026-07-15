@@ -1,16 +1,14 @@
 """Cloud connectivity for the openadapt-flow CLI (``login`` / ``push`` /
 break-report emitter).
 
-This is a thin, additive WRAPPER around the existing engine: it changes no
-compiler / IR / replay internals. It adds exactly three capabilities the local
-loop needs to talk to the hosted control plane (``app.openadapt.ai``):
+This is a thin, additive wrapper around the existing engine: it changes no
+compiler / IR / replay internals. It provides the local loop's governed hosted
+control-plane boundary (``app.openadapt.ai``):
 
-* :func:`login`  — validate an ingest token against the hosted API and record
-  the non-secret host (and, as a documented-insecure last resort when no OS
-  keychain is available, the token) into ``~/.openadapt/config.toml``.
-* :func:`push`   — zip a recording (or a compiled bundle) DIRECTORY to a temp
-  ``.zip`` and upload it as ``multipart/form-data`` to ``POST /api/ingest``,
-  returning the server-assigned ``workflow_id`` + dashboard URL.
+* :func:`login` validates an ingest token and prefers OS-keychain storage.
+  Plaintext config storage is an explicit opt-in migration fallback.
+* :func:`push` uploads only a reviewed, exact-hash sanitized archive to
+  ``POST /api/ingest`` with an ``openadapt.sanitization/v1`` manifest.
 * :func:`report_break` — serialize a halted run's ``report.json`` (its
   :class:`~openadapt_flow.ir.HaltObservation` / ``RunReport.halt``) into a
   PHI-free diagnostic and ``POST`` it to ``/api/runs/ingest-report`` so a break
@@ -24,17 +22,14 @@ Design notes (grounded in the desktop/tray architecture spec, §3a/§3b/§3c/§3
   return 0/1 only; there is no "exit 2 = safe halt". The break emitter parses
   the report, so a wrapping caller (the desktop engine, the cloud runner) reads
   the same source of truth (§8 item 3).
-* **Bundle/recording is a DIRECTORY; the ingest API wants a ``.zip``** — the
-  push path zips before upload (§8 item 4).
-* **Secrets belong in the OS keychain**, which the desktop app owns (via
-  ``keyring``). ``openadapt-flow`` has no keychain dependency, so its ``login``
-  falls back to ``config.toml`` with ``0600`` perms and a printed warning — the
-  documented-insecure last resort in the resolution precedence (§3e). The
-  desktop app supersedes this by storing the token in the OS keychain.
+* **Approval freezes the directory to a deterministic ZIP**. The upload sends
+  those exact approved bytes, never a post-approval reconstruction.
+* **Secrets belong in the OS keychain**. The optional ``hosted`` extra supplies
+  ``keyring``; environment injection remains first-class for CI/BYOC. Plaintext
+  ``config.toml`` storage requires explicit operator consent.
 
-Token resolution precedence (for ``push`` / ``report_break`` and any outbound
-call): ``--token`` argument  ->  ``OPENADAPT_INGEST_TOKEN`` env  ->
-``~/.openadapt/config.toml`` ``[hosted] token``.
+Token resolution precedence: argument -> ``OPENADAPT_INGEST_TOKEN`` -> OS
+keychain -> an existing ``config.toml`` token retained for migration.
 
 Only the existing ``httpx`` dependency (and the stdlib) is used — no new heavy
 dependency is introduced.
@@ -43,13 +38,19 @@ dependency is introduced.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
+import json
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
+from uuid import UUID
 
 import httpx
+import idna
 
 __all__ = [
     "DEFAULT_HOST",
@@ -58,6 +59,7 @@ __all__ = [
     "resolve_host",
     "resolve_token",
     "resolve_deployment_kind",
+    "resolve_destination_policy",
     "find_latest_recording",
     "login",
     "push",
@@ -71,19 +73,28 @@ DEFAULT_HOST = "https://app.openadapt.ai"
 #: Environment variable read for the ingest token (the non-interactive / CI /
 #: BYOC-server path).
 TOKEN_ENV = "OPENADAPT_INGEST_TOKEN"
+KEYRING_SERVICE = "openadapt-flow"
 
 #: Environment variable naming the deployment lane (``cloud`` | ``byoc`` |
 #: ``regulated``). Falls back to ``config.toml`` ``[hosted] deployment_lane``.
 DEPLOYMENT_KIND_ENV = "OPENADAPT_FLOW_DEPLOYMENT_KIND"
 
-#: Environment variable forcing PHI mode (a truthy value treats every recording
-#: as PHI-bearing, so it is never uploaded to the multi-tenant cloud).
+#: Environment variable forcing PHI mode. Raw artifacts still never egress;
+#: verified sanitized derivatives may upload to a trusted destination.
 PHI_MODE_ENV = "OPENADAPT_FLOW_PHI_MODE"
 
-#: Lanes whose recordings must NEVER leave the customer machine/tenant. A
-#: recording on one of these lanes is refused for upload (teach locally); only a
-#: compiled, PHI-free bundle may be pushed.
-_REGULATED_LANES = frozenset({"byoc", "regulated"})
+#: Destination policy is independent of the deployment lane.  A customer-owned
+#: endpoint is trusted only when explicitly classified and allowlisted.
+DESTINATION_KIND_ENV = "OPENADAPT_FLOW_DESTINATION_KIND"
+TRUSTED_HOSTS_ENV = "OPENADAPT_FLOW_TRUSTED_HOSTS"
+AUTO_APPROVE_ENV = "OPENADAPT_FLOW_AUTO_APPROVE_SANITIZED"
+
+#: Lanes whose recordings and bundles must NEVER leave the customer
+#: machine/tenant through this hosted-ingest path. A customer-owned control
+#: plane needs a separately verified destination/trust policy; a lane label is
+#: not sufficient evidence that the configured host is inside that boundary.
+_DEPLOYMENT_LANES = frozenset({"cloud", "byoc", "regulated"})
+_DESTINATION_KINDS = frozenset({"openadapt-managed", "customer-managed", "local"})
 
 #: Network timeouts (seconds). Uploads can be large, so the push timeout is
 #: generous; the lightweight validate/report calls use a short timeout.
@@ -95,8 +106,18 @@ class HostedError(RuntimeError):
     """A hosted-connectivity failure (auth, network, or a non-2xx response)."""
 
 
+@dataclass(frozen=True)
+class DestinationPolicy:
+    """An authenticated upload destination whose trust was explicitly resolved."""
+
+    kind: str
+    host: str
+    trusted: bool
+    reason: str
+
+
 # ---------------------------------------------------------------------------
-# config.toml (non-secret host/lane config; the last-resort token store)
+# config.toml (non-secret host/lane config; legacy token migration read)
 # ---------------------------------------------------------------------------
 
 
@@ -217,6 +238,22 @@ def _update_hosted_config(updates: dict[str, Any]) -> Path:
     return path
 
 
+def _remove_hosted_config_key(key: str) -> Path:
+    """Remove a migrated secret while preserving non-secret hosted settings."""
+    path = config_path()
+    data = _load_toml(path)
+    section = data.get("hosted")
+    if isinstance(section, dict):
+        section.pop(key, None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_dump_toml(data))
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
 # ---------------------------------------------------------------------------
 # host + token resolution
 # ---------------------------------------------------------------------------
@@ -224,19 +261,50 @@ def _update_hosted_config(updates: dict[str, Any]) -> Path:
 
 def resolve_host(host: Optional[str] = None) -> str:
     """Resolve the hosted base URL: ``host`` arg  ->  ``config.toml``  ->
-    :data:`DEFAULT_HOST`. Trailing slash stripped."""
+    :data:`DEFAULT_HOST`.
+
+    The returned value is the canonical origin used for both destination-policy
+    checks and network requests.  Keeping those values identical prevents a
+    token-bearing request from reaching a URL that was only approximately
+    equivalent to the one the policy approved.
+    """
     resolved = host or _hosted_config().get("host") or DEFAULT_HOST
-    return str(resolved).rstrip("/")
+    return _origin(str(resolved).strip())
 
 
-def resolve_token(token: Optional[str] = None) -> str:
+def _keyring_token(host: str) -> Optional[str]:
+    try:
+        import keyring
+
+        return keyring.get_password(KEYRING_SERVICE, _origin(host))
+    except Exception:  # noqa: BLE001 - unavailable/locked keychain falls through
+        return None
+
+
+def _store_keyring_token(host: str, token: str) -> bool:
+    try:
+        import keyring
+
+        keyring.set_password(KEYRING_SERVICE, _origin(host), token)
+        return True
+    except Exception:  # noqa: BLE001 - caller decides whether plaintext is allowed
+        return False
+
+
+def resolve_token(token: Optional[str] = None, *, host: Optional[str] = None) -> str:
     """Resolve the ingest token by precedence, or raise :class:`HostedError`.
 
-    Precedence: ``token`` arg  ->  ``OPENADAPT_INGEST_TOKEN`` env  ->
-    ``~/.openadapt/config.toml`` ``[hosted] token`` (the documented-insecure
-    last resort; the desktop app stores it in the OS keychain instead).
+    Precedence: explicit argument -> environment -> OS keychain -> existing
+    plaintext config. Config reading remains for migration, but new plaintext
+    storage requires explicit opt-in in :func:`login`.
     """
-    resolved = token or os.environ.get(TOKEN_ENV) or _hosted_config().get("token")
+    resolved_host = resolve_host(host)
+    resolved = (
+        token
+        or os.environ.get(TOKEN_ENV)
+        or _keyring_token(resolved_host)
+        or _hosted_config().get("token")
+    )
     if not resolved:
         raise HostedError(
             "No ingest token. Pass --token, set "
@@ -250,9 +318,9 @@ def resolve_deployment_kind(deployment_kind: Optional[str] = None) -> str:
     """Resolve the deployment lane: arg -> ``OPENADAPT_FLOW_DEPLOYMENT_KIND`` env
     -> ``config.toml`` ``[hosted] deployment_lane`` -> ``"cloud"``.
 
-    The lane governs the outbound PHI boundary: ``cloud`` is multi-tenant (a
-    recording must be scrubbed before upload); ``byoc``/``regulated`` are
-    single-tenant/on-prem (a raw recording must never be uploaded at all)."""
+    The lane describes where execution runs.  It does not, by itself, prove
+    where an upload host is located; :func:`resolve_destination_policy` makes
+    that independent trust decision."""
     resolved = (
         deployment_kind
         or os.environ.get(DEPLOYMENT_KIND_ENV)
@@ -262,11 +330,137 @@ def resolve_deployment_kind(deployment_kind: Optional[str] = None) -> str:
     return str(resolved).strip().lower()
 
 
+def _origin(host: str) -> str:
+    parsed = urlparse(host)
+    if not parsed.scheme or not parsed.hostname:
+        raise HostedError(f"Upload host is not an absolute URL: {host!r}")
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise HostedError("Hosted origin must use HTTP or HTTPS")
+    if parsed.username or parsed.password:
+        raise HostedError("Hosted origin must not contain URL user information")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise HostedError("Hosted origin must not contain a path, query, or fragment")
+    try:
+        port_number = parsed.port
+    except ValueError as exc:
+        raise HostedError("Hosted origin contains an invalid port") from exc
+
+    hostname = parsed.hostname
+    if hostname.endswith("."):
+        raise HostedError("Hosted origin must not use a trailing-dot hostname")
+    try:
+        ipv6 = ipaddress.IPv6Address(hostname)
+    except ValueError:
+        try:
+            hostname = (
+                idna.encode(hostname, uts46=True, std3_rules=True)
+                .decode("ascii")
+                .lower()
+            )
+        except idna.IDNAError as exc:
+            raise HostedError("Hosted origin contains an invalid hostname") from exc
+        labels = hostname.split(".")
+        if len(hostname) > 253 or any(
+            not label
+            or len(label) > 63
+            or not label[0].isalnum()
+            or not label[-1].isalnum()
+            or any(not (character.isalnum() or character == "-") for character in label)
+            for label in labels
+        ):
+            raise HostedError("Hosted origin contains an invalid hostname")
+        authority = hostname
+    else:
+        authority = f"[{ipv6.compressed}]"
+
+    if port_number is not None and (scheme, port_number) not in {
+        ("http", 80),
+        ("https", 443),
+    }:
+        authority = f"{authority}:{port_number}"
+    return f"{scheme}://{authority}"
+
+
+def _trusted_hosts(explicit: Optional[list[str]] = None) -> set[str]:
+    configured = _hosted_config().get("trusted_hosts", "")
+    raw = explicit or [
+        item
+        for source in (os.environ.get(TRUSTED_HOSTS_ENV, ""), str(configured))
+        for item in source.split(",")
+        if item.strip()
+    ]
+    origins: set[str] = set()
+    for item in raw:
+        origins.add(_origin(str(item).strip().rstrip("/")))
+    return origins
+
+
+def resolve_destination_policy(
+    host: str,
+    *,
+    destination_kind: Optional[str] = None,
+    trusted_hosts: Optional[list[str]] = None,
+) -> DestinationPolicy:
+    """Resolve destination trust from endpoint identity, not deployment labels.
+
+    ``app.openadapt.ai`` is the sole implicit OpenAdapt-managed origin.  A
+    customer-managed origin must be explicitly classified and appear in the
+    exact-origin allowlist.  Local development accepts loopback only.  Unknown,
+    cleartext remote, and mismatched destinations are refused.
+    """
+    origin = _origin(host)
+    configured = _hosted_config()
+    kind = (
+        destination_kind
+        or os.environ.get(DESTINATION_KIND_ENV)
+        or configured.get("destination_kind")
+    )
+    if kind is None and origin == _origin(DEFAULT_HOST):
+        kind = "openadapt-managed"
+    kind = str(kind or "unknown").strip().lower()
+    if kind not in _DESTINATION_KINDS:
+        raise HostedError(
+            f"Destination {origin} has no recognized trust classification. "
+            "Set --destination-kind and, for a customer endpoint, add its exact "
+            f"origin to --trusted-host (or {TRUSTED_HOSTS_ENV})."
+        )
+    parsed = urlparse(origin)
+    if kind == "openadapt-managed":
+        if origin != _origin(DEFAULT_HOST):
+            raise HostedError(
+                f"Refusing to classify {origin} as OpenAdapt-managed; the "
+                f"recognized managed origin is {_origin(DEFAULT_HOST)}."
+            )
+        return DestinationPolicy(kind, origin, True, "recognized managed origin")
+    if kind == "local":
+        if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise HostedError("A local destination must resolve to a loopback hostname")
+        return DestinationPolicy(kind, origin, True, "loopback development endpoint")
+    if parsed.scheme != "https":
+        raise HostedError("Customer-managed artifact upload requires HTTPS")
+    if origin not in _trusted_hosts(trusted_hosts):
+        raise HostedError(
+            f"Customer-managed destination {origin} is not in the exact-origin allowlist"
+        )
+    return DestinationPolicy(kind, origin, True, "explicit customer origin allowlist")
+
+
+def _auto_approve_enabled(explicit: Optional[bool]) -> bool:
+    if explicit is not None:
+        return explicit
+    configured = _hosted_config().get("auto_approve_sanitized", False)
+    raw = os.environ.get(AUTO_APPROVE_ENV)
+    if raw is not None:
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(configured)
+
+
 def _phi_mode(phi_mode: Optional[bool] = None) -> bool:
     """Resolve PHI mode: arg -> ``OPENADAPT_FLOW_PHI_MODE`` env -> ``SCRUB=on``.
 
-    When True, every recording is treated as PHI-bearing and is never uploaded
-    to the multi-tenant cloud (only compiled, PHI-free bundles may be pushed)."""
+    PHI mode never permits raw egress. A verified sanitized derivative may
+    still upload under the destination trust policy."""
     if phi_mode is not None:
         return phi_mode
     env = os.environ.get(PHI_MODE_ENV)
@@ -334,11 +528,23 @@ def _zip_dir(src: Path) -> Path:
     return Path(archive)
 
 
+def _assert_upload_tree_safe(src: Path) -> None:
+    """Refuse filesystem indirection that could escape an upload directory."""
+    for path in sorted(src.rglob("*")):
+        if path.is_symlink():
+            raise HostedError(
+                f"Refusing to upload {src}: symlink {path.relative_to(src)} "
+                "could reference data outside the reviewed artifact tree."
+            )
+
+
 #: Recording artifacts scrubbed before a cloud upload. Frames are image-redacted;
 #: structured/text artifacts are run through the text scrubber (whole-file — a
 #: best-effort de-identification that preserves surrounding JSON syntax).
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
-_TEXT_SUFFIXES = frozenset({".json", ".jsonl", ".txt", ".md", ".csv"})
+_TEXT_SUFFIXES = frozenset(
+    {".json", ".jsonl", ".txt", ".md", ".csv", ".yaml", ".yml", ".toml"}
+)
 
 
 def _scrub_recording_tree(src: Path) -> Path:
@@ -375,6 +581,12 @@ def _scrub_recording_tree(src: Path) -> Path:
             elif suffix in _TEXT_SUFFIXES:
                 text = path.read_text(encoding="utf-8", errors="replace")
                 path.write_text(scrubber.scrub_text(text), encoding="utf-8")
+            else:
+                raise HostedError(
+                    "unsupported artifact cannot be PHI-scrubbed safely: "
+                    f"{path.relative_to(dest)}. Database, video, audio, archive, "
+                    "and unknown binary files must remain local."
+                )
     except Exception as exc:  # noqa: BLE001 — fail closed: never ship raw PHI
         shutil.rmtree(tmp, ignore_errors=True)
         if isinstance(exc, HostedError):
@@ -396,18 +608,22 @@ def login(
     host: Optional[str] = None,
     *,
     save: bool = True,
+    allow_plaintext_token: bool = False,
+    destination_kind: Optional[str] = None,
+    trusted_hosts: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Validate an ingest token against the hosted API and (optionally) record
-    the host + token into ``~/.openadapt/config.toml``.
+    the host in ``~/.openadapt/config.toml`` and token in the OS keychain.
 
     Args:
         token: The ingest token (``oai_ingest_…``). Falls back to
-            ``OPENADAPT_INGEST_TOKEN`` env, then ``config.toml`` — so a
-            re-login with no argument re-validates the stored token.
+            ``OPENADAPT_INGEST_TOKEN`` env, the OS keychain, then an existing
+            plaintext ``config.toml`` token retained only for migration.
         host: Hosted base URL (default: ``config.toml`` host, else
             :data:`DEFAULT_HOST`).
-        save: When True (default), persist host + token to ``config.toml`` on a
-            successful validation (see the module docstring on secret storage).
+        save: When True (default), persist the host and store the token in the
+            OS keychain. Plaintext token fallback requires
+            ``allow_plaintext_token=True``.
 
     Returns:
         ``{"host": <str>, "valid": True, "settings_url": <str>,
@@ -418,12 +634,20 @@ def login(
             unreachable.
     """
     resolved_host = resolve_host(host)
-    resolved_token = resolve_token(token)
+    resolve_destination_policy(
+        resolved_host,
+        destination_kind=destination_kind,
+        trusted_hosts=trusted_hosts,
+    )
+    resolved_token = resolve_token(token, host=resolved_host)
     # Validate with a cheap authenticated GET (resolves the token -> org).
     url = f"{resolved_host}/api/needs-attention/count"
     try:
         resp = httpx.get(
-            url, headers=_auth_headers(resolved_token), timeout=_API_TIMEOUT
+            url,
+            headers=_auth_headers(resolved_token),
+            timeout=_API_TIMEOUT,
+            follow_redirects=False,
         )
     except httpx.HTTPError as exc:
         raise HostedError(f"Could not reach {resolved_host}: {exc}") from exc
@@ -437,14 +661,33 @@ def login(
             f"Token validation failed ({resp.status_code}) against {url}."
         )
     saved_to: Optional[str] = None
+    storage: Optional[str] = None
     if save:
-        path = _update_hosted_config({"host": resolved_host, "token": resolved_token})
-        saved_to = str(path)
+        if _store_keyring_token(resolved_host, resolved_token):
+            _update_hosted_config({"host": resolved_host})
+            _remove_hosted_config_key("token")
+            saved_to = f"OS keychain ({KEYRING_SERVICE}/{_origin(resolved_host)})"
+            storage = "keyring"
+        elif allow_plaintext_token:
+            path = _update_hosted_config(
+                {"host": resolved_host, "token": resolved_token}
+            )
+            saved_to = str(path)
+            storage = "plaintext-config"
+        else:
+            _update_hosted_config({"host": resolved_host})
+            raise HostedError(
+                "Token validated but was not stored: no usable OS keychain is "
+                "available. Install 'openadapt-flow[hosted]', set the token via "
+                f"{TOKEN_ENV}, use --no-save, or explicitly accept the mode-0600 "
+                "plaintext fallback with --allow-plaintext-token."
+            )
     return {
         "host": resolved_host,
         "valid": True,
         "settings_url": f"{resolved_host}/dashboard/settings/ingest",
         "config_path": saved_to,
+        "token_storage": storage,
     }
 
 
@@ -458,126 +701,223 @@ def push(
     *,
     kind: str = "recording",
     name: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    resolves_run_id: Optional[str] = None,
     host: Optional[str] = None,
     token: Optional[str] = None,
     deployment_kind: Optional[str] = None,
     phi_mode: Optional[bool] = None,
+    attest_non_phi: bool = False,
+    destination_kind: Optional[str] = None,
+    trusted_hosts: Optional[list[str]] = None,
+    sanitized_out: Optional[Any] = None,
+    auto_approve: Optional[bool] = None,
+    validation_attestation: Optional[Any] = None,
 ) -> dict[str, Any]:
-    """Zip a recording/bundle DIRECTORY and upload it to ``POST /api/ingest``.
+    """Sanitize, approve, and upload an exact immutable artifact archive.
 
-    PHI boundary (fail-closed) — a raw recording carries full-frame screenshots
-    and typed field values, so it is NOT uploaded blindly:
+    Deployment lane and destination trust are separate.  ``byoc`` and
+    ``regulated`` artifacts may upload after complete sanitization to either the
+    recognized OpenAdapt-managed origin or an explicitly allowlisted
+    customer-managed origin.  A raw artifact is never uploaded.  Human review
+    is required by default; an administrator can enable policy approval only
+    after every file type is covered and the second scrub pass is stable.
 
-    * On a ``byoc``/``regulated`` lane, or under PHI mode, a **recording** is
-      REFUSED for upload (teach locally; only a compiled, PHI-free ``bundle``
-      may be pushed). This keeps regulated recordings on the customer machine.
-    * On the ``cloud`` (multi-tenant) lane, a **recording** is de-identified
-      (frames image-redacted, text artifacts scrubbed) on a temp copy BEFORE
-      upload. If no scrubber is available, the upload is REFUSED rather than
-      shipping raw PHI.
-    * A ``bundle`` is already PHI-free by construction (the compiler strips
-      field values / screenshots), so it uploads directly on any lane.
-
-    Args:
-        path: The recording (or compiled bundle) directory. Defaults to the
-            most-recent recording dir (:func:`find_latest_recording`).
-        kind: ``"recording"`` (default) or ``"bundle"``.
-        name: Optional workflow name (the server auto-suggests one otherwise).
-        host: Hosted base URL (default resolution).
-        token: Ingest token (default resolution).
-        deployment_kind: Deployment lane (``cloud`` | ``byoc`` | ``regulated``);
-            default resolution via :func:`resolve_deployment_kind`.
-        phi_mode: Force PHI mode; default resolution via env/``SCRUB=on``.
-
-    Returns:
-        The server ``ingest`` object plus a convenience
-        ``dashboard_url`` — e.g. ``{"workflow_id": …, "workflow_name": …,
-        "kind": …, "compile": {…}, "dashboard_url": …}``.
-
-    Raises:
-        HostedError: bad ``kind``, missing path, a refused PHI boundary, auth
-            failure, or a non-201 response.
+    A first call with a raw path normally returns ``pending_review`` and the
+    durable derivative path.  Review and approve that derivative, then call
+    ``push`` on the derivative.  Approval freezes a deterministic archive;
+    upload sends those exact approved bytes and a
+    ``openadapt.sanitization/v1`` manifest.
     """
     if kind not in ("recording", "bundle"):
         raise HostedError(f"--kind must be 'recording' or 'bundle', got {kind!r}")
+    requested_kind = kind
+    normalized_workflow_id: Optional[str] = None
+    if workflow_id is not None:
+        if requested_kind != "bundle":
+            raise HostedError("--workflow-id is only valid with --kind bundle")
+        try:
+            normalized_workflow_id = str(UUID(str(workflow_id).strip()))
+        except (ValueError, AttributeError) as exc:
+            raise HostedError("--workflow-id must be a valid UUID") from exc
+    normalized_resolves_run_id: Optional[str] = None
+    if resolves_run_id is not None:
+        if requested_kind != "bundle" or normalized_workflow_id is None:
+            raise HostedError(
+                "--resolves-run-id requires --kind bundle and --workflow-id"
+            )
+        try:
+            normalized_resolves_run_id = str(UUID(str(resolves_run_id).strip()))
+        except (ValueError, AttributeError) as exc:
+            raise HostedError("--resolves-run-id must be a valid UUID") from exc
     resolved_host = resolve_host(host)
-    resolved_token = resolve_token(token)
+    resolved_token = resolve_token(token, host=resolved_host)
     lane = resolve_deployment_kind(deployment_kind)
+    if lane not in _DEPLOYMENT_LANES:
+        raise HostedError(
+            f"Unknown deployment lane {lane!r}; expected one of "
+            f"{sorted(_DEPLOYMENT_LANES)}. Refusing to choose an egress policy."
+        )
+    destination = resolve_destination_policy(
+        resolved_host,
+        destination_kind=destination_kind,
+        trusted_hosts=trusted_hosts,
+    )
+    if attest_non_phi:
+        raise HostedError(
+            "--attest-non-phi no longer bypasses sanitization. A declaration is "
+            "not a verified derivative; run `sanitize`, review, and approve it."
+        )
 
     src = Path(path) if path is not None else find_latest_recording()
     if not src.is_dir():
         raise HostedError(f"PATH is not a directory: {src}")
+    _assert_upload_tree_safe(src)
 
-    # PHI boundary. A RAW recording carries full-frame screenshots + typed field
-    # values, so it must clear the full lane/PHI/scrubber gate before any egress.
-    # A COMPILED bundle is PHI-free BY CONSTRUCTION -- but only when it is
-    # ACTUALLY a compiled bundle (``workflow.json``/``.enc`` present). Fail
-    # closed: a path handed to us as ``--kind bundle`` that is NOT a real bundle
-    # (e.g. a raw recording dir mislabeled to skip this gate) is routed through
-    # the recording gate instead of egressing unknown contents. We prove the
-    # bundle is compiled via ``_is_bundle_dir(src)`` BEFORE trusting it.
-    upload_src = src
-    scrub_tmp: Optional[Path] = None
-    is_compiled_bundle = kind == "bundle" and _is_bundle_dir(src)
-    if not is_compiled_bundle:
+    from openadapt_flow.sanitized_artifact import (
+        MANIFEST_NAME,
+        SanitizationError,
+        approve_derivative,
+        approved_archive_path,
+        build_ingest_manifest,
+        load_and_verify_derivative,
+        load_valid_approval,
+        sanitize_artifact,
+        source_tree_sha256,
+    )
+
+    is_derivative = (src / MANIFEST_NAME).is_file()
+    if not is_derivative:
+        actual_kind = (
+            "bundle" if kind == "bundle" and _is_bundle_dir(src) else "recording"
+        )
+        if kind == "bundle" and actual_kind != "bundle":
+            raise HostedError(
+                f"{src.name!r} is not a compiled bundle (no workflow.json/.enc). "
+                "Pass --kind recording instead."
+            )
+        if sanitized_out is not None:
+            derivative = Path(sanitized_out)
+        else:
+            root = config_path().parent / "sanitized"
+            stamp = source_tree_sha256(src)[:12]
+            derivative = root / f"artifact-{stamp}"
+        try:
+            if not derivative.exists():
+                sanitize_artifact(src, derivative, kind=actual_kind)
+            else:
+                existing = load_and_verify_derivative(derivative)
+                if existing.get("source_tree_sha256") != source_tree_sha256(src):
+                    raise SanitizationError(
+                        "Existing derivative does not match the current source tree"
+                    )
+            if _auto_approve_enabled(auto_approve):
+                approve_derivative(
+                    derivative,
+                    source=src,
+                    reviewer="policy:complete-type-coverage",
+                    automatic=True,
+                )
+            else:
+                return {
+                    "uploaded": False,
+                    "pending_review": True,
+                    "sanitized_path": str(derivative),
+                    "review_command": (
+                        f"openadapt-flow review-sanitized {derivative} --original {src}"
+                    ),
+                    "destination_kind": destination.kind,
+                    "deployment_kind": lane,
+                    "phi_mode": _phi_mode(phi_mode),
+                }
+        except SanitizationError as exc:
+            raise HostedError(f"Artifact sanitization failed: {exc}") from exc
+        src = derivative
+
+    try:
+        local_manifest = load_and_verify_derivative(src)
+        approval = load_valid_approval(src)
+        ingest_manifest = build_ingest_manifest(src)
+    except SanitizationError as exc:
+        raise HostedError(f"Sanitized artifact is not uploadable: {exc}") from exc
+    kind = str(local_manifest["kind"])
+    if kind != requested_kind:
+        raise HostedError(
+            f"--kind {requested_kind!r} does not match the reviewed derivative's "
+            f"manifest kind {kind!r}"
+        )
+    if int(ingest_manifest["findings"]["unresolved"]) != 0:
+        raise HostedError("Sanitized artifact has unresolved findings")
+
+    archive_path = approved_archive_path(src)
+    data: dict[str, str] = {"kind": kind}
+    if normalized_workflow_id is not None:
+        data["workflow_id"] = normalized_workflow_id
+    if normalized_resolves_run_id is not None:
+        data["resolves_run_id"] = normalized_resolves_run_id
+    if kind == "bundle":
+        if validation_attestation is None:
+            raise HostedError(
+                "A runnable bundle needs a runtime-validation attestation. Run "
+                "`openadapt-flow validate-hosted ...`, then pass its JSON with "
+                "--validation-attestation. Privacy approval alone is not runtime "
+                "validation."
+            )
+        from openadapt_flow.runtime_validation import (
+            RuntimeValidationError,
+            load_runtime_validation_attestation,
+            verify_runtime_validation_attestation,
+        )
+
+        try:
+            attestation = (
+                validation_attestation
+                if isinstance(validation_attestation, dict)
+                else load_runtime_validation_attestation(Path(validation_attestation))
+            )
+            verify_runtime_validation_attestation(
+                attestation,
+                bundle_sha256=approval["approved_derivative_sha256"],
+                token=resolved_token,
+            )
+        except RuntimeValidationError as exc:
+            raise HostedError(f"Runtime validation is not uploadable: {exc}") from exc
+        data["validation_attestation"] = json.dumps(
+            attestation, sort_keys=True, separators=(",", ":")
+        )
+    if name:
         from openadapt_flow import privacy
 
-        # A path passed as a bundle but lacking workflow.json[.enc] is not a
-        # PHI-free-by-compile artifact -- treat it as a raw recording.
-        mislabeled_bundle = kind == "bundle"
-        prefix = (
-            f"{src.name!r} was passed as --kind bundle but is not a compiled "
-            "bundle (no workflow.json/.enc); treating it as a raw recording. "
-            if mislabeled_bundle
-            else ""
-        )
-        if lane in _REGULATED_LANES or _phi_mode(phi_mode):
-            raise HostedError(
-                prefix
-                + f"Refusing to upload a raw recording on the {lane!r} lane"
-                + (" (PHI mode)" if lane not in _REGULATED_LANES else "")
-                + ". A recording carries full-frame screenshots and typed field "
-                "values; on a regulated/PHI deployment it must never leave the "
-                "machine. Teach locally, then push the compiled bundle "
-                "(--kind bundle), which is PHI-free."
-            )
-        if not privacy.scrubbing_available():
-            raise HostedError(
-                prefix
-                + "Refusing to upload a recording to the cloud: no PHI scrubber "
-                "is available to de-identify its frames/values first. Install "
-                "it with: pip install 'openadapt-flow[privacy]' (and "
-                "python -m spacy download en_core_web_trf), or teach locally "
-                "and push the compiled bundle (--kind bundle)."
-            )
-        upload_src = _scrub_recording_tree(src)
-        scrub_tmp = upload_src.parent
-        # The wire declares what actually left the machine: a scrubbed recording,
-        # not a compiled bundle.
-        kind = "recording"
-
-    zip_path = _zip_dir(upload_src)
-    data: dict[str, str] = {"kind": kind}
-    if name:
-        data["name"] = name
+        scrubber = privacy.get_scrubber()
+        if scrubber is None:
+            raise HostedError("Cannot sanitize the outbound workflow name")
+        safe_name = scrubber.scrub_text(name)
+        if scrubber.scrub_text(safe_name) != safe_name:
+            raise HostedError("Workflow name still changes on a second scrub pass")
+        data["name"] = safe_name
+    data["sanitization_manifest"] = json.dumps(
+        ingest_manifest, sort_keys=True, separators=(",", ":")
+    )
     try:
-        with zip_path.open("rb") as fh:
+        with archive_path.open("rb") as fh:
             resp = httpx.post(
                 f"{resolved_host}/api/ingest",
                 headers=_auth_headers(resolved_token),
-                files={"file": (f"{src.name}.zip", fh, "application/zip")},
+                files={
+                    "file": (
+                        f"openadapt-sanitized-{ingest_manifest['artifact']['sha256'][:12]}.zip",
+                        fh,
+                        "application/zip",
+                    )
+                },
                 data=data,
                 timeout=_UPLOAD_TIMEOUT,
+                follow_redirects=False,
             )
     except httpx.HTTPError as exc:
         raise HostedError(
             f"Upload to {resolved_host}/api/ingest failed: {exc}"
         ) from exc
-    finally:
-        shutil.rmtree(zip_path.parent, ignore_errors=True)
-        if scrub_tmp is not None:
-            shutil.rmtree(scrub_tmp, ignore_errors=True)
-
     if resp.status_code == 401:
         raise HostedError("Ingest token was rejected (401).")
     if resp.status_code != 201:
@@ -588,6 +928,10 @@ def push(
     ingest = payload.get("ingest", payload) if isinstance(payload, dict) else {}
     workflow_id = ingest.get("workflow_id")
     result = dict(ingest)
+    result["uploaded"] = True
+    result["sanitization"] = ingest_manifest
+    result["approval"] = approval
+    result["destination_kind"] = destination.kind
     if workflow_id:
         result["dashboard_url"] = f"{resolved_host}/dashboard/workflows/{workflow_id}"
     return result
@@ -605,16 +949,9 @@ def _body_snippet(resp: httpx.Response, limit: int = 300) -> str:
         return "<unreadable body>"
 
 
-def _scrub(text: Optional[str]) -> str:
-    """Fail-closed PHI scrub of a single diagnostic string (empty for None)."""
-    from openadapt_flow import privacy
-
-    return privacy.scrub_text(text) or ""
-
-
-def _drift_signature(state_id: str, reason: str) -> str:
-    """A stable, PHI-free fingerprint of the halt situation (for dedup)."""
-    digest = hashlib.sha256(f"{state_id}|{reason}".encode("utf-8")).hexdigest()
+def _drift_signature(workflow_id: str, rung: Optional[str], steps: int) -> str:
+    """A stable fingerprint built only from non-free-text structural fields."""
+    digest = hashlib.sha256(f"{workflow_id}|{rung}|{steps}".encode("utf-8")).hexdigest()
     return digest[:16]
 
 
@@ -632,58 +969,29 @@ def _build_break_payload(
     workflow_id: str,
     deployment_kind: str,
     org_id: Optional[str],
-    report_path: Path,
-    include_error: bool = True,
-    include_free_text: bool = True,
 ) -> dict[str, Any]:
-    """Assemble the PHI-free ``/api/runs/ingest-report`` payload from a
-    ``RunReport`` (§3c). No screenshots / field values / DOM / report body are
-    ever included.
+    """Assemble the schema-minimal break payload.
 
-    The free-text diagnostic fields (``step_intent`` / ``reason`` / ``error``)
-    are potentially PHI-bearing, so they are emitted ONLY when
-    ``include_free_text`` is True — i.e. when an active scrubber can de-identify
-    them first (or the operator has explicitly opted out via ``SCRUB=off``).
-    When ``include_free_text`` is False (scrubber unavailable under the default
-    ``auto`` posture), the payload degrades to a PHI-free MINIMAL descriptor:
-    the one-way ``drift_signature`` hash, status, resolver rung, and numeric
-    metrics — enough to dedup/triage a break centrally without shipping raw PHI.
-
-    The ``drift_signature`` is hashed from the RAW state_id + reason (a one-way
-    SHA-256, itself PHI-free) so it is stable regardless of whether free text is
-    included."""
+    Screenshots, DOM, field values, report bodies, and all free-text
+    intent/reason/error fields are excluded. The one-way drift signature and
+    coarse numeric fields remain useful for deduplication and triage.
+    """
     halt = report.halt
     status = "halt" if halt is not None else "failed"
-    raw_reason = (halt.reason if halt else "") or ""
-    state_id = halt.state_id if halt else ""
-
     steps = len(report.results)
     duration_s = round(report.total_ms / 1000.0, 3)
+    resolver_rung = _last_failed_rung(report)
 
     payload: dict[str, Any] = {
         "org_id": org_id,
         "workflow_id": workflow_id,
         "deployment_kind": deployment_kind,
         "status": status,
-        "resolver_rung": _last_failed_rung(report),
-        "drift_signature": _drift_signature(state_id, raw_reason),
-        "report_path": str(report_path),
+        "resolver_rung": resolver_rung,
+        "drift_signature": _drift_signature(workflow_id, resolver_rung, steps),
         "metrics": {"steps": steps, "duration_s": duration_s},
+        "phi_minimal": True,
     }
-
-    if include_free_text:
-        payload["step_intent"] = _scrub(halt.intent if halt else "")
-        payload["reason"] = _scrub(raw_reason)
-        if include_error:
-            for step in reversed(report.results):
-                if step.error:
-                    payload["error"] = _scrub(step.error)
-                    break
-    else:
-        # No scrubber to de-identify free text: omit it and flag the descriptor
-        # as PHI-minimal so the server (and any human triager) knows why.
-        payload["phi_minimal"] = True
-
     return payload
 
 
@@ -696,12 +1004,14 @@ def report_break(
     deployment_kind: str = "cloud",
     org_id: Optional[str] = None,
     allow_local_fallback: bool = True,
+    destination_kind: Optional[str] = None,
+    trusted_hosts: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Emit a PHI-free break diagnostic for a halted run to
     ``POST /api/runs/ingest-report`` (§3c).
 
     Reads ``run_dir/report.json`` (:class:`~openadapt_flow.ir.RunReport`) and,
-    when it carries a halt (or failed), posts a scrubbed descriptor so the break
+    when it carries a halt (or failed), posts a schema-minimal descriptor so the break
     is triageable centrally. The recording NEVER leaves the machine — only the
     diagnostic (§8 item 3: halt is read from ``report.json``, not an exit code).
 
@@ -727,9 +1037,8 @@ def report_break(
 
     Raises:
         HostedError: missing report, auth failure, or a non-2xx/422 response
-            (422 is handled by scrub+retry then local fallback).
+            (422 is handled by local fallback).
     """
-    from openadapt_flow import privacy
     from openadapt_flow.ir import RunReport
 
     run_path = Path(run_dir)
@@ -742,74 +1051,37 @@ def report_break(
         return {"emitted": False, "reason": "run succeeded; no halt to report"}
 
     resolved_host = resolve_host(host)
-    resolved_token = resolve_token(token)
+    resolve_destination_policy(
+        resolved_host,
+        destination_kind=destination_kind,
+        trusted_hosts=trusted_hosts,
+    )
+    resolved_token = resolve_token(token, host=resolved_host)
     url = f"{resolved_host}/api/runs/ingest-report"
 
-    # Decide whether PHI-bearing free text (step_intent/reason/error) may be
-    # included. It may ONLY when an active scrubber can de-identify it first, or
-    # the operator explicitly opted out of scrubbing (SCRUB=off, e.g. an
-    # already-de-identified fixture corpus). Under the default `auto` posture
-    # with the capability MISSING, we must NOT send raw free text — degrade to a
-    # PHI-free minimal descriptor. Under SCRUB=on with the capability missing,
-    # text_scrubbing_enabled() raises (fail-closed) -> local-only fallback.
-    try:
-        scrubbing = privacy.text_scrubbing_enabled()
-    except privacy.PrivacyNotAvailable:
-        if allow_local_fallback:
-            return {
-                "emitted": False,
-                "local_only": True,
-                "reason": "scrubber unavailable under fail-closed policy",
-            }
-        raise
-    include_free_text = scrubbing or privacy.scrub_mode() == "off"
-
-    # Build + post; the fail-closed scrub inside _scrub may still raise
-    # PrivacyNotAvailable if the policy flips concurrently.
-    try:
-        payload = _build_break_payload(
-            report,
-            workflow_id=workflow_id,
-            deployment_kind=deployment_kind,
-            org_id=org_id,
-            report_path=report_path,
-            include_free_text=include_free_text,
-        )
-    except privacy.PrivacyNotAvailable:
-        if allow_local_fallback:
-            return {
-                "emitted": False,
-                "local_only": True,
-                "reason": "scrubber unavailable under fail-closed policy",
-            }
-        raise
+    # Launch contract: auto-upload only the schema-minimal descriptor. Even
+    # scrubbed free text needs a separately reviewed, hash-bound sanitization
+    # artifact before the control plane can trust it.
+    payload = _build_break_payload(
+        report,
+        workflow_id=workflow_id,
+        deployment_kind=deployment_kind,
+        org_id=org_id,
+    )
 
     resp = _post_report(url, resolved_token, payload)
 
     if resp.status_code == 422:
-        # PHI boundary violation (fail-closed). Retry once with a harder,
-        # error-free payload; if it still trips, fall back to local-only.
-        harder = _build_break_payload(
-            report,
-            workflow_id=workflow_id,
-            deployment_kind=deployment_kind,
-            org_id=org_id,
-            report_path=report_path,
-            include_error=False,
-            include_free_text=include_free_text,
+        if allow_local_fallback:
+            return {
+                "emitted": False,
+                "local_only": True,
+                "reason": "server rejected payload as PHI boundary (422)",
+                "detail": _body_snippet(resp),
+            }
+        raise HostedError(
+            f"ingest-report rejected as PHI boundary (422): {_body_snippet(resp)}"
         )
-        resp = _post_report(url, resolved_token, harder)
-        if resp.status_code == 422:
-            if allow_local_fallback:
-                return {
-                    "emitted": False,
-                    "local_only": True,
-                    "reason": "server rejected payload as PHI boundary (422)",
-                    "detail": _body_snippet(resp),
-                }
-            raise HostedError(
-                f"ingest-report rejected as PHI boundary (422): {_body_snippet(resp)}"
-            )
 
     if resp.status_code == 401:
         raise HostedError("Ingest token was rejected (401).")
@@ -835,6 +1107,7 @@ def _post_report(url: str, token: str, payload: dict[str, Any]) -> httpx.Respons
             headers={**_auth_headers(token), "x-ingest-token": token},
             json=payload,
             timeout=_API_TIMEOUT,
+            follow_redirects=False,
         )
     except httpx.HTTPError as exc:
         raise HostedError(f"POST {url} failed: {exc}") from exc

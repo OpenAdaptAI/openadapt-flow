@@ -8,9 +8,9 @@ The runnable scaffold is in [`deploy/on-prem/`](../deploy/on-prem/); the
 compliance posture is in
 [`deploy/on-prem/COMPLIANCE.md`](../deploy/on-prem/COMPLIANCE.md).
 
-> This is the OPPOSITE lane from the hosted cloud runner. There is **no**
-> Modal/Supabase, no account, no telemetry, no cloud model. If a step here would
-> require an internet call, it is wrong.
+> This is independent of optional hosted control-plane connectivity. There is
+> **no** account, telemetry, public cloud model, or hosted-execution dependency
+> in this lane. If a step here would require an internet call, it is wrong.
 
 ## What runs on the clinic machine
 
@@ -52,7 +52,7 @@ Components, and how each maps to what already ships in this repo:
 | **Local runner / scheduler** | `deploy/on-prem/bin/run-queue.sh` + `systemd/*.path` unit | NEW thin wrapper: a directory is the queue; event-driven or polling. No broker, no daemon framework, no network. |
 | **Deployment wiring** | `deployment.yaml` → `openadapt_flow.deployment.DeploymentConfig` | Backend URL, system-of-record effect verifier, actuation, durability, policy. Empty file = fully local, zero egress. |
 | **PHI scrubbing** | `openadapt_flow/privacy.py` + `openadapt-privacy` (`[privacy]` extra) | `OPENADAPT_FLOW_SCRUB=on` fail-closed; image redaction implied under `on`. |
-| **At-rest protection** | Operator full-disk encryption + salted-hash `identity_template` (+ optional `OPENADAPT_FLOW_IDENTITY_SALT`) | See `docs/phi_at_rest.md`. Per-bundle cryptographic sealing is **deferred** (below). |
+| **At-rest protection** | Operator full-disk encryption + salted-hash `identity_template` + opt-in AES-256-GCM bundle/checkpoint sealing (`OPENADAPT_BUNDLE_KEY`) | See `docs/phi_at_rest.md`. Bundle JSON and template crops are sealed when encryption is enabled; KMS/key rotation remain operator responsibilities. |
 | **Local audit log** | `deploy/on-prem/bin/audit-log.sh` → `audit/audit.log` | NEW append-only, hash-chained, PHI-free JSONL index over the runs. |
 | **Durable state** | `openadapt_flow/runtime/durable/` (`checkpoints/`, `pending_escalation.json`) | A halted run pauses durably and is resumable (`resume`/`approve`) — locally. |
 | **Air-gap attestation** | `deploy/on-prem/bin/verify-airgap.sh` | NEW: proves the software-side no-egress posture; the firewall is the real control. |
@@ -111,13 +111,13 @@ FileVault — openadapt-flow never holds the disk key):
 are held in the OS keychain / a root-only file and injected as environment
 variables (`OPENADAPT_FLOW_IDENTITY_SALT`, `OPENADAPT_FLOW_VLM_TOKEN`).
 
-**Encryption — honest status.** Today's at-rest control is operator full-disk
-encryption plus one-way identity hashing plus optional scrubbing. A single
-**sealed, encrypted bundle container** (AES/age envelope, decrypt-in-memory) is
-*designed* in `docs/phi_at_rest.md` but **not implemented** — there is no
-`openadapt_flow.crypto` module yet and the `encrypted` manifest flag is always
-`false`. Until it ships, rely on the encrypted volume; do not represent bundles
-as cryptographically sealed.
+**Encryption - honest status.** Operator full-disk encryption remains the
+deployment baseline. In addition, `Workflow.save(encrypt=True)` and
+`OPENADAPT_BUNDLE_KEY` opt into AES-256-GCM containers for `workflow.json`,
+template crops, and durable checkpoints; keyed loads decrypt them in memory and
+fail on a missing/wrong key or tampering. This is shipped but off by default.
+The engine does not provide KMS integration, envelope-key rotation, backup-key
+escrow, or hardware-backed key custody; those remain operator responsibilities.
 
 ## The local audit log
 

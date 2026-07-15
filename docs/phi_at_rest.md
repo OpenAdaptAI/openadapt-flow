@@ -5,7 +5,7 @@ A compiled bundle (`workflow.json` + `templates/*.png` + `workflow.py`) is a
 healthcare deployment it is a **HIPAA-designated record** and must be
 classified, access-controlled, retention-managed, and **encrypted at rest** by
 the operator. This page states the current at-rest posture, what each
-remediation does, and the design for the deferred encryption step.
+remediation does, and the remaining key-management evolution.
 
 See also [PRIVACY.md](PRIVACY.md) (the in-flight / scrubbing map),
 [phi_in_transit.md](phi_in_transit.md) (PHI **on the wire** — the win_agent
@@ -90,16 +90,13 @@ PHI-bearing screenshot is left on disk. (The COMPLIANCE.md at-rest line for
 `templates/` can therefore flip from "operator-disk-encryption only" to "sealed";
 that file is owned by a separate PR.)
 
-**Scope / not yet done:** the resolver seam that reads a decrypted crop
-(`Workflow.decrypted_template`) is in place, but wiring the live `Replayer` to
-prefer it over the on-disk `templates/*.png` read for an encrypted bundle is a
-follow-up in `runtime/replayer.py` (out of this change's file scope).
-Deployment-time **key management** (OS keychain / KMS / envelope keys, key
-rotation) is still the operator's responsibility — the passphrase is supplied via
-env/argument; this change provides the AEAD substrate, not a KMS. The
-envelope-key / whole-container design below remains the target.
+The live resolver consumes the keyed load's in-memory decrypted crops and does
+not materialize plaintext PNGs on disk. Deployment-time **key management** (OS
+keychain / KMS / envelope keys, escrow, and rotation) is still the operator's
+responsibility: the passphrase is supplied via environment or library argument.
+This provides the AEAD substrate, not a KMS.
 
-### Target design (envelope keys / whole-container — future)
+### Future key-management design (envelope keys / whole container)
 
 1. **Sealed container.** Serialize `workflow.json` + `templates/` into a single
    encrypted container (e.g. an [age](https://github.com/FiloSottile/age) /
@@ -117,5 +114,6 @@ envelope-key / whole-container design below remains the target.
    refuses to write an **un**encrypted bundle once the key provider is
    configured.
 
-Until then: treat every bundle as PHI, keep it off shared storage / git, and
-rely on **full-disk encryption** on the machines that hold it.
+Even with bundle sealing enabled, treat every bundle as PHI, keep it off public
+or unmanaged shared storage and git, and use **full-disk encryption** on the
+machines that hold it.

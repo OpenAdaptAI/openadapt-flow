@@ -67,14 +67,15 @@ PHI path beyond the clinic's existing EMR access.
 | Identifier-bearing postconditions / landmarks | **Dropped at compile time** when the Presidio scrub is active. | REAL (requires the `privacy` extra). |
 | The shareable `REPORT.md` free text and (opt-in) frames | **Presidio PHI scrubbing / image redaction**, fail-closed under `SCRUB=on`. | REAL (requires `privacy` extra + local NER model). |
 | A single **sealed, encrypted bundle container** (AES/age envelope, decrypt-in-memory) | **Opt-in AEAD via `openadapt_flow.crypto`** — `Workflow.save(encrypt=True, key=…)` / `OPENADAPT_BUNDLE_KEY` seals `workflow.json` with **AES-256-GCM** (scrypt-derived key, domain-separated AAD); `encrypted: true` on the manifest + `Workflow.encrypted`. | **REAL (opt-in, shipped)** — see `docs/phi_at_rest.md`. A wrong/missing key or tampered ciphertext fails loud and safe. Unencrypted stays the default, so enable it explicitly for at-rest sealing beyond full-disk encryption. |
-| `templates/*.png` (recorded screen crops) | Full-disk encryption + governance guards (kept out of git); opt-in Presidio image redaction on persisted frames. | REAL for FDE + guard; the per-bundle container ships, but the template crops are **not yet sealed inside it** — they still rely on FDE (`docs/phi_at_rest.md` "not yet done"). |
+| `templates/*.png` (recorded screen crops) | Full-disk encryption + governance guards; opt-in bundle sealing writes only AES-256-GCM `*.png.enc` crops and decrypts them in memory. | REAL but opt-in. Unencrypted bundles still carry plaintext crops and require the storage boundary. |
 
 **Honest bottom line on encryption:** at-rest protection is operator full-disk
 encryption + one-way identity hashing + optional scrubbing, **plus opt-in
-per-bundle AES-256-GCM sealing** (`OPENADAPT_BUNDLE_KEY`) for `workflow.json` and
-checkpoints. Enable the per-bundle seal for cryptographic at-rest protection that
-does not depend solely on the volume; the template crops are not yet inside the
-sealed container, so they still rely on full-disk encryption.
+per-bundle AES-256-GCM sealing** (`OPENADAPT_BUNDLE_KEY`) for `workflow.json`,
+template crops, and checkpoints. Enable the per-bundle seal for cryptographic
+at-rest protection that does not depend solely on the volume; full-disk
+encryption remains the baseline for recordings, reports, logs, and unsealed
+bundles.
 
 ## Audit-log contents
 
@@ -99,9 +100,9 @@ For stronger assurance, make the log append-only at the filesystem layer
   agreements, DPIA/PIA, breach procedures, staff training, and sign-off are the
   clinic's.
 - **Per-bundle cryptographic seal is opt-in** (AES-256-GCM via
-  `OPENADAPT_BUNDLE_KEY`; see the table). It is off by default and the template
-  crops are not yet sealed inside it, so full-disk encryption remains the baseline
-  at-rest control; enable the seal explicitly for bundle-level crypto.
+  `OPENADAPT_BUNDLE_KEY`; see the table). It is off by default, does not cover
+  recordings or run reports, and does not supply KMS/rotation, so full-disk
+  encryption remains the baseline at-rest control.
 - **The engine's own safety limits still apply** — the wrong-patient identity
   ladder, unarmed-step gaps, transactional-write caveats, and OCR ceilings in
   `docs/LIMITS.md` are unchanged by running on-prem. On-prem changes *where* the

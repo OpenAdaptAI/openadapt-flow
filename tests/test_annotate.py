@@ -39,7 +39,7 @@ from openadapt_flow.ir import (
 from openadapt_flow.runtime.replayer import Replayer
 
 # Reuse the compile-recording synthetic builder + drawing helpers.
-from test_compiler import (
+from tests.test_compiler import (
     _write_recording,
     blank,
     draw_button,
@@ -47,7 +47,7 @@ from test_compiler import (
 )
 
 # Reuse the faked backend/vision + step builders (ZERO model, no Playwright).
-from test_replayer import FakeBackend, FakeVision, Match, click_step, make_png
+from tests.test_replayer import FakeBackend, FakeVision, Match, click_step, make_png
 
 
 # -- helpers -----------------------------------------------------------------

@@ -4,6 +4,7 @@ name: CI
 # blocking the merge on every gate a reviewer cares about:
 #   - pull_request: run the FULL REQUIRED GATE on every PR --
 #       lint (ruff + lenient whole-package mypy),
+#       python-compatibility (lower-bound install + consistency tests),
 #       mypy-strict-safety (strict types on the safety path),
 #       phi-guard, docs-consistency, interop-types,
 #       test (fast unit suite + enforced safety coverage floor),
@@ -19,9 +20,9 @@ name: CI
 # runner spend for zero extra signal).
 #
 # Which jobs to mark REQUIRED in branch protection (repo Settings, owner-only):
-#   lint, mypy-strict-safety, phi-guard, docs-consistency, interop-types, test,
-#   e2e-browser, wheel. (test-matrix and windows-mock are post-merge/nightly --
-#   NOT required.)
+#   lint, python-compatibility, mypy-strict-safety, phi-guard,
+#   docs-consistency, interop-types, test, e2e-browser, wheel. (test-matrix and
+#   windows-mock are post-merge/nightly -- NOT required.)
 on:
   pull_request:
   push:
@@ -68,6 +69,30 @@ jobs:
 
       - name: Mypy
         run: mypy
+
+  # --- Supported Python lower bound (required on PRs) ----------------------
+  # The full cross-platform matrix remains post-merge/nightly, but the oldest
+  # supported interpreter must install and execute the release-consistency gate
+  # before merge. This specifically prevents Python 3.11-only stdlib imports or
+  # dependency metadata drift from reaching PyPI unnoticed.
+  python-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and compatibility test runner
+        run: pip install -e . pytest
+
+      - name: Verify release consistency on Python 3.10
+        run: |
+          python scripts/check_consistency.py
+          pytest -q tests/test_consistency.py
 
   # --- STRICT type check on the safety-critical path (required on PRs) ------
   # A second, STRICTER mypy pass scoped to the safety modules ONLY: the
@@ -321,14 +346,16 @@ jobs:
   # --- Post-merge / nightly: full Python matrix + macOS, FULL suite --------
   # NOT a required check and NOT run on PRs (so merges never block on it). Runs
   # the COMPLETE suite including the slow tests/e2e browser/OCR leg across
-  # Python 3.10-3.13 on Linux plus a macOS leg, on push to main and nightly.
+  # Python 3.10-3.12 on Linux plus a macOS leg, on push to main and nightly.
+  # Python 3.13 remains outside the supported boundary until the validated
+  # rapidocr-onnxruntime identity path can be safely migrated and requalified.
   test-matrix:
     if: ${{ github.event_name != 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12"]
         include:
           # At least one non-Linux leg for the browser/OCR runtime.
           - os: macos-latest

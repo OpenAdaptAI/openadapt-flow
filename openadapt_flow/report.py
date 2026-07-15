@@ -57,7 +57,7 @@ def _warn_if_plaintext_phi(report: RunReport) -> None:
         "not active (OPENADAPT_FLOW_SCRUB=auto and the 'privacy' extra is not "
         "installed). This shareable report may contain patient name/DOB/MRN. "
         "Install it (pip install 'openadapt-flow[privacy]' && python -m spacy "
-        "download en_core_web_trf) and set OPENADAPT_FLOW_SCRUB=on to scrub and "
+        "download en_core_web_sm) and set OPENADAPT_FLOW_SCRUB=on to scrub and "
         "fail closed.",
         PlaintextPHIWarning,
         stacklevel=2,

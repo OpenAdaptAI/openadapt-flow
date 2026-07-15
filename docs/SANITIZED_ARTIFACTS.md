@@ -8,7 +8,7 @@ review, and exact bytes are verifiable.
 
 ```bash
 pip install 'openadapt-flow[privacy,hosted]'
-python -m spacy download en_core_web_trf
+python -m spacy download en_core_web_sm
 
 openadapt-flow sanitize recording/ --kind recording --out triage.sanitized/
 openadapt-flow review-sanitized triage.sanitized/ --original recording/

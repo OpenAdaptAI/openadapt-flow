@@ -8,7 +8,11 @@ version = "1.7.0"
 description = "Compile demonstrated GUI workflows into deterministic local replay with governed repair and refusal"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+# rapidocr-onnxruntime is part of the validated identity/OCR path and does not
+# publish Python 3.13-compatible releases. Keep the package boundary aligned
+# with the runtime we actually qualify; migrating OCR engines requires rerunning
+# the identity and dense-surface safety evidence first.
+requires-python = ">=3.10,<3.13"
 authors = [{ name = "OpenAdapt.AI" }]
 dependencies = [
     "pydantic>=2.5",
@@ -78,8 +82,8 @@ rdp = ["aardwolf>=0.2.13"]
 # runtime imports openadapt_flow.privacy unconditionally, but it degrades to a
 # no-op when this extra is absent (OPENADAPT_FLOW_SCRUB=auto). A regulated
 # deployment installs this and sets OPENADAPT_FLOW_SCRUB=on to fail closed.
-# After install: python -m spacy download en_core_web_trf
-privacy = ["openadapt-privacy[presidio]>=0.1.0"]
+# After install: python -m spacy download en_core_web_sm
+privacy = ["openadapt-privacy[presidio]>=1.0.0"]
 # Preferred hosted-token storage. Without this extra, use the environment or
 # explicitly opt into the mode-0600 plaintext fallback.
 hosted = ["keyring>=25"]
@@ -151,7 +155,10 @@ version_toml = ["pyproject.toml:project.version"]
 # released pyproject version).
 version_variables = ["openadapt_flow/__init__.py:__version__"]
 commit_message = "chore: release {version}"
-build_command = "pip install uv && uv build"
+# Refresh the editable root package after semantic-release changes the version.
+# ``--offline`` keeps release resolution bound to the reviewed lock instead of
+# silently upgrading dependencies during publication.
+build_command = "pip install uv && uv lock --offline && uv build"
 
 [tool.semantic_release.branches.main]
 match = "main"

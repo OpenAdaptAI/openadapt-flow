@@ -75,7 +75,7 @@ def test_scrub_drops_identifier_postcondition_when_active(monkeypatch):
 def test_scrub_drops_identifier_landmark_when_active(tmp_path):
     # A patient-name row next to the click target would otherwise be mined as a
     # geometry LANDMARK (plaintext). With the scrub active it must be dropped.
-    from test_compiler import blank, draw_button, draw_text, write_frame
+    from tests.test_compiler import blank, draw_button, draw_text, write_frame
 
     privacy.set_text_scrubber(_FakeScrubber())
     rec = tmp_path / "rec"

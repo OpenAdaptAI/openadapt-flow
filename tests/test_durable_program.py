@@ -25,8 +25,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 # Reuse the scripted fakes + the scripted system-of-record verifier.
-from test_durable_runtime import FakeSoRVerifier, _approval, _vision_ok
-from test_replayer import FakeBackend, FakeVision
+from tests.test_durable_runtime import FakeSoRVerifier, _approval, _vision_ok
+from tests.test_replayer import FakeBackend, FakeVision
 
 from openadapt_flow.ir import (
     ActionKind,

@@ -162,6 +162,44 @@ def compute_content_digest(workflow: "Workflow", file_hashes: dict[str, str]) ->
     return _sha256_bytes(canonical.encode("utf-8"))
 
 
+def build_runtime_parameter_schema(workflow: "Workflow") -> list[dict]:
+    """Return the canonical hosted parameter contract without runtime values.
+
+    The shape deliberately includes legacy defaults and secret-only parameters,
+    but never their example/default values. This is the single cross-language
+    representation signed by Flow and consumed by Cloud.
+    """
+    names = sorted(
+        set(workflow.params) | set(workflow.param_specs) | set(workflow.secret_params)
+    )
+    payload: list[dict] = []
+    for name in names:
+        spec = workflow.param_specs.get(name)
+        payload.append(
+            {
+                "name": name,
+                "type": spec.type.value if spec is not None else "string",
+                "required": (
+                    spec.required
+                    if spec is not None
+                    else name in workflow.secret_params
+                ),
+                "secret": name in workflow.secret_params,
+                "choices": list(spec.choices) if spec is not None else [],
+            }
+        )
+    return payload
+
+
+def compute_parameter_schema_digest(workflow: "Workflow") -> str:
+    """Digest the canonical runtime parameter contract without values."""
+    payload = build_runtime_parameter_schema(workflow)
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return _sha256_bytes(canonical.encode("utf-8"))
+
+
 def build_manifest(workflow: "Workflow", bundle_dir: Path | str) -> BundleManifest:
     """Compute a fresh :class:`BundleManifest` for ``workflow`` in ``bundle_dir``.
 
@@ -180,6 +218,12 @@ def build_manifest(workflow: "Workflow", bundle_dir: Path | str) -> BundleManife
 
     provenance = BundleProvenance(
         compiler_version=_compiler_version,
+        source_recording_sha256=(
+            prior_prov.source_recording_sha256 if prior_prov else None
+        ),
+        compiler_config_sha256=(
+            prior_prov.compiler_config_sha256 if prior_prov else None
+        ),
         created_at=(prior_prov.created_at if prior_prov else workflow.created_at),
         policy_name=prior_prov.policy_name if prior_prov else None,
         certified=prior_prov.certified if prior_prov else False,

@@ -50,6 +50,8 @@ __all__ = [
     "scrub_params",
     "scrub_image_bytes",
     "get_text_scrubber",
+    "get_scrubber",
+    "scrubbing_available",
     "set_text_scrubber",
     "set_image_scrubber",
     "reset_scrubbers",
@@ -72,6 +74,17 @@ class ImageScrubber(Protocol):
     """Minimal image-scrubbing contract (satisfied by PresidioScrubbingProvider)."""
 
     def scrub_image(self, image, fill_color: Optional[int] = None): ...
+
+
+@runtime_checkable
+class Scrubber(TextScrubber, ImageScrubber, Protocol):
+    """Combined text+image scrubbing contract (the PresidioScrubbingProvider).
+
+    A single provider does both text and image de-identification, so the
+    outbound-upload path (which must scrub recording frames AND text artifacts
+    before they leave the machine, regardless of the local console posture) can
+    take one capability object rather than two mode-gated getters.
+    """
 
 
 # Cached singletons. ``_UNSET`` distinguishes "not yet built" from "built, but
@@ -141,6 +154,34 @@ def text_scrubbing_enabled() -> bool:
     return get_text_scrubber() is not None
 
 
+def get_scrubber() -> Optional[Scrubber]:
+    """Return the scrubbing provider if the capability is present, else None.
+
+    Unlike :func:`get_text_scrubber`, this is a pure CAPABILITY check: it does
+    NOT consult ``OPENADAPT_FLOW_SCRUB`` (so it returns a provider even under
+    mode ``off``/``auto``) and it never raises. It is used by the OUTBOUND
+    UPLOAD path, which must de-identify a recording's frames and text artifacts
+    before they leave the machine regardless of the local-console scrub posture
+    (a compliance-critical boundary, not a console convenience). The lazy
+    singleton is shared with the text getter; tests inject via
+    :func:`set_text_scrubber`.
+    """
+    global _text_scrubber
+    if _text_scrubber is _UNSET:
+        _text_scrubber = _build_provider()
+    return _text_scrubber  # type: ignore[return-value]
+
+
+def scrubbing_available() -> bool:
+    """True when a scrubbing provider can be built or was injected (capability).
+
+    This is the gate the upload path checks: when it is False, a recording must
+    NOT be uploaded to the multi-tenant cloud (fail-closed), because there is no
+    way to de-identify its frames/text first.
+    """
+    return get_scrubber() is not None
+
+
 def _scrub_images_flag_set() -> bool:
     """True when ``OPENADAPT_FLOW_SCRUB_IMAGES`` is explicitly truthy."""
     return os.environ.get("OPENADAPT_FLOW_SCRUB_IMAGES", "0").strip().lower() in (
@@ -194,17 +235,31 @@ def scrub_params(params: dict[str, str]) -> dict[str, str]:
     return {key: scrubber.scrub_text(value) for key, value in params.items()}
 
 
-def scrub_image_bytes(png: bytes) -> bytes:
+def scrub_image_bytes(png: bytes, *, force: bool = False) -> bytes:
     """Redact PII/PHI regions from a PNG, or return it unchanged when redaction is off.
 
-    Only active when :func:`image_redaction_enabled` (opt-in). On any redaction
-    error the ORIGINAL bytes are returned unchanged — image redaction is a
-    best-effort enhancement layered on the documented no-share posture, never a
-    correctness gate.
+    Two modes:
+
+    * ``force=False`` (default): honour the mode gate — only active when
+      :func:`image_redaction_enabled` (opt-in under ``auto``, implied under
+      ``on``). This is the PERSIST/LOG path; on any redaction error the ORIGINAL
+      bytes are returned unchanged (best-effort enhancement layered on the
+      documented no-share local posture, never a correctness gate).
+    * ``force=True``: the OUTBOUND UPLOAD path — redact whenever a provider is
+      available (:func:`get_scrubber`), independent of ``OPENADAPT_FLOW_SCRUB``
+      / ``OPENADAPT_FLOW_SCRUB_IMAGES``, and **re-raise on failure** so the
+      caller aborts the upload rather than shipping an unredacted frame. The
+      caller is responsible for first checking :func:`scrubbing_available`.
     """
-    if not png or not image_redaction_enabled():
+    if not png:
         return png
-    scrubber = _get_image_scrubber()
+    scrubber: Optional[ImageScrubber]
+    if force:
+        scrubber = get_scrubber()
+    elif image_redaction_enabled():
+        scrubber = _get_image_scrubber()
+    else:
+        return png
     if scrubber is None:
         return png
     try:
@@ -216,6 +271,8 @@ def scrub_image_bytes(png: bytes) -> bytes:
         redacted.save(out, format="PNG")
         return out.getvalue()
     except Exception:  # noqa: BLE001 — never let redaction crash a run
+        if force:
+            raise
         return png
 
 

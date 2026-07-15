@@ -40,6 +40,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Sequence
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.backend import Backend
@@ -56,6 +57,41 @@ def _parse_params(pairs: Sequence[str] | None) -> dict[str, str]:
             raise SystemExit(f"--param expects k=v, got {pair!r}")
         key, value = pair.split("=", 1)
         params[key] = value
+    return params
+
+
+def _replay_params(
+    pairs: Sequence[str] | None,
+    params_file: str | None = None,
+) -> dict[str, str]:
+    """Load replay bindings without requiring sensitive values in argv.
+
+    ``--params-file`` is intended for managed runners: the file can be staged
+    inside the per-run boundary while process listings contain only its path.
+    Explicit ``--param`` flags remain supported and override file values.
+    """
+    import json
+
+    params: dict[str, str] = {}
+    if params_file:
+        path = Path(params_file)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"--params-file could not be read as JSON: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise SystemExit("--params-file must contain one JSON object")
+        if len(raw) > 100:
+            raise SystemExit("--params-file may contain at most 100 parameters")
+        for key, value in raw.items():
+            if not isinstance(key, str) or not key:
+                raise SystemExit("--params-file keys must be non-empty strings")
+            if not isinstance(value, (str, int, float, bool)) or isinstance(
+                value, (dict, list)
+            ):
+                raise SystemExit(f"--params-file value for {key!r} must be a scalar")
+            params[key] = str(value)
+    params.update(_parse_params(pairs))
     return params
 
 
@@ -226,6 +262,8 @@ def _build_and_run_replayer(
     api_actuator,
     durable: bool,
     use_structural: bool,
+    execution_origin: Optional[str] = None,
+    execution_entry_url: Optional[str] = None,
 ):
     """Wire the grounding / identity-VLM ladder and run the replayer.
 
@@ -295,6 +333,8 @@ def _build_and_run_replayer(
         bundle_dir=bundle,
         run_dir=run_dir,
         save_healed_to=save_healed_to,
+        execution_origin=execution_origin,
+        execution_entry_url=execution_entry_url,
     )
 
 
@@ -310,6 +350,7 @@ def _finish_replay(run_dir: Path, report) -> int:
             "NOTE: a model-grounding component was wired for this run — "
             "screenshots could have left the box (see REPORT.md)."
         )
+    _maybe_report_break(run_dir, report)
     return 0 if report.success else 1
 
 
@@ -557,7 +598,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     bundle = Path(args.bundle)
     run_dir = Path(args.run_dir) if args.run_dir else _default_run_dir()
     workflow = Workflow.load(bundle)
-    params = _parse_params(args.param)
+    params = _replay_params(args.param, getattr(args, "params_file", None))
 
     # Deployment wiring (from --config and/or direct flags): a system-of-record
     # EffectVerifier, an ApiActuator, durable-runtime, and the egress opt-in.
@@ -649,6 +690,10 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     api_actuator=api_actuator,
                     durable=durable,
                     use_structural=not bool(args.drift),
+                    execution_origin=(
+                        f"{urlsplit(page.url).scheme}://{urlsplit(page.url).netloc}"
+                    ),
+                    execution_entry_url=url,
                 )
             finally:
                 video_path = None
@@ -1086,6 +1131,263 @@ def _cmd_emit_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_login(args: argparse.Namespace) -> int:
+    """Validate an ingest token against the hosted control plane and store the
+    host in config and the token in the OS keychain when saving is enabled.
+
+    Token resolution: ``--token`` -> ``OPENADAPT_INGEST_TOKEN`` env ->
+    OS keychain -> existing config migration token. Mint a
+    token in the dashboard at ``<host>/dashboard/settings/ingest``.
+    """
+    from openadapt_flow.hosted import HostedError, login
+
+    try:
+        result = login(
+            token=args.token,
+            host=args.host,
+            save=not args.no_save,
+            allow_plaintext_token=args.allow_plaintext_token,
+            destination_kind=args.destination_kind,
+            trusted_hosts=args.trusted_host,
+        )
+    except HostedError as e:
+        print(f"login failed: {e}")
+        return 1
+    print(f"Logged in to {result['host']} (token validated).")
+    if result.get("config_path"):
+        if result.get("token_storage") == "keyring":
+            print(
+                f"Token saved to {result['config_path']}; non-secret host saved in config."
+            )
+        else:
+            print(
+                f"Host + token saved to {result['config_path']} (mode 0600).\n"
+                "WARNING: plaintext storage was explicitly enabled. Prefer the "
+                "OS keychain or OPENADAPT_INGEST_TOKEN."
+            )
+    print(f"Manage tokens at {result['settings_url']}")
+    return 0
+
+
+def _cmd_push(args: argparse.Namespace) -> int:
+    """Upload the exact approved sanitized archive to ``/api/ingest``.
+
+    ``PATH`` defaults to the most-recent recording directory. Raw input creates
+    a derivative and pauses for review; approved input sends the exact frozen
+    archive and prints the server-assigned workflow id/dashboard URL.
+    """
+    from openadapt_flow.hosted import HostedError, push
+
+    try:
+        result = push(
+            args.path,
+            kind=args.kind,
+            name=args.name,
+            workflow_id=args.workflow_id,
+            resolves_run_id=args.resolves_run_id,
+            host=args.host,
+            token=args.token,
+            deployment_kind=args.deployment_kind,
+            attest_non_phi=args.attest_non_phi,
+            destination_kind=args.destination_kind,
+            trusted_hosts=args.trusted_host,
+            sanitized_out=args.sanitized_out,
+            auto_approve=args.auto_approve,
+            validation_attestation=args.validation_attestation,
+        )
+    except HostedError as e:
+        print(f"push failed: {e}")
+        return 1
+    if result.get("pending_review"):
+        print(f"Sanitized derivative created at {result['sanitized_path']}.")
+        print(
+            "Upload paused for local review; the original was not modified or uploaded."
+        )
+        print(result["review_command"])
+        return 0
+    workflow_id = result.get("workflow_id", "<unknown>")
+    compile_status = (result.get("compile") or {}).get("status", "?")
+    print(
+        f"Pushed. workflow_id={workflow_id} "
+        f"(name={result.get('workflow_name')!r}, kind={result.get('kind')}, "
+        f"compile={compile_status})."
+    )
+    if result.get("dashboard_url"):
+        print(f"Dashboard: {result['dashboard_url']}")
+    return 0
+
+
+def _cmd_validate_hosted(args: argparse.Namespace) -> int:
+    """Create a challenge-bound operator runtime-validation attestation."""
+    import json
+
+    from openadapt_flow.runtime_validation import (
+        RuntimeValidationError,
+        create_runtime_validation_attestation,
+        save_runtime_validation_attestation,
+    )
+
+    try:
+        compiler_config = (
+            json.loads(Path(args.compiler_config).read_text(encoding="utf-8"))
+            if args.compiler_config
+            else None
+        )
+        if compiler_config is not None and not isinstance(compiler_config, dict):
+            raise RuntimeValidationError("Compiler config must be a JSON object")
+        attestation = create_runtime_validation_attestation(
+            recording_derivative=Path(args.recording),
+            bundle_derivative=Path(args.bundle),
+            run_dir=Path(args.run_dir),
+            policy_source=args.policy,
+            risk_class=args.risk_class,
+            environment=args.environment,
+            target_url=args.target_url,
+            allowed_hosts=args.allowed_host,
+            compiler_config=compiler_config,
+            host=args.host,
+            token=args.token,
+            destination_kind=args.destination_kind,
+            trusted_hosts=args.trusted_host,
+        )
+        output = save_runtime_validation_attestation(attestation, Path(args.out))
+    except (OSError, json.JSONDecodeError, RuntimeValidationError) as exc:
+        print(f"validate-hosted failed: {exc}")
+        return 1
+    print(f"Runtime-validation attestation written to {output}.")
+    print(
+        "This is a challenge-bound operator attestation, not independent "
+        "certification. Upload it once with `push --validation-attestation`."
+    )
+    return 0
+
+
+def _cmd_sanitize(args: argparse.Namespace) -> int:
+    from openadapt_flow.sanitized_artifact import SanitizationError, sanitize_artifact
+
+    try:
+        manifest = sanitize_artifact(
+            Path(args.path),
+            Path(args.out),
+            kind=args.kind,
+            redactions_file=Path(args.redactions) if args.redactions else None,
+            overwrite=args.overwrite,
+        )
+    except SanitizationError as e:
+        print(f"sanitize failed: {e}")
+        return 1
+    print(
+        f"Sanitized {manifest['processed_file_count']} file(s) into {args.out}; "
+        f"execution semantics: {manifest['execution_semantics']}."
+    )
+    print(
+        "Review locally: openadapt-flow review-sanitized "
+        f"{args.out} --original {args.path}"
+    )
+    return 0
+
+
+def _cmd_review_sanitized(args: argparse.Namespace) -> int:
+    from openadapt_flow.sanitized_artifact import SanitizationError, serve_review
+
+    try:
+        serve_review(
+            Path(args.original),
+            Path(args.path),
+            port=args.port,
+            open_browser=not args.no_open,
+        )
+    except SanitizationError as e:
+        print(f"review failed: {e}")
+        return 1
+    return 0
+
+
+def _cmd_approve_sanitized(args: argparse.Namespace) -> int:
+    from openadapt_flow.sanitized_artifact import SanitizationError, approve_derivative
+
+    try:
+        approval = approve_derivative(
+            Path(args.path), source=Path(args.original), reviewer=args.reviewer
+        )
+    except SanitizationError as e:
+        print(f"approval failed: {e}")
+        return 1
+    print(
+        "Approved immutable archive "
+        f"sha256={approval['approved_derivative_sha256']} "
+        f"size={approval['approved_archive_size_bytes']} bytes."
+    )
+    return 0
+
+
+def _cmd_report_break(args: argparse.Namespace) -> int:
+    """Emit a PHI-free break diagnostic from a halted run's ``report.json``.
+
+    Reads ``run_dir/report.json`` (``RunReport.halt`` / ``HaltObservation``) —
+    halt is read from the report, NOT a process exit code — scrubs it
+    fail-closed, and POSTs it to ``/api/runs/ingest-report`` so the break is
+    triageable centrally. The recording never leaves the machine.
+    """
+    from openadapt_flow.hosted import HostedError, report_break
+
+    try:
+        result = report_break(
+            args.run_dir,
+            workflow_id=args.workflow_id,
+            host=args.host,
+            token=args.token,
+            deployment_kind=args.deployment_kind,
+            org_id=args.org_id,
+            destination_kind=args.destination_kind,
+            trusted_hosts=args.trusted_host,
+        )
+    except HostedError as e:
+        print(f"report-break failed: {e}")
+        return 1
+    if not result.get("emitted"):
+        if result.get("local_only"):
+            print(f"Break kept LOCAL-ONLY: {result.get('reason')}")
+        else:
+            print(f"Nothing emitted: {result.get('reason')}")
+        return 0
+    print(
+        f"Break reported (run_id={result.get('run_id')}, "
+        f"halt_id={result.get('halt_id')}, status={result.get('status')})."
+    )
+    if result.get("teach_url"):
+        print(f"Teach: {result['teach_url']}")
+    return 0
+
+
+def _maybe_report_break(run_dir: Path, report) -> None:
+    """Opt-in post-run hook: emit a break diagnostic when a run halts.
+
+    Off by default and fully best-effort — it only fires when BOTH
+    ``OPENADAPT_FLOW_HOSTED_WORKFLOW_ID`` is set (the hosted workflow id this
+    bundle maps to) and the run carries a halt. Any failure is swallowed so the
+    hook NEVER changes the run's outcome or exit code (WRAP-not-rewrite).
+    """
+    import os
+
+    workflow_id = os.environ.get("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID")
+    if not workflow_id or getattr(report, "halt", None) is None:
+        return
+    try:
+        from openadapt_flow.hosted import report_break
+
+        result = report_break(
+            run_dir,
+            workflow_id=workflow_id,
+            deployment_kind=os.environ.get("OPENADAPT_FLOW_DEPLOYMENT_KIND", "cloud"),
+            org_id=os.environ.get("OPENADAPT_FLOW_ORG_ID"),
+        )
+        if result.get("emitted"):
+            print(f"Break reported to hosted control plane (workflow {workflow_id}).")
+    except Exception as e:  # noqa: BLE001 — a diagnostic hook must never fail a run
+        print(f"(break report skipped: {e})")
+
+
 def _cmd_teach(args: argparse.Namespace) -> int:
     """Self-serve HALT -> LEARN -> RESOLVE for a halted run + a fix demo.
 
@@ -1240,7 +1542,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="openadapt-flow",
         description=(
             "Record a workflow once, compile it into a deterministic "
-            "vision-anchored script, replay it locally, heal it on drift."
+            "vision-anchored script, replay it locally, and use bounded "
+            "re-resolution or governed repair when the interface drifts."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1385,7 +1688,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated MockMed drift modes (theme,move,rename,modal) "
-            "to demonstrate self-healing; only valid without --url"
+            "to demonstrate bounded drift resolution; only valid without --url"
         ),
     )
     p.add_argument(
@@ -1402,6 +1705,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="K=V",
         help="Parameter substitution (repeatable)",
+    )
+    p.add_argument(
+        "--params-file",
+        default=None,
+        help=(
+            "JSON object of parameter bindings; keeps values out of process "
+            "arguments for managed execution"
+        ),
     )
     p.add_argument(
         "--allow-model-grounding",
@@ -1756,6 +2067,352 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_teach)
+
+    p = sub.add_parser(
+        "login",
+        help=(
+            "Validate an ingest token against the hosted control plane and "
+            "store it in the OS keychain"
+        ),
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Ingest token (oai_ingest_…). Falls back to OPENADAPT_INGEST_TOKEN, "
+            "then OS keychain, then an existing config migration token. "
+            "Mint one at <host>/dashboard/settings/ingest."
+        ),
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--destination-kind",
+        choices=["openadapt-managed", "customer-managed", "local"],
+        default=None,
+        help="Trust class for the token destination",
+    )
+    p.add_argument(
+        "--trusted-host",
+        action="append",
+        default=None,
+        help="Exact allowed customer-managed origin (repeatable)",
+    )
+    p.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Validate only; do not store the host or token",
+    )
+    p.add_argument(
+        "--allow-plaintext-token",
+        action="store_true",
+        help=(
+            "Explicitly allow mode-0600 config token storage when no OS keychain "
+            "is available (insecure fallback)"
+        ),
+    )
+    p.set_defaults(func=_cmd_login)
+
+    p = sub.add_parser(
+        "sanitize",
+        help="Create a verified PHI-scrubbed derivative without modifying the original",
+    )
+    p.add_argument("path", help="Original recording or bundle directory")
+    p.add_argument("--out", required=True, help="New sanitized derivative directory")
+    p.add_argument(
+        "--kind", choices=["recording", "bundle"], required=True, help="Artifact type"
+    )
+    p.add_argument(
+        "--redactions",
+        default=None,
+        help="Optional local JSON file with additional text/image redactions",
+    )
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing derivative (never modifies the original)",
+    )
+    p.set_defaults(func=_cmd_sanitize)
+
+    p = sub.add_parser(
+        "review-sanitized",
+        help="Review original vs sanitized content in a loopback-only local viewer",
+    )
+    p.add_argument("path", help="Sanitized derivative directory")
+    p.add_argument("--original", required=True, help="Original artifact directory")
+    p.add_argument(
+        "--port", type=int, default=0, help="Loopback port (default: random)"
+    )
+    p.add_argument(
+        "--no-open", action="store_true", help="Print the viewer URL without opening it"
+    )
+    p.set_defaults(func=_cmd_review_sanitized)
+
+    p = sub.add_parser(
+        "approve-sanitized",
+        help="Approve and freeze the exact reviewed derivative as an immutable archive",
+    )
+    p.add_argument("path", help="Sanitized derivative directory")
+    p.add_argument("--original", required=True, help="Original artifact directory")
+    p.add_argument(
+        "--reviewer", required=True, help="Reviewer identity for the audit record"
+    )
+    p.set_defaults(func=_cmd_approve_sanitized)
+
+    p = sub.add_parser(
+        "validate-hosted",
+        help=(
+            "Bind strict lint, policy certification, and a successful local "
+            "replay to an expiring Cloud challenge and exact approved artifacts"
+        ),
+    )
+    p.add_argument(
+        "--recording",
+        required=True,
+        help="Approved sanitized recording derivative used to compile the bundle",
+    )
+    p.add_argument(
+        "--bundle",
+        required=True,
+        help="Approved sanitized bundle derivative whose exact archive will upload",
+    )
+    p.add_argument(
+        "--run-dir",
+        required=True,
+        help="Successful governed replay directory containing report.json",
+    )
+    p.add_argument(
+        "--policy",
+        required=True,
+        help="Named or file-backed policy that the bundle must pass",
+    )
+    p.add_argument(
+        "--risk-class",
+        required=True,
+        choices=["low", "consequential"],
+        help=(
+            "Compiled workflow risk class: low for reversible-only workflows, "
+            "consequential when any step is irreversible; must match the bundle"
+        ),
+    )
+    p.add_argument(
+        "--environment",
+        required=True,
+        help=(
+            "Non-PHI validation environment identifier; only its SHA-256 is uploaded"
+        ),
+    )
+    p.add_argument(
+        "--target-url",
+        required=True,
+        help=(
+            "Exact non-PHI HTTPS entry URL used by the validated browser workflow; "
+            "query strings, fragments, and credentials are refused"
+        ),
+    )
+    p.add_argument(
+        "--allowed-host",
+        action="append",
+        default=None,
+        help=(
+            "Additional exact hostname the hosted browser may reach (repeatable); "
+            "the target hostname is included automatically"
+        ),
+    )
+    p.add_argument(
+        "--compiler-config",
+        default=None,
+        help="Optional JSON object describing the compile configuration",
+    )
+    p.add_argument("--out", required=True, help="Attestation JSON output path")
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: configured host or https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--destination-kind",
+        choices=["openadapt-managed", "customer-managed", "local"],
+        default=None,
+        help="Trust class for the challenge destination",
+    )
+    p.add_argument(
+        "--trusted-host",
+        action="append",
+        default=None,
+        help="Exact allowed customer-managed origin (repeatable)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Ingest token used to acquire and sign the one-time challenge",
+    )
+    p.set_defaults(func=_cmd_validate_hosted)
+
+    p = sub.add_parser(
+        "push",
+        help=(
+            "Upload the exact approved sanitized archive to /api/ingest; "
+            "raw input is sanitized locally and paused for review"
+        ),
+    )
+    p.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help=(
+            "Recording (or bundle) directory to push. Default: the most-recent "
+            "recording directory found under the current directory."
+        ),
+    )
+    p.add_argument(
+        "--kind",
+        choices=["recording", "bundle"],
+        default="recording",
+        help="What the directory is (default: recording)",
+    )
+    p.add_argument(
+        "--name",
+        default=None,
+        help="Workflow name (the server auto-suggests one otherwise)",
+    )
+    p.add_argument(
+        "--workflow-id",
+        default=None,
+        help=(
+            "Existing hosted workflow UUID to receive this validated bundle as "
+            "a new active version (bundle uploads only)"
+        ),
+    )
+    p.add_argument(
+        "--deployment-kind",
+        choices=["cloud", "byoc", "regulated"],
+        default=None,
+        help=(
+            "Execution deployment lane (independent of destination trust; default: "
+            "OPENADAPT_FLOW_DEPLOYMENT_KIND env, then config.toml "
+            "deployment_lane, else cloud). All lanes may upload only a verified "
+            "sanitized derivative."
+        ),
+    )
+    p.add_argument(
+        "--attest-non-phi",
+        action="store_true",
+        help=(
+            "Deprecated and refused: declarations no longer bypass sanitization, "
+            "review, or exact-hash approval."
+        ),
+    )
+    p.add_argument(
+        "--destination-kind",
+        choices=["openadapt-managed", "customer-managed", "local"],
+        default=None,
+        help=(
+            "Trust class for the upload endpoint. app.openadapt.ai is recognized "
+            "automatically; customer-managed endpoints also require --trusted-host."
+        ),
+    )
+    p.add_argument(
+        "--trusted-host",
+        action="append",
+        default=None,
+        help="Exact allowed customer-managed origin, e.g. https://control.example (repeatable)",
+    )
+    p.add_argument(
+        "--sanitized-out",
+        default=None,
+        help="Where to create the derivative when PATH is raw (default: OPENADAPT_HOME)",
+    )
+    p.add_argument(
+        "--auto-approve",
+        action="store_true",
+        default=None,
+        help=(
+            "Administrator policy approval for fully covered, stable derivatives; "
+            "human review is the default."
+        ),
+    )
+    p.add_argument(
+        "--validation-attestation",
+        default=None,
+        help=("Challenge-bound runtime-validation JSON required for runnable bundles"),
+    )
+    p.add_argument(
+        "--resolves-run-id",
+        default=None,
+        help=(
+            "Halted run UUID resolved by this validated replacement; requires "
+            "--kind bundle and --workflow-id"
+        ),
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Ingest token (default: OPENADAPT_INGEST_TOKEN env, OS keychain, "
+            "then an existing config migration token)"
+        ),
+    )
+    p.set_defaults(func=_cmd_push)
+
+    p = sub.add_parser(
+        "report-break",
+        help=(
+            "Emit a PHI-free break diagnostic from a halted run's report.json "
+            "to /api/runs/ingest-report (the recording stays local)"
+        ),
+    )
+    p.add_argument("run_dir", help="The halted run directory (holds report.json)")
+    p.add_argument(
+        "--workflow-id",
+        required=True,
+        help="The hosted workflow id this run belongs to (from `push`/dashboard)",
+    )
+    p.add_argument(
+        "--deployment-kind",
+        choices=["cloud", "byoc"],
+        default="cloud",
+        help="Deployment lane (routes the teach target; default: cloud)",
+    )
+    p.add_argument(
+        "--org-id",
+        default=None,
+        help="Org id, carried in the body until the per-user token store is canonical",
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--destination-kind",
+        choices=["openadapt-managed", "customer-managed", "local"],
+        default=None,
+        help="Trust class for the break-report destination",
+    )
+    p.add_argument(
+        "--trusted-host",
+        action="append",
+        default=None,
+        help="Exact allowed customer-managed origin (repeatable)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Ingest token (default: OPENADAPT_INGEST_TOKEN env, OS keychain, "
+            "then an existing config migration token)"
+        ),
+    )
+    p.set_defaults(func=_cmd_report_break)
 
     return parser
 

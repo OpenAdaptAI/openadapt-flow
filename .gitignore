@@ -42,3 +42,4 @@ bundle/
 *.bundle/
 # Local scrub/regeneration scratch venvs
 .venv-phi/
+paper/build/

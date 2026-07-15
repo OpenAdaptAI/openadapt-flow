@@ -508,15 +508,33 @@ def push(
     if not src.is_dir():
         raise HostedError(f"PATH is not a directory: {src}")
 
-    # PHI boundary for RAW recordings (bundles are PHI-free by construction).
+    # PHI boundary. A RAW recording carries full-frame screenshots + typed field
+    # values, so it must clear the full lane/PHI/scrubber gate before any egress.
+    # A COMPILED bundle is PHI-free BY CONSTRUCTION -- but only when it is
+    # ACTUALLY a compiled bundle (``workflow.json``/``.enc`` present). Fail
+    # closed: a path handed to us as ``--kind bundle`` that is NOT a real bundle
+    # (e.g. a raw recording dir mislabeled to skip this gate) is routed through
+    # the recording gate instead of egressing unknown contents. We prove the
+    # bundle is compiled via ``_is_bundle_dir(src)`` BEFORE trusting it.
     upload_src = src
     scrub_tmp: Optional[Path] = None
-    if kind == "recording":
+    is_compiled_bundle = kind == "bundle" and _is_bundle_dir(src)
+    if not is_compiled_bundle:
         from openadapt_flow import privacy
 
+        # A path passed as a bundle but lacking workflow.json[.enc] is not a
+        # PHI-free-by-compile artifact -- treat it as a raw recording.
+        mislabeled_bundle = kind == "bundle"
+        prefix = (
+            f"{src.name!r} was passed as --kind bundle but is not a compiled "
+            "bundle (no workflow.json/.enc); treating it as a raw recording. "
+            if mislabeled_bundle
+            else ""
+        )
         if lane in _REGULATED_LANES or _phi_mode(phi_mode):
             raise HostedError(
-                f"Refusing to upload a raw recording on the {lane!r} lane"
+                prefix
+                + f"Refusing to upload a raw recording on the {lane!r} lane"
                 + (" (PHI mode)" if lane not in _REGULATED_LANES else "")
                 + ". A recording carries full-frame screenshots and typed field "
                 "values; on a regulated/PHI deployment it must never leave the "
@@ -525,7 +543,8 @@ def push(
             )
         if not privacy.scrubbing_available():
             raise HostedError(
-                "Refusing to upload a recording to the cloud: no PHI scrubber "
+                prefix
+                + "Refusing to upload a recording to the cloud: no PHI scrubber "
                 "is available to de-identify its frames/values first. Install "
                 "it with: pip install 'openadapt-flow[privacy]' (and "
                 "python -m spacy download en_core_web_trf), or teach locally "
@@ -533,6 +552,9 @@ def push(
             )
         upload_src = _scrub_recording_tree(src)
         scrub_tmp = upload_src.parent
+        # The wire declares what actually left the machine: a scrubbed recording,
+        # not a compiled bundle.
+        kind = "recording"
 
     zip_path = _zip_dir(upload_src)
     data: dict[str, str] = {"kind": kind}

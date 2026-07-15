@@ -254,8 +254,9 @@ def test_push_401(tmp_path, monkeypatch):
 
 
 def test_push_bundle_uploads_without_scrubber(tmp_path, monkeypatch):
-    """A compiled bundle is PHI-free by construction, so it uploads directly
-    even with no scrubber available and on any lane."""
+    """A GENUINE compiled bundle (workflow.json present) is PHI-free by
+    construction, so it uploads directly even with no scrubber available and on
+    a regulated/byoc lane."""
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "workflow.json").write_text("{}")
@@ -273,6 +274,46 @@ def test_push_bundle_uploads_without_scrubber(tmp_path, monkeypatch):
     )
     assert result["workflow_id"] == "wf_b"
     assert recorder["kw"]["data"] == {"kind": "bundle"}
+
+
+def test_push_recording_mislabeled_as_bundle_refused_on_regulated(tmp_path, monkeypatch):
+    """Fail closed: a raw recording dir mislabeled ``--kind bundle`` (no
+    workflow.json[.enc]) must NOT skip the PHI gate. On a regulated lane it is
+    treated as a recording and REFUSED, never egressed."""
+    rec = _make_recording(tmp_path, "rec")  # meta.json + events.jsonl, NOT a bundle
+    privacy.set_text_scrubber(_FakeScrubber())  # even WITH a scrubber, refuse
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload on regulated")
+    )
+    with pytest.raises(hosted.HostedError, match="not a compiled bundle"):
+        hosted.push(
+            rec,
+            kind="bundle",
+            deployment_kind="regulated",
+            host="https://h.test",
+            token="tok",
+        )
+
+
+def test_push_recording_mislabeled_as_bundle_scrubbed_on_cloud(tmp_path, monkeypatch):
+    """A recording dir mislabeled ``--kind bundle`` on the cloud lane is routed
+    through the recording gate: it is scrubbed and uploaded as a RECORDING (the
+    wire declares what actually left), never egressed raw as a bundle."""
+    rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
+    recorder: dict = {}
+    monkeypatch.setattr(
+        httpx, "post", _capture_post(recorder, 201, {"ingest": {"workflow_id": "wf_r"}})
+    )
+    result = hosted.push(
+        rec,
+        kind="bundle",
+        deployment_kind="cloud",
+        host="https://h.test",
+        token="tok",
+    )
+    assert result["workflow_id"] == "wf_r"
+    assert recorder["kw"]["data"] == {"kind": "recording"}
 
 
 def test_push_recording_refused_on_byoc_lane(tmp_path, monkeypatch):

@@ -155,10 +155,10 @@ version_toml = ["pyproject.toml:project.version"]
 # released pyproject version).
 version_variables = ["openadapt_flow/__init__.py:__version__"]
 commit_message = "chore: release {version}"
-# Refresh the editable root package after semantic-release changes the version.
-# ``--offline`` keeps release resolution bound to the reviewed lock instead of
-# silently upgrading dependencies during publication.
-build_command = "pip install uv && uv lock --offline && uv build"
+# Semantic Release runs its build inside a Python 3.14 container, while Flow's
+# validated runtime is Python 3.10-3.12. Stamp only the editable root lock entry
+# instead of asking uv to resolve the project under an unsupported interpreter.
+build_command = "python -m ensurepip --upgrade && python -m pip install --disable-pip-version-check uv==0.11.29 && python scripts/check_release_consistency.py --sync && git add uv.lock && uv build --wheel --sdist && python scripts/check_release_consistency.py --require-dist"
 
 [tool.semantic_release.branches.main]
 match = "main"

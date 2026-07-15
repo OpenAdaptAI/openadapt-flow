@@ -125,7 +125,9 @@ def test_build_emits_html_and_json_with_real_figures(tmp_path) -> None:
     # Compiled is model-free: $0 must be shown for the compiled cost.
     assert "$0" in html
     # The wedge framing and honest caveats are present, not buried.
-    assert "every run, forever" in html.lower()
+    assert "illustrative repeat-run model cost" in html.lower()
+    assert "not new runs" in html.lower()
+    assert "excludes authoring" in html.lower()
     assert "Read before quoting these numbers" in html
     assert "not a general capability claim" in html.lower() or (
         "not capability" in html.lower()

@@ -211,7 +211,13 @@ def test_execution_scope_refuses_ambiguous_cross_parser_hosts(origin):
 
 @pytest.mark.parametrize(
     "allowed",
-    ["cdn.example.com:443", ".cdn.example.com", "cdn..example.com", "127.0.0.1", "metadata.google.internal"],
+    [
+        "cdn.example.com:443",
+        ".cdn.example.com",
+        "cdn..example.com",
+        "127.0.0.1",
+        "metadata.google.internal",
+    ],
 )
 def test_execution_scope_refuses_non_hostname_allowlist_entries(allowed):
     with pytest.raises(RuntimeValidationError, match="Invalid allowed host"):

@@ -89,9 +89,7 @@ def _replay_params(
             if not isinstance(value, (str, int, float, bool)) or isinstance(
                 value, (dict, list)
             ):
-                raise SystemExit(
-                    f"--params-file value for {key!r} must be a scalar"
-                )
+                raise SystemExit(f"--params-file value for {key!r} must be a scalar")
             params[key] = str(value)
     params.update(_parse_params(pairs))
     return params

@@ -765,7 +765,7 @@ def build_ingest_manifest(destination: Path) -> dict[str, Any]:
             for entry in local["files"]
         }
     )
-    envelope = {
+    envelope: dict[str, Any] = {
         "schema": "openadapt.sanitization/v1",
         "artifact": {
             "kind": local["kind"],

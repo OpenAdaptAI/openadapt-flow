@@ -174,8 +174,29 @@ def _capture_post(recorder, status=201, json_body=None):
     return fake
 
 
+class _FakeScrubber:
+    """A fast text+image scrubber double (satisfies privacy.Scrubber).
+
+    Text scrubbing replaces the fixture PHI tokens; image scrubbing is identity
+    (the redaction geometry is Presidio's job, out of scope for these unit
+    tests — here we only assert the scrub PATH is taken)."""
+
+    def __init__(self):
+        self.text_calls = 0
+        self.image_calls = 0
+
+    def scrub_text(self, text, is_separated=False):
+        self.text_calls += 1
+        return text.replace("Jane Doe", "<PERSON>").replace("12345", "<NUM>")
+
+    def scrub_image(self, image, fill_color=None):
+        self.image_calls += 1
+        return image
+
+
 def test_push_success(tmp_path, monkeypatch):
     rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())  # cloud recording => scrub before upload
     recorder: dict = {}
     body = {
         "ingest": {
@@ -198,6 +219,7 @@ def test_push_success(tmp_path, monkeypatch):
 def test_push_default_path_uses_latest(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
     recorder: dict = {}
     monkeypatch.setattr(
         httpx,
@@ -215,6 +237,7 @@ def test_push_bad_kind(tmp_path):
 
 def test_push_non_201(tmp_path, monkeypatch):
     rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
     monkeypatch.setattr(
         httpx, "post", lambda url, **kw: httpx.Response(502, text="store down")
     )
@@ -224,9 +247,109 @@ def test_push_non_201(tmp_path, monkeypatch):
 
 def test_push_401(tmp_path, monkeypatch):
     rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
     monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(401))
     with pytest.raises(hosted.HostedError, match="401"):
         hosted.push(rec, token="tok", host="https://h.test")
+
+
+def test_push_bundle_uploads_without_scrubber(tmp_path, monkeypatch):
+    """A compiled bundle is PHI-free by construction, so it uploads directly
+    even with no scrubber available and on any lane."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "workflow.json").write_text("{}")
+    privacy.set_text_scrubber(None)  # no capability
+    recorder: dict = {}
+    monkeypatch.setattr(
+        httpx, "post", _capture_post(recorder, 201, {"ingest": {"workflow_id": "wf_b"}})
+    )
+    result = hosted.push(
+        bundle,
+        kind="bundle",
+        deployment_kind="byoc",
+        host="https://h.test",
+        token="tok",
+    )
+    assert result["workflow_id"] == "wf_b"
+    assert recorder["kw"]["data"] == {"kind": "bundle"}
+
+
+def test_push_recording_refused_on_byoc_lane(tmp_path, monkeypatch):
+    """A raw recording must never leave the machine on a regulated/byoc lane."""
+    rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())  # even WITH a scrubber, refuse
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload on byoc")
+    )
+    with pytest.raises(hosted.HostedError, match="byoc"):
+        hosted.push(rec, deployment_kind="byoc", host="https://h.test", token="tok")
+
+
+def test_push_recording_refused_under_phi_mode(tmp_path, monkeypatch):
+    """PHI mode (SCRUB=on) refuses a raw recording upload even on the cloud lane."""
+    rec = _make_recording(tmp_path, "rec")
+    monkeypatch.setenv("OPENADAPT_FLOW_SCRUB", "on")
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload under PHI mode")
+    )
+    with pytest.raises(hosted.HostedError, match="PHI"):
+        hosted.push(rec, deployment_kind="cloud", host="https://h.test", token="tok")
+
+
+def test_push_recording_refused_when_scrubber_unavailable(tmp_path, monkeypatch):
+    """Cloud lane, but no scrubber to de-identify frames/values => refuse
+    (never ship raw PHI)."""
+    rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(None)  # capability absent
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: pytest.fail("must not upload unscrubbed")
+    )
+    with pytest.raises(hosted.HostedError, match="no PHI scrubber"):
+        hosted.push(rec, deployment_kind="cloud", host="https://h.test", token="tok")
+
+
+def test_push_recording_scrubs_before_upload(tmp_path, monkeypatch):
+    """Cloud lane with a scrubber: the recording's text artifacts + frames are
+    de-identified on a temp copy BEFORE the upload (the original is untouched)."""
+    rec = _make_recording(tmp_path, "rec")
+    # PHI in an artifact + a frame that must be image-scrubbed.
+    (rec / "meta.json").write_text('{"params": {"patient": "Jane Doe"}}')
+    frames = rec / "frames"
+    frames.mkdir()
+    from PIL import Image
+
+    buf = __import__("io").BytesIO()
+    Image.new("RGB", (4, 4), (255, 0, 0)).save(buf, format="PNG")
+    (frames / "0000_before.png").write_bytes(buf.getvalue())
+
+    fake = _FakeScrubber()
+    privacy.set_text_scrubber(fake)
+
+    captured: dict = {}
+
+    def fake_post(url, **kw):
+        # Read the uploaded zip bytes so we can assert what actually shipped.
+        captured["bytes"] = kw["files"]["file"][1].read()
+        return httpx.Response(201, json={"ingest": {"workflow_id": "wf_s"}})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = hosted.push(
+        rec, deployment_kind="cloud", host="https://h.test", token="tok"
+    )
+    assert result["workflow_id"] == "wf_s"
+    # scrub path ran: text + image scrubbers were both invoked.
+    assert fake.text_calls >= 1
+    assert fake.image_calls == 1
+    # the uploaded zip carries the SCRUBBED artifact, not raw PHI.
+    import io as _io
+
+    with zipfile.ZipFile(_io.BytesIO(captured["bytes"])) as zf:
+        meta = zf.read("meta.json").decode()
+    assert "Jane Doe" not in meta
+    assert "<PERSON>" in meta
+    # original on disk is untouched.
+    assert "Jane Doe" in (rec / "meta.json").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +509,36 @@ def test_report_break_scrubber_unavailable_fails_closed(tmp_path, monkeypatch):
     assert result["local_only"] is True
 
 
+def test_report_break_omits_free_text_when_scrub_unavailable(tmp_path, monkeypatch):
+    """Default `auto` posture + NO scrubber: the break is still emitted, but as a
+    PHI-free MINIMAL descriptor — raw free-text PHI must NOT be sent (Violation
+    A: previously step_intent/reason/error went out unscrubbed under auto)."""
+    run_dir = tmp_path / "runs" / "r1"
+    _halted_run(run_dir)
+    # auto mode (default), capability explicitly absent.
+    privacy.set_text_scrubber(None)
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    result = hosted.report_break(
+        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+    )
+    assert result["emitted"] is True
+    posted = recorder["kw"]["json"]
+    blob = json.dumps(posted)
+    # NO raw PHI leaks.
+    assert "Jane Doe" not in blob
+    assert "12345" not in blob
+    # free-text fields are omitted; the minimal descriptor is still useful.
+    assert "step_intent" not in posted
+    assert "reason" not in posted
+    assert "error" not in posted
+    assert posted["phi_minimal"] is True
+    assert posted["status"] == "halt"
+    assert posted["resolver_rung"] == "ocr"
+    assert len(posted["drift_signature"]) == 16
+    assert posted["metrics"] == {"steps": 1, "duration_s": 2.5}
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring
 # ---------------------------------------------------------------------------
@@ -418,7 +571,12 @@ def test_cli_login_dispatch(monkeypatch, capsys):
 
 
 def test_cli_push_dispatch(monkeypatch, capsys):
-    def fake_push(path, kind="recording", name=None, host=None, token=None):
+    captured: dict = {}
+
+    def fake_push(
+        path, kind="recording", name=None, host=None, token=None, deployment_kind=None
+    ):
+        captured.update(deployment_kind=deployment_kind)
         return {
             "workflow_id": "wf_7",
             "workflow_name": "n",
@@ -428,8 +586,9 @@ def test_cli_push_dispatch(monkeypatch, capsys):
         }
 
     monkeypatch.setattr(hosted, "push", fake_push)
-    rc = main(["push", "some/rec", "--kind", "bundle"])
+    rc = main(["push", "some/rec", "--kind", "bundle", "--deployment-kind", "byoc"])
     assert rc == 0
+    assert captured["deployment_kind"] == "byoc"
     out = capsys.readouterr().out
     assert "wf_7" in out
     assert "Dashboard" in out

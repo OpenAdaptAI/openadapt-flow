@@ -57,6 +57,7 @@ __all__ = [
     "config_path",
     "resolve_host",
     "resolve_token",
+    "resolve_deployment_kind",
     "find_latest_recording",
     "login",
     "push",
@@ -70,6 +71,19 @@ DEFAULT_HOST = "https://app.openadapt.ai"
 #: Environment variable read for the ingest token (the non-interactive / CI /
 #: BYOC-server path).
 TOKEN_ENV = "OPENADAPT_INGEST_TOKEN"
+
+#: Environment variable naming the deployment lane (``cloud`` | ``byoc`` |
+#: ``regulated``). Falls back to ``config.toml`` ``[hosted] deployment_lane``.
+DEPLOYMENT_KIND_ENV = "OPENADAPT_FLOW_DEPLOYMENT_KIND"
+
+#: Environment variable forcing PHI mode (a truthy value treats every recording
+#: as PHI-bearing, so it is never uploaded to the multi-tenant cloud).
+PHI_MODE_ENV = "OPENADAPT_FLOW_PHI_MODE"
+
+#: Lanes whose recordings must NEVER leave the customer machine/tenant. A
+#: recording on one of these lanes is refused for upload (teach locally); only a
+#: compiled, PHI-free bundle may be pushed.
+_REGULATED_LANES = frozenset({"byoc", "regulated"})
 
 #: Network timeouts (seconds). Uploads can be large, so the push timeout is
 #: generous; the lightweight validate/report calls use a short timeout.
@@ -232,6 +246,37 @@ def resolve_token(token: Optional[str] = None) -> str:
     return str(resolved)
 
 
+def resolve_deployment_kind(deployment_kind: Optional[str] = None) -> str:
+    """Resolve the deployment lane: arg -> ``OPENADAPT_FLOW_DEPLOYMENT_KIND`` env
+    -> ``config.toml`` ``[hosted] deployment_lane`` -> ``"cloud"``.
+
+    The lane governs the outbound PHI boundary: ``cloud`` is multi-tenant (a
+    recording must be scrubbed before upload); ``byoc``/``regulated`` are
+    single-tenant/on-prem (a raw recording must never be uploaded at all)."""
+    resolved = (
+        deployment_kind
+        or os.environ.get(DEPLOYMENT_KIND_ENV)
+        or _hosted_config().get("deployment_lane")
+        or "cloud"
+    )
+    return str(resolved).strip().lower()
+
+
+def _phi_mode(phi_mode: Optional[bool] = None) -> bool:
+    """Resolve PHI mode: arg -> ``OPENADAPT_FLOW_PHI_MODE`` env -> ``SCRUB=on``.
+
+    When True, every recording is treated as PHI-bearing and is never uploaded
+    to the multi-tenant cloud (only compiled, PHI-free bundles may be pushed)."""
+    if phi_mode is not None:
+        return phi_mode
+    env = os.environ.get(PHI_MODE_ENV)
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    from openadapt_flow import privacy
+
+    return privacy.scrub_mode() == "on"
+
+
 def _auth_headers(token: str) -> dict[str, str]:
     """The bearer header every outbound call carries (also acceptable to the
     API as ``x-ingest-token``)."""
@@ -287,6 +332,58 @@ def _zip_dir(src: Path) -> Path:
     base = Path(tmp) / src.name
     archive = shutil.make_archive(str(base), "zip", root_dir=str(src))
     return Path(archive)
+
+
+#: Recording artifacts scrubbed before a cloud upload. Frames are image-redacted;
+#: structured/text artifacts are run through the text scrubber (whole-file — a
+#: best-effort de-identification that preserves surrounding JSON syntax).
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+_TEXT_SUFFIXES = frozenset({".json", ".jsonl", ".txt", ".md", ".csv"})
+
+
+def _scrub_recording_tree(src: Path) -> Path:
+    """Copy a recording directory to a temp location with every frame + text
+    artifact PHI-scrubbed, and return the scrubbed COPY (the original is never
+    mutated). The caller deletes the returned dir's parent.
+
+    Fail-closed: raises :class:`HostedError` if no scrubbing provider is
+    available (the caller must first check
+    :func:`openadapt_flow.privacy.scrubbing_available`) or if any single frame
+    cannot be redacted — an unredactable frame must abort the upload, never ship
+    raw.
+    """
+    from openadapt_flow import privacy
+
+    scrubber = privacy.get_scrubber()
+    if scrubber is None:  # defensive; the caller gates on scrubbing_available()
+        raise HostedError(
+            "Refusing to upload a recording: no PHI scrubber is available. "
+            "Install it with: pip install 'openadapt-flow[privacy]'."
+        )
+    tmp = Path(tempfile.mkdtemp(prefix="openadapt-flow-scrub-"))
+    dest = tmp / src.name
+    shutil.copytree(src, dest)
+    try:
+        for path in sorted(dest.rglob("*")):
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix in _IMAGE_SUFFIXES:
+                path.write_bytes(
+                    privacy.scrub_image_bytes(path.read_bytes(), force=True)
+                )
+            elif suffix in _TEXT_SUFFIXES:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                path.write_text(scrubber.scrub_text(text), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — fail closed: never ship raw PHI
+        shutil.rmtree(tmp, ignore_errors=True)
+        if isinstance(exc, HostedError):
+            raise
+        raise HostedError(
+            f"Refusing to upload: PHI scrub of the recording failed ({exc}). "
+            "The recording was NOT uploaded."
+        ) from exc
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -363,8 +460,23 @@ def push(
     name: Optional[str] = None,
     host: Optional[str] = None,
     token: Optional[str] = None,
+    deployment_kind: Optional[str] = None,
+    phi_mode: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Zip a recording/bundle DIRECTORY and upload it to ``POST /api/ingest``.
+
+    PHI boundary (fail-closed) — a raw recording carries full-frame screenshots
+    and typed field values, so it is NOT uploaded blindly:
+
+    * On a ``byoc``/``regulated`` lane, or under PHI mode, a **recording** is
+      REFUSED for upload (teach locally; only a compiled, PHI-free ``bundle``
+      may be pushed). This keeps regulated recordings on the customer machine.
+    * On the ``cloud`` (multi-tenant) lane, a **recording** is de-identified
+      (frames image-redacted, text artifacts scrubbed) on a temp copy BEFORE
+      upload. If no scrubber is available, the upload is REFUSED rather than
+      shipping raw PHI.
+    * A ``bundle`` is already PHI-free by construction (the compiler strips
+      field values / screenshots), so it uploads directly on any lane.
 
     Args:
         path: The recording (or compiled bundle) directory. Defaults to the
@@ -373,6 +485,9 @@ def push(
         name: Optional workflow name (the server auto-suggests one otherwise).
         host: Hosted base URL (default resolution).
         token: Ingest token (default resolution).
+        deployment_kind: Deployment lane (``cloud`` | ``byoc`` | ``regulated``);
+            default resolution via :func:`resolve_deployment_kind`.
+        phi_mode: Force PHI mode; default resolution via env/``SCRUB=on``.
 
     Returns:
         The server ``ingest`` object plus a convenience
@@ -380,19 +495,46 @@ def push(
         "kind": …, "compile": {…}, "dashboard_url": …}``.
 
     Raises:
-        HostedError: bad ``kind``, missing path, auth failure, or a non-201
-            response.
+        HostedError: bad ``kind``, missing path, a refused PHI boundary, auth
+            failure, or a non-201 response.
     """
     if kind not in ("recording", "bundle"):
         raise HostedError(f"--kind must be 'recording' or 'bundle', got {kind!r}")
     resolved_host = resolve_host(host)
     resolved_token = resolve_token(token)
+    lane = resolve_deployment_kind(deployment_kind)
 
     src = Path(path) if path is not None else find_latest_recording()
     if not src.is_dir():
         raise HostedError(f"PATH is not a directory: {src}")
 
-    zip_path = _zip_dir(src)
+    # PHI boundary for RAW recordings (bundles are PHI-free by construction).
+    upload_src = src
+    scrub_tmp: Optional[Path] = None
+    if kind == "recording":
+        from openadapt_flow import privacy
+
+        if lane in _REGULATED_LANES or _phi_mode(phi_mode):
+            raise HostedError(
+                f"Refusing to upload a raw recording on the {lane!r} lane"
+                + (" (PHI mode)" if lane not in _REGULATED_LANES else "")
+                + ". A recording carries full-frame screenshots and typed field "
+                "values; on a regulated/PHI deployment it must never leave the "
+                "machine. Teach locally, then push the compiled bundle "
+                "(--kind bundle), which is PHI-free."
+            )
+        if not privacy.scrubbing_available():
+            raise HostedError(
+                "Refusing to upload a recording to the cloud: no PHI scrubber "
+                "is available to de-identify its frames/values first. Install "
+                "it with: pip install 'openadapt-flow[privacy]' (and "
+                "python -m spacy download en_core_web_trf), or teach locally "
+                "and push the compiled bundle (--kind bundle)."
+            )
+        upload_src = _scrub_recording_tree(src)
+        scrub_tmp = upload_src.parent
+
+    zip_path = _zip_dir(upload_src)
     data: dict[str, str] = {"kind": kind}
     if name:
         data["name"] = name
@@ -411,6 +553,8 @@ def push(
         ) from exc
     finally:
         shutil.rmtree(zip_path.parent, ignore_errors=True)
+        if scrub_tmp is not None:
+            shutil.rmtree(scrub_tmp, ignore_errors=True)
 
     if resp.status_code == 401:
         raise HostedError("Ingest token was rejected (401).")
@@ -468,40 +612,56 @@ def _build_break_payload(
     org_id: Optional[str],
     report_path: Path,
     include_error: bool = True,
+    include_free_text: bool = True,
 ) -> dict[str, Any]:
     """Assemble the PHI-free ``/api/runs/ingest-report`` payload from a
-    ``RunReport`` (§3c). All free-text fields pass through the fail-closed
-    scrubber; no screenshots / field values / DOM / report body are included."""
-    halt = report.halt
-    step_intent = _scrub(halt.intent if halt else "")
-    reason = _scrub(halt.reason if halt else "")
-    status = "halt" if halt is not None else "failed"
+    ``RunReport`` (§3c). No screenshots / field values / DOM / report body are
+    ever included.
 
-    error: Optional[str] = None
-    if include_error:
-        for step in reversed(report.results):
-            if step.error:
-                error = _scrub(step.error)
-                break
+    The free-text diagnostic fields (``step_intent`` / ``reason`` / ``error``)
+    are potentially PHI-bearing, so they are emitted ONLY when
+    ``include_free_text`` is True — i.e. when an active scrubber can de-identify
+    them first (or the operator has explicitly opted out via ``SCRUB=off``).
+    When ``include_free_text`` is False (scrubber unavailable under the default
+    ``auto`` posture), the payload degrades to a PHI-free MINIMAL descriptor:
+    the one-way ``drift_signature`` hash, status, resolver rung, and numeric
+    metrics — enough to dedup/triage a break centrally without shipping raw PHI.
+
+    The ``drift_signature`` is hashed from the RAW state_id + reason (a one-way
+    SHA-256, itself PHI-free) so it is stable regardless of whether free text is
+    included."""
+    halt = report.halt
+    status = "halt" if halt is not None else "failed"
+    raw_reason = (halt.reason if halt else "") or ""
+    state_id = halt.state_id if halt else ""
 
     steps = len(report.results)
     duration_s = round(report.total_ms / 1000.0, 3)
-    state_id = halt.state_id if halt else ""
 
     payload: dict[str, Any] = {
         "org_id": org_id,
         "workflow_id": workflow_id,
         "deployment_kind": deployment_kind,
         "status": status,
-        "step_intent": step_intent,
-        "reason": reason,
         "resolver_rung": _last_failed_rung(report),
-        "drift_signature": _drift_signature(state_id, reason),
+        "drift_signature": _drift_signature(state_id, raw_reason),
         "report_path": str(report_path),
         "metrics": {"steps": steps, "duration_s": duration_s},
     }
-    if error:
-        payload["error"] = error
+
+    if include_free_text:
+        payload["step_intent"] = _scrub(halt.intent if halt else "")
+        payload["reason"] = _scrub(raw_reason)
+        if include_error:
+            for step in reversed(report.results):
+                if step.error:
+                    payload["error"] = _scrub(step.error)
+                    break
+    else:
+        # No scrubber to de-identify free text: omit it and flag the descriptor
+        # as PHI-minimal so the server (and any human triager) knows why.
+        payload["phi_minimal"] = True
+
     return payload
 
 
@@ -563,8 +723,27 @@ def report_break(
     resolved_token = resolve_token(token)
     url = f"{resolved_host}/api/runs/ingest-report"
 
-    # Build + post; fail-closed scrub may raise PrivacyNotAvailable when the
-    # compliance-pinned policy (SCRUB=on) is set without the capability.
+    # Decide whether PHI-bearing free text (step_intent/reason/error) may be
+    # included. It may ONLY when an active scrubber can de-identify it first, or
+    # the operator explicitly opted out of scrubbing (SCRUB=off, e.g. an
+    # already-de-identified fixture corpus). Under the default `auto` posture
+    # with the capability MISSING, we must NOT send raw free text — degrade to a
+    # PHI-free minimal descriptor. Under SCRUB=on with the capability missing,
+    # text_scrubbing_enabled() raises (fail-closed) -> local-only fallback.
+    try:
+        scrubbing = privacy.text_scrubbing_enabled()
+    except privacy.PrivacyNotAvailable:
+        if allow_local_fallback:
+            return {
+                "emitted": False,
+                "local_only": True,
+                "reason": "scrubber unavailable under fail-closed policy",
+            }
+        raise
+    include_free_text = scrubbing or privacy.scrub_mode() == "off"
+
+    # Build + post; the fail-closed scrub inside _scrub may still raise
+    # PrivacyNotAvailable if the policy flips concurrently.
     try:
         payload = _build_break_payload(
             report,
@@ -572,6 +751,7 @@ def report_break(
             deployment_kind=deployment_kind,
             org_id=org_id,
             report_path=report_path,
+            include_free_text=include_free_text,
         )
     except privacy.PrivacyNotAvailable:
         if allow_local_fallback:
@@ -594,6 +774,7 @@ def report_break(
             org_id=org_id,
             report_path=report_path,
             include_error=False,
+            include_free_text=include_free_text,
         )
         resp = _post_report(url, resolved_token, harder)
         if resp.status_code == 422:

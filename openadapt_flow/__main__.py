@@ -1129,6 +1129,7 @@ def _cmd_push(args: argparse.Namespace) -> int:
             name=args.name,
             host=args.host,
             token=args.token,
+            deployment_kind=args.deployment_kind,
         )
     except HostedError as e:
         print(f"push failed: {e}")
@@ -1935,6 +1936,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--name",
         default=None,
         help="Workflow name (the server auto-suggests one otherwise)",
+    )
+    p.add_argument(
+        "--deployment-kind",
+        choices=["cloud", "byoc", "regulated"],
+        default=None,
+        help=(
+            "Deployment lane governing the PHI boundary (default: "
+            "OPENADAPT_FLOW_DEPLOYMENT_KIND env, then config.toml "
+            "deployment_lane, else cloud). On byoc/regulated a raw recording is "
+            "REFUSED (push a compiled bundle instead); on cloud a recording is "
+            "de-identified before upload."
+        ),
     )
     p.add_argument(
         "--host",

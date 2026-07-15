@@ -10,7 +10,7 @@ shareable artifact (``REPORT.md``) or the console.
 via the ``privacy`` extra::
 
     pip install 'openadapt-flow[privacy]'
-    python -m spacy download en_core_web_trf
+    python -m spacy download en_core_web_sm
 
 Posture is controlled by two environment variables, safe by default:
 
@@ -128,7 +128,7 @@ def get_text_scrubber() -> Optional[TextScrubber]:
         raise PrivacyNotAvailable(
             "OPENADAPT_FLOW_SCRUB=on but openadapt-privacy is not installed. "
             "Install it with: pip install 'openadapt-flow[privacy]' and "
-            "python -m spacy download en_core_web_trf, or set "
+            "python -m spacy download en_core_web_sm, or set "
             "OPENADAPT_FLOW_SCRUB=auto to write plaintext locally."
         )
     return _text_scrubber  # type: ignore[return-value]

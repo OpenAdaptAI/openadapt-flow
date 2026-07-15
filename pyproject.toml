@@ -82,8 +82,8 @@ rdp = ["aardwolf>=0.2.13"]
 # runtime imports openadapt_flow.privacy unconditionally, but it degrades to a
 # no-op when this extra is absent (OPENADAPT_FLOW_SCRUB=auto). A regulated
 # deployment installs this and sets OPENADAPT_FLOW_SCRUB=on to fail closed.
-# After install: python -m spacy download en_core_web_trf
-privacy = ["openadapt-privacy[presidio]>=0.1.0"]
+# After install: python -m spacy download en_core_web_sm
+privacy = ["openadapt-privacy[presidio]>=1.0.0"]
 # Preferred hosted-token storage. Without this extra, use the environment or
 # explicitly opt into the mode-0600 plaintext fallback.
 hosted = ["keyring>=25"]

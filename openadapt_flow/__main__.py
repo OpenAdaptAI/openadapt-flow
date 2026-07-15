@@ -197,10 +197,10 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
     """Merge the ``--backend`` family of CLI flags over ``cfg.backend``.
 
     A deployment ``--config`` supplies the backend section; direct flags
-    (``--backend`` / ``--agent-url`` / ``--rdp-host``) override individual
-    fields, exactly as the effects/actuation flags override their sections. With
-    no flags the config's backend (default ``web``) is returned unchanged, so an
-    unflagged web replay behaves precisely as before.
+    (``--backend`` / ``--agent-url`` / ``--rdp-host`` / ``--window``) override
+    individual fields, exactly as the effects/actuation flags override their
+    sections. With no flags the config's backend (default ``web``) is returned
+    unchanged, so an unflagged web replay behaves precisely as before.
     """
     backend = cfg.backend
     if getattr(args, "backend", None):
@@ -209,6 +209,10 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
         backend = backend.model_copy(update={"agent_url": args.agent_url})
     if getattr(args, "rdp_host", None):
         backend = backend.model_copy(update={"rdp_host": args.rdp_host})
+    if getattr(args, "window", None):
+        # --window names the local remote-display client-window owner substring
+        # (the macOS / Citrix pixel path); it maps to backend.rdp_window.
+        backend = backend.model_copy(update={"rdp_window": args.window})
     return backend
 
 
@@ -378,7 +382,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
     # SAME compile-ready recording format. Selection is fail-loud (a missing
     # target for the chosen backend raises rather than silently record web).
     backend = getattr(args, "backend", None) or "web"
-    if backend in ("windows", "rdp"):
+    if backend in ("windows", "rdp", "macos"):
         return _cmd_record_desktop(args, backend)
 
     if not args.url:
@@ -1258,13 +1262,15 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
     """
     p.add_argument(
         "--backend",
-        choices=["web", "windows", "rdp"],
+        choices=["web", "windows", "rdp", "macos"],
         default=None,
         help=(
             "Backend to drive: 'web' (default; Playwright/Chromium), 'windows' "
-            "(native Windows via the WAA HTTP agent — needs --agent-url), or "
+            "(native Windows via the WAA HTTP agent — needs --agent-url), "
             "'rdp' (pixel-only remote desktop / Citrix — needs --rdp-host or a "
-            "configured rdp_window). Overrides backend.kind from --config."
+            "configured rdp_window), or 'macos' (the local macOS remote-display "
+            "window path — a Citrix Workspace / Parallels client window; needs "
+            "--window). Overrides backend.kind from --config."
         ),
     )
     p.add_argument(
@@ -1282,8 +1288,19 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
         metavar="HOST",
         help=(
             "RDP host/IP for --backend rdp (network RDP via FreeRDP). Overrides "
-            "backend.rdp_host. For the local Citrix/Parallels window path set "
-            "backend.rdp_window in --config instead."
+            "backend.rdp_host. For the local Citrix/Parallels window path use "
+            "--backend macos --window instead."
+        ),
+    )
+    p.add_argument(
+        "--window",
+        default=None,
+        metavar="OWNER",
+        help=(
+            "Owner-app substring of the local remote-display CLIENT WINDOW to "
+            'drive with --backend macos (e.g. --window "Citrix Workspace" or '
+            "--window Parallels). Sets backend.rdp_window; the macOS Quartz "
+            "backend captures and injects into that on-screen window."
         ),
     )
 

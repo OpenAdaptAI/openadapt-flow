@@ -30,6 +30,9 @@ from openadapt_flow.deployment import BackendConfig, DeploymentConfig
         ("remote-display", "rdp"),
         ("remote_display", "rdp"),
         ("citrix", "rdp"),
+        ("macos", "rdp"),
+        ("MacOS", "rdp"),
+        ("mac", "rdp"),
     ],
 )
 def test_normalize_kind(raw, expected) -> None:
@@ -83,15 +86,28 @@ def test_windows_requires_agent_url() -> None:
         build_backend(BackendConfig(kind="windows"))
 
 
-def test_windows_tls_pin_is_refused_until_wired() -> None:
-    # agent_tls_pin is reserved for openadapt-flow#112; main's WindowsBackend
-    # has no TLS-pin param, so a set-but-unenforced pin must FAIL, not lie.
-    with pytest.raises(ValueError, match="agent_tls_pin"):
-        build_backend(
-            BackendConfig(
-                kind="windows", agent_url="http://host:5001", agent_tls_pin="ab:cd"
-            )
+def test_windows_threads_tls_pin() -> None:
+    # openadapt-flow#112 landed: agent_tls_pin is now WIRED. The factory threads
+    # it to WindowsBackend as pin_fingerprint (https loopback so the fail-closed
+    # require_tls default is satisfied without a live server).
+    pin = "ab" * 32  # a valid 64-hex-char (SHA-256) fingerprint
+    backend = build_backend(
+        BackendConfig(
+            kind="windows",
+            agent_url="https://localhost:5001",
+            agent_tls_pin=pin,
         )
+    )
+    assert type(backend).__name__ == "WindowsBackend"
+    assert backend._pin_fingerprint == pin
+
+
+def test_windows_no_pin_leaves_connection_unpinned() -> None:
+    # Unset pin => pin_fingerprint None (byte-for-byte the pre-#112 behavior).
+    backend = build_backend(
+        BackendConfig(kind="windows", agent_url="http://localhost:5001")
+    )
+    assert backend._pin_fingerprint is None
 
 
 # --- rdp (network, via injected transport) ----------------------------------
@@ -186,6 +202,18 @@ def test_rdp_window_builds_remote_display_backend() -> None:
     assert backend._title_substr == "Win11"
 
 
+def test_macos_kind_builds_remote_display_backend() -> None:
+    # --backend macos is the local remote-display window path: kind 'macos'
+    # normalizes to 'rdp' and, with rdp_window set (no rdp_host), builds the
+    # macOS RemoteDisplayBackend against the named client window.
+    backend = build_backend(
+        BackendConfig(kind="macos", rdp_window="Citrix Workspace"),
+        window_client=_FakeWindowClient(),
+    )
+    assert type(backend).__name__ == "RemoteDisplayBackend"
+    assert backend._owner_substr == "Citrix Workspace"
+
+
 # --- unknown kind -----------------------------------------------------------
 
 
@@ -218,6 +246,20 @@ def test_flags_override_config_backend() -> None:
     assert merged.agent_url == "http://a:5001"
     # Untouched config fields survive the merge.
     assert merged.url == "http://demo"
+
+
+def test_macos_window_flags_merge_to_remote_display() -> None:
+    # `--backend macos --window "Citrix Workspace"` sets kind + rdp_window; the
+    # factory then builds the macOS RemoteDisplayBackend against that window.
+    cfg = DeploymentConfig()
+    args = _replay_args(["--backend", "macos", "--window", "Citrix Workspace"])
+    merged = _resolve_backend_config(args, cfg)
+    assert merged.kind == "macos"
+    assert merged.rdp_window == "Citrix Workspace"
+    assert merged.rdp_host is None
+    backend = build_backend(merged, window_client=_FakeWindowClient())
+    assert type(backend).__name__ == "RemoteDisplayBackend"
+    assert backend._owner_substr == "Citrix Workspace"
 
 
 def test_rdp_host_flag_overrides_config() -> None:

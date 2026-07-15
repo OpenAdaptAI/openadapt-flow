@@ -34,9 +34,12 @@ if TYPE_CHECKING:  # pragma: no cover
 def _normalize_kind(kind: Optional[str]) -> str:
     """Canonicalize a backend ``kind`` token (lower-cased, aliases folded)."""
     k = (kind or "web").strip().lower()
-    if k in ("remote-display", "remote_display", "citrix"):
+    if k in ("remote-display", "remote_display", "citrix", "macos", "mac"):
         # Convenience aliases: the remote-display client-window path is the
-        # local variant of the `rdp` (pixel-only remote desktop) family.
+        # local variant of the `rdp` (pixel-only remote desktop) family. The
+        # `macos` alias names the substrate explicitly (the macOS Quartz window
+        # backend that drives a Citrix Workspace / Parallels client window) —
+        # ``--backend macos --window "Citrix Workspace"`` is the pilot path.
         return "rdp"
     return k
 
@@ -88,19 +91,19 @@ def build_backend(
                 "backend.kind 'windows' requires backend.agent_url (the "
                 "in-guest WAA agent base URL, e.g. --agent-url http://localhost:5001)"
             )
-        if cfg.agent_tls_pin:
-            # RESERVED for openadapt-flow#112; main's WindowsBackend has no
-            # TLS-pin parameter, so wiring it here would be a lie. Fail loud
-            # rather than silently ignore a security control the operator set.
-            raise ValueError(
-                "backend.agent_tls_pin is reserved for the in-flight TLS-pin "
-                "work (openadapt-flow#112) and is NOT enforced on this build; "
-                "unset it until that lands rather than run with an unpinned "
-                "connection that looks pinned"
-            )
         from openadapt_flow.backends.windows_backend import WindowsBackend
 
-        return WindowsBackend(cfg.agent_url, auth_token=cfg.agent_token)
+        # TLS pin (openadapt-flow#112, now landed): when set, WindowsBackend
+        # PINS the agent's per-run certificate — an https:// session is accepted
+        # only if the server presents exactly that fingerprint. Passed through as
+        # ``pin_fingerprint``; None (unset) leaves the connection unpinned exactly
+        # as before. The backend fail-closes on a plaintext non-loopback URL, so
+        # a pin set against http:// is caught there rather than silently ignored.
+        return WindowsBackend(
+            cfg.agent_url,
+            auth_token=cfg.agent_token,
+            pin_fingerprint=cfg.agent_tls_pin,
+        )
 
     if kind == "rdp":
         return _build_rdp_backend(

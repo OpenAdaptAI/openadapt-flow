@@ -44,12 +44,17 @@ class BackendConfig(BaseModel):
       ``rdp_window`` instead drives a local remote-display CLIENT WINDOW (the
       faithful Citrix analog — a Citrix Workspace / Parallels window captured
       and injected at the host OS level).
+    - ``macos`` — alias for the local remote-display window path above (the
+      macOS Quartz backend). ``--backend macos --window "Citrix Workspace"``
+      sets ``rdp_window`` to the client-window owner substring; identical to
+      ``kind: rdp`` with ``rdp_window`` set.
 
     Every non-``web`` field is optional and defaults to None, so an existing
     ``web`` deployment (or an empty config) is byte-for-byte unchanged.
     """
 
-    #: Which backend to drive: ``web`` (default) | ``windows`` | ``rdp``.
+    #: Which backend to drive: ``web`` (default) | ``windows`` | ``rdp`` |
+    #: ``macos`` (alias for the ``rdp`` local remote-display window path).
     kind: str = "web"
 
     #: The GUI URL to drive (the app under automation). None => the caller's
@@ -66,10 +71,13 @@ class BackendConfig(BaseModel):
     #: Optional bearer token for a token-authenticated WAA agent (sent as
     #: ``Authorization: Bearer <token>``). None => no auth header (loopback).
     agent_token: Optional[str] = None
-    #: Placeholder for the agent's pinned TLS certificate fingerprint. RESERVED
-    #: for the in-flight TLS-pin work (openadapt-flow#112); NOT wired into the
-    #: backend on this branch (main's WindowsBackend has no TLS-pin parameter),
-    #: so setting it today has no effect. Documented follow-up.
+    #: SHA-256 fingerprint of the in-guest agent's per-run TLS certificate
+    #: (openadapt-flow#112). When set, the factory threads it to WindowsBackend
+    #: as ``pin_fingerprint``: an ``https://`` session to the agent is accepted
+    #: only if the server presents exactly this certificate (PHI-in-transit
+    #: identity). Unset => the connection is not pinned (loopback dev / a channel
+    #: relying on system-CA validation). A pin against a plaintext non-loopback
+    #: ``agent_url`` fail-closes in the backend rather than run unpinned.
     agent_tls_pin: Optional[str] = None
 
     # -- rdp (network RDP via FreeRDP/aardwolf) ------------------------------

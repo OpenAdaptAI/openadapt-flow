@@ -38,7 +38,12 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.risk import classify_step_risk
-from openadapt_flow.runtime.identity import band_region, context_from_lines, coverage
+from openadapt_flow.runtime.identity import (
+    band_region,
+    context_from_lines,
+    context_region_from_lines,
+    coverage,
+)
 from openadapt_flow.vision.hashing import phash_distance, phash_png
 from openadapt_flow.vision.ocr import OcrLine, normalize_text, ocr
 
@@ -960,6 +965,39 @@ def compile_recording(
                 if structural_raw
                 else None
             )
+            # Identifier crop (PIXEL-ONLY substrates): when identity is armed
+            # by the OCR band but NO structured identity was captured (Citrix /
+            # RDP / macOS remote-display — UIA/DOM does not cross the pixel
+            # boundary), also persist a crop of the row's identity pixels. It
+            # feeds the pixel-compare identity tier
+            # (runtime.identity.verify_pixel_identity), whose rendered pixels
+            # keep the O/0 and l/1 distinction OCR collapses. That tier is
+            # MISMATCH-or-ABSTAIN only (VERIFY is hard-gated off), so arming it
+            # makes a WRONG identifier HALT while it can never false-accept — the
+            # zero-false-accept guarantee is preserved. On structured (DOM/UIA)
+            # substrates structured_identity is set and this stays None (the
+            # structured tier handles identity; no identity pixels at rest).
+            identifier_crop_rel: Optional[str] = None
+            identifier_region: Optional[Region] = None
+            if context_text is not None and structured_identity is None:
+                id_region = context_region_from_lines(
+                    frame_lines,
+                    exclude_region=crop_region,
+                    band=band_region(
+                        click, crop_region[3], (frame.shape[1], frame.shape[0])
+                    ),
+                    point=click,
+                    min_confidence=MIN_OCR_CONFIDENCE,
+                    reference_date=reference_date,
+                )
+                if id_region is not None:
+                    identifier_rel = f"identifiers/{step_id}.png"
+                    (bundle / "identifiers").mkdir(parents=True, exist_ok=True)
+                    (bundle / identifier_rel).write_bytes(
+                        _crop_png(before_png, id_region)
+                    )
+                    identifier_crop_rel = identifier_rel
+                    identifier_region = id_region
             anchor = Anchor(
                 template=template_rel,
                 region=crop_region,
@@ -969,6 +1007,8 @@ def compile_recording(
                 structured_identity=structured_identity,
                 structural=structural,
                 landmarks=landmarks,
+                identifier_crop=identifier_crop_rel,
+                identifier_region=identifier_region,
             )
             # Identity-protection audit trail: an UNARMED click proceeds
             # with NO identity verification at replay (docs/LIMITS.md), so

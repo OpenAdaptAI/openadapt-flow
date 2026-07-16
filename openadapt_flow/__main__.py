@@ -1791,6 +1791,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parameter substitution (repeatable)",
     )
     p.add_argument(
+        "--params-file",
+        default=None,
+        help=(
+            "JSON object of parameter bindings; keeps values out of process "
+            "arguments for managed execution"
+        ),
+    )
+    p.add_argument(
         "--allow-model-grounding",
         action="store_true",
         help=(

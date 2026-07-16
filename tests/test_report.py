@@ -195,6 +195,22 @@ def test_run_report_failure(tmp_path: Path) -> None:
     assert "![step_verify after](steps/step_verify_after.png)" in md
 
 
+def test_run_report_discloses_approved_unverified_effect(tmp_path: Path) -> None:
+    run_dir = _make_run_dir(tmp_path, success=True)
+    report = RunReport.model_validate_json((run_dir / "report.json").read_text())
+    report.governed_authorization_id = "approval-123"
+    report.governed_approval_source = "local-cli-explicit-flag"
+    report.approved_unverified_effect_step_ids = ["step_save"]
+    report.results[1].effect_approved_unverified = True
+    report.results[1].effect_results = ["[approved-unverified] explicit approval"]
+    report.save(run_dir)
+
+    md = render_run_report(run_dir).read_text(encoding="utf-8")
+    assert "**Governed authorization:** `approval-123`" in md
+    assert "**Approved without independent effect verification:** `step_save`" in md
+    assert "effect ⚠ approved" in md
+
+
 def test_run_report_missing_json(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         render_run_report(tmp_path)

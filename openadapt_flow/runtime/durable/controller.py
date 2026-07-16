@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from openadapt_flow.ir import Step, StepResult, Workflow
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.checkpoint import (
     CheckpointStore,
     PendingEscalation,
@@ -177,18 +178,23 @@ class DurableRun:
         workflow_name: str,
         bundle_dir: Path | str,
         params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
         save_healed_to: Optional[Path | str] = None,
         key: Optional[str] = None,
+        governed_authorization: Optional[GovernedRunAuthorization] = None,
     ) -> None:
         # ``key`` (None by default) opts the durable artifacts into AES-256-GCM
         # encryption-at-rest; unset => plaintext, exactly as before.
         self.store = CheckpointStore(run_dir, key=key)
         self.workflow_name = workflow_name
+        self.governed_authorization = governed_authorization
         self.store.write_manifest(
             RunManifest(
                 workflow_name=workflow_name,
                 bundle_dir=str(Path(bundle_dir).resolve()),
                 params=dict(params),
+                worklists=worklists,
+                governed_authorization=governed_authorization,
                 save_healed_to=(str(save_healed_to) if save_healed_to else None),
             )
         )
@@ -217,6 +223,18 @@ class DurableRun:
                     next_step_index=step_index + 1,
                     params=dict(params),
                     effect_verified=result.effect_verified,
+                    effect_approved_unverified=result.effect_approved_unverified,
+                    effect_contract_hashes=list(result.effect_contract_hashes),
+                    governed_authorization_id=(
+                        self.governed_authorization.authorization_id
+                        if self.governed_authorization is not None
+                        else None
+                    ),
+                    governed_approval_source=(
+                        self.governed_authorization.approval_source
+                        if self.governed_authorization is not None
+                        else None
+                    ),
                     postconditions_ok=result.postconditions_ok,
                     skipped=result.skipped,
                     actuation=result.actuation,
@@ -326,6 +344,16 @@ def resumed_step_results(
                 skipped=checkpoint.skipped if checkpoint is not None else False,
                 effect_verified=(
                     checkpoint.effect_verified if checkpoint is not None else None
+                ),
+                effect_approved_unverified=(
+                    checkpoint.effect_approved_unverified
+                    if checkpoint is not None
+                    else False
+                ),
+                effect_contract_hashes=(
+                    list(checkpoint.effect_contract_hashes)
+                    if checkpoint is not None
+                    else []
                 ),
                 postconditions_ok=(
                     checkpoint.postconditions_ok if checkpoint is not None else None

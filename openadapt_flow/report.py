@@ -140,6 +140,27 @@ def render_run_report(run_dir: Path | str) -> Path:
             "- **Data egress:** none — fully local replay (zero screenshots "
             "left the box)"
         )
+    if report.governed_authorization_id:
+        lines.append(
+            "- **Governed authorization:** `"
+            f"{_md_escape(report.governed_authorization_id)}` "
+            f"({_md_escape(report.governed_approval_source or 'unspecified')})"
+        )
+        lines.append(
+            "- **Admitted policy:** "
+            f"{_md_escape(report.governed_policy_name or 'unspecified')}; "
+            "runtime inputs bound to `"
+            f"{_md_escape(report.governed_runtime_inputs_digest or 'unspecified')}`"
+        )
+        if report.approved_unverified_effect_step_ids:
+            steps = ", ".join(
+                f"`{_md_escape(step_id)}`"
+                for step_id in report.approved_unverified_effect_step_ids
+            )
+            lines.append(
+                "- **Approved without independent effect verification:** "
+                f"{steps}; screen postconditions still applied"
+            )
     lines.append("")
 
     # -- Parameters -----------------------------------------------------
@@ -213,6 +234,12 @@ def render_run_report(run_dir: Path | str) -> Path:
             if result.input_retried:
                 marker += " (retried)"
             verified_parts.append(marker)
+        if result.effect_verified is True:
+            verified_parts.append("effect ✓")
+        elif result.effect_verified is False:
+            verified_parts.append("effect ✗")
+        elif result.effect_approved_unverified:
+            verified_parts.append("effect ⚠ approved")
         verified = ", ".join(verified_parts) or "&mdash;"
         lines.append(
             f"| {i} | `{_md_escape(result.step_id)}` "

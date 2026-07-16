@@ -57,6 +57,7 @@ from openadapt_flow import crypto
 from openadapt_flow.deployment import DeploymentConfig
 from openadapt_flow.ir import Step, Workflow
 from openadapt_flow.policy import (
+    has_screen_postcondition,
     has_system_effect,
     has_unconfirmed_effect_binding,
     is_identity_applicable,
@@ -64,6 +65,11 @@ from openadapt_flow.policy import (
     step_tags,
 )
 from openadapt_flow.risk import classify_step_risk
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    UnverifiedWriteApproval,
+    runtime_inputs_digest,
+)
 from openadapt_flow.traversal import iter_workflow_steps
 
 #: Default certifying policy for a regulated run when none is configured.
@@ -176,6 +182,11 @@ class RunGateReport(BaseModel):
     workflow_name: str
     policy_name: str
     gates: list[GateResult] = Field(default_factory=list)
+    bundle_content_digest: Optional[str] = Field(default=None, pattern="^[a-f0-9]{64}$")
+    required_identity_step_ids: list[str] = Field(default_factory=list)
+    effect_verifier_configured: bool = False
+    api_actuator_configured: bool = False
+    unverified_write_approval_granted: bool = False
 
     @property
     def passed(self) -> bool:
@@ -220,6 +231,7 @@ def evaluate_run_gate(
     bundle_dir: Path | str,
     deployment: DeploymentConfig,
     effect_verifier: object | None,
+    api_actuator: object | None = None,
     policy_source: Optional[str] = None,
     approval_available: bool = False,
     strict_templates: bool = False,
@@ -258,18 +270,39 @@ def evaluate_run_gate(
     policy_name = policy_source or deployment.policy.policy or DEFAULT_POLICY
     steps = list(iter_workflow_steps(workflow))
 
+    approval_gate = _gate_approval(
+        steps, effect_verifier, api_actuator, approval_available
+    )
     gates = [
         _gate_certification(workflow, policy_name),
         _gate_identity(steps),
         _gate_effect(steps),
-        _gate_approval(steps, effect_verifier, approval_available),
+        approval_gate,
         _gate_encryption(workflow, bundle, require_encryption, strict_templates),
         _gate_manifest(
             workflow, bundle, pinned_content_digest, pinned_compiler_version
         ),
     ]
     return RunGateReport(
-        workflow_name=workflow.name, policy_name=policy_name, gates=gates
+        workflow_name=workflow.name,
+        policy_name=policy_name,
+        gates=gates,
+        bundle_content_digest=(
+            workflow.manifest.content_digest if workflow.manifest is not None else None
+        ),
+        required_identity_step_ids=[
+            step.id for step in steps if must_be_identity_armed(step)
+        ],
+        effect_verifier_configured=effect_verifier is not None,
+        api_actuator_configured=api_actuator is not None,
+        unverified_write_approval_granted=(
+            effect_verifier is None
+            and approval_available
+            and approval_gate.passed
+            and any(
+                is_consequential(step) and has_system_effect(step) for step in steps
+            )
+        ),
     )
 
 
@@ -383,7 +416,10 @@ def _gate_effect(steps: list[Step]) -> GateResult:
 
 
 def _gate_approval(
-    steps: list[Step], effect_verifier: object | None, approval_available: bool
+    steps: list[Step],
+    effect_verifier: object | None,
+    api_actuator: object | None,
+    approval_available: bool,
 ) -> GateResult:
     """Gate 4: writes with no configured verifier need explicit approval.
 
@@ -407,7 +443,30 @@ def _gate_approval(
             True,
             "no consequential writes require independent verification",
         )
+    direct_api_writes = [
+        step
+        for step in writes
+        if api_actuator is not None and step.api_binding is not None
+    ]
+    if direct_api_writes:
+        return _result(
+            GATE_APPROVAL,
+            False,
+            f"{len(direct_api_writes)} direct API write(s) have no verifier; "
+            "operator approval cannot replace the API tier's independent outcome "
+            "check",
+            [step.id for step in direct_api_writes],
+        )
     if approval_available:
+        vacuous = [step for step in writes if not has_screen_postcondition(step)]
+        if vacuous:
+            return _result(
+                GATE_APPROVAL,
+                False,
+                f"{len(vacuous)} approved-unverified GUI write(s) have no "
+                "screen postcondition floor",
+                [step.id for step in vacuous],
+            )
         return _result(
             GATE_APPROVAL,
             True,
@@ -422,6 +481,58 @@ def _gate_approval(
         "(no verifier configured for this deployment) and no explicit approval "
         "was provided -- halting",
         [s.id for s in writes],
+    )
+
+
+def build_runtime_authorization(
+    workflow: Workflow,
+    report: RunGateReport,
+    *,
+    approval_source: str = "local-cli-explicit-flag",
+    params: Optional[dict[str, str]] = None,
+    worklists: Optional[dict[str, list[dict[str, str]]]] = None,
+) -> GovernedRunAuthorization:
+    """Bind a successful admission decision to the exact sealed workflow.
+
+    The returned capability is passed in-memory to :class:`Replayer`.  It
+    enforces two facts that admission alone cannot: identity-required steps
+    must receive an affirmative live verdict, and an approved unverifiable GUI
+    write must be the exact step/effect contract the operator admitted.
+    """
+    if not report.passed:
+        raise ValueError("cannot authorize a workflow that failed the run gate")
+    if workflow.manifest is None or not workflow.manifest.content_digest:
+        raise ValueError("cannot authorize an unsealed workflow")
+    if report.bundle_content_digest != workflow.manifest.content_digest:
+        raise ValueError("run gate report belongs to a different workflow")
+
+    from openadapt_flow.bundle_validation import compute_content_digest
+
+    recomputed = compute_content_digest(workflow, workflow.manifest.file_hashes)
+    if recomputed != report.bundle_content_digest:
+        raise ValueError("workflow changed after the run gate evaluated it")
+
+    steps = list(iter_workflow_steps(workflow))
+    approvals: list[UnverifiedWriteApproval] = []
+    if report.unverified_write_approval_granted:
+        approvals = [
+            UnverifiedWriteApproval(
+                step_id=step.id,
+                effect_contract_hashes=tuple(
+                    effect.contract_hash() for effect in step.effects
+                ),
+            )
+            for step in steps
+            if is_consequential(step) and has_system_effect(step)
+        ]
+
+    return GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, params, worklists),
+        admitted_policy_name=report.policy_name,
+        required_identity_step_ids=tuple(report.required_identity_step_ids),
+        unverified_write_approvals=tuple(approvals),
+        approval_source=approval_source,
     )
 
 

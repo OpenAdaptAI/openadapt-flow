@@ -67,6 +67,7 @@ def resume(
     approval: Optional[ApprovalRecord] = None,
     bundle_dir: Optional[Path | str] = None,
     params: Optional[dict[str, str]] = None,
+    worklists: Optional[dict[str, list[dict[str, str]]]] = None,
     save_healed_to: Optional[Path | str] = None,
     now: Optional[datetime] = None,
     key: Optional[str] = None,
@@ -89,6 +90,8 @@ def resume(
         params: Override the parameter bindings recorded in the manifest;
             defaults to the manifest's ``params`` so the resume re-binds
             identically.
+        worklists: Override the worklists recorded in the manifest; defaults to
+            the original frozen worklists so program loops resume identically.
         save_healed_to: Override the manifest's healed-bundle path.
         now: Injectable clock for the stale-pause check (defaults to UTC now).
         key: At-rest passphrase for an ENCRYPTED run (its checkpoints and/or its
@@ -126,6 +129,11 @@ def resume(
     resolved_params = (
         params if params is not None else (manifest.params if manifest else {})
     )
+    resolved_worklists = (
+        worklists
+        if worklists is not None
+        else (manifest.worklists if manifest is not None else {})
+    )
     resolved_healed = save_healed_to or (manifest.save_healed_to if manifest else None)
 
     live_bundle_version = bundle_version(resolved_bundle)
@@ -143,6 +151,15 @@ def resume(
         )
 
     workflow = Workflow.load(resolved_bundle, key=key)
+    if manifest is not None and manifest.governed_authorization is not None:
+        existing = getattr(replayer, "governed_authorization", None)
+        if existing is not None and existing != manifest.governed_authorization:
+            raise BundleMismatch(
+                "resume Replayer carries a different governed authorization "
+                "than the durable run manifest"
+            )
+        replayer.governed_authorization = manifest.governed_authorization
+        replayer.governed_continuation = True
     # Keep the resumed leg sealing new checkpoints with the same key.
     replayer.checkpoint_key = key
     program_checkpoint: Optional[ProgramCheckpoint] = store.last_program_checkpoint()
@@ -155,6 +172,7 @@ def resume(
             checkpoint=program_checkpoint,
             bundle_dir=resolved_bundle,
             params=resolved_params,
+            worklists=resolved_worklists,
             save_healed_to=resolved_healed,
             live_bundle_version=live_bundle_version,
         )
@@ -165,6 +183,7 @@ def resume(
     return replayer.run(
         workflow,
         params=resolved_params,
+        worklists=resolved_worklists,
         bundle_dir=resolved_bundle,
         run_dir=run_dir,
         save_healed_to=(Path(resolved_healed) if resolved_healed else None),
@@ -180,6 +199,7 @@ def _resume_program(
     checkpoint: Optional[ProgramCheckpoint],
     bundle_dir: Path,
     params: dict[str, str],
+    worklists: dict[str, list[dict[str, str]]],
     save_healed_to: Optional[Path | str],
     live_bundle_version: str,
 ) -> RunReport:
@@ -210,6 +230,7 @@ def _resume_program(
     return replayer.run(
         workflow,
         params=params,
+        worklists=worklists,
         bundle_dir=bundle_dir,
         run_dir=store.run_dir,
         save_healed_to=(Path(save_healed_to) if save_healed_to else None),

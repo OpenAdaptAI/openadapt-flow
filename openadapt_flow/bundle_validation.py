@@ -279,7 +279,11 @@ class BundleIntegrityError(Exception):
 
 
 def verify_integrity(
-    workflow: "Workflow", bundle_dir: Path | str, stored: BundleManifest
+    workflow: "Workflow",
+    bundle_dir: Path | str,
+    stored: BundleManifest,
+    *,
+    decrypted_assets: Optional[dict[str, bytes]] = None,
 ) -> None:
     """Recompute the bundle's asset hashes + content digest and compare them to
     ``stored``. Raises :class:`BundleIntegrityError` on any mismatch.
@@ -291,10 +295,11 @@ def verify_integrity(
     1. the ``workflow.json`` content (plus the SEALED asset-hash list) must
        still hash to the sealed ``content_digest`` -- catches any edit to the
        serialized workflow;
-    2. every asset the manifest SEALED must still be present on disk and hash to
-       its recorded value -- catches a tampered/removed template. Assets ADDED
-       after the seal are outside the seal and are not checked here (re-saving
-       reseals them).
+    2. every asset the manifest SEALED must still be present and hash to its
+       recorded value -- from disk for plaintext bundles, or from the caller's
+       authenticated in-memory plaintext map for encrypted bundles. Assets
+       ADDED after the seal are outside the seal and are not checked here
+       (re-saving reseals them).
 
     Only meaningful for a bundle that carries a persisted manifest with a
     non-empty digest; legacy (pre-v2) bundles have no sealed digest to compare
@@ -315,6 +320,19 @@ def verify_integrity(
     # 2. Each sealed asset must still hash to its recorded value.
     bundle = Path(bundle_dir)
     for rel, expected in stored.file_hashes.items():
+        if decrypted_assets is not None:
+            data = decrypted_assets.get(rel)
+            if data is None:
+                raise BundleIntegrityError(
+                    f"manifest lists sealed asset {rel!r} but its authenticated "
+                    "plaintext is unavailable"
+                )
+            if _sha256_bytes(data) != expected:
+                raise BundleIntegrityError(
+                    f"sealed asset {rel!r} plaintext hash mismatch "
+                    "(tampered or corrupted)"
+                )
+            continue
         path = bundle / rel
         if not path.is_file():
             raise BundleIntegrityError(

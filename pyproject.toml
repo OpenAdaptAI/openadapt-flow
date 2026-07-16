@@ -83,7 +83,13 @@ rdp = ["aardwolf>=0.2.13"]
 # no-op when this extra is absent (OPENADAPT_FLOW_SCRUB=auto). A regulated
 # deployment installs this and sets OPENADAPT_FLOW_SCRUB=on to fail closed.
 # After install: python -m spacy download en_core_web_sm
-privacy = ["openadapt-privacy[presidio]>=1.0.0"]
+privacy = [
+    "openadapt-privacy[presidio]>=1.0.0",
+    # spaCy imports Click directly from its CLI package but does not declare it;
+    # Typer 0.27 stopped supplying Click transitively. Keep regulated-mode
+    # compilation importable under fresh, unconstrained PyPI resolution.
+    "click>=8.0,<9",
+]
 # Preferred hosted-token storage. Without this extra, use the environment or
 # explicitly opt into the mode-0600 plaintext fallback.
 hosted = ["keyring>=25"]

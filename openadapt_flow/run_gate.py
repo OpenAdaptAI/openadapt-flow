@@ -26,10 +26,10 @@ structured reason naming the failing gate) unless ALL of the following hold:
    Where independent verification is impossible (no verifier wired), the write
    is admitted ONLY under EXPLICIT operator approval; absent approval, the run
    halts.
-5. **Encryption at rest** -- the bundle's ``workflow.json`` is sealed with
-   AES-256-GCM. A plaintext bundle is refused. Template / screenshot assets are
-   not yet sealed by the crypto layer; their presence is a loud WARNING by
-   default and a REFUSAL under ``strict_templates``.
+5. **Encryption at rest** -- the bundle's ``workflow.json`` and template crops
+   are sealed with AES-256-GCM. A plaintext bundle is refused. Any additional
+   plaintext template / screenshot asset is a loud WARNING by default and a
+   REFUSAL under ``strict_templates``.
 6. **Sealed manifest + version pin** -- the bundle carries an integrity-sealed
    manifest whose digest re-verifies (no post-seal tampering), and any supplied
    version pin (content digest / compiler version) matches. A mismatch refuses.
@@ -53,6 +53,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from openadapt_flow import crypto
 from openadapt_flow.deployment import DeploymentConfig
 from openadapt_flow.ir import Step, Workflow
 from openadapt_flow.policy import (
@@ -244,8 +245,9 @@ def evaluate_run_gate(
         approval_available: The operator has EXPLICITLY approved executing writes
             whose effects cannot be independently verified in this deployment
             (gate 4 fallback). Default False (fail closed).
-        strict_templates: Treat unsealed template / screenshot assets as a
-            REFUSAL rather than a warning (gate 5).
+        strict_templates: Treat any genuinely unsealed template / screenshot
+            asset as a REFUSAL rather than a warning (gate 5). Ciphertexts
+            produced by ``Workflow.save(encrypt=True)`` satisfy this gate.
         require_encryption: Require the bundle be AES-GCM encrypted at rest
             (gate 5). Default True (fail closed).
         pinned_content_digest / pinned_compiler_version: Optional version pins
@@ -423,19 +425,43 @@ def _gate_approval(
     )
 
 
-def _template_assets(workflow: Workflow, bundle: Path) -> list[str]:
-    """Bundle-relative template/screenshot asset paths (from the manifest and
-    from the ``templates/`` directory on disk)."""
-    paths: set[str] = set()
+def _template_asset_encryption(
+    workflow: Workflow, bundle: Path
+) -> tuple[list[str], list[str], list[str]]:
+    """Return logical assets, cleartext leaks, and uncovered declared assets."""
+
+    assets: set[str] = set()
+    unsealed: set[str] = set()
+    uncovered: set[str] = set()
     manifest = workflow.manifest
+    declared = set(manifest.file_hashes) if manifest is not None else set()
     if manifest is not None:
-        paths.update(manifest.file_hashes.keys())
+        assets.update(declared)
     tdir = bundle / "templates"
     if tdir.is_dir():
         for p in tdir.rglob("*"):
-            if p.is_file():
-                paths.add(str(p.relative_to(bundle)))
-    return sorted(paths)
+            if not p.is_file():
+                continue
+            rel = p.relative_to(bundle).as_posix()
+            if rel.endswith(".enc"):
+                logical = rel.removesuffix(".enc")
+                assets.add(logical)
+                if not crypto.is_encrypted(p.read_bytes()):
+                    unsealed.add(rel)
+            else:
+                assets.add(rel)
+                unsealed.add(rel)
+    if workflow.encrypted:
+        authenticated = workflow.decrypted_templates()
+        for rel in declared:
+            ciphertext = bundle / f"{rel}.enc"
+            if (
+                not ciphertext.is_file()
+                or not crypto.is_encrypted(ciphertext.read_bytes())
+                or rel not in authenticated
+            ):
+                uncovered.add(rel)
+    return sorted(assets), sorted(unsealed), sorted(uncovered)
 
 
 def _gate_encryption(
@@ -452,9 +478,7 @@ def _gate_encryption(
             "bundle workflow.json is NOT encrypted at rest (AES-256-GCM). "
             "Re-save with save(encrypt=True) / a configured OPENADAPT_BUNDLE_KEY",
         )
-    # Template / screenshot assets are not sealed by the crypto layer yet: they
-    # sit as plaintext PNGs alongside the (encrypted) workflow.json.
-    templates = _template_assets(workflow, bundle)
+    templates, unsealed, uncovered = _template_asset_encryption(workflow, bundle)
     enc_note = "encrypted" if workflow.encrypted else "plaintext (not required)"
     if not templates:
         return _result(
@@ -462,22 +486,46 @@ def _gate_encryption(
             True,
             f"workflow.json {enc_note}; no template/screenshot assets present",
         )
+    if workflow.encrypted and uncovered:
+        return _result(
+            GATE_ENCRYPTION,
+            False,
+            f"workflow.json encrypted, but {len(uncovered)} declared template/"
+            "screenshot asset(s) lack authenticated ciphertext coverage",
+            uncovered,
+        )
+    if workflow.encrypted and unsealed:
+        return _result(
+            GATE_ENCRYPTION,
+            False,
+            f"workflow.json encrypted, but {len(unsealed)} plaintext template/"
+            "screenshot asset(s) remain on disk; mixed encrypted/plaintext "
+            "bundles are refused",
+            unsealed,
+        )
+    if not unsealed:
+        return _result(
+            GATE_ENCRYPTION,
+            True,
+            f"workflow.json {enc_note}; {len(templates)} template/screenshot "
+            "asset(s) encrypted at rest",
+        )
     if strict_templates:
         return _result(
             GATE_ENCRYPTION,
             False,
-            f"workflow.json {enc_note}, but {len(templates)} template/screenshot "
+            f"workflow.json {enc_note}, but {len(unsealed)} template/screenshot "
             "asset(s) are UNSEALED (plaintext at rest) and --strict-templates "
             "is set",
-            templates,
+            unsealed,
         )
     return _result(
         GATE_ENCRYPTION,
         True,
-        f"workflow.json {enc_note}; WARNING: {len(templates)} template/"
+        f"workflow.json {enc_note}; WARNING: {len(unsealed)} template/"
         "screenshot asset(s) are unsealed (plaintext at rest) -- protect via "
         "disk encryption or run with --strict-templates to refuse",
-        templates,
+        unsealed,
         warning=True,
     )
 
@@ -503,7 +551,14 @@ def _gate_manifest(
             "-- cannot verify provenance or version-pin it",
         )
     try:
-        verify_integrity(workflow, bundle, manifest)
+        verify_integrity(
+            workflow,
+            bundle,
+            manifest,
+            decrypted_assets=(
+                workflow.decrypted_templates() if workflow.encrypted else None
+            ),
+        )
     except BundleIntegrityError as e:
         return _result(
             GATE_MANIFEST,

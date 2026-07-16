@@ -427,12 +427,13 @@ jobs:
         run: pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py
 
   # --- Clean-wheel install + CLI smoke (REQUIRED on PRs) -------------------
-  # Builds the wheel, installs it in a FRESH venv (no source tree, core deps
-  # only), and proves the packaged distribution actually works end to end:
-  # import + version/py.typed integrity, then the installed `openadapt-flow`
-  # console script drives a real compile of a committed fixture recording and
-  # loads the compiled bundle. (The replay leg is covered by the required
-  # `e2e-browser` job, since replay needs a live target app + headless browser.)
+  # Builds the wheel, installs it in a FRESH venv (no source tree), and proves
+  # the packaged distribution actually works end to end: core import +
+  # version/py.typed integrity, production privacy/hosted extras, then the
+  # installed `openadapt-flow` console script drives a real compile of a
+  # committed fixture recording and loads the compiled bundle. (The replay leg
+  # is covered by the required `e2e-browser` job, since replay needs a live
+  # target app + headless browser.)
   # Runs on PRs now so packaging/CLI breakage blocks the merge instead of
   # surfacing post-merge.
   wheel:
@@ -460,6 +461,15 @@ jobs:
           # version-agnostic so it keeps holding across releases) and that the
           # py.typed marker shipped inside the wheel.
           cd /tmp && /tmp/clean/bin/python -c "import os, importlib.metadata as m, openadapt_flow; v = openadapt_flow.__version__; dist = m.version('openadapt-flow'); print('attr', v, 'dist', dist); assert v == dist, (v, dist); p = os.path.join(os.path.dirname(openadapt_flow.__file__), 'py.typed'); assert os.path.exists(p), 'py.typed missing from installed package'; print('py.typed present, import OK')"
+
+      - name: Install production extras and verify spaCy runtime imports
+        run: |
+          WHEEL="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
+          python -m venv /tmp/privacy
+          /tmp/privacy/bin/pip install "${WHEEL}[privacy,hosted]"
+          /tmp/privacy/bin/pip check
+          cd /tmp && /tmp/privacy/bin/python -c "import importlib.metadata as m, click, spacy; print('privacy imports OK:', m.version('click'), m.version('spacy'))"
 
       # CLI smoke on the INSTALLED console script (not the source tree). --help
       # must exit 0; the version is asserted via the import check above (there is

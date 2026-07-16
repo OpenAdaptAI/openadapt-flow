@@ -291,21 +291,78 @@ def test_unencrypted_allowed_with_escape_hatch(tmp_path):
 
 
 def test_unsealed_templates_warn_by_default_refuse_when_strict(tmp_path):
-    wf, bundle = _seal(_good_workflow("tmpl"), tmp_path)
-    # Drop a plaintext template asset into the bundle.
+    wf, bundle = _seal(_good_workflow("tmpl"), tmp_path, encrypt=False)
     (bundle / "templates").mkdir(exist_ok=True)
     (bundle / "templates" / "s0.png").write_bytes(b"\x89PNG plaintext crop")
 
-    warn = _run(wf, bundle)
+    warn = _run(wf, bundle, require_encryption=False)
     g = warn.gate(GATE_ENCRYPTION)
     assert g is not None and g.passed and g.warning
     assert warn.passed  # a warning does not fail the run
+    assert "WARNING: 1 template/screenshot asset(s) are unsealed" in g.detail
 
-    strict = _run(wf, bundle, strict_templates=True)
+    strict = _run(wf, bundle, strict_templates=True, require_encryption=False)
     gs = strict.gate(GATE_ENCRYPTION)
     assert gs is not None and not gs.passed
     assert not strict.passed
     assert any("s0.png" in o for o in gs.offenders)
+
+
+def test_encrypted_templates_pass_strict_gate(tmp_path):
+    workflow = _good_workflow("sealed-templates")
+    bundle = tmp_path / workflow.name
+    templates = bundle / "templates"
+    templates.mkdir(parents=True)
+    (templates / "s0.png").write_bytes(b"\x89PNG sealed patient crop")
+    workflow.save(bundle, encrypt=True, key=_KEY)
+    loaded = Workflow.load(bundle, key=_KEY)
+
+    assert not (templates / "s0.png").exists()
+    assert (templates / "s0.png.enc").is_file()
+    report = _run(loaded, bundle, strict_templates=True)
+    gate = report.gate(GATE_ENCRYPTION)
+
+    assert gate is not None and gate.passed and not gate.warning
+    assert gate.offenders == []
+    assert "1 template/screenshot asset(s) encrypted at rest" in gate.detail
+    assert report.passed, report.render()
+
+
+def test_encrypted_bundle_with_plaintext_template_leak_is_always_refused(tmp_path):
+    workflow = _good_workflow("mixed-templates")
+    bundle = tmp_path / workflow.name
+    templates = bundle / "templates"
+    templates.mkdir(parents=True)
+    (templates / "s0.png").write_bytes(b"\x89PNG sealed patient crop")
+    workflow.save(bundle, encrypt=True, key=_KEY)
+    loaded = Workflow.load(bundle, key=_KEY)
+    (templates / "leaked.png").write_bytes(b"\x89PNG unexpected cleartext")
+
+    report = _run(loaded, bundle, strict_templates=False)
+    gate = report.gate(GATE_ENCRYPTION)
+
+    assert gate is not None and not gate.passed and not gate.warning
+    assert gate.offenders == ["templates/leaked.png"]
+    assert "mixed encrypted/plaintext bundles are refused" in gate.detail
+    assert "[REFUSE] Encrypted bundle" in report.render()
+
+
+def test_encrypted_bundle_missing_declared_ciphertext_is_refused(tmp_path):
+    workflow = _good_workflow("missing-ciphertext")
+    bundle = tmp_path / workflow.name
+    templates = bundle / "templates"
+    templates.mkdir(parents=True)
+    (templates / "s0.png").write_bytes(b"\x89PNG sealed patient crop")
+    workflow.save(bundle, encrypt=True, key=_KEY)
+    loaded = Workflow.load(bundle, key=_KEY)
+    (templates / "s0.png.enc").unlink()
+
+    report = _run(loaded, bundle, strict_templates=True)
+    gate = report.gate(GATE_ENCRYPTION)
+
+    assert gate is not None and not gate.passed
+    assert gate.offenders == ["templates/s0.png"]
+    assert "lack authenticated ciphertext coverage" in gate.detail
 
 
 # ---------------------------------------------------------------------------

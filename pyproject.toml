@@ -4,11 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openadapt-flow"
-version = "1.7.0"
+version = "1.8.0"
 description = "Compile demonstrated GUI workflows into deterministic local replay with governed repair and refusal"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+# rapidocr-onnxruntime is part of the validated identity/OCR path and does not
+# publish Python 3.13-compatible releases. Keep the package boundary aligned
+# with the runtime we actually qualify; migrating OCR engines requires rerunning
+# the identity and dense-surface safety evidence first.
+requires-python = ">=3.10,<3.13"
 authors = [{ name = "OpenAdapt.AI" }]
 dependencies = [
     "pydantic>=2.5",
@@ -78,15 +82,30 @@ rdp = ["aardwolf>=0.2.13"]
 # runtime imports openadapt_flow.privacy unconditionally, but it degrades to a
 # no-op when this extra is absent (OPENADAPT_FLOW_SCRUB=auto). A regulated
 # deployment installs this and sets OPENADAPT_FLOW_SCRUB=on to fail closed.
-# After install: python -m spacy download en_core_web_trf
-privacy = ["openadapt-privacy[presidio]>=0.1.0"]
+# After install: python -m spacy download en_core_web_sm
+privacy = [
+    "openadapt-privacy[presidio]>=1.0.0",
+    # spaCy imports Click directly from its CLI package but does not declare it;
+    # Typer 0.27 stopped supplying Click transitively. Keep regulated-mode
+    # compilation importable under fresh, unconstrained PyPI resolution.
+    "click>=8.0,<9",
+]
 # Preferred hosted-token storage. Without this extra, use the environment or
 # explicitly opt into the mode-0600 plaintext fallback.
 hosted = ["keyring>=25"]
 # On-prem VLM inference service (the GPU-box appliance side).
 service = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
-# Apple-Silicon dev backend for the VLM service (local model, no GPU box).
-service-mlx = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "mlx-vlm>=0.1"]
+# Apple-Silicon Research backend for the VLM service (local model, no GPU box).
+# mlx-vlm 0.6.4 requires the Transformers range containing fixes for
+# GHSA-69w3-r845-3855, GHSA-29pf-2h5f-8g72, and GHSA-fgcw-684q-jj6r. Keep the
+# direct constraint as defense in depth in case a future transitive requirement
+# is loosened.
+service-mlx = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "mlx-vlm>=0.6.4,<0.7",
+    "transformers>=5.5,<5.13",
+]
 # Cross-platform desktop recording on-ramp: convert an openadapt-capture
 # session into a flow recording (openadapt_flow.adapters.capture). Optional and
 # imported lazily — the flow core never pulls it onto the replay hot path. Note:
@@ -151,7 +170,10 @@ version_toml = ["pyproject.toml:project.version"]
 # released pyproject version).
 version_variables = ["openadapt_flow/__init__.py:__version__"]
 commit_message = "chore: release {version}"
-build_command = "pip install uv && uv build"
+# Semantic Release runs its build inside a Python 3.14 container, while Flow's
+# validated runtime is Python 3.10-3.12. Stamp only the editable root lock entry
+# instead of asking uv to resolve the project under an unsupported interpreter.
+build_command = "python -m ensurepip --upgrade && python -m pip install --disable-pip-version-check uv==0.11.29 && python scripts/check_release_consistency.py --sync && git add uv.lock && uv build --wheel --sdist && python scripts/check_release_consistency.py --require-dist"
 
 [tool.semantic_release.branches.main]
 match = "main"

@@ -36,6 +36,10 @@ def test_readme_and_pyproject_versions_agree():
     assert cc.package_version() == cc.pyproject_version()
 
 
+def test_lock_and_pyproject_versions_agree():
+    assert cc.lock_version() == cc.pyproject_version()
+
+
 # --------------------------------------------------------------------------- #
 # version drift is caught
 # --------------------------------------------------------------------------- #
@@ -45,6 +49,14 @@ def test_version_mismatch_detected():
 
 def test_version_match_ok():
     assert cc.check_version(pkg="1.2.3", toml="1.2.3") == []
+
+
+def test_lock_version_mismatch_detected():
+    assert cc.check_lock_version(lock="1.2.2", toml="1.2.3")
+
+
+def test_lock_version_match_ok():
+    assert cc.check_lock_version(lock="1.2.3", toml="1.2.3") == []
 
 
 # --------------------------------------------------------------------------- #

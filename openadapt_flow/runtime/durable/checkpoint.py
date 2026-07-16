@@ -44,6 +44,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import ApprovalRecord
 from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
 
@@ -80,6 +81,8 @@ class RunManifest(BaseModel):
     #: The run's fully-resolved parameter bindings (defaults + caller
     #: overrides), so a resume re-binds identically.
     params: dict[str, str] = Field(default_factory=dict)
+    worklists: dict[str, list[dict[str, str]]] = Field(default_factory=dict)
+    governed_authorization: Optional[GovernedRunAuthorization] = None
     #: Optional healed-bundle output path, mirrored from the original run.
     save_healed_to: Optional[str] = None
     created_at: str = Field(default_factory=_now)
@@ -114,6 +117,10 @@ class RunCheckpoint(BaseModel):
     params: dict[str, str] = Field(default_factory=dict)
     #: Verification evidence carried for the audit trail / operator.
     effect_verified: Optional[bool] = None
+    effect_approved_unverified: bool = False
+    effect_contract_hashes: list[str] = Field(default_factory=list)
+    governed_authorization_id: Optional[str] = None
+    governed_approval_source: Optional[str] = None
     postconditions_ok: Optional[bool] = None
     skipped: bool = False
     actuation: Optional[str] = None
@@ -387,6 +394,17 @@ class CheckpointStore:
         for cp in self.program_checkpoints():
             effects.extend(cp.new_effects)
         return effects
+
+    def completed_unverified_effect_keys(self) -> list[str]:
+        """Already-performed, explicitly approved effect hashes.
+
+        These prevent duplicate re-execution but are never treated as
+        independently CONFIRMED and are never passed to record revalidation.
+        """
+        keys: list[str] = []
+        for checkpoint in self.program_checkpoints():
+            keys.extend(checkpoint.new_unverified_effect_keys)
+        return keys
 
     # -- approval (authenticated resume authorization; P0-5) -----------------
 

@@ -147,6 +147,13 @@ class ProgramCheckpoint(BaseModel):
     #: still hold before continuing. Consistent with the run manifest already
     #: persisting the run's params; a run directory is sensitive at rest.
     new_effects: list[dict] = Field(default_factory=list)
+    #: Already-performed effects admitted under explicit approval rather than
+    #: independently confirmed. Kept separate so resume never promotes them to
+    #: CONFIRMED while still preventing duplicate re-execution.
+    new_unverified_effect_keys: list[str] = Field(default_factory=list)
+    new_unverified_effects: list[dict] = Field(default_factory=list)
+    governed_authorization_id: Optional[str] = None
+    governed_approval_source: Optional[str] = None
     #: On-screen text expected at the resume point (this state's TEXT_PRESENT
     #: postconditions). Resume revalidates the live app still shows them before
     #: restoring -- an app that drifted off the checkpoint's state is refused.

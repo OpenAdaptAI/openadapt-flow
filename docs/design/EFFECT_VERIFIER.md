@@ -128,6 +128,18 @@ Proven in `test_compensation_reconciles_detected_duplicate` /
 `test_compensation_escalates_partial_save` /
 `test_compensation_escalates_when_indeterminate`.
 
+## Explicit fallback when no verifier exists
+
+The permissive `replay` path still halts before a step that declares effects
+without an `EffectVerifier`. A certified `run` invocation may instead supply
+`--approve-unverified-writes`. The gate issues a run-bound authorization tied
+to the sealed bundle, exact step, and effect-contract hashes; the GUI action
+then retains its screen postconditions and is reported as
+`effect_approved_unverified`, never as independently confirmed. Direct API
+writes cannot use this fallback because they have no independent outcome check
+or GUI-postcondition floor. See
+[`GOVERNED_RUN_AUTHORIZATION.md`](GOVERNED_RUN_AUTHORIZATION.md).
+
 ## How this binds to PR #61's `Effect` type
 
 The RFC (`WORKFLOW_PROGRAM_IR.md` §2.2) promotes `Postcondition` → a typed

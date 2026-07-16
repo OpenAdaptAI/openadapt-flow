@@ -15,7 +15,17 @@ from PIL import Image, ImageDraw
 
 from openadapt_flow import hosted, privacy
 from openadapt_flow.compiler import compile_recording
-from openadapt_flow.ir import Workflow
+from openadapt_flow.compiler.codegen import render_workflow_py
+from openadapt_flow.ir import (
+    ActionKind,
+    Anchor,
+    Postcondition,
+    PostconditionKind,
+    Step,
+    StructuralLocator,
+    Workflow,
+)
+from openadapt_flow.policy import lint_workflow
 from openadapt_flow.runtime.replayer import Replayer
 from openadapt_flow.sanitized_artifact import (
     APPROVAL_NAME,
@@ -42,6 +52,31 @@ class FakeScrubber:
     def scrub_image(self, image, fill_color=None):
         # Tests verify the image handler and exact-byte lifecycle. Detection
         # geometry belongs to openadapt-privacy's own provider tests.
+        return image
+
+
+class SyntaxHostileScrubber:
+    """Model current Presidio false positives on serialized runtime data."""
+
+    def scrub_text(self, text: str, is_separated: bool = False) -> str:
+        if text.startswith("<") and text.endswith(">"):
+            return text
+        if text in {"created_at", "steps"}:
+            return "<ORGANIZATION>"
+        text = re.sub(r'"https?://[^\"]+"', "<URL>", text)
+        if text.startswith(("http://", "https://")):
+            return "<URL>"
+        if text == "0000_after":
+            return "<DATE_TIME>"
+        text = text.replace("1280", "<DATE_TIME>")
+        text = re.sub(r"2026-07-16T[0-9:.+-]+", "<DATE_TIME>", text)
+        text = text.replace(".png", "_<URL>g")
+        text = text.replace("Jane Doe", "<PERSON>")
+        if re.fullmatch(r"[0-9a-f]{32}", text):
+            return "<ORGANIZATION>"
+        return text
+
+    def scrub_image(self, image, fill_color=None):
         return image
 
 
@@ -130,6 +165,171 @@ def test_derivative_inventory_rescan_and_original_immutable(tmp_path):
         load_and_verify_derivative(dest)["derivative_tree_sha256"]
         == manifest["derivative_tree_sha256"]
     )
+
+
+def test_recording_json_scrubbing_preserves_syntax_and_scalar_types(tmp_path):
+    privacy.set_text_scrubber(SyntaxHostileScrubber())
+    source = tmp_path / "recording"
+    frames = source / "frames"
+    frames.mkdir(parents=True)
+    (source / "meta.json").write_text(
+        json.dumps(
+            {
+                "id": "c770c8bdbb6c4864a5e29eec19f4bafd",
+                "created_at": "2026-07-16T01:38:54.430400+00:00",
+                "viewport": [1280, 800],
+                "app_url": "https://the-internet.herokuapp.com/key_presses",
+                "params": {"Jane Doe": "Jane Doe"},
+                "secret_params": [],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (source / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "i": 0,
+                "kind": "key",
+                "key": "Enter",
+                "url_before": "https://the-internet.herokuapp.com/key_presses",
+                "title_before": "The Internet",
+                "pages_before": 1,
+                "url_after": "https://the-internet.herokuapp.com/key_presses",
+                "title_after": "The Internet",
+                "pages_after": 1,
+                "t": 0.809,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = Image.new("RGB", (320, 200), "white")
+    after = before.copy()
+    ImageDraw.Draw(after).rectangle((100, 70, 220, 130), fill="black")
+    before.save(frames / "0000_before.png", format="PNG")
+    after.save(frames / "0000_after.png", format="PNG")
+
+    destination = tmp_path / "sanitized"
+    sanitize_artifact(source, destination, kind="recording")
+    sanitized_meta = json.loads((destination / "meta.json").read_text())
+    sanitized_event = json.loads((destination / "events.jsonl").read_text())
+
+    assert sanitized_meta["viewport"] == [1280, 800]
+    assert "created_at" in sanitized_meta
+    assert sanitized_meta["app_url"] == "<URL>"
+    assert sanitized_meta["params"] == {"<PERSON>": "<PERSON>"}
+    assert sanitized_event["url_before"] == "<URL>"
+    assert sanitized_event["url_after"] == "<URL>"
+    assert (destination / "frames" / "0000_before.png").is_file()
+    assert (destination / "frames" / "0000_after.png").is_file()
+    approve_derivative(destination, source=source, reviewer="privacy-reviewer")
+    workflow = compile_recording(
+        destination, tmp_path / "bundle", name="sanitized-enter"
+    )
+    assert workflow.steps[0].expect
+    assert not any(
+        issue.code == "vacuous_postcondition"
+        for issue in lint_workflow(workflow).findings
+    )
+
+
+def test_zero_phi_bundle_preserves_exact_executable_bytes(tmp_path):
+    privacy.set_text_scrubber(SyntaxHostileScrubber())
+    bundle = tmp_path / "bundle"
+    template = bundle / "templates" / "step_000_expect.png"
+    template.parent.mkdir(parents=True)
+    template.write_bytes(_png())
+    workflow = Workflow(
+        name="public-enter-qualification",
+        recording_id="c770c8bdbb6c4864a5e29eec19f4bafd",
+        viewport=(1280, 800),
+        steps=[
+            Step(
+                id="step_000",
+                intent="press Enter",
+                action=ActionKind.KEY,
+                key="Enter",
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.REGION_STABLE,
+                        region=(0, 0, 8, 8),
+                        phash="0000000000000000",
+                        template="templates/step_000_expect.png",
+                    )
+                ],
+            )
+        ],
+    )
+    workflow.save(bundle)
+    (bundle / "workflow.py").write_text(render_workflow_py(workflow), encoding="utf-8")
+    source_bytes = {
+        path.relative_to(bundle): path.read_bytes()
+        for path in bundle.rglob("*")
+        if path.is_file()
+    }
+
+    destination = tmp_path / "sanitized"
+    manifest = sanitize_artifact(bundle, destination, kind="bundle")
+
+    assert manifest["execution_semantics"] == "preserved"
+    assert {
+        rel: (destination / rel).read_bytes() for rel in source_bytes
+    } == source_bytes
+    approve_derivative(destination, source=bundle, reviewer="privacy-reviewer")
+    Workflow.load(destination)
+
+
+def test_phi_bearing_canonical_bundle_is_scrubbed_resealed_and_loadable(tmp_path):
+    bundle = tmp_path / "bundle"
+    template = bundle / "templates" / "step_000.png"
+    template.parent.mkdir(parents=True)
+    template.write_bytes(_png())
+    workflow = Workflow(
+        name="Jane Doe intake",
+        recording_id="c770c8bdbb6c4864a5e29eec19f4bafd",
+        viewport=(8, 8),
+        steps=[
+            Step(
+                id="step_000",
+                intent="open Jane Doe",
+                action=ActionKind.CLICK,
+                anchor=Anchor(
+                    template="templates/step_000.png",
+                    region=(0, 0, 8, 8),
+                    click_point=(4, 4),
+                    structural=StructuralLocator(
+                        selector="button[data-patient='Jane Doe']",
+                        role="button",
+                        name="Jane Doe",
+                    ),
+                ),
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.REGION_STABLE,
+                        region=(0, 0, 8, 8),
+                        phash="0000000000000000",
+                        template="templates/step_000.png",
+                    )
+                ],
+            )
+        ],
+    )
+    workflow.save(bundle)
+    (bundle / "workflow.py").write_text(render_workflow_py(workflow), encoding="utf-8")
+
+    destination = tmp_path / "sanitized"
+    manifest = sanitize_artifact(bundle, destination, kind="bundle")
+
+    assert manifest["execution_semantics"] == "not-preserved"
+    text_bytes = b"".join(
+        path.read_bytes()
+        for path in destination.rglob("*")
+        if path.is_file() and path.suffix in {".json", ".py"}
+    )
+    assert b"Jane Doe" not in text_bytes
+    assert Workflow.load(destination).steps[0].anchor is not None
+    approve_derivative(destination, source=bundle, reviewer="privacy-reviewer")
 
 
 def test_manual_redactions_invalidate_approval_and_reapproval_is_deterministic(

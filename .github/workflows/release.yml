@@ -61,13 +61,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        if: steps.check_skip.outputs.skip != 'true'
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-
-      # Semantic Release computes the version, bumps pyproject, tags, AND runs
-      # `build_command` (uv build) to populate dist/. There is deliberately no
-      # separate build step — a second `uv build` would collide on dist/*.tar.gz.
+      # Semantic Release computes the version, synchronizes the editable root
+      # lock entry, builds both distributions, then commits and tags. The build
+      # command installs its own pinned uv inside the action's Python 3.14
+      # container and deliberately avoids resolving the runtime lock there
+      # because Flow supports Python 3.10-3.12.
       - name: Python Semantic Release
         if: steps.check_skip.outputs.skip != 'true'
         id: release

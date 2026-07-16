@@ -29,6 +29,7 @@ import tempfile
 import webbrowser
 import zipfile
 from datetime import datetime, timezone
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
@@ -143,27 +144,32 @@ def _verify_original_source(source: Path, manifest: dict[str, Any]) -> None:
         raise SanitizationError("Original source name changed after sanitization")
 
 
-def _safe_component(component: str, scrubber: Any) -> tuple[str, bool]:
-    scrubbed = scrubber.scrub_text(component)
+def _safe_component(
+    component: str, scrubber: Any, *, preserve_extension: bool = False
+) -> tuple[str, bool]:
+    stem, ext = os.path.splitext(component) if preserve_extension else (component, "")
+    scrubbed = scrubber.scrub_text(stem)
     if scrubber.scrub_text(scrubbed) != scrubbed:
         raise SanitizationError(
             "A sanitized filename still changes on a second scrub pass"
         )
-    if scrubbed == component:
+    if scrubbed == stem:
         return component, False
     safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", scrubbed).strip(" ._")
     if not safe:
         safe = "redacted"
     suffix = hashlib.sha256(component.encode("utf-8")).hexdigest()[:8]
-    stem, ext = os.path.splitext(safe)
-    return f"{stem or 'redacted'}-{suffix}{ext}", True
+    return f"{safe}-{suffix}{ext}", True
 
 
 def _sanitized_relpath(rel: Path, scrubber: Any) -> tuple[Path, bool]:
     parts: list[str] = []
     changed = False
-    for component in rel.parts:
-        safe, part_changed = _safe_component(component, scrubber)
+    last = len(rel.parts) - 1
+    for index, component in enumerate(rel.parts):
+        safe, part_changed = _safe_component(
+            component, scrubber, preserve_extension=index == last
+        )
         parts.append(safe)
         changed = changed or part_changed
     return Path(*parts), changed
@@ -215,6 +221,265 @@ def _apply_text_redactions(
     return text, applied
 
 
+_OPAQUE_MACHINE_ID = re.compile(
+    r"(?:[0-9a-f]{16,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|"
+    r"(?:step|state|s)::?[A-Za-z0-9_.:-]+|step_[0-9]+)",
+    re.IGNORECASE,
+)
+_RECORDING_STRUCTURAL_JSON_KEYS = frozenset(
+    {
+        "app_url",
+        "automation_id",
+        "created_at",
+        "dom_fields_after",
+        "dom_fields_before",
+        "dx",
+        "dy",
+        "i",
+        "id",
+        "key",
+        "kind",
+        "name",
+        "pages_after",
+        "pages_before",
+        "param",
+        "params",
+        "role",
+        "secret",
+        "secret_params",
+        "selector",
+        "sor_after",
+        "sor_before",
+        "source",
+        "structural",
+        "structured_identity",
+        "t",
+        "task_description",
+        "text",
+        "title_after",
+        "title_before",
+        "url_after",
+        "url_before",
+        "viewport",
+        "x",
+        "y",
+    }
+)
+
+
+@lru_cache(maxsize=1)
+def _bundle_structural_json_keys() -> frozenset[str]:
+    """Collect syntax keys declared by the executable bundle schema."""
+
+    from openadapt_flow.ir import Workflow
+
+    found: set[str] = set()
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                found.update(str(key) for key in properties)
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(Workflow.model_json_schema())
+    return frozenset(found)
+
+
+def _json_key_is_structural(kind: str, key: str) -> bool:
+    if kind == "recording":
+        return key in _RECORDING_STRUCTURAL_JSON_KEYS
+    if kind == "bundle":
+        return key in _bundle_structural_json_keys()
+    return False
+
+
+def _bundle_string_is_structural(path: tuple[str | int, ...], value: str) -> bool:
+    """Return whether a bundle string is generated operational metadata.
+
+    Unknown fields default to scrubbing. The allowlist covers values whose
+    mutation would corrupt the executable schema without removing user data;
+    user-derived fields such as names, intents, labels, parameter examples,
+    postcondition text, effect values, and identity text are deliberately absent.
+    """
+
+    key = path[-1] if path and isinstance(path[-1], str) else ""
+    if key.endswith(("_sha256", "_digest", "_hash", "_version")):
+        return True
+    if key.endswith("_at") and value:
+        return True
+    if key in {"recording_id", "id"} and _OPAQUE_MACHINE_ID.fullmatch(value):
+        return True
+    if key in {"c", "r", "phash", "salt", "structured"} and re.fullmatch(
+        r"[0-9a-f]{16,}", value
+    ):
+        return True
+    if (
+        len(path) >= 2
+        and path[-2] == "file_hashes"
+        and re.fullmatch(r"[0-9a-f]{64}", value)
+    ):
+        return True
+    return False
+
+
+def _merge_applied_redactions(
+    target: dict[tuple[str, str, str], dict[str, Any]],
+    applied: list[dict[str, Any]],
+) -> None:
+    for item in applied:
+        key = (
+            item["type"],
+            item["literal_sha256"],
+            item["replacement_sha256"],
+        )
+        current = target.setdefault(key, {**item, "matches": 0})
+        current["matches"] += item["matches"]
+
+
+def _scrub_json_value(
+    value: Any,
+    *,
+    scrubber: Any,
+    redactions: list[dict[str, Any]],
+    rel: str,
+    kind: str,
+    path_map: dict[str, str],
+    known_paths: set[str],
+    path: tuple[str | int, ...] = (),
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Scrub JSON string values without exposing keys or non-string scalars.
+
+    Artifact-relative paths are transformed by the filename policy and then
+    treated as already scrubbed. This prevents Presidio URL recognizers from
+    corrupting safe ``*.png`` references while keeping path and file content
+    transformations bound to the same derivative inventory.
+    """
+
+    aggregate: dict[tuple[str, str, str], dict[str, Any]] = {}
+    if isinstance(value, dict):
+        transformed: dict[str, Any] = {}
+        for raw_key, child in value.items():
+            if not isinstance(raw_key, str):
+                raise SanitizationError(f"JSON object key is not a string in {rel}")
+            key = raw_key
+            safe_key = path_map.get(key, key)
+            if safe_key not in known_paths and not _json_key_is_structural(
+                kind, safe_key
+            ):
+                safe_key = scrubber.scrub_text(safe_key)
+                safe_key, key_applied = _apply_text_redactions(
+                    safe_key, redactions, rel
+                )
+                _merge_applied_redactions(aggregate, key_applied)
+            if safe_key in transformed:
+                raise SanitizationError(
+                    f"Scrubbing produced a duplicate JSON key in {rel}: {safe_key!r}"
+                )
+            updated, applied = _scrub_json_value(
+                child,
+                scrubber=scrubber,
+                redactions=redactions,
+                rel=rel,
+                kind=kind,
+                path_map=path_map,
+                known_paths=known_paths,
+                path=(*path, safe_key),
+            )
+            transformed[safe_key] = updated
+            _merge_applied_redactions(aggregate, applied)
+        return transformed, list(aggregate.values())
+    if isinstance(value, list):
+        transformed_list: list[Any] = []
+        for index, child in enumerate(value):
+            updated, applied = _scrub_json_value(
+                child,
+                scrubber=scrubber,
+                redactions=redactions,
+                rel=rel,
+                kind=kind,
+                path_map=path_map,
+                known_paths=known_paths,
+                path=(*path, index),
+            )
+            transformed_list.append(updated)
+            _merge_applied_redactions(aggregate, applied)
+        return transformed_list, list(aggregate.values())
+    if not isinstance(value, str):
+        return value, []
+
+    mapped = path_map.get(value, value)
+    if mapped in known_paths or (
+        kind == "bundle" and _bundle_string_is_structural(path, mapped)
+    ):
+        scrubbed = mapped
+    else:
+        scrubbed = scrubber.scrub_text(mapped)
+    scrubbed, applied = _apply_text_redactions(scrubbed, redactions, rel)
+    return scrubbed, applied
+
+
+def _scrub_json_text(
+    raw: str,
+    *,
+    suffix: str,
+    scrubber: Any,
+    redactions: list[dict[str, Any]],
+    rel: str,
+    kind: str,
+    path_map: dict[str, str],
+    known_paths: set[str],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Parse, transform, and re-serialize JSON/JSONL without type corruption."""
+
+    if suffix == ".json":
+        parsed = json.loads(raw)
+        transformed, applied = _scrub_json_value(
+            parsed,
+            scrubber=scrubber,
+            redactions=redactions,
+            rel=rel,
+            kind=kind,
+            path_map=path_map,
+            known_paths=known_paths,
+        )
+        if transformed == parsed:
+            return raw, applied
+        newline = "\n" if raw.endswith("\n") else ""
+        return json.dumps(transformed, indent=2, ensure_ascii=False) + newline, applied
+
+    aggregate: dict[tuple[str, str, str], dict[str, Any]] = {}
+    output: list[str] = []
+    for raw_line in raw.splitlines(keepends=True):
+        content = raw_line.rstrip("\r\n")
+        ending = raw_line[len(content) :]
+        if not content.strip():
+            output.append(raw_line)
+            continue
+        parsed = json.loads(content)
+        transformed, applied = _scrub_json_value(
+            parsed,
+            scrubber=scrubber,
+            redactions=redactions,
+            rel=rel,
+            kind=kind,
+            path_map=path_map,
+            known_paths=known_paths,
+        )
+        output.append(
+            content
+            if transformed == parsed
+            else json.dumps(transformed, ensure_ascii=False, separators=(",", ":"))
+        )
+        output.append(ending)
+        _merge_applied_redactions(aggregate, applied)
+    return "".join(output), list(aggregate.values())
+
+
 def _redact_image_rectangles(
     data: bytes, redactions: list[dict[str, Any]], rel: str
 ) -> tuple[bytes, list[dict[str, Any]]]:
@@ -262,6 +527,10 @@ def _scrub_text_file(
     rel: str,
     scrubber: Any,
     redactions: list[dict[str, Any]],
+    *,
+    kind: str,
+    path_map: dict[str, str],
+    known_paths: set[str],
 ) -> tuple[bytes, list[dict[str, Any]]]:
     try:
         raw = source.read_text(encoding="utf-8")
@@ -269,15 +538,39 @@ def _scrub_text_file(
         raise SanitizationError(f"Text artifact is not valid UTF-8: {rel}") from exc
     if "\x00" in raw:
         raise SanitizationError(f"Text artifact contains NUL/binary data: {rel}")
-    scrubbed = scrubber.scrub_text(raw)
-    scrubbed, applied = _apply_text_redactions(scrubbed, redactions, rel)
-    rescanned = scrubber.scrub_text(scrubbed)
-    rescanned, _ = _apply_text_redactions(rescanned, redactions, rel)
+    suffix = source.suffix.lower()
+    _validate_structured_text(suffix, raw, rel)
+    if suffix in {".json", ".jsonl"}:
+        scrubbed, applied = _scrub_json_text(
+            raw,
+            suffix=suffix,
+            scrubber=scrubber,
+            redactions=redactions,
+            rel=rel,
+            kind=kind,
+            path_map=path_map,
+            known_paths=known_paths,
+        )
+        rescanned, _ = _scrub_json_text(
+            scrubbed,
+            suffix=suffix,
+            scrubber=scrubber,
+            redactions=redactions,
+            rel=rel,
+            kind=kind,
+            path_map={},
+            known_paths=known_paths,
+        )
+    else:
+        scrubbed = scrubber.scrub_text(raw)
+        scrubbed, applied = _apply_text_redactions(scrubbed, redactions, rel)
+        rescanned = scrubber.scrub_text(scrubbed)
+        rescanned, _ = _apply_text_redactions(rescanned, redactions, rel)
     if rescanned != scrubbed:
         raise SanitizationError(
             f"Second scrub pass still changed {rel}; residual identifiers may remain"
         )
-    _validate_structured_text(source.suffix.lower(), scrubbed, rel)
+    _validate_structured_text(suffix, scrubbed, rel)
     return scrubbed.encode("utf-8"), applied
 
 
@@ -411,6 +704,52 @@ def _tree_rows(dest: Path) -> list[tuple[str, str]]:
     ]
 
 
+def _reseal_sanitized_bundle(bundle: Path) -> None:
+    """Rebuild generated bundle surfaces after a load-bearing transformation."""
+
+    from openadapt_flow.compiler.codegen import render_workflow_py
+    from openadapt_flow.ir import Workflow
+
+    workflow = Workflow.load(bundle, verify_integrity=False)
+    if workflow.manifest is not None:
+        provenance = workflow.manifest.provenance
+        provenance.policy_name = None
+        provenance.certified = False
+        provenance.certification_status = None
+        provenance.certified_at = None
+        provenance.expires_at = None
+    workflow.save(bundle)
+    workflow_py = bundle / "workflow.py"
+    if workflow_py.is_file():
+        workflow_py.write_text(render_workflow_py(workflow), encoding="utf-8")
+
+
+_RECORDING_FRAME_PATH = re.compile(
+    r"frames/[0-9]{4,}_(?:before|after)\.png", re.IGNORECASE
+)
+_BUNDLE_GENERATED_TEMPLATE_PATH = re.compile(
+    r"templates/step_[0-9]+(?:_expect)?\.png(?:\.enc)?", re.IGNORECASE
+)
+
+
+def _is_generated_artifact_path(kind: str, rel: Path) -> bool:
+    """Protect exact compiler/recorder schema paths from NLP false positives."""
+
+    value = rel.as_posix()
+    if kind == "recording":
+        return value in {"meta.json", "events.jsonl"} or bool(
+            _RECORDING_FRAME_PATH.fullmatch(value)
+        )
+    if kind == "bundle":
+        return value in {
+            "workflow.json",
+            "workflow.json.enc",
+            "workflow.py",
+            "manifest.json",
+        } or bool(_BUNDLE_GENERATED_TEMPLATE_PATH.fullmatch(value))
+    return False
+
+
 def sanitize_artifact(
     source: Path,
     destination: Path,
@@ -442,6 +781,10 @@ def sanitize_artifact(
             raise SanitizationError(
                 "workflow.py is not the deterministic rendering of workflow.json"
             )
+    canonical_bundle = kind == "bundle" and all(
+        (source / name).is_file()
+        for name in ("workflow.json", "workflow.py", "manifest.json")
+    )
     scrubber = privacy.get_scrubber()
     if scrubber is None:
         raise SanitizationError(
@@ -456,12 +799,17 @@ def sanitize_artifact(
     staging = Path(tempfile.mkdtemp(prefix="openadapt-sanitize-")) / "artifact"
     staging.mkdir(parents=True)
     entries: list[dict[str, Any]] = []
-    seen_paths: set[str] = set()
     semantics = "preserved"
     try:
-        for index, path in enumerate(files):
+        path_plan: list[tuple[Path, Path, Path, bool]] = []
+        path_map: dict[str, str] = {}
+        seen_paths: set[str] = set()
+        for path in files:
             rel = path.relative_to(source)
-            safe_rel, renamed = _sanitized_relpath(rel, scrubber)
+            if _is_generated_artifact_path(kind, rel):
+                safe_rel, renamed = rel, False
+            else:
+                safe_rel, renamed = _sanitized_relpath(rel, scrubber)
             if (
                 path.suffix.lower() in _IMAGE_SUFFIXES
                 and safe_rel.suffix.lower() != ".png"
@@ -472,15 +820,34 @@ def sanitize_artifact(
             if safe_rel_str in seen_paths:
                 raise SanitizationError(f"Sanitized filename collision: {safe_rel_str}")
             seen_paths.add(safe_rel_str)
+            path_map[rel.as_posix()] = safe_rel_str
+            path_plan.append((path, rel, safe_rel, renamed))
+
+        known_paths = set(path_map.values())
+        for index, (path, rel, safe_rel, renamed) in enumerate(path_plan):
+            safe_rel_str = safe_rel.as_posix()
             suffix = path.suffix.lower()
+            manual: list[dict[str, Any]]
             forbidden = _forbidden_binary_type(path)
             if forbidden is not None and suffix not in _IMAGE_SUFFIXES:
                 raise SanitizationError(
                     f"Unsupported {forbidden} content in {rel}; extension cannot bypass policy"
                 )
-            if suffix in _TEXT_SUFFIXES:
+            if canonical_bundle and rel.as_posix() in {"workflow.py", "manifest.json"}:
+                # Both files are deterministic derivatives of workflow.json.
+                # Preserve them byte-for-byte when workflow data is unchanged;
+                # a load-bearing transform reseals/regenerates them below.
+                output, manual = path.read_bytes(), []
+                handler = "utf8-text"
+            elif suffix in _TEXT_SUFFIXES:
                 output, manual = _scrub_text_file(
-                    path, rel.as_posix(), scrubber, redactions["text"]
+                    path,
+                    rel.as_posix(),
+                    scrubber,
+                    redactions["text"],
+                    kind=kind,
+                    path_map=path_map,
+                    known_paths=known_paths,
                 )
                 handler = "utf8-text"
             elif suffix in _IMAGE_SUFFIXES:
@@ -524,6 +891,14 @@ def sanitize_artifact(
                     "verification": "stable-second-pass",
                 }
             )
+        if canonical_bundle and semantics == "not-preserved":
+            _reseal_sanitized_bundle(staging)
+            for entry in entries:
+                derivative = staging / entry["path"]
+                entry["derivative_sha256"] = _sha256_file(derivative)
+                entry["changed"] = entry["renamed"] or (
+                    entry["source_sha256"] != entry["derivative_sha256"]
+                )
         source_rows = [
             (str(path.relative_to(source)), _sha256_file(path)) for path in files
         ]
@@ -611,16 +986,55 @@ def _rescan_derivative(destination: Path) -> dict[str, Any]:
         raise SanitizationError(
             "Cannot approve without the manifest's scrubbing capability"
         )
+    known_paths = {entry["path"] for entry in manifest["files"]}
+    bundle_workflow: Any = None
     for entry in manifest["files"]:
         path = destination / entry["path"]
         if entry["handler"] == "utf8-text":
             current_text = path.read_text(encoding="utf-8")
-            rescanned_text = scrubber.scrub_text(current_text)
+            if manifest["kind"] == "bundle" and entry["path"] in {
+                "workflow.py",
+                "manifest.json",
+            }:
+                from openadapt_flow.compiler.codegen import render_workflow_py
+                from openadapt_flow.ir import Workflow
+
+                if bundle_workflow is None:
+                    bundle_workflow = Workflow.load(destination)
+                if entry["path"] == "workflow.py":
+                    expected = render_workflow_py(bundle_workflow)
+                    if current_text != expected:
+                        raise SanitizationError(
+                            "Approval rescan found workflow.py is not the "
+                            "deterministic rendering of workflow.json"
+                        )
+                else:
+                    expected_manifest = bundle_workflow.manifest.model_dump(mode="json")
+                    if json.loads(current_text) != expected_manifest:
+                        raise SanitizationError(
+                            "Approval rescan found manifest.json does not match "
+                            "the sealed workflow manifest"
+                        )
+                continue
+            suffix = path.suffix.lower()
+            _validate_structured_text(suffix, current_text, entry["path"])
+            if suffix in {".json", ".jsonl"}:
+                rescanned_text, _ = _scrub_json_text(
+                    current_text,
+                    suffix=suffix,
+                    scrubber=scrubber,
+                    redactions=[],
+                    rel=entry["path"],
+                    kind=manifest["kind"],
+                    path_map={},
+                    known_paths=known_paths,
+                )
+            else:
+                rescanned_text = scrubber.scrub_text(current_text)
             if rescanned_text != current_text:
                 raise SanitizationError(
                     f"Approval rescan found a remaining identifier in {entry['path']}"
                 )
-            _validate_structured_text(path.suffix.lower(), current_text, entry["path"])
         elif entry["handler"] == "image-ocr-redaction":
             current_bytes = path.read_bytes()
             rescanned_bytes = privacy.scrub_image_bytes(current_bytes, force=True)

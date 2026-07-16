@@ -293,7 +293,7 @@ the optional `privacy` extra (Presidio-backed
 [openadapt-privacy](https://github.com/OpenAdaptAI/openadapt-privacy)):
 
 ```bash
-pip install 'openadapt-flow[privacy]' && python -m spacy download en_core_web_trf
+pip install 'openadapt-flow[privacy]' && python -m spacy download en_core_web_sm
 export OPENADAPT_FLOW_SCRUB=on          # scrub REPORT.md + logs, fail closed
 ```
 

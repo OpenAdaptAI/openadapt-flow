@@ -19,7 +19,7 @@ deployment:
 
 ```bash
 pip install 'openadapt-flow[privacy]'
-python -m spacy download en_core_web_trf
+python -m spacy download en_core_web_sm
 ```
 
 Two environment variables control the posture. The default is **predictable,

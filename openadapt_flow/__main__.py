@@ -262,6 +262,7 @@ def _build_and_run_replayer(
     api_actuator,
     durable: bool,
     use_structural: bool,
+    governed_authorization=None,
     execution_origin: Optional[str] = None,
     execution_entry_url: Optional[str] = None,
 ):
@@ -326,6 +327,7 @@ def _build_and_run_replayer(
         api_actuator=api_actuator,
         durable=durable,
         use_structural=use_structural,
+        governed_authorization=governed_authorization,
     ).run(
         workflow,
         params=params,
@@ -367,6 +369,7 @@ def _replay_desktop(
     effect_verifier,
     api_actuator,
     durable: bool,
+    governed_authorization=None,
 ) -> int:
     """Replay against a NON-browser backend (windows / rdp) built by the factory.
 
@@ -403,6 +406,7 @@ def _replay_desktop(
             # No MockMed drift here, so the deterministic structural rung is
             # preferred exactly as in a non-drift web replay.
             use_structural=True,
+            governed_authorization=governed_authorization,
         )
     finally:
         close = getattr(backend, "close", None)
@@ -629,6 +633,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             effect_verifier=effect_verifier,
             api_actuator=api_actuator,
             durable=durable,
+            governed_authorization=getattr(args, "_governed_run_authorization", None),
         )
 
     headed = args.headed or cfg.backend.headed
@@ -690,6 +695,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     api_actuator=api_actuator,
                     durable=durable,
                     use_structural=not bool(args.drift),
+                    governed_authorization=getattr(
+                        args, "_governed_run_authorization", None
+                    ),
                     execution_origin=(
                         f"{urlsplit(page.url).scheme}://{urlsplit(page.url).netloc}"
                     ),
@@ -730,7 +738,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     ``--drift`` (a MockMed-only teaching aid) forced off.
     """
     from openadapt_flow.ir import Workflow
-    from openadapt_flow.run_gate import evaluate_run_gate
+    from openadapt_flow.run_gate import (
+        build_runtime_authorization,
+        evaluate_run_gate,
+    )
 
     bundle = Path(args.bundle)
     # Load the bundle first (decrypting if encrypted -- the key comes from
@@ -741,7 +752,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"run REFUSED: bundle could not be loaded safely: {e}")
         return 2
 
-    cfg, effect_verifier, _api, _durable, _egress = _deployment_runtime(args)
+    cfg, effect_verifier, api_actuator, _durable, _egress = _deployment_runtime(args)
     policy_source = args.policy or cfg.policy.policy
 
     report = evaluate_run_gate(
@@ -749,6 +760,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         bundle_dir=bundle,
         deployment=cfg,
         effect_verifier=effect_verifier,
+        api_actuator=api_actuator,
         policy_source=policy_source,
         approval_available=bool(getattr(args, "approve_unverified_writes", False)),
         strict_templates=bool(getattr(args, "strict_templates", False)),
@@ -764,6 +776,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if not report.passed:
         # Fail closed: refuse execution and exit nonzero.
         return 2
+
+    runtime_params = _replay_params(args.param, getattr(args, "params_file", None))
+    runtime_worklists = _resolve_worklists(getattr(args, "worklist", None), workflow)
+    args._governed_run_authorization = build_runtime_authorization(
+        workflow,
+        report,
+        params=runtime_params,
+        worklists=runtime_worklists,
+    )
 
     # Admitted. A deployment run is not the drift-demo; force it off and delegate
     # to the shared replay executor (which reads all deployment wiring itself).

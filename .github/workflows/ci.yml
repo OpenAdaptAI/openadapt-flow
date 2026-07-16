@@ -4,6 +4,7 @@ name: CI
 # blocking the merge on every gate a reviewer cares about:
 #   - pull_request: run the FULL REQUIRED GATE on every PR --
 #       lint (ruff + lenient whole-package mypy),
+#       python-compatibility (lower-bound install + consistency tests),
 #       mypy-strict-safety (strict types on the safety path),
 #       phi-guard, docs-consistency, interop-types,
 #       test (fast unit suite + enforced safety coverage floor),
@@ -19,9 +20,9 @@ name: CI
 # runner spend for zero extra signal).
 #
 # Which jobs to mark REQUIRED in branch protection (repo Settings, owner-only):
-#   lint, mypy-strict-safety, phi-guard, docs-consistency, interop-types, test,
-#   e2e-browser, wheel. (test-matrix and windows-mock are post-merge/nightly --
-#   NOT required.)
+#   lint, python-compatibility, mypy-strict-safety, phi-guard,
+#   docs-consistency, interop-types, test, e2e-browser, wheel. (test-matrix and
+#   windows-mock are post-merge/nightly -- NOT required.)
 on:
   pull_request:
   push:
@@ -68,6 +69,30 @@ jobs:
 
       - name: Mypy
         run: mypy
+
+  # --- Supported Python lower bound (required on PRs) ----------------------
+  # The full cross-platform matrix remains post-merge/nightly, but the oldest
+  # supported interpreter must install and execute the release-consistency gate
+  # before merge. This specifically prevents Python 3.11-only stdlib imports or
+  # dependency metadata drift from reaching PyPI unnoticed.
+  python-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and compatibility test runner
+        run: pip install -e . pytest
+
+      - name: Verify release consistency on Python 3.10
+        run: |
+          python scripts/check_consistency.py
+          pytest -q tests/test_consistency.py
 
   # --- STRICT type check on the safety-critical path (required on PRs) ------
   # A second, STRICTER mypy pass scoped to the safety modules ONLY: the
@@ -321,14 +346,16 @@ jobs:
   # --- Post-merge / nightly: full Python matrix + macOS, FULL suite --------
   # NOT a required check and NOT run on PRs (so merges never block on it). Runs
   # the COMPLETE suite including the slow tests/e2e browser/OCR leg across
-  # Python 3.10-3.13 on Linux plus a macOS leg, on push to main and nightly.
+  # Python 3.10-3.12 on Linux plus a macOS leg, on push to main and nightly.
+  # Python 3.13 remains outside the supported boundary until the validated
+  # rapidocr-onnxruntime identity path can be safely migrated and requalified.
   test-matrix:
     if: ${{ github.event_name != 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12"]
         include:
           # At least one non-Linux leg for the browser/OCR runtime.
           - os: macos-latest
@@ -400,12 +427,13 @@ jobs:
         run: pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py
 
   # --- Clean-wheel install + CLI smoke (REQUIRED on PRs) -------------------
-  # Builds the wheel, installs it in a FRESH venv (no source tree, core deps
-  # only), and proves the packaged distribution actually works end to end:
-  # import + version/py.typed integrity, then the installed `openadapt-flow`
-  # console script drives a real compile of a committed fixture recording and
-  # loads the compiled bundle. (The replay leg is covered by the required
-  # `e2e-browser` job, since replay needs a live target app + headless browser.)
+  # Builds the wheel, installs it in a FRESH venv (no source tree), and proves
+  # the packaged distribution actually works end to end: core import +
+  # version/py.typed integrity, production privacy/hosted extras, then the
+  # installed `openadapt-flow` console script drives a real compile of a
+  # committed fixture recording and loads the compiled bundle. (The replay leg
+  # is covered by the required `e2e-browser` job, since replay needs a live
+  # target app + headless browser.)
   # Runs on PRs now so packaging/CLI breakage blocks the merge instead of
   # surfacing post-merge.
   wheel:
@@ -433,6 +461,15 @@ jobs:
           # version-agnostic so it keeps holding across releases) and that the
           # py.typed marker shipped inside the wheel.
           cd /tmp && /tmp/clean/bin/python -c "import os, importlib.metadata as m, openadapt_flow; v = openadapt_flow.__version__; dist = m.version('openadapt-flow'); print('attr', v, 'dist', dist); assert v == dist, (v, dist); p = os.path.join(os.path.dirname(openadapt_flow.__file__), 'py.typed'); assert os.path.exists(p), 'py.typed missing from installed package'; print('py.typed present, import OK')"
+
+      - name: Install production extras and verify spaCy runtime imports
+        run: |
+          WHEEL="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
+          python -m venv /tmp/privacy
+          /tmp/privacy/bin/pip install "${WHEEL}[privacy,hosted]"
+          /tmp/privacy/bin/pip check
+          cd /tmp && /tmp/privacy/bin/python -c "import importlib.metadata as m, click, spacy; print('privacy imports OK:', m.version('click'), m.version('spacy'))"
 
       # CLI smoke on the INSTALLED console script (not the source tree). --help
       # must exit 0; the version is asserted via the import check above (there is

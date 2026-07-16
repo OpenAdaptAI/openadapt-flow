@@ -19,9 +19,11 @@ record (an API/DB read, never the pixels). A non-CONFIRMED verdict HALTS the
 run — mirroring the identity gate's refuse-rather-than-guess posture — and for
 an irreversible effect a configured compensator may ``reconcile_or_escalate``
 (RECONCILED continues, ESCALATE halts). A step that declares effects with NO
-verifier configured is a deployment error and HALTS (an unverifiable
-consequential write is never allowed to pass). This path makes ZERO model
-calls — effect verification reads the system of record.
+verifier configured is a deployment error and HALTS unless the fail-closed
+``run`` gate supplies an exact, bundle-bound approval for that GUI step. An
+approved write remains visibly unverified and still must pass its screen
+postconditions; direct API writes always require an independent verifier. This
+path makes ZERO model calls — effect verification reads the system of record.
 
 Steps that succeed via any rung other than ``template`` are healed: the
 anchor is refreshed from the live frame, the heal is recorded under
@@ -31,6 +33,7 @@ healed bundle is written.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import time
@@ -67,6 +70,7 @@ from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import healing as healing_mod
 from openadapt_flow.runtime import identity as identity_mod
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import StateDiverged
 from openadapt_flow.runtime.durable.program_checkpoint import (
     TOP_GRAPH_ID,
@@ -179,10 +183,11 @@ class _ProgramHalt(Exception):
     report records. Caught only by ``_interpret_program`` -- never escapes the
     Replayer."""
 
-    def __init__(self, outcome: str, reason: str) -> None:
+    def __init__(self, outcome: str, reason: str, *, safety: bool = False) -> None:
         super().__init__(reason)
         self.outcome = outcome
         self.reason = reason
+        self.safety = safety
 
 
 def _all_workflow_steps(workflow: Workflow):
@@ -257,6 +262,11 @@ class Replayer:
             re-run from step 0. None of this touches the backend, vision, or a
             model — it is bookkeeping over the ``StepResult``. Off by default;
             a non-durable run behaves exactly as before.
+        governed_authorization: Optional, bundle-bound capability produced by
+            the fail-closed ``run`` gate. It can require affirmative identity
+            on selected steps and approve exact GUI effect contracts without a
+            verifier while keeping them visibly unverified. Ordinary ``replay``
+            leaves it unset.
         poll_interval_s: Postcondition polling interval in seconds.
     """
 
@@ -276,6 +286,8 @@ class Replayer:
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
         allow_model_grounding: bool = False,
+        governed_authorization: Optional[GovernedRunAuthorization] = None,
+        governed_continuation: bool = False,
     ) -> None:
         if vision is None:
             import openadapt_flow.vision as vision  # lazy: heavy OCR deps
@@ -329,6 +341,17 @@ class Replayer:
         # makes a model call — the $0 runtime guarantee is preserved.
         self.effect_verifier = effect_verifier
         self.effect_compensator = effect_compensator
+        # ``run``-only, bundle-bound admission capability.  The ordinary
+        # ``replay`` path leaves this unset and preserves its permissive
+        # behavior.  When present it carries exact identity/effect decisions
+        # from the run gate into the shared executor instead of reducing them
+        # to a boolean that could authorize a different workflow.
+        self.governed_authorization = governed_authorization
+        self.governed_continuation = governed_continuation
+        self._governed_asset_snapshot: dict[str, bytes] = {}
+        self._governed_asset_hashes: dict[str, str] = {}
+        self._governed_plaintext_assets = False
+        self._governed_asset_mutation: Optional[str] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -446,7 +469,11 @@ class Replayer:
         # ``__run_id__`` param so an idempotency key can be bound PER-RUN (via
         # ``ValueExpr(param="__run_id__")``) instead of reusing a frozen demo
         # literal across unrelated runs.
-        self._run_id = uuid.uuid4().hex
+        self._run_id = (
+            self.governed_authorization.authorization_id
+            if self.governed_authorization is not None
+            else uuid.uuid4().hex
+        )
         # Parameter resolution (Workflow-program IR, Phase 1): recorded defaults
         # (``params`` dict) plus each TYPED ``param_specs`` example as a default,
         # with caller-supplied values overriding both. A v0 bundle (empty
@@ -476,6 +503,57 @@ class Replayer:
             params=params,
             screenshots_may_leave_box=self._screenshots_may_leave_box,
         )
+        if self.governed_authorization is not None:
+            refusal, assets = self.governed_authorization.validate_execution_snapshot(
+                workflow,
+                bundle_dir=bundle_dir,
+                params=params,
+                worklists=worklists,
+                continuation=self.governed_continuation,
+            )
+            self._governed_asset_snapshot = assets
+            assert workflow.manifest is not None
+            self._governed_asset_hashes = dict(workflow.manifest.file_hashes)
+            self._governed_plaintext_assets = not workflow.encrypted
+            self._governed_asset_mutation = None
+            report.governed_authorization_id = (
+                self.governed_authorization.authorization_id
+            )
+            report.governed_approval_source = (
+                self.governed_authorization.approval_source
+            )
+            report.governed_authorization_created_at = (
+                self.governed_authorization.created_at
+            )
+            report.governed_policy_name = (
+                self.governed_authorization.admitted_policy_name
+            )
+            report.governed_runtime_inputs_digest = (
+                self.governed_authorization.runtime_inputs_digest
+            )
+            report.required_identity_step_ids = list(
+                self.governed_authorization.required_identity_step_ids
+            )
+            report.approved_unverified_effect_step_ids = [
+                approval.step_id
+                for approval in self.governed_authorization.unverified_write_approvals
+            ]
+            report.governed_authorized_effect_contracts = {
+                approval.step_id: list(approval.effect_contract_hashes)
+                for approval in self.governed_authorization.unverified_write_approvals
+            }
+            if refusal is not None:
+                report.results.append(
+                    StepResult(
+                        step_id="<authorization>",
+                        intent="validate governed run authorization",
+                        ok=False,
+                        error=f"{refusal} — refusing to run; run aborted",
+                    )
+                )
+                report.success = False
+                report.save(run_dir)
+                return report
         self._record_identity_coverage(workflow, report)
         new_crops: dict[str, bytes] = {}
         # Per-run reset; the attribute is declared in __init__.
@@ -518,8 +596,10 @@ class Replayer:
                 workflow_name=workflow.name,
                 bundle_dir=bundle_dir,
                 params=params,
+                worklists=worklists or {},
                 save_healed_to=save_healed_to,
                 key=self.checkpoint_key,
+                governed_authorization=self.governed_authorization,
             )
         if resume_from:
             from openadapt_flow.runtime.durable import resumed_step_results
@@ -795,10 +875,14 @@ class Replayer:
             # a resume (the store already holds the pre-pause checkpoints).
             self._program_seq = len(store.program_checkpoints())
             self._completed_effect_keys = list(store.completed_effect_keys())
+            self._completed_unverified_effect_keys = list(
+                store.completed_unverified_effect_keys()
+            )
             self._bundle_version = _bundle_version(bundle_dir)
         else:
             self._program_seq = 0
             self._completed_effect_keys = []
+            self._completed_unverified_effect_keys = []
             self._bundle_version = ""
         try:
             if resume_checkpoint is not None:
@@ -825,6 +909,7 @@ class Replayer:
                     new_crops=new_crops,
                     depth=0,
                 )
+            self._raise_on_governed_asset_mutation()
             report.success = True
             if report.terminal_outcome is None:
                 # Fell off the top graph with no explicit terminal: a clean,
@@ -843,6 +928,7 @@ class Replayer:
                     intent=f"program {halt.outcome}",
                     ok=False,
                     error=halt.reason,
+                    safety_halt=halt.safety,
                 )
             )
 
@@ -950,6 +1036,7 @@ class Replayer:
             self._current_params = params
 
             if state.kind is StateKind.TERMINAL:
+                self._raise_on_governed_asset_mutation()
                 outcome = state.outcome or "success"
                 report.terminal_outcome = outcome
                 if outcome == "success":
@@ -1100,18 +1187,21 @@ class Replayer:
 
         if not result.ok:
             # A skipped guard is ok=True; only a genuine failure lands here.
-            if state.on_exception is not None:
+            if state.on_exception is not None and not result.safety_halt:
                 result.exception_handled = True
                 return state.on_exception  # graph try/except: route + continue
             raise _ProgramHalt(
                 "halt",
                 result.error or f"action state '{state.id}' failed — run aborted",
+                safety=result.safety_halt,
             )
-        nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
         # Tier-3 durable checkpoint: this action state VERIFIED (identity +
         # effects + postconditions); capture the whole interpreter state so an
-        # approved resume can RESTORE it from exactly here.
+        # approved resume can RESTORE it from exactly here. Persist BEFORE
+        # selecting an outgoing guarded edge: predicate evaluation can halt,
+        # but the already-performed write must still enter the effect ledger.
         self._record_program_checkpoint(state, result, params, report)
+        nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
         return nxt
 
     def _exec_loop_state(
@@ -1225,9 +1315,11 @@ class Replayer:
             return transitions[0].target
         frame = self.vision.wait_settled(self.backend)
         for t in transitions:
-            if t.guard is None or self._predicate_holds(
+            matched = t.guard is None or self._predicate_holds(
                 t.guard, frame, bundle_dir, params
-            ):
+            )
+            self._raise_on_governed_asset_mutation()
+            if matched:
                 return t.target
         raise _ProgramHalt(
             "halt",
@@ -1262,7 +1354,10 @@ class Replayer:
         consequential write: the write is NOT re-performed (no backend action, no
         effect re-verification). A verified result is synthesized so the report
         still accounts for the state. Returns True when it skipped."""
-        if not self._completed_effect_keys:
+        if (
+            not self._completed_effect_keys
+            and not self._completed_unverified_effect_keys
+        ):
             return False
         step = state.step
         if step is None or not step.effects:
@@ -1272,14 +1367,31 @@ class Replayer:
             keys = [e.contract_hash() for e in resolved]
         except Exception:
             return False
-        if not keys or not all(k in self._completed_effect_keys for k in keys):
+        if not keys:
+            return False
+        confirmed = all(k in self._completed_effect_keys for k in keys)
+        performed_unverified = all(
+            k in self._completed_effect_keys
+            or k in self._completed_unverified_effect_keys
+            for k in keys
+        )
+        if not confirmed and not performed_unverified:
             return False
         result = StepResult(
             step_id=step.id,
             intent=step.intent,
             ok=True,
-            effect_verified=True,
+            effect_verified=True if confirmed else None,
+            effect_approved_unverified=not confirmed,
             effect_contract_hashes=keys,
+            effect_results=(
+                ["[resume] previously CONFIRMED effect was not re-executed"]
+                if confirmed
+                else [
+                    "[resume] previously approved-unverified effect was not "
+                    "re-executed; it remains unverified"
+                ]
+            ),
         )
         report.results.append(result)
         self._account_result(report, result)
@@ -1304,8 +1416,17 @@ class Replayer:
         if durable is None:
             return
         step = state.step
-        new_keys = list(result.effect_contract_hashes)
-        new_effects = (
+        new_keys = (
+            list(result.effect_contract_hashes)
+            if result.effect_verified is True
+            else []
+        )
+        new_unverified_keys = (
+            list(result.effect_contract_hashes)
+            if result.effect_approved_unverified
+            else []
+        )
+        resolved_effects = (
             [
                 e.model_dump(mode="json")
                 for e in self._resolve_effects(step.effects, params)
@@ -1316,6 +1437,7 @@ class Replayer:
         # Extend the live ledger so a later state in the SAME leg (and the next
         # checkpoint's union) sees these as already-confirmed.
         self._completed_effect_keys.extend(new_keys)
+        self._completed_unverified_effect_keys.extend(new_unverified_keys)
         expected = (
             [
                 pc.text
@@ -1334,7 +1456,19 @@ class Replayer:
             frames=[self._frame_to_model(f) for f in self._frame_stack],
             bound_params=dict(params),
             new_effect_keys=new_keys,
-            new_effects=new_effects,
+            new_effects=resolved_effects if new_keys else [],
+            new_unverified_effect_keys=new_unverified_keys,
+            new_unverified_effects=(resolved_effects if new_unverified_keys else []),
+            governed_authorization_id=(
+                self.governed_authorization.authorization_id
+                if self.governed_authorization is not None
+                else None
+            ),
+            governed_approval_source=(
+                self.governed_authorization.approval_source
+                if self.governed_authorization is not None
+                else None
+            ),
             expected_texts=expected,
             transition_history_hash=_history_hash(report.visited_states),
             bundle_version=self._bundle_version,
@@ -1689,6 +1823,8 @@ class Replayer:
         # openadapt_flow.runtime.actuators.
         if self.api_actuator is not None and step.api_binding is not None:
             if self._try_api_tier(step, params, result):
+                if self.governed_authorization is not None and not result.ok:
+                    result.safety_halt = True
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
 
@@ -1727,6 +1863,8 @@ class Replayer:
                 result.skipped = gate_error is None
                 result.ok = gate_error is None
                 result.error = gate_error
+                if self._governed_asset_mutation is not None:
+                    result.safety_halt = True
                 result.after_png = self._save_step_png(
                     run_dir, step.id, "after", last_frame
                 )
@@ -1803,9 +1941,14 @@ class Replayer:
                         )
                         + " — refusing to act; run aborted"
                     )
-                elif (
-                    check.status in ("unreadable", "abstain")
-                    and step.risk == "irreversible"
+                elif check.status in ("unreadable", "abstain") and (
+                    step.risk == "irreversible"
+                    or (
+                        self.governed_authorization is not None
+                        and self.governed_authorization.requires_verified_identity(
+                            step.id
+                        )
+                    )
                 ):
                     reason = (
                         "rests on a glyph-confusable identifier OCR may have "
@@ -1815,11 +1958,30 @@ class Replayer:
                         else "could not be read from the live screen "
                         "(context band OCR found no usable text)"
                     )
-                    error = (
-                        f"Step '{step.id}' ({step.intent}) is irreversible "
-                        f"and its target identity {reason} — needs human "
-                        "confirmation; refusing to act"
+                    governed = (
+                        self.governed_authorization is not None
+                        and self.governed_authorization.requires_verified_identity(
+                            step.id
+                        )
                     )
+                    scope = (
+                        "requires verified identity under the governed run policy"
+                        if governed
+                        else "is irreversible"
+                    )
+                    error = (
+                        f"Step '{step.id}' ({step.intent}) {scope} and its target "
+                        f"identity {reason} — needs human confirmation; refusing "
+                        "to act"
+                    )
+                    if governed:
+                        result.safety_halt = True
+                if (
+                    error is not None
+                    and self.governed_authorization is not None
+                    and self.governed_authorization.requires_verified_identity(step.id)
+                ):
+                    result.safety_halt = True
             # System-of-record effect verification -- SNAPSHOT the record just
             # before the (consequential) action, so the post-action verifier
             # can count only what THIS step wrote (delta / at-most-once /
@@ -1829,24 +1991,49 @@ class Replayer:
             # rather than pass it silently.
             if error is None and step.effects:
                 if self.effect_verifier is None:
-                    error = (
-                        f"Step '{step.id}' ({step.intent}) declares "
-                        f"{len(step.effects)} system-of-record effect(s) but no "
-                        "EffectVerifier is configured for this run — refusing "
-                        "to perform an unverifiable consequential write "
-                        "(deployment/configuration error); run aborted"
+                    authorization = self.governed_authorization
+                    approved = (
+                        authorization is not None
+                        and authorization.approves_unverified_write(step)
                     )
-                    result.effect_verified = False
-                    result.effect_results.append(
-                        "no EffectVerifier configured for a step that declares "
-                        "effects (fail-safe HALT)"
-                    )
+                    if approved:
+                        assert authorization is not None
+                        resolved_effects = self._resolve_effects(step.effects, params)
+                        result.effect_contract_hashes.extend(
+                            effect.contract_hash() for effect in resolved_effects
+                        )
+                        result.effect_approved_unverified = True
+                        result.effect_results.append(
+                            "[approved-unverified] no independent EffectVerifier; "
+                            "GUI actuation explicitly approved for authorization "
+                            f"{authorization.authorization_id}; "
+                            "screen postconditions still required"
+                        )
+                    else:
+                        error = (
+                            f"Step '{step.id}' ({step.intent}) declares "
+                            f"{len(step.effects)} system-of-record effect(s) but no "
+                            "EffectVerifier is configured for this run — refusing "
+                            "to perform an unverifiable consequential write "
+                            "(deployment/configuration error); run aborted"
+                        )
+                        result.effect_verified = False
+                        result.effect_results.append(
+                            "no EffectVerifier configured for a step that declares "
+                            "effects (fail-safe HALT)"
+                        )
+                        if self.governed_authorization is not None:
+                            result.safety_halt = True
                 else:
                     # Bind the effect contracts to this run's params BEFORE the
                     # pre-state snapshot (P0-3): match/value/idempotency_key must
                     # describe the record THIS run writes, not the demo's.
                     resolved_effects = self._resolve_effects(step.effects, params)
                     effect_pre_state = self.effect_verifier.capture_pre_state()
+
+            if self._governed_asset_mutation is not None:
+                error = self._governed_asset_mutation
+                result.safety_halt = True
 
             if error is None:
                 error = self._act(
@@ -1860,6 +2047,9 @@ class Replayer:
                     result=result,
                     graph_ctx=graph_ctx,
                 )
+                if self._governed_asset_mutation is not None:
+                    error = self._governed_asset_mutation
+                    result.safety_halt = True
 
             if error is None:
                 after_png = self.vision.wait_settled(self.backend)
@@ -1867,6 +2057,9 @@ class Replayer:
                 postconditions_ok, last_frame, failed = self._check_postconditions(
                     step, after_png, bundle_dir, start_state, result
                 )
+                if self._governed_asset_mutation is not None:
+                    postconditions_ok = False
+                    failed.append(self._governed_asset_mutation)
                 result.postconditions_ok = postconditions_ok
                 if result.postcondition_drift_rescues:
                     # The rescue descriptions embed OCR'd on-screen text
@@ -1890,6 +2083,8 @@ class Replayer:
                         f"({step.intent}): expected screen state not reached "
                         f"(semantic drift) — failed: {detail} — run aborted"
                     )
+                    if self.governed_authorization is not None:
+                        result.safety_halt = True
 
             # Independent system-of-record verification, AFTER the screen
             # postconditions passed: the screen oracle cannot see a partial
@@ -1900,6 +2095,8 @@ class Replayer:
                 error = self._verify_effects(
                     step, effect_pre_state, result, effects=resolved_effects
                 )
+                if error is not None and self.governed_authorization is not None:
+                    result.safety_halt = True
 
             result.ok = error is None
             result.error = error
@@ -2240,14 +2437,8 @@ class Replayer:
         # PNG straight from disk exactly as before (the fallback also covers an
         # encrypted bundle whose crop wasn't sealed, keeping ``template_png``
         # None rather than erroring).
-        template_png: Optional[bytes] = None
         rel = step.anchor.template
-        if workflow.encrypted:
-            template_png = workflow.decrypted_template(rel)
-        if template_png is None:
-            template_path = Path(bundle_dir) / rel
-            if template_path.is_file():
-                template_png = template_path.read_bytes()
+        template_png = self._asset_bytes(bundle_dir, rel, workflow=workflow)
 
         # The structural ACTION rung (top of the ladder) runs only when the
         # live backend can re-find an element (StructuralActionBackend). A
@@ -2441,9 +2632,13 @@ class Replayer:
         Model-free: predicates are evaluated by :meth:`_predicate_holds`.
         """
         # Guard (precondition) on the entry frame.
-        if step.guard is not None and not self._predicate_holds(
+        guard_holds = step.guard is None or self._predicate_holds(
             step.guard.predicate, before_png, bundle_dir, params
-        ):
+        )
+        if self._governed_asset_mutation is not None:
+            return False, self._governed_asset_mutation, before_png
+        if not guard_holds:
+            assert step.guard is not None
             if step.guard.on_unmet == "skip":
                 return False, None, before_png
             return (
@@ -2501,10 +2696,7 @@ class Replayer:
         if kind is PredicateKind.ANCHOR_RESOLVES:
             if pred.anchor is None:
                 return False
-            template_png: Optional[bytes] = None
-            template_path = Path(bundle_dir) / pred.anchor.template
-            if template_path.is_file():
-                template_png = template_path.read_bytes()
+            template_png = self._asset_bytes(bundle_dir, pred.anchor.template)
             return (
                 resolve(
                     pred.anchor,
@@ -2706,10 +2898,9 @@ class Replayer:
             or anchor.identifier_region is None
         ):
             return None, None
-        crop_path = Path(bundle_dir) / anchor.identifier_crop
-        if not crop_path.is_file():
+        recorded_png = self._asset_bytes(bundle_dir, anchor.identifier_crop)
+        if recorded_png is None:
             return None, None
-        recorded_png = crop_path.read_bytes()
         rx, ry, rw, rh = anchor.identifier_region
         live_region = (
             resolution.point[0] + (rx - anchor.click_point[0]),
@@ -3056,7 +3247,10 @@ class Replayer:
             self.backend.scroll(dx, dy)
             return None
 
-        if self._predicate_holds(stop_pred, before_png, bundle_dir, params):
+        holds = self._predicate_holds(stop_pred, before_png, bundle_dir, params)
+        if self._governed_asset_mutation is not None:
+            return self._governed_asset_mutation
+        if holds:
             return None  # target already in view; nothing to scroll
 
         increment = math.hypot(dx, dy)
@@ -3066,7 +3260,10 @@ class Replayer:
             self.backend.scroll(dx, dy)
             scrolled += increment
             frame = self.vision.wait_settled(self.backend)
-            if self._predicate_holds(stop_pred, frame, bundle_dir, params):
+            holds = self._predicate_holds(stop_pred, frame, bundle_dir, params)
+            if self._governed_asset_mutation is not None:
+                return self._governed_asset_mutation
+            if holds:
                 return None
 
         following = (
@@ -3322,14 +3519,47 @@ class Replayer:
             return distance <= pc.phash_tolerance
         return False
 
-    @staticmethod
-    def _postcondition_template(pc: Any, bundle_dir: Path) -> Optional[bytes]:
+    def _postcondition_template(self, pc: Any, bundle_dir: Path) -> Optional[bytes]:
         """Bytes of a REGION_STABLE postcondition's template crop, if any."""
         rel = getattr(pc, "template", None)
         if not rel:
             return None
+        return self._asset_bytes(bundle_dir, rel)
+
+    def _asset_bytes(
+        self,
+        bundle_dir: Path,
+        rel: str,
+        *,
+        workflow: Optional[Workflow] = None,
+    ) -> Optional[bytes]:
+        """Return the verified run snapshot for governed asset consumers."""
+        if self.governed_authorization is not None:
+            data = self._governed_asset_snapshot.get(rel)
+            expected = self._governed_asset_hashes.get(rel)
+            if self._governed_plaintext_assets and expected is not None:
+                path = Path(bundle_dir) / rel
+                try:
+                    current = path.read_bytes()
+                except OSError:
+                    current = b""
+                if hashlib.sha256(current).hexdigest() != expected:
+                    self._governed_asset_mutation = (
+                        f"governed sealed asset {rel!r} changed after admission; "
+                        "refusing to act; run aborted"
+                    )
+            return data
+        if workflow is not None and workflow.encrypted:
+            decrypted = workflow.decrypted_template(rel)
+            if decrypted is not None:
+                return decrypted
         path = Path(bundle_dir) / rel
         return path.read_bytes() if path.is_file() else None
+
+    def _raise_on_governed_asset_mutation(self) -> None:
+        """Make predicate-only mutation a non-catchable program safety halt."""
+        if self._governed_asset_mutation is not None:
+            raise _ProgramHalt("halt", self._governed_asset_mutation, safety=True)
 
     # -- healing ---------------------------------------------------------------
 

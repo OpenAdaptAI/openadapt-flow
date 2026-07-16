@@ -21,6 +21,7 @@ from openadapt_flow.deployment import (
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    ApiBinding,
     Postcondition,
     PostconditionKind,
     Step,
@@ -33,6 +34,7 @@ from openadapt_flow.run_gate import (
     GATE_ENCRYPTION,
     GATE_IDENTITY,
     GATE_MANIFEST,
+    build_runtime_authorization,
     evaluate_run_gate,
 )
 from openadapt_flow.runtime.effects import Effect, EffectKind
@@ -268,6 +270,79 @@ def test_unverifiable_write_with_explicit_approval_admitted(tmp_path):
     assert report.passed, report.render()
 
 
+def test_unverified_approval_requires_screen_postcondition(tmp_path):
+    wf = _good_workflow("vacuous_approval")
+    wf.steps[1].expect = []
+    wf, bundle = _seal(wf, tmp_path)
+    report = _run(
+        wf,
+        bundle,
+        verifier=False,
+        approval_available=True,
+        policy_source="permissive",
+    )
+
+    gate = report.gate(GATE_APPROVAL)
+    assert gate is not None and not gate.passed
+    assert gate.offenders == ["s1"]
+    assert "no screen postcondition" in gate.detail
+
+
+def test_approval_is_bound_to_bundle_steps_and_effect_contracts(tmp_path):
+    wf, bundle = _seal(_good_workflow("bound_approval"), tmp_path)
+    report = _run(wf, bundle, verifier=False, approval_available=True)
+    authorization = build_runtime_authorization(
+        wf,
+        report,
+    )
+
+    assert authorization.validate_workflow(wf) is None
+    assert authorization.required_identity_step_ids == ("s0", "s1")
+    assert authorization.approves_unverified_write(wf.steps[1])
+
+    changed = wf.model_copy(deep=True)
+    changed.steps[1].effects[0].match = {"patient_id": "different"}
+    assert "in-memory workflow semantics" in (
+        authorization.validate_workflow(changed) or ""
+    )
+
+
+def test_authorization_factory_rejects_report_from_other_workflow(tmp_path):
+    wf_a, bundle_a = _seal(_good_workflow("workflow_a"), tmp_path)
+    wf_b, _bundle_b = _seal(_good_workflow("workflow_b"), tmp_path)
+    report_a = _run(wf_a, bundle_a, verifier=False, approval_available=True)
+
+    with pytest.raises(ValueError, match="different workflow"):
+        build_runtime_authorization(wf_b, report_a)
+
+
+def test_verifier_admission_cannot_be_reinterpreted_as_unverified_approval(tmp_path):
+    wf, bundle = _seal(_good_workflow("verified_only"), tmp_path)
+    report = _run(wf, bundle, verifier=True, approval_available=True)
+    authorization = build_runtime_authorization(wf, report)
+
+    assert report.unverified_write_approval_granted is False
+    assert authorization.unverified_write_approvals == ()
+
+
+def test_direct_api_write_cannot_use_unverified_approval(tmp_path):
+    wf = _good_workflow("api_unverified")
+    wf.steps[1].api_binding = ApiBinding(url_template="/api/encounter")
+    wf, bundle = _seal(wf, tmp_path)
+    report = evaluate_run_gate(
+        wf,
+        bundle_dir=bundle,
+        deployment=_deployment(verifier=False),
+        effect_verifier=None,
+        api_actuator=object(),
+        approval_available=True,
+    )
+
+    gate = report.gate(GATE_APPROVAL)
+    assert gate is not None and not gate.passed
+    assert "direct API write" in gate.detail
+
+
 # ---------------------------------------------------------------------------
 # Gate 5: encryption
 # ---------------------------------------------------------------------------
@@ -291,21 +366,78 @@ def test_unencrypted_allowed_with_escape_hatch(tmp_path):
 
 
 def test_unsealed_templates_warn_by_default_refuse_when_strict(tmp_path):
-    wf, bundle = _seal(_good_workflow("tmpl"), tmp_path)
-    # Drop a plaintext template asset into the bundle.
+    wf, bundle = _seal(_good_workflow("tmpl"), tmp_path, encrypt=False)
     (bundle / "templates").mkdir(exist_ok=True)
     (bundle / "templates" / "s0.png").write_bytes(b"\x89PNG plaintext crop")
 
-    warn = _run(wf, bundle)
+    warn = _run(wf, bundle, require_encryption=False)
     g = warn.gate(GATE_ENCRYPTION)
     assert g is not None and g.passed and g.warning
     assert warn.passed  # a warning does not fail the run
+    assert "WARNING: 1 template/screenshot asset(s) are unsealed" in g.detail
 
-    strict = _run(wf, bundle, strict_templates=True)
+    strict = _run(wf, bundle, strict_templates=True, require_encryption=False)
     gs = strict.gate(GATE_ENCRYPTION)
     assert gs is not None and not gs.passed
     assert not strict.passed
     assert any("s0.png" in o for o in gs.offenders)
+
+
+def test_encrypted_templates_pass_strict_gate(tmp_path):
+    workflow = _good_workflow("sealed-templates")
+    bundle = tmp_path / workflow.name
+    templates = bundle / "templates"
+    templates.mkdir(parents=True)
+    (templates / "s0.png").write_bytes(b"\x89PNG sealed patient crop")
+    workflow.save(bundle, encrypt=True, key=_KEY)
+    loaded = Workflow.load(bundle, key=_KEY)
+
+    assert not (templates / "s0.png").exists()
+    assert (templates / "s0.png.enc").is_file()
+    report = _run(loaded, bundle, strict_templates=True)
+    gate = report.gate(GATE_ENCRYPTION)
+
+    assert gate is not None and gate.passed and not gate.warning
+    assert gate.offenders == []
+    assert "1 template/screenshot asset(s) encrypted at rest" in gate.detail
+    assert report.passed, report.render()
+
+
+def test_encrypted_bundle_with_plaintext_template_leak_is_always_refused(tmp_path):
+    workflow = _good_workflow("mixed-templates")
+    bundle = tmp_path / workflow.name
+    templates = bundle / "templates"
+    templates.mkdir(parents=True)
+    (templates / "s0.png").write_bytes(b"\x89PNG sealed patient crop")
+    workflow.save(bundle, encrypt=True, key=_KEY)
+    loaded = Workflow.load(bundle, key=_KEY)
+    (templates / "leaked.png").write_bytes(b"\x89PNG unexpected cleartext")
+
+    report = _run(loaded, bundle, strict_templates=False)
+    gate = report.gate(GATE_ENCRYPTION)
+
+    assert gate is not None and not gate.passed and not gate.warning
+    assert gate.offenders == ["templates/leaked.png"]
+    assert "mixed encrypted/plaintext bundles are refused" in gate.detail
+    assert "[REFUSE] Encrypted bundle" in report.render()
+
+
+def test_encrypted_bundle_missing_declared_ciphertext_is_refused(tmp_path):
+    workflow = _good_workflow("missing-ciphertext")
+    bundle = tmp_path / workflow.name
+    templates = bundle / "templates"
+    templates.mkdir(parents=True)
+    (templates / "s0.png").write_bytes(b"\x89PNG sealed patient crop")
+    workflow.save(bundle, encrypt=True, key=_KEY)
+    loaded = Workflow.load(bundle, key=_KEY)
+    (templates / "s0.png.enc").unlink()
+
+    report = _run(loaded, bundle, strict_templates=True)
+    gate = report.gate(GATE_ENCRYPTION)
+
+    assert gate is not None and not gate.passed
+    assert gate.offenders == ["templates/s0.png"]
+    assert "lack authenticated ciphertext coverage" in gate.detail
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +563,36 @@ def test_cli_run_dry_run_reports_without_executing(tmp_path, monkeypatch, capsys
     assert "ADMIT" in out
     # Dry-run must NOT execute even on an admitted bundle.
     assert "Replay" not in out
+
+
+def test_cli_run_hands_bound_authorization_to_replay(tmp_path, monkeypatch, capsys):
+    import openadapt_flow.__main__ as main
+
+    wf, bundle = _seal(_good_workflow("cli_approved"), tmp_path)
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    captured = {}
+
+    def capture(args):
+        captured["authorization"] = args._governed_run_authorization
+        return 0
+
+    monkeypatch.setattr(main, "_cmd_replay", capture)
+    parser = main.build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            str(bundle),
+            "--policy",
+            "clinical-write",
+            "--approve-unverified-writes",
+        ]
+    )
+
+    assert args.func(args) == 0
+    authorization = captured["authorization"]
+    assert authorization.validate_workflow(wf) is None
+    assert authorization.approves_unverified_write(wf.steps[1])
+    assert "EXPLICITLY approved" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("encrypt", [True, False])

@@ -53,7 +53,7 @@ Components, and how each maps to what already ships in this repo:
 | **Deployment wiring** | `deployment.yaml` → `openadapt_flow.deployment.DeploymentConfig` | Backend URL, system-of-record effect verifier, actuation, durability, policy. Empty file = fully local, zero egress. |
 | **PHI scrubbing** | `openadapt_flow/privacy.py` + `openadapt-privacy` (`[privacy]` extra) | `OPENADAPT_FLOW_SCRUB=on` fail-closed; image redaction implied under `on`. |
 | **At-rest protection** | Operator full-disk encryption + salted-hash `identity_template` + opt-in AES-256-GCM bundle/checkpoint sealing (`OPENADAPT_BUNDLE_KEY`) | See `docs/phi_at_rest.md`. Bundle JSON and template crops are sealed when encryption is enabled; KMS/key rotation remain operator responsibilities. |
-| **Local audit log** | `deploy/on-prem/bin/audit-log.sh` → `audit/audit.log` | NEW append-only, hash-chained, PHI-free JSONL index over the runs. |
+| **Local audit log** | `deploy/on-prem/bin/audit-log.sh` → `audit/audit.log` | Serialized, append-only, hash-chained, PHI-free JSONL index over runs and release changes. |
 | **Durable state** | `openadapt_flow/runtime/durable/` (`checkpoints/`, `pending_escalation.json`) | A halted run pauses durably and is resumable (`resume`/`approve`) — locally. |
 | **Air-gap attestation** | `deploy/on-prem/bin/verify-airgap.sh` | NEW: proves the software-side no-egress posture; the firewall is the real control. |
 | **Optional on-prem VLM** | `docs/deployment/ON_PREM_VLM.md`, `openadapt-flow-vlm-service` | LAN-only GPU box; opt-in; off by default (default install pulls no model). |
@@ -122,8 +122,9 @@ escrow, or hardware-backed key custody; those remain operator responsibilities.
 ## The local audit log
 
 `audit/audit.log` is the tamper-evident **index** over the runs: newline-
-delimited JSON, append-only, PHI-free. Each record carries UTC timestamp, event
-(`queued`/`started`/`verified`/`halted`/`failed`/`resumed`), an opaque job id,
+delimited JSON, append-only, PHI-free. Each record carries UTC timestamp, run or
+release event (`queued`/`started`/`verified`/`halted`/`failed`/`resumed` and
+prepared/completed update, rollback, or migration), an opaque job id,
 the bundle basename, the run-dir path, the process exit code, the OS actor, an
 operator note, and `prev_sha` — a sha256 chain linking it to the previous line,
 so any silent edit or deletion breaks every subsequent hash and is caught by
@@ -158,13 +159,16 @@ out-of-band and pulled in by the operator:
    media, and points `onprem.yaml:updates` at them.
 3. `install.sh --update` verifies the signature against the **pinned vendor
    public key** in `keys/`, installs into a fresh blue/green venv, runs the
-   smoke test + `verify-airgap.sh`, flips the runner over, and records the
-   applied version in the audit log.
+   smoke test + `verify-airgap.sh`, atomically flips the runner over, and records
+   prepared/completed events in the audit log. A checksum may detect transport
+   corruption, but never substitutes for the required signature.
 
-Signature *verification* and the blue/green swap are documented but the
-apply step is a **STUB** in this scaffold (it needs the site's staged artifacts
-and vendor key). The offline, no-egress *policy* is real and enforced by the
-firewall + `verify-airgap.sh`.
+The update and rollback paths are implemented. Release archives are extracted
+through bounded traversal/link/device checks, version metadata must match the
+bundled wheel, and release state changes are serialized. Existing installations
+using the earlier single `venv/` layout are migrated automatically; that venv is
+retained as the first rollback target. See the complete operator procedure in
+[`deploy/on-prem/UPDATE.md`](../deploy/on-prem/UPDATE.md).
 
 ## Install (summary)
 
@@ -179,8 +183,9 @@ OPENADAPT_FLOW_SCRUB=on ./bin/verify-airgap.sh --config onprem.yaml --probe
 
 Containers instead of systemd: `docker compose -f docker-compose.yml config`
 (validate), then `docker compose up -d runner`. See
-[`deploy/on-prem/README.md`](../deploy/on-prem/README.md) for the full runbook
-and the REAL-vs-STUB table, and
+[`deploy/on-prem/README.md`](../deploy/on-prem/README.md) and
+[`deploy/on-prem/UPDATE.md`](../deploy/on-prem/UPDATE.md) for the runnable
+package and update/rollback runbook, and
 [`deploy/on-prem/COMPLIANCE.md`](../deploy/on-prem/COMPLIANCE.md) for the
 PHIPA/HIPAA-adjacent posture and boundaries.
 

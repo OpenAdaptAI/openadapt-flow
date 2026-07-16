@@ -301,9 +301,7 @@ def test_unsealed_templates_warn_by_default_refuse_when_strict(tmp_path):
     assert warn.passed  # a warning does not fail the run
     assert "WARNING: 1 template/screenshot asset(s) are unsealed" in g.detail
 
-    strict = _run(
-        wf, bundle, strict_templates=True, require_encryption=False
-    )
+    strict = _run(wf, bundle, strict_templates=True, require_encryption=False)
     gs = strict.gate(GATE_ENCRYPTION)
     assert gs is not None and not gs.passed
     assert not strict.passed

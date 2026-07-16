@@ -9,6 +9,7 @@ A CLI test confirms ``run`` refuses without executing (and ``--dry-run`` reports
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -593,6 +594,114 @@ def test_cli_run_hands_bound_authorization_to_replay(tmp_path, monkeypatch, caps
     assert authorization.validate_workflow(wf) is None
     assert authorization.approves_unverified_write(wf.steps[1])
     assert "EXPLICITLY approved" in capsys.readouterr().out
+
+
+def test_cli_run_params_file_binds_authorization_without_values_in_argv(
+    tmp_path, monkeypatch
+):
+    import openadapt_flow.__main__ as main
+    from openadapt_flow.runtime.authorization import runtime_inputs_digest
+
+    wf, bundle = _seal(_good_workflow("cli_params_file"), tmp_path)
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    params_file = tmp_path / "runtime-params.json"
+    secret_value = "patient-secret-not-on-argv"
+    params_file.write_text(
+        json.dumps(
+            {
+                "patient_id": secret_value,
+                "count": 2,
+                "approved": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def capture(args):
+        captured["authorization"] = args._governed_run_authorization
+        return 0
+
+    monkeypatch.setattr(main, "_cmd_replay", capture)
+    argv = [
+        "run",
+        str(bundle),
+        "--policy",
+        "clinical-write",
+        "--approve-unverified-writes",
+        "--params-file",
+        str(params_file),
+        "--param",
+        "count=3",
+    ]
+    assert secret_value not in " ".join(argv)
+    args = main.build_parser().parse_args(argv)
+    assert args.params_file == str(params_file)
+    assert secret_value not in repr(vars(args))
+    assert args.func(args) == 0
+
+    expected = {
+        "patient_id": secret_value,
+        "count": "3",
+        "approved": "True",
+    }
+    authorization = captured["authorization"]
+    assert authorization.runtime_inputs_digest == runtime_inputs_digest(
+        wf, expected, None
+    )
+
+
+@pytest.mark.parametrize(
+    "payload,error",
+    [
+        pytest.param("{", "could not be read as JSON", id="malformed"),
+        pytest.param("[]", "must contain one JSON object", id="non-object"),
+        pytest.param(
+            json.dumps({f"p{i}": i for i in range(101)}),
+            "may contain at most 100 parameters",
+            id="too-many-parameters",
+        ),
+        pytest.param(
+            json.dumps({"patient_id": None}),
+            "value for 'patient_id' must be a scalar",
+            id="null-value",
+        ),
+        pytest.param(
+            json.dumps({"patient_id": ["p1"]}),
+            "value for 'patient_id' must be a scalar",
+            id="list-value",
+        ),
+        pytest.param(
+            json.dumps({"patient_id": {"id": "p1"}}),
+            "value for 'patient_id' must be a scalar",
+            id="object-value",
+        ),
+    ],
+)
+def test_cli_run_rejects_invalid_params_file_without_executing(
+    tmp_path, monkeypatch, payload, error
+):
+    import openadapt_flow.__main__ as main
+
+    _no_execute(monkeypatch)
+    _wf, bundle = _seal(_good_workflow("cli_invalid_params"), tmp_path)
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    params_file = tmp_path / "runtime-params.json"
+    params_file.write_text(payload, encoding="utf-8")
+    args = main.build_parser().parse_args(
+        [
+            "run",
+            str(bundle),
+            "--policy",
+            "clinical-write",
+            "--approve-unverified-writes",
+            "--params-file",
+            str(params_file),
+        ]
+    )
+
+    with pytest.raises(SystemExit, match=error):
+        args.func(args)
 
 
 @pytest.mark.parametrize("encrypt", [True, False])

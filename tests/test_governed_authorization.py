@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from openadapt_flow.ir import (
     ActionKind,
+    Guard,
     Postcondition,
     PostconditionKind,
+    Predicate,
+    PredicateKind,
     ProgramGraph,
     State,
     StateKind,
@@ -146,6 +149,70 @@ def test_identity_asset_uses_same_mutation_guard(tmp_path):
     assert report.success is False
     assert backend.actions == []
     assert "changed after admission" in (report.results[0].error or "")
+
+
+def test_guard_skip_cannot_hide_governed_asset_mutation(tmp_path):
+    step = context_click_step("Jane Sample 1980-01-15 MRN 123")
+    step.guard = Guard(
+        predicate=Predicate(
+            kind=PredicateKind.ANCHOR_RESOLVES,
+            anchor=step.anchor.model_copy(deep=True),
+        ),
+        on_unmet="skip",
+    )
+    workflow, bundle = _seal(tmp_path, Workflow(name="guard_race", steps=[step]))
+    authorization = _authorization(workflow)
+    backend = FakeBackend()
+    vision = _MutatingVision(bundle / "templates" / "btn.png")
+
+    report = Replayer(backend, vision=vision, governed_authorization=authorization).run(
+        workflow, bundle_dir=bundle, run_dir=tmp_path / "run"
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].safety_halt is True
+    assert report.results[0].skipped is False
+    assert "changed after admission" in (report.results[0].error or "")
+
+
+def test_program_transition_cannot_hide_governed_asset_mutation(tmp_path):
+    anchor = context_click_step("Jane Sample 1980-01-15 MRN 123").anchor
+    program = ProgramGraph(
+        entry="branch",
+        states={
+            "branch": State(
+                id="branch",
+                kind=StateKind.BRANCH,
+                transitions=[
+                    Transition(
+                        target="done",
+                        guard=Predicate(
+                            kind=PredicateKind.ANCHOR_RESOLVES,
+                            anchor=anchor,
+                        ),
+                    )
+                ],
+            ),
+            "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+        },
+    )
+    workflow, bundle = _seal(
+        tmp_path, Workflow(name="transition_race", program=program)
+    )
+    authorization = _authorization(workflow)
+    backend = FakeBackend()
+    vision = _MutatingVision(bundle / "templates" / "btn.png")
+
+    report = Replayer(backend, vision=vision, governed_authorization=authorization).run(
+        workflow, bundle_dir=bundle, run_dir=tmp_path / "run"
+    )
+
+    assert report.success is False
+    assert report.terminal_outcome == "halt"
+    assert backend.actions == []
+    assert report.results[-1].safety_halt is True
+    assert "changed after admission" in (report.results[-1].error or "")
 
 
 def test_authorization_is_single_use(tmp_path):

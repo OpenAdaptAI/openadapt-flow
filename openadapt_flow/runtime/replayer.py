@@ -909,6 +909,7 @@ class Replayer:
                     new_crops=new_crops,
                     depth=0,
                 )
+            self._raise_on_governed_asset_mutation()
             report.success = True
             if report.terminal_outcome is None:
                 # Fell off the top graph with no explicit terminal: a clean,
@@ -1035,6 +1036,7 @@ class Replayer:
             self._current_params = params
 
             if state.kind is StateKind.TERMINAL:
+                self._raise_on_governed_asset_mutation()
                 outcome = state.outcome or "success"
                 report.terminal_outcome = outcome
                 if outcome == "success":
@@ -1311,9 +1313,11 @@ class Replayer:
             return transitions[0].target
         frame = self.vision.wait_settled(self.backend)
         for t in transitions:
-            if t.guard is None or self._predicate_holds(
+            matched = t.guard is None or self._predicate_holds(
                 t.guard, frame, bundle_dir, params
-            ):
+            )
+            self._raise_on_governed_asset_mutation()
+            if matched:
                 return t.target
         raise _ProgramHalt(
             "halt",
@@ -1857,6 +1861,8 @@ class Replayer:
                 result.skipped = gate_error is None
                 result.ok = gate_error is None
                 result.error = gate_error
+                if self._governed_asset_mutation is not None:
+                    result.safety_halt = True
                 result.after_png = self._save_step_png(
                     run_dir, step.id, "after", last_frame
                 )
@@ -2621,9 +2627,13 @@ class Replayer:
         Model-free: predicates are evaluated by :meth:`_predicate_holds`.
         """
         # Guard (precondition) on the entry frame.
-        if step.guard is not None and not self._predicate_holds(
+        guard_holds = step.guard is None or self._predicate_holds(
             step.guard.predicate, before_png, bundle_dir, params
-        ):
+        )
+        if self._governed_asset_mutation is not None:
+            return False, self._governed_asset_mutation, before_png
+        if not guard_holds:
+            assert step.guard is not None
             if step.guard.on_unmet == "skip":
                 return False, None, before_png
             return (
@@ -3534,6 +3544,11 @@ class Replayer:
                 return decrypted
         path = Path(bundle_dir) / rel
         return path.read_bytes() if path.is_file() else None
+
+    def _raise_on_governed_asset_mutation(self) -> None:
+        """Make predicate-only mutation a non-catchable program safety halt."""
+        if self._governed_asset_mutation is not None:
+            raise _ProgramHalt("halt", self._governed_asset_mutation, safety=True)
 
     # -- healing ---------------------------------------------------------------
 

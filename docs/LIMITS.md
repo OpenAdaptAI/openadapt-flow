@@ -52,6 +52,11 @@ Deterministic does **not** mean:
 A "healthy" run is one that stays within the evidence and checks encoded in
 the bundle. It is not a claim that the surrounding application is healthy.
 
+Governed execution recomputes workflow semantics, snapshots verified sealed
+assets, binds parameters and worklists, detects later plaintext asset
+replacement at every consumer, and persists the same authorization across
+durable resume.
+
 ## Repair has four distinct outcomes
 
 "Self-healing" is shorthand and should not be read as unrestricted autonomy.
@@ -93,10 +98,14 @@ For an armed step:
 - OCR can be unable to distinguish identifiers such as `O` from `0` or `l`
   from `1` on a pixel-only display;
 - the pixel comparison tier can reject some differences but is not enabled to
-  authorize a match; and
-- when all usable identity evidence is unreadable or ambiguous, irreversible
-  actions halt, while a reversible action can proceed with the condition
-  recorded in its report.
+  authorize a match.
+
+Permissive `replay` may proceed on an unreadable reversible target and reports
+that condition. Governed `run` requires an affirmative live verdict for every
+identity-required admitted step; mismatch, unreadable, or abstain halts before
+action, and program exception edges cannot convert that safety halt into
+success. Unarmed steps remain outside this guarantee and may be refused by the
+selected policy.
 
 No identity tier can distinguish two entities whose available evidence is
 identical. Structured text avoids OCR glyph collapse, but it is only as unique
@@ -151,12 +160,14 @@ later-rolled-back write. Visual verification and a screen-reading model cannot
 detect a backend fault when the interface itself displays success.
 
 OpenAdapt can verify a declared effect against a configured REST, FHIR, or
-document-store verifier. A declared effect without a verifier halts in the
-replayer. The deployment `run` gate requires consequential writes to declare
-effects. Although its admission report can record explicit operator approval
-when no verifier is configured, the shared replayer still halts before an
-effected write without a verifier. Do not treat approval as effect confirmation
-or rely on it to make an unverifiable write executable.
+document-store verifier. When no verifier is configured, the governed `run`
+gate admits a GUI write only after explicit `--approve-unverified-writes` and
+only when the step has a non-vacuous screen postcondition. The resulting
+authorization is bound to the exact sealed bundle, effective runtime inputs,
+step, and effect-contract hashes. Replay records
+`effect_approved_unverified=true`, never `effect_verified=true`; approval is
+not independent confirmation. Direct API writes still require a verifier and
+refuse this fallback.
 
 The remaining boundary is material:
 

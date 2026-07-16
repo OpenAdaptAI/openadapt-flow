@@ -22,6 +22,7 @@ releases/HISTORY             append-only ledger of activate/rollback events
 current  -> releases/<version>    the ACTIVE release   (atomic symlink)
 previous -> releases/<version>    the rollback target  (atomic symlink)
 venv     -> current/venv          convenience alias for humans/docs
+rollback-forward -> ...           transient crash-recovery pointer during rollback
 
 bundles/ runs/ jobs/ audit/ keys/ deployment.yaml   DATA — NEVER touched by an
                                                      update or a rollback.
@@ -41,29 +42,34 @@ all survive across any number of updates.
 ## Build a signed release bundle (off-site, on a connected host)
 
 The bundle is a tarball containing a `VERSION` file and an offline pip
-wheelhouse, plus a checksum and (recommended) a detached signature:
+wheelhouse, plus a required detached signature and an optional checksum:
 
 ```bash
 # 1. Assemble the payload
 mkdir -p release/wheels
-echo "1.7.0" > release/VERSION
-pip download 'openadapt-flow[privacy]==1.7.0' -d release/wheels   # + deps
+echo "1.8.0" > release/VERSION
+python -m pip download --only-binary=:all: \
+  'openadapt-flow[privacy]==1.8.0' -d release/wheels
 
 # 2. Archive it
-tar czf release-1.7.0.tar.gz release
+COPYFILE_DISABLE=1 tar czf release-1.8.0.tar.gz release
 
-# 3. Integrity: sha256 sidecar (REQUIRED unless you sign)
-shasum -a 256 release-1.7.0.tar.gz > release-1.7.0.tar.gz.sha256
+# 3. Optional transport-corruption check
+shasum -a 256 release-1.8.0.tar.gz > release-1.8.0.tar.gz.sha256
 
-# 4. Authenticity: detached signature with your PINNED vendor key (RECOMMENDED)
+# 4. Authenticity: detached signature with your PINNED vendor key (REQUIRED)
 #    minisign (ed25519):
-minisign -Sm release-1.7.0.tar.gz            # -> release-1.7.0.tar.gz.minisig
+minisign -Sm release-1.8.0.tar.gz            # -> release-1.8.0.tar.gz.minisig
 #    or openssl (RSA/ECDSA PEM key):
 openssl dgst -sha256 -sign vendor_priv.pem \
-  -out release-1.7.0.tar.gz.sig release-1.7.0.tar.gz
+  -out release-1.8.0.tar.gz.sig release-1.8.0.tar.gz
 ```
 
-Copy the archive + its `.sha256` and/or signature onto removable media. Keep the
+The `VERSION` value must exactly match the single `openadapt_flow` wheel in the
+wheelhouse. `COPYFILE_DISABLE=1` prevents macOS metadata sidecars from entering
+the release layout.
+
+Copy the archive, signature, and optional `.sha256` onto removable media. Keep the
 **private** signing key off the clinic box forever; only the **public** key is
 staged on the box (`updates.vendor_pubkey`).
 
@@ -79,9 +85,9 @@ sudo ./install.sh --update --config onprem.yaml
 
 # Option B — pass paths explicitly
 sudo ./install.sh --update --config onprem.yaml \
-  --release   /media/usb/release-1.7.0.tar.gz \
-  --checksum  /media/usb/release-1.7.0.tar.gz.sha256 \
-  --signature /media/usb/release-1.7.0.tar.gz.minisig \
+  --release   /media/usb/release-1.8.0.tar.gz \
+  --checksum  /media/usb/release-1.8.0.tar.gz.sha256 \
+  --signature /media/usb/release-1.8.0.tar.gz.minisig \
   --pubkey    /srv/openadapt/keys/vendor.pub \
   --sig-tool  minisign
 ```
@@ -89,16 +95,18 @@ sudo ./install.sh --update --config onprem.yaml \
 What `--update` does, in order — **it never flips `current` until every gate
 passes**:
 
-1. **Verify** the bundle: the sha256 checksum must match **and/or** the
-   signature must verify against the pinned public key. If either is present and
-   **fails**, the update aborts (fail-closed). If neither can be verified, it
-   aborts.
-2. **Build** the new release in a *new* `releases/<version>/` dir (offline `pip
-   --no-index` from the bundled wheelhouse). The running release is untouched.
+1. **Verify authenticity**: the detached signature must verify against the
+   pinned public key. GPG verification uses an isolated temporary keyring, not
+   the host's trusted-key set. If a checksum is present, it must also match.
+2. **Extract and build safely**: traversal paths, links, devices, duplicates,
+   oversized payloads, ambiguous layouts, and version/wheel mismatches are
+   refused. The new `releases/<version>/` uses offline, wheel-only `pip
+   --no-index`; the running release is untouched.
 3. **Smoke-test** the new release: the engine CLI must run and the air-gap
    acceptance gate (`verify-airgap.sh`) must pass.
 4. **Atomically flip** `current` -> the new release and record the outgoing one
-   as `previous`. A PHI-free `updated` record is appended to `audit.log`.
+   as `previous`. Release changes are serialized. PHI-free prepared/completed
+   records are appended to the same locked, hash-chained audit log as runs.
 
 If step 1, 2, or 3 fails, the half-built release dir is removed and the box stays
 on the release it was already running. **There is no window in which a part, or
@@ -112,15 +120,17 @@ unverified, release is live.**
 sudo ./install.sh --rollback --config onprem.yaml
 ```
 
-Flips `current` back to `previous` atomically and swaps the pointers so you can
-roll forward again. A `rolledback` record is appended to `audit.log`. Because
-both releases already exist on disk, rollback is a symlink swap — effectively
-instantaneous, with zero effect on customer data.
+Flips `current` back to `previous` atomically and restores a roll-forward pointer.
+A transient `rollback-forward` link keeps the outgoing release reachable across
+power loss between pointer changes; the next update or rollback reconciles it.
+A `rolledback` record is appended to `audit.log`. Because both releases already
+exist on disk, rollback is a pointer change with zero effect on customer data.
 
-> First-update caveat: a box installed before the release layout existed has no
-> `previous` until its **second** managed update. The first `--update` builds the
-> first managed release; a pre-existing `venv/` (old layout) is left in place and
-> can be removed once the new release is confirmed healthy.
+> **Existing-layout migration:** a box installed with the earlier single
+> `storage_root/venv` layout is migrated automatically after the signed new
+> release passes verification, build, and smoke. The old venv moves into a
+> versioned release, remains reachable through the original absolute shebang
+> path, and becomes the first `previous` rollback target.
 
 ---
 
@@ -134,32 +144,33 @@ OPENADAPT_ONPREM_AUDIT_LOG=/srv/openadapt/audit/audit.log \
   ./bin/verify-airgap.sh --config onprem.yaml --audit    # walk the hash chain
 ```
 
-`audit.log` records `updated` / `rolledback` events (version only — PHI-free),
-hash-chained to the surrounding run records, so the update history is
-tamper-evident alongside the run history.
+`audit.log` records prepared and completed update/rollback events (versions only,
+PHI-free), hash-chained to surrounding run records. Writers serialize the
+read-previous-hash plus append transaction, so concurrent runner and updater
+events retain one valid chain. If completion logging fails after a pointer flip,
+the command returns non-zero and tells the operator to reconcile; it never
+reports an unlogged state change as successful.
 
 ---
 
 ## Prune old releases (disk hygiene)
 
-Keep at least `current` and `previous`. Older releases can be removed once you
-are confident you won't roll back to them:
-
-```bash
-# keep the 2 newest, delete the rest (never delete current/previous targets)
-ls -1dt /srv/openadapt/releases/*/ | tail -n +3 | xargs -r rm -rf
-```
+Keep the exact targets of both `current` and `previous`. Pruning is intentionally
+manual: resolve both pointers with `readlink`, compare each candidate's absolute
+path, and remove only an older root-owned release that matches neither pointer.
+Do not use an age-only `ls | xargs rm` command; activation order and file mtime
+are not equivalent.
 
 ---
 
 ## Test it yourself
 
-`bin/test-update.sh` proves the whole update -> rollback lifecycle (atomic flip,
-data preservation, checksum/signature/smoke gates, and audit records) in a
-throwaway temp dir, fully offline:
+`bin/test-update.sh` proves signed update/rollback, authenticity and extraction
+refusals, legacy migration, pointer/lock safety, data preservation, and concurrent
+audit-chain integrity in a throwaway temp dir, fully offline:
 
 ```bash
-./bin/test-update.sh        # 27 assertions; exit 0 = all pass
+./bin/test-update.sh        # 43 baseline; 45 with GPG keygen available; exit 0 = pass
 ```
 
 ---

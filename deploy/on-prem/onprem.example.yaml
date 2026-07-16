@@ -76,26 +76,25 @@ runner:
 # -- updates: OFFLINE, operator-pulled, signed -------------------------------
 # The clinic NEVER auto-updates over the internet. An engineer prepares a signed
 # release bundle out-of-band; the operator copies it in on removable media and
-# `install.sh --update` VERIFIES it (checksum + signature) and SMOKE-TESTS the
-# new release BEFORE it atomically flips the `current` symlink. A bad release is
-# discarded and the box stays on the running one. `install.sh --rollback`
-# reverts to the previous release instantly. See deploy/on-prem/UPDATE.md.
+# `install.sh --update` VERIFIES its signature (and optional checksum) and
+# SMOKE-TESTS the new release BEFORE it atomically flips the `current` symlink.
+# A bad release is discarded and the box stays on the running one.
+# `install.sh --rollback` reverts to the previous release instantly. See
+# deploy/on-prem/UPDATE.md.
 updates:
   channel: offline
   # Path (on removable media) to the release archive (a .tar.gz containing a
   # VERSION file + a wheels/ offline wheelhouse). Left blank until staged.
   release_archive: ""
-  # Detached signature over release_archive (AUTHENTICITY). Optional but
-  # STRONGLY recommended for a regulated box. Left blank => integrity relies on
-  # the checksum alone.
+  # Detached signature over release_archive (AUTHENTICITY). REQUIRED. An update
+  # without a signature verified by vendor_pubkey is always refused.
   release_signature: ""
-  # sha256 checksum sidecar over release_archive (INTEGRITY). Leave blank to
-  # auto-detect "<release_archive>.sha256". A checksum OR a verifiable signature
-  # MUST succeed or the update aborts (fail-closed).
+  # Optional sha256 corruption check. Leave blank to auto-detect
+  # "<release_archive>.sha256". A checksum never substitutes for a signature.
   release_checksum: ""
   # The vendor PUBLIC key used to verify release_signature (minisign / signify /
   # GPG / an openssl PEM public key — a PUBLIC key, safe to store here).
   vendor_pubkey: /srv/openadapt/keys/vendor.pub
   # Which tool verifies the signature: minisign | signify | gpg | openssl.
-  # Leave blank to infer from the signature file extension.
-  signature_tool: ""
+  # minisign and GPG extensions can be inferred; set this explicitly for .sig.
+  signature_tool: minisign

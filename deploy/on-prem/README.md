@@ -14,11 +14,12 @@ install story) and **[COMPLIANCE.md](COMPLIANCE.md)** (posture + data-flow).
 |---|---|---|
 | `onprem.example.yaml` | Install config (storage roots, audit path, egress posture, offline-update pointers). Copy to `onprem.yaml`. | REAL (data file) |
 | `install.sh` | Stand up storage layout + first versioned release (offline wheelhouse) + systemd units, then run the air-gap gate. Also `--update` (atomic, verified, rollback-able) and `--rollback`. | REAL for layout/release/systemd/gate/update/rollback; STUB only for FDE provisioning |
-| `bin/lib-release.sh` | Release manager: atomic `current` symlink swap, checksum+signature verify, smoke check, versioned release dirs, rollback. Sourced by `install.sh`. | REAL |
+| `bin/lib-release.sh` | Release manager: pinned-key signature verification, optional checksum, bounded extraction, serialized atomic activation, legacy migration, smoke check, and rollback. | REAL |
+| `bin/safe-extract-release.py` | Rejects traversal, links, devices, duplicates, and oversized release archives before build. | REAL |
 | `bin/run-queue.sh` | Local, directory-based run queue. Claims jobs, runs `openadapt-flow run`, records outcomes, files done/failed. Fail-closed on `SCRUB!=on`. | REAL (thin wrapper over the shipped CLI) |
 | `bin/audit-log.sh` | Append-only, hash-chained, PHI-free audit writer (run + release-lifecycle events). | REAL |
 | `bin/verify-airgap.sh` | Asserts no outbound path: config/env/deployment URL scan, optional active egress probe, optional audit-chain walk. | REAL (best-effort; firewall is primary) |
-| `bin/test-update.sh` | Hermetic, offline proof of the update -> rollback lifecycle (atomic flip, data preservation, integrity + smoke gates). | REAL (27 assertions) |
+| `bin/test-update.sh` | Hermetic offline proof of signed update, refusal paths, legacy migration, data preservation, rollback/recovery, locks, and audit-chain serialization. | REAL (43 baseline assertions; 45 when local GPG key generation is available) |
 | `UPDATE.md` | Offline update + rollback runbook: build a signed release, apply it atomically, revert instantly. | REAL (doc) |
 | `systemd/openadapt-flow-runner.service` + `.path` | Event-driven runner unit with kernel-level egress denial (`IPAddressDeny=any`). | REAL (Linux/systemd) |
 | `docker-compose.yml` + `Dockerfile` | Container alternative on an `internal:true` (egress-blocked) network; optional LAN-only VLM appliance profile. | REAL topology; STUB image build (needs offline `./wheels`) |
@@ -59,18 +60,19 @@ sudo ./install.sh --update --config onprem.yaml
 sudo ./install.sh --rollback --config onprem.yaml
 ```
 
-Releases live in `releases/<version>/`; `current` is an atomic symlink the
-systemd unit runs through. An update is **never** made live until its checksum/
-signature verifies **and** it passes a smoke check — on failure the box stays on
-the running release. Customer data (`bundles/ runs/ jobs/ audit/ keys/`) is never
-touched.
+Releases live in root-owned `releases/<version>/`; the service account cannot
+modify release code or the activation pointers. `current` is an atomic symlink
+the systemd unit runs through. An update is **never** made live until its
+signature verifies against the pinned vendor key, its optional checksum matches,
+its archive passes bounded extraction, and it passes a smoke check. Customer data
+(`bundles/ runs/ jobs/ audit/ keys/`) remains outside the release tree.
 
 ## Non-negotiables
 
 - **`OPENADAPT_FLOW_SCRUB=on`** — fail-closed PHI scrubbing. `run-queue.sh`
   refuses to start otherwise.
-- **`storage_root` on a full-disk-encrypted volume** — the primary at-rest
-  control (per-bundle sealing is deferred; see COMPLIANCE.md).
+- **`storage_root` on a full-disk-encrypted volume** — the baseline at-rest
+  control; optional bundle/checkpoint sealing is additional (see COMPLIANCE.md).
 - **No cloud keys, no off-LAN URLs** — `verify-airgap.sh` must PASS before PHI.
 - Offline, operator-pulled, signed updates only — never auto-update. Updates are
   verified + smoke-tested before an atomic flip and are instantly rollback-able.

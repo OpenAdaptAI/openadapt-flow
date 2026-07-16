@@ -24,8 +24,8 @@
 #
 #   # apply a staged, signed offline release (atomic; verifies before flipping)
 #   sudo ./install.sh --update --config onprem.yaml \
-#        [--release ./release-1.7.0.tar.gz] [--checksum ...] \
-#        [--signature ...] [--pubkey ...] [--sig-tool gpg|openssl|minisign]
+#        [--release ./release-1.8.0.tar.gz] [--checksum ...] \
+#        --signature ... --pubkey ... --sig-tool gpg|openssl|minisign|signify
 #
 #   # revert to the previous release instantly (no rebuild)
 #   sudo ./install.sh --rollback --config onprem.yaml
@@ -72,24 +72,58 @@ done
 
 [[ -z "$CONFIG" ]] && { echo "install.sh: --config onprem.yaml is required" >&2; exit 2; }
 [[ -f "$CONFIG" ]] || { echo "install.sh: config $CONFIG not found" >&2; exit 2; }
+if [[ "$DO_UPDATE" -eq 1 && "$DO_ROLLBACK" -eq 1 ]]; then
+  echo "install.sh: --update and --rollback are mutually exclusive" >&2
+  exit 2
+fi
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "install.sh: run as root so release code remains immutable to the service user" >&2
+  exit 1
+fi
 
 # Minimal YAML scalar reader (top-level or one-level-nested "key: value"). The
 # on-prem config is a flat, operator-edited file; we avoid a YAML dependency in
 # the bootstrap path so install.sh runs before the venv exists.
 cfg() {
-  local key="$1"
-  grep -E "^[[:space:]]*${key}[[:space:]]*:" "$CONFIG" | head -n1 \
+  local key="$1" value=""
+  value="$(grep -E "^[[:space:]]*${key}[[:space:]]*:" "$CONFIG" | head -n1 \
     | sed -E "s/^[[:space:]]*${key}[[:space:]]*:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^\"//; s/\"$//" \
-    | tr -d "'"
+    | tr -d "'")" || true
+  printf '%s' "$value"
 }
 
 STORAGE_ROOT="$(cfg storage_root)"; STORAGE_ROOT="${STORAGE_ROOT:-/srv/openadapt}"
 SERVICE_USER="$(cfg service_user)"; SERVICE_USER="${SERVICE_USER:-openadapt}"
 SCRUB="$(cfg scrub)"; SCRUB="${SCRUB:-on}"
 
+# Release code and activation pointers are root-controlled. Runtime-writable
+# data receives service-user ownership separately below.
+harden_release_control() {
+  mkdir -p "$STORAGE_ROOT/releases"
+  chown root:root "$STORAGE_ROOT" "$STORAGE_ROOT/releases"
+  chmod 0755 "$STORAGE_ROOT" "$STORAGE_ROOT/releases"
+  chown -RP root:root "$STORAGE_ROOT/releases"
+  chmod -R go-w "$STORAGE_ROOT/releases"
+  for pointer in current previous venv rollback-forward; do
+    if [[ -L "$STORAGE_ROOT/$pointer" ]]; then
+      chown -h root:root "$STORAGE_ROOT/$pointer"
+    fi
+  done
+}
+harden_release_control
+
 # Wire the audit log so update/rollback append a PHI-free record.
 export OPENADAPT_ONPREM_AUDIT_BIN="$HERE/bin/audit-log.sh"
 export OPENADAPT_ONPREM_AUDIT_LOG="${OPENADAPT_ONPREM_AUDIT_LOG:-$STORAGE_ROOT/audit/audit.log}"
+
+restore_audit_ownership() {
+  if id "$SERVICE_USER" >/dev/null 2>&1; then
+    chown "$SERVICE_USER" "$STORAGE_ROOT/audit"
+    if [[ -e "$OPENADAPT_ONPREM_AUDIT_LOG" ]]; then
+      chown "$SERVICE_USER" "$OPENADAPT_ONPREM_AUDIT_LOG"
+    fi
+  fi
+}
 
 echo "openadapt-flow on-prem install"
 echo "  storage_root : $STORAGE_ROOT"
@@ -102,8 +136,10 @@ echo
 # ---------------------------------------------------------------------------
 if [[ "$DO_ROLLBACK" -eq 1 ]]; then
   echo "== [REAL] rollback to previous release =="
-  rel_do_rollback "$STORAGE_ROOT"
-  exit $?
+  if rel_do_rollback "$STORAGE_ROOT" "$CONFIG"; then rc=0; else rc=$?; fi
+  harden_release_control
+  restore_audit_ownership
+  exit "$rc"
 fi
 
 # ---------------------------------------------------------------------------
@@ -122,9 +158,15 @@ if [[ "$DO_UPDATE" -eq 1 ]]; then
     echo "  updates.release_archive in $CONFIG (staged from removable media)." >&2
     exit 2
   fi
-  rel_do_update "$STORAGE_ROOT" "$REL_ARCHIVE" "$REL_CHECKSUM" "$REL_SIG" \
-    "$REL_PUBKEY" "$REL_SIGTOOL" "$CONFIG" "$REL_VERSION"
-  exit $?
+  if [[ -z "$REL_SIG" || -z "$REL_PUBKEY" ]]; then
+    echo "install.sh: updates require a detached signature and pinned vendor public key" >&2
+    exit 2
+  fi
+  if rel_do_update "$STORAGE_ROOT" "$REL_ARCHIVE" "$REL_CHECKSUM" "$REL_SIG" \
+    "$REL_PUBKEY" "$REL_SIGTOOL" "$CONFIG" "$REL_VERSION"; then rc=0; else rc=$?; fi
+  harden_release_control
+  restore_audit_ownership
+  exit "$rc"
 fi
 
 # ---------------------------------------------------------------------------
@@ -134,13 +176,17 @@ echo "== [REAL] storage layout under $STORAGE_ROOT =="
 for d in bundles runs jobs jobs/inbox jobs/processing jobs/done jobs/failed audit keys releases; do
   mkdir -p "$STORAGE_ROOT/$d"
 done
-# Tight perms: only the service user (and root) should read PHI-at-rest.
-chmod 0700 "$STORAGE_ROOT" "$STORAGE_ROOT"/{bundles,runs,jobs,audit,keys} 2>/dev/null || true
+# Runtime state is service-writable. Workflow bundles and the pinned update key
+# are operator-controlled and only group-readable by the service.
+chmod 0700 "$STORAGE_ROOT"/{bundles,runs,jobs,audit,keys} 2>/dev/null || true
 if id "$SERVICE_USER" >/dev/null 2>&1; then
-  chown -R "$SERVICE_USER" "$STORAGE_ROOT" 2>/dev/null || \
-    echo "  (could not chown to $SERVICE_USER — run as root to set ownership)"
+  SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+  chown -RP "$SERVICE_USER:$SERVICE_GROUP" "$STORAGE_ROOT"/{runs,jobs,audit}
+  chown -RP "root:$SERVICE_GROUP" "$STORAGE_ROOT"/{bundles,keys}
+  chmod 0750 "$STORAGE_ROOT"/{bundles,keys}
 else
   echo "  NOTE: service user '$SERVICE_USER' does not exist; create it, then re-run to chown."
+  chown -RP root:root "$STORAGE_ROOT"/{bundles,keys}
 fi
 echo "  created bundles/ runs/ jobs/{inbox,processing,done,failed} audit/ keys/ releases/"
 
@@ -161,14 +207,28 @@ if [[ -n "$WHEELHOUSE" ]]; then
   fi
   # Build the FIRST versioned release in place, then flip `current` to it. The
   # version is read from the wheelhouse wheel name (no build/network needed).
-  VER="${REL_VERSION:-$(rel_detect_version "$WHEELHOUSE" "$WHEELHOUSE")}"
+  WHEEL_VERSION="$(rel_wheelhouse_version "$WHEELHOUSE")" || exit 1
+  VER="${REL_VERSION:-$WHEEL_VERSION}"
+  rel_validate_version "$VER" || exit 1
+  if [[ "$VER" != "$WHEEL_VERSION" ]]; then
+    echo "install.sh: --release-version must match wheel version $WHEEL_VERSION" >&2
+    exit 2
+  fi
   RELDIR="$STORAGE_ROOT/releases/$VER"
   echo "== [REAL] first release from local wheelhouse ($WHEELHOUSE) -> $RELDIR =="
   if [[ -d "$RELDIR" ]]; then
-    echo "  release $VER already exists at $RELDIR (reusing)"
+    if [[ "$(rel_current_path "$STORAGE_ROOT")" == "$RELDIR" ]] \
+      && rel_validate_release_dir "$STORAGE_ROOT" "$RELDIR" \
+      && rel_smoke "$RELDIR" "$CONFIG"; then
+      echo "  release $VER is already active and passed smoke validation"
+      RELDIR_ALREADY_ACTIVE=1
+    else
+      echo "install.sh: immutable release path already exists but is not a healthy current release" >&2
+      exit 1
+    fi
   else
     mkdir -p "$RELDIR"
-    if ! rel_build_release "$RELDIR" "$WHEELHOUSE"; then
+    if ! rel_build_release "$RELDIR" "$WHEELHOUSE" "$VER"; then
       echo "install.sh: first release build failed" >&2; rm -rf "$RELDIR"; exit 1
     fi
     {
@@ -176,9 +236,16 @@ if [[ -n "$WHEELHOUSE" ]]; then
       echo "applied_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       echo "source_archive=wheelhouse:$(basename "$WHEELHOUSE")"
       echo "source_sha256="
+      echo "verify_method=local-wheelhouse"
     } > "$RELDIR/RELEASE"
+    chmod 0600 "$RELDIR/RELEASE"
+    chmod -R go-w "$RELDIR" 2>/dev/null || true
   fi
-  rel_activate "$STORAGE_ROOT" "$RELDIR"
+  if [[ "${RELDIR_ALREADY_ACTIVE:-0}" -ne 1 ]]; then
+    rel_activate "$STORAGE_ROOT" "$RELDIR"
+  fi
+  harden_release_control
+  restore_audit_ownership
   echo "  installed openadapt-flow[privacy] into $RELDIR/venv (offline)"
   echo "  active engine path: $STORAGE_ROOT/current/venv/bin"
   echo "  NOTE: also install the spaCy NER model offline:"

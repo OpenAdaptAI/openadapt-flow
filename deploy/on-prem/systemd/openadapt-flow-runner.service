@@ -44,7 +44,13 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=@STORAGE_ROOT@
+# The runner may write operational data, never release code or activation
+# pointers. POSIX ownership enforces the same boundary outside systemd.
+ReadWritePaths=@STORAGE_ROOT@/runs @STORAGE_ROOT@/jobs @STORAGE_ROOT@/audit
+ReadOnlyPaths=@STORAGE_ROOT@/bundles @STORAGE_ROOT@/keys @STORAGE_ROOT@/releases
+ReadOnlyPaths=@STORAGE_ROOT@/current -@STORAGE_ROOT@/previous @STORAGE_ROOT@/venv
+ReadOnlyPaths=@STORAGE_ROOT@/deployment.yaml
+UMask=0077
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes

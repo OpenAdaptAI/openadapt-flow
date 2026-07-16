@@ -6,8 +6,9 @@ HTML + JSON. The tests assert that
 
 1. the figures loaded from the source files match those files exactly (nothing
    is invented or re-derived), and
-2. the emitted ``comparison.html`` actually carries the real headline figures
-   (a guard against a template drifting away from the data).
+2. the emitted ``comparison.html`` actually carries the real headline figures,
+   and
+3. the committed HTML and JSON match a fresh generation from the raw results.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ import json
 from pathlib import Path
 
 from benchmark.comparison_artifact import generate as gen
-
 
 # ---------------------------------------------------------------------------
 # Extraction fidelity — the loaded figures equal the source files
@@ -141,6 +141,17 @@ def test_build_emits_html_and_json_with_real_figures(tmp_path) -> None:
     payload_oe = payload["benchmarks"]["openemr"]["arms"]
     assert payload_oe["compiled"]["cost_usd_per_run"] == 0.0
     assert payload_oe["agent"]["cost_usd_per_run"] == oe.agent.cost_per_run
+
+
+def test_checked_in_outputs_match_fresh_generation(tmp_path) -> None:
+    """Committed publication artifacts must not lag their raw result files."""
+    gen.build(tmp_path)
+    for name in ("comparison.html", "comparison.json"):
+        expected = (tmp_path / name).read_text()
+        committed = (gen.HERE / name).read_text()
+        assert committed == expected, (
+            f"{name} is stale; run python -m benchmark.comparison_artifact.generate"
+        )
 
 
 def test_html_is_theme_aware(tmp_path) -> None:

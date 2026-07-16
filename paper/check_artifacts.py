@@ -6,13 +6,16 @@ import json
 import math
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def load(relative: str) -> dict:
     with (ROOT / relative).open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def load_text(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
 
 
 def require_equal(actual: object, expected: object, label: str) -> None:
@@ -25,6 +28,13 @@ def require_close(actual: float, expected: float, label: str) -> None:
         raise AssertionError(f"{label}: expected {expected}, found {actual}")
 
 
+def require_contains(text: str, expected: str, label: str) -> None:
+    normalized_text = " ".join(text.split())
+    normalized_expected = " ".join(expected.split())
+    if expected not in text and normalized_expected not in normalized_text:
+        raise AssertionError(f"{label}: paper is missing {expected!r}")
+
+
 def main() -> None:
     comparison_artifact = load("benchmark/comparison_artifact/comparison.json")
     require_equal(
@@ -33,6 +43,27 @@ def main() -> None:
     comparison = comparison_artifact["benchmarks"]
     openemr = comparison["openemr"]["arms"]
     mockmed = comparison["mockmed"]["arms"]
+
+    for benchmark_name, source_path, artifact_arms in (
+        ("OpenEMR", "benchmark/openemr/results.json", openemr),
+        ("MockMed", "benchmark/results.json", mockmed),
+    ):
+        source_arms = load(source_path)["arms"]
+        for arm_name in ("compiled", "agent"):
+            for field in (
+                "n",
+                "success_count",
+                "success_rate",
+                "wall_s_p50",
+                "wall_s_p95",
+                "cost_usd_per_run",
+                "cost_usd_total",
+            ):
+                require_equal(
+                    artifact_arms[arm_name][field],
+                    source_arms[arm_name][field],
+                    f"{benchmark_name} {arm_name} {field} source binding",
+                )
 
     require_equal(openemr["compiled"]["n"], 20, "OpenEMR compiled n")
     require_equal(openemr["compiled"]["success_count"], 20, "OpenEMR compiled success")
@@ -148,6 +179,105 @@ def main() -> None:
         require_equal(
             result["over_halt_rate"], over_halt_rate, f"{name} over-halt rate"
         )
+
+    # Bind the prose and table back to the artifacts. The assertions above catch
+    # benchmark drift; these assertions also catch a paper edit that changes a
+    # headline number without changing its source artifact.
+    main_tex = load_text("paper/main.tex")
+    methodology_tex = load_text("paper/sections/04_methodology.tex")
+    results_tex = load_text("paper/sections/05_results.tex")
+
+    require_contains(
+        main_tex,
+        f"a {len(reliability['results'])}-application public-web corpus",
+        "abstract reliability-corpus count",
+    )
+    require_contains(
+        methodology_tex,
+        (
+            f"The compiled arm has {openemr['compiled']['n']} runs and the "
+            f"computer-use-agent arm {openemr['agent']['n']}."
+        ),
+        "OpenEMR methodology sample sizes",
+    )
+    require_contains(
+        methodology_tex,
+        (
+            f"The compiled arm has {mockmed['compiled']['n']} runs and the "
+            f"agent arm {mockmed['agent']['n']}."
+        ),
+        "MockMed methodology sample sizes",
+    )
+
+    for label, arms in (("OpenEMR", openemr), ("MockMed", mockmed)):
+        for arm_label, arm_key in (("Compiled", "compiled"), ("Agent", "agent")):
+            arm = arms[arm_key]
+            table_row = (
+                f"{label} & {arm_label} & {arm['success_count']}/{arm['n']} & "
+                f"{arm['n']} & {arm['wall_s_p50']:.1f} & "
+                f"\\${arm['cost_usd_per_run']:.2f}"
+            )
+            require_contains(results_tex, table_row, f"{label} {arm_key} table row")
+
+    require_contains(
+        results_tex,
+        (
+            f"all {len(reliability['results'])} recordings compiled; "
+            f"{outcomes['success']} replays reached a verified success, "
+            f"{outcomes['safe_halt']} halted safely, and "
+            f"{outcomes['wrong_action']} reported success"
+        ),
+        "public-web outcome counts",
+    )
+
+    injected_faults = [
+        result
+        for result in faults["classes"]
+        if result["mode"] not in {"ok", "idempotent"}
+    ]
+    silently_mishandled = sum(
+        result["silently_mishandled_count"] > 0 for result in injected_faults
+    )
+    number_words = {
+        0: "zero",
+        1: "one",
+        2: "two",
+        3: "three",
+        4: "four",
+        5: "five",
+        6: "six",
+        7: "seven",
+        8: "eight",
+        9: "nine",
+        10: "ten",
+    }
+    require_contains(
+        results_tex,
+        (
+            "screen-only verification silently mishandled "
+            f"{number_words[silently_mishandled]} of "
+            f"{number_words[len(injected_faults)]} injected fault classes"
+        ),
+        "transactional silent-mishandling count",
+    )
+    require_contains(
+        results_tex,
+        f"There were {faults['meta']['repeats']} consistent repeats per class.",
+        "transactional repeat count",
+    )
+
+    structured = configs["structured"]
+    pixel = configs["pixel_stable"]
+    require_contains(
+        results_tex,
+        f"zero over-halts on {structured['n_correct']} correct homonym cases",
+        "structured identity availability",
+    )
+    require_contains(
+        results_tex,
+        (f"zero false accepts at {pixel['over_halt_rate'] * 100:.0f}\\% over-halt"),
+        "pixel identity safety and availability",
+    )
 
     print("paper artifact constants: OK")
 

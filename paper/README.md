@@ -1,7 +1,8 @@
 # OpenAdapt arXiv paper
 
 This directory contains the source for the OpenAdapt technical paper. It is a
-submission draft, not a submitted paper.
+submission draft, not a submitted paper. The draft deliberately carries no
+named byline until every author has approved the author list and order.
 
 ## Submission blockers
 
@@ -30,7 +31,8 @@ generated files.
 
 ## Evidence contract
 
-`check_artifacts.py` reads the repository benchmark JSON and asserts every
-headline number used in the draft. It does not re-run the applications. The
-reproducibility section and `ARTIFACT_CHECKLIST.md` distinguish source-backed,
-CI-reproducible, field, fixture, and one-run descriptive evidence.
+`check_artifacts.py` binds the raw benchmark results to the comparison artifact
+and the headline numbers in the LaTeX draft. It does not re-run the
+applications. The reproducibility section and `ARTIFACT_CHECKLIST.md`
+distinguish source-backed, CI-reproducible, field, fixture, and one-run
+descriptive evidence.

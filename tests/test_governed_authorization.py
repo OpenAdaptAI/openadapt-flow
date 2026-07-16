@@ -12,6 +12,7 @@ from openadapt_flow.ir import (
     ProgramGraph,
     State,
     StateKind,
+    Step,
     Transition,
     Workflow,
 )
@@ -49,16 +50,17 @@ def _seal(tmp_path, workflow: Workflow) -> tuple[Workflow, object]:
 
 
 class _MutatingVision(FakeVision):
-    def __init__(self, path):
+    def __init__(self, path, *, mutate_on=1):
         super().__init__()
         self.path = path
+        self.mutate_on = mutate_on
         self.template_results = [
             Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99)
         ]
 
     def wait_settled(self, backend, **kwargs):
         frame = super().wait_settled(backend, **kwargs)
-        if self.settle_count == 1:
+        if self.settle_count == self.mutate_on:
             self.path.write_bytes(b"concurrent substitution")
         return frame
 
@@ -213,6 +215,127 @@ def test_program_transition_cannot_hide_governed_asset_mutation(tmp_path):
     assert backend.actions == []
     assert report.results[-1].safety_halt is True
     assert "changed after admission" in (report.results[-1].error or "")
+
+
+def test_scroll_stop_predicate_mutation_halts_before_scroll(tmp_path):
+    anchor = context_click_step("Jane Sample 1980-01-15 MRN 123").anchor
+    scroll = Step(
+        id="scroll",
+        intent="scroll until target appears",
+        action=ActionKind.SCROLL,
+        scroll_dx=0,
+        scroll_dy=300,
+        wait_until=Predicate(
+            kind=PredicateKind.ANCHOR_RESOLVES,
+            anchor=anchor,
+        ),
+    )
+    workflow, bundle = _seal(tmp_path, Workflow(name="scroll_race", steps=[scroll]))
+    authorization = _authorization(workflow)
+    backend = FakeBackend()
+    vision = _MutatingVision(bundle / "templates" / "btn.png")
+
+    report = Replayer(backend, vision=vision, governed_authorization=authorization).run(
+        workflow, bundle_dir=bundle, run_dir=tmp_path / "run"
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].safety_halt is True
+    assert "changed after admission" in (report.results[0].error or "")
+
+
+def test_transition_halt_checkpoints_already_performed_write(tmp_path):
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"patient": "A"},
+        idempotency_key="transition-write",
+    )
+    write = Step(
+        id="write",
+        intent="save record",
+        action=ActionKind.KEY,
+        key="Enter",
+        effects=[effect],
+        expect=[Postcondition(kind=PostconditionKind.TEXT_PRESENT, text="Saved")],
+    )
+    anchor = context_click_step("Jane Sample 1980-01-15 MRN 123").anchor
+    program = ProgramGraph(
+        entry="write-state",
+        states={
+            "write-state": State(
+                id="write-state",
+                kind=StateKind.ACTION,
+                step=write,
+                transitions=[
+                    Transition(
+                        target="done",
+                        guard=Predicate(
+                            kind=PredicateKind.ANCHOR_RESOLVES,
+                            anchor=anchor,
+                        ),
+                    )
+                ],
+            ),
+            "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+        },
+    )
+    workflow, bundle = _seal(
+        tmp_path, Workflow(name="transition_checkpoint", program=program)
+    )
+    assert workflow.manifest is not None
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+        admitted_policy_name="test-governed",
+        unverified_write_approvals=(
+            UnverifiedWriteApproval(
+                step_id="write", effect_contract_hashes=(effect.contract_hash(),)
+            ),
+        ),
+    )
+    backend = FakeBackend()
+    target_path = bundle / "templates" / "btn.png"
+    original_target = target_path.read_bytes()
+    vision = _MutatingVision(target_path, mutate_on=3)
+    vision.text_results = {
+        "Saved": Match(point=(1, 1), region=(0, 0, 2, 2), confidence=0.99)
+    }
+    run_dir = tmp_path / "run"
+
+    report = Replayer(
+        backend,
+        vision=vision,
+        governed_authorization=authorization,
+        durable=True,
+        poll_interval_s=0.0,
+    ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+    assert report.success is False
+    assert backend.actions == [("press", "Enter")]
+    checkpoint = CheckpointStore(run_dir).last_program_checkpoint()
+    assert checkpoint is not None
+    assert checkpoint.verified_state_id == "write-state"
+    assert checkpoint.new_effect_keys == []
+    assert checkpoint.new_unverified_effect_keys == [effect.contract_hash()]
+
+    target_path.write_bytes(original_target)
+    resumed_backend = FakeBackend()
+    resumed_vision = resolving_vision()
+    resumed_vision.text_results = {
+        "Saved": Match(point=(1, 1), region=(0, 0, 2, 2), confidence=0.99)
+    }
+    resumed = resume(
+        run_dir,
+        Replayer(resumed_backend, vision=resumed_vision, poll_interval_s=0.0),
+        approval=ApprovalRecord(
+            approver="operator@example.com",
+            resolution="continue after guarded transition halt",
+            bundle_version=bundle_version(bundle),
+        ),
+    )
+    assert resumed.success is True
+    assert resumed_backend.actions == []
 
 
 def test_authorization_is_single_use(tmp_path):

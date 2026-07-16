@@ -1195,11 +1195,13 @@ class Replayer:
                 result.error or f"action state '{state.id}' failed — run aborted",
                 safety=result.safety_halt,
             )
-        nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
         # Tier-3 durable checkpoint: this action state VERIFIED (identity +
         # effects + postconditions); capture the whole interpreter state so an
-        # approved resume can RESTORE it from exactly here.
+        # approved resume can RESTORE it from exactly here. Persist BEFORE
+        # selecting an outgoing guarded edge: predicate evaluation can halt,
+        # but the already-performed write must still enter the effect ledger.
         self._record_program_checkpoint(state, result, params, report)
+        nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
         return nxt
 
     def _exec_loop_state(
@@ -2045,6 +2047,9 @@ class Replayer:
                     result=result,
                     graph_ctx=graph_ctx,
                 )
+                if self._governed_asset_mutation is not None:
+                    error = self._governed_asset_mutation
+                    result.safety_halt = True
 
             if error is None:
                 after_png = self.vision.wait_settled(self.backend)
@@ -3242,7 +3247,10 @@ class Replayer:
             self.backend.scroll(dx, dy)
             return None
 
-        if self._predicate_holds(stop_pred, before_png, bundle_dir, params):
+        holds = self._predicate_holds(stop_pred, before_png, bundle_dir, params)
+        if self._governed_asset_mutation is not None:
+            return self._governed_asset_mutation
+        if holds:
             return None  # target already in view; nothing to scroll
 
         increment = math.hypot(dx, dy)
@@ -3252,7 +3260,10 @@ class Replayer:
             self.backend.scroll(dx, dy)
             scrolled += increment
             frame = self.vision.wait_settled(self.backend)
-            if self._predicate_holds(stop_pred, frame, bundle_dir, params):
+            holds = self._predicate_holds(stop_pred, frame, bundle_dir, params)
+            if self._governed_asset_mutation is not None:
+                return self._governed_asset_mutation
+            if holds:
                 return None
 
         following = (

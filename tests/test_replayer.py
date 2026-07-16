@@ -21,6 +21,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.replayer import Replayer
 
 VIEWPORT = (300, 200)
@@ -1040,6 +1041,46 @@ def test_identity_unreadable_proceeds_flagged_when_reversible(bundle, run_dir):
     assert report.success is True
     assert ("click", 110, 105, False) in backend.actions
     assert report.results[0].identity.status == "unreadable"
+
+
+@pytest.mark.parametrize(
+    ("live_text", "status"),
+    [
+        ([], "unreadable"),
+        ([OcrLine("MG4408 Okafor, Philip 1966-01-17 M Active")], "abstain"),
+    ],
+)
+def test_governed_run_requires_affirmative_identity_for_reversible_navigation(
+    bundle, run_dir, live_text, status
+):
+    """An armed entity-navigation step must verify, not merely be reversible."""
+    context = (
+        "MG4408 Okafor, Philip 1966-01-17 M Active"
+        if status == "abstain"
+        else "Jane Sample Knee pain referral High"
+    )
+    vision = resolving_vision()
+    vision.ocr_lines = live_text
+    backend = FakeBackend()
+    step = context_click_step(context)
+    workflow = Workflow(name="governed_identity", steps=[step])
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        required_identity_step_ids=[step.id],
+    )
+
+    report = Replayer(
+        backend,
+        vision=vision,
+        governed_authorization=authorization,
+    ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].identity.status == status
+    assert "governed run policy" in (report.results[0].error or "")
 
 
 def test_identity_band_excludes_targets_own_label(bundle, run_dir):

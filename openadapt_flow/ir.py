@@ -1383,11 +1383,15 @@ class StepResult(BaseModel):
     # None when the step declared no `effects`; True when every declared
     # effect was CONFIRMED (or a duplicate was RECONCILED by compensation);
     # False when one HALTED the run (REFUTED / INDETERMINATE / escalated, or
-    # effects were declared with no verifier configured). ``effect_results``
+    # effects were declared with no verifier configured). None is also used for
+    # an explicitly approved but unverified GUI write; the separate
+    # ``effect_approved_unverified`` flag makes that risk acceptance visible.
+    # ``effect_results``
     # holds one human-readable verdict line per declared effect, for the
     # audit trail (mirrors the identity check's report surface). ZERO model
     # calls on this path — effect verification reads the system of record.
     effect_verified: Optional[bool] = None
+    effect_approved_unverified: bool = False
     effect_results: list[str] = Field(default_factory=list)
     # One stable, NON-secret-bearing SHA-256 digest per verified effect, taken
     # AFTER the effect's ValueExpr contract was bound to THIS run's params
@@ -1478,6 +1482,13 @@ class RunReport(BaseModel):
     parameter_schema_sha256: Optional[str] = Field(
         default=None, pattern="^[a-f0-9]{64}$"
     )
+    # Present only when the fail-closed ``run`` command handed an exact,
+    # bundle-bound admission capability into replay.  The id/source are audit
+    # references, not proof that a local CLI user's identity was authenticated.
+    governed_authorization_id: Optional[str] = None
+    governed_approval_source: Optional[str] = None
+    required_identity_step_ids: list[str] = Field(default_factory=list)
+    approved_unverified_effect_step_ids: list[str] = Field(default_factory=list)
     params: dict[str, str] = Field(default_factory=dict)
     results: list[StepResult] = Field(default_factory=list)
     success: bool = False

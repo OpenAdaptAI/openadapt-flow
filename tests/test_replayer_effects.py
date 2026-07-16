@@ -18,10 +18,6 @@ from __future__ import annotations
 
 import requests
 
-# Reuse the scripted fakes from the main replayer unit tests (pytest's
-# prepend import mode puts tests/ on sys.path).
-from tests.test_replayer import FakeBackend, FakeVision, Match
-
 from openadapt_flow.ir import (
     ActionKind,
     Postcondition,
@@ -30,6 +26,10 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.mockmed.fault_server import serve as fault_serve
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    UnverifiedWriteApproval,
+)
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
@@ -37,6 +37,10 @@ from openadapt_flow.runtime.effects import (
     RestRecordVerifier,
 )
 from openadapt_flow.runtime.replayer import Replayer
+
+# Reuse the scripted fakes from the main replayer unit tests (pytest's
+# prepend import mode puts tests/ on sys.path).
+from tests.test_replayer import FakeBackend, FakeVision, Match
 
 TARGET = {"patient_id": "p1", "type": "Triage"}
 
@@ -113,6 +117,24 @@ def _dirs(tmp_path):
     bundle = tmp_path / "bundle"
     (bundle / "templates").mkdir(parents=True)
     return bundle, tmp_path / "run"
+
+
+def _authorize_unverified(workflow, bundle):
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    step = workflow.steps[0]
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        unverified_write_approvals=[
+            UnverifiedWriteApproval(
+                step_id=step.id,
+                effect_contract_hashes=[
+                    effect.contract_hash() for effect in step.effects
+                ],
+            )
+        ],
+    )
+    return workflow, authorization
 
 
 # -- CONFIRMED: correct write proceeds --------------------------------------
@@ -310,6 +332,65 @@ def test_effects_declared_but_no_verifier_is_config_error_halt(tmp_path):
         assert db.snapshot()["records"] == []
     finally:
         stop()
+
+
+def test_run_bound_approval_executes_gui_write_but_never_marks_it_verified(
+    tmp_path,
+):
+    url, db, stop = _fault_server()
+    try:
+        backend = WritingBackend(url)
+        vision = _vision_that_confirms_saved()
+        workflow = _save_workflow(
+            effects=[
+                Effect(
+                    kind=EffectKind.RECORD_WRITTEN,
+                    match=TARGET,
+                    expected_count=1,
+                )
+            ]
+        )
+        bundle, run_dir = _dirs(tmp_path)
+        workflow, authorization = _authorize_unverified(workflow, bundle)
+        report = Replayer(
+            backend,
+            vision=vision,
+            governed_authorization=authorization,
+            poll_interval_s=0.01,
+        ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+        assert report.success is True
+        result = report.results[0]
+        assert result.postconditions_ok is True
+        assert result.effect_verified is None
+        assert result.effect_approved_unverified is True
+        assert any("approved-unverified" in line for line in result.effect_results)
+        assert len(result.effect_contract_hashes) == 1
+        assert report.approved_unverified_effect_step_ids == ["save"]
+        assert len(db.snapshot()["records"]) == 1
+    finally:
+        stop()
+
+
+def test_run_bound_approval_digest_mismatch_halts_before_action(tmp_path):
+    backend = FakeBackend()
+    workflow = _save_workflow(
+        effects=[Effect(kind=EffectKind.RECORD_WRITTEN, match=TARGET)]
+    )
+    bundle, run_dir = _dirs(tmp_path)
+    workflow, authorization = _authorize_unverified(workflow, bundle)
+    authorization = authorization.model_copy(update={"bundle_content_digest": "0" * 64})
+
+    report = Replayer(
+        backend,
+        vision=_vision_that_confirms_saved(),
+        governed_authorization=authorization,
+    ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+    assert report.success is False
+    assert report.results[0].step_id == "<authorization>"
+    assert "bound to bundle digest" in (report.results[0].error or "")
+    assert backend.actions == []
 
 
 # -- BACK-COMPAT: a no-effects bundle replays unchanged with no verifier ----

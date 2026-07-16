@@ -64,6 +64,10 @@ from openadapt_flow.policy import (
     step_tags,
 )
 from openadapt_flow.risk import classify_step_risk
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    UnverifiedWriteApproval,
+)
 from openadapt_flow.traversal import iter_workflow_steps
 
 #: Default certifying policy for a regulated run when none is configured.
@@ -220,6 +224,7 @@ def evaluate_run_gate(
     bundle_dir: Path | str,
     deployment: DeploymentConfig,
     effect_verifier: object | None,
+    api_actuator: object | None = None,
     policy_source: Optional[str] = None,
     approval_available: bool = False,
     strict_templates: bool = False,
@@ -262,7 +267,7 @@ def evaluate_run_gate(
         _gate_certification(workflow, policy_name),
         _gate_identity(steps),
         _gate_effect(steps),
-        _gate_approval(steps, effect_verifier, approval_available),
+        _gate_approval(steps, effect_verifier, api_actuator, approval_available),
         _gate_encryption(workflow, bundle, require_encryption, strict_templates),
         _gate_manifest(
             workflow, bundle, pinned_content_digest, pinned_compiler_version
@@ -383,7 +388,10 @@ def _gate_effect(steps: list[Step]) -> GateResult:
 
 
 def _gate_approval(
-    steps: list[Step], effect_verifier: object | None, approval_available: bool
+    steps: list[Step],
+    effect_verifier: object | None,
+    api_actuator: object | None,
+    approval_available: bool,
 ) -> GateResult:
     """Gate 4: writes with no configured verifier need explicit approval.
 
@@ -407,6 +415,20 @@ def _gate_approval(
             True,
             "no consequential writes require independent verification",
         )
+    direct_api_writes = [
+        step
+        for step in writes
+        if api_actuator is not None and step.api_binding is not None
+    ]
+    if direct_api_writes:
+        return _result(
+            GATE_APPROVAL,
+            False,
+            f"{len(direct_api_writes)} direct API write(s) have no verifier; "
+            "operator approval cannot replace the API tier's independent outcome "
+            "check",
+            [step.id for step in direct_api_writes],
+        )
     if approval_available:
         return _result(
             GATE_APPROVAL,
@@ -422,6 +444,50 @@ def _gate_approval(
         "(no verifier configured for this deployment) and no explicit approval "
         "was provided -- halting",
         [s.id for s in writes],
+    )
+
+
+def build_runtime_authorization(
+    workflow: Workflow,
+    report: RunGateReport,
+    *,
+    effect_verifier: object | None,
+    approval_available: bool,
+    approval_source: str = "local-cli-explicit-flag",
+) -> GovernedRunAuthorization:
+    """Bind a successful admission decision to the exact sealed workflow.
+
+    The returned capability is passed in-memory to :class:`Replayer`.  It
+    enforces two facts that admission alone cannot: identity-required steps
+    must receive an affirmative live verdict, and an approved unverifiable GUI
+    write must be the exact step/effect contract the operator admitted.
+    """
+    if not report.passed:
+        raise ValueError("cannot authorize a workflow that failed the run gate")
+    if workflow.manifest is None or not workflow.manifest.content_digest:
+        raise ValueError("cannot authorize an unsealed workflow")
+
+    steps = list(iter_workflow_steps(workflow))
+    approvals: list[UnverifiedWriteApproval] = []
+    if effect_verifier is None and approval_available:
+        approvals = [
+            UnverifiedWriteApproval(
+                step_id=step.id,
+                effect_contract_hashes=tuple(
+                    effect.contract_hash() for effect in step.effects
+                ),
+            )
+            for step in steps
+            if is_consequential(step) and has_system_effect(step)
+        ]
+
+    return GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        required_identity_step_ids=tuple(
+            step.id for step in steps if must_be_identity_armed(step)
+        ),
+        unverified_write_approvals=tuple(approvals),
+        approval_source=approval_source,
     )
 
 

@@ -31,7 +31,9 @@ actuation:
 
 # -- effects: the system of record consequential writes are verified against -
 # kind: none | rest | fhir | document-hash
-#   none          -> no verifier (a bundle with effects then HALTs, fail-safe)
+#   none          -> no verifier (replay HALTs; governed run may execute GUI
+#                    writes only with --approve-unverified-writes, recorded as
+#                    approved-unverified; direct API writes still refuse)
 #   rest          -> JSON REST SoR (e.g. MockMed /api/db)
 #   fhir          -> FHIR R4 search (e.g. OpenEMR)
 #   document-hash -> a filesystem document store

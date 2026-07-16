@@ -19,9 +19,11 @@ record (an API/DB read, never the pixels). A non-CONFIRMED verdict HALTS the
 run — mirroring the identity gate's refuse-rather-than-guess posture — and for
 an irreversible effect a configured compensator may ``reconcile_or_escalate``
 (RECONCILED continues, ESCALATE halts). A step that declares effects with NO
-verifier configured is a deployment error and HALTS (an unverifiable
-consequential write is never allowed to pass). This path makes ZERO model
-calls — effect verification reads the system of record.
+verifier configured is a deployment error and HALTS unless the fail-closed
+``run`` gate supplies an exact, bundle-bound approval for that GUI step. An
+approved write remains visibly unverified and still must pass its screen
+postconditions; direct API writes always require an independent verifier. This
+path makes ZERO model calls — effect verification reads the system of record.
 
 Steps that succeed via any rung other than ``template`` are healed: the
 anchor is refreshed from the live frame, the heal is recorded under
@@ -67,6 +69,7 @@ from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import healing as healing_mod
 from openadapt_flow.runtime import identity as identity_mod
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import StateDiverged
 from openadapt_flow.runtime.durable.program_checkpoint import (
     TOP_GRAPH_ID,
@@ -257,6 +260,11 @@ class Replayer:
             re-run from step 0. None of this touches the backend, vision, or a
             model — it is bookkeeping over the ``StepResult``. Off by default;
             a non-durable run behaves exactly as before.
+        governed_authorization: Optional, bundle-bound capability produced by
+            the fail-closed ``run`` gate. It can require affirmative identity
+            on selected steps and approve exact GUI effect contracts without a
+            verifier while keeping them visibly unverified. Ordinary ``replay``
+            leaves it unset.
         poll_interval_s: Postcondition polling interval in seconds.
     """
 
@@ -276,6 +284,7 @@ class Replayer:
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
         allow_model_grounding: bool = False,
+        governed_authorization: Optional[GovernedRunAuthorization] = None,
     ) -> None:
         if vision is None:
             import openadapt_flow.vision as vision  # lazy: heavy OCR deps
@@ -329,6 +338,12 @@ class Replayer:
         # makes a model call — the $0 runtime guarantee is preserved.
         self.effect_verifier = effect_verifier
         self.effect_compensator = effect_compensator
+        # ``run``-only, bundle-bound admission capability.  The ordinary
+        # ``replay`` path leaves this unset and preserves its permissive
+        # behavior.  When present it carries exact identity/effect decisions
+        # from the run gate into the shared executor instead of reducing them
+        # to a boolean that could authorize a different workflow.
+        self.governed_authorization = governed_authorization
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -476,6 +491,33 @@ class Replayer:
             params=params,
             screenshots_may_leave_box=self._screenshots_may_leave_box,
         )
+        if self.governed_authorization is not None:
+            refusal = self.governed_authorization.validate_workflow(workflow)
+            report.governed_authorization_id = (
+                self.governed_authorization.authorization_id
+            )
+            report.governed_approval_source = (
+                self.governed_authorization.approval_source
+            )
+            report.required_identity_step_ids = list(
+                self.governed_authorization.required_identity_step_ids
+            )
+            report.approved_unverified_effect_step_ids = [
+                approval.step_id
+                for approval in self.governed_authorization.unverified_write_approvals
+            ]
+            if refusal is not None:
+                report.results.append(
+                    StepResult(
+                        step_id="<authorization>",
+                        intent="validate governed run authorization",
+                        ok=False,
+                        error=f"{refusal} — refusing to run; run aborted",
+                    )
+                )
+                report.success = False
+                report.save(run_dir)
+                return report
         self._record_identity_coverage(workflow, report)
         new_crops: dict[str, bytes] = {}
         # Per-run reset; the attribute is declared in __init__.
@@ -1803,9 +1845,14 @@ class Replayer:
                         )
                         + " — refusing to act; run aborted"
                     )
-                elif (
-                    check.status in ("unreadable", "abstain")
-                    and step.risk == "irreversible"
+                elif check.status in ("unreadable", "abstain") and (
+                    step.risk == "irreversible"
+                    or (
+                        self.governed_authorization is not None
+                        and self.governed_authorization.requires_verified_identity(
+                            step.id
+                        )
+                    )
                 ):
                     reason = (
                         "rests on a glyph-confusable identifier OCR may have "
@@ -1815,10 +1862,21 @@ class Replayer:
                         else "could not be read from the live screen "
                         "(context band OCR found no usable text)"
                     )
+                    governed = (
+                        self.governed_authorization is not None
+                        and self.governed_authorization.requires_verified_identity(
+                            step.id
+                        )
+                    )
+                    scope = (
+                        "requires verified identity under the governed run policy"
+                        if governed
+                        else "is irreversible"
+                    )
                     error = (
-                        f"Step '{step.id}' ({step.intent}) is irreversible "
-                        f"and its target identity {reason} — needs human "
-                        "confirmation; refusing to act"
+                        f"Step '{step.id}' ({step.intent}) {scope} and its target "
+                        f"identity {reason} — needs human confirmation; refusing "
+                        "to act"
                     )
             # System-of-record effect verification -- SNAPSHOT the record just
             # before the (consequential) action, so the post-action verifier
@@ -1829,18 +1887,37 @@ class Replayer:
             # rather than pass it silently.
             if error is None and step.effects:
                 if self.effect_verifier is None:
-                    error = (
-                        f"Step '{step.id}' ({step.intent}) declares "
-                        f"{len(step.effects)} system-of-record effect(s) but no "
-                        "EffectVerifier is configured for this run — refusing "
-                        "to perform an unverifiable consequential write "
-                        "(deployment/configuration error); run aborted"
+                    authorization = self.governed_authorization
+                    approved = (
+                        authorization is not None
+                        and authorization.approves_unverified_write(step)
                     )
-                    result.effect_verified = False
-                    result.effect_results.append(
-                        "no EffectVerifier configured for a step that declares "
-                        "effects (fail-safe HALT)"
-                    )
+                    if approved:
+                        assert authorization is not None
+                        resolved_effects = self._resolve_effects(step.effects, params)
+                        result.effect_contract_hashes.extend(
+                            effect.contract_hash() for effect in resolved_effects
+                        )
+                        result.effect_approved_unverified = True
+                        result.effect_results.append(
+                            "[approved-unverified] no independent EffectVerifier; "
+                            "GUI actuation explicitly approved for authorization "
+                            f"{authorization.authorization_id}; "
+                            "screen postconditions still required"
+                        )
+                    else:
+                        error = (
+                            f"Step '{step.id}' ({step.intent}) declares "
+                            f"{len(step.effects)} system-of-record effect(s) but no "
+                            "EffectVerifier is configured for this run — refusing "
+                            "to perform an unverifiable consequential write "
+                            "(deployment/configuration error); run aborted"
+                        )
+                        result.effect_verified = False
+                        result.effect_results.append(
+                            "no EffectVerifier configured for a step that declares "
+                            "effects (fail-safe HALT)"
+                        )
                 else:
                     # Bind the effect contracts to this run's params BEFORE the
                     # pre-state snapshot (P0-3): match/value/idempotency_key must

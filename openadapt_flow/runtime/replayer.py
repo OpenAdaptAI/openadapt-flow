@@ -33,6 +33,7 @@ healed bundle is written.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import time
@@ -347,6 +348,10 @@ class Replayer:
         # to a boolean that could authorize a different workflow.
         self.governed_authorization = governed_authorization
         self.governed_continuation = governed_continuation
+        self._governed_asset_snapshot: dict[str, bytes] = {}
+        self._governed_asset_hashes: dict[str, str] = {}
+        self._governed_plaintext_assets = False
+        self._governed_asset_mutation: Optional[str] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -499,13 +504,18 @@ class Replayer:
             screenshots_may_leave_box=self._screenshots_may_leave_box,
         )
         if self.governed_authorization is not None:
-            refusal = self.governed_authorization.validate_execution(
+            refusal, assets = self.governed_authorization.validate_execution_snapshot(
                 workflow,
                 bundle_dir=bundle_dir,
                 params=params,
                 worklists=worklists,
                 continuation=self.governed_continuation,
             )
+            self._governed_asset_snapshot = assets
+            assert workflow.manifest is not None
+            self._governed_asset_hashes = dict(workflow.manifest.file_hashes)
+            self._governed_plaintext_assets = not workflow.encrypted
+            self._governed_asset_mutation = None
             report.governed_authorization_id = (
                 self.governed_authorization.authorization_id
             )
@@ -2013,6 +2023,10 @@ class Replayer:
                     resolved_effects = self._resolve_effects(step.effects, params)
                     effect_pre_state = self.effect_verifier.capture_pre_state()
 
+            if self._governed_asset_mutation is not None:
+                error = self._governed_asset_mutation
+                result.safety_halt = True
+
             if error is None:
                 error = self._act(
                     step,
@@ -2032,6 +2046,9 @@ class Replayer:
                 postconditions_ok, last_frame, failed = self._check_postconditions(
                     step, after_png, bundle_dir, start_state, result
                 )
+                if self._governed_asset_mutation is not None:
+                    postconditions_ok = False
+                    failed.append(self._governed_asset_mutation)
                 result.postconditions_ok = postconditions_ok
                 if result.postcondition_drift_rescues:
                     # The rescue descriptions embed OCR'd on-screen text
@@ -2409,14 +2426,8 @@ class Replayer:
         # PNG straight from disk exactly as before (the fallback also covers an
         # encrypted bundle whose crop wasn't sealed, keeping ``template_png``
         # None rather than erroring).
-        template_png: Optional[bytes] = None
         rel = step.anchor.template
-        if workflow.encrypted:
-            template_png = workflow.decrypted_template(rel)
-        if template_png is None:
-            template_path = Path(bundle_dir) / rel
-            if template_path.is_file():
-                template_png = template_path.read_bytes()
+        template_png = self._asset_bytes(bundle_dir, rel, workflow=workflow)
 
         # The structural ACTION rung (top of the ladder) runs only when the
         # live backend can re-find an element (StructuralActionBackend). A
@@ -2670,10 +2681,7 @@ class Replayer:
         if kind is PredicateKind.ANCHOR_RESOLVES:
             if pred.anchor is None:
                 return False
-            template_png: Optional[bytes] = None
-            template_path = Path(bundle_dir) / pred.anchor.template
-            if template_path.is_file():
-                template_png = template_path.read_bytes()
+            template_png = self._asset_bytes(bundle_dir, pred.anchor.template)
             return (
                 resolve(
                     pred.anchor,
@@ -2875,10 +2883,9 @@ class Replayer:
             or anchor.identifier_region is None
         ):
             return None, None
-        crop_path = Path(bundle_dir) / anchor.identifier_crop
-        if not crop_path.is_file():
+        recorded_png = self._asset_bytes(bundle_dir, anchor.identifier_crop)
+        if recorded_png is None:
             return None, None
-        recorded_png = crop_path.read_bytes()
         rx, ry, rw, rh = anchor.identifier_region
         live_region = (
             resolution.point[0] + (rx - anchor.click_point[0]),
@@ -3491,12 +3498,40 @@ class Replayer:
             return distance <= pc.phash_tolerance
         return False
 
-    @staticmethod
-    def _postcondition_template(pc: Any, bundle_dir: Path) -> Optional[bytes]:
+    def _postcondition_template(self, pc: Any, bundle_dir: Path) -> Optional[bytes]:
         """Bytes of a REGION_STABLE postcondition's template crop, if any."""
         rel = getattr(pc, "template", None)
         if not rel:
             return None
+        return self._asset_bytes(bundle_dir, rel)
+
+    def _asset_bytes(
+        self,
+        bundle_dir: Path,
+        rel: str,
+        *,
+        workflow: Optional[Workflow] = None,
+    ) -> Optional[bytes]:
+        """Return the verified run snapshot for governed asset consumers."""
+        if self.governed_authorization is not None:
+            data = self._governed_asset_snapshot.get(rel)
+            expected = self._governed_asset_hashes.get(rel)
+            if self._governed_plaintext_assets and expected is not None:
+                path = Path(bundle_dir) / rel
+                try:
+                    current = path.read_bytes()
+                except OSError:
+                    current = b""
+                if hashlib.sha256(current).hexdigest() != expected:
+                    self._governed_asset_mutation = (
+                        f"governed sealed asset {rel!r} changed after admission; "
+                        "refusing to act; run aborted"
+                    )
+            return data
+        if workflow is not None and workflow.encrypted:
+            decrypted = workflow.decrypted_template(rel)
+            if decrypted is not None:
+                return decrypted
         path = Path(bundle_dir) / rel
         return path.read_bytes() if path.is_file() else None
 

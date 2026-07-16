@@ -40,8 +40,24 @@ def _seal(tmp_path, workflow: Workflow) -> tuple[Workflow, object]:
     bundle = tmp_path / workflow.name
     (bundle / "templates").mkdir(parents=True)
     (bundle / "templates" / "btn.png").write_bytes(make_png((50, 20)))
+    (bundle / "templates" / "identity.png").write_bytes(make_png((80, 20)))
     workflow.save(bundle)
     return Workflow.load(bundle), bundle
+
+
+class _MutatingVision(FakeVision):
+    def __init__(self, path):
+        super().__init__()
+        self.path = path
+        self.template_results = [
+            Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99)
+        ]
+
+    def wait_settled(self, backend, **kwargs):
+        frame = super().wait_settled(backend, **kwargs)
+        if self.settle_count == 1:
+            self.path.write_bytes(b"concurrent substitution")
+        return frame
 
 
 def _authorization(
@@ -93,6 +109,43 @@ def test_bundle_asset_mismatch_halts_before_action(tmp_path):
     assert report.success is False
     assert backend.actions == []
     assert "bundle integrity failed" in (report.results[0].error or "")
+
+
+def test_target_asset_mutation_after_validation_halts_before_action(tmp_path):
+    step = context_click_step("Jane Sample 1980-01-15 MRN 123")
+    workflow, bundle = _seal(tmp_path, Workflow(name="target_race", steps=[step]))
+    authorization = _authorization(workflow, required=(step.id,))
+    backend = FakeBackend()
+    vision = _MutatingVision(bundle / "templates" / "btn.png")
+    vision.ocr_lines = [OcrLine("Jane Sample 1980-01-15 MRN 123")]
+
+    report = Replayer(backend, vision=vision, governed_authorization=authorization).run(
+        workflow, bundle_dir=bundle, run_dir=tmp_path / "run"
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert "changed after admission" in (report.results[0].error or "")
+    assert vision.template_png_calls == [make_png((50, 20))]
+
+
+def test_identity_asset_uses_same_mutation_guard(tmp_path):
+    step = context_click_step("Jane Sample 1980-01-15 MRN 123")
+    step.anchor.identifier_crop = "templates/identity.png"
+    step.anchor.identifier_region = (160, 95, 80, 20)
+    workflow, bundle = _seal(tmp_path, Workflow(name="identity_race", steps=[step]))
+    authorization = _authorization(workflow, required=(step.id,))
+    backend = FakeBackend()
+    vision = _MutatingVision(bundle / "templates" / "identity.png")
+    vision.ocr_lines = []
+
+    report = Replayer(backend, vision=vision, governed_authorization=authorization).run(
+        workflow, bundle_dir=bundle, run_dir=tmp_path / "run"
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert "changed after admission" in (report.results[0].error or "")
 
 
 def test_authorization_is_single_use(tmp_path):

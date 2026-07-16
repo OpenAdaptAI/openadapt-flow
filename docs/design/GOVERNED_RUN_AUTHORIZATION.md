@@ -22,6 +22,9 @@ immediately before touching the backend. A bundle, input, step, or
 effect-contract mismatch halts before action, and a fresh authorization is
 single-use within the process. Durable pause/resume persists the exact
 authorization and frozen worklists, then revalidates them as a continuation.
+Plaintext sealed assets are retained as a verified in-memory snapshot; every
+target, predicate, identity, and postcondition consumer also detects later disk
+replacement and halts rather than reading substituted bytes.
 For required identity steps, `unreadable` and `abstain` halt even when the
 action is reversible. Program exception edges cannot catch these governed
 safety halts and convert them into success. An approved GUI write may execute

@@ -150,9 +150,28 @@ class GovernedRunAuthorization(BaseModel):
         continuation: bool = False,
     ) -> str | None:
         """Validate semantics, sealed assets, inputs, and single-use status."""
+        refusal, _assets = self.validate_execution_snapshot(
+            workflow,
+            bundle_dir=bundle_dir,
+            params=params,
+            worklists=worklists,
+            continuation=continuation,
+        )
+        return refusal
+
+    def validate_execution_snapshot(
+        self,
+        workflow: Workflow,
+        *,
+        bundle_dir: Path | str,
+        params: dict[str, str] | None,
+        worklists: dict[str, list[dict[str, str]]] | None,
+        continuation: bool = False,
+    ) -> tuple[str | None, dict[str, bytes]]:
+        """Validate once and return the exact sealed bytes execution may use."""
         refusal = self.validate_workflow(workflow)
         if refusal is not None:
-            return refusal
+            return refusal, {}
         assert workflow.manifest is not None
 
         from openadapt_flow.bundle_validation import (
@@ -170,13 +189,33 @@ class GovernedRunAuthorization(BaseModel):
                 ),
             )
         except BundleIntegrityError as exc:
-            return f"governed run authorization bundle integrity failed: {exc}"
+            return f"governed run authorization bundle integrity failed: {exc}", {}
+
+        assets: dict[str, bytes] = {}
+        decrypted = workflow.decrypted_templates() if workflow.encrypted else None
+        try:
+            for rel, expected in workflow.manifest.file_hashes.items():
+                data = (
+                    decrypted.get(rel)
+                    if decrypted is not None
+                    else (Path(bundle_dir) / rel).read_bytes()
+                )
+                if data is None or hashlib.sha256(data).hexdigest() != expected:
+                    return (
+                        f"governed run authorization asset {rel!r} changed "
+                        "while its verified snapshot was created",
+                        {},
+                    )
+                assets[rel] = data
+        except OSError as exc:
+            return f"governed run authorization could not snapshot assets: {exc}", {}
 
         actual_inputs = runtime_inputs_digest(workflow, params, worklists)
         if actual_inputs != self.runtime_inputs_digest:
             return (
                 "governed run authorization is bound to different runtime "
-                "parameters or worklists"
+                "parameters or worklists",
+                {},
             )
 
         if not continuation:
@@ -184,10 +223,11 @@ class GovernedRunAuthorization(BaseModel):
                 if self.authorization_id in _CONSUMED_IDS:
                     return (
                         "governed run authorization was already consumed by a "
-                        "different execution"
+                        "different execution",
+                        {},
                     )
                 _CONSUMED_IDS.add(self.authorization_id)
-        return None
+        return None, assets
 
     def requires_verified_identity(self, step_id: str) -> bool:
         return step_id in self.required_identity_step_ids

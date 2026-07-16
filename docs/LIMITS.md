@@ -147,8 +147,10 @@ detect a backend fault when the interface itself displays success.
 OpenAdapt can verify a declared effect against a configured REST, FHIR, or
 document-store verifier. A declared effect without a verifier halts in the
 replayer. The deployment `run` gate requires consequential writes to declare
-effects and requires either a configured verifier or explicit operator
-approval.
+effects. Although its admission report can record explicit operator approval
+when no verifier is configured, the shared replayer still halts before an
+effected write without a verifier. Do not treat approval as effect confirmation
+or rely on it to make an unverifiable write executable.
 
 The remaining boundary is material:
 
@@ -158,7 +160,7 @@ The remaining boundary is material:
   parameters;
 - the verifier's permissions, query, freshness window, and independence must
   be validated in the real deployment;
-- explicit approval permits execution without independent confirmation; and
+- operator approval is risk acceptance, not independent confirmation; and
 - a screen read-back is useful but is not independent effect verification.
 
 A bounded fault-model study demonstrates why this matters: the screen-only

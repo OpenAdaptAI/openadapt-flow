@@ -24,7 +24,7 @@
 #
 #   # apply a staged, signed offline release (atomic; verifies before flipping)
 #   sudo ./install.sh --update --config onprem.yaml \
-#        [--release ./release-1.8.0.tar.gz] [--checksum ...] \
+#        [--release ./release-1.8.1.tar.gz] [--checksum ...] \
 #        --signature ... --pubkey ... --sig-tool gpg|openssl|minisign|signify
 #
 #   # revert to the previous release instantly (no rebuild)

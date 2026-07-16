@@ -47,22 +47,22 @@ wheelhouse, plus a required detached signature and an optional checksum:
 ```bash
 # 1. Assemble the payload
 mkdir -p release/wheels
-echo "1.8.0" > release/VERSION
+echo "1.8.1" > release/VERSION
 python -m pip download --only-binary=:all: \
-  'openadapt-flow[privacy]==1.8.0' -d release/wheels
+  'openadapt-flow[privacy]==1.8.1' -d release/wheels
 
 # 2. Archive it
-COPYFILE_DISABLE=1 tar czf release-1.8.0.tar.gz release
+COPYFILE_DISABLE=1 tar czf release-1.8.1.tar.gz release
 
 # 3. Optional transport-corruption check
-shasum -a 256 release-1.8.0.tar.gz > release-1.8.0.tar.gz.sha256
+shasum -a 256 release-1.8.1.tar.gz > release-1.8.1.tar.gz.sha256
 
 # 4. Authenticity: detached signature with your PINNED vendor key (REQUIRED)
 #    minisign (ed25519):
-minisign -Sm release-1.8.0.tar.gz            # -> release-1.8.0.tar.gz.minisig
+minisign -Sm release-1.8.1.tar.gz            # -> release-1.8.1.tar.gz.minisig
 #    or openssl (RSA/ECDSA PEM key):
 openssl dgst -sha256 -sign vendor_priv.pem \
-  -out release-1.8.0.tar.gz.sig release-1.8.0.tar.gz
+  -out release-1.8.1.tar.gz.sig release-1.8.1.tar.gz
 ```
 
 The `VERSION` value must exactly match the single `openadapt_flow` wheel in the
@@ -85,9 +85,9 @@ sudo ./install.sh --update --config onprem.yaml
 
 # Option B — pass paths explicitly
 sudo ./install.sh --update --config onprem.yaml \
-  --release   /media/usb/release-1.8.0.tar.gz \
-  --checksum  /media/usb/release-1.8.0.tar.gz.sha256 \
-  --signature /media/usb/release-1.8.0.tar.gz.minisig \
+  --release   /media/usb/release-1.8.1.tar.gz \
+  --checksum  /media/usb/release-1.8.1.tar.gz.sha256 \
+  --signature /media/usb/release-1.8.1.tar.gz.minisig \
   --pubkey    /srv/openadapt/keys/vendor.pub \
   --sig-tool  minisign
 ```

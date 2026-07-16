@@ -4,6 +4,17 @@ We separate comparative task performance, breadth, transactional safety, and
 identity availability. A single aggregate success rate would hide materially
 different errors.
 
+\paragraph{Comparative conditions.}
+Both repeated-workflow comparisons were generated on 2026-07-08 on the recorded
+platform \texttt{macOS-15.7.3-arm64-arm-64bit}. The compiled and agent arms
+drove the same vision-only Playwright backend: screenshots in and pixel clicks,
+typed text, key presses, and scrolling out, with no DOM selectors at runtime.
+The agent condition used \texttt{claude-sonnet-5} with the
+\texttt{computer\_20251124} tool and
+\texttt{computer-use-2025-11-24} beta header. Agent costs are calculated from
+recorded token usage and the list-price schedule stored in each raw result; the
+compiled condition recorded no model calls.
+
 \paragraph{Outcome taxonomy.}
 Success means the external task oracle is satisfied. A safe halt stops without
 the intended effect. Over-halt is a safe halt when the intended correct action

@@ -43,12 +43,16 @@ def main() -> None:
     comparison = comparison_artifact["benchmarks"]
     openemr = comparison["openemr"]["arms"]
     mockmed = comparison["mockmed"]["arms"]
+    source_results = {
+        "OpenEMR": load("benchmark/openemr/results.json"),
+        "MockMed": load("benchmark/results.json"),
+    }
 
-    for benchmark_name, source_path, artifact_arms in (
-        ("OpenEMR", "benchmark/openemr/results.json", openemr),
-        ("MockMed", "benchmark/results.json", mockmed),
+    for benchmark_name, source, artifact_arms in (
+        ("OpenEMR", source_results["OpenEMR"], openemr),
+        ("MockMed", source_results["MockMed"], mockmed),
     ):
-        source_arms = load(source_path)["arms"]
+        source_arms = source["arms"]
         for arm_name in ("compiled", "agent"):
             for field in (
                 "n",
@@ -186,6 +190,25 @@ def main() -> None:
     main_tex = load_text("paper/main.tex")
     methodology_tex = load_text("paper/sections/04_methodology.tex")
     results_tex = load_text("paper/sections/05_results.tex")
+
+    openemr_source = source_results["OpenEMR"]
+    mockmed_source = source_results["MockMed"]
+    for field in ("model", "computer_tool", "beta_header", "platform"):
+        require_equal(
+            openemr_source[field],
+            mockmed_source[field],
+            f"comparative {field}",
+        )
+        require_contains(
+            methodology_tex,
+            str(openemr_source[field]).replace("_", "\\_"),
+            f"comparative {field} disclosure",
+        )
+    require_contains(
+        methodology_tex,
+        openemr_source["generated_at"].split("T", maxsplit=1)[0],
+        "comparative run date",
+    )
 
     require_contains(
         main_tex,

@@ -49,3 +49,20 @@ def test_transformers_is_confined_to_the_mlx_research_extra() -> None:
     }
     assert "transformers" not in core_names
     assert {"mlx-vlm", "transformers"} <= mlx_names
+
+
+def test_privacy_extra_declares_spacy_runtime_click_dependency() -> None:
+    """Do not rely on Typer to make spaCy's direct Click import available."""
+
+    roots = [
+        package
+        for package in _lock_packages()
+        if package["name"] == "openadapt-flow"
+        and package.get("source") == {"editable": "."}
+    ]
+    assert len(roots) == 1
+    privacy_names = {
+        dependency["name"]
+        for dependency in roots[0]["optional-dependencies"]["privacy"]
+    }
+    assert {"click", "openadapt-privacy"} <= privacy_names

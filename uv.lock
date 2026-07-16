@@ -2251,6 +2251,7 @@ interop = [
     { name = "openadapt-types" },
 ]
 privacy = [
+    { name = "click" },
     { name = "openadapt-privacy", extra = ["presidio"] },
 ]
 rdp = [
@@ -2275,6 +2276,7 @@ requires-dist = [
     { name = "aardwolf", marker = "extra == 'rdp'", specifier = ">=0.2.13" },
     { name = "anthropic", marker = "extra == 'dev'", specifier = ">=0.40" },
     { name = "anthropic", marker = "extra == 'grounder'", specifier = ">=0.40" },
+    { name = "click", marker = "extra == 'privacy'", specifier = ">=8.0,<9" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'service'", specifier = ">=0.110" },

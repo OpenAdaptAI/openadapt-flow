@@ -141,6 +141,27 @@ def compiled(tmp_path_factory: pytest.TempPathFactory):
 
 
 class TestCompileRecording:
+    def test_incomplete_frame_pair_fails_loud(self, tmp_path: Path) -> None:
+        recording = tmp_path / "recording"
+        (recording / "frames").mkdir(parents=True)
+        write_frame(recording, 0, "before", blank())
+        (recording / "events.jsonl").write_text(
+            json.dumps({"i": 0, "kind": "key", "key": "Enter", "t": 1.0}) + "\n"
+        )
+        (recording / "meta.json").write_text(
+            json.dumps(
+                {
+                    "id": "incomplete-recording",
+                    "created_at": "2026-07-16T00:00:00+00:00",
+                    "viewport": list(VIEWPORT),
+                    "params": {},
+                }
+            )
+        )
+
+        with pytest.raises(FileNotFoundError, match="incomplete frame pair"):
+            compile_recording(recording, tmp_path / "bundle", name="incomplete")
+
     def test_workflow_metadata(self, compiled) -> None:
         wf = compiled["workflow"]
         assert wf.name == "triage-demo"
@@ -188,7 +209,6 @@ class TestCompileRecording:
     def test_click_landmarks_outside_crop(self, compiled) -> None:
         anchor = compiled["workflow"].steps[0].anchor
         assert 1 <= len(anchor.landmarks) <= 2
-        crop = anchor.region
         for lm in anchor.landmarks:
             assert lm.distance_px > 0
             assert lm.relation in {"left_of", "right_of", "above", "below"}

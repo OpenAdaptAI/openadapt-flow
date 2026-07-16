@@ -842,7 +842,8 @@ def compile_recording(
             step id, an invalid risk value, or when the parameter-leakage
             lint finds a demonstrated parameter value baked into a
             postcondition or geometry landmark.
-        FileNotFoundError: If a click event's before frame is missing.
+        FileNotFoundError: If a click event's before frame is missing, or any
+            event has only one half of its before/after frame pair.
     """
     from openadapt_flow.compiler.codegen import render_workflow_py
 
@@ -895,8 +896,15 @@ def compile_recording(
         i = int(event["i"])
         kind = event["kind"]
         step_id = f"step_{i:03d}"
-        before_png = _read_png(recording / "frames" / f"{i:04d}_before.png")
-        after_png = _read_png(recording / "frames" / f"{i:04d}_after.png")
+        before_path = recording / "frames" / f"{i:04d}_before.png"
+        after_path = recording / "frames" / f"{i:04d}_after.png"
+        if before_path.is_file() != after_path.is_file():
+            missing = before_path if not before_path.is_file() else after_path
+            raise FileNotFoundError(
+                f"incomplete frame pair for {kind} event {i}: missing {missing}"
+            )
+        before_png = _read_png(before_path)
+        after_png = _read_png(after_path)
 
         if kind in ("click", "double_click"):
             if before_png is None:

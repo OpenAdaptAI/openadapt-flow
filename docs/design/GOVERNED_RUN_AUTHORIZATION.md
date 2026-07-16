@@ -77,4 +77,3 @@ The committed artifact uses three deterministic trials per condition and
 reports correct action, silent wrong action, safe halt, and over-halt. It is a
 synthetic authorization-semantic test, not evidence of application or OCR
 reliability.
-

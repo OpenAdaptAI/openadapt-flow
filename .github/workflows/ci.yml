@@ -197,6 +197,9 @@ jobs:
       - name: Test openadapt-types boundary (no skips)
         run: pytest -q tests/test_interop_types.py
 
+      - name: Type-check boundary against released schema
+        run: mypy --config-file .github/mypy-interop.ini openadapt_flow/interop/types.py
+
   # --- PHI governance guard (PHI audit REM-1) ------------------------------
   # Refuses to let a compiled bundle carrying a plaintext patient identity band
   # reach the repo. Structural (no deps): scans every git-tracked workflow.json
@@ -290,49 +293,6 @@ jobs:
             runs/**/report.json
             runs/**/*.png
           if-no-files-found: warn
-
-  # --- Canonical-types interop shim (REQUIRED on PRs) ----------------------
-  # The rest of CI installs `.[dev]`, which does NOT pull openadapt-types, so
-  # every test in tests/test_interop_types.py `pytest.importorskip`s away and
-  # the shim (openadapt_flow/interop/types.py) is never validated against the
-  # REAL canonical schema. This job closes that hole: it installs the `interop`
-  # extra so the bounded openadapt-types pin actually resolves, runs the interop
-  # suite (which now executes instead of skipping), and type-checks the shim
-  # against the real package. If a new openadapt-types minor changes a field the
-  # shim maps by exact name, this job fails here instead of silently at a
-  # downstream consumer. Keep it a required PR context (branch protection).
-  interop:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install (with interop extra)
-        run: pip install -e .[dev,interop]
-
-      # Fail loudly if the extra somehow did not bring in the real package --
-      # otherwise the suite below would importorskip and pass vacuously, exactly
-      # the silent-skip this job exists to prevent.
-      - name: Assert openadapt-types is installed (no silent skip)
-        run: python -c "import openadapt_types; print('openadapt-types', getattr(openadapt_types, '__version__', '?'))"
-
-      - name: Interop suite (shim <-> real openadapt-types)
-        run: pytest -q tests/test_interop_types.py
-
-      # Type-check the shim against the REAL package models (the whole-package
-      # `lint` job can't: it never installs openadapt-types, so those imports
-      # resolve to Any there). Uses a dedicated config that turns on the pydantic
-      # mypy plugin so the canonical models' Field(default) signatures are
-      # understood; the plugin is scoped to this job so lint/mypy-strict stay
-      # unchanged. This catches a future openadapt-types minor that renames or
-      # retypes a field the shim maps by exact name.
-      - name: Mypy (interop shim vs. real openadapt-types)
-        run: mypy --config-file .github/mypy-interop.ini openadapt_flow/interop/types.py
 
   # --- Browser record -> compile -> replay E2E (REQUIRED on PRs) -----------
   # The end-to-end record -> compile -> replay-under-drift suite. It drives a

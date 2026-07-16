@@ -2294,7 +2294,7 @@ requires-dist = [
     { name = "openadapt-capture", marker = "extra == 'capture'", specifier = ">=0.5.1" },
     { name = "openadapt-grounding", marker = "extra == 'grounding'", specifier = ">=0.1.0" },
     { name = "openadapt-privacy", extras = ["presidio"], marker = "extra == 'privacy'", specifier = ">=1.0.0" },
-    { name = "openadapt-types", marker = "extra == 'interop'", specifier = ">=0.1.0" },
+    { name = "openadapt-types", marker = "extra == 'interop'", specifier = ">=0.2.0,<0.4.0" },
     { name = "opencv-python-headless", specifier = ">=4.9" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "playwright", specifier = ">=1.44" },

@@ -98,6 +98,12 @@ For an armed step:
   actions halt, while a reversible action can proceed with the condition
   recorded in its report.
 
+No identity tier can distinguish two entities whose available evidence is
+identical. Structured text avoids OCR glyph collapse, but it is only as unique
+as the identifiers exposed by the application. A deployment that requires a
+specific internal record must include that discriminator or verify it through
+the system of record.
+
 That last distinction makes correct risk classification important. Risk is
 inferred from action text and metadata and can be overridden, but inference is
 heuristic. An icon-only save, a generic "OK", or an Enter key that submits a

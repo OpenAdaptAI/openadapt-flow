@@ -23,7 +23,10 @@ from types import SimpleNamespace
 from PIL import Image
 
 from openadapt_flow.ir import ActionKind, Anchor, Step, Workflow
-from openadapt_flow.runtime.authorization import GovernedRunAuthorization
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    runtime_inputs_digest,
+)
 from openadapt_flow.runtime.replayer import Replayer
 
 _IDENTITY = "Jane Sample 1980-01-15 MRN RC79284 Active"
@@ -122,6 +125,8 @@ def _trial(condition: str, root: Path, index: int) -> dict:
         assert workflow.manifest is not None
         authorization = GovernedRunAuthorization(
             bundle_content_digest=workflow.manifest.content_digest,
+            runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+            admitted_policy_name="validation",
             required_identity_step_ids=("open-patient",),
         )
     report = Replayer(

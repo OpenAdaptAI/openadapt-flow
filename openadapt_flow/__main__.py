@@ -777,11 +777,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Fail closed: refuse execution and exit nonzero.
         return 2
 
+    runtime_params = _replay_params(args.param, getattr(args, "params_file", None))
+    runtime_worklists = _resolve_worklists(getattr(args, "worklist", None), workflow)
     args._governed_run_authorization = build_runtime_authorization(
         workflow,
         report,
-        effect_verifier=effect_verifier,
-        approval_available=bool(getattr(args, "approve_unverified_writes", False)),
+        params=runtime_params,
+        worklists=runtime_worklists,
     )
 
     # Admitted. A deployment run is not the drift-demo; force it off and delegate

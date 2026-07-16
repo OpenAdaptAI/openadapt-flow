@@ -146,6 +146,12 @@ def render_run_report(run_dir: Path | str) -> Path:
             f"{_md_escape(report.governed_authorization_id)}` "
             f"({_md_escape(report.governed_approval_source or 'unspecified')})"
         )
+        lines.append(
+            "- **Admitted policy:** "
+            f"{_md_escape(report.governed_policy_name or 'unspecified')}; "
+            "runtime inputs bound to `"
+            f"{_md_escape(report.governed_runtime_inputs_digest or 'unspecified')}`"
+        )
         if report.approved_unverified_effect_step_ids:
             steps = ", ".join(
                 f"`{_md_escape(step_id)}`"

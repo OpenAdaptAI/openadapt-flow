@@ -8,13 +8,48 @@ an approval intended for one workflow from becoming a reusable bypass.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from openadapt_flow.ir import Step, Workflow
 from openadapt_flow.traversal import iter_workflow_steps
+
+_CONSUMED_IDS: set[str] = set()
+_CONSUMED_LOCK = threading.Lock()
+
+
+def effective_runtime_params(
+    workflow: Workflow, supplied: dict[str, str] | None
+) -> dict[str, str]:
+    """Resolve defaults exactly as :meth:`Replayer.run` does."""
+    merged = dict(workflow.params)
+    for name, spec in workflow.param_specs.items():
+        if spec.example is not None:
+            merged.setdefault(name, spec.example)
+    merged.update(supplied or {})
+    return merged
+
+
+def runtime_inputs_digest(
+    workflow: Workflow,
+    params: dict[str, str] | None,
+    worklists: dict[str, list[dict[str, str]]] | None,
+) -> str:
+    """Hash the exact effective runtime inputs without persisting their values."""
+    payload = {
+        "params": effective_runtime_params(workflow, params),
+        "worklists": worklists or {},
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class UnverifiedWriteApproval(BaseModel):
@@ -42,6 +77,8 @@ class GovernedRunAuthorization(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     bundle_content_digest: str = Field(pattern="^[a-f0-9]{64}$")
+    runtime_inputs_digest: str = Field(pattern="^[a-f0-9]{64}$")
+    admitted_policy_name: str
     required_identity_step_ids: tuple[str, ...] = Field(default_factory=tuple)
     unverified_write_approvals: tuple[UnverifiedWriteApproval, ...] = Field(
         default_factory=tuple
@@ -58,6 +95,17 @@ class GovernedRunAuthorization(BaseModel):
                 "governed run authorization is bound to bundle digest "
                 f"{self.bundle_content_digest[:16]}..., but the loaded bundle is "
                 f"{(actual_digest or 'unsealed')[:16]}..."
+            )
+        if workflow.manifest is None:
+            return "governed run authorization requires a sealed manifest"
+
+        from openadapt_flow.bundle_validation import compute_content_digest
+
+        recomputed = compute_content_digest(workflow, workflow.manifest.file_hashes)
+        if recomputed != self.bundle_content_digest:
+            return (
+                "governed run authorization no longer matches the current "
+                "in-memory workflow semantics"
             )
 
         steps = {step.id: step for step in iter_workflow_steps(workflow)}
@@ -90,6 +138,55 @@ class GovernedRunAuthorization(BaseModel):
                     "governed run authorization effect contract mismatch for step "
                     f"{approval.step_id!r}"
                 )
+        return None
+
+    def validate_execution(
+        self,
+        workflow: Workflow,
+        *,
+        bundle_dir: Path | str,
+        params: dict[str, str] | None,
+        worklists: dict[str, list[dict[str, str]]] | None,
+        continuation: bool = False,
+    ) -> str | None:
+        """Validate semantics, sealed assets, inputs, and single-use status."""
+        refusal = self.validate_workflow(workflow)
+        if refusal is not None:
+            return refusal
+        assert workflow.manifest is not None
+
+        from openadapt_flow.bundle_validation import (
+            BundleIntegrityError,
+            verify_integrity,
+        )
+
+        try:
+            verify_integrity(
+                workflow,
+                bundle_dir,
+                workflow.manifest,
+                decrypted_assets=(
+                    workflow.decrypted_templates() if workflow.encrypted else None
+                ),
+            )
+        except BundleIntegrityError as exc:
+            return f"governed run authorization bundle integrity failed: {exc}"
+
+        actual_inputs = runtime_inputs_digest(workflow, params, worklists)
+        if actual_inputs != self.runtime_inputs_digest:
+            return (
+                "governed run authorization is bound to different runtime "
+                "parameters or worklists"
+            )
+
+        if not continuation:
+            with _CONSUMED_LOCK:
+                if self.authorization_id in _CONSUMED_IDS:
+                    return (
+                        "governed run authorization was already consumed by a "
+                        "different execution"
+                    )
+                _CONSUMED_IDS.add(self.authorization_id)
         return None
 
     def requires_verified_identity(self, step_id: str) -> bool:

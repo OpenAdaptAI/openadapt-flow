@@ -29,6 +29,7 @@ from openadapt_flow.mockmed.fault_server import serve as fault_serve
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     UnverifiedWriteApproval,
+    runtime_inputs_digest,
 )
 from openadapt_flow.runtime.effects import (
     Effect,
@@ -125,6 +126,8 @@ def _authorize_unverified(workflow, bundle):
     step = workflow.steps[0]
     authorization = GovernedRunAuthorization(
         bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+        admitted_policy_name="test",
         unverified_write_approvals=[
             UnverifiedWriteApproval(
                 step_id=step.id,

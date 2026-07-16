@@ -10,17 +10,28 @@ explicitly approved unverified write cannot disappear before the action.
 A successful run gate creates an ephemeral `GovernedRunAuthorization` bound to:
 
 - the sealed bundle content digest;
+- the exact effective parameter and worklist digest;
+- the policy that admitted the run;
 - every step that must receive an affirmative live identity verdict;
 - the exact unresolved effect-contract hashes approved without an independent
   verifier;
 - a unique authorization id and an honest approval-source label.
 
-The replayer validates the capability before touching the backend. A digest,
-step, or effect-contract mismatch halts before action. For required identity
-steps, `unreadable` and `abstain` halt even when the action is reversible. An
-approved GUI write may execute without a system-of-record verifier, but screen
-postconditions still apply and the result is recorded as
+The replayer recomputes in-memory semantics and verifies sealed assets
+immediately before touching the backend. A bundle, input, step, or
+effect-contract mismatch halts before action, and a fresh authorization is
+single-use within the process. Durable pause/resume persists the exact
+authorization and frozen worklists, then revalidates them as a continuation.
+For required identity steps, `unreadable` and `abstain` halt even when the
+action is reversible. Program exception edges cannot catch these governed
+safety halts and convert them into success. An approved GUI write may execute
+without a system-of-record verifier, but a non-vacuous screen postcondition is
+required and the result is recorded as
 `effect_approved_unverified=true`, never `effect_verified=true`.
+
+Durable ledgers retain approved-but-unverified effect hashes separately from
+independently confirmed effects. Both prevent duplicate re-execution, but only
+confirmed effects are reported or revalidated as confirmed.
 
 Direct API writes cannot use this fallback. Without a verifier, an API response
 is not an independent effect oracle and there is no GUI postcondition floor, so

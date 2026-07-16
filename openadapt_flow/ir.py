@@ -1392,6 +1392,10 @@ class StepResult(BaseModel):
     # calls on this path — effect verification reads the system of record.
     effect_verified: Optional[bool] = None
     effect_approved_unverified: bool = False
+    # A governed identity/effect/postcondition refusal is not an ordinary
+    # workflow exception. Program ``on_exception`` handlers must not turn it
+    # into a successful terminal outcome.
+    safety_halt: bool = False
     effect_results: list[str] = Field(default_factory=list)
     # One stable, NON-secret-bearing SHA-256 digest per verified effect, taken
     # AFTER the effect's ValueExpr contract was bound to THIS run's params
@@ -1487,6 +1491,14 @@ class RunReport(BaseModel):
     # references, not proof that a local CLI user's identity was authenticated.
     governed_authorization_id: Optional[str] = None
     governed_approval_source: Optional[str] = None
+    governed_authorization_created_at: Optional[str] = None
+    governed_policy_name: Optional[str] = None
+    governed_runtime_inputs_digest: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    governed_authorized_effect_contracts: dict[str, list[str]] = Field(
+        default_factory=dict
+    )
     required_identity_step_ids: list[str] = Field(default_factory=list)
     approved_unverified_effect_step_ids: list[str] = Field(default_factory=list)
     params: dict[str, str] = Field(default_factory=dict)

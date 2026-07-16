@@ -21,7 +21,10 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
-from openadapt_flow.runtime.authorization import GovernedRunAuthorization
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    runtime_inputs_digest,
+)
 from openadapt_flow.runtime.replayer import Replayer
 
 VIEWPORT = (300, 200)
@@ -1068,6 +1071,8 @@ def test_governed_run_requires_affirmative_identity_for_reversible_navigation(
     workflow = Workflow.load(bundle)
     authorization = GovernedRunAuthorization(
         bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+        admitted_policy_name="test",
         required_identity_step_ids=[step.id],
     )
 

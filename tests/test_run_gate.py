@@ -270,14 +270,30 @@ def test_unverifiable_write_with_explicit_approval_admitted(tmp_path):
     assert report.passed, report.render()
 
 
+def test_unverified_approval_requires_screen_postcondition(tmp_path):
+    wf = _good_workflow("vacuous_approval")
+    wf.steps[1].expect = []
+    wf, bundle = _seal(wf, tmp_path)
+    report = _run(
+        wf,
+        bundle,
+        verifier=False,
+        approval_available=True,
+        policy_source="permissive",
+    )
+
+    gate = report.gate(GATE_APPROVAL)
+    assert gate is not None and not gate.passed
+    assert gate.offenders == ["s1"]
+    assert "no screen postcondition" in gate.detail
+
+
 def test_approval_is_bound_to_bundle_steps_and_effect_contracts(tmp_path):
     wf, bundle = _seal(_good_workflow("bound_approval"), tmp_path)
     report = _run(wf, bundle, verifier=False, approval_available=True)
     authorization = build_runtime_authorization(
         wf,
         report,
-        effect_verifier=None,
-        approval_available=True,
     )
 
     assert authorization.validate_workflow(wf) is None
@@ -286,9 +302,27 @@ def test_approval_is_bound_to_bundle_steps_and_effect_contracts(tmp_path):
 
     changed = wf.model_copy(deep=True)
     changed.steps[1].effects[0].match = {"patient_id": "different"}
-    assert "effect contract mismatch" in (
+    assert "in-memory workflow semantics" in (
         authorization.validate_workflow(changed) or ""
     )
+
+
+def test_authorization_factory_rejects_report_from_other_workflow(tmp_path):
+    wf_a, bundle_a = _seal(_good_workflow("workflow_a"), tmp_path)
+    wf_b, _bundle_b = _seal(_good_workflow("workflow_b"), tmp_path)
+    report_a = _run(wf_a, bundle_a, verifier=False, approval_available=True)
+
+    with pytest.raises(ValueError, match="different workflow"):
+        build_runtime_authorization(wf_b, report_a)
+
+
+def test_verifier_admission_cannot_be_reinterpreted_as_unverified_approval(tmp_path):
+    wf, bundle = _seal(_good_workflow("verified_only"), tmp_path)
+    report = _run(wf, bundle, verifier=True, approval_available=True)
+    authorization = build_runtime_authorization(wf, report)
+
+    assert report.unverified_write_approval_granted is False
+    assert authorization.unverified_write_approvals == ()
 
 
 def test_direct_api_write_cannot_use_unverified_approval(tmp_path):

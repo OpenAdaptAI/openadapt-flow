@@ -19,9 +19,9 @@ def _lock_packages() -> list[dict]:
 
 def _locked_version(name: str) -> tuple[int, ...]:
     matches = [package for package in _lock_packages() if package["name"] == name]
-    assert (
-        len(matches) == 1
-    ), f"expected one locked {name} package, found {len(matches)}"
+    assert len(matches) == 1, (
+        f"expected one locked {name} package, found {len(matches)}"
+    )
     return tuple(int(part) for part in matches[0]["version"].split("."))
 
 

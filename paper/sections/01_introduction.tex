@@ -1,0 +1,34 @@
+\section{Introduction}
+
+Graphical user interfaces remain a practical integration boundary for legacy,
+third-party, and remote applications. Selector-based automation can be fast and
+deterministic when stable structure is available, while visual scripting tools
+extend automation to pixel surfaces \cite{sikuli}. Recent computer-use agents
+instead observe a screen and choose the next action with a general model, a
+useful formulation for previously unseen tasks and broad benchmarks
+\cite{webarena,workarena}. Repeated operational work has a different shape: the
+business intent is stable, the sequence is mostly known, errors are costly, and
+the same task may run hundreds of times.
+
+\system{} treats a successful human demonstration as source material for a
+program rather than as context for a model on every run. Compilation extracts
+parameters, target evidence, postconditions, and risk metadata. Replay follows
+the compiled program deterministically. Models are optional repair tiers, not
+the healthy-path controller.
+
+This paper makes four contributions:
+\begin{enumerate}
+  \item A demonstration compiler and backend-neutral workflow representation
+        for deterministic repeated GUI execution.
+  \item A resolution ladder that prefers structured identity, then local visual
+        evidence, and records bounded drift repairs as reviewable changes.
+  \item Governance mechanisms that distinguish runnable from certified,
+        verify identity and system effects where configured, and refuse rather
+        than silently degrade.
+  \item An evaluation protocol that reports task success together with silent
+        incorrect success and over-halt, with raw artifacts and limitations.
+\end{enumerate}
+
+The contribution is not a claim to have solved general desktop automation. The
+current evidence is strongest on browser workflows. Windows evidence is
+experimental, while RDP and Citrix work remains research-grade.

@@ -23,10 +23,10 @@ honest-limits patterns — so the two artifacts read as a matched set.
 | MockMed — 100 compiled vs 20 agent, p50/p95, cost/run, drift row | [`benchmark/results.json`](../results.json) |
 | one-time record + compile cost ("about a minute of human demonstration") | prose in [`benchmark/openemr/BENCHMARK.md`](../openemr/BENCHMARK.md) + [`benchmark/BENCHMARK.md`](../BENCHMARK.md) — the **only** prose-sourced figure, labelled as such |
 
-Nothing on the page is invented. The `derived` figures (p50 speed-up, and the
-"every run, forever" column) are plain arithmetic on the measured numbers —
-`agent p50 / compiled p50`, and `measured $/run × N` — and are labelled as
-derived, not as new measurements.
+Nothing on the page is invented. The `derived` figures (p50 speed-up and the
+illustrative repeat-run model-cost table) are plain arithmetic on the measured
+numbers: `agent p50 / compiled p50` and `measured model $/run × N`. They are
+labelled as projections, not new measurements or total-cost claims.
 
 ## What it shows
 
@@ -35,8 +35,8 @@ add-patient-note workflow on a live EMR), then the **CI-reproducible anchor**
 (MockMed, the bundled demo clinic). For each benchmark:
 
 - **Success parity** — both arms pass the same arm-independent OCR check.
-- **Cost** — `$0` for compiled vs `$/run` for the agent, as an inline-SVG bar
-  chart with an emphasized zero endpoint, plus an "every run, forever" table.
+- **Measured model API cost** — `$0` for compiled vs `$/run` for the agent, as
+  an inline-SVG bar chart plus an explicitly limited arithmetic projection.
 - **Latency** — p50/p95 wall-clock for both arms as grouped inline-SVG bars.
 
 Charts are inline SVG (axis, gridlines, emphasized endpoints, tabular-nums

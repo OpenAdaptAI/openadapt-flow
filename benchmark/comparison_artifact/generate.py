@@ -394,7 +394,10 @@ def _cost_chart(b: Benchmark) -> str:
         "USD / run (list price)",
         rows,
         fmt_tick=lambda v: fmt_usd_short(v),
-        caption="Compiled replay makes zero model calls — $0 per run, every run, forever.",
+        caption=(
+            "In this measured sample, compiled replay made zero model calls and "
+            "incurred $0 in model API charges."
+        ),
     )
 
 
@@ -450,9 +453,8 @@ def _stat_tiles(b: Benchmark) -> str:
     return f'<div class="tiles">{cells}</div>'
 
 
-def _forever_panel(b: Benchmark) -> str:
-    """Derived extrapolation: agent cost = measured per-run cost x N. Clearly
-    labelled as arithmetic on the real per-run figure, not a new measurement."""
+def _projected_cost_panel(b: Benchmark) -> str:
+    """Illustrative arithmetic projection, explicitly not a new measurement."""
     per = b.agent.cost_per_run
     rows = "".join(
         f"<tr><td class='n'>{n:,}</td><td class='c'>$0</td>"
@@ -462,15 +464,18 @@ def _forever_panel(b: Benchmark) -> str:
     note = b.extras.get("pricing_note") or "list price"
     return (
         '<div class="forever">'
-        '<div class="forever-h">Every run, forever '
-        '<span class="derived">(agent = measured $/run &times; N; arithmetic, not a new run)</span>'
+        '<div class="forever-h">Illustrative repeat-run model cost '
+        '<span class="derived">(measured model $/run &times; N; not new runs)</span>'
         '</div>'
         '<table class="forever-t"><thead><tr>'
-        '<th>runs of this task</th><th>compiled</th><th>agent</th></tr></thead>'
+        '<th>modeled runs</th><th>compiled model API</th><th>agent model API</th></tr></thead>'
         f'<tbody>{rows}</tbody></table>'
-        f'<p class="forever-note">Agent column is the real per-run cost '
-        f'({fmt_usd(per)}) multiplied out at {_e(note)}. The compiled bundle '
-        f'is recorded once ({_e(DEMO_COST_TEXT)}) and then replays free.</p>'
+        f'<p class="forever-note">Agent values multiply the measured per-run '
+        f'model charge ({fmt_usd(per)}) at {_e(note)}. The compiled column '
+        f'projects the sample\'s zero model calls only. It excludes authoring, '
+        f'maintenance, compute, storage, review, and exception-handling cost and '
+        f'assumes the measured task and rates remain unchanged. The one-time '
+        f'demonstration was {_e(DEMO_COST_TEXT)}.</p>'
         '</div>'
     )
 
@@ -536,7 +541,7 @@ def _bench_section(b: Benchmark, *, lead: bool) -> str:
         <div class="chart-cell">{_cost_chart(b)}</div>
         <div class="chart-cell">{_latency_chart(b)}</div>
       </div>
-      {_forever_panel(b)}
+      {_projected_cost_panel(b)}
       <p class="bench-method">Both arms drive the same vision-only interface
         (screenshots in; pixel clicks / typed text / scrolls out) against the
         same target; the agent is <code>{_e(b.model)}</code> with the

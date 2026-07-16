@@ -1,0 +1,48 @@
+\section{Results}
+
+\begin{table}[t]
+\centering
+\caption{Bounded repeated-workflow comparison. Model API costs are estimates
+derived from recorded token usage and artifact-declared list prices; they
+exclude authoring and operations.}
+\label{tab:comparison}
+\begin{tabular}{llrrrr}
+\toprule
+Task & Arm & Success & $n$ & Median (s) & Model cost/run \\
+\midrule
+OpenEMR & Compiled & 20/20 & 20 & 39.2 & \$0.00 \\
+OpenEMR & Agent & 10/10 & 10 & 70.4 & \$0.55 \\
+MockMed & Compiled & 100/100 & 100 & 4.9 & \$0.00 \\
+MockMed & Agent & 20/20 & 20 & 37.5 & \$0.27 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:comparison} shows that, on these two already-demonstrated tasks,
+compiled replay completed every measured run with lower median latency and no
+model calls. The unequal, small samples do not establish superior reliability.
+The correct inference is narrower: repeated reasoning was unnecessary for the
+healthy executions measured here.
+
+On the one-run public-web corpus, all 29 recordings compiled; 17 replays reached
+a verified success, 10 halted safely, and 2 reported success while the external
+oracle disagreed. Both silent wrong actions were vacuous successes under an
+environment blocker rather than a harmful persisted write, but they demonstrate
+that weak postconditions can still yield a green report. Because each app ran
+once and the corpus excludes authenticated enterprise and desktop applications,
+these counts are failure discovery, not a generalization rate estimate.
+
+In the transactional study, screen-only verification silently mishandled five
+of seven injected fault classes: partial save, duplicate submission, optimistic
+UI followed by rejection, stale overwrite, and double delivery. There were 10
+consistent repeats per class. When the step declared the expected effect and a
+system-of-record verifier was configured, those five classes refuted and halted
+through the live replayer. This improvement has two non-optional preconditions:
+the effect must be authored and the verifier deployed.
+
+The integrated identity ladder recorded zero false accepts in every tested
+configuration. Structured browser identity also had zero over-halts on 14
+correct homonym cases. Pure-pixel configurations halted on all correct
+confusable cases: zero false accepts at 100\% over-halt. This is the intended
+safety/availability disclosure, not evidence that pixel-only identity is ready
+for dense clinical lists.

@@ -1,0 +1,55 @@
+\section{Evaluation Methodology}
+
+We separate comparative task performance, breadth, transactional safety, and
+identity availability. A single aggregate success rate would hide materially
+different errors.
+
+\paragraph{Comparative conditions.}
+Both repeated-workflow comparisons were generated on 2026-07-08 on the recorded
+platform \texttt{macOS-15.7.3-arm64-arm-64bit}. The compiled and agent arms
+drove the same vision-only Playwright backend: screenshots in and pixel clicks,
+typed text, key presses, and scrolling out, with no DOM selectors at runtime.
+The agent condition used \texttt{claude-sonnet-5} with the
+\texttt{computer\_20251124} tool and
+\texttt{computer-use-2025-11-24} beta header. Agent costs are calculated from
+recorded token usage and the list-price schedule stored in each raw result; the
+compiled condition recorded no model calls.
+
+\paragraph{Outcome taxonomy.}
+Success means the external task oracle is satisfied. A safe halt stops without
+the intended effect. Over-halt is a safe halt when the intended correct action
+was in fact available. Silent incorrect success means the runtime reports
+success while the external oracle disagrees. False abort means the intended
+effect occurred but the runtime reports failure. We report run counts rather
+than confidence intervals for small bounded studies.
+
+\paragraph{OpenEMR comparison.}
+The task logs into the shared public OpenEMR demonstration site, searches a
+patient, opens Patient Messages, adds a parameterized note, and saves. The
+compiled arm has 20 runs and the computer-use-agent arm 10. Both use the same
+task-level success check. The shared public instance is mutable and the study is
+not fully reproducible in CI; it is field evidence, not a production study.
+
+\paragraph{MockMed comparison.}
+The bundled browser fixture performs a triage workflow. The compiled arm has
+100 runs and the agent arm 20. This is the CI-reproducible anchor, but the
+application is purpose-built and is not evidence about hostile enterprise UIs.
+
+\paragraph{Public-web reliability corpus.}
+Twenty-nine public, unauthenticated applications are recorded, compiled, and
+replayed once on an unchanged UI using an external goal oracle. This study is
+descriptive: one run per application does not meet the repeated-trial standard
+for a capability claim, and the selection excludes SSO-walled and desktop
+targets.
+
+\paragraph{Transactional fault model.}
+Seven persistence faults and controls are injected at a real HTTP persistence
+boundary behind the MockMed UI, with 10 repeats per class. Database state, not
+the UI report, is the oracle. The same classes are evaluated with declared
+effects and a system-of-record verifier.
+
+\paragraph{Identity ladder.}
+Adversarial same-name/same-date-of-birth homonyms differ by confusable glyphs
+such as O/0 and l/1. The actual replayer stack is evaluated with structured and
+pure-pixel configurations. False accept and over-halt are both reported because
+a system can obtain zero wrong clicks by refusing every correct one.

@@ -1,0 +1,35 @@
+name: Paper
+
+on:
+  pull_request:
+    paths:
+      - "paper/**"
+      - "benchmark/**"
+      - ".github/workflows/paper.yml"
+  push:
+    branches: [main]
+    paths:
+      - "paper/**"
+      - "benchmark/**"
+      - ".github/workflows/paper.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check paper constants against benchmark artifacts
+        run: python paper/check_artifacts.py
+      - name: Install TeX
+        run: sudo apt-get update && sudo apt-get install -y latexmk texlive-latex-extra
+      - name: Build PDF
+        run: make -C paper
+      - name: Upload PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: openadapt-paper
+          path: paper/build/main.pdf

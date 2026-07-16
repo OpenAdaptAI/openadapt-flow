@@ -1,0 +1,28 @@
+\section{Limitations and Threats to Validity}
+
+The evidence does not establish long-term reliability, maintenance effort,
+total cost of ownership, multi-tenant scale, or safety in clinical production.
+OpenEMR uses a shared public demonstration site and a small sample. MockMed is a
+fixture. The breadth corpus has one trial per application and selection bias
+toward public no-auth browser apps. No published study covers weeks of natural
+drift or a representative distribution of customer workflows.
+
+Identity is only checked on armed steps. Risk classification uses keywords and
+can miss an icon-only or indirect write. Visual postconditions do not verify a
+system-of-record effect. Effect declarations and verifiers require deployment
+work. Optional model rescue can false-rescue an ambiguous state, and measured
+grounding is weak on dense lists. Human review can catch contextual sanitation
+errors but is not proof of de-identification.
+
+Backend maturity is uneven. The browser path cannot stand in for native Windows,
+RDP, or Citrix. Remote display introduces compression, scaling, latency,
+coordinate, lock-screen, credential, input-acceptance, and identity-availability
+variables not represented by an analog test.
+
+Cost values use recorded provider usage and then-current price metadata. They do
+not include recording, compilation, operator review, exception handling,
+infrastructure, support, or maintenance. Provider prices and models change.
+
+Finally, the authors develop the evaluated system. Raw artifacts and scripts
+reduce but do not eliminate experimenter bias. Independent replication and
+pre-registered longitudinal workloads remain necessary.

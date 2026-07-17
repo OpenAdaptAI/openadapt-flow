@@ -16,7 +16,6 @@ offline (no model download, no Anthropic calls).
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -298,25 +297,72 @@ def test_report_md_no_warning_when_scrub_off(monkeypatch, tmp_path: Path):
         render_run_report(run_dir)  # must not raise
 
 
-def test_report_md_no_warning_for_bundled_synthetic_demo(monkeypatch, tmp_path: Path):
-    """``synthetic_demo=True`` (bundled MockMed, no operator values) => silent.
+def test_default_mockmed_replay_warns_for_arbitrary_phi_bundle(
+    monkeypatch, tmp_path: Path
+):
+    """Default MockMed routing cannot declare an arbitrary bundle synthetic.
 
-    The replay CLI sets this only when it served the bundled synthetic MockMed
-    demo itself (no ``--url``) and no ``--param``/worklist values flowed in,
-    so the identity-like text is known-fake demo data.
+    ``replay`` accepts any bundle while defaulting the target URL to MockMed.
+    The bundle's provenance is therefore unknown, even with no parameter or
+    worklist overrides, and its identity-like report text must still warn.
     """
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    import openadapt_flow.__main__ as cli
     from openadapt_flow.report import PlaintextPHIWarning
 
     monkeypatch.setattr(privacy, "_build_provider", lambda: None)
     privacy.reset_scrubbers()
+    bundle = tmp_path / "arbitrary-phi-bundle"
+    bundle.mkdir()
     run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    _phi_report().save(run_dir)
+    observed: dict[str, object] = {"served": False, "stopped": False}
 
-    import warnings as _w
+    def fake_load(path):
+        observed["bundle"] = Path(path)
+        return object()
 
-    with _w.catch_warnings():
-        _w.simplefilter("error", PlaintextPHIWarning)
-        md = render_run_report(run_dir, synthetic_demo=True).read_text()
-    # Only the warning is softened — the report content is unchanged.
-    assert "John Smith" in md
+    def fake_serve(*, port):
+        assert port == 0
+        observed["served"] = True
+
+        def stop() -> None:
+            observed["stopped"] = True
+
+        return "http://127.0.0.1:45678/", stop
+
+    def fake_run(_backend, **kwargs):
+        report = _phi_report()
+        report.save(kwargs["run_dir"])
+        return report
+
+    page = SimpleNamespace(
+        url="http://127.0.0.1:45678/", video=None, goto=lambda _url: None
+    )
+    browser = SimpleNamespace(new_page=lambda **_kw: page, close=lambda: None)
+    playwright = SimpleNamespace(chromium=SimpleNamespace(launch=lambda **_kw: browser))
+
+    @contextmanager
+    def fake_sync_playwright():
+        yield playwright
+
+    monkeypatch.setattr("openadapt_flow.ir.Workflow.load", fake_load)
+    monkeypatch.setattr("openadapt_flow.mockmed.server.serve", fake_serve)
+    monkeypatch.setattr(
+        "openadapt_flow._browser_setup.ensure_chromium_installed", lambda: None
+    )
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", fake_sync_playwright)
+    monkeypatch.setattr(
+        "openadapt_flow.backends.factory.build_backend", lambda *_a, **_k: object()
+    )
+    monkeypatch.setattr(cli, "_build_and_run_replayer", fake_run)
+
+    args = cli.build_parser().parse_args(
+        ["replay", str(bundle), "--run-dir", str(run_dir)]
+    )
+
+    with pytest.warns(PlaintextPHIWarning):
+        assert cli._cmd_replay(args) == 1
+    assert observed == {"served": True, "stopped": True, "bundle": bundle}
+    assert "John Smith" in (run_dir / "REPORT.md").read_text(encoding="utf-8")

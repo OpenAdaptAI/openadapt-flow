@@ -266,7 +266,8 @@ claims:
         proves: >-
           The capture->recording bridge over a REAL openadapt-capture session
           (its own event-processing pipeline + frame extraction) feeding the
-          UNMODIFIED compiler.
+          UNMODIFIED compiler (runs on default CI: the `test` job installs the
+          `capture` extra; openadapt-capture >=0.5.4 imports clean headless).
       - path: docs/desktop/RECORDING.md
         kind: doc
         proves: >-
@@ -278,8 +279,9 @@ claims:
         Offline capture carries NO structural (UIA AutomationId) locator, so
         replay uses the visual ladder (template/ocr/geometry). The live capture
         needs a display (openadapt-capture is the optional `capture` extra); the
-        CI proof covers convert -> compile -> replay on the recording format,
-        not a live capture session.
+        CI proof covers a real on-disk capture session -> convert -> compile ->
+        replay, not a live recorder run (the live recorder has its own
+        integration suite in the openadapt-capture repo).
       - >-
         `--secret` is refused on the pixel/desktop substrate (no field geometry
         to redact), and `rdp` recording must be captured in the same pixel space

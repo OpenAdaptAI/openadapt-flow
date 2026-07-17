@@ -10,9 +10,10 @@ clicks/drags/typed text) and real frame extraction, so the test cannot silently
 pass against a schema that no longer exists. The converted recording is fed to
 the UNMODIFIED compiler — the format bridge, proven end to end.
 
-openadapt-capture screenshots the display at import time, so the whole module
-is skipped when the package cannot be imported (headless CI / no display); it
-runs for real on a developer desktop with the ``capture`` extra installed.
+openadapt-capture >=0.5.4 imports clean headless (the historical
+screenshot-at-import side effect was removed in 0.5.3/0.5.4), so this module
+runs for real in headless CI — the `test` job installs the ``capture`` extra.
+It is skipped only when that optional extra is not installed.
 """
 
 from __future__ import annotations
@@ -23,24 +24,19 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# openadapt-capture is an optional extra AND screenshots the display when
-# imported (a module-level side effect in its recorder). Skip the whole module
-# if it is absent or cannot be imported in this environment.
+# openadapt-capture is an optional extra: skip only when it is not installed.
+# Since 0.5.4 the import is headless-clean (no screenshot at import), so when
+# the extra IS installed — as in CI's `test` job — an import failure is a real
+# regression and must fail loudly here instead of silently skipping.
 if importlib.util.find_spec("openadapt_capture") is None:
     pytest.skip(
         "openadapt-capture not installed (capture extra)", allow_module_level=True
     )
-try:  # importing the package screenshots the display; skip if that fails
-    import openadapt_capture  # noqa: F401
-    from openadapt_capture.db import create_db
-    from openadapt_capture.db.models import ActionEvent, Recording
-    from openadapt_capture.video import VideoWriter
-except Exception as exc:  # pragma: no cover - environment dependent
-    pytest.skip(
-        f"openadapt-capture cannot be imported here ({exc})",
-        allow_module_level=True,
-    )
 
+import openadapt_capture  # noqa: F401
+from openadapt_capture.db import create_db
+from openadapt_capture.db.models import ActionEvent, Recording
+from openadapt_capture.video import VideoWriter
 from PIL import Image, ImageDraw
 
 from openadapt_flow.adapters.capture import convert_capture
@@ -137,7 +133,8 @@ def write_recording_db(path: Path, action_rows: list[dict]) -> None:
             video_start_time=VIDEO_T0,
             double_click_interval_seconds=0.5,
             double_click_distance_pixels=5.0,
-            # capture persists pixel_ratio only in the config JSON.
+            # config-JSON pixel_ratio: the legacy (pre-0.5.4) persistence path,
+            # which CaptureSession.pixel_ratio still honors as a fallback.
             config={"pixel_ratio": PIXEL_RATIO},
         )
         session.add(recording)

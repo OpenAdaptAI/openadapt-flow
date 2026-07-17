@@ -3186,6 +3186,53 @@ class Replayer:
 
     # -- closed-loop scroll ------------------------------------------------------
 
+    def _implicit_scroll_target_ready(
+        self,
+        step: Step,
+        frame_png: bytes,
+        *,
+        workflow: Workflow,
+        bundle_dir: Path,
+        params: dict[str, str],
+    ) -> bool:
+        """Resolve an implicit scroll target and honor its armed identity.
+
+        A generic input crop can visually resolve in several places on a long
+        form. Declaring the target visible from that visual match alone makes
+        the preceding scroll a false no-op. Structural resolution stays
+        available, model grounding stays disabled, and an identity-armed target
+        is ready only when the same pre-action identity gate verifies it.
+        """
+        if step.anchor is None:
+            return False
+        template_png = self._asset_bytes(
+            bundle_dir, step.anchor.template, workflow=workflow
+        )
+        structural = (
+            self.backend
+            if self.use_structural and hasattr(self.backend, "locate_structural")
+            else None
+        )
+        resolved = resolve(
+            step.anchor,
+            frame_png,
+            self.vision,
+            None,  # scroll readiness must remain deterministic and model-free
+            step.intent,
+            template_png=template_png,
+            viewport=self.backend.viewport,
+            structural=structural,
+        )
+        if resolved is None:
+            return False
+        resolution, _matched_region = resolved
+        if not step.identity_armed:
+            return True
+        check = self._verify_identity(
+            step, resolution, frame_png, params, workflow, bundle_dir
+        )
+        return check.status == "verified"
+
     def _act_scroll(
         self,
         step: Step,
@@ -3237,6 +3284,7 @@ class Replayer:
         # The scroll's readiness is a wait_until predicate: an explicit
         # step.wait_until wins; otherwise the next anchor's ANCHOR_RESOLVES.
         stop_pred = step.wait_until
+        implicit_target_readiness = stop_pred is None and next_step is not None
         if stop_pred is None and next_step is not None:
             stop_pred = Predicate(
                 kind=PredicateKind.ANCHOR_RESOLVES,
@@ -3247,7 +3295,19 @@ class Replayer:
             self.backend.scroll(dx, dy)
             return None
 
-        holds = self._predicate_holds(stop_pred, before_png, bundle_dir, params)
+        def readiness_holds(frame_png: bytes) -> bool:
+            if implicit_target_readiness:
+                assert next_step is not None
+                return self._implicit_scroll_target_ready(
+                    next_step,
+                    frame_png,
+                    workflow=workflow,
+                    bundle_dir=bundle_dir,
+                    params=params,
+                )
+            return self._predicate_holds(stop_pred, frame_png, bundle_dir, params)
+
+        holds = readiness_holds(before_png)
         if self._governed_asset_mutation is not None:
             return self._governed_asset_mutation
         if holds:
@@ -3260,7 +3320,7 @@ class Replayer:
             self.backend.scroll(dx, dy)
             scrolled += increment
             frame = self.vision.wait_settled(self.backend)
-            holds = self._predicate_holds(stop_pred, frame, bundle_dir, params)
+            holds = readiness_holds(frame)
             if self._governed_asset_mutation is not None:
                 return self._governed_asset_mutation
             if holds:

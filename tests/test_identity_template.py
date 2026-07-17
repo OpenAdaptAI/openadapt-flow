@@ -130,6 +130,100 @@ def test_param_mode_stores_no_demonstrated_identifier() -> None:
     assert got.mode == "param"
 
 
+def test_param_mode_ignores_shared_token_from_unembedded_longer_param() -> None:
+    """Template ownership matches the plaintext whole-value embedding gate."""
+    band = "Name OpenAdapt Middle Name Last Name"
+    examples = {
+        "fname": "OpenAdapt",
+        "email": "openadapt.loan-parity@example.invalid",
+    }
+    tmpl = build_identity_template(band, param_examples=examples)
+    assert tmpl is not None
+    assert set(tmpl.param_token_indices) == {"fname"}
+
+    params = {**examples, "fname": "ChangedName"}
+    observed = "Name ChangedName Middle Name Last Name"
+    plain = I.verify_target_identity(
+        band, observed, params=params, param_examples=examples
+    )
+    got = verify_template_identity(
+        tmpl, observed, params=params, param_examples=examples
+    )
+    assert got.status == plain.status == "verified"
+    assert got.mode == plain.mode == "param"
+
+
+def test_param_span_does_not_drop_separate_mrn_substring() -> None:
+    """A parameter may not claim identity tokens outside its exact occurrence."""
+    band = "MRN 123456 Email patient123456@example.invalid Active"
+    examples = {"email": "patient123456@example.invalid"}
+    tmpl = build_identity_template(band, param_examples=examples)
+    assert tmpl is not None
+    # Only the exact email token is parameter-owned; the independent MRN stays
+    # in the hashed residue and must still reject a wrong record.
+    assert tmpl.param_token_indices["email"] == [3]
+
+    params = {"email": "changed@example.invalid"}
+    observed = "MRN 654321 Email changed@example.invalid Active"
+    plain = I.verify_target_identity(
+        band, observed, params=params, param_examples=examples
+    )
+    got = verify_template_identity(
+        tmpl, observed, params=params, param_examples=examples
+    )
+    assert plain.status == "mismatch"
+    assert got.status == plain.status
+
+
+def test_partial_token_parameter_is_left_hashed_not_dropped() -> None:
+    """Prefix/suffix identity cannot be discarded by an inner param match."""
+    band = "Account ID=234567X Status Active"
+    examples = {"account": "234567"}
+    tmpl = build_identity_template(band, param_examples=examples)
+    assert tmpl is not None
+    assert "account" not in tmpl.param_token_indices
+
+    params = {"account": "876543"}
+    observed = "Account ID=876543Y Status Active 876543"
+    plain = I.verify_target_identity(
+        band, observed, params=params, param_examples=examples
+    )
+    got = verify_template_identity(
+        tmpl, observed, params=params, param_examples=examples
+    )
+    assert plain.status == "mismatch"
+    assert got.status != "verified"
+
+
+def test_param_substitution_preserves_untouched_split_concat_windows() -> None:
+    """OCR-glued residue labels remain matchable after a param is replaced."""
+    band = "Postal Code: 02139 Country: Add"
+    examples = {"postal_code": "02139"}
+    tmpl = build_identity_template(band, param_examples=examples)
+    assert tmpl is not None
+
+    observed = "PostalCode: 02139 Country: Add"
+    plain = I.verify_target_identity(
+        band,
+        observed,
+        params=examples,
+        param_examples=examples,
+    )
+    got = verify_template_identity(
+        tmpl,
+        observed,
+        params=examples,
+        param_examples=examples,
+    )
+
+    # The identifier is glyph-confusable, so the conservative final verdict is
+    # abstain. The regression is that the glued static label no longer causes
+    # an earlier false mismatch after parameter substitution.
+    assert plain.status == "abstain"
+    assert got.status == plain.status
+    assert got.coverage == 1.0
+
+
 def test_structured_tier_is_exact_match_over_hash() -> None:
     struct = "MG4408 Okafor, Philip 1966-01-17 M Active"
     tmpl = build_identity_template(None, structured_identity=struct)

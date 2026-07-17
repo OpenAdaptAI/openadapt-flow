@@ -12,7 +12,11 @@ import types
 import pytest
 
 from openadapt_flow.backends import parallels_vm as pv
-from openadapt_flow.backends.parallels_vm import ParallelsError, ParallelsVM
+from openadapt_flow.backends.parallels_vm import (
+    ParallelsError,
+    ParallelsVM,
+    SnapshotInfo,
+)
 
 UUID = "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
 
@@ -80,6 +84,91 @@ def test_list_snapshots_marks_current(monkeypatch):
     assert snaps[0].current is False
     assert snaps[1].current is True
     assert snaps[1].snapshot_id == "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
+
+
+def test_host_free_space_preflight_refuses_before_vm_command(monkeypatch):
+    calls = _mock_run(monkeypatch, {})
+    monkeypatch.setattr(
+        pv.shutil,
+        "disk_usage",
+        lambda _path: types.SimpleNamespace(free=7 * 1024**3),
+    )
+    with pytest.raises(ParallelsError, match="7.0 GiB available, 16.0 GiB required"):
+        ParallelsVM(UUID).require_host_free_space(storage_path="/vm-volume")
+    assert calls == []
+
+
+def test_host_free_space_preflight_returns_observed_bytes(monkeypatch):
+    free = 49 * 1024**3
+    monkeypatch.setattr(
+        pv.shutil,
+        "disk_usage",
+        lambda _path: types.SimpleNamespace(free=free),
+    )
+    assert ParallelsVM(UUID).require_host_free_space(storage_path="/vm-volume") == free
+
+
+def test_delete_owned_snapshot_is_exact_and_has_no_children_flag(monkeypatch):
+    calls = _mock_run(monkeypatch, {"snapshot-delete": _completed("deleted")})
+    snapshot_id = "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
+    ParallelsVM(UUID).delete_owned_snapshot(snapshot_id)
+    assert calls == [
+        [
+            pv.DEFAULT_PRLCTL,
+            "snapshot-delete",
+            UUID,
+            "-i",
+            snapshot_id,
+        ]
+    ]
+
+
+def test_restore_base_then_deletes_only_owned_snapshot(monkeypatch):
+    vm = ParallelsVM(UUID)
+    base = "{35dba943-a22d-473c-b1b0-44fa6326e626}"
+    owned = "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
+    snapshots = iter(
+        [
+            [SnapshotInfo(base, False), SnapshotInfo(owned, True)],
+            [SnapshotInfo(base, True), SnapshotInfo(owned, False)],
+            [SnapshotInfo(base, True)],
+        ]
+    )
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(vm, "list_snapshots", lambda: next(snapshots))
+    monkeypatch.setattr(vm, "revert", lambda item: calls.append(("revert", item)))
+    monkeypatch.setattr(
+        vm,
+        "delete_owned_snapshot",
+        lambda item: calls.append(("delete", item)),
+    )
+    vm.restore_base_and_delete_owned_snapshot(
+        base_snapshot_id=base,
+        owned_snapshot_id=owned,
+    )
+    assert calls == [("revert", base), ("delete", owned)]
+
+
+def test_restore_refusal_never_deletes_when_base_is_not_current(monkeypatch):
+    vm = ParallelsVM(UUID)
+    base = "{35dba943-a22d-473c-b1b0-44fa6326e626}"
+    owned = "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
+    snapshots = iter(
+        [
+            [SnapshotInfo(base, False), SnapshotInfo(owned, True)],
+            [SnapshotInfo(base, False), SnapshotInfo(owned, True)],
+        ]
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(vm, "list_snapshots", lambda: next(snapshots))
+    monkeypatch.setattr(vm, "revert", lambda _item: None)
+    monkeypatch.setattr(vm, "delete_owned_snapshot", deleted.append)
+    with pytest.raises(ParallelsError, match="base did not become current"):
+        vm.restore_base_and_delete_owned_snapshot(
+            base_snapshot_id=base,
+            owned_snapshot_id=owned,
+        )
+    assert deleted == []
 
 
 def test_guest_ip_skips_apipa(monkeypatch):

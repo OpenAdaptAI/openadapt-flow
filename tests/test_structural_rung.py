@@ -29,9 +29,11 @@ import pytest
 from PIL import Image
 
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionKind,
     Anchor,
     Step,
+    StepResult,
     StructuralHandle,
     StructuralLocator,
     Workflow,
@@ -140,6 +142,7 @@ def test_structural_rung_tried_first_and_wins() -> None:
     assert resolution.rung == "structural"
     assert resolution.point == (207, 133)
     assert resolution.confidence == 1.0
+    assert resolution.structural_handle == backend._handle
     # The visual template rung was never consulted.
     assert vision.template_calls == 0
     # A region (for healing / clamping) is returned, sized like the anchor.
@@ -179,6 +182,27 @@ def test_structural_exception_falls_through_no_crash() -> None:
         structural=backend,
     )
     assert res is not None and res[0].rung == "template"
+
+
+def test_structural_ambiguity_refusal_never_falls_through_to_pixels() -> None:
+    from openadapt_flow.backend import StructuralResolutionRefused
+
+    class Ambiguous:
+        def locate_structural(self, locator):
+            raise StructuralResolutionRefused("two exact Submit buttons")
+
+    vision = _FakeVision()
+    vision.template_results = [_Match(point=(120, 110), region=(100, 100, 40, 20))]
+    with pytest.raises(StructuralResolutionRefused, match="two exact Submit"):
+        resolve(
+            _anchor(),
+            make_png(),
+            vision,
+            template_png=b"tpl",
+            viewport=VIEWPORT,
+            structural=Ambiguous(),
+        )
+    assert vision.template_calls == 0
 
 
 def test_pixel_only_backend_uses_visual_ladder() -> None:
@@ -302,13 +326,30 @@ class _FakeSession:
 
     def post(self, url, json=None, timeout=None):
         self.posted.append(json)
-        return self._resp
+        if url.endswith("/execute_windows"):
+            return self._resp
+        return _Resp(text="not found", status=404)
+
+
+class _RouteSession:
+    def __init__(self, routes):
+        self.routes = routes
+        self.posted = []
+
+    def post(self, url, json=None, timeout=None):
+        self.posted.append((url, json))
+        for suffix, response in self.routes.items():
+            if url.endswith(suffix):
+                return response
+        return _Resp(text="not found", status=404)
 
 
 def _win_backend(resp):
     from openadapt_flow.backends.windows_backend import WindowsBackend
 
-    return WindowsBackend(session=_FakeSession(resp), viewport=(800, 600))
+    return WindowsBackend(
+        session=_FakeSession(resp), viewport=(800, 600), allow_legacy_exec=True
+    )
 
 
 def test_windows_structural_locator_at_parses_uia_dict() -> None:
@@ -357,6 +398,205 @@ def test_windows_locate_structural_skips_server_without_ids() -> None:
     # backend must not even hit the server.
     assert be.locate_structural(StructuralLocator(selector="#x")) is None
     assert session.posted == []
+
+
+def test_windows_typed_uia_unique_candidate_and_native_receipt() -> None:
+    fingerprint = "a" * 64
+    candidate = {
+        "automation_id": "saveButton",
+        "role": "button",
+        "name": "Save",
+        "window_name": "Patient Notes",
+        "bounds": [10, 20, 110, 60],
+        "point": [60, 40],
+        "supported_operations": ["invoke"],
+        "fingerprint": fingerprint,
+    }
+    session = _RouteSession(
+        {
+            "/uia/find": _Resp(
+                json_data={
+                    "status": "ok",
+                    "match": "unique",
+                    "candidate_count": 1,
+                    "truncated": False,
+                    "candidates": [candidate],
+                }
+            ),
+            "/uia/act": _Resp(
+                json_data={
+                    "status": "ok",
+                    "candidate_count": 1,
+                    "receipt": {
+                        "status": "delivered",
+                        "receipt_id": "receipt-1",
+                        "operation": "uia_invoke",
+                        "native": True,
+                        "target_fingerprint": fingerprint,
+                        "delivered_at": "2026-07-17T00:00:00+00:00",
+                        "outcome_verified": False,
+                    },
+                }
+            ),
+        }
+    )
+    from openadapt_flow.backends.windows_backend import WindowsBackend
+
+    backend = WindowsBackend(session=session, viewport=(800, 600))
+    locator = StructuralLocator(
+        automation_id="saveButton",
+        role="button",
+        name="Save",
+        window_name="Patient Notes",
+    )
+    handle = backend.locate_structural(locator)
+    assert handle is not None
+    assert handle.point == (60, 40)
+    assert handle.region == (10, 20, 100, 40)
+    assert handle.target_fingerprint == fingerprint
+    receipt = backend.act_structural(locator, handle)
+    assert receipt.operation == "uia_invoke"
+    assert receipt.native is True
+    assert receipt.outcome_verified is False
+    assert not any(url.endswith("/execute_windows") for url, _ in session.posted)
+
+
+def test_windows_typed_uia_ambiguous_candidates_refuse() -> None:
+    from openadapt_flow.backend import StructuralResolutionRefused
+    from openadapt_flow.backends.windows_backend import WindowsBackend
+
+    session = _RouteSession(
+        {
+            "/uia/find": _Resp(
+                json_data={
+                    "status": "ok",
+                    "match": "ambiguous",
+                    "candidate_count": 2,
+                    "truncated": False,
+                    "candidates": [{}, {}],
+                }
+            )
+        }
+    )
+    backend = WindowsBackend(session=session, viewport=(800, 600))
+    with pytest.raises(StructuralResolutionRefused, match="candidate_count=2"):
+        backend.locate_structural(StructuralLocator(automation_id="submit"))
+
+
+def test_windows_typed_uia_stale_actuation_is_structural_refusal() -> None:
+    from openadapt_flow.backend import StructuralResolutionRefused
+    from openadapt_flow.backends.windows_backend import WindowsBackend
+
+    fingerprint = "d" * 64
+    session = _RouteSession(
+        {
+            "/uia/act": _Resp(
+                status=409,
+                json_data={
+                    "status": "error",
+                    "code": "stale_target",
+                    "error": "UIA target changed after resolution",
+                },
+            )
+        }
+    )
+    backend = WindowsBackend(session=session, viewport=(800, 600))
+    with pytest.raises(StructuralResolutionRefused, match="stale_target"):
+        backend.act_structural(
+            StructuralLocator(automation_id="saveButton"),
+            StructuralHandle(
+                point=(60, 40),
+                target_fingerprint=fingerprint,
+                supported_operations=["invoke"],
+            ),
+        )
+
+
+def test_replayer_marks_structural_ambiguity_as_safety_halt(tmp_path) -> None:
+    from openadapt_flow.backend import StructuralResolutionRefused
+    from openadapt_flow.runtime.replayer import Replayer
+
+    class AmbiguousBackend(_IdentityAndStructuralBackend):
+        def locate_structural(self, locator):
+            raise StructuralResolutionRefused("two exact Save buttons")
+
+    vision = _FakeVision()
+    vision.wait_settled = lambda _backend: make_png()
+    backend = AmbiguousBackend((207, 133), "")
+    step = Step(
+        id="s1",
+        intent="save",
+        action=ActionKind.CLICK,
+        anchor=_anchor(),
+    )
+    report = Replayer(backend, vision=vision, poll_interval_s=0.01).run(
+        Workflow(name="wf", steps=[step]),
+        bundle_dir=tmp_path,
+        run_dir=tmp_path / "run",
+    )
+    assert report.success is False
+    assert report.results[0].safety_halt is True
+    assert "Structural safety refusal" in report.results[0].error
+    assert backend.clicks == []
+    assert vision.template_calls == 0
+
+
+def test_replayer_records_native_delivery_separately_from_outcome(tmp_path) -> None:
+    from openadapt_flow.runtime.replayer import Replayer
+
+    fingerprint = "c" * 64
+
+    class NativeBackend(_IdentityAndStructuralBackend):
+        def locate_structural(self, locator):
+            return StructuralHandle(
+                point=self._point,
+                target_fingerprint=fingerprint,
+                supported_operations=["invoke"],
+            )
+
+        def act_structural(self, locator, handle, *, double=False):
+            assert handle.target_fingerprint == fingerprint
+            return ActionDeliveryReceipt(
+                receipt_id="native-1",
+                operation="uia_invoke",
+                native=True,
+                target_fingerprint=fingerprint,
+                delivered_at="2026-07-17T00:00:00+00:00",
+            )
+
+    backend = NativeBackend((207, 133), "")
+    replayer = Replayer(backend, vision=_FakeVision(), poll_interval_s=0.01)
+    step = Step(
+        id="s1",
+        intent="save",
+        action=ActionKind.CLICK,
+        anchor=_anchor(),
+    )
+    resolution = resolve(
+        step.anchor,
+        make_png(),
+        _FakeVision(),
+        template_png=None,
+        viewport=VIEWPORT,
+        structural=backend,
+    )[0]
+    result = StepResult(step_id=step.id, intent=step.intent, ok=False)
+    error = replayer._act(
+        step,
+        resolution,
+        {},
+        workflow=Workflow(name="wf", steps=[step]),
+        step_index=0,
+        bundle_dir=tmp_path,
+        before_png=make_png(),
+        result=result,
+    )
+    assert error is None
+    assert result.actuation == "uia"
+    assert result.delivery_receipt is not None
+    assert result.delivery_receipt.outcome_verified is False
+    assert result.postconditions_ok is None
+    assert result.effect_verified is None
 
 
 # ---------------------------------------------------------------------------

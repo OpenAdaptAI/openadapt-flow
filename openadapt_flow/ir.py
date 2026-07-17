@@ -129,6 +129,14 @@ class StructuralLocator(BaseModel):
         default=None,
         description="Windows UIA AutomationId (native desktop backends)",
     )
+    window_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Exact top-level UIA window name captured with the target. Native "
+            "backends use it to scope candidate enumeration and refuse duplicate "
+            "controls in a different application window."
+        ),
+    )
 
 
 class TokenTemplate(BaseModel):
@@ -1300,6 +1308,26 @@ class StructuralHandle(BaseModel):
 
     point: Point
     confidence: float = 1.0
+    region: Optional[Region] = Field(
+        default=None,
+        description=(
+            "Exact live element rectangle as (x, y, width, height), in the "
+            "same coordinate space as point. Runtime input verification uses "
+            "this instead of a fixed crop around the element center so wide "
+            "text fields are observed in full."
+        ),
+    )
+    target_fingerprint: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "Opaque SHA-256 fingerprint of the unique structural candidate. "
+            "A native action re-resolves the locator and requires this exact "
+            "fingerprint, closing the resolve/act stale-target gap."
+        ),
+    )
+    candidate_count: Literal[1] = 1
+    supported_operations: list[str] = Field(default_factory=list, max_length=16)
 
 
 class Resolution(BaseModel):
@@ -1307,6 +1335,25 @@ class Resolution(BaseModel):
     point: Point
     confidence: float
     elapsed_ms: float
+    structural_handle: Optional[StructuralHandle] = None
+
+
+class ActionDeliveryReceipt(BaseModel):
+    """Proof that an action was delivered, never that its outcome happened.
+
+    Native UIA Invoke/Focus/Toggle/Select and physical input can confirm only
+    that the operating-system action API accepted the request. Business success
+    remains the independent postcondition + system-of-record effect verifier's
+    responsibility. ``outcome_verified`` is therefore fixed False here.
+    """
+
+    status: Literal["delivered"] = "delivered"
+    receipt_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    native: bool
+    target_fingerprint: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    delivered_at: str = Field(min_length=20, max_length=64)
+    outcome_verified: Literal[False] = False
 
 
 class IdentityCheck(BaseModel):
@@ -1409,6 +1456,10 @@ class StepResult(BaseModel):
     # resolution ladder (the default). Diagnostic/audit — lets an operator see
     # which steps ran on the deterministic API tier vs the visual floor.
     actuation: Optional[str] = None
+    # OS/UIA action-delivery evidence only. It deliberately cannot satisfy a
+    # postcondition or system-of-record effect; those independent verdicts are
+    # recorded in ``postconditions_ok`` / ``effect_verified``.
+    delivery_receipt: Optional[ActionDeliveryReceipt] = None
     # Drift-oracle: postconditions that deterministically FAILED but were
     # confirmed by the optional on-prem VLM state-verifier under render drift
     # (recorded for audit; empty unless an appliance is configured).

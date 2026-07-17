@@ -45,8 +45,11 @@ def _fake_png() -> bytes:
 class RunningTLSAgent:
     """A started HTTPS agent server plus its base URL (context-managed)."""
 
-    def __init__(self, config: AgentConfig) -> None:
-        self.server = create_server(config, grab_fn=_fake_png)
+    def __init__(self, config: AgentConfig, *, uia_fn=None) -> None:
+        kwargs = {"grab_fn": _fake_png}
+        if uia_fn is not None:
+            kwargs["uia_fn"] = uia_fn
+        self.server = create_server(config, **kwargs)
         host, port = self.server.server_address[:2]
         self.url = f"https://{host}:{port}"
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -67,7 +70,8 @@ def tls_agent(cert: CertBundle) -> Iterator[RunningTLSAgent]:
     a = RunningTLSAgent(
         AgentConfig(
             host="127.0.0.1", port=0, certfile=cert.certfile, keyfile=cert.keyfile
-        )
+        ),
+        uia_fn=lambda operation, payload: {"status": "ok", "text": None},
     )
     yield a
     a.close()
@@ -111,23 +115,27 @@ def test_pinned_client_completes_handshake_and_gets_screenshot(
     assert backend.screenshot().startswith(_PNG_SIGNATURE)
 
 
-def test_pinned_command_channel_works_over_tls(
+def test_pinned_typed_observation_channel_works_over_tls(
     tls_agent: RunningTLSAgent, cert: CertBundle
 ) -> None:
-    # The PHI command channel (/execute_windows) also round-trips over the
-    # pinned TLS session. Use a pyautogui-free command (a bare print) so the
-    # assertion is about TLS + pinning, not the Windows automation stack CI
-    # lacks -- the pin is still exact-match enforced by the pinned session.
+    # A PHI-bearing typed observation also round-trips over the pinned TLS
+    # session. The arbitrary-exec compatibility route remains disabled.
     from openadapt_flow.backends.win_agent import pinned_session
 
     sess = pinned_session(cert.fingerprint)
     resp = sess.post(
-        f"{tls_agent.url}/execute_windows",
-        json={"command": "print('<<OAFLOW_STRUCTURED>>ok<<END_OAFLOW_STRUCTURED>>')"},
+        f"{tls_agent.url}/uia/text-at-point",
+        json={"x": 1, "y": 1},
         timeout=5,
     )
     assert resp.status_code == 200
-    assert "<<OAFLOW_STRUCTURED>>ok<<END_OAFLOW_STRUCTURED>>" in resp.json()["output"]
+    assert resp.json() == {"status": "ok", "text": None}
+    legacy = sess.post(
+        f"{tls_agent.url}/execute_windows",
+        json={"command": "print('must not execute')"},
+        timeout=5,
+    )
+    assert legacy.status_code == 404
 
 
 def test_plaintext_client_cannot_talk_to_tls_server(

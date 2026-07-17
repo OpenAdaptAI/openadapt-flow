@@ -38,6 +38,7 @@ import struct
 import time
 from typing import Any, Optional
 
+from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.ir import Anchor, Point, Region, Resolution, Rung
 
 RUNG_ORDER: tuple[Rung, ...] = (
@@ -294,6 +295,11 @@ def resolve(
         if locate is not None:
             try:
                 handle = locate(anchor.structural)
+            except StructuralResolutionRefused:
+                # Ambiguity is a safety refusal, not a miss. Falling through
+                # to pixels could choose one of the same indistinguishable
+                # candidates and silently defeat the uniqueness contract.
+                raise
             except Exception:
                 handle = None
             if handle is not None:
@@ -306,6 +312,7 @@ def resolve(
                     point=point,
                     confidence=float(getattr(handle, "confidence", 1.0)),
                     elapsed_ms=elapsed_ms(),
+                    structural_handle=handle,
                 )
                 return resolution, region
 

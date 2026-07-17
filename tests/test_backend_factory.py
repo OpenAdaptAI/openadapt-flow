@@ -83,15 +83,16 @@ def test_windows_requires_agent_url() -> None:
         build_backend(BackendConfig(kind="windows"))
 
 
-def test_windows_tls_pin_is_refused_until_wired() -> None:
-    # agent_tls_pin is reserved for openadapt-flow#112; main's WindowsBackend
-    # has no TLS-pin param, so a set-but-unenforced pin must FAIL, not lie.
-    with pytest.raises(ValueError, match="agent_tls_pin"):
-        build_backend(
-            BackendConfig(
-                kind="windows", agent_url="http://host:5001", agent_tls_pin="ab:cd"
-            )
+def test_windows_threads_tls_pin_into_pinned_session() -> None:
+    fingerprint = "ab" * 32
+    backend = build_backend(
+        BackendConfig(
+            kind="windows",
+            agent_url="https://host:5001",
+            agent_tls_pin=fingerprint,
         )
+    )
+    assert backend._pin_fingerprint == fingerprint
 
 
 # --- rdp (network, via injected transport) ----------------------------------

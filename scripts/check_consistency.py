@@ -12,8 +12,8 @@ instead of a thing a reader eventually notices. It enforces four invariants:
   backticked ``a/b.ext`` token in ``README.md`` / ``DESIGN.md`` /
   ``docs/LIMITS.md``, and every such path in a ``.github/workflows/*.yml``
   comment, actually exists.
-* **banned phrases** — stale claims the README must never carry again
-  (``vision-only``, ``adapters to come``, ``864 tests``).
+* **banned phrases** — stale or unbounded claims the README must never carry
+  again (including substrate universals and single-demonstration guarantees).
 * **test count** — the README deliberately carries NO hardcoded test count (a
   number that rots on every test added). If someone reintroduces one, it is
   checked against ``pytest --collect-only`` and must match within a tolerance.
@@ -46,8 +46,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DOC_FILES = ["README.md", "DESIGN.md", "docs/LIMITS.md"]
 README = "README.md"
 
-# Stale claims the README must never carry again. Lowercased substring match.
-BANNED_PHRASES = ["vision-only", "adapters to come", "864 tests"]
+# Stale or unbounded claims the README must never carry again. Lowercased
+# substring match. Substrate maturity belongs in the evidence matrix; the
+# opening must not silently turn intended scope into universal availability.
+BANNED_PHRASES = [
+    "vision-only",
+    "adapters to come",
+    "864 tests",
+    "any repeated gui task",
+    "demonstrated once",
+    "replays exactly",
+]
 
 # A referenced path is only checked when it ends in one of these (prose slashes
 # like "O/0" or "20/20" carry no extension and are ignored), or is a directory

@@ -2291,7 +2291,7 @@ requires-dist = [
     { name = "mlx-vlm", marker = "extra == 'service-mlx'", specifier = ">=0.6.4,<0.7" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "openadapt-capture", marker = "extra == 'capture'", specifier = ">=0.5.1" },
+    { name = "openadapt-capture", marker = "extra == 'capture'", specifier = ">=0.5.4" },
     { name = "openadapt-grounding", marker = "extra == 'grounding'", specifier = ">=0.1.0" },
     { name = "openadapt-privacy", extras = ["presidio"], marker = "extra == 'privacy'", specifier = ">=1.0.0" },
     { name = "openadapt-types", marker = "extra == 'interop'", specifier = ">=0.2.0,<0.4.0" },

@@ -31,7 +31,9 @@ is a thin orchestration over two components that already exist and are tested:
    (`meta.json` + `events.jsonl` + `frames/{i:04d}_before.png` / `_after.png`),
    running openadapt-capture's own event-processing pipeline (raw streams →
    merged clicks / typed text). This adapter is unit-tested end to end against a
-   real capture session in `tests/test_capture_adapter.py`.
+   real capture session in `tests/test_capture_adapter.py`, and those tests run
+   on default CI: the fast unit `test` job installs the `capture` extra
+   (openadapt-capture >=0.5.4 imports clean headless, so no display is needed).
 
 The genuinely new piece (`openadapt_flow/desktop_record.py`,
 `record_desktop_capture`) is the **live orchestration**: start a capture

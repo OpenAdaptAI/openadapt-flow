@@ -57,12 +57,13 @@ of being ignored.
 Coordinate spaces: capture mouse coordinates are in *logical points* (pynput);
 video frames are *physical pixels*. openadapt-flow requires event coordinates in
 the same pixel space as the frames, so points are scaled by
-``CaptureSession.pixel_ratio`` (physical / logical). NOTE: capture 0.5.x only
-persists ``pixel_ratio`` when the recorder wrote it into the recording
-``config`` JSON; absent that it defaults to 1.0 and coordinates pass through
-unscaled. On a HiDPI capture whose ``pixel_ratio`` was not persisted, click
-coordinates would be under-scaled — an honest limitation of the upstream
-metadata, not something this adapter can recover from pixels alone.
+``CaptureSession.pixel_ratio`` (physical / logical). NOTE: sessions recorded
+with capture >=0.5.4 persist ``pixel_ratio`` on the recording model itself, so
+scaling is always correct for them. Older 0.5.x sessions carry it only when
+the recorder wrote it into the recording ``config`` JSON; absent that it
+defaults to 1.0 and coordinates pass through unscaled — on such a legacy HiDPI
+session click coordinates would be under-scaled, an honest limitation of the
+old metadata that this adapter cannot recover from pixels alone.
 
 Frame selection: openadapt-capture records **action-gated** video (frames are
 encoded around user actions, not continuously). For an event at wall-clock time

@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 from collections import Counter
 from typing import Optional
 
@@ -170,13 +171,59 @@ def build_identity_template(
                     )
                 )
         # Which tokens were a parameter's demonstrated value (param re-anchor).
+        # Use the plaintext matcher's whole-value embedding decision first.
+        # A token shared with a longer parameter is not enough to make that
+        # parameter part of the band (for example ``OpenAdapt`` as a first
+        # name and inside ``openadapt@example.invalid``). Marking both would
+        # require the unrelated full value during replay and create a false
+        # identity halt, diverging from ``verify_target_identity``.
+        embedded = set(_id.embedded_params(context_text, param_examples))
+        raw_token_spans = [match.span() for match in re.finditer(r"\S+", context_text)]
         for name, example in param_examples.items():
-            ex = _id.squash(example or "")
-            if len(ex) < _id.MIN_PARAM_CHARS:
+            if name not in embedded:
                 continue
-            idxs = [
-                j for j, t in enumerate(squashed_tokens) if _id._token_belongs_to(t, ex)
-            ]
+            ex = _id.squash(example or "")
+            # Match the plaintext substitute path exactly. When the complete
+            # demonstrated value occurs verbatim, own only tokens inside that
+            # occurrence. Otherwise use the same OCR-jitter fallback as
+            # ``substitute_param``. Without the span rule, a value such as an
+            # email containing an MRN substring could also claim and remove a
+            # separate MRN token, turning a wrong-record mismatch into verify.
+            occurrences = list(
+                re.finditer(re.escape(example), context_text, re.IGNORECASE)
+            )
+            if occurrences:
+                owned: set[int] = set()
+                aligned = True
+                for occurrence in occurrences:
+                    start, end = occurrence.span()
+                    overlapping = [
+                        j
+                        for j, (token_start, token_end) in enumerate(raw_token_spans)
+                        if token_start < end and token_end > start
+                    ]
+                    if not overlapping:
+                        aligned = False
+                        break
+                    first, last = overlapping[0], overlapping[-1]
+                    if (
+                        raw_token_spans[first][0] != start
+                        or raw_token_spans[last][1] != end
+                    ):
+                        # The parameter occupies only part of a larger token.
+                        # The current template IR cannot retain the token's
+                        # dynamic prefix/suffix while replacing its middle;
+                        # leave it hashed and safely over-halt on changed input.
+                        aligned = False
+                        break
+                    owned.update(overlapping)
+                idxs = sorted(owned) if aligned else []
+            else:
+                idxs = [
+                    j
+                    for j, t in enumerate(squashed_tokens)
+                    if _id._token_belongs_to(t, ex)
+                ]
             if idxs:
                 tmpl.param_token_indices[name] = idxs
         tmpl.rests_on_confusable_identifier = any(t.glyph for t in tmpl.tokens)
@@ -477,8 +524,11 @@ def verify_template_identity(
             band_len=tmpl.band_len,
             tokens=residue_tokens + run_value_tokens,
         )
-        # Rebuild split-concat keys over the substituted token list.
-        sub_tmpl.concats = _rebuild_concats(sub_tmpl, salt)
+        # Preserve split-concat keys for recorded residue windows that survive
+        # substitution unchanged.  Recomputing them is impossible without the
+        # recorded plaintext, but their salted hashes remain valid after an
+        # index-only remap.  Windows touching a parameter are omitted.
+        sub_tmpl.concats = _remap_residue_concats(tmpl, drop)
 
         # The run's value must actually appear in the live band (contiguous run).
         for name in in_band:
@@ -515,22 +565,30 @@ def verify_template_identity(
     )
 
 
-def _rebuild_concats(tmpl: IdentityTemplate, salt: bytes) -> list[ConcatTemplate]:
-    """Recompute split-window concat keys after param substitution.
+def _remap_residue_concats(
+    tmpl: IdentityTemplate, drop: set[int]
+) -> list[ConcatTemplate]:
+    """Remap concat windows whose recorded tokens all survive substitution.
 
-    The substituted token list mixes recorded-residue tokens (known only by
-    hash) with freshly hashed run-value tokens. A concat's canonical key cannot
-    be formed from two hashes, so windows that would SPAN a recorded-residue
-    token are omitted (their split match is simply unavailable — the safe
-    direction: a missing split can only reduce coverage, never fabricate it).
-    Windows wholly inside the appended run-value tokens are rebuilt from their
-    known plaintext. In practice the run value is a single contiguous value, so
-    this preserves the split behavior that matters (an OCR-glued run value)."""
-    # We only have plaintext for the appended run-value tokens; without it we
-    # cannot canonicalize a concatenation, so we conservatively emit no concats
-    # here. Single-token matching still covers the common param case; split is a
-    # tolerance enhancement whose absence only tightens the gate.
-    return []
+    The recorded plaintext is deliberately unavailable at replay, so a concat
+    hash cannot be recomputed from the per-token hashes.  It also does not need
+    to be: a recorded window that contains no substituted parameter token has
+    identical content in the residue.  Preserve that exact salted hash and
+    shift only its start index.  Any window touching a dropped token is omitted
+    because carrying it across substitution could bind to the demonstration's
+    value instead of the run's value.
+
+    This restores safe OCR split tolerance such as ``Postal`` + ``Code:``
+    matching ``PostalCode:`` without weakening parameter identity.
+    """
+    remapped: list[ConcatTemplate] = []
+    for concat in tmpl.concats:
+        window = range(concat.i, concat.i + concat.size)
+        if any(index in drop for index in window):
+            continue
+        new_i = sum(1 for index in range(concat.i) if index not in drop)
+        remapped.append(concat.model_copy(update={"i": new_i}))
+    return remapped
 
 
 def token_in_template(tmpl: IdentityTemplate, token: str) -> bool:

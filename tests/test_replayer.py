@@ -14,6 +14,7 @@ from PIL import Image
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    IdentityCheck,
     Landmark,
     Postcondition,
     PostconditionKind,
@@ -684,6 +685,40 @@ def test_closed_loop_scroll_noops_when_anchor_already_in_view(bundle, run_dir):
     )
     assert report.success is True
     assert backend.actions == [("click", 110, 105, False)]
+
+
+def test_closed_loop_scroll_requires_armed_target_identity(
+    bundle, run_dir, monkeypatch
+):
+    """A generic crop at the wrong form row cannot make scroll readiness pass."""
+    vision = FakeVision()
+    target = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99)
+    # The generic crop resolves both before and after the scroll, then again
+    # for the actual click. Identity is what distinguishes wrong-row from ready.
+    vision.template_results = [target, target, target]
+    backend = FakeBackend()
+    click = click_step()
+    assert click.anchor is not None
+    click.anchor.context_text = "Synthetic Contact Address"
+    click.identity_armed = True
+    workflow = Workflow(name="wf", steps=[scroll_step(), click])
+    replayer = Replayer(backend, vision=vision, poll_interval_s=0.01)
+    checks = iter(
+        [
+            IdentityCheck(status="mismatch", expected="target", observed="wrong"),
+            IdentityCheck(status="verified", expected="target", observed="target"),
+            IdentityCheck(status="verified", expected="target", observed="target"),
+        ]
+    )
+    monkeypatch.setattr(
+        replayer, "_verify_identity", lambda *args, **kwargs: next(checks)
+    )
+    report = replayer.run(workflow, bundle_dir=bundle, run_dir=run_dir)
+    assert report.success is True
+    assert backend.actions == [
+        ("scroll", 0, 400),
+        ("click", 110, 105, False),
+    ]
 
 
 def test_closed_loop_scroll_budget_exhaustion_fails_loudly(bundle, run_dir):

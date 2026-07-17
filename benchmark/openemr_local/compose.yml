@@ -1,0 +1,51 @@
+# Adapted from OpenEMR's production compose at source commit
+# 7c96c8eefe460d6fadbccbe93d0fa6bf819acd69. Local synthetic benchmark only.
+services:
+  db:
+    image: ${MARIADB_IMAGE:?pinned MARIADB_IMAGE required}
+    command: ["mariadbd", "--character-set-server=utf8mb4"]
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?generated fixture secret required}
+      MYSQL_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?generated fixture secret required}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh", "--su-mysql", "--connect", "--innodb_initialized"]
+      start_period: 60s
+      start_interval: 10s
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - database:/var/lib/mysql
+
+  openemr:
+    image: ${OPENEMR_IMAGE:?pinned OPENEMR_IMAGE required}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: db
+      MYSQL_ROOT_PASS: ${MARIADB_ROOT_PASSWORD:?generated fixture secret required}
+      MYSQL_USER: openemr
+      MYSQL_PASS: ${OPENEMR_DB_PASSWORD:?generated fixture secret required}
+      MYSQL_DATABASE: openemr
+      OE_USER: ${OPENEMR_ACTOR_USER:?fixture actor required}
+      OE_PASS: ${OPENEMR_ACTOR_PASSWORD:?generated fixture secret required}
+    healthcheck:
+      test: ["CMD", "/usr/bin/curl", "--fail", "--insecure", "--location", "--show-error", "--silent", "https://localhost/meta/health/readyz"]
+      start_period: 180s
+      start_interval: 10s
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    ports:
+      # Synthetic credentials and data must never bind to a LAN interface.
+      - "127.0.0.1:${OPENEMR_HTTP_PORT:-9301}:80"
+      - "127.0.0.1:${OPENEMR_HTTPS_PORT:-9300}:443"
+    volumes:
+      - logs:/var/log
+      - sites:/var/www/localhost/htdocs/openemr/sites
+
+volumes:
+  database:
+  logs:
+  sites:

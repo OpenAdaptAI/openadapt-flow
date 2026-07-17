@@ -115,7 +115,9 @@ def render_run_report(run_dir: Path | str) -> Path:
         FileNotFoundError: If ``run_dir/report.json`` does not exist.
     """
     run = Path(run_dir)
-    report = RunReport.model_validate_json((run / "report.json").read_text())
+    report = RunReport.model_validate_json(
+        (run / "report.json").read_text(encoding="utf-8")
+    )
     _warn_if_plaintext_phi(report)
 
     ok_count = sum(1 for r in report.results if r.ok)

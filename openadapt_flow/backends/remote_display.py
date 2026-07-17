@@ -653,6 +653,234 @@ class MacWindowClient:
             return None
         return None
 
+    def window_id_at_point(self, x: float, y: float) -> Optional[int]:
+        """Frontmost visible window containing a screen point, any layer."""
+        try:
+            import Quartz
+
+            opts = (
+                Quartz.kCGWindowListOptionOnScreenOnly
+                | Quartz.kCGWindowListExcludeDesktopElements
+            )
+            wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
+            for window in wins or []:
+                bounds = window.get("kCGWindowBounds", {}) or {}
+                left = float(bounds.get("X", 0.0))
+                top = float(bounds.get("Y", 0.0))
+                width = float(bounds.get("Width", 0.0))
+                height = float(bounds.get("Height", 0.0))
+                if width <= 0 or height <= 0:
+                    continue
+                if left <= x < left + width and top <= y < top + height:
+                    window_id = int(window.get("kCGWindowNumber", 0) or 0)
+                    return window_id if window_id > 0 else None
+        except Exception:  # noqa: BLE001 - unknown point target fails closed
+            return None
+        return None
+
+    def raise_window(self, window: WindowInfo) -> bool:
+        """Raise one exact native window within its owning application.
+
+        App activation alone does not select a document when macOS restores
+        several windows into one process. Match the already-unique
+        CoreGraphics target by its exact AX title, require one AX candidate,
+        and perform ``AXRaise``. The native backend independently re-checks
+        the exact CoreGraphics window id afterward, so a stale title or failed
+        AX mapping remains a fail-closed refusal.
+        """
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCreateApplication,
+                AXUIElementPerformAction,
+                AXUIElementSetAttributeValue,
+                kAXFocusedAttribute,
+                kAXFocusedWindowAttribute,
+                kAXMainAttribute,
+                kAXRaiseAction,
+                kAXTitleAttribute,
+                kAXWindowsAttribute,
+            )
+
+            app = AXUIElementCreateApplication(int(window.pid))
+            error, ax_windows = AXUIElementCopyAttributeValue(
+                app, kAXWindowsAttribute, None
+            )
+            if error != 0 or ax_windows is None:
+                return False
+            matches = []
+            for candidate in ax_windows:
+                title_error, title = AXUIElementCopyAttributeValue(
+                    candidate, kAXTitleAttribute, None
+                )
+                if title_error == 0 and str(title or "") == window.title:
+                    matches.append(candidate)
+            if len(matches) != 1:
+                return False
+            target = matches[0]
+            # AXRaise alone changes visual stacking but need not make the
+            # document the app's key/main window. Request all three states;
+            # unsupported attributes remain harmless because the native
+            # backend independently requires the exact topmost CoreGraphics
+            # id. Physical/global input additionally requires active app PID;
+            # exact-element AX text does not route through that global stream.
+            for element, attribute, value in (
+                (app, kAXFocusedWindowAttribute, target),
+                (target, kAXMainAttribute, True),
+                (target, kAXFocusedAttribute, True),
+            ):
+                try:
+                    AXUIElementSetAttributeValue(element, attribute, value)
+                except Exception:  # noqa: BLE001 - final foreground gate decides
+                    pass
+            if AXUIElementPerformAction(target, kAXRaiseAction) != 0:
+                return False
+            focused_error, focused_window = AXUIElementCopyAttributeValue(
+                app, kAXFocusedWindowAttribute, None
+            )
+            main_error, is_main = AXUIElementCopyAttributeValue(
+                target, kAXMainAttribute, None
+            )
+            return (
+                focused_error == 0
+                and focused_window == target
+                and main_error == 0
+                and bool(is_main)
+            )
+        except Exception:  # noqa: BLE001 - caller verifies exact topmost id
+            return False
+
+    def replace_selected_text(self, window: WindowInfo, text: str) -> bool:
+        """Replace the selection in the exact target window's focused element.
+
+        Quartz events may carry a Unicode payload, but application frameworks
+        are permitted to ignore that payload and translate only the virtual
+        keycode. A discarded payload must not look like successful native text
+        delivery. Accessibility selected-text replacement is layout independent
+        and returns an explicit delivery result. This method requires a unique
+        AX window title and proves that the focused element belongs to it before
+        writing; the caller separately verifies the exact topmost CG id. The
+        active-app PID remains mandatory only for global/physical input.
+        """
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCreateApplication,
+                AXUIElementIsAttributeSettable,
+                AXUIElementSetAttributeValue,
+                kAXFocusedUIElementAttribute,
+                kAXFocusedWindowAttribute,
+                kAXMainAttribute,
+                kAXSelectedTextAttribute,
+                kAXTitleAttribute,
+                kAXTopLevelUIElementAttribute,
+                kAXWindowsAttribute,
+            )
+
+            app = AXUIElementCreateApplication(int(window.pid))
+            windows_error, ax_windows = AXUIElementCopyAttributeValue(
+                app, kAXWindowsAttribute, None
+            )
+            if windows_error != 0 or ax_windows is None:
+                return False
+            matching_windows = []
+            for candidate in ax_windows:
+                title_error, title = AXUIElementCopyAttributeValue(
+                    candidate, kAXTitleAttribute, None
+                )
+                if title_error == 0 and str(title or "") == window.title:
+                    matching_windows.append(candidate)
+            if len(matching_windows) != 1:
+                return False
+            target = matching_windows[0]
+
+            focused_window_error, focused_window = AXUIElementCopyAttributeValue(
+                app, kAXFocusedWindowAttribute, None
+            )
+            main_error, is_main = AXUIElementCopyAttributeValue(
+                target, kAXMainAttribute, None
+            )
+            if (
+                focused_window_error != 0
+                or focused_window != target
+                or main_error != 0
+                or not bool(is_main)
+            ):
+                return False
+
+            focused_error, focused = AXUIElementCopyAttributeValue(
+                app, kAXFocusedUIElementAttribute, None
+            )
+            if focused_error != 0 or focused is None:
+                return False
+            top_error, top_level = AXUIElementCopyAttributeValue(
+                focused, kAXTopLevelUIElementAttribute, None
+            )
+            if top_error != 0 or top_level is None:
+                return False
+            top_title_error, top_title = AXUIElementCopyAttributeValue(
+                top_level, kAXTitleAttribute, None
+            )
+            if top_title_error != 0 or str(top_title or "") != window.title:
+                return False
+            if top_level != target:
+                return False
+
+            settable_error, settable = AXUIElementIsAttributeSettable(
+                focused, kAXSelectedTextAttribute, None
+            )
+            if settable_error != 0 or not settable:
+                return False
+            return (
+                AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute, text)
+                == 0
+            )
+        except Exception:  # noqa: BLE001 - unsupported AX is a safe refusal
+            return False
+
+    def exact_window_focused_main(self, window: WindowInfo) -> bool:
+        """Whether one exact AX window is both focused and main, read-only."""
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCreateApplication,
+                kAXFocusedWindowAttribute,
+                kAXMainAttribute,
+                kAXTitleAttribute,
+                kAXWindowsAttribute,
+            )
+
+            app = AXUIElementCreateApplication(int(window.pid))
+            windows_error, ax_windows = AXUIElementCopyAttributeValue(
+                app, kAXWindowsAttribute, None
+            )
+            if windows_error != 0 or ax_windows is None:
+                return False
+            matches = []
+            for candidate in ax_windows:
+                title_error, title = AXUIElementCopyAttributeValue(
+                    candidate, kAXTitleAttribute, None
+                )
+                if title_error == 0 and str(title or "") == window.title:
+                    matches.append(candidate)
+            if len(matches) != 1:
+                return False
+            target = matches[0]
+            focused_error, focused = AXUIElementCopyAttributeValue(
+                app, kAXFocusedWindowAttribute, None
+            )
+            main_error, is_main = AXUIElementCopyAttributeValue(
+                target, kAXMainAttribute, None
+            )
+            return (
+                focused_error == 0
+                and focused == target
+                and main_error == 0
+                and bool(is_main)
+            )
+        except Exception:  # noqa: BLE001 - missing proof must fail closed
+            return False
+
     def capture(self, window_id: int) -> tuple[bytes, int, int]:
         import Quartz
         from PIL import Image
@@ -691,27 +919,76 @@ class MacWindowClient:
         except Exception:  # noqa: BLE001
             return None
 
+    def focused_application_pid(self) -> Optional[int]:
+        """PID accepting keyboard input according to system-wide AX state.
+
+        ``NSWorkspace.frontmostApplication`` can lag behind the accessibility
+        and WindowServer focus state under remote control. Global physical
+        input therefore uses the system-wide ``AXFocusedApplication`` proof,
+        which Apple defines as the application accepting keyboard input. Any
+        missing attribute, AX error, invalid PID, or binding failure is an
+        unknown result and must remain a fail-closed refusal at the backend.
+        """
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCreateSystemWide,
+                AXUIElementGetPid,
+                kAXFocusedApplicationAttribute,
+            )
+
+            system = AXUIElementCreateSystemWide()
+            focused_error, focused_app = AXUIElementCopyAttributeValue(
+                system, kAXFocusedApplicationAttribute, None
+            )
+            if focused_error != 0 or focused_app is None:
+                return None
+            pid_error, pid = AXUIElementGetPid(focused_app, None)
+            if pid_error != 0 or pid is None or int(pid) <= 0:
+                return None
+            return int(pid)
+        except Exception:  # noqa: BLE001 - missing proof must fail closed
+            return None
+
     def activate(self, pid: int) -> None:
-        # 1) fast path: un-hide + activate via the running-application API.
+        # Use AppKit's explicit source-aware handoff where available. Merely
+        # raising an AX window can put it visually above the active application
+        # while NSWorkspace still routes key events elsewhere. The caller must
+        # observe the target as both active app and exact topmost CG window.
         try:
             from AppKit import (
+                NSApplicationActivateAllWindows,
                 NSApplicationActivateIgnoringOtherApps,
                 NSRunningApplication,
+                NSWorkspace,
             )
 
             app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-            if app is not None:
-                if app.isHidden():
-                    app.unhide()
-                app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            if app is None:
+                return
+            if app.isHidden():
+                app.unhide()
+            options = (
+                NSApplicationActivateIgnoringOtherApps | NSApplicationActivateAllWindows
+            )
+            source = NSWorkspace.sharedWorkspace().frontmostApplication()
+            transfer = getattr(app, "activateFromApplication_options_", None)
+            transferred = False
+            if (
+                source is not None
+                and int(source.processIdentifier()) != int(pid)
+                and transfer is not None
+            ):
+                transferred = bool(transfer(source, options))
+            if not transferred:
+                app.activateWithOptions_(options)
         except Exception:  # noqa: BLE001 - activation is best-effort focus
             pass
-        # 2) forceful path: a non-GUI (accessory) process cannot reliably steal
-        # activation from the current frontmost app via the API above, so also
-        # ask System Events to raise the process. Crucial for input: window-buffer
-        # CAPTURE works through occlusion, but a coordinate CLICK lands on whatever
-        # is VISUALLY topmost — the client window MUST be truly frontmost or clicks
-        # hit the wrong app. (Requires Accessibility, which input already needs.)
+        # Preserve the remote-display/Citrix path's legacy focus fallback.
+        # Accessory/background driver processes cannot always transfer focus
+        # through AppKit alone. This exact-PID System Events request changes
+        # only application focus; native input still verifies AX focused-app,
+        # exact AX window, and exact topmost CG id before emitting any event.
         if self.frontmost_pid() == pid:
             return
         try:
@@ -727,7 +1004,7 @@ class MacWindowClient:
                 capture_output=True,
                 timeout=5,
             )
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:  # noqa: BLE001 - caller's focus proof is authoritative
             pass
 
     # -- input injection (screen points) ------------------------------------
@@ -800,21 +1077,6 @@ class MacWindowClient:
                     ev = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
                     Quartz.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
                     self._post(ev)
-            time.sleep(0.006)
-
-    def type_unicode(self, text: str) -> None:
-        """Type native Unicode text without assuming the active key layout."""
-        import Quartz
-
-        # CGEventKeyboardSetUnicodeString accepts a bounded string per event.
-        # Chunking avoids silently truncating long native text fields.
-        for start in range(0, len(text), 20):
-            chunk = text[start : start + 20]
-            utf16_units = len(chunk.encode("utf-16-le")) // 2
-            for down in (True, False):
-                event = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
-                Quartz.CGEventKeyboardSetUnicodeString(event, utf16_units, chunk)
-                self._post(event)
             time.sleep(0.006)
 
     def key(self, keycode: int, *, down: bool, flags: list[str]) -> None:

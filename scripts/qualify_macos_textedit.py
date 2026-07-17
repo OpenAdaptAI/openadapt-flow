@@ -27,11 +27,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from openadapt_flow import __version__
 from openadapt_flow.backends.macos_backend import MacOSBackend, MacOSBackendError
 from openadapt_flow.backends.remote_display import MacWindowClient, WindowInfo
 
 MIN_TRIALS = 3
 TEXTEDIT_APP = "TextEdit"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def file_oracle(path: Path, expected: bytes) -> dict[str, Any]:
@@ -47,6 +49,36 @@ def file_oracle(path: Path, expected: bytes) -> dict[str, Any]:
     }
 
 
+def _oracle_failure_type(verdict: dict[str, Any]) -> str | None:
+    status = verdict.get("status")
+    if status == "confirmed":
+        return None
+    if status == "refuted":
+        return "file_effect_refuted"
+    return "file_effect_unverifiable"
+
+
+def _trial_metrics(results: list[dict[str, Any]]) -> dict[str, int]:
+    """Classify normal trials from action receipt and independent oracle.
+
+    A backend sequence that returned successfully but whose final file effect
+    is refuted or unverifiable is a silent incorrect success. A refusal or
+    exception before the backend sequence reported success is an over-halt.
+    These categories are intentionally disjoint.
+    """
+    return {
+        "silent_incorrect_successes": sum(
+            bool(result.get("backend_sequence_reported_success"))
+            and result.get("oracle", {}).get("status") != "confirmed"
+            for result in results
+        ),
+        "over_halts": sum(
+            not bool(result.get("backend_sequence_reported_success"))
+            for result in results
+        ),
+    }
+
+
 def _wait_for_matches(
     client: MacWindowClient,
     title: str,
@@ -54,12 +86,38 @@ def _wait_for_matches(
     count: int,
     timeout_s: float = 10.0,
 ) -> list[WindowInfo]:
+    """Wait for a stable, on-screen set of matching windows.
+
+    Launch Services can briefly publish a document title while TextEdit is
+    still restoring/reordering windows. Requiring three identical window-id,
+    pid, title, bounds, and visibility observations prevents the harness from
+    treating that transient title as an input-ready target.
+    """
     deadline = time.monotonic() + timeout_s
     matches: list[WindowInfo] = []
+    prior_signature: tuple[tuple[object, ...], ...] | None = None
+    stable_observations = 0
     while time.monotonic() < deadline:
         matches = client.find_windows(TEXTEDIT_APP, title)
-        if len(matches) == count:
-            return matches
+        signature = tuple(
+            (
+                window.window_id,
+                window.pid,
+                window.title,
+                window.bounds,
+                window.on_screen,
+            )
+            for window in matches
+        )
+        if len(matches) == count and all(window.on_screen for window in matches):
+            stable_observations = (
+                stable_observations + 1 if signature == prior_signature else 1
+            )
+            if stable_observations >= 3:
+                return matches
+        else:
+            stable_observations = 0
+        prior_signature = signature
         time.sleep(0.1)
     raise RuntimeError(
         f"expected {count} TextEdit window(s) matching {title!r}; found {len(matches)}"
@@ -147,6 +205,7 @@ def _run_trial(
     expected = f"OpenAdapt native macOS trial {trial} {run_id}\n".encode()
     path.write_bytes(baseline)
     pid: Optional[int] = None
+    backend_sequence_reported_success = False
     started = time.monotonic()
     try:
         _open_isolated(path)
@@ -162,14 +221,20 @@ def _run_trial(
         backend.press("ControlOrMeta+a")
         backend.type_text(expected.decode())
         backend.press("ControlOrMeta+s")
+        backend_sequence_reported_success = True
         oracle = _wait_oracle(path, expected)
-        return {
+        result = {
             "trial": trial,
             "status": "passed" if oracle["status"] == "confirmed" else "failed",
             "oracle": oracle,
+            "backend_sequence_reported_success": True,
             "frame_bytes": len(frame),
             "duration_s": round(time.monotonic() - started, 3),
         }
+        failure_type = _oracle_failure_type(oracle)
+        if failure_type is not None:
+            result["failure_type"] = failure_type
+        return result
     except Exception as error:  # noqa: BLE001 - evidence records exact failure
         return {
             "trial": trial,
@@ -177,6 +242,7 @@ def _run_trial(
             "failure_type": type(error).__name__,
             "error": str(error),
             "oracle": file_oracle(path, expected),
+            "backend_sequence_reported_success": backend_sequence_reported_success,
             "duration_s": round(time.monotonic() - started, 3),
         }
     finally:
@@ -246,9 +312,67 @@ def _permission_report(client: MacWindowClient) -> dict[str, bool]:
     }
 
 
+def _candidate_state(trials: int) -> dict[str, Any]:
+    """Bind qualification evidence to one exact committed Flow candidate."""
+    try:
+        sha_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        git_sha = sha_result.stdout.strip()
+        dirty_paths = [line for line in status_result.stdout.splitlines() if line]
+    except Exception as error:  # noqa: BLE001 - unknown provenance cannot qualify
+        return {
+            "git_sha": None,
+            "git_dirty": None,
+            "git_state_error": str(error),
+            "flow_version": __version__,
+            "qualification_config": _qualification_config(trials),
+        }
+    return {
+        "git_sha": git_sha,
+        "git_dirty": bool(dirty_paths),
+        "dirty_paths": dirty_paths,
+        "flow_version": __version__,
+        "qualification_config": _qualification_config(trials),
+    }
+
+
+def _qualification_config(trials: int) -> dict[str, Any]:
+    return {
+        "backend_kind": "macos",
+        "application": TEXTEDIT_APP,
+        "normal_trials": trials,
+        "ambiguity_refusal_cases": 1,
+        "oracle": "exact target-file bytes",
+        "focused_application_proof": "system-wide AX focused application PID",
+        "window_proofs": [
+            "unique exact PID/title",
+            "exact topmost CoreGraphics window id",
+            "exact focused/main AX window",
+        ],
+        "text_delivery": "writable AX selected-text on exact focused element",
+        "physical_fallback": False,
+        "automatic_retry": False,
+    }
+
+
 def qualify(trials: int) -> tuple[int, dict[str, Any]]:
     client = MacWindowClient()
     permissions = _permission_report(client)
+    candidate = _candidate_state(trials)
     base: dict[str, Any] = {
         "schema_version": 1,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -257,8 +381,12 @@ def qualify(trials: int) -> tuple[int, dict[str, Any]]:
             "platform": platform.platform(),
             "python": platform.python_version(),
             "permissions": permissions,
+            "candidate": candidate,
         },
         "trials_required": trials,
+        "run_count": {"normal_trials": trials, "ambiguity_refusal_cases": 1},
+        "automatic_retry": False,
+        "evidence_classification": "acceptance_candidate",
         "oracle": "exact bytes read independently from the target file",
         "failure_taxonomy": [
             "permission_refusal",
@@ -268,6 +396,7 @@ def qualify(trials: int) -> tuple[int, dict[str, Any]]:
             "capture_failure",
             "input_delivery_failure",
             "file_effect_refuted",
+            "file_effect_unverifiable",
             "cleanup_failure",
         ],
         "caveats": [
@@ -287,6 +416,20 @@ def qualify(trials: int) -> tuple[int, dict[str, Any]]:
                     "Run this script once with --request-permissions, approve "
                     "both macOS prompts for the app that launches Codex/Flow, "
                     "then restart that app and rerun the qualification."
+                ),
+            }
+        )
+        return 2, base
+
+    if candidate.get("git_dirty") is not False:
+        base.update(
+            {
+                "status": "blocked",
+                "evidence_classification": "diagnostic_only_not_acceptance",
+                "trials_completed": 0,
+                "candidate_gate": (
+                    "live acceptance requires an exact git SHA and a clean "
+                    "worktree; commit or remove all candidate changes first"
                 ),
             }
         )
@@ -324,12 +467,7 @@ def qualify(trials: int) -> tuple[int, dict[str, Any]]:
             "trials": results,
             "ambiguity_trial": ambiguity,
             "cleanup_errors": cleanup_errors,
-            "silent_incorrect_successes": sum(
-                result.get("status") == "passed"
-                and result.get("oracle", {}).get("status") != "confirmed"
-                for result in results
-            ),
-            "over_halts": sum(result.get("status") == "failed" for result in results),
+            **_trial_metrics(results),
         }
     )
     return (0 if passed else 1), base

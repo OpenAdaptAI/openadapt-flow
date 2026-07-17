@@ -2203,7 +2203,7 @@ wheels = [
 
 [[package]]
 name = "openadapt-flow"
-version = "1.11.0"
+version = "1.12.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -2249,6 +2249,11 @@ hosted = [
 ]
 interop = [
     { name = "openadapt-types" },
+]
+macos = [
+    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
 ]
 privacy = [
     { name = "click" },
@@ -2299,6 +2304,9 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0" },
     { name = "playwright", specifier = ">=1.44" },
     { name = "pydantic", specifier = ">=2.5" },
+    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin' and extra == 'macos'", specifier = ">=10.3" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'macos'", specifier = ">=10.3" },
+    { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin' and extra == 'macos'", specifier = ">=10.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.2" },

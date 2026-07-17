@@ -5,10 +5,12 @@
 [![Python](https://img.shields.io/pypi/pyversions/openadapt-flow)](https://pypi.org/project/openadapt-flow/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-OpenAdapt compiles a demonstrated GUI workflow into a deterministic, locally
-executable program. Healthy runs make no model calls. When an interface drifts,
-it re-resolves from recorded evidence or proposes a governed repair, and halts
-when verification fails.
+Show OpenAdapt any repeated GUI task — in the browser, in a native desktop
+app, or inside a Citrix or virtual-desktop session — demonstrated once. It
+compiles the demonstration into a governed, deterministic, locally executable
+program that replays exactly, with zero model calls on a healthy run. When the
+interface drifts, it re-resolves from recorded evidence or proposes a governed
+repair, and it halts instead of guessing when verification fails.
 
 ![One demonstration, two UIs, same compiled workflow — the right side self-heals under a theme it has never seen](docs/showcase/demo.gif)
 

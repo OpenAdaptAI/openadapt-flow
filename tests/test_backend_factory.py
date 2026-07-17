@@ -307,8 +307,7 @@ def test_replay_windows_constructs_windows_backend(monkeypatch, tmp_path) -> Non
 
     monkeypatch.setattr(m, "_build_and_run_replayer", fake_run)
     monkeypatch.setattr(
-        "openadapt_flow.report.render_run_report",
-        lambda run_dir, **_kw: "REPORT.md",
+        "openadapt_flow.report.render_run_report", lambda run_dir: "REPORT.md"
     )
     monkeypatch.setattr("openadapt_flow.ir.Workflow.load", lambda bundle: object())
 

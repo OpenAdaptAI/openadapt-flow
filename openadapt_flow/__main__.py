@@ -352,17 +352,11 @@ def _build_and_run_replayer(
     )
 
 
-def _finish_replay(run_dir: Path, report, *, synthetic_demo: bool = False) -> int:
-    """Render the run report, print the outcome, and map it to an exit code.
-
-    ``synthetic_demo`` is True only for the bundled-MockMed demo replay with no
-    operator ``--param`` overrides (see ``render_run_report``); it softens the
-    first-run plaintext-PHI warning for known-synthetic demo data and nothing
-    else.
-    """
+def _finish_replay(run_dir: Path, report) -> int:
+    """Render the run report, print the outcome, and map it to an exit code."""
     from openadapt_flow.report import render_run_report
 
-    report_md = render_run_report(run_dir, synthetic_demo=synthetic_demo)
+    report_md = render_run_report(run_dir)
     outcome = "success" if report.success else "FAILED"
     print(f"Replay {outcome}: {report_md}")
     if report.screenshots_may_leave_box:
@@ -736,16 +730,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if stop is not None:
             stop()
 
-    # Soften the first-run plaintext-PHI warning ONLY when the CLI itself
-    # served the bundled synthetic MockMed demo (no --url) and no operator
-    # values flowed in (--param / --params-file / worklists) — every
-    # identity-like value is then the recorded fake demo data. Real targets
-    # or operator-supplied values keep the full warning.
-    return _finish_replay(
-        run_dir,
-        report,
-        synthetic_demo=(stop is not None and not params and not worklists),
-    )
+    return _finish_replay(run_dir, report)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:

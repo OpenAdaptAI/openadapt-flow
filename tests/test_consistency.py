@@ -63,7 +63,14 @@ def test_lock_version_match_ok():
 # banned phrases are caught
 # --------------------------------------------------------------------------- #
 def test_banned_phrase_detected():
-    for phrase in ("vision-only", "adapters to come", "864 tests"):
+    for phrase in (
+        "vision-only",
+        "adapters to come",
+        "864 tests",
+        "any repeated GUI task",
+        "demonstrated once",
+        "replays exactly",
+    ):
         errors = cc.check_banned_phrases(f"prose {phrase} more prose")
         assert errors, f"{phrase!r} not flagged"
 

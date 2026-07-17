@@ -330,9 +330,7 @@ def _install_fake_browser(monkeypatch, captured: dict) -> None:
     monkeypatch.setattr(bs, "ensure_chromium_installed", lambda: None)
     monkeypatch.setattr(grounder_mod, "build_grounder", lambda fallback=None: None)
     monkeypatch.setattr(remote_mod, "appliance_from_env", lambda: None)
-    monkeypatch.setattr(
-        report_mod, "render_run_report", lambda run_dir, **_kw: "REPORT.md"
-    )
+    monkeypatch.setattr(report_mod, "render_run_report", lambda run_dir: "REPORT.md")
     monkeypatch.setattr(runtime_mod, "Replayer", _FakeReplayer)
 
 
@@ -530,9 +528,7 @@ def test_resume_windows_config_builds_windows_backend(
     monkeypatch.setattr(
         durable_mod, "resume", lambda run_dir, replayer, key=None: _FakeReport()
     )
-    monkeypatch.setattr(
-        report_mod, "render_run_report", lambda run_dir, **_kw: "REPORT.md"
-    )
+    monkeypatch.setattr(report_mod, "render_run_report", lambda run_dir: "REPORT.md")
 
     rc = main(
         [

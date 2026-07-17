@@ -16,18 +16,35 @@ Public surface:
   :class:`EffectVerdict`, :class:`Verdict`, :class:`EffectVerifier`.
 - Verifiers: :class:`RestRecordVerifier` (JSON REST SoR, e.g. MockMed
   ``/api/db``), :class:`FhirEffectVerifier` (OpenEMR FHIR R4, primary),
+  :class:`SqlRecordVerifier` (read-only SQL, enforced whitelist),
+  :class:`FileArrivalVerifier` (file / SFTP arrival),
   :class:`DocumentHashVerifier` (filesystem document store).
-- Compensation: :func:`reconcile_or_escalate`, :class:`Compensator`,
-  :class:`RestCompensator`, :class:`CompensationResult`.
+- SQL table-delta audit (promoted from the Frappe Lending reference matrix):
+  :func:`capture_table_counts`, :func:`audit_table_deltas`.
+- Secret-isolated auth for declarative configs: :class:`AuthRef`.
+- Compensation / reconciliation: :func:`reconcile_or_escalate`,
+  :class:`Compensator`, :class:`RestCompensator`, :class:`CompensationResult`,
+  :class:`ReconciliationTask`, :func:`build_reconciliation_task`.
+
+The declarative deployment surface for all of this (one ``deployment.yaml``
+section wiring a verifier, its secret-isolated auth, and its run-parameter
+bindings) lives in :mod:`openadapt_flow.deployment`; the operator guide is
+``docs/EFFECT_KIT.md``.
 """
 
+from openadapt_flow.runtime.effects.auth import (  # noqa: F401
+    AuthRef,
+)
 from openadapt_flow.runtime.effects.compensation import (  # noqa: F401
     CompensationAction,
     CompensationOutcome,
     CompensationResult,
     Compensator,
+    ReconciliationTask,
     RestCompensator,
+    build_reconciliation_task,
     reconcile_or_escalate,
+    record_digest,
 )
 from openadapt_flow.runtime.effects.document_hash import (  # noqa: F401
     DocumentHashVerifier,
@@ -48,8 +65,18 @@ from openadapt_flow.runtime.effects.fhir import (  # noqa: F401
     FhirEffectVerifier,
     extract_path,
 )
+from openadapt_flow.runtime.effects.file_arrival import (  # noqa: F401
+    ArrivalTransport,
+    FileArrivalVerifier,
+)
 from openadapt_flow.runtime.effects.rest import (  # noqa: F401
     RestRecordVerifier,
+)
+from openadapt_flow.runtime.effects.sql import (  # noqa: F401
+    SqlRecordVerifier,
+    assert_read_only_sql,
+    audit_table_deltas,
+    capture_table_counts,
 )
 
 __all__ = [
@@ -73,4 +100,14 @@ __all__ = [
     "CompensationResult",
     "CompensationAction",
     "CompensationOutcome",
+    "ReconciliationTask",
+    "build_reconciliation_task",
+    "record_digest",
+    "AuthRef",
+    "SqlRecordVerifier",
+    "assert_read_only_sql",
+    "audit_table_deltas",
+    "capture_table_counts",
+    "FileArrivalVerifier",
+    "ArrivalTransport",
 ]

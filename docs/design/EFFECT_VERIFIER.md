@@ -4,6 +4,12 @@
 `Effect` type proposed in
 [`WORKFLOW_PROGRAM_IR.md`](./WORKFLOW_PROGRAM_IR.md) (PR #61).
 
+**Operator guide:** the deployable kit built on this design — declarative
+verifier configs (REST / FHIR / read-only SQL / file-SFTP / document-hash)
+with secret-isolated auth, run-parameter binding, effect-coverage
+lint/certify gates, and typed reconciliation tasks — is documented in
+[`docs/EFFECT_KIT.md`](../EFFECT_KIT.md).
+
 ## The problem this closes
 
 A vision/screen postcondition (`openadapt_flow.ir.Postcondition`) answers

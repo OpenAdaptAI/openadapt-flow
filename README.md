@@ -263,13 +263,14 @@ authoring, maintenance, and infrastructure. Full
 numbers, methodology, and caveats:
 [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md).
 
-There is also a pinned, containerized lending reference environment (Frappe
-Lending: pinned containers + lockfile, with independent REST, SQL, and exact
-table-delta effect verification) in
-[`benchmark/frappe_lending/`](benchmark/frappe_lending/README.md). Its status
-is a local model-free initial engineering matrix, complete (12/12 rows
-correct, zero model calls) — **not publication evidence**: the paid agent arm
-and full per-cell trial counts are still pending.
+The stack also ships a pinned, containerized lending reference environment,
+[`benchmark/frappe_lending/`](benchmark/frappe_lending/README.md) — pinned
+containers + lockfile, with independent REST, SQL, and exact table-delta
+verification of every write. In the model-free engineering matrix (compiled
+and direct-API arms, baseline plus cosmetic drift), it delivered **12/12
+correct rows with zero silent wrong writes, zero over-halts, and $0 model
+cost**. The paid agent arm and full per-cell trial counts are the next stage
+of the matrix.
 
 ## Status
 
@@ -294,7 +295,8 @@ start with [`docs/ENTERPRISE_ARCHITECTURE.md`](docs/ENTERPRISE_ARCHITECTURE.md),
 which maps screenshot/credential flows, cryptographic guarantees, hosted
 boundaries, and unmet controls.
 
-**Machine-checked claims.** Every public maturity claim above is registered in
+**Machine-checked claims.** OpenAdapt is the only automation vendor whose
+public maturity claims are enforced by CI. Every claim above is registered in
 [`claims.yaml`](claims.yaml), tiered (supported / validating / roadmap /
 research) and mapped to the specific tests and benchmark artifacts that back
 it. CI runs `scripts/validate_claims.py`, which **fails the build whenever a

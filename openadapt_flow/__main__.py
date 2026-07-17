@@ -346,11 +346,17 @@ def _build_and_run_replayer(
     )
 
 
-def _finish_replay(run_dir: Path, report) -> int:
-    """Render the run report, print the outcome, and map it to an exit code."""
+def _finish_replay(run_dir: Path, report, *, synthetic_demo: bool = False) -> int:
+    """Render the run report, print the outcome, and map it to an exit code.
+
+    ``synthetic_demo`` is True only for the bundled-MockMed demo replay with no
+    operator ``--param`` overrides (see ``render_run_report``); it softens the
+    first-run plaintext-PHI warning for known-synthetic demo data and nothing
+    else.
+    """
     from openadapt_flow.report import render_run_report
 
-    report_md = render_run_report(run_dir)
+    report_md = render_run_report(run_dir, synthetic_demo=synthetic_demo)
     outcome = "success" if report.success else "FAILED"
     print(f"Replay {outcome}: {report_md}")
     if report.screenshots_may_leave_box:
@@ -724,7 +730,16 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if stop is not None:
             stop()
 
-    return _finish_replay(run_dir, report)
+    # Soften the first-run plaintext-PHI warning ONLY when the CLI itself
+    # served the bundled synthetic MockMed demo (no --url) and no operator
+    # values flowed in (--param / --params-file / worklists) — every
+    # identity-like value is then the recorded fake demo data. Real targets
+    # or operator-supplied values keep the full warning.
+    return _finish_replay(
+        run_dir,
+        report,
+        synthetic_demo=(stop is not None and not params and not worklists),
+    )
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -1573,6 +1588,22 @@ def _add_deployment_flags(
         )
 
 
+def _package_version() -> str:
+    """The installed ``openadapt-flow`` distribution version.
+
+    Falls back to the source tree's ``openadapt_flow.__version__`` when the
+    package is not installed as a distribution (e.g. run from a checkout).
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("openadapt-flow")
+    except PackageNotFoundError:
+        from openadapt_flow import __version__
+
+        return __version__
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -1582,6 +1613,11 @@ def build_parser() -> argparse.ArgumentParser:
             "vision-anchored script, replay it locally, and use bounded "
             "re-resolution or governed repair when the interface drifts."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_package_version()}",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from playwright.sync_api import Page
 
     from openadapt_flow.backend import Backend
+    from openadapt_flow.backends.macos_backend import MacOSClient
     from openadapt_flow.backends.rdp_backend import RDPTransport
     from openadapt_flow.backends.remote_display import WindowClient
     from openadapt_flow.deployment import BackendConfig
@@ -47,6 +48,7 @@ def build_backend(
     page: Optional["Page"] = None,
     rdp_transport: Optional["RDPTransport"] = None,
     window_client: Optional["WindowClient"] = None,
+    macos_client: Optional["MacOSClient"] = None,
 ) -> "Backend":
     """Construct the backend selected by ``cfg.kind``.
 
@@ -62,6 +64,7 @@ def build_backend(
         window_client: An injected remote-display ``WindowClient`` for the
             ``kind: rdp`` local-window path. When omitted, the live macOS
             client is used. Primarily a test seam.
+        macos_client: An injected native macOS client for ``kind: macos``.
 
     Returns:
         A live backend implementing the :class:`Backend` protocol.
@@ -96,13 +99,27 @@ def build_backend(
             pin_fingerprint=cfg.agent_tls_pin,
         )
 
+    if kind == "macos":
+        if not cfg.macos_app:
+            raise ValueError(
+                "backend.kind 'macos' requires backend.macos_app "
+                "(e.g. --macos-app TextEdit)"
+            )
+        from openadapt_flow.backends.macos_backend import MacOSBackend
+
+        return MacOSBackend(
+            macos_client,
+            app=cfg.macos_app,
+            window_title=cfg.macos_window_title,
+        )
+
     if kind == "rdp":
         return _build_rdp_backend(
             cfg, rdp_transport=rdp_transport, window_client=window_client
         )
 
     raise ValueError(
-        f"unknown backend.kind {cfg.kind!r} (expected: web | windows | rdp)"
+        f"unknown backend.kind {cfg.kind!r} (expected: web | windows | macos | rdp)"
     )
 
 

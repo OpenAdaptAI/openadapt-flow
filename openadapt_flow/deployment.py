@@ -45,6 +45,9 @@ class BackendConfig(BaseModel):
     - ``windows`` — the WAA (Windows Agent Arena) HTTP backend for native
       Windows desktops. Requires ``agent_url`` (the in-guest agent's base URL);
       ``agent_token`` authenticates a token-protected agent.
+    - ``macos`` — a local native macOS application window. Requires
+      ``macos_app``; ``macos_window_title`` should uniquely identify the target
+      window when the application owns more than one.
     - ``rdp`` — a pixel-only remote-desktop backend for the Citrix/legacy-EMR
       wedge. ``rdp_host`` drives a network RDP session (FreeRDP/aardwolf);
       ``rdp_window`` instead drives a local remote-display CLIENT WINDOW (the
@@ -55,7 +58,7 @@ class BackendConfig(BaseModel):
     ``web`` deployment (or an empty config) is byte-for-byte unchanged.
     """
 
-    #: Which backend to drive: ``web`` (default) | ``windows`` | ``rdp``.
+    #: Which backend to drive: ``web`` (default) | ``windows`` | ``macos`` | ``rdp``.
     kind: str = "web"
 
     #: The GUI URL to drive (the app under automation). None => the caller's
@@ -76,6 +79,14 @@ class BackendConfig(BaseModel):
     #: the Windows backend pins the exact certificate before sending screenshots
     #: or UIA/input requests; a mismatch fails at the TLS handshake.
     agent_tls_pin: Optional[str] = None
+
+    # -- native macOS --------------------------------------------------------
+    #: Owner application name/substring (e.g. ``"TextEdit"``). REQUIRED for
+    #: ``kind: macos``.
+    macos_app: Optional[str] = None
+    #: Window-title substring. The backend refuses ambiguous matches rather
+    #: than selecting the first window.
+    macos_window_title: Optional[str] = None
 
     # -- rdp (network RDP via FreeRDP/aardwolf) ------------------------------
     #: RDP host/IP for a network RDP session. REQUIRED for ``kind: rdp`` unless

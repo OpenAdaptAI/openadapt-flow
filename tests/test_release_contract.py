@@ -4,7 +4,11 @@ import re
 from pathlib import Path
 
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 CI
+    import tomli as tomllib
 
 from scripts.check_release_consistency import release_versions, sync_lock_version
 

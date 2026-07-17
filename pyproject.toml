@@ -57,8 +57,10 @@ dev = [
     "scikit-image>=0.22",
     # WindowsBackend tests (mock WAA server).
     "requests>=2.31",
-    # VLM service tests (TestClient over the FastAPI app).
+    # VLM service + operator console tests (TestClient over the FastAPI apps);
+    # uvicorn for the console's boot smoke test.
     "fastapi>=0.110",
+    "uvicorn>=0.29",
     # Engineering-hygiene gates (lint+format, type-check, coverage). Pinned to
     # majors so CI and local dev run the same checkers.
     "ruff==0.15.21",
@@ -72,6 +74,10 @@ grounder = ["anthropic>=0.40"]
 # OCRAnchorGrounder imports it lazily and abstains (returns None) when absent,
 # so the core stays installable and the ladder safe-halts without it.
 grounding = ["openadapt-grounding>=0.1.0"]
+# Operator console: `openadapt-flow console` serves a localhost-only web UI
+# over compiled bundles / run reports / skill libraries (openadapt_flow.console).
+# FastAPI app + uvicorn server; the API client side (httpx) is already core.
+console = ["fastapi>=0.110", "uvicorn>=0.29"]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31"]
 # FreeRDPBackend: pure-Python async RDP client for the pixel-only RDP path
@@ -161,6 +167,8 @@ packages = ["openadapt_flow"]
 [tool.hatch.build.targets.wheel.force-include]
 "openadapt_flow/py.typed" = "openadapt_flow/py.typed"
 "schemas" = "openadapt_flow/schemas"
+# The operator console's UI is one static HTML file served by the FastAPI app.
+"openadapt_flow/console/static" = "openadapt_flow/console/static"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

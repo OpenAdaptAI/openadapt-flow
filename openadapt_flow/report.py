@@ -205,6 +205,38 @@ def render_run_report(run_dir: Path | str) -> Path:
         )
     lines.append("")
 
+    # -- Effect-verification coverage -------------------------------------
+    # Stated on every report (kit): which EXECUTED steps carried a
+    # system-of-record effect contract and how each fared. Steps with no
+    # contract fall back to screen evidence for their writes — the exact gap
+    # `openadapt-flow lint` / `certify --policy` measure over the whole
+    # bundle (per-consequential-step effect coverage %).
+    lines.append("## Effect verification (system of record)")
+    lines.append("")
+    executed = [r for r in report.results if not r.skipped]
+    with_contracts = [r for r in executed if r.effect_contract_hashes]
+    if with_contracts:
+        confirmed = sum(1 for r in with_contracts if r.effect_verified is True)
+        halted = sum(1 for r in with_contracts if r.effect_verified is False)
+        approved = sum(1 for r in with_contracts if r.effect_approved_unverified)
+        lines.append(
+            f"**{len(with_contracts)} of {len(executed)} executed step(s) "
+            "carried a system-of-record effect contract** — "
+            f"{confirmed} confirmed, {halted} halted, "
+            f"{approved} approved-unverified. Steps without a contract fall "
+            "back to screen evidence for their writes (run "
+            "`openadapt-flow lint` for the bundle's per-consequential-step "
+            "effect coverage)."
+        )
+    else:
+        lines.append(
+            "_No executed step carried a system-of-record effect contract — "
+            "every write on this run was verified from screen evidence only. "
+            "Run `openadapt-flow lint` to see the bundle's consequential-step "
+            "effect coverage._"
+        )
+    lines.append("")
+
     # -- Per-step table ---------------------------------------------------
     lines.append("## Steps")
     lines.append("")

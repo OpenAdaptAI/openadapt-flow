@@ -198,6 +198,19 @@ class Effect(BaseModel):
     #: Which record field carries the idempotency key (substrate-specific;
     #: the MockMed system-of-record uses ``"key"``).
     key_field: str = "key"
+    #: Cross-cutting duplicate-write / idempotency guard (kit). When True, a
+    #: ``record_written`` count considers ONLY records that are NEW relative to
+    #: the pre-action snapshot (by :func:`stable_id`): with the default
+    #: ``expected_count=1`` the contract reads "exactly ONE NEW matching record
+    #: was created by this action" -- so a selector that legitimately matches
+    #: pre-existing rows (e.g. "an encounter for this patient") still catches a
+    #: double-submit (2 new rows) and a phantom write (0 new rows). Requires a
+    #: REACHABLE pre-state baseline: when the pre-state could not be read the
+    #: verdict is INDETERMINATE -> HALT (a delta against an unknown baseline is
+    #: never guessed). Works identically on every substrate (REST / SQL / FHIR
+    #: / filesystem) because the delta is computed in the shared judge.
+    #: Default False -- absolute counting, byte-for-byte the v1 behavior.
+    count_new_only: bool = False
     #: ``record_written`` only: also REFUTE when a record that existed in the
     #: pre-state (``before``) and does NOT match :attr:`match` has since
     #: vanished -- collateral loss. This is what catches a stale / lost-update
@@ -296,6 +309,11 @@ class Effect(BaseModel):
             "key_field": self.key_field,
             "forbid_collateral_loss": self.forbid_collateral_loss,
         }
+        # Included ONLY when set, so every pre-existing contract (and every
+        # governed-run authorization / completed-effect ledger entry that binds
+        # its hash — PR #129) keeps its exact digest.
+        if self.count_new_only:
+            payload["count_new_only"] = True
         digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()

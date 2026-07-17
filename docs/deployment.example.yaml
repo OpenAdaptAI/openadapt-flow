@@ -30,13 +30,26 @@ actuation:
   timeout_s: 5.0
 
 # -- effects: the system of record consequential writes are verified against -
-# kind: none | rest | fhir | document-hash
+# kind: none | rest | fhir | sql | file | document-hash
 #   none          -> no verifier (replay HALTs; governed run may execute GUI
 #                    writes only with --approve-unverified-writes, recorded as
 #                    approved-unverified; direct API writes still refuse)
-#   rest          -> JSON REST SoR (e.g. MockMed /api/db)
+#   rest          -> JSON REST SoR (e.g. MockMed /api/db, Frappe REST)
 #   fhir          -> FHIR R4 search (e.g. OpenEMR)
-#   document-hash -> a filesystem document store
+#   sql           -> a read-only SELECT against the app database (enforced
+#                    statement whitelist; the verifier cannot write)
+#   file          -> file/SFTP arrival (pattern + size>0 + mtime freshness +
+#                    optional content probe)
+#   document-hash -> a filesystem document store (exact SHA-256 content)
+#
+# Kit conventions (docs/EFFECT_KIT.md):
+#   * SECRETS ARE REFERENCES: auth / access_token_env / sql_password_env name
+#     env vars; a missing var fails LOUD at construction. Never put a
+#     credential literal in this file.
+#   * RUN-PARAM BINDING IS EXPLICIT: path_params / search_param_exprs /
+#     sql_query_params values are {param: name} or {literal: v} (a bare
+#     string is a literal), resolved against the governed --params-file /
+#     --param values when the verifier is built.
 effects:
   kind: rest
 
@@ -44,13 +57,44 @@ effects:
   base_url: http://localhost:8080
   records_path: /api/db
   records_key: records
+  # Secret-isolated auth (exactly one style; values are ENV VAR NAMES):
+  # auth:
+  #   bearer_env: SOR_BEARER_TOKEN
+  #   # header: Authorization        # arbitrary-header style (e.g. Frappe
+  #   # value_env: FRAPPE_API_AUTH   #   "token <key>:<secret>")
+  #   # basic_env: SOR_BASIC_CREDS   # "user:pass"
+  # Template the records path against run params ({applicant} in the path):
+  # records_path: "/api/resource/Loan Application?filters=[[\"applicant\",\"=\",\"{applicant}\"]]"
+  # path_params:
+  #   applicant: { param: applicant }
 
   # fhir (used when kind: fhir) ----------------------------------------------
   # base_url: https://openemr.example.org/apis/default/fhir
   # resource_type: Observation
-  # search_params: { patient: "Patient/123", category: vital-signs }
-  # access_token: "${OPENEMR_FHIR_TOKEN}"   # set via env in real deployments
+  # search_params: { category: vital-signs }
+  # search_param_exprs:
+  #   patient: { param: patient_ref }      # bound per-run
+  # access_token_env: OPENEMR_FHIR_TOKEN   # secret-isolated (preferred over
+  #                                        # the deprecated access_token literal)
   # verify_tls: true
+
+  # sql (used when kind: sql) -------------------------------------------------
+  # sql_query: >-
+  #   SELECT name, applicant, loan_product, loan_amount
+  #   FROM "tabLoan Application" WHERE applicant = :applicant
+  # sql_query_params:
+  #   applicant: { param: applicant }
+  # sqlite_database: /var/lib/app/app.db   # stdlib sqlite3 driver, OR:
+  # sql_driver: pymysql                    # any DB-API module name
+  # sql_connect_args: { host: db.internal, user: oracle_ro, database: app }
+  # sql_password_env: ORACLE_RO_PASSWORD   # injected as connect(password=...)
+
+  # file (used when kind: file) -----------------------------------------------
+  # root: /var/lib/interface/outbox
+  # file_pattern: "claim_batch_*.csv"
+  # file_min_size: 1
+  # file_mtime_window_s: 120
+  # file_content_probe: "^BATCH_HEADER"
 
   # document-hash (used when kind: document-hash) ----------------------------
   # root: /var/lib/exports

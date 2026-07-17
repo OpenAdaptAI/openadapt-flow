@@ -19,6 +19,8 @@ invent state.
 
 from __future__ import annotations
 
+import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -31,6 +33,88 @@ from openadapt_flow.runtime.effects.effect import (
     EffectVerifier,
     Verdict,
 )
+
+
+class ReconciliationTask(BaseModel):
+    """A typed, audit-ready reconciliation work item for a HALTED effect.
+
+    Interface-level ONLY (by design -- there is no compensation engine): when
+    a verifier failure escalates, the caller gets a self-contained record of
+    WHAT could not be certified and the evidence needed to reconcile it by
+    hand -- the halt + evidence pattern documented in
+    ``docs/EFFECT_KIT.md``. Carries the one-way ``contract_hash`` (never the
+    resolved values themselves), so persisting/exporting a task does not leak
+    a patient identifier or other bound parameter.
+    """
+
+    task_id: str = Field(default_factory=lambda: f"recon-{uuid.uuid4().hex[:12]}")
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    #: Why the task exists: ``effect_refuted`` | ``effect_indeterminate`` |
+    #: ``compensation_failed``.
+    kind: str
+    substrate: str = ""
+    effect_kind: str = ""
+    #: One-way SHA-256 digest of the RESOLVED contract (audit join key against
+    #: ``StepResult.effect_contract_hashes`` / the governed-run authorization).
+    contract_hash: str = ""
+    verdict: str = ""
+    reason: str = ""
+    #: Machine-readable evidence for the operator (counts / values observed
+    #: vs expected, records the verifier matched).
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    #: What a human should do about it (advice text, never auto-executed).
+    suggested_action: str = ""
+
+
+def build_reconciliation_task(
+    effect: Effect, verdict: EffectVerdict, *, kind: Optional[str] = None
+) -> ReconciliationTask:
+    """Build the typed reconciliation task for a non-CONFIRMED verdict."""
+    if kind is None:
+        kind = (
+            "effect_indeterminate"
+            if verdict.verdict is Verdict.INDETERMINATE
+            else "effect_refuted"
+        )
+    if verdict.verdict is Verdict.INDETERMINATE:
+        suggested = (
+            "restore read access to the system of record, then re-verify the "
+            "contract before resuming (never assume the write landed)"
+        )
+    elif (
+        verdict.observed_count is not None
+        and verdict.expected_count is not None
+        and verdict.observed_count > verdict.expected_count
+    ):
+        suggested = (
+            "inspect the matched records and remove the duplicate(s) the "
+            "action created, then re-verify exactly the intended record "
+            "remains"
+        )
+    else:
+        suggested = (
+            "inspect the system of record against the contract evidence and "
+            "repair the missing/partial/collateral state by hand, then "
+            "re-verify before resuming"
+        )
+    return ReconciliationTask(
+        kind=kind,
+        substrate=verdict.substrate,
+        effect_kind=effect.kind.value,
+        contract_hash=effect.contract_hash(),
+        verdict=verdict.verdict.value,
+        reason=verdict.reason,
+        evidence={
+            "observed_count": verdict.observed_count,
+            "expected_count": verdict.expected_count,
+            "observed_value": verdict.observed_value,
+            "expected_value": verdict.expected_value,
+            "matched_records": verdict.matched_records,
+        },
+        suggested_action=suggested,
+    )
 
 
 class CompensationOutcome(str, Enum):
@@ -53,6 +137,10 @@ class CompensationResult(BaseModel):
     final_verdict: Optional[EffectVerdict] = None
     #: Human-facing escalation summary for the durable checkpoint.
     escalation: Optional[str] = None
+    #: Typed reconciliation work item (kit): populated on every ESCALATED
+    #: outcome so the caller's halt carries actionable, audit-ready evidence.
+    #: ``None`` for RECONCILED / NOOP.
+    task: Optional[ReconciliationTask] = None
 
 
 class CompensationAction(BaseModel):
@@ -123,18 +211,21 @@ def reconcile_or_escalate(
     # INDETERMINATE (unreadable SoR) or a reversible effect: never auto-fix.
     if verdict.verdict is Verdict.INDETERMINATE:
         return _escalate(
+            effect,
             verdict,
             "system of record is unreadable -- cannot compensate blindly; "
             "durably halt and escalate to a human",
         )
     if effect.risk != "irreversible":
         return _escalate(
+            effect,
             verdict,
             "reversible effect refuted -- halt for review (no compensation "
             "configured for reversible writes)",
         )
     if compensator is None:
         return _escalate(
+            effect,
             verdict,
             "no compensator available for an irreversible refuted effect -- "
             "durably halt and escalate",
@@ -146,6 +237,7 @@ def reconcile_or_escalate(
     # action -- so they escalate.
     if not _is_duplicate(verdict):
         return _escalate(
+            effect,
             verdict,
             "refuted effect is not a duplicate (missing / partial / "
             "collateral loss) -- no safe automatic compensation; escalate",
@@ -154,9 +246,11 @@ def reconcile_or_escalate(
     action = compensator.undo(effect, verdict, context=context)
     if not action.ok:
         return _escalate(
+            effect,
             verdict,
             f"compensation failed ({action.error}) -- escalate",
             actions_taken=len(action.deleted_records),
+            kind="compensation_failed",
         )
 
     reverified = verifier.verify(effect, before, context=context)
@@ -173,14 +267,21 @@ def reconcile_or_escalate(
             final_verdict=reverified,
         )
     return _escalate(
+        effect,
         reverified,
         "compensation did not restore the intended state -- escalate",
         actions_taken=len(action.deleted_records),
+        kind="compensation_failed",
     )
 
 
 def _escalate(
-    verdict: EffectVerdict, reason: str, *, actions_taken: int = 0
+    effect: Effect,
+    verdict: EffectVerdict,
+    reason: str,
+    *,
+    actions_taken: int = 0,
+    kind: Optional[str] = None,
 ) -> CompensationResult:
     return CompensationResult(
         outcome=CompensationOutcome.ESCALATED,
@@ -191,6 +292,7 @@ def _escalate(
         escalation=(
             f"[{verdict.substrate}] {verdict.kind.value}: {verdict.reason} -- {reason}"
         ),
+        task=build_reconciliation_task(effect, verdict, kind=kind),
     )
 
 

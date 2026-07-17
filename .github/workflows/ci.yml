@@ -15,6 +15,8 @@ name: CI
 #     too slow/OS-bound for PRs (full Python matrix + macOS + windows-mock).
 #   - schedule: a nightly run of the same heavy suites, so long-lived branches
 #     and environment drift are caught even without a merge.
+#   - workflow_dispatch: let maintainers validate those post-merge suites on an
+#     exact repair branch before merging a change to their own CI contract.
 # There is intentionally NO bare `push:` -- a bare push trigger fires a SECOND
 # identical run alongside `pull_request` on every PR-branch push (double the
 # runner spend for zero extra signal).
@@ -29,6 +31,7 @@ on:
     branches: [main]
   schedule:
     - cron: "0 7 * * *" # 07:00 UTC nightly full matrix
+  workflow_dispatch:
 
 # Cancel any superseded in-flight run for the same ref (e.g. a force-push or a
 # rapid second push to a PR branch) instead of letting both run to completion.

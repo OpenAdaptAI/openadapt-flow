@@ -21,6 +21,14 @@ def test_playwright_version_probes_are_valid_python() -> None:
     assert r"m.version(\"playwright\")" not in workflow
 
 
+def test_full_matrix_can_be_dispatched_on_an_exact_branch() -> None:
+    workflow = CI.read_text(encoding="utf-8")
+    on_start = workflow.index("on:\n")
+    jobs_start = workflow.index("\njobs:\n", on_start)
+
+    assert "  workflow_dispatch:\n" in workflow[on_start:jobs_start]
+
+
 def test_macos_deselects_only_redundant_heavy_identity_harness() -> None:
     workflow = CI.read_text(encoding="utf-8")
     node = "tests/test_identity_ladder.py::test_harness_zero_false_accept_all_configs"

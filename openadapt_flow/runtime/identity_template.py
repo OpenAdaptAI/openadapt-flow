@@ -178,9 +178,7 @@ def build_identity_template(
         # require the unrelated full value during replay and create a false
         # identity halt, diverging from ``verify_target_identity``.
         embedded = set(_id.embedded_params(context_text, param_examples))
-        raw_token_spans = [
-            match.span() for match in re.finditer(r"\S+", context_text)
-        ]
+        raw_token_spans = [match.span() for match in re.finditer(r"\S+", context_text)]
         for name, example in param_examples.items():
             if name not in embedded:
                 continue

@@ -737,7 +737,9 @@ def test_typed_effects_and_api_binding_share_all_task_fields() -> None:
     assert binding.body_template["applicant_type"] == spec.applicant_type
     assert binding.body_template["company"] == spec.company
     assert binding.body_template["repayment_method"] == spec.repayment_method
-    assert binding.body_template["applicant_phone_number"] == spec.applicant_phone_number
+    assert (
+        binding.body_template["applicant_phone_number"] == spec.applicant_phone_number
+    )
     assert binding.body_template["loan_amount"] == 125000.0
     assert binding.body_template["repayment_periods"] == 18
     assert binding.body_template["is_term_loan"] == 1

@@ -687,7 +687,9 @@ def test_closed_loop_scroll_noops_when_anchor_already_in_view(bundle, run_dir):
     assert backend.actions == [("click", 110, 105, False)]
 
 
-def test_closed_loop_scroll_requires_armed_target_identity(bundle, run_dir, monkeypatch):
+def test_closed_loop_scroll_requires_armed_target_identity(
+    bundle, run_dir, monkeypatch
+):
     """A generic crop at the wrong form row cannot make scroll readiness pass."""
     vision = FakeVision()
     target = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99)
@@ -708,10 +710,10 @@ def test_closed_loop_scroll_requires_armed_target_identity(bundle, run_dir, monk
             IdentityCheck(status="verified", expected="target", observed="target"),
         ]
     )
-    monkeypatch.setattr(replayer, "_verify_identity", lambda *args, **kwargs: next(checks))
-    report = replayer.run(
-        workflow, bundle_dir=bundle, run_dir=run_dir
+    monkeypatch.setattr(
+        replayer, "_verify_identity", lambda *args, **kwargs: next(checks)
     )
+    report = replayer.run(workflow, bundle_dir=bundle, run_dir=run_dir)
     assert report.success is True
     assert backend.actions == [
         ("scroll", 0, 400),

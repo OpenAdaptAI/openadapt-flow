@@ -512,7 +512,9 @@ def test_exact_arm_delta_contract_catches_duplicates_and_collateral() -> None:
     assert all_deltas["patient_data"] == 1
     assert all_deltas["payments"] == 0
 
-    duplicate_after = dict(correct_after, patient_data=correct_after["patient_data"] + 1)
+    duplicate_after = dict(
+        correct_after, patient_data=correct_after["patient_data"] + 1
+    )
     assert "patient_data:+2 (expected +1)" in unexpected_table_deltas(
         before, duplicate_after, arm="compiled"
     )

@@ -297,13 +297,17 @@ def canonical_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, st
 
     def normalize(field: str, value: Any) -> str:
         text = "" if value is None else str(value)
-        if field in {
-            "loan_amount",
-            "repayment_periods",
-            "is_term_loan",
-            "rate_of_interest",
-            "docstatus",
-        } and text:
+        if (
+            field
+            in {
+                "loan_amount",
+                "repayment_periods",
+                "is_term_loan",
+                "rate_of_interest",
+                "docstatus",
+            }
+            and text
+        ):
             try:
                 number = Decimal(text)
             except InvalidOperation:

@@ -15,6 +15,11 @@ permissions:
 jobs:
   lifecycle:
     name: lifecycle (${{ matrix.os }})
+    # Windows otherwise inherits the legacy console code page. Keep the
+    # harness, child CLIs, and uploaded JSON/log evidence on one UTF-8 contract.
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
     strategy:
       fail-fast: false
       matrix:

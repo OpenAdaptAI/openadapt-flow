@@ -31,11 +31,18 @@ def _run(
     """Run a lifecycle command, persist its output, and enforce its exit code."""
     printable = subprocess.list2cmdline(list(command))
     print(f"\n$ {printable}", flush=True)
+    child_env = env.copy()
+    # Windows runners otherwise inherit a legacy console code page (commonly
+    # cp1252). The CLI deliberately prints status glyphs, and its JSON evidence
+    # is a UTF-8 artifact contract, so make the subprocess boundary explicit.
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         list(command),
         cwd=cwd,
-        env=env,
+        env=child_env,
         text=True,
+        encoding="utf-8",
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
@@ -154,6 +161,8 @@ def run_lifecycle(
     python = _venv_python(venv_dir)
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     # MockMed contains synthetic identities. Disable the optional PHI warning so
     # lifecycle output stays actionable; real regulated runs must use SCRUB=on.
     env["OPENADAPT_FLOW_SCRUB"] = "off"

@@ -120,7 +120,7 @@ def load_halt_report(run_dir: Path | str) -> RunReport:
             f"no run report at {report_path} -- teach needs the directory of a "
             "run that HALTED (holding report.json)"
         )
-    report = RunReport.model_validate_json(report_path.read_text())
+    report = RunReport.model_validate_json(report_path.read_text(encoding="utf-8"))
     if report.halt is None:
         raise TeachError(
             f"the run at {run} did not halt (report.json has no halt observation) "

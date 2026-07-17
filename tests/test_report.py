@@ -136,6 +136,18 @@ def _make_run_dir(tmp_path: Path, *, success: bool) -> Path:
 # -- render_run_report --------------------------------------------------------
 
 
+def test_run_report_json_is_utf8(tmp_path: Path) -> None:
+    report = RunReport(
+        workflow_name="Crème brûlée — ✓",
+        started_at="2026-07-17T12:00:00+00:00",
+    )
+
+    path = report.save(tmp_path / "unicode-run")
+
+    payload = path.read_bytes().decode("utf-8")
+    assert "Crème brûlée — ✓" in payload
+
+
 def test_run_report_success(tmp_path: Path) -> None:
     run_dir = _make_run_dir(tmp_path, success=True)
     out = render_run_report(run_dir)

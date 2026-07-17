@@ -1045,7 +1045,7 @@ def report_break(
     report_path = run_path / "report.json"
     if not report_path.is_file():
         raise HostedError(f"No report.json in {run_path} — nothing to report.")
-    report = RunReport.model_validate_json(report_path.read_text())
+    report = RunReport.model_validate_json(report_path.read_text(encoding="utf-8"))
 
     if report.halt is None and report.success:
         return {"emitted": False, "reason": "run succeeded; no halt to report"}

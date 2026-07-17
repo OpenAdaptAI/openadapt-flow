@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,30 @@ def test_resolve_wheel_requires_exactly_one_match(tmp_path):
     (tmp_path / "two.whl").write_bytes(b"wheel")
     with pytest.raises(ValueError, match="matched 2"):
         lifecycle._resolve_wheel(str(tmp_path / "*.whl"))
+
+
+def test_run_forces_utf8_for_child_cli_and_log(tmp_path, monkeypatch):
+    lifecycle = _module()
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="✓ UTF-8\n")
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", fake_run)
+    log = tmp_path / "child.log"
+
+    lifecycle._run(
+        ["openadapt-flow", "--help"],
+        cwd=tmp_path,
+        env={"PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252"},
+        log=log,
+    )
+
+    assert captured["env"]["PYTHONUTF8"] == "1"
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert captured["encoding"] == "utf-8"
+    assert log.read_bytes().decode("utf-8").endswith("✓ UTF-8\n")
 
 
 def test_inspect_artifacts_requires_reports_repairs_and_healed_bundle(tmp_path):

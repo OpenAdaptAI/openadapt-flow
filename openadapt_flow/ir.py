@@ -1592,7 +1592,7 @@ class RunReport(BaseModel):
         run = Path(run_dir)
         run.mkdir(parents=True, exist_ok=True)
         path = run / "report.json"
-        path.write_text(self.model_dump_json(indent=2))
+        path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
         return path
 
 

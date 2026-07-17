@@ -233,7 +233,7 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
     """Merge the ``--backend`` family of CLI flags over ``cfg.backend``.
 
     A deployment ``--config`` supplies the backend section; direct flags
-    (``--backend`` / ``--agent-url`` / ``--rdp-host``) override individual
+    (``--backend`` / ``--agent-url`` / ``--macos-app`` / ``--rdp-host``) override individual
     fields, exactly as the effects/actuation flags override their sections. With
     no flags the config's backend (default ``web``) is returned unchanged, so an
     unflagged web replay behaves precisely as before.
@@ -243,6 +243,12 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
         backend = backend.model_copy(update={"kind": args.backend})
     if getattr(args, "agent_url", None):
         backend = backend.model_copy(update={"agent_url": args.agent_url})
+    if getattr(args, "macos_app", None):
+        backend = backend.model_copy(update={"macos_app": args.macos_app})
+    if getattr(args, "macos_window_title", None):
+        backend = backend.model_copy(
+            update={"macos_window_title": args.macos_window_title}
+        )
     if getattr(args, "rdp_host", None):
         backend = backend.model_copy(update={"rdp_host": args.rdp_host})
     return backend
@@ -422,7 +428,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
     # SAME compile-ready recording format. Selection is fail-loud (a missing
     # target for the chosen backend raises rather than silently record web).
     backend = getattr(args, "backend", None) or "web"
-    if backend in ("windows", "rdp"):
+    if backend in ("windows", "macos", "rdp"):
         return _cmd_record_desktop(args, backend)
 
     if not args.url:
@@ -452,7 +458,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
 
 
 def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
-    """Record a live desktop demonstration for the windows/rdp backend.
+    """Record a live desktop demonstration for a native/pixel desktop backend.
 
     Reuses the tested capture stack: an ``openadapt-capture`` session captures
     the operator's real demonstration, then
@@ -1456,11 +1462,12 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
     """
     p.add_argument(
         "--backend",
-        choices=["web", "windows", "rdp"],
+        choices=["web", "windows", "macos", "rdp"],
         default=None,
         help=(
             "Backend to drive: 'web' (default; Playwright/Chromium), 'windows' "
-            "(native Windows via the WAA HTTP agent — needs --agent-url), or "
+            "(native Windows via the WAA HTTP agent — needs --agent-url), "
+            "'macos' (one native Mac app window — needs --macos-app), or "
             "'rdp' (pixel-only remote desktop / Citrix — needs --rdp-host or a "
             "configured rdp_window). Overrides backend.kind from --config."
         ),
@@ -1472,6 +1479,24 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
         help=(
             "Base URL of the in-guest Windows (WAA) agent for --backend windows "
             "(e.g. http://localhost:5001). Overrides backend.agent_url."
+        ),
+    )
+    p.add_argument(
+        "--macos-app",
+        default=None,
+        metavar="APP",
+        help=(
+            "Owner application for --backend macos (e.g. TextEdit). Overrides "
+            "backend.macos_app."
+        ),
+    )
+    p.add_argument(
+        "--macos-window-title",
+        default=None,
+        metavar="TITLE",
+        help=(
+            "Window-title substring for --backend macos. Ambiguous matches "
+            "are refused. Overrides backend.macos_window_title."
         ),
     )
     p.add_argument(
@@ -1604,7 +1629,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Record a typed value as a PARAMETER; its demonstrated value "
             "becomes the default, overridable at replay with --param. For "
             "--backend web, FIELD is the field name/id. For --backend "
-            "windows/rdp (no field identity on a pixel substrate), use "
+            "windows/macos/rdp (no field identity on a pixel substrate), use "
             "NAME=VALUE — the typed value equal to VALUE is marked as parameter "
             "NAME. Repeatable."
         ),
@@ -1613,7 +1638,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--task",
         default=None,
         help=(
-            "Task description for a desktop (--backend windows/rdp) capture "
+            "Task description for a desktop (--backend windows/macos/rdp) capture "
             "session (stored in the recording metadata)."
         ),
     )

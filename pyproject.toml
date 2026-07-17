@@ -74,6 +74,13 @@ grounder = ["anthropic>=0.40"]
 grounding = ["openadapt-grounding>=0.1.0"]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31"]
+# Native macOS window capture/input. Imported lazily; other platforms never
+# install or import these framework bindings.
+macos = [
+    "pyobjc-framework-applicationservices>=10.3; sys_platform == 'darwin'",
+    "pyobjc-framework-cocoa>=10.3; sys_platform == 'darwin'",
+    "pyobjc-framework-quartz>=10.3; sys_platform == 'darwin'",
+]
 # FreeRDPBackend: pure-Python async RDP client for the pixel-only RDP path
 # (L1/Retinology EMR over RDP). Lazily imported by AardwolfTransport — never
 # needed for the mock-tested adapter, only for the real/live transport.

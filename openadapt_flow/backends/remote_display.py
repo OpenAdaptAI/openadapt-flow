@@ -537,21 +537,54 @@ class MacWindowClient:
         except Exception:  # noqa: BLE001 - absence == untrusted
             return False
 
-    def find_window(
+    def capture_trusted(self) -> bool:
+        """Whether this process may capture other applications' windows."""
+        try:
+            import Quartz
+
+            preflight = getattr(Quartz, "CGPreflightScreenCaptureAccess", None)
+            # Screen Recording consent did not exist before macOS 10.15. When
+            # the preflight API is absent, window capture itself remains the
+            # authoritative check performed by ``capture``.
+            return True if preflight is None else bool(preflight())
+        except Exception:  # noqa: BLE001 - absence cannot be treated as consent
+            return False
+
+    def request_capture_access(self) -> bool:
+        """Ask macOS to show its Screen Recording consent prompt."""
+        try:
+            import Quartz
+
+            request = getattr(Quartz, "CGRequestScreenCaptureAccess", None)
+            return True if request is None else bool(request())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def request_input_access(self) -> bool:
+        """Ask macOS to show its Accessibility consent prompt."""
+        try:
+            from ApplicationServices import (
+                AXIsProcessTrustedWithOptions,
+                kAXTrustedCheckOptionPrompt,
+            )
+
+            return bool(
+                AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    def find_windows(
         self, owner_substr: str, title_substr: Optional[str]
-    ) -> Optional[WindowInfo]:
+    ) -> list[WindowInfo]:
+        """Return every normal window matching owner/title, front to back."""
         import Quartz
 
         owner_l = owner_substr.lower()
         title_l = title_substr.lower() if title_substr else None
-        # kCGWindowListOptionAll (not OnScreenOnly): a remote-display client is
-        # sometimes momentarily HIDDEN (Cmd+H / focus loss) — we still need its
-        # pid to un-hide + foreground it, and CGWindowListCreateImage can capture
-        # a de-fronted window. on_screen is recorded so a caller can foreground.
         opts = Quartz.kCGWindowListOptionAll
         wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
-        best: Optional[WindowInfo] = None
-        best_area = -1.0
+        matches: list[WindowInfo] = []
         for w in wins or []:
             owner = str(w.get("kCGWindowOwnerName", "") or "")
             name = str(w.get("kCGWindowName", "") or "")
@@ -560,7 +593,7 @@ class MacWindowClient:
             if title_l is not None and title_l not in name.lower():
                 continue
             if int(w.get("kCGWindowLayer", 0) or 0) != 0:
-                continue  # skip menubar/overlay layers; the app window is layer 0
+                continue
             b = w.get("kCGWindowBounds", {}) or {}
             bounds = (
                 float(b.get("X", 0.0)),
@@ -568,18 +601,57 @@ class MacWindowClient:
                 float(b.get("Width", 0.0)),
                 float(b.get("Height", 0.0)),
             )
-            area = bounds[2] * bounds[3]
-            if area > best_area:
-                best_area = area
-                best = WindowInfo(
-                    window_id=int(w.get("kCGWindowNumber", 0) or 0),
+            window_id = int(w.get("kCGWindowNumber", 0) or 0)
+            pid = int(w.get("kCGWindowOwnerPID", 0) or 0)
+            if window_id <= 0 or pid <= 0 or bounds[2] <= 0 or bounds[3] <= 0:
+                continue
+            matches.append(
+                WindowInfo(
+                    window_id=window_id,
                     owner=owner,
                     title=name,
-                    pid=int(w.get("kCGWindowOwnerPID", 0) or 0),
+                    pid=pid,
                     bounds=bounds,
                     on_screen=bool(w.get("kCGWindowIsOnscreen", False)),
                 )
+            )
+        return matches
+
+    def find_window(
+        self, owner_substr: str, title_substr: Optional[str]
+    ) -> Optional[WindowInfo]:
+        # kCGWindowListOptionAll (not OnScreenOnly): a remote-display client is
+        # sometimes momentarily HIDDEN (Cmd+H / focus loss) — we still need its
+        # pid to un-hide + foreground it, and CGWindowListCreateImage can capture
+        # a de-fronted window. on_screen is recorded so a caller can foreground.
+        best: Optional[WindowInfo] = None
+        best_area = -1.0
+        for window in self.find_windows(owner_substr, title_substr):
+            area = window.bounds[2] * window.bounds[3]
+            if area > best_area:
+                best_area = area
+                best = window
         return best
+
+    def frontmost_window_id(self) -> Optional[int]:
+        """ID of the topmost on-screen normal window, or None if unknown."""
+        try:
+            import Quartz
+
+            opts = (
+                Quartz.kCGWindowListOptionOnScreenOnly
+                | Quartz.kCGWindowListExcludeDesktopElements
+            )
+            wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
+            for window in wins or []:
+                if int(window.get("kCGWindowLayer", 0) or 0) != 0:
+                    continue
+                window_id = int(window.get("kCGWindowNumber", 0) or 0)
+                if window_id > 0:
+                    return window_id
+        except Exception:  # noqa: BLE001
+            return None
+        return None
 
     def capture(self, window_id: int) -> tuple[bytes, int, int]:
         import Quartz
@@ -728,6 +800,21 @@ class MacWindowClient:
                     ev = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
                     Quartz.CGEventKeyboardSetUnicodeString(ev, len(ch), ch)
                     self._post(ev)
+            time.sleep(0.006)
+
+    def type_unicode(self, text: str) -> None:
+        """Type native Unicode text without assuming the active key layout."""
+        import Quartz
+
+        # CGEventKeyboardSetUnicodeString accepts a bounded string per event.
+        # Chunking avoids silently truncating long native text fields.
+        for start in range(0, len(text), 20):
+            chunk = text[start : start + 20]
+            utf16_units = len(chunk.encode("utf-16-le")) // 2
+            for down in (True, False):
+                event = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
+                Quartz.CGEventKeyboardSetUnicodeString(event, utf16_units, chunk)
+                self._post(event)
             time.sleep(0.006)
 
     def key(self, keycode: int, *, down: bool, flags: list[str]) -> None:

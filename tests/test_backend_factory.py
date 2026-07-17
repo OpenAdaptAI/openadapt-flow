@@ -26,6 +26,7 @@ from openadapt_flow.deployment import BackendConfig, DeploymentConfig
         ("web", "web"),
         ("WEB", "web"),
         (" windows ", "windows"),
+        ("macos", "macos"),
         ("rdp", "rdp"),
         ("remote-display", "rdp"),
         ("remote_display", "rdp"),
@@ -93,6 +94,27 @@ def test_windows_threads_tls_pin_into_pinned_session() -> None:
         )
     )
     assert backend._pin_fingerprint == fingerprint
+
+
+# --- native macOS -----------------------------------------------------------
+
+
+def test_macos_cli_flags_override_config() -> None:
+    cfg = DeploymentConfig()
+    args = _replay_args(
+        [
+            "--backend",
+            "macos",
+            "--macos-app",
+            "TextEdit",
+            "--macos-window-title",
+            "oa-trial",
+        ]
+    )
+    merged = _resolve_backend_config(args, cfg)
+    assert merged.kind == "macos"
+    assert merged.macos_app == "TextEdit"
+    assert merged.macos_window_title == "oa-trial"
 
 
 # --- rdp (network, via injected transport) ----------------------------------

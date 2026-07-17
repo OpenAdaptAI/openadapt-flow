@@ -168,6 +168,88 @@
       "errors": []
     },
     {
+      "id": "effect-verifier-kit",
+      "claim": "The effect-verifier kit makes declaring and wiring effect verification a reviewed deployment-config exercise instead of bespoke per-deployment code: declarative REST / FHIR / read-only-SQL / file-arrival / document-hash verifier configs with secret-isolated auth references and explicit run-parameter binding, a cross-substrate exactly-one-NEW-record duplicate guard, per-consequential-step effect-coverage lint/certify gates, and typed reconciliation tasks on halt.",
+      "tier": "validating",
+      "reproducibility": null,
+      "surfaces": [
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "CONTRACT-PROVEN, not live-proven: the SQL verifier is exercised against sqlite fixtures (no production MariaDB/Postgres), the SFTP arrival path against a fake transport (no real SFTP server), and the worked-example configs are templates \u2014 only the FHIR substrate has an additional opt-in live-OpenEMR test. Per-verifier claims are exactly as strong as these tests."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_effect_sql.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The read-only SQL verifier's whitelist (mutation/stacking/comment smuggling refused at construction) and full verdict contract, plus the exact table-delta audit promoted from the Frappe Lending reference matrix \u2014 against LOCAL sqlite fixtures only."
+        },
+        {
+          "path": "tests/test_effect_file_arrival.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "File-arrival verdicts (pattern / size>0 / mtime freshness / content probe / duplicate export) against real temp directories, and the SFTP path against an in-memory fake paramiko-shaped transport."
+        },
+        {
+          "path": "tests/test_effect_kit_config.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The declarative construction path: env-var auth references fail loud when unset, run-parameter references resolve at build (and refuse to construct unresolved), and pre-kit configs build byte-identically."
+        },
+        {
+          "path": "tests/test_effect_coverage_lint.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "lint warns per consequential step lacking an effect contract and reports coverage %; certify fails the same gap only when the policy sets require_effects_for_irreversible (warn-vs-fail is policy-configurable)."
+        },
+        {
+          "path": "tests/test_effect_reconciliation.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Every escalated verification failure emits a typed ReconciliationTask carrying the one-way contract hash and verdict evidence \u2014 never the resolved selector values."
+        },
+        {
+          "path": "docs/EFFECT_KIT.md",
+          "kind": "doc",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The operator-facing kit contract: config reference plus Frappe (REST/SQL) and OpenEMR (FHIR/SQL) worked examples targeting the reference fixtures."
+        }
+      ],
+      "errors": []
+    },
+    {
       "id": "identity-gate-halt-armed",
       "claim": "On ambiguity the runtime halts instead of guessing, and an identity gate refuses a wrong-entity (wrong-patient) click \u2014 on ARMED steps only.",
       "tier": "supported",

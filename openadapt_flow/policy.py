@@ -228,6 +228,14 @@ class Policy(BaseModel):
             real system of record, not the screen. This is the check a clinical
             write needs: a screen assertion alone is the exact weak oracle the
             effect layer replaced.
+        require_effects_for_irreversible: Blanket form of
+            ``require_system_effects_for``: EVERY step whose compiled risk is
+            ``irreversible`` (consequential write) MUST declare at least one
+            system-of-record effect. This is the policy-side escalation of the
+            linter's ``missing_effect_contract`` advice — the same gap
+            ``lint`` reports as a warning FAILS certification when a
+            deployment turns this on ("warn vs fail" is the policy's choice,
+            per docs/EFFECT_KIT.md).
         require_idempotency_key_for: Every step matching one of these tokens
             (e.g. ``irreversible``) MUST carry a system-of-record effect bearing
             an idempotency / at-most-once key, so a retried or double-delivered
@@ -262,6 +270,7 @@ class Policy(BaseModel):
     require_identity_for: list[str] = Field(default_factory=list)
     require_screen_postconditions_for: list[str] = Field(default_factory=list)
     require_system_effects_for: list[str] = Field(default_factory=list)
+    require_effects_for_irreversible: bool = False
     require_idempotency_key_for: list[str] = Field(default_factory=list)
     prohibit_unconfirmed_effect_bindings: bool = False
     # DEPRECATED alias of require_screen_postconditions_for (see docstring).
@@ -479,6 +488,29 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
                     )
                 )
 
+        # Blanket consequential-write coverage (kit): every irreversible step
+        # must carry an effect contract, full stop — the certify-time "fail"
+        # escalation of the linter's missing_effect_contract "warn".
+        if (
+            policy.require_effects_for_irreversible
+            and step.risk == "irreversible"
+            and not has_system_effect(step)
+        ):
+            violations.append(
+                Violation(
+                    rule="require_effects_for_irreversible",
+                    step_id=step.id,
+                    reason=(
+                        "step is an IRREVERSIBLE write but declares no "
+                        "system-of-record effect (step.effects) — without a "
+                        "declared effect contract and a configured verifier "
+                        "the runtime falls back to screen evidence, which "
+                        "cannot see a partial / phantom / duplicate / "
+                        "lost-update write"
+                    ),
+                )
+            )
+
         if policy.require_idempotency_key_for and step_matches_any(
             step, policy.require_idempotency_key_for
         ):
@@ -574,6 +606,24 @@ class LintReport(BaseModel):
     workflow_name: str
     n_steps: int
     findings: list[Finding] = Field(default_factory=list)
+    #: Effect-contract coverage over the bundle's CONSEQUENTIAL
+    #: (``risk == "irreversible"``) steps: how many there are, and how many
+    #: declare at least one system-of-record effect (``step.effects``). The
+    #: kit's headline number — a consequential step with no declared effect
+    #: falls back to screen evidence at run time.
+    consequential_steps: int = 0
+    effect_covered_consequential_steps: int = 0
+
+    @property
+    def effect_coverage(self) -> Optional[float]:
+        """Fraction of consequential steps carrying an effect contract.
+
+        ``None`` when the bundle has no consequential steps (coverage of
+        nothing is not 100%).
+        """
+        if self.consequential_steps == 0:
+            return None
+        return self.effect_covered_consequential_steps / self.consequential_steps
 
     @property
     def max_severity(self) -> str:
@@ -600,6 +650,15 @@ class LintReport(BaseModel):
             key=lambda f: (-SEVERITY_ORDER[f.severity], f.step_id or ""),
         )
         lines = [head]
+        coverage = self.effect_coverage
+        if coverage is None:
+            lines.append("  effect coverage: n/a (no consequential/irreversible steps)")
+        else:
+            lines.append(
+                f"  effect coverage: {self.effect_covered_consequential_steps}"
+                f"/{self.consequential_steps} consequential step(s) declare a "
+                f"system-of-record effect ({coverage:.0%})"
+            )
         if not ordered:
             lines.append("  no coverage gaps found.")
         for f in ordered:
@@ -623,13 +682,47 @@ def lint_workflow(workflow: Workflow) -> LintReport:
     - ``under_classified_risk`` — a step whose text looks write-shaped but that
       compiled ``reversible`` (typically a bundle predating auto risk-
       classification; recompile or set ``risk_overrides``). Always ``warn``.
+    - ``missing_effect_contract`` — a CONSEQUENTIAL (irreversible) step that
+      declares no system-of-record effect (``step.effects``): the runtime then
+      falls back to screen evidence for that write. Always ``warn`` here
+      (advice); a policy escalates the same gap to a certification FAILURE via
+      ``require_effects_for_irreversible`` (warn-vs-fail is policy-configurable).
+
+    The report also carries the bundle's effect-contract coverage over its
+    consequential steps (``consequential_steps`` /
+    ``effect_covered_consequential_steps`` / ``effect_coverage``).
     """
     findings: list[Finding] = []
+    consequential = 0
+    effect_covered = 0
     # Same canonical traversal the certifier uses: lint a program-mode bundle's
     # graph/subflow action states, not just its (often empty) linear steps.
     steps = list(iter_workflow_steps(workflow))
     for step in steps:
         irreversible = step.risk == "irreversible"
+
+        if irreversible:
+            consequential += 1
+            if has_system_effect(step):
+                effect_covered += 1
+            else:
+                findings.append(
+                    Finding(
+                        severity="warn",
+                        code="missing_effect_contract",
+                        step_id=step.id,
+                        message=(
+                            f"{step.action.value} is an IRREVERSIBLE write "
+                            "with no declared system-of-record effect "
+                            "(step.effects) — the run will fall back to "
+                            "screen evidence for this write (blind to "
+                            "partial/phantom/duplicate/lost-update faults); "
+                            "declare an effect contract, or certify with "
+                            "require_effects_for_irreversible to make this a "
+                            "hard failure"
+                        ),
+                    )
+                )
 
         if is_identity_applicable(step) and not is_identity_armed(step):
             reason = step.identity_unarmed_reason or (
@@ -680,4 +773,6 @@ def lint_workflow(workflow: Workflow) -> LintReport:
         workflow_name=workflow.name,
         n_steps=len(steps),
         findings=findings,
+        consequential_steps=consequential,
+        effect_covered_consequential_steps=effect_covered,
     )

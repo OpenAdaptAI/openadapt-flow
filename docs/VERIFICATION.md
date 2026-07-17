@@ -11,7 +11,7 @@
 ## What is CI-proven today vs. being validated
 
 - **CI-proven today (6):** `web-supported`, `deterministic-zero-model-replay`, `effect-verification-silent-writes`, `identity-gate-halt-armed`, `halt-teach-promote`, `mockmed-benchmark-ci-reproducible`
-- **Being validated — opt-in / infra-gated or field (4):** `windows-desktop-validating`, `desktop-recording-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
+- **Being validated — opt-in / infra-gated or field (5):** `effect-verifier-kit`, `windows-desktop-validating`, `desktop-recording-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
 
 ## Claims
 
@@ -67,6 +67,26 @@
 **Caveats (honest limits):**
 
 - Verification requires the step to DECLARE typed `effects` AND a configured EffectVerifier. Without a real system-of-record verifier, on-screen read-back is SAME-SURFACE and not independent.
+
+### `effect-verifier-kit` — validating — opt-in / infra-gated or field test
+
+> The effect-verifier kit makes declaring and wiring effect verification a reviewed deployment-config exercise instead of bespoke per-deployment code: declarative REST / FHIR / read-only-SQL / file-arrival / document-hash verifier configs with secret-isolated auth references and explicit run-parameter binding, a cross-substrate exactly-one-NEW-record duplicate guard, per-consequential-step effect-coverage lint/certify gates, and typed reconciliation tasks on halt.
+
+- Surfaces: docs
+- Strongest evidence strength: **supported** (tier is `validating`)
+
+| Backing evidence | Kind | Gating / CI stage | Strength | Proves |
+|---|---|---|---|---|
+| `tests/test_effect_sql.py` | test | ci (required PR gate (test)) | supported | The read-only SQL verifier's whitelist (mutation/stacking/comment smuggling refused at construction) and full verdict contract, plus the exact table-delta audit promoted from the Frappe Lending reference matrix — against LOCAL sqlite fixtures only. |
+| `tests/test_effect_file_arrival.py` | test | ci (required PR gate (test)) | supported | File-arrival verdicts (pattern / size>0 / mtime freshness / content probe / duplicate export) against real temp directories, and the SFTP path against an in-memory fake paramiko-shaped transport. |
+| `tests/test_effect_kit_config.py` | test | ci (required PR gate (test)) | supported | The declarative construction path: env-var auth references fail loud when unset, run-parameter references resolve at build (and refuse to construct unresolved), and pre-kit configs build byte-identically. |
+| `tests/test_effect_coverage_lint.py` | test | ci (required PR gate (test)) | supported | lint warns per consequential step lacking an effect contract and reports coverage %; certify fails the same gap only when the policy sets require_effects_for_irreversible (warn-vs-fail is policy-configurable). |
+| `tests/test_effect_reconciliation.py` | test | ci (required PR gate (test)) | supported | Every escalated verification failure emits a typed ReconciliationTask carrying the one-way contract hash and verdict evidence — never the resolved selector values. |
+| `docs/EFFECT_KIT.md` | doc | artifact (doc/benchmark) | roadmap | The operator-facing kit contract: config reference plus Frappe (REST/SQL) and OpenEMR (FHIR/SQL) worked examples targeting the reference fixtures. |
+
+**Caveats (honest limits):**
+
+- CONTRACT-PROVEN, not live-proven: the SQL verifier is exercised against sqlite fixtures (no production MariaDB/Postgres), the SFTP arrival path against a fake transport (no real SFTP server), and the worked-example configs are templates — only the FHIR substrate has an additional opt-in live-OpenEMR test. Per-verifier claims are exactly as strong as these tests.
 
 ### `identity-gate-halt-armed` — supported — CI-proven today
 

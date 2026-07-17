@@ -23,6 +23,19 @@ from openadapt_flow.runtime.effects.effect import (
 )
 
 
+def new_records_only(
+    matched: list[dict[str, Any]], before: EffectState
+) -> list[dict[str, Any]]:
+    """The subset of ``matched`` that did NOT exist in the pre-state.
+
+    The cross-cutting duplicate-write guard (``Effect.count_new_only``):
+    identity is :func:`stable_id`, the same accounting collateral-loss uses,
+    so the delta works on every substrate that normalizes to dict records.
+    """
+    before_ids = {stable_id(r) for r in before.records}
+    return [r for r in matched if stable_id(r) not in before_ids]
+
+
 def _indeterminate(effect: Effect, substrate: str, reason: str) -> EffectVerdict:
     return EffectVerdict(
         verdict=Verdict.INDETERMINATE,
@@ -68,6 +81,21 @@ def judge_records(
             for r in matched
             if str(r.get(effect.key_field, None)) == str(effect.idempotency_key)
         ]
+
+    # Duplicate-write guard (count_new_only): judge only the records that
+    # APPEARED since the pre-state -- "exactly expected_count NEW record(s)".
+    # Without a readable baseline the delta is unknowable -> INDETERMINATE
+    # (never guess which records are new).
+    if effect.count_new_only and effect.kind is EffectKind.RECORD_WRITTEN:
+        if not before.reachable:
+            return _indeterminate(
+                effect,
+                substrate,
+                "count_new_only requires a readable pre-state baseline, but "
+                "the system of record was unreachable before the action -- "
+                "cannot attribute records to this action; HALT",
+            )
+        matched = new_records_only(matched, before)
 
     if effect.kind is EffectKind.FIELD_EQUALS:
         return _judge_field_equals(effect, matched, substrate)

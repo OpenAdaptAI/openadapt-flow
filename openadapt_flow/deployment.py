@@ -22,9 +22,15 @@ fully-local, zero-egress) deployment.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Mapping, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Import-light (pydantic only): the effect CONTRACT types double as the
+# declarative config vocabulary, so a deployment YAML binds run parameters
+# with the exact ``{param: ...}`` / ``{literal: ...}`` form bundles use.
+from openadapt_flow.runtime.effects.auth import AuthRef
+from openadapt_flow.runtime.effects.effect import ValueExpr
 
 
 class BackendConfig(BaseModel):
@@ -110,22 +116,81 @@ class EffectsConfig(BaseModel):
     wires no verifier — a bundle that declares NO effects then replays exactly
     as before, but a step that DOES declare effects HALTs (fail-safe: an
     unverifiable consequential write is never silently accepted).
+
+    Effect-verifier kit conventions (``docs/EFFECT_KIT.md``):
+
+    - **Secrets are references, never literals.** ``auth`` /
+      ``access_token_env`` / ``sql_password_env`` name environment variables
+      staged by the operator; a missing variable fails LOUD at construction.
+    - **Run-parameter binding is explicit.** Every ``*_params`` /
+      ``*_exprs`` mapping takes the same ``{param: name}`` / ``{literal: v}``
+      :class:`~openadapt_flow.runtime.effects.ValueExpr` form bundles use (a
+      bare string is a literal), and is resolved against the governed run
+      parameters (``--params-file`` / ``--param``) when the verifier is
+      BUILT — so one bundle + one deployment YAML ships with its verification
+      bound to the record each run actually writes.
     """
 
-    #: ``none`` | ``rest`` | ``fhir`` | ``document-hash``.
+    #: ``none`` | ``rest`` | ``fhir`` | ``sql`` | ``file`` | ``document-hash``.
     kind: str = "none"
 
     # -- rest (JSON REST system of record, e.g. MockMed /api/db) -------------
     base_url: Optional[str] = None
     records_path: str = "/api/db"
     records_key: Optional[str] = "records"
+    #: Secret-isolated auth headers for the records read (bearer_env /
+    #: header+value_env / basic_env). Never a credential literal.
+    auth: Optional[AuthRef] = None
+    #: Values for ``{placeholder}``s in ``records_path``, resolved (and
+    #: URL-quoted) at construction — e.g.
+    #: ``records_path: "/api/resource/Loan Application?filters=...{applicant}..."``
+    #: with ``path_params: {applicant: {param: applicant}}``. Empty -> the
+    #: path is used verbatim (no formatting), byte-identical to before.
+    path_params: dict[str, ValueExpr] = Field(default_factory=dict)
 
     # -- fhir (FHIR R4 search, e.g. OpenEMR) ---------------------------------
     resource_type: str = "Observation"
     search_params: dict[str, str] = Field(default_factory=dict)
     field_paths: Optional[dict[str, str]] = None
+    #: OAuth2 bearer token literal. DEPRECATED for committed configs — prefer
+    #: ``access_token_env`` so the YAML never carries the secret.
     access_token: Optional[str] = None
+    #: Name of the env var holding the OAuth2 bearer token (secret-isolated;
+    #: wins over ``access_token``; missing var fails loud).
+    access_token_env: Optional[str] = None
     verify_tls: bool = True
+    #: FHIR search params whose VALUES bind to run parameters (merged over
+    #: ``search_params`` after resolution) — e.g.
+    #: ``search_param_exprs: {patient: {param: patient_id}}``.
+    search_param_exprs: dict[str, ValueExpr] = Field(default_factory=dict)
+
+    # -- sql (read-only SELECT against the app database) ---------------------
+    #: The single read-only SELECT returning candidate records (validated by
+    #: the kit's statement whitelist; a mutating query refuses to construct).
+    #: Use the driver's native parameter placeholders for dynamic values.
+    sql_query: Optional[str] = None
+    #: DB-API parameter values for ``sql_query`` (literal or ``{param: ...}``).
+    sql_query_params: dict[str, ValueExpr] = Field(default_factory=dict)
+    #: Path to a SQLite database file (stdlib driver; the CI-proven path).
+    sqlite_database: Optional[str] = None
+    #: Alternatively: an importable DB-API driver module name (``pymysql``,
+    #: ``mariadb``, ``psycopg``) ...
+    sql_driver: Optional[str] = None
+    #: ... plus its non-secret ``connect(**kwargs)`` arguments ...
+    sql_connect_args: dict[str, Any] = Field(default_factory=dict)
+    #: ... and the env var holding the database password (injected as the
+    #: ``password`` connect kwarg; secret-isolated, fails loud when missing).
+    sql_password_env: Optional[str] = None
+
+    # -- file (file / SFTP arrival; local directory via YAML) ----------------
+    #: (uses the shared ``root``) filename glob for candidate records.
+    file_pattern: str = "*"
+    #: Minimum byte size for a conforming arrival (size > 0 by default).
+    file_min_size: int = 1
+    #: Freshness window in seconds (``fresh`` flag); None -> always fresh.
+    file_mtime_window_s: Optional[float] = None
+    #: Optional regex probed against each candidate's leading content.
+    file_content_probe: Optional[str] = None
 
     # -- document-hash (filesystem document store) ---------------------------
     root: Optional[str] = None
@@ -134,6 +199,19 @@ class EffectsConfig(BaseModel):
     # -- shared --------------------------------------------------------------
     timeout_s: float = 5.0
     poll_interval_s: float = 0.2
+
+    @field_validator(
+        "path_params", "search_param_exprs", "sql_query_params", mode="before"
+    )
+    @classmethod
+    def _coerce_value_exprs(cls, v: Any) -> Any:
+        """A bare YAML string is a literal (the same coercion ``Effect`` uses)."""
+        if isinstance(v, dict):
+            return {
+                k: ({"literal": val} if isinstance(val, str) else val)
+                for k, val in v.items()
+            }
+        return v
 
 
 class ActuationConfig(BaseModel):
@@ -209,12 +287,63 @@ def load_deployment(source: str | Path) -> DeploymentConfig:
         raise ValueError(f"invalid deployment config {path}: {e}") from e
 
 
-def build_effect_verifier(cfg: EffectsConfig) -> Optional[Any]:
+def _resolve_config_exprs(
+    section: str,
+    exprs: Mapping[str, ValueExpr],
+    params: Optional[Mapping[str, str]],
+) -> dict[str, str]:
+    """Resolve a config's ``ValueExpr`` mapping against the run's params.
+
+    Fail-safe is fail-LOUD here: a ``{param: ...}`` reference that the run did
+    not supply raises (the verifier would otherwise silently probe the wrong
+    record), and the message names the missing parameter.
+    """
+    resolved: dict[str, str] = {}
+    for key, expr in exprs.items():
+        value = expr.resolve(dict(params or {}))
+        if value is None:
+            raise ValueError(
+                f"effects.{section}[{key!r}] references run parameter "
+                f"{expr.param!r}, which was not supplied — pass it via "
+                "--param / --params-file (a verifier is never wired against "
+                "an unresolved selector)"
+            )
+        resolved[key] = value
+    return resolved
+
+
+def _require_env(name: str, what: str) -> str:
+    """Read a secret env var named by the config; fail loud when absent."""
+    import os
+
+    value = os.environ.get(name, "")
+    if not value:
+        raise ValueError(
+            f"{what} references environment variable {name!r}, which is not "
+            "set (or empty) — refusing to wire an unauthenticated/broken "
+            "effect verifier"
+        )
+    return value
+
+
+def build_effect_verifier(
+    cfg: EffectsConfig, params: Optional[Mapping[str, str]] = None
+) -> Optional[Any]:
     """Construct the configured ``EffectVerifier`` (or None for ``kind: none``).
 
+    Args:
+        cfg: The deployment's ``effects`` section.
+        params: The governed run parameters (``--params-file`` / ``--param``
+            values). Configs that bind ``{param: ...}`` references
+            (``path_params`` / ``search_param_exprs`` / ``sql_query_params``)
+            are resolved against these AT CONSTRUCTION, so the verifier probes
+            the record THIS run writes. A config with no references ignores
+            ``params`` entirely (fully back-compatible).
+
     Raises:
-        ValueError: on an unknown ``kind`` or a missing required field for the
-            selected verifier (fail loud rather than wire a broken verifier).
+        ValueError: on an unknown ``kind``, a missing required field, an
+            unresolved ``{param: ...}`` reference, or a missing secret env var
+            (fail loud rather than wire a broken verifier).
     """
     kind = (cfg.kind or "none").strip().lower()
     if kind in ("none", ""):
@@ -225,10 +354,29 @@ def build_effect_verifier(cfg: EffectsConfig) -> Optional[Any]:
             raise ValueError("effects.kind 'rest' requires effects.base_url")
         from openadapt_flow.runtime.effects import RestRecordVerifier
 
+        headers = cfg.auth.resolve_headers() if cfg.auth is not None else None
+        records_path = cfg.records_path
+        if cfg.path_params:
+            from urllib.parse import quote
+
+            values = {
+                key: quote(value, safe="")
+                for key, value in _resolve_config_exprs(
+                    "path_params", cfg.path_params, params
+                ).items()
+            }
+            try:
+                records_path = records_path.format(**values)
+            except (KeyError, IndexError, ValueError) as e:
+                raise ValueError(
+                    f"effects.records_path template does not match "
+                    f"effects.path_params: {e!r}"
+                ) from e
         return RestRecordVerifier(
             cfg.base_url,
-            records_path=cfg.records_path,
+            records_path=records_path,
             records_key=cfg.records_key,
+            headers=headers,
             timeout_s=cfg.timeout_s,
             poll_interval_s=cfg.poll_interval_s,
         )
@@ -238,15 +386,77 @@ def build_effect_verifier(cfg: EffectsConfig) -> Optional[Any]:
             raise ValueError("effects.kind 'fhir' requires effects.base_url")
         from openadapt_flow.runtime.effects import FhirEffectVerifier
 
+        access_token = cfg.access_token
+        if cfg.access_token_env:
+            access_token = _require_env(
+                cfg.access_token_env, "effects.access_token_env"
+            )
+        search_params = dict(cfg.search_params)
+        if cfg.search_param_exprs:
+            search_params.update(
+                _resolve_config_exprs(
+                    "search_param_exprs", cfg.search_param_exprs, params
+                )
+            )
         return FhirEffectVerifier(
             cfg.base_url,
             resource_type=cfg.resource_type,
-            search_params=cfg.search_params or None,
+            search_params=search_params or None,
             field_paths=cfg.field_paths,
-            access_token=cfg.access_token,
+            access_token=access_token,
             verify_tls=cfg.verify_tls,
             timeout_s=cfg.timeout_s,
             poll_interval_s=cfg.poll_interval_s,
+        )
+
+    if kind == "sql":
+        if not cfg.sql_query:
+            raise ValueError("effects.kind 'sql' requires effects.sql_query")
+        from openadapt_flow.runtime.effects import SqlRecordVerifier
+
+        connect: Callable[[], Any]
+        if cfg.sqlite_database:
+            import sqlite3
+
+            database = cfg.sqlite_database
+            connect = lambda: sqlite3.connect(database)  # noqa: E731
+        elif cfg.sql_driver:
+            import importlib
+
+            module = importlib.import_module(cfg.sql_driver)
+            connect_args = dict(cfg.sql_connect_args)
+            if cfg.sql_password_env:
+                connect_args["password"] = _require_env(
+                    cfg.sql_password_env, "effects.sql_password_env"
+                )
+            connect = lambda: module.connect(**connect_args)  # noqa: E731
+        else:
+            raise ValueError(
+                "effects.kind 'sql' requires effects.sqlite_database or "
+                "effects.sql_driver (+ sql_connect_args)"
+            )
+        return SqlRecordVerifier(
+            connect,
+            cfg.sql_query,
+            query_params=(
+                _resolve_config_exprs("sql_query_params", cfg.sql_query_params, params)
+                or None
+            ),
+            timeout_s=cfg.timeout_s,
+            poll_interval_s=cfg.poll_interval_s,
+        )
+
+    if kind == "file":
+        if not cfg.root:
+            raise ValueError("effects.kind 'file' requires effects.root")
+        from openadapt_flow.runtime.effects import FileArrivalVerifier
+
+        return FileArrivalVerifier(
+            cfg.root,
+            pattern=cfg.file_pattern,
+            min_size=cfg.file_min_size,
+            mtime_window_s=cfg.file_mtime_window_s,
+            content_probe=cfg.file_content_probe,
         )
 
     if kind in ("document-hash", "document_hash", "doc-hash"):
@@ -258,7 +468,7 @@ def build_effect_verifier(cfg: EffectsConfig) -> Optional[Any]:
 
     raise ValueError(
         f"unknown effects.kind {cfg.kind!r} "
-        "(expected: none | rest | fhir | document-hash)"
+        "(expected: none | rest | fhir | sql | file | document-hash)"
     )
 
 

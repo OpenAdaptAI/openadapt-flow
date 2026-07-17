@@ -41,6 +41,11 @@ class RestRecordVerifier:
             body is itself a JSON list, pass ``None``.
         session: Optional ``requests``-style session (injectable for tests /
             auth headers); a module-level default is used when omitted.
+        headers: Optional headers sent with every read (the kit's
+            secret-isolated auth path: ``effects.auth`` in a deployment YAML
+            resolves an env-var reference to these headers at construction --
+            see ``runtime.effects.auth.AuthRef``). ``None`` -> no extra
+            headers, byte-identical to the pre-kit behavior.
         timeout_s: Per-request timeout in seconds.
         poll_interval_s: Gap between reachability retries while polling for
             the write to land within ``Effect.timeout_s``.
@@ -55,12 +60,14 @@ class RestRecordVerifier:
         records_path: str = "/api/db",
         records_key: Optional[str] = "records",
         session: Any = None,
+        headers: Optional[dict[str, str]] = None,
         timeout_s: float = 5.0,
         poll_interval_s: float = 0.2,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.records_path = records_path
         self.records_key = records_key
+        self.headers = dict(headers) if headers else None
         self.timeout_s = timeout_s
         self.poll_interval_s = poll_interval_s
         self._session = session
@@ -82,7 +89,15 @@ class RestRecordVerifier:
         """
         url = f"{self.base_url}{self.records_path}"
         try:
-            resp = self._get_session().get(url, timeout=self.timeout_s)
+            # ``headers`` is passed ONLY when configured, so injected
+            # ``requests``-style sessions with a narrower ``get`` signature
+            # (tests, custom oracles) keep working exactly as before.
+            if self.headers:
+                resp = self._get_session().get(
+                    url, timeout=self.timeout_s, headers=self.headers
+                )
+            else:
+                resp = self._get_session().get(url, timeout=self.timeout_s)
         except Exception:  # noqa: BLE001 - any transport failure is unreadable
             return None
         if resp.status_code // 100 != 2:

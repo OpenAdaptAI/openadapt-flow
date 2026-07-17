@@ -149,11 +149,14 @@ jobs:
             openadapt_flow/runtime/replayer.py \
             openadapt_flow/runtime/resolver.py \
             openadapt_flow/runtime/effects/effect.py \
+            openadapt_flow/runtime/effects/auth.py \
             openadapt_flow/runtime/effects/compensation.py \
             openadapt_flow/runtime/effects/document_hash.py \
             openadapt_flow/runtime/effects/fhir.py \
+            openadapt_flow/runtime/effects/file_arrival.py \
             openadapt_flow/runtime/effects/onscreen.py \
             openadapt_flow/runtime/effects/rest.py \
+            openadapt_flow/runtime/effects/sql.py \
             openadapt_flow/compiler/compile.py \
             openadapt_flow/compiler/codegen.py \
             openadapt_flow/compiler/annotate.py \

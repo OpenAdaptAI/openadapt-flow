@@ -177,7 +177,7 @@ def _resolve_worklists(
     return worklists
 
 
-def _deployment_runtime(args: argparse.Namespace):
+def _deployment_runtime(args: argparse.Namespace, params: dict[str, str] | None = None):
     """Resolve the deployment wiring for a replay/run from ``--config`` + flags.
 
     Returns ``(cfg, effect_verifier, api_actuator, durable, allow_egress)``.
@@ -185,6 +185,12 @@ def _deployment_runtime(args: argparse.Namespace):
     FHIR search params, ...); direct flags override the common fields. With
     neither, everything is default: no verifier, no actuator, non-durable, and
     egress only if ``--allow-model-grounding`` was passed (fully back-compatible).
+
+    ``params`` (the governed ``--params-file`` / ``--param`` values) binds an
+    effect-verifier config's explicit ``{param: ...}`` references
+    (``effects.path_params`` / ``search_param_exprs`` / ``sql_query_params``)
+    at construction — see ``docs/EFFECT_KIT.md``. A config with no references
+    ignores it.
     """
     from openadapt_flow.deployment import (
         DeploymentConfig,
@@ -216,7 +222,7 @@ def _deployment_runtime(args: argparse.Namespace):
         actuation = actuation.model_copy(update={"api": True})
 
     try:
-        effect_verifier = build_effect_verifier(effects)
+        effect_verifier = build_effect_verifier(effects, params=params)
         api_actuator = build_api_actuator(actuation)
     except ValueError as e:
         raise SystemExit(str(e))
@@ -619,7 +625,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         api_actuator,
         durable,
         allow_egress,
-    ) = _deployment_runtime(args)
+    ) = _deployment_runtime(args, params=params)
     worklists = _resolve_worklists(getattr(args, "worklist", None), workflow)
 
     # Backend selection (--backend web|windows|rdp, overriding --config). A
@@ -758,7 +764,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"run REFUSED: bundle could not be loaded safely: {e}")
         return 2
 
-    cfg, effect_verifier, api_actuator, _durable, _egress = _deployment_runtime(args)
+    gate_params = _replay_params(args.param, getattr(args, "params_file", None))
+    cfg, effect_verifier, api_actuator, _durable, _egress = _deployment_runtime(
+        args, params=gate_params
+    )
     policy_source = args.policy or cfg.policy.policy
 
     report = evaluate_run_gate(
@@ -849,7 +858,12 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         api_actuator,
         _durable,
         allow_egress,
-    ) = _deployment_runtime(args)
+    ) = _deployment_runtime(
+        args,
+        params=_replay_params(
+            getattr(args, "param", None), getattr(args, "params_file", None)
+        ),
+    )
 
     # Route the resumed run through the SAME backend factory as replay/run
     # (--backend / --agent-url / --rdp-host over --config), so a resume drives
@@ -1528,11 +1542,13 @@ def _add_deployment_flags(
     )
     p.add_argument(
         "--effects-kind",
-        choices=["none", "rest", "fhir", "document-hash"],
+        choices=["none", "rest", "fhir", "sql", "file", "document-hash"],
         default=None,
         help=(
             "System-of-record EffectVerifier to wire so consequential writes "
-            "are verified against the real record (not the screen)"
+            "are verified against the real record (not the screen). The sql/"
+            "file kinds need their config fields (sql_query, root, ...) from "
+            "a --config deployment YAML"
         ),
     )
     p.add_argument(
@@ -1918,6 +1934,27 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Refuse to resume unless the pending escalation is 'approved' "
             "(see `approve`)"
+        ),
+    )
+    # A deployment whose effect verifier binds run parameters
+    # (effects.path_params / search_param_exprs / sql_query_params) needs the
+    # SAME params to rebuild the verifier on resume — without them the
+    # construction fails loud and the resume refuses. Mirror replay/run.
+    p.add_argument(
+        "--param",
+        action="append",
+        metavar="K=V",
+        help=(
+            "Parameter substitution (repeatable); required again on resume "
+            "when the effect-verifier config binds run parameters"
+        ),
+    )
+    p.add_argument(
+        "--params-file",
+        default=None,
+        help=(
+            "JSON object of parameter bindings; keeps values out of process "
+            "arguments for managed execution (see --param)"
         ),
     )
     _add_backend_flags(p)

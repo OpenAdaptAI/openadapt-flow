@@ -29,6 +29,9 @@ benchmark/cosmetic_drift/_recording/
 benchmark/fault_model/runs/
 benchmark/fault_model/_bundle/
 benchmark/fault_model/_recording/
+# openIMIS claims reference environment: recordings, bundles, generated
+# stack secrets, and media captures all stay local.
+benchmark/openimis_claims/out/
 .venv-phi/
 
 # --- PHI governance (audit REM-1): keep compiled bundles out of git ---

@@ -8,8 +8,9 @@ programmatic control plane the pipeline drives; there are no manual GUI steps.
 Everything is built on ``prlctl``:
 
 * lifecycle: ``status`` / ``start`` / ``stop`` / ``suspend`` / ``resume``
-* reversibility: ``snapshot`` / ``list_snapshots`` / ``revert`` (never delete
-  the user's snapshots — reverts only)
+* reversibility: ``snapshot`` / ``list_snapshots`` / ``revert``; qualification
+  harnesses may delete only the exact ephemeral snapshot id they just created
+  after a verified switch back to a preserved base
 * in-guest execution: ``exec`` runs as ``NT AUTHORITY\\SYSTEM`` in session 0
 * host-side screen capture: ``capture`` (``prlctl capture`` — bypasses the
   session-0 desktop-isolation that blocks an in-guest ``BitBlt``)
@@ -43,6 +44,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # The user's existing VM (see docs/desktop/PHASE2.md). Overridable per call.
 DEFAULT_VM_UUID = "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
 DEFAULT_PRLCTL = "/usr/local/bin/prlctl"
+MIN_QUALIFICATION_HOST_FREE_BYTES = 16 * 1024**3
 SHIM_PORT = 5000
 _SCRIPT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "desktop")
 # In-guest install locations (forward slashes: Python + curl accept them and
@@ -213,6 +215,37 @@ class ParallelsVM:
             time.sleep(1)
         time.sleep(settle_s)
 
+    def require_host_free_space(
+        self,
+        *,
+        minimum_bytes: int = MIN_QUALIFICATION_HOST_FREE_BYTES,
+        storage_path: str | os.PathLike[str] = ".",
+    ) -> int:
+        """Fail before VM mutation when its host volume lacks safe headroom.
+
+        Snapshot creation can consume many GiB and Parallels may fail a later
+        switch or suspend when the host volume fills. Qualification callers
+        pass a path on the VM bundle's volume (the workspace and VM share one
+        volume in the supported local harness). The free-byte count is returned
+        for evidence; no VM command runs on refusal.
+        """
+        if minimum_bytes <= 0:
+            raise ValueError("minimum_bytes must be positive")
+        try:
+            free_bytes = shutil.disk_usage(storage_path).free
+        except OSError as exc:
+            raise ParallelsError(
+                f"cannot inspect host free space at {os.fspath(storage_path)!r}"
+            ) from exc
+        if free_bytes < minimum_bytes:
+            gib = 1024**3
+            raise ParallelsError(
+                "insufficient host free space for a snapshot-safe qualification: "
+                f"{free_bytes / gib:.1f} GiB available, "
+                f"{minimum_bytes / gib:.1f} GiB required"
+            )
+        return free_bytes
+
     # -- snapshots (reversibility) ------------------------------------------
 
     def snapshot(self, name: str, description: str = "") -> str:
@@ -248,6 +281,58 @@ class ParallelsVM:
     def revert(self, snapshot_id: str) -> None:
         """Revert to a snapshot (the per-run clean-state reset)."""
         self._run(["snapshot-switch", self.uuid, "-i", snapshot_id])
+
+    def delete_owned_snapshot(self, snapshot_id: str) -> None:
+        """Delete one exact harness-owned snapshot, never its children.
+
+        This primitive is intentionally singular and has no ``children`` or
+        name-based mode. Callers must retain the id returned by :meth:`snapshot`
+        and must first switch to their preserved base with
+        :meth:`restore_base_and_delete_owned_snapshot`.
+        """
+        snapshot_pattern = (
+            r"\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}"
+        )
+        if re.fullmatch(snapshot_pattern, snapshot_id) is None:
+            raise ValueError("snapshot_id must be one exact braced UUID")
+        self._run(["snapshot-delete", self.uuid, "-i", snapshot_id])
+
+    def restore_base_and_delete_owned_snapshot(
+        self,
+        *,
+        base_snapshot_id: str,
+        owned_snapshot_id: str,
+    ) -> None:
+        """Switch to a preserved base, then delete one trial snapshot safely.
+
+        The deletion is attempted only after ``snapshot-list`` proves the base
+        is current. A post-check proves the owned id is gone and the base is
+        still current. Any failure stops immediately and leaves the evidence
+        trial rejected.
+        """
+        if base_snapshot_id == owned_snapshot_id:
+            raise ValueError("refusing to delete the preserved base snapshot")
+        before = self.list_snapshots()
+        before_ids = {item.snapshot_id for item in before}
+        if base_snapshot_id not in before_ids:
+            raise ParallelsError("preserved base snapshot is missing")
+        if owned_snapshot_id not in before_ids:
+            raise ParallelsError("owned trial snapshot is missing")
+        self.revert(base_snapshot_id)
+        switched = self.list_snapshots()
+        if not any(
+            item.snapshot_id == base_snapshot_id and item.current for item in switched
+        ):
+            raise ParallelsError("preserved base did not become current")
+        self.delete_owned_snapshot(owned_snapshot_id)
+        after = self.list_snapshots()
+        if any(item.snapshot_id == owned_snapshot_id for item in after):
+            raise ParallelsError("owned trial snapshot still exists after deletion")
+        if not any(
+            item.snapshot_id == base_snapshot_id and item.current for item in after
+        ):
+            raise ParallelsError("preserved base stopped being current after deletion")
 
     # -- in-guest execution --------------------------------------------------
 

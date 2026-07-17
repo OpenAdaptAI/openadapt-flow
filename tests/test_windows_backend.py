@@ -202,7 +202,9 @@ def waa() -> MockWaa:
 @pytest.fixture()
 def backend(waa: MockWaa) -> WindowsBackend:
     waa.reset()
-    return WindowsBackend(waa.url, screenshot_retry_delay_s=0.01)
+    return WindowsBackend(
+        waa.url, screenshot_retry_delay_s=0.01, allow_legacy_exec=True
+    )
 
 
 class FakePyautogui(types.ModuleType):
@@ -300,7 +302,17 @@ def test_auth_header_sent_when_token_set() -> None:
             seen["auth"] = self.headers.get("Authorization", "")
             length = int(self.headers.get("Content-Length") or 0)
             self.rfile.read(length)
-            body = json.dumps({"status": "ok"}).encode()
+            body = json.dumps(
+                {
+                    "status": "delivered",
+                    "receipt_id": "physical-1",
+                    "operation": "physical_click",
+                    "native": False,
+                    "target_fingerprint": None,
+                    "delivered_at": "2026-07-17T00:00:00+00:00",
+                    "outcome_verified": False,
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -339,7 +351,10 @@ def test_screenshot_retries_then_succeeds(
 
 def test_screenshot_fails_after_retries(waa: MockWaa) -> None:
     backend = WindowsBackend(
-        waa.url, screenshot_max_retries=2, screenshot_retry_delay_s=0.01
+        waa.url,
+        screenshot_max_retries=2,
+        screenshot_retry_delay_s=0.01,
+        allow_legacy_exec=True,
     )
     waa.screenshot_failures = 5
     with pytest.raises(RuntimeError, match="screenshot failed after 2"):
@@ -367,7 +382,11 @@ def test_double_click_command(
 
 
 def test_execute_error_raises(waa: MockWaa) -> None:
-    backend = WindowsBackend(waa.url + "/missing", screenshot_retry_delay_s=0.01)
+    backend = WindowsBackend(
+        waa.url + "/missing",
+        screenshot_retry_delay_s=0.01,
+        allow_legacy_exec=True,
+    )
     with pytest.raises(RuntimeError):
         backend.click(1, 1)
 

@@ -11,7 +11,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
-    from openadapt_flow.ir import StructuralHandle, StructuralLocator
+    from openadapt_flow.ir import (
+        ActionDeliveryReceipt,
+        StructuralHandle,
+        StructuralLocator,
+    )
+
+
+class StructuralResolutionRefused(RuntimeError):
+    """A structural backend found candidates but could not prove uniqueness.
+
+    This is a safety refusal, not an ordinary miss. The resolver must not hide
+    it by falling through to a weaker visual rung that could choose one of the
+    same ambiguous controls.
+    """
 
 
 @runtime_checkable
@@ -180,15 +193,34 @@ class StructuralActionBackend(Protocol):
     def locate_structural(
         self, locator: "StructuralLocator"
     ) -> Optional["StructuralHandle"]:
-        """Locate ``locator``'s element on the live surface; return its point.
+        """Locate ``locator``'s unique element on the live surface.
 
-        Returns a :class:`~openadapt_flow.ir.StructuralHandle` whose ``point``
-        is the element's center (same coordinate space as :meth:`Backend.click`)
-        on a unique, actionable match, or None when the element is absent, not
-        uniquely resolvable, off-screen, or the substrate exposes no structured
-        layer (never raises) -- the resolver then falls through to the visual
-        rungs.
+        A backend MUST raise :class:`StructuralResolutionRefused` when one or
+        more candidates exist but uniqueness cannot be established. ``None``
+        is reserved for an ordinary miss/unavailable structural substrate, so
+        the runtime cannot hide ambiguity by falling through to visual match.
         """
+        ...
+
+
+@runtime_checkable
+class NativeStructuralActionBackend(Protocol):
+    """Optional native element actuation after governed structural resolution.
+
+    ``act_structural`` re-resolves the exact locator, requires the candidate
+    fingerprint returned by ``locate_structural``, and uses the strongest UIA
+    pattern available. Its receipt proves input delivery only; postconditions
+    and independent effects remain authoritative for outcome verification.
+    """
+
+    def act_structural(
+        self,
+        locator: "StructuralLocator",
+        handle: "StructuralHandle",
+        *,
+        double: bool = False,
+    ) -> "ActionDeliveryReceipt":
+        """Deliver a native action to the same unique structural candidate."""
         ...
 
 

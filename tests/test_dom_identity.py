@@ -29,7 +29,6 @@ from openadapt_flow.runtime.identity import (
     verify_structured_identity,
 )
 
-
 # ---------------------------------------------------------------------------
 # normalize_structured: O/0 stay DISTINCT (that is the whole point)
 # ---------------------------------------------------------------------------
@@ -195,13 +194,17 @@ class _FakeSession:
 
     def post(self, url, json=None, timeout=None):
         self.posted.append(json)
-        return self._resp
+        if url.endswith("/execute_windows"):
+            return self._resp
+        return _Resp(status_code=404, text="not found")
 
 
 def _win_backend(resp):
     from openadapt_flow.backends.windows_backend import WindowsBackend
 
-    return WindowsBackend(session=_FakeSession(resp), viewport=(800, 600))
+    return WindowsBackend(
+        session=_FakeSession(resp), viewport=(800, 600), allow_legacy_exec=True
+    )
 
 
 def test_windows_structured_text_returns_echoed_uia_text() -> None:
@@ -282,6 +285,7 @@ def test_playwright_structured_text_distinguishes_glyph_siblings() -> None:
 # ---------------------------------------------------------------------------
 
 import io as _io  # noqa: E402
+
 from PIL import Image as _Image  # noqa: E402
 
 from openadapt_flow.runtime.replayer import Replayer  # noqa: E402

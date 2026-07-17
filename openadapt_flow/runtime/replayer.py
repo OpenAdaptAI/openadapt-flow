@@ -42,7 +42,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from openadapt_flow.backend import Backend
+from openadapt_flow.backend import Backend, StructuralResolutionRefused
 from openadapt_flow.bundle_validation import compute_parameter_schema_digest
 from openadapt_flow.ir import (
     ActionKind,
@@ -105,6 +105,7 @@ PC_TEMPLATE_THRESHOLD = 0.9
 # known (keyboard-only focus moves, e.g. Tab between fields), the whole
 # frame is used instead.
 FIELD_REGION_SIZE = (640, 240)
+FIELD_REGION_PAD = 16
 
 # Typed-input verification, diff-only acceptance: when the typed value is
 # OCR-able but OCR cannot find it, a pixel change alone is accepted only if
@@ -387,6 +388,7 @@ class Replayer:
         # Point of the most recent successful click (the focusing click for
         # a following TYPE step); reset per run.
         self._last_click_point: Optional[Point] = None
+        self._last_click_region: Optional[Region] = None
         # Stable-per-run identity; (re)assigned at the top of run(). Present as
         # an empty default so a direct _execute_step call (tests) still resolves
         # effect contracts (a literal effect ignores it).
@@ -558,6 +560,7 @@ class Replayer:
         new_crops: dict[str, bytes] = {}
         # Per-run reset; the attribute is declared in __init__.
         self._last_click_point = None
+        self._last_click_region = None
         t_run = time.monotonic()
 
         # Fail fast, naming them, when a REQUIRED typed parameter has no value
@@ -2140,6 +2143,16 @@ class Replayer:
                     result.ok = False
                     error = heal_outcome.halt_reason
                     result.error = error
+        except StructuralResolutionRefused as exc:
+            # Ambiguity, disappearance, or a stale resolve->act fingerprint is
+            # an intentional fail-closed refusal. Record it as a safety halt,
+            # never as an incidental backend crash and never retry via pixels.
+            result.ok = False
+            result.safety_halt = True
+            result.error = (
+                f"Structural safety refusal for step '{step.id}' "
+                f"({step.intent}): {exc} — no action was admitted"
+            )
         except Exception as exc:  # defensive: report, don't crash the run
             result.ok = False
             result.error = f"Step '{step.id}' raised {type(exc).__name__}: {exc}"
@@ -2503,8 +2516,29 @@ class Replayer:
         if step.action in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK):
             assert resolution is not None  # guaranteed by _resolve_step
             x, y = resolution.point
-            self.backend.click(x, y, double=step.action is ActionKind.DOUBLE_CLICK)
+            native_act = getattr(self.backend, "act_structural", None)
+            if (
+                resolution.rung == "structural"
+                and resolution.structural_handle is not None
+                and step.anchor is not None
+                and step.anchor.structural is not None
+                and callable(native_act)
+            ):
+                result.delivery_receipt = native_act(
+                    step.anchor.structural,
+                    resolution.structural_handle,
+                    double=step.action is ActionKind.DOUBLE_CLICK,
+                )
+                result.actuation = "uia"
+            else:
+                self.backend.click(x, y, double=step.action is ActionKind.DOUBLE_CLICK)
             self._last_click_point = (x, y)
+            self._last_click_region = (
+                resolution.structural_handle.region
+                if resolution.rung == "structural"
+                and resolution.structural_handle is not None
+                else None
+            )
             return None
 
         if step.action is ActionKind.TYPE:
@@ -2546,20 +2580,49 @@ class Replayer:
             # field point — verification diffs the whole frame and the
             # retry cannot re-click.
             field_point: Optional[Point] = None
+            field_region: Optional[Region] = None
             if resolution is not None:
                 # Anchored TYPE: click to focus the field first.
                 x, y = resolution.point
-                self.backend.click(x, y)
+                native_act = getattr(self.backend, "act_structural", None)
+                if (
+                    resolution.rung == "structural"
+                    and resolution.structural_handle is not None
+                    and step.anchor is not None
+                    and step.anchor.structural is not None
+                    and callable(native_act)
+                ):
+                    result.delivery_receipt = native_act(
+                        step.anchor.structural,
+                        resolution.structural_handle,
+                    )
+                    result.actuation = "uia"
+                else:
+                    self.backend.click(x, y)
                 field_point = (x, y)
+                field_region = (
+                    resolution.structural_handle.region
+                    if resolution.rung == "structural"
+                    and resolution.structural_handle is not None
+                    else None
+                )
                 # Fresh baseline AFTER the focusing click so its own focus
                 # ring never counts as "input landed".
                 before_png = self.backend.screenshot()
             elif self._prev_was_click(workflow, step_index, graph_ctx):
                 field_point = self._last_click_point
+                field_region = self._last_click_region
             self.backend.type_text(text)
             if not text:
                 return None  # nothing typed, nothing to verify
-            return self._verify_typed_input(step, text, field_point, before_png, result)
+            return self._verify_typed_input(
+                step,
+                text,
+                field_point,
+                before_png,
+                result,
+                field_region=field_region,
+            )
 
         if step.action is ActionKind.KEY:
             if not step.key:
@@ -3038,11 +3101,23 @@ class Replayer:
 
     # -- typed-input verification -------------------------------------------------
 
-    def _field_region(self, field_point: Optional[Point]) -> Optional[Region]:
+    def _field_region(
+        self,
+        field_point: Optional[Point],
+        structural_region: Optional[Region] = None,
+    ) -> Optional[Region]:
         """Region to observe for typed input, or None for the whole frame."""
+        vw, vh = self.backend.viewport
+        if structural_region is not None:
+            sx, sy, sw, sh = structural_region
+            x = max(0, sx - FIELD_REGION_PAD)
+            y = max(0, sy - FIELD_REGION_PAD)
+            right = min(vw, sx + sw + FIELD_REGION_PAD)
+            bottom = min(vh, sy + sh + FIELD_REGION_PAD)
+            if right > x and bottom > y:
+                return (x, y, right - x, bottom - y)
         if field_point is None:
             return None
-        vw, vh = self.backend.viewport
         w = min(FIELD_REGION_SIZE[0], vw)
         h = min(FIELD_REGION_SIZE[1], vh)
         x = min(max(0, field_point[0] - w // 2), max(0, vw - w))
@@ -3079,7 +3154,12 @@ class Replayer:
         return total
 
     def _typed_input_landed(
-        self, text: str, field_point: Optional[Point], baseline_png: bytes
+        self,
+        text: str,
+        field_point: Optional[Point],
+        baseline_png: bytes,
+        *,
+        field_region: Optional[Region] = None,
     ) -> tuple[bool, bool]:
         """Did the just-typed ``text`` visibly land?
 
@@ -3099,7 +3179,7 @@ class Replayer:
             retyping is only safe when nothing changed).
         """
         after_png = self.vision.wait_settled(self.backend)
-        region = self._field_region(field_point)
+        region = self._field_region(field_point, field_region)
         changed = self.vision.pixels_changed(baseline_png, after_png, region=region)
         needle = identity_mod.squash(text)
         if len(needle) < identity_mod.MIN_PARAM_CHARS:
@@ -3135,6 +3215,8 @@ class Replayer:
         field_point: Optional[Point],
         baseline_png: bytes,
         result: StepResult,
+        *,
+        field_region: Optional[Region] = None,
     ) -> Optional[str]:
         """Verify a TYPE action landed; one guarded refocus-and-retype retry.
 
@@ -3150,7 +3232,12 @@ class Replayer:
         confirmed must never be reported as success (VALIDATION.md 'focus
         stolen' finding).
         """
-        landed, changed = self._typed_input_landed(text, field_point, baseline_png)
+        landed, changed = self._typed_input_landed(
+            text,
+            field_point,
+            baseline_png,
+            field_region=field_region,
+        )
         if landed:
             result.input_verified = True
             return None
@@ -3171,7 +3258,12 @@ class Replayer:
             self.backend.press("ControlOrMeta+a")
         retry_baseline = self.backend.screenshot()
         self.backend.type_text(text)
-        landed, _changed = self._typed_input_landed(text, field_point, retry_baseline)
+        landed, _changed = self._typed_input_landed(
+            text,
+            field_point,
+            retry_baseline,
+            field_region=field_region,
+        )
         if landed:
             result.input_verified = True
             return None

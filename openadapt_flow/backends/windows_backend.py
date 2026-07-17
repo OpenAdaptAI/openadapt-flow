@@ -38,12 +38,18 @@ from __future__ import annotations
 import base64
 import struct
 import warnings
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlparse
 
 import requests
 
-from openadapt_flow.ir import StructuralHandle, StructuralLocator
+from openadapt_flow.backend import StructuralResolutionRefused
+from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
+    StructuralHandle,
+    StructuralLocator,
+)
 
 DEFAULT_SERVER_URL = "http://localhost:5001"
 
@@ -63,6 +69,19 @@ SCREENSHOT_RETRY_DELAY_S = 2.0
 SCROLL_PIXELS_PER_NOTCH = 100
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+@dataclass(frozen=True)
+class _TypedResponse:
+    """Result of a tolerant typed observation request."""
+
+    available: bool
+    payload: Optional[dict]
+
+
+class _TypedRouteUnavailable(RuntimeError):
+    """An explicitly legacy-enabled dev agent lacks the typed endpoint."""
+
 
 # Playwright-style modifier names (as recorded / emitted by the replayer,
 # e.g. 'ControlOrMeta+a') -> pyautogui key names. On Windows the Meta/Command
@@ -196,6 +215,7 @@ class WindowsBackend:
         pin_fingerprint: Optional[str] = None,
         require_tls: Optional[bool] = None,
         session: Optional[requests.Session] = None,
+        allow_legacy_exec: bool = False,
     ) -> None:
         self.server_url = server_url.rstrip("/")
         self._viewport = viewport
@@ -205,6 +225,7 @@ class WindowsBackend:
         self._screenshot_retry_delay_s = screenshot_retry_delay_s
         self._auth_token = auth_token or None
         self._pin_fingerprint = pin_fingerprint or None
+        self._allow_legacy_exec = bool(allow_legacy_exec)
 
         scheme = urlparse(self.server_url).scheme.lower()
         host = urlparse(self.server_url).hostname or ""
@@ -309,6 +330,111 @@ class WindowsBackend:
             f"screenshot failed after {self._screenshot_max_retries} attempts"
         ) from last_error
 
+    def _post_typed_read(self, path: str, payload: dict) -> _TypedResponse:
+        """POST a typed observation without turning absence into an action.
+
+        A 404 means an older development agent lacks the typed contract. It is
+        distinguishable from a successful ``None`` observation so explicitly
+        legacy-enabled callers can use the compatibility path. Every other
+        error is an unavailable observation and therefore falls through to the
+        visual/OCR ladder; it never fabricates a structural result.
+        """
+        try:
+            response = self._session.post(
+                f"{self.server_url}{path}",
+                json=payload,
+                **self._request_kwargs(),
+            )
+        except Exception:
+            return _TypedResponse(False, None)
+        if response.status_code == 404:
+            return _TypedResponse(False, None)
+        if response.status_code != 200:
+            return _TypedResponse(True, None)
+        try:
+            data = response.json()
+        except Exception:
+            return _TypedResponse(True, None)
+        if not isinstance(data, dict) or data.get("status") != "ok":
+            return _TypedResponse(True, None)
+        return _TypedResponse(True, data)
+
+    def _post_typed_action(self, path: str, payload: dict) -> dict:
+        """POST a bounded typed action and fail loudly on non-delivery."""
+        try:
+            response = self._session.post(
+                f"{self.server_url}{path}",
+                json=payload,
+                **self._request_kwargs(),
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"typed win-agent action {path} unreachable: {exc}"
+            ) from exc
+        if response.status_code != 200:
+            if response.status_code == 404:
+                raise _TypedRouteUnavailable(
+                    f"typed win-agent route {path} unavailable"
+                )
+            code: Optional[str] = None
+            message: Optional[str] = None
+            try:
+                error = response.json()
+            except Exception:
+                error = None
+            if isinstance(error, dict):
+                code = error.get("code") if isinstance(error.get("code"), str) else None
+                message = (
+                    error.get("error") if isinstance(error.get("error"), str) else None
+                )
+            if (
+                path == "/uia/act"
+                and response.status_code == 409
+                and code
+                in {
+                    "ambiguous_target",
+                    "native_action_failed",
+                    "native_action_unavailable",
+                    "stale_target",
+                    "target_not_found",
+                }
+            ):
+                raise StructuralResolutionRefused(
+                    f"UIA actuation refused ({code}): {message or 'target changed'}"
+                )
+            raise RuntimeError(
+                f"typed win-agent action {path} HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"typed win-agent action {path} returned invalid JSON"
+            ) from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"typed win-agent action {path} returned invalid payload"
+            )
+        return data
+
+    @staticmethod
+    def _validate_physical_receipt(payload: dict, operation: str) -> None:
+        """Require exact input-delivery evidence before treating HTTP 200 as success."""
+        try:
+            receipt = ActionDeliveryReceipt.model_validate(payload)
+        except Exception as exc:
+            raise RuntimeError(
+                "typed input returned an invalid delivery receipt"
+            ) from exc
+        if (
+            receipt.operation != operation
+            or receipt.native
+            or receipt.target_fingerprint is not None
+            or receipt.outcome_verified is not False
+        ):
+            raise RuntimeError("typed input returned a mismatched delivery receipt")
+
     # -- structured-text identity (openadapt_flow.backend.IdentityBackend) --
 
     def structured_text_at(self, x: int, y: int) -> Optional[str]:
@@ -333,6 +459,13 @@ class WindowsBackend:
         unavailable, or when nothing is under the point (never raises) -- the
         identity ladder then falls back to the OCR tier.
         """
+        typed = self._post_typed_read("/uia/text-at-point", {"x": int(x), "y": int(y)})
+        if typed.available:
+            value = typed.payload.get("text") if typed.payload is not None else None
+            return str(value) if isinstance(value, str) and value else None
+        if not self._allow_legacy_exec:
+            return None
+
         snippet = (
             "import json\n"
             "def _oaflow_structured_text_at(px, py):\n"
@@ -424,6 +557,8 @@ class WindowsBackend:
         non-200, missing output, or transport failure -- identity then falls
         back to OCR.
         """
+        if not self._allow_legacy_exec:
+            return None
         try:
             resp = self._session.post(
                 f"{self.server_url}/execute_windows",
@@ -485,6 +620,18 @@ class WindowsBackend:
         unavailable, or the WAA server does not echo output (never raises) --
         the step then relies on the visual anchor.
         """
+        typed = self._post_typed_read("/uia/locator-at", {"x": int(x), "y": int(y)})
+        if typed.available:
+            value = typed.payload.get("locator") if typed.payload is not None else None
+            if not isinstance(value, dict):
+                return None
+            try:
+                return StructuralLocator.model_validate(value)
+            except Exception:
+                return None
+        if not self._allow_legacy_exec:
+            return None
+
         snippet = (
             "import json\n"
             "def _oaflow_locator_at(px, py):\n"
@@ -549,6 +696,7 @@ class WindowsBackend:
             automation_id=value.get("automation_id"),
             role=value.get("role"),
             name=value.get("name"),
+            window_name=value.get("window_name"),
         )
 
     def locate_structural(
@@ -567,6 +715,74 @@ class WindowsBackend:
         name = locator.name or ""
         if not aid and not (role and name):
             return None
+        typed = self._post_typed_read(
+            "/uia/find",
+            {"locator": locator.model_dump(mode="json", exclude_none=True)},
+        )
+        if typed.available:
+            payload = typed.payload
+            if payload is None:
+                return None
+            match = payload.get("match")
+            candidate_count = payload.get("candidate_count")
+            truncated = payload.get("truncated") is True
+            candidates = payload.get("candidates")
+            if match == "not_found":
+                return None
+            if match == "ambiguous" or truncated:
+                raise StructuralResolutionRefused(
+                    "UIA locator is ambiguous: "
+                    f"candidate_count={candidate_count!r}, truncated={truncated}"
+                )
+            if (
+                match != "unique"
+                or candidate_count != 1
+                or not isinstance(candidates, list)
+                or len(candidates) != 1
+                or not isinstance(candidates[0], dict)
+            ):
+                return None
+            candidate = candidates[0]
+            point = candidate.get("point")
+            bounds = candidate.get("bounds")
+            fingerprint = candidate.get("fingerprint")
+            operations = candidate.get("supported_operations", [])
+            if (
+                not isinstance(point, list)
+                or len(point) != 2
+                or not all(
+                    isinstance(item, int) and not isinstance(item, bool)
+                    for item in point
+                )
+                or not isinstance(fingerprint, str)
+                or len(fingerprint) != 64
+                or not isinstance(bounds, list)
+                or len(bounds) != 4
+                or not all(
+                    isinstance(item, int) and not isinstance(item, bool)
+                    for item in bounds
+                )
+                or bounds[2] <= bounds[0]
+                or bounds[3] <= bounds[1]
+                or not isinstance(operations, list)
+                or any(not isinstance(item, str) for item in operations)
+            ):
+                return None
+            return StructuralHandle(
+                point=(point[0], point[1]),
+                region=(
+                    bounds[0],
+                    bounds[1],
+                    bounds[2] - bounds[0],
+                    bounds[3] - bounds[1],
+                ),
+                target_fingerprint=fingerprint,
+                candidate_count=1,
+                supported_operations=operations,
+            )
+        if not self._allow_legacy_exec:
+            return None
+
         snippet = (
             "import json\n"
             "def _oaflow_locate(aid, role, name):\n"
@@ -624,8 +840,69 @@ class WindowsBackend:
             return None
         return StructuralHandle(point=(int(value[0]), int(value[1])))
 
+    def act_structural(
+        self,
+        locator: StructuralLocator,
+        handle: StructuralHandle,
+        *,
+        double: bool = False,
+    ) -> ActionDeliveryReceipt:
+        """Deliver a native UIA action to the same uniquely resolved target.
+
+        The receipt is intentionally an input-delivery artifact only. Runtime
+        postconditions and system-of-record effects still decide whether the
+        workflow step succeeded.
+        """
+        fingerprint = handle.target_fingerprint
+        if not fingerprint:
+            raise RuntimeError("native UIA actuation requires a target fingerprint")
+        response = self._post_typed_action(
+            "/uia/act",
+            {
+                "locator": locator.model_dump(mode="json", exclude_none=True),
+                "expected_fingerprint": fingerprint,
+                "operation": "double_click" if double else "click",
+            },
+        )
+        if response.get("candidate_count") != 1:
+            raise RuntimeError("typed UIA action omitted unique-candidate evidence")
+        receipt = response.get("receipt")
+        try:
+            parsed = ActionDeliveryReceipt.model_validate(receipt)
+        except Exception as exc:
+            raise RuntimeError(
+                "typed UIA action returned an invalid delivery receipt"
+            ) from exc
+        if (
+            not parsed.native
+            or parsed.target_fingerprint != fingerprint
+            or not parsed.operation.startswith("uia_")
+            or parsed.outcome_verified is not False
+        ):
+            raise RuntimeError(
+                "typed UIA action returned a mismatched delivery receipt"
+            )
+        return parsed
+
     def click(self, x: int, y: int, *, double: bool = False) -> None:
-        """Click (or double-click) at pixel coordinates via pyautogui."""
+        """Click (or double-click) through the bounded typed input contract."""
+        try:
+            response = self._post_typed_action(
+                "/input",
+                {
+                    "action": "click",
+                    "x": int(x),
+                    "y": int(y),
+                    "double": bool(double),
+                },
+            )
+            self._validate_physical_receipt(
+                response, "physical_double_click" if double else "physical_click"
+            )
+            return
+        except _TypedRouteUnavailable:
+            if not self._allow_legacy_exec:
+                raise
         fn = "doubleClick" if double else "click"
         self._execute(f"import pyautogui; pyautogui.{fn}({int(x)}, {int(y)})")
 
@@ -639,11 +916,24 @@ class WindowsBackend:
         """
         if not text:
             return
+        try:
+            response = self._post_typed_action(
+                "/input",
+                {
+                    "action": "type_text",
+                    "text": text,
+                    "interval_s": self._type_interval_s,
+                },
+            )
+            self._validate_physical_receipt(response, "physical_type_text")
+            return
+        except _TypedRouteUnavailable:
+            if not self._allow_legacy_exec:
+                raise
         if text.isascii():
             self._execute(
                 "import pyautogui; "
-                f"pyautogui.write({text!r}, "
-                f"interval={self._type_interval_s})"
+                f"pyautogui.write({text!r}, interval={self._type_interval_s})"
             )
             return
         b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
@@ -666,6 +956,15 @@ class WindowsBackend:
     def press(self, key: str) -> None:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``."""
         keys = normalize_chord(key)
+        try:
+            response = self._post_typed_action(
+                "/input", {"action": "press", "keys": keys}
+            )
+            self._validate_physical_receipt(response, "physical_press")
+            return
+        except _TypedRouteUnavailable:
+            if not self._allow_legacy_exec:
+                raise
         if len(keys) == 1:
             self._execute(f"import pyautogui; pyautogui.press({keys[0]!r})")
         else:
@@ -679,9 +978,25 @@ class WindowsBackend:
         pyautogui's convention is inverted for vertical scrolling (positive
         = view up), so ``dy`` changes sign; horizontal signs agree.
         """
-        parts: list[str] = ["import pyautogui"]
         v = self._notches(dy)
         h = self._notches(dx)
+        if not v and not h:
+            return
+        try:
+            response = self._post_typed_action(
+                "/input",
+                {
+                    "action": "scroll",
+                    "horizontal_notches": h,
+                    "vertical_notches": -v,
+                },
+            )
+            self._validate_physical_receipt(response, "physical_scroll")
+            return
+        except _TypedRouteUnavailable:
+            if not self._allow_legacy_exec:
+                raise
+        parts: list[str] = ["import pyautogui"]
         if v:
             parts.append(f"pyautogui.scroll({-v})")
         if h:
@@ -715,6 +1030,10 @@ class WindowsBackend:
         Raises:
             RuntimeError: On a transport failure or a non-200 response.
         """
+        if not self._allow_legacy_exec:
+            raise RuntimeError(
+                "legacy arbitrary-exec is disabled; the typed win-agent route is required"
+            )
         try:
             resp = self._session.post(
                 f"{self.server_url}/execute_windows",
@@ -735,3 +1054,31 @@ class WindowsBackend:
             return True
         except RuntimeError:
             return False
+
+    def agent_capabilities(self) -> frozenset[str]:
+        """Return the agent's declared bounded capability set.
+
+        Production qualification uses this to prove the live guest is on the
+        typed contract and did not expose the development-only arbitrary-exec
+        route. Invalid or unreachable health metadata fails closed.
+        """
+        try:
+            response = self._session.get(
+                f"{self.server_url}/health", **self._request_kwargs()
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"win-agent health unreachable: {exc}") from exc
+        if response.status_code != 200:
+            raise RuntimeError(f"win-agent health HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError("win-agent health returned invalid JSON") from exc
+        if not isinstance(payload, dict) or payload.get("status") != "ok":
+            raise RuntimeError("win-agent health returned a non-ok payload")
+        capabilities = payload.get("capabilities")
+        if not isinstance(capabilities, list) or any(
+            not isinstance(item, str) for item in capabilities
+        ):
+            raise RuntimeError("win-agent health omitted valid capabilities")
+        return frozenset(capabilities)

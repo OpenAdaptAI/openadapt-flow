@@ -88,19 +88,13 @@ def build_backend(
                 "backend.kind 'windows' requires backend.agent_url (the "
                 "in-guest WAA agent base URL, e.g. --agent-url http://localhost:5001)"
             )
-        if cfg.agent_tls_pin:
-            # RESERVED for openadapt-flow#112; main's WindowsBackend has no
-            # TLS-pin parameter, so wiring it here would be a lie. Fail loud
-            # rather than silently ignore a security control the operator set.
-            raise ValueError(
-                "backend.agent_tls_pin is reserved for the in-flight TLS-pin "
-                "work (openadapt-flow#112) and is NOT enforced on this build; "
-                "unset it until that lands rather than run with an unpinned "
-                "connection that looks pinned"
-            )
         from openadapt_flow.backends.windows_backend import WindowsBackend
 
-        return WindowsBackend(cfg.agent_url, auth_token=cfg.agent_token)
+        return WindowsBackend(
+            cfg.agent_url,
+            auth_token=cfg.agent_token,
+            pin_fingerprint=cfg.agent_tls_pin,
+        )
 
     if kind == "rdp":
         return _build_rdp_backend(

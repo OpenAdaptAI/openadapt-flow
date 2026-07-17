@@ -1,0 +1,200 @@
+{
+  "caveats": [
+    "This qualifies the named in-tree WinForms workflow and exact VM snapshot, not arbitrary Windows applications.",
+    "Native UIA receipts prove delivery to a re-resolved unique fingerprint; the SQLite oracle, not the receipt, verifies the business outcome.",
+    "Screenshot artifacts remain local and are excluded from this PHI-free evidence file."
+  ],
+  "environment": {
+    "agent_contract": "typed_input_v1 + uia_v1; legacy_exec disabled",
+    "base_snapshot_id": "{35dba943-a22d-473c-b1b0-44fa6326e626}",
+    "substrate": "Parallels Desktop Windows 11 ARM",
+    "transport": "per-run TLS certificate pin plus bearer token",
+    "vm_uuid": "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
+  },
+  "generated_at": "2026-07-17T19:35:25.060076+00:00",
+  "minimum_evidence_standard": {
+    "clean_snapshot_per_trial": true,
+    "required_accepted_trials": 3
+  },
+  "oracle": {
+    "refusal_invariant": "stale and ambiguous UIA actions leave all database rows unchanged",
+    "source": "independent SQLite pn_db.py all query",
+    "success": "target record contains the exact synthetic note and every sibling note remains empty"
+  },
+  "runs": [
+    {
+      "accepted": false,
+      "ambiguity_refusal_passed": false,
+      "clean_restore_passed": true,
+      "completed_at": "2026-07-17T19:18:15+00:00",
+      "exception_type": "AssertionError",
+      "failure_category": "input_verification_over_halt",
+      "legacy_exec_refusal_passed": true,
+      "malformed_input_refusal_passed": true,
+      "matrix_id": "20260717-region-verifier-rejected",
+      "model_calls": 0,
+      "native_receipt_count": 1,
+      "oracle_passed": false,
+      "over_halt": true,
+      "report_success": false,
+      "rung_counts": {
+        "structural": 1
+      },
+      "silent_incorrect_success": false,
+      "stale_refusal_passed": false,
+      "started_at": "2026-07-17T19:17:20.044658+00:00",
+      "total_ms": 7692.663166089915,
+      "trial": 1
+    },
+    {
+      "accepted": false,
+      "ambiguity_refusal_passed": false,
+      "clean_restore_passed": true,
+      "completed_at": "2026-07-17T19:20:05+00:00",
+      "exception_type": "AssertionError",
+      "failure_category": "input_verification_over_halt",
+      "legacy_exec_refusal_passed": true,
+      "malformed_input_refusal_passed": true,
+      "matrix_id": "20260717-region-verifier-rejected",
+      "model_calls": 0,
+      "native_receipt_count": 1,
+      "oracle_passed": false,
+      "over_halt": true,
+      "report_success": false,
+      "rung_counts": {
+        "structural": 1
+      },
+      "silent_incorrect_success": false,
+      "stale_refusal_passed": false,
+      "started_at": "2026-07-17T19:19:11.843647+00:00",
+      "total_ms": 7641.325457952917,
+      "trial": 2
+    },
+    {
+      "accepted": false,
+      "ambiguity_refusal_passed": false,
+      "clean_restore_passed": true,
+      "completed_at": "2026-07-17T19:21:30+00:00",
+      "exception_type": "AssertionError",
+      "failure_category": "input_verification_over_halt",
+      "legacy_exec_refusal_passed": true,
+      "malformed_input_refusal_passed": true,
+      "matrix_id": "20260717-region-verifier-rejected",
+      "model_calls": 0,
+      "native_receipt_count": 1,
+      "oracle_passed": false,
+      "over_halt": true,
+      "report_success": false,
+      "rung_counts": {
+        "structural": 1
+      },
+      "silent_incorrect_success": false,
+      "stale_refusal_passed": false,
+      "started_at": "2026-07-17T19:20:45.262492+00:00",
+      "total_ms": 8130.0344170304015,
+      "trial": 3
+    },
+    {
+      "accepted": true,
+      "ambiguity_refusal_passed": true,
+      "clean_restore_passed": true,
+      "completed_at": "2026-07-17T19:32:51.151611+00:00",
+      "environment": {
+        "base_snapshot_id": "{35dba943-a22d-473c-b1b0-44fa6326e626}",
+        "vm_uuid": "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
+      },
+      "failure_category": null,
+      "legacy_exec_refusal_passed": true,
+      "malformed_input_refusal_passed": true,
+      "matrix_id": "20260717-exact-bounds-v1",
+      "model_calls": 0,
+      "native_receipt_count": 4,
+      "oracle_passed": true,
+      "over_halt": false,
+      "report_success": true,
+      "rung_counts": {
+        "structural": 4
+      },
+      "silent_incorrect_success": false,
+      "stale_refusal_passed": true,
+      "started_at": "2026-07-17T19:30:00.582831+00:00",
+      "total_ms": 25729.91966700647,
+      "trial": 1
+    },
+    {
+      "accepted": false,
+      "ambiguity_refusal_passed": false,
+      "clean_restore_passed": false,
+      "completed_at": "2026-07-17T19:35:25.059521+00:00",
+      "environment": {
+        "base_snapshot_id": "{35dba943-a22d-473c-b1b0-44fa6326e626}",
+        "vm_uuid": "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
+      },
+      "exception_type": "AssertionError",
+      "failure_category": "environment_restore_failure",
+      "legacy_exec_refusal_passed": true,
+      "malformed_input_refusal_passed": true,
+      "matrix_id": "20260717-exact-bounds-v1",
+      "model_calls": 0,
+      "native_receipt_count": 4,
+      "oracle_passed": true,
+      "over_halt": false,
+      "report_success": true,
+      "rung_counts": {
+        "structural": 4
+      },
+      "silent_incorrect_success": false,
+      "stale_refusal_passed": false,
+      "started_at": "2026-07-17T19:32:51.182952+00:00",
+      "total_ms": 26839.715957990848,
+      "trial": 2
+    },
+    {
+      "accepted": false,
+      "ambiguity_refusal_passed": false,
+      "clean_restore_passed": false,
+      "completed_at": "2026-07-17T19:35:26+00:00",
+      "environment": {
+        "base_snapshot_id": "{35dba943-a22d-473c-b1b0-44fa6326e626}",
+        "vm_uuid": "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
+      },
+      "exception_type": "ParallelsError",
+      "failure_category": "host_disk_exhaustion",
+      "legacy_exec_refusal_passed": false,
+      "malformed_input_refusal_passed": false,
+      "matrix_id": "20260717-exact-bounds-v1",
+      "native_receipt_count": 0,
+      "oracle_passed": false,
+      "over_halt": false,
+      "report_success": false,
+      "silent_incorrect_success": false,
+      "stale_refusal_passed": false,
+      "started_at": "2026-07-17T19:35:25.1+00:00",
+      "trial": 3,
+      "trial_snapshot_deleted": false
+    }
+  ],
+  "schema_version": "openadapt.windows-uia.v1",
+  "summary": {
+    "accepted_ambiguity_refusal_count": 1,
+    "accepted_count": 1,
+    "accepted_native_receipt_count": 4,
+    "accepted_stale_refusal_count": 1,
+    "accepted_task_success_count": 1,
+    "failure_taxonomy": {
+      "environment_restore_failure": 1,
+      "host_disk_exhaustion": 1,
+      "input_verification_over_halt": 3,
+      "none": 1
+    },
+    "over_halt_count": 3,
+    "rejected_count": 5,
+    "run_count": 6,
+    "silent_incorrect_success_count": 0
+  },
+  "task": {
+    "application": "in-tree WinForms Patient Notes benchmark harness",
+    "name": "patient-notes-record-compile-governed-replay",
+    "workflow": "record, compile, replay, and verify one isolated note write"
+  }
+}

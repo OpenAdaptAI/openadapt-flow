@@ -1228,6 +1228,23 @@ def test_type_verification_passes_when_field_changes(bundle, run_dir):
     assert vision.pixels_changed_calls and (vision.pixels_changed_calls[0] is not None)
 
 
+def test_type_verification_prefers_exact_structural_field_region() -> None:
+    """Wide native text fields must be observed across their full UIA bounds.
+
+    A fixed crop around the center can exclude text rendered at the field's
+    left edge (the real WinForms search-box failure). UIA bounds are padded,
+    clamped, and used directly when available.
+    """
+    backend = FakeBackend(viewport=(1200, 800))
+    replayer = Replayer(backend, vision=FakeVision())
+    assert replayer._field_region((520, 109), structural_region=(40, 87, 960, 44)) == (
+        24,
+        71,
+        992,
+        76,
+    )
+
+
 def test_type_verification_refocuses_and_retypes_once(bundle, run_dir):
     """Focus theft: the first attempt lands nowhere visible; the retry
     re-clicks the field, selects all (replace, never append), retypes, and

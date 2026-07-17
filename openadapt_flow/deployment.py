@@ -66,10 +66,9 @@ class BackendConfig(BaseModel):
     #: Optional bearer token for a token-authenticated WAA agent (sent as
     #: ``Authorization: Bearer <token>``). None => no auth header (loopback).
     agent_token: Optional[str] = None
-    #: Placeholder for the agent's pinned TLS certificate fingerprint. RESERVED
-    #: for the in-flight TLS-pin work (openadapt-flow#112); NOT wired into the
-    #: backend on this branch (main's WindowsBackend has no TLS-pin parameter),
-    #: so setting it today has no effect. Documented follow-up.
+    #: SHA-256 fingerprint of the in-guest agent's TLS certificate. When set,
+    #: the Windows backend pins the exact certificate before sending screenshots
+    #: or UIA/input requests; a mismatch fails at the TLS handshake.
     agent_tls_pin: Optional[str] = None
 
     # -- rdp (network RDP via FreeRDP/aardwolf) ------------------------------

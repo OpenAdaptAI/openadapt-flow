@@ -263,6 +263,14 @@ authoring, maintenance, and infrastructure. Full
 numbers, methodology, and caveats:
 [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md).
 
+There is also a pinned, containerized lending reference environment (Frappe
+Lending: pinned containers + lockfile, with independent REST, SQL, and exact
+table-delta effect verification) in
+[`benchmark/frappe_lending/`](benchmark/frappe_lending/README.md). Its status
+is a local model-free initial engineering matrix, complete (12/12 rows
+correct, zero model calls) — **not publication evidence**: the paid agent arm
+and full per-cell trial counts are still pending.
+
 ## Status
 
 Early, and honest about it — maturity is uneven across the surface. The
@@ -285,6 +293,15 @@ GUI, hosted, and deployment surfaces is published in
 start with [`docs/ENTERPRISE_ARCHITECTURE.md`](docs/ENTERPRISE_ARCHITECTURE.md),
 which maps screenshot/credential flows, cryptographic guarantees, hosted
 boundaries, and unmet controls.
+
+**Machine-checked claims.** Every public maturity claim above is registered in
+[`claims.yaml`](claims.yaml), tiered (supported / validating / roadmap /
+research) and mapped to the specific tests and benchmark artifacts that back
+it. CI runs `scripts/validate_claims.py`, which **fails the build whenever a
+claim's tier outranks its strongest evidence** and regenerates
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the claim-by-claim
+verification report — from the registry, so the adjectives in this README
+cannot quietly rot.
 
 ## Privacy (PHI)
 
@@ -419,6 +436,11 @@ pip install -e '.[dev]'
 playwright install chromium  # optional: else auto-downloads on first launch
 pytest -q
 ```
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). A
+ready-made first contribution: pick a module off the mypy type-debt burn-down
+list (`[[tool.mypy.overrides]]` in `pyproject.toml`), tighten its annotations,
+and remove it from the list.
 
 The demo GIF is generated from real run artifacts by
 `scripts/make_demo_gif.py`. MIT license.

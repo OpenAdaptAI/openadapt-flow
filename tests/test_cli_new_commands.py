@@ -330,7 +330,9 @@ def _install_fake_browser(monkeypatch, captured: dict) -> None:
     monkeypatch.setattr(bs, "ensure_chromium_installed", lambda: None)
     monkeypatch.setattr(grounder_mod, "build_grounder", lambda fallback=None: None)
     monkeypatch.setattr(remote_mod, "appliance_from_env", lambda: None)
-    monkeypatch.setattr(report_mod, "render_run_report", lambda run_dir: "REPORT.md")
+    monkeypatch.setattr(
+        report_mod, "render_run_report", lambda run_dir, **_kw: "REPORT.md"
+    )
     monkeypatch.setattr(runtime_mod, "Replayer", _FakeReplayer)
 
 
@@ -528,7 +530,9 @@ def test_resume_windows_config_builds_windows_backend(
     monkeypatch.setattr(
         durable_mod, "resume", lambda run_dir, replayer, key=None: _FakeReport()
     )
-    monkeypatch.setattr(report_mod, "render_run_report", lambda run_dir: "REPORT.md")
+    monkeypatch.setattr(
+        report_mod, "render_run_report", lambda run_dir, **_kw: "REPORT.md"
+    )
 
     rc = main(
         [
@@ -545,3 +549,21 @@ def test_resume_windows_config_builds_windows_backend(
     backend = captured["backend"]
     assert type(backend).__name__ == "WindowsBackend"
     assert backend.server_url == "http://localhost:5001"
+
+
+# ---------------------------------------------------------------------------
+# --version
+# ---------------------------------------------------------------------------
+
+
+def test_version_flag_prints_version_and_exits_zero(capsys) -> None:
+    """``openadapt-flow --version`` prints the version and exits 0 (no subcommand)."""
+    from openadapt_flow.__main__ import _package_version
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--version"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out.strip()
+    assert out == f"openadapt-flow {_package_version()}"
+    prog, _, ver = out.partition(" ")
+    assert ver and ver[0].isdigit()

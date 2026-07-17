@@ -38,7 +38,7 @@ def _report_has_identity_like_text(report: RunReport) -> bool:
     return any((r.intent or "").strip() for r in report.results)
 
 
-def _warn_if_plaintext_phi(report: RunReport) -> None:
+def _warn_if_plaintext_phi(report: RunReport, *, synthetic_demo: bool = False) -> None:
     """Warn (once) when REPORT.md will contain plaintext identity-like text.
 
     Fires only when scrubbing is *not* active (default ``auto`` with the
@@ -47,7 +47,17 @@ def _warn_if_plaintext_phi(report: RunReport) -> None:
     ``on`` fails closed upstream before reaching here. Not a behavior change —
     the report is still written; this only makes the plaintext write visible.
     ``warnings`` dedups per call site, so it is effectively one-time per process.
+
+    ``synthetic_demo=True`` suppresses the warning. The ONLY caller that sets
+    it is the ``replay`` CLI, and only when the CLI itself served the bundled
+    MockMed demo app in-process (no ``--url``) AND the operator supplied no
+    ``--param`` overrides — i.e. the identity-like free text is the recorded
+    synthetic demo data, so alarming a first-run user about PHI would be
+    noise. Any replay against a real app, or with operator-supplied values,
+    keeps the full warning.
     """
+    if synthetic_demo:
+        return
     if _scrub_mode() == "off" or _text_scrubbing_enabled():
         return
     if not _report_has_identity_like_text(report):
@@ -101,12 +111,16 @@ def _before_after_table(result: StepResult) -> list[str]:
     ]
 
 
-def render_run_report(run_dir: Path | str) -> Path:
+def render_run_report(run_dir: Path | str, *, synthetic_demo: bool = False) -> Path:
     """Render ``REPORT.md`` inside ``run_dir`` from its ``report.json``.
 
     Args:
         run_dir: Run directory containing ``report.json`` (and the
             ``steps/`` / ``heals/`` image folders it references).
+        synthetic_demo: True ONLY when the caller knows every identity-like
+            free-text field is bundled synthetic demo data (the CLI's
+            bundled-MockMed replay with no operator ``--param`` overrides);
+            suppresses the plaintext-PHI warning, nothing else.
 
     Returns:
         Path to the written ``REPORT.md``.
@@ -118,7 +132,7 @@ def render_run_report(run_dir: Path | str) -> Path:
     report = RunReport.model_validate_json(
         (run / "report.json").read_text(encoding="utf-8")
     )
-    _warn_if_plaintext_phi(report)
+    _warn_if_plaintext_phi(report, synthetic_demo=synthetic_demo)
 
     ok_count = sum(1 for r in report.results if r.ok)
     icon = "✅" if report.success else "❌"

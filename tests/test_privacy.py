@@ -296,3 +296,27 @@ def test_report_md_no_warning_when_scrub_off(monkeypatch, tmp_path: Path):
     with _w.catch_warnings():
         _w.simplefilter("error", PlaintextPHIWarning)
         render_run_report(run_dir)  # must not raise
+
+
+def test_report_md_no_warning_for_bundled_synthetic_demo(monkeypatch, tmp_path: Path):
+    """``synthetic_demo=True`` (bundled MockMed, no operator values) => silent.
+
+    The replay CLI sets this only when it served the bundled synthetic MockMed
+    demo itself (no ``--url``) and no ``--param``/worklist values flowed in,
+    so the identity-like text is known-fake demo data.
+    """
+    from openadapt_flow.report import PlaintextPHIWarning
+
+    monkeypatch.setattr(privacy, "_build_provider", lambda: None)
+    privacy.reset_scrubbers()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _phi_report().save(run_dir)
+
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("error", PlaintextPHIWarning)
+        md = render_run_report(run_dir, synthetic_demo=True).read_text()
+    # Only the warning is softened — the report content is unchanged.
+    assert "John Smith" in md

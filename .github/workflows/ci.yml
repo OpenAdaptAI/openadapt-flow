@@ -242,8 +242,18 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # The `capture` extra rides along so the desktop on-ramp adapter tests
+      # (tests/test_capture_adapter.py) run for REAL in this job instead of
+      # silently skipping: openadapt-capture >=0.5.4 imports clean headless
+      # (no screenshot at import), so no display is needed.
       - name: Install
-        run: pip install -e .[dev]
+        run: pip install -e '.[dev,capture]'
+
+      # Guard the invariant the adapter tests rely on: the capture extra must
+      # import headless. If this ever regresses upstream, fail here with a
+      # clear message rather than deep inside test collection.
+      - name: Verify openadapt-capture imports headless
+        run: python -c "import openadapt_capture"
 
       # Cache the Playwright browser binaries (chromium) so the lightweight
       # browser-backed unit tests don't re-download ~150MB every run. Keyed on

@@ -167,12 +167,12 @@
 | Backing evidence | Kind | Gating / CI stage | Strength | Proves |
 |---|---|---|---|---|
 | `tests/test_desktop_record.py` | test | ci (required PR gate (test)) | supported | The live-capture orchestration + CLI wiring (record --backend windows|rdp -> openadapt-capture -> convert_capture), and that a desktop-shaped recording COMPILES into a bundle and REPLAYS to completion through the desktop backend path, resolving each click to its recorded target (runs on default CI). |
-| `tests/test_capture_adapter.py` | test | ci (required PR gate (test)) | supported | The capture->recording bridge over a REAL openadapt-capture session (its own event-processing pipeline + frame extraction) feeding the UNMODIFIED compiler. |
+| `tests/test_capture_adapter.py` | test | ci (required PR gate (test)) | supported | The capture->recording bridge over a REAL openadapt-capture session (its own event-processing pipeline + frame extraction) feeding the UNMODIFIED compiler (runs on default CI: the `test` job installs the `capture` extra; openadapt-capture >=0.5.4 imports clean headless). |
 | `docs/desktop/RECORDING.md` | doc | artifact (doc/benchmark) | roadmap | The precise REAL-vs-deferred map (visual-ladder-only structural rung, secret redaction, rdp coordinate space) and the reuse of openadapt-capture + the capture adapter. |
 
 **Caveats (honest limits):**
 
-- Offline capture carries NO structural (UIA AutomationId) locator, so replay uses the visual ladder (template/ocr/geometry). The live capture needs a display (openadapt-capture is the optional `capture` extra); the CI proof covers convert -> compile -> replay on the recording format, not a live capture session.
+- Offline capture carries NO structural (UIA AutomationId) locator, so replay uses the visual ladder (template/ocr/geometry). The live capture needs a display (openadapt-capture is the optional `capture` extra); the CI proof covers a real on-disk capture session -> convert -> compile -> replay, not a live recorder run (the live recorder has its own integration suite in the openadapt-capture repo).
 - `--secret` is refused on the pixel/desktop substrate (no field geometry to redact), and `rdp` recording must be captured in the same pixel space the backend replays in (no cross-machine coordinate remap yet).
 
 ### `citrix-pixel-validating` — validating — opt-in / infra-gated or field test

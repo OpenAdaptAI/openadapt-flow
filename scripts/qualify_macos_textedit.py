@@ -141,22 +141,101 @@ def _process_exists(pid: int) -> bool:
         return False
 
 
-def _terminate_isolated(pid: int) -> None:
-    """Terminate only the exact `open -n` process created by this harness."""
-    if not _process_exists(pid):
-        return
-    os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
+def _wait_for_process_absence(pid: int, timeout_s: float) -> bool:
+    """Return only after the exact PID is absent or the deadline expires."""
+    deadline = time.monotonic() + timeout_s
+    while True:
         if not _process_exists(pid):
-            return
+            return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.05)
-    os.kill(pid, signal.SIGKILL)
+
+
+def _terminate_isolated(pid: int) -> dict[str, Any]:
+    """Terminate an exact harness PID and return an independently checked receipt."""
+    receipt: dict[str, Any] = {
+        "pid": pid,
+        "initially_present": _process_exists(pid),
+        "sigterm_sent": False,
+        "sigkill_sent": False,
+        "verified_absent": False,
+    }
+    if not receipt["initially_present"]:
+        receipt.update({"verified_absent": True, "exit_stage": "already_absent"})
+        return receipt
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        receipt["sigterm_sent"] = True
+    except ProcessLookupError:
+        verified_absent = not _process_exists(pid)
+        receipt.update(
+            {
+                "verified_absent": verified_absent,
+                "exit_stage": "before_sigterm",
+            }
+        )
+        if not verified_absent:
+            receipt["error"] = "PID was present after SIGTERM lookup race"
+        return receipt
+    if _wait_for_process_absence(pid, 2.0):
+        receipt.update({"verified_absent": True, "exit_stage": "after_sigterm"})
+        return receipt
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+        receipt["sigkill_sent"] = True
+    except ProcessLookupError:
+        verified_absent = not _process_exists(pid)
+        receipt.update(
+            {
+                "verified_absent": verified_absent,
+                "exit_stage": "before_sigkill",
+            }
+        )
+        if not verified_absent:
+            receipt["error"] = "PID was present after SIGKILL lookup race"
+        return receipt
+    if _wait_for_process_absence(pid, 2.0):
+        receipt.update({"verified_absent": True, "exit_stage": "after_sigkill"})
+        return receipt
+
+    receipt.update(
+        {
+            "exit_stage": "still_present_after_sigkill",
+            "error": "exact harness PID remained after SIGTERM and SIGKILL",
+        }
+    )
+    return receipt
+
+
+def _textedit_pids() -> set[int]:
+    """Return exact TextEdit PIDs for unrelated-process preservation auditing."""
+    result = subprocess.run(
+        ["pgrep", "-x", TEXTEDIT_APP],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode not in {0, 1}:
+        raise RuntimeError(
+            f"TextEdit PID audit failed with exit {result.returncode}: "
+            f"{result.stderr.strip()}"
+        )
+    return {int(line) for line in result.stdout.splitlines() if line.strip()}
 
 
 def _close_target(
-    client: MacWindowClient, title: str, pid: int, *, errors: list[str]
+    client: MacWindowClient,
+    title: str,
+    pid: int,
+    *,
+    warnings: list[str],
+    receipts: list[dict[str, Any]],
 ) -> None:
+    graceful_close: dict[str, Any] = {"status": "not_attempted"}
     try:
         # Re-opening an already-open file makes that exact document the main
         # window of its isolated TextEdit process; the backend still verifies
@@ -173,14 +252,63 @@ def _close_target(
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
                 if not client.find_windows(TEXTEDIT_APP, title):
+                    graceful_close = {"status": "window_absent"}
                     break
                 time.sleep(0.05)
+            else:
+                graceful_close = {"status": "window_still_present"}
+                warnings.append(
+                    f"window cleanup {title!r}: graceful Command+W did not "
+                    "remove the window; exact-PID fallback required"
+                )
+        else:
+            graceful_close = {
+                "status": "selector_not_unique",
+                "matched_windows": len(matches),
+            }
+            warnings.append(
+                f"window cleanup {title!r}: selector matched {len(matches)} "
+                "windows; exact-PID fallback required"
+            )
     except Exception as error:  # noqa: BLE001 - cleanup continues to exact pid
-        errors.append(f"window cleanup {title!r}: {error}")
+        graceful_close = {"status": "refused", "error": str(error)}
+        warnings.append(f"window cleanup {title!r}: {error}")
     try:
-        _terminate_isolated(pid)
+        receipt = _terminate_isolated(pid)
     except Exception as error:  # noqa: BLE001
-        errors.append(f"process cleanup pid={pid}: {error}")
+        receipt = {
+            "pid": pid,
+            "verified_absent": not _process_exists(pid),
+            "exit_stage": "exception",
+            "error": str(error),
+        }
+    receipt.update({"title": title, "graceful_close": graceful_close})
+    receipts.append(receipt)
+
+
+def _cleanup_failures(
+    receipts: list[dict[str, Any]],
+    *,
+    root_exists: bool,
+    textedit_pids_before: set[int],
+    textedit_pids_after: set[int],
+) -> list[str]:
+    """Return only authoritative residue or unrelated-process changes."""
+    failures = [
+        f"harness PID remained after cleanup: {receipt['pid']}"
+        for receipt in receipts
+        if not receipt.get("verified_absent")
+    ]
+    if root_exists:
+        failures.append("temporary qualification root remained after cleanup")
+    harness_pids = {int(receipt["pid"]) for receipt in receipts}
+    unrelated_after = textedit_pids_after - harness_pids
+    if unrelated_after != textedit_pids_before:
+        failures.append(
+            "unrelated TextEdit PID set changed: "
+            f"before={sorted(textedit_pids_before)} after={sorted(unrelated_after)}"
+        )
+    return failures
 
 
 def _wait_oracle(path: Path, expected: bytes, timeout_s: float = 5.0) -> dict[str, Any]:
@@ -197,7 +325,8 @@ def _run_trial(
     root: Path,
     run_id: str,
     trial: int,
-    cleanup_errors: list[str],
+    cleanup_warnings: list[str],
+    cleanup_receipts: list[dict[str, Any]],
 ) -> dict[str, Any]:
     title = f"oa-macos-{run_id}-trial-{trial}"
     path = root / f"{title}.txt"
@@ -247,14 +376,21 @@ def _run_trial(
         }
     finally:
         if pid is not None:
-            _close_target(client, title, pid, errors=cleanup_errors)
+            _close_target(
+                client,
+                title,
+                pid,
+                warnings=cleanup_warnings,
+                receipts=cleanup_receipts,
+            )
 
 
 def _run_ambiguity_trial(
     client: MacWindowClient,
     root: Path,
     run_id: str,
-    cleanup_errors: list[str],
+    cleanup_warnings: list[str],
+    cleanup_receipts: list[dict[str, Any]],
 ) -> dict[str, Any]:
     selector = f"oa-macos-{run_id}-ambiguous"
     paths = [root / f"{selector}-{suffix}.txt" for suffix in ("a", "b")]
@@ -302,7 +438,13 @@ def _run_ambiguity_trial(
         }
     finally:
         for title, pid in pids.items():
-            _close_target(client, title, pid, errors=cleanup_errors)
+            _close_target(
+                client,
+                title,
+                pid,
+                warnings=cleanup_warnings,
+                receipts=cleanup_receipts,
+            )
 
 
 def _permission_report(client: MacWindowClient) -> dict[str, bool]:
@@ -438,22 +580,55 @@ def qualify(trials: int) -> tuple[int, dict[str, Any]]:
     run_id = uuid.uuid4().hex[:10]
     root = Path(tempfile.mkdtemp(prefix=f"openadapt-macos-{run_id}-"))
     original_frontmost = client.frontmost_pid()
-    cleanup_errors: list[str] = []
+    textedit_pids_before = _textedit_pids()
+    cleanup_warnings: list[str] = []
+    cleanup_receipts: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     ambiguity: dict[str, Any] = {"status": "not_run"}
     try:
         results = [
-            _run_trial(client, root, run_id, trial, cleanup_errors)
+            _run_trial(
+                client,
+                root,
+                run_id,
+                trial,
+                cleanup_warnings,
+                cleanup_receipts,
+            )
             for trial in range(1, trials + 1)
         ]
-        ambiguity = _run_ambiguity_trial(client, root, run_id, cleanup_errors)
+        ambiguity = _run_ambiguity_trial(
+            client,
+            root,
+            run_id,
+            cleanup_warnings,
+            cleanup_receipts,
+        )
     finally:
         if original_frontmost is not None:
             client.activate(original_frontmost)
         try:
             shutil.rmtree(root)
         except Exception as error:  # noqa: BLE001
-            cleanup_errors.append(f"temporary directory cleanup {root}: {error}")
+            cleanup_warnings.append(f"temporary directory cleanup {root}: {error}")
+
+    textedit_pids_after = _textedit_pids()
+    root_exists = root.exists()
+    cleanup_errors = _cleanup_failures(
+        cleanup_receipts,
+        root_exists=root_exists,
+        textedit_pids_before=textedit_pids_before,
+        textedit_pids_after=textedit_pids_after,
+    )
+    harness_pids = {int(receipt["pid"]) for receipt in cleanup_receipts}
+    cleanup_audit = {
+        "temporary_root": str(root),
+        "temporary_root_exists": root_exists,
+        "textedit_pids_before": sorted(textedit_pids_before),
+        "textedit_pids_after": sorted(textedit_pids_after),
+        "harness_pids": sorted(harness_pids),
+        "unrelated_textedit_pids_after": sorted(textedit_pids_after - harness_pids),
+    }
 
     passed = (
         all(result["status"] == "passed" for result in results)
@@ -467,6 +642,9 @@ def qualify(trials: int) -> tuple[int, dict[str, Any]]:
             "trials": results,
             "ambiguity_trial": ambiguity,
             "cleanup_errors": cleanup_errors,
+            "cleanup_warnings": cleanup_warnings,
+            "cleanup_receipts": cleanup_receipts,
+            "cleanup_audit": cleanup_audit,
             **_trial_metrics(results),
         }
     )

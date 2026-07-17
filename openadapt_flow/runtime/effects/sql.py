@@ -15,12 +15,19 @@ bespoke benchmark plumbing into a deployable kit component:
 - :func:`capture_table_counts` -- read-only ``COUNT(*)`` per audited table,
   the before/after inputs to :func:`audit_table_deltas`.
 
-READ-ONLY IS ENFORCED, not assumed: :func:`assert_read_only_sql` whitelists a
-single ``SELECT``/``WITH``-``SELECT`` statement and refuses mutating keywords,
-statement stacking, and comment smuggling AT CONSTRUCTION TIME -- an effect
-verifier must be physically incapable of becoming a second writer. Values are
-bound through DB-API parameters (never string-interpolated), so a run param
-cannot inject SQL.
+READ-ONLY is enforced in TWO layers, and the statement filter is only the
+inner one: :func:`assert_read_only_sql` refuses anything but a single
+``SELECT``/``WITH``-``SELECT`` statement (no stacking, no comments, no
+mutating/DDL keywords, no known side-effecting functions) AT CONSTRUCTION
+TIME, and values are bound through DB-API parameters (never
+string-interpolated) so a run param cannot inject SQL. But a keyword filter
+CANNOT prove a SELECT is side-effect-free on a real engine -- a Postgres
+``SELECT some_udf(...)`` or vendor function can mutate state while passing
+every lexical check. The REAL enforcement is the database role: run this
+verifier under a dedicated READ-ONLY account (no INSERT/UPDATE/DELETE, no
+EXECUTE on writing functions, no sequence privileges), as
+``docs/EFFECT_KIT.md`` instructs. The filter then guards against config
+mistakes; the role guards against everything.
 
 Driver-neutral: the caller supplies a zero-arg ``connect`` callable returning
 a DB-API 2.0 connection (``sqlite3.connect`` in tests and CI; ``pymysql`` /
@@ -58,7 +65,13 @@ _FORBIDDEN_SQL = re.compile(
     r"insert|update|delete|drop|alter|create|replace|truncate|merge|"
     r"grant|revoke|attach|detach|pragma|vacuum|"
     r"exec|execute|call|"
-    r"into|returning"
+    r"into|returning|"
+    # Known side-effecting / abuse-prone functions reachable from a bare
+    # SELECT (defense in depth -- the read-only DB ROLE is the real gate):
+    # sequence movement, large-object I/O, remote execution, extension
+    # loading, and sleep/DoS primitives.
+    r"nextval|setval|lastval|lo_import|lo_export|dblink\w*|load_extension|"
+    r"pg_sleep|sleep|benchmark"
     r")\b",
     re.IGNORECASE,
 )
@@ -122,8 +135,10 @@ class SqlRecordVerifier:
             closed per read.
         query: A single read-only SELECT returning the candidate records
             (one row per record; column names become record keys). Validated
-            by :func:`assert_read_only_sql` at construction -- a mutating
-            query refuses to construct. Use your driver's native parameter
+            by :func:`assert_read_only_sql` at construction -- a lexically
+            mutating query refuses to construct (defense in depth; the
+            connection's READ-ONLY database role is the real enforcement --
+            see the module docstring). Use your driver's native parameter
             placeholders (``:name`` for sqlite3, ``%(name)s`` for
             pymysql/psycopg) for every dynamic value.
         query_params: Values bound through DB-API parameters (never

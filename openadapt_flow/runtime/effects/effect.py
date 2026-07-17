@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ValueExpr(BaseModel):
@@ -209,6 +209,12 @@ class Effect(BaseModel):
     #: verdict is INDETERMINATE -> HALT (a delta against an unknown baseline is
     #: never guessed). Works identically on every substrate (REST / SQL / FHIR
     #: / filesystem) because the delta is computed in the shared judge.
+    #: ``record_written`` ONLY (validated -- a ``field_equals`` contract
+    #: refuses it rather than silently ignoring it). Caveat for substrates
+    #: whose records carry no ``id``: newness falls back to whole-record
+    #: identity (:func:`stable_id`), so a NEW row byte-identical to a
+    #: pre-existing one is not counted as new -- prefer substrates/queries
+    #: that expose a stable id when using this guard.
     #: Default False -- absolute counting, byte-for-byte the v1 behavior.
     count_new_only: bool = False
     #: ``record_written`` only: also REFUTE when a record that existed in the
@@ -265,6 +271,17 @@ class Effect(BaseModel):
     @classmethod
     def _coerce_value(cls, v: Any) -> Any:
         return cls._coerce_expr(v)
+
+    @model_validator(mode="after")
+    def _count_new_only_scope(self) -> "Effect":
+        """``count_new_only`` is a ``record_written`` guard; refuse (fail
+        loud) rather than silently ignore it on a ``field_equals`` contract."""
+        if self.count_new_only and self.kind is not EffectKind.RECORD_WRITTEN:
+            raise ValueError(
+                "count_new_only applies only to record_written effects "
+                "(a field_equals read-back has no newness delta)"
+            )
+        return self
 
     # -- run-time parameter binding (P0-3) -----------------------------------
     def resolve(self, params: Mapping[str, str]) -> "Effect":

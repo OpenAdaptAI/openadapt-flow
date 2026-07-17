@@ -95,11 +95,27 @@ class TestReadOnlyWhitelist:
             "SELECT /* hidden */ * FROM t",
             "PRAGMA writable_schema=1",
             "select * from t where a = (select 1); attach database 'x' as y",
+            # Side-effecting functions reachable from a bare SELECT (the DB
+            # role is the real gate; these are the cheap lexical catches).
+            "SELECT nextval('loan_seq')",
+            "SELECT setval('loan_seq', 99)",
+            "SELECT lo_import('/etc/passwd')",
+            "SELECT dblink_exec('conn', 'x')",
+            "SELECT load_extension('/tmp/evil.so')",
+            "WITH slow AS (SELECT pg_sleep(30)) SELECT * FROM slow",
+            "SELECT sleep(10)",
+            "SELECT benchmark(100000000, sha1('x'))",
         ],
     )
     def test_mutating_or_smuggled_queries_refuse(self, query: str):
         with pytest.raises(ValueError):
             assert_read_only_sql(query)
+
+    def test_filter_is_defense_in_depth_not_proof(self):
+        """A lexically-clean SELECT calling an arbitrary UDF passes the
+        filter — documented honestly: the read-only DB ROLE is the real
+        enforcement (docs/EFFECT_KIT.md)."""
+        assert_read_only_sql("SELECT some_custom_function(1) FROM t")
 
     def test_verifier_construction_enforces_whitelist(self, tmp_path: Path):
         with pytest.raises(ValueError):

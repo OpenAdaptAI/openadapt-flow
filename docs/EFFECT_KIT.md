@@ -110,10 +110,17 @@ Per-kind required fields:
 | `document-hash` | `root` | `glob` |
 
 The `sql` kind refuses to construct unless `sql_query` passes the read-only
-whitelist (single statement, `SELECT`/`WITH` leading keyword, no comments, no
-mutating/DDL/control keywords, values bound only through DB-API parameters).
-The SFTP variant of `file` is programmatic-only (inject a paramiko-compatible
-`transport` into `FileArrivalVerifier`); YAML wires local directories.
+statement filter (single statement, `SELECT`/`WITH` leading keyword, no
+comments, no mutating/DDL/control keywords or known side-effecting functions,
+values bound only through DB-API parameters). **The filter is defense in
+depth, not proof**: on Postgres/MySQL a lexically-clean `SELECT` can still
+call a side-effecting function (a UDF, `nextval`, `dblink`), so **always run
+the SQL verifier under a dedicated read-only database role** — no
+INSERT/UPDATE/DELETE, no EXECUTE on writing functions, no sequence
+privileges. The role is the real enforcement; the filter catches config
+mistakes early. The SFTP variant of `file` is programmatic-only (inject a
+paramiko-compatible `transport` into `FileArrivalVerifier`); YAML wires local
+directories.
 
 ## Reconciliation tasks (interface only — deliberately no engine)
 
@@ -172,7 +179,9 @@ effects:
     applicant: { param: applicant }
   sql_driver: pymysql
   # database = the fixture site's DB name (the fixture derives it at runtime —
-  # see benchmark/frappe_lending/fixture.py::_site_db_name)
+  # see benchmark/frappe_lending/fixture.py::_site_db_name). The fixture only
+  # exposes root; a REAL deployment must use a dedicated read-only DB role
+  # (see the enforcement note above).
   sql_connect_args: { host: 127.0.0.1, user: root, database: "<site-db-name>" }
   sql_password_env: FRAPPE_DB_ROOT_PASSWORD
 ```

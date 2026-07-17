@@ -9,6 +9,8 @@ in the hash only when set, so pre-kit contract hashes are unchanged.
 
 from __future__ import annotations
 
+import pytest
+
 from openadapt_flow.runtime.effects import (
     CompensationOutcome,
     Effect,
@@ -111,18 +113,46 @@ class TestReconciliationTask:
         assert result.task is None
 
     def test_task_carries_no_resolved_values(self):
-        """The task exposes the one-way hash, never the selector values."""
+        """The FULL task dump — evidence included — carries digests and
+        counts only: never the selector values, never matched-record field
+        contents, never field read-back values (all can be PHI)."""
         effect = _effect(match={"patient_id": "SENSITIVE-123"})
+        verdict = EffectVerdict(
+            verdict=Verdict.REFUTED,
+            kind=EffectKind.RECORD_WRITTEN,
+            substrate="sql",
+            reason="duplicate write",
+            observed_count=2,
+            expected_count=1,
+            observed_value="SENSITIVE-NOTE-OBSERVED",
+            expected_value="SENSITIVE-NOTE-EXPECTED",
+            matched_records=[
+                {"id": 1, "patient_id": "SENSITIVE-123", "ssn": "999-99-9999"},
+                {"id": 2, "patient_id": "SENSITIVE-123", "ssn": "999-99-9999"},
+            ],
+        )
         result = reconcile_or_escalate(
             effect,
-            _verdict(Verdict.INDETERMINATE),
+            verdict,
             verifier=_StubVerifier(),
             before=_BEFORE,
         )
         task = result.task
         assert task is not None
-        dumped = task.model_dump_json(exclude={"evidence"})
-        assert "SENSITIVE-123" not in dumped
+        dumped = task.model_dump_json()  # FULL dump, evidence included
+        for sensitive in (
+            "SENSITIVE-123",
+            "999-99-9999",
+            "SENSITIVE-NOTE-OBSERVED",
+            "SENSITIVE-NOTE-EXPECTED",
+        ):
+            assert sensitive not in dumped
+        # ...while still giving the operator joinable evidence.
+        assert task.evidence["observed_count"] == 2
+        assert task.evidence["values_match"] is False
+        digests = task.evidence["matched_record_digests"]
+        assert len(digests) == 2
+        assert all(d.startswith("sha256:") for d in digests)
 
     def test_build_helper_directly(self):
         effect = _effect()
@@ -130,6 +160,36 @@ class TestReconciliationTask:
         assert task.kind == "effect_refuted"
         assert task.effect_kind == "record_written"
         assert task.substrate == "sql"
+
+
+class TestCountNewOnlyScope:
+    def test_field_equals_refuses_count_new_only(self):
+        """Fail loud, never silently ignore, on the invalid combination."""
+        with pytest.raises(ValueError, match="record_written"):
+            Effect(
+                kind=EffectKind.FIELD_EQUALS,
+                match={"patient_id": "p1"},
+                field="note",
+                value="x",
+                count_new_only=True,
+            )
+
+    def test_record_written_accepts_count_new_only(self):
+        assert _effect(count_new_only=True).count_new_only is True
+
+
+class TestResumeCliParams:
+    def test_resume_parser_accepts_param_bindings(self):
+        """A param-bound effect-verifier config must be re-bindable on
+        resume (adversarial-review finding: the flags were replay/run-only,
+        making a durable param-bound run un-resumable)."""
+        from openadapt_flow.__main__ import build_parser
+
+        args = build_parser().parse_args(
+            ["resume", "runs/x", "--param", "k=v", "--params-file", "p.json"]
+        )
+        assert args.param == ["k=v"]
+        assert args.params_file == "p.json"
 
 
 class TestContractHashStability:

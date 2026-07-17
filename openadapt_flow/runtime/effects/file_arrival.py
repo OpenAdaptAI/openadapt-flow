@@ -164,10 +164,11 @@ class FileArrivalVerifier:
             name = str(getattr(entry, "filename", ""))
             if not name or not fnmatch.fnmatch(name, self.pattern):
                 continue
-            size = getattr(entry, "st_size", None)
-            mtime = getattr(entry, "st_mtime", None)
-            if size is None or mtime is None:
-                return None  # a listing without stat data is unusable
+            try:
+                size = int(getattr(entry, "st_size"))
+                mtime = float(getattr(entry, "st_mtime"))
+            except (AttributeError, TypeError, ValueError):
+                return None  # a listing without usable stat data is unreadable
             content_match = True
             if self.content_probe is not None:
                 remote_path = f"{self.root.rstrip('/')}/{name}"
@@ -185,8 +186,8 @@ class FileArrivalVerifier:
                 self._record(
                     rel=name,
                     name=name,
-                    size=int(size),
-                    mtime=float(mtime),
+                    size=size,
+                    mtime=mtime,
                     now=now,
                     content_match=content_match,
                 )

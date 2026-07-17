@@ -1517,11 +1517,13 @@ def _add_deployment_flags(
     )
     p.add_argument(
         "--effects-kind",
-        choices=["none", "rest", "fhir", "document-hash"],
+        choices=["none", "rest", "fhir", "sql", "file", "document-hash"],
         default=None,
         help=(
             "System-of-record EffectVerifier to wire so consequential writes "
-            "are verified against the real record (not the screen)"
+            "are verified against the real record (not the screen). The sql/"
+            "file kinds need their config fields (sql_query, root, ...) from "
+            "a --config deployment YAML"
         ),
     )
     p.add_argument(
@@ -1907,6 +1909,27 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Refuse to resume unless the pending escalation is 'approved' "
             "(see `approve`)"
+        ),
+    )
+    # A deployment whose effect verifier binds run parameters
+    # (effects.path_params / search_param_exprs / sql_query_params) needs the
+    # SAME params to rebuild the verifier on resume — without them the
+    # construction fails loud and the resume refuses. Mirror replay/run.
+    p.add_argument(
+        "--param",
+        action="append",
+        metavar="K=V",
+        help=(
+            "Parameter substitution (repeatable); required again on resume "
+            "when the effect-verifier config binds run parameters"
+        ),
+    )
+    p.add_argument(
+        "--params-file",
+        default=None,
+        help=(
+            "JSON object of parameter bindings; keeps values out of process "
+            "arguments for managed execution (see --param)"
         ),
     )
     _add_backend_flags(p)

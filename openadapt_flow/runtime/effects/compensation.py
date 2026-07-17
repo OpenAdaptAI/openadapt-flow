@@ -19,6 +19,8 @@ invent state.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -61,11 +63,30 @@ class ReconciliationTask(BaseModel):
     contract_hash: str = ""
     verdict: str = ""
     reason: str = ""
-    #: Machine-readable evidence for the operator (counts / values observed
-    #: vs expected, records the verifier matched).
+    #: Machine-readable evidence for the operator — DIGESTS AND COUNTS ONLY,
+    #: never record contents: observed/expected counts, a values-match flag,
+    #: and a one-way digest per matched record (:func:`record_digest`, joinable
+    #: against the system of record locally by an operator who can read it).
+    #: Field VALUES (a patient identifier, a note read-back) never enter the
+    #: task, so persisting/exporting it inherits no PHI from the record system.
     evidence: dict[str, Any] = Field(default_factory=dict)
     #: What a human should do about it (advice text, never auto-executed).
     suggested_action: str = ""
+
+
+def record_digest(record: dict[str, Any]) -> str:
+    """One-way SHA-256 digest of a system-of-record record.
+
+    Lets a :class:`ReconciliationTask` reference the exact records a verdict
+    matched (so an operator with system-of-record access can confirm them)
+    without carrying any field value out of the system of record.
+    """
+    payload = json.dumps(
+        {k: str(v) for k, v in sorted(record.items())},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 def build_reconciliation_task(
@@ -109,9 +130,17 @@ def build_reconciliation_task(
         evidence={
             "observed_count": verdict.observed_count,
             "expected_count": verdict.expected_count,
-            "observed_value": verdict.observed_value,
-            "expected_value": verdict.expected_value,
-            "matched_records": verdict.matched_records,
+            # A boolean, never the values: field read-back values can be PHI
+            # (a note, an identifier) and must not leave the record system
+            # inside a persistable task.
+            "values_match": (
+                None
+                if verdict.observed_value is None and verdict.expected_value is None
+                else verdict.observed_value == verdict.expected_value
+            ),
+            "matched_record_digests": [
+                record_digest(r) for r in verdict.matched_records
+            ],
         },
         suggested_action=suggested,
     )

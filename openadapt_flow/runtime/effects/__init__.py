@@ -44,6 +44,7 @@ from openadapt_flow.runtime.effects.compensation import (  # noqa: F401
     RestCompensator,
     build_reconciliation_task,
     reconcile_or_escalate,
+    record_digest,
 )
 from openadapt_flow.runtime.effects.document_hash import (  # noqa: F401
     DocumentHashVerifier,
@@ -101,6 +102,7 @@ __all__ = [
     "CompensationOutcome",
     "ReconciliationTask",
     "build_reconciliation_task",
+    "record_digest",
     "AuthRef",
     "SqlRecordVerifier",
     "assert_read_only_sql",

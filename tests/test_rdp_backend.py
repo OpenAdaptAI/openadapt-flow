@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 
 import cv2
 import numpy as np
@@ -341,6 +342,7 @@ def test_viewport_override(transport: FakeRDPTransport) -> None:
 def test_click_sends_pointer_down_then_up(
     transport: FakeRDPTransport, backend: FreeRDPBackend
 ) -> None:
+    backend.screenshot()
     backend.click(10, 20)
     assert transport.pointer_events == [
         (10, 20, "left", True),
@@ -351,6 +353,7 @@ def test_click_sends_pointer_down_then_up(
 def test_double_click_sends_sequence_twice(
     transport: FakeRDPTransport, backend: FreeRDPBackend
 ) -> None:
+    backend.screenshot()
     backend.click(30, 40, double=True)
     assert transport.pointer_events == [
         (30, 40, "left", True),
@@ -363,9 +366,80 @@ def test_double_click_sends_sequence_twice(
 def test_click_coordinates_pass_through(
     transport: FakeRDPTransport, backend: FreeRDPBackend
 ) -> None:
+    backend.screenshot()
     backend.click(*BUTTON_CENTER)
     xs = {(x, y) for (x, y, _b, _d) in transport.pointer_events}
     assert xs == {BUTTON_CENTER}
+
+
+def test_click_refuses_point_outside_current_framebuffer(
+    transport: FakeRDPTransport, backend: FreeRDPBackend
+) -> None:
+    backend.screenshot()
+    with pytest.raises(RuntimeError, match="outside framebuffer"):
+        backend.click(VIEWPORT[0], 10)
+    assert transport.pointer_events == []
+
+
+def test_click_refuses_stale_frame_lease(monkeypatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr(
+        "openadapt_flow.backends.rdp_backend.time.monotonic",
+        lambda: now["value"],
+    )
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, max_frame_age_s=1.0)
+    backend.screenshot()
+    now["value"] = 101.01
+    with pytest.raises(RuntimeError, match="frame is stale"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
+
+
+def test_click_refuses_framebuffer_resize_after_capture() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+    backend.screenshot()
+    transport.screens[0] = transport.screens[0].resize((640, 480))
+    with pytest.raises(RuntimeError, match="framebuffer changed"):
+        backend.click(320, 240)
+    assert transport.pointer_events == []
+
+
+def test_readiness_probe_refuses_locked_or_unexpected_session() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, readiness_probe=lambda _png: False)
+    backend.screenshot()
+    with pytest.raises(RuntimeError, match="readiness probe rejected"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
+
+
+def test_coordinate_click_requires_prior_frame_lease(
+    transport: FakeRDPTransport, backend: FreeRDPBackend
+) -> None:
+    with pytest.raises(RuntimeError, match="no captured RDP frame lease"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
+
+
+def test_frame_age_rechecked_after_blocking_readiness(monkeypatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr(
+        "openadapt_flow.backends.rdp_backend.time.monotonic",
+        lambda: now["value"],
+    )
+
+    def slow_probe(_png):
+        now["value"] = 102.0
+        return True
+
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, max_frame_age_s=1.0, readiness_probe=slow_probe)
+    backend.screenshot()
+    with pytest.raises(RuntimeError, match="frame is stale"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
 
 
 # -- type_text -----------------------------------------------------------------
@@ -769,8 +843,6 @@ def test_aardwolf_connect_failure_terminates_and_stops_thread(monkeypatch) -> No
 #   export OPENADAPT_FLOW_RDP_PASS=password
 #   # optional: OPENADAPT_FLOW_RDP_DOMAIN, OPENADAPT_FLOW_RDP_WIDTH/_HEIGHT
 #   pytest tests/test_rdp_backend.py -k live_smoke -s
-
-import os
 
 
 @pytest.mark.skipif(

@@ -294,8 +294,17 @@ class MacOSBackend(RemoteDisplayBackend):
                 "then restart it. Refusing to emit input."
             )
 
-    def _ensure_input_ready(self) -> None:
+    def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
         """Gate physical/global input on both active app and exact window."""
+        if point is not None:
+            # The base remote-display hook receives captured-pixel coordinates,
+            # while native macOS must bind and convert the exact screen point in
+            # its click override. Never reinterpret those pixels as global
+            # coordinates if a caller bypasses the native point-bound path.
+            raise MacOSBackendError(
+                "native macOS coordinate input must use the point-bound click "
+                "path; refusing an unconverted base-backend point"
+            )
         self._ensure_input_trusted()
         self.ensure_foreground()
         bound = self._resolve_window(refresh=True)

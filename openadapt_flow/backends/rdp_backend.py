@@ -45,7 +45,9 @@ docs/LIMITS.md). This mirrors how WindowsBackend omits StructuralBackend.
 from __future__ import annotations
 
 import io
-from typing import Optional, Protocol, Union, runtime_checkable
+import threading
+import time
+from typing import Callable, Optional, Protocol, Union, runtime_checkable
 
 from PIL import Image
 
@@ -191,6 +193,14 @@ class FreeRDPBackend:
             derived once from the first framebuffer and cached.
         connect: When True (default) connect the transport on construction.
             Pass False if the caller manages the transport lifecycle.
+        max_frame_age_s: Maximum age of the screenshot that established an
+            action's coordinate/session context. A stale frame is refused
+            instead of sending input into a desktop that may have changed.
+        readiness_probe: Optional deployment-specific pixel predicate. It is
+            evaluated on the last screenshot before every input and should
+            return False for lock/login/disconnect or unexpected-app screens.
+            Generic RDP has no portable structured lock-state signal, so a
+            consequential deployment should supply this fail-closed hook.
     """
 
     def __init__(
@@ -199,9 +209,20 @@ class FreeRDPBackend:
         *,
         viewport: Optional[tuple[int, int]] = None,
         connect: bool = True,
+        max_frame_age_s: float = 10.0,
+        readiness_probe: Optional[Callable[[bytes], bool]] = None,
     ) -> None:
         self._transport = transport
         self._viewport = viewport
+        self._max_frame_age_s = float(max_frame_age_s)
+        if self._max_frame_age_s <= 0:
+            raise ValueError("max_frame_age_s must be positive")
+        self._readiness_probe = readiness_probe
+        self._last_frame_monotonic: Optional[float] = None
+        # Keep capture/geometry validation and a complete input gesture in one
+        # critical section. A concurrent screenshot may otherwise replace the
+        # coordinate lease between pointer-down and pointer-up.
+        self._input_lock = threading.RLock()
         if connect:
             self._transport.connect()
 
@@ -227,14 +248,17 @@ class FreeRDPBackend:
         Raises:
             RuntimeError: If the transport hands back nothing usable.
         """
-        frame, w, h = self._transport.framebuffer()
-        img = self._to_image(frame, int(w), int(h))
-        # Cache the viewport from the frame we actually encoded, so viewport
-        # and screenshot can never disagree.
-        self._viewport = img.size
-        buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="PNG")
-        return buf.getvalue()
+        with self._input_lock:
+            frame, w, h = self._transport.framebuffer()
+            img = self._to_image(frame, int(w), int(h))
+            # Cache the viewport from the frame we actually encoded, so viewport
+            # and screenshot can never disagree.
+            self._viewport = img.size
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="PNG")
+            png = buf.getvalue()
+            self._last_frame_monotonic = time.monotonic()
+            return png
 
     def wait_first_frame(self, *, retries: int = 20, settle_s: float = 0.25) -> bytes:
         """Poll :meth:`screenshot` until a non-blank frame, returning its PNG.
@@ -270,10 +294,13 @@ class FreeRDPBackend:
         A single click is a pointer down then up at (x, y); a double click is
         that press/release sequence sent twice.
         """
-        presses = 2 if double else 1
-        for _ in range(presses):
-            self._transport.pointer(int(x), int(y), "left", True)
-            self._transport.pointer(int(x), int(y), "left", False)
+        with self._input_lock:
+            self._ensure_input_ready(point=(int(x), int(y)))
+            presses = 2 if double else 1
+            for _ in range(presses):
+                self._assert_frame_fresh()
+                self._transport.pointer(int(x), int(y), "left", True)
+                self._transport.pointer(int(x), int(y), "left", False)
 
     def type_text(self, text: str) -> None:
         """Type text into the focused control, one key down/up per character.
@@ -285,11 +312,15 @@ class FreeRDPBackend:
         a modifier). Releasing a key that never actually registered is a
         harmless no-op on the target, so the guarantee costs nothing.
         """
-        for ch in text:
-            try:
-                self._transport.key(ch, True)
-            finally:
-                self._release_keys((ch,))
+        if not text:
+            return
+        with self._input_lock:
+            self._ensure_input_ready()
+            for ch in text:
+                try:
+                    self._transport.key(ch, True)
+                finally:
+                    self._release_keys((ch,))
 
     def press(self, key: str) -> None:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``.
@@ -308,13 +339,15 @@ class FreeRDPBackend:
         released; a redundant release is a no-op on the target.
         """
         parts = normalize_chord(key)
-        pressed: list[str] = []
-        try:
-            for part in parts:
-                pressed.append(part)
-                self._transport.key(part, True)
-        finally:
-            self._release_keys(reversed(pressed))
+        with self._input_lock:
+            self._ensure_input_ready()
+            pressed: list[str] = []
+            try:
+                for part in parts:
+                    pressed.append(part)
+                    self._transport.key(part, True)
+            finally:
+                self._release_keys(reversed(pressed))
 
     def _release_keys(self, parts) -> None:
         """Release each key token, best-effort: one failing release never
@@ -338,7 +371,9 @@ class FreeRDPBackend:
         """
         if dx == 0 and dy == 0:
             return
-        self._transport.wheel(int(dx), int(dy))
+        with self._input_lock:
+            self._ensure_input_ready()
+            self._transport.wheel(int(dx), int(dy))
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -347,6 +382,67 @@ class FreeRDPBackend:
         self._transport.disconnect()
 
     # -- internals -----------------------------------------------------------
+
+    def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
+        """Validate the frame lease, dimensions, bounds and readiness hook.
+
+        The resolver acts on screenshot pixels. Sending those coordinates after
+        the frame ages out or the negotiated desktop size changes risks a
+        silent wrong-target action, so both conditions fail closed and force a
+        new screenshot/resolution cycle.
+        """
+        if self._last_frame_monotonic is None and point is not None:
+            raise RuntimeError(
+                "no captured RDP frame lease for coordinate input; capture and "
+                "resolve the target before clicking"
+            )
+        if self._last_frame_monotonic is None:
+            # Keyboard/wheel callers still need a current session-readiness
+            # lease even though they do not carry screenshot coordinates.
+            self.screenshot()
+        self._assert_frame_fresh()
+
+        frame, w, h = self._transport.framebuffer()
+        current = (int(w), int(h))
+        if current[0] <= 0 or current[1] <= 0:
+            raise RuntimeError(f"RDP framebuffer has invalid dimensions {current!r}")
+        if self._viewport != current:
+            raise RuntimeError(
+                f"RDP framebuffer changed from {self._viewport!r} to {current!r}; "
+                "capture and re-resolve before sending input"
+            )
+        if point is not None:
+            x, y = point
+            if not (0 <= x < current[0] and 0 <= y < current[1]):
+                raise RuntimeError(
+                    f"RDP input point {(x, y)!r} is outside framebuffer {current!r}"
+                )
+        if self._readiness_probe is not None:
+            # Evaluate readiness on the current framebuffer, not merely the
+            # resolver's leased image: a lock/disconnect can appear while the
+            # dimensions stay unchanged.
+            current_img = self._to_image(frame, current[0], current[1])
+            buf = io.BytesIO()
+            current_img.convert("RGB").save(buf, format="PNG")
+            if not self._readiness_probe(buf.getvalue()):
+                raise RuntimeError(
+                    "RDP readiness probe rejected the current frame "
+                    "(locked, disconnected, or unexpected session); refusing input"
+                )
+        # framebuffer/readiness work can block on the network; recheck at the
+        # last common point before an input edge.
+        self._assert_frame_fresh()
+
+    def _assert_frame_fresh(self) -> None:
+        if self._last_frame_monotonic is None:
+            raise RuntimeError("no captured RDP frame lease")
+        age = time.monotonic() - self._last_frame_monotonic
+        if age > self._max_frame_age_s:
+            raise RuntimeError(
+                f"RDP frame is stale ({age:.3f}s > {self._max_frame_age_s:.3f}s); "
+                "halting intentionally so the runtime can capture, re-resolve, "
+                "and re-check identity"
+            )
 
     @staticmethod
     def _to_image(frame: Union["Image.Image", bytes], w: int, h: int) -> Image.Image:

@@ -205,6 +205,16 @@ def test_capture_and_input_permissions_fail_loud() -> None:
     assert not input_client.calls
 
 
+def test_base_pixel_point_gate_refuses_unconverted_native_coordinates() -> None:
+    client = FakeMacClient()
+    target = backend(client)
+
+    with pytest.raises(MacOSBackendError, match="point-bound click"):
+        target._ensure_input_ready(point=(10, 10))
+
+    assert not client.calls
+
+
 def test_input_refuses_when_exact_window_is_not_topmost() -> None:
     client = FakeMacClient(frontmost_window_id=999, raise_succeeds=False)
     with pytest.raises(MacOSBackendError, match="not the topmost window"):

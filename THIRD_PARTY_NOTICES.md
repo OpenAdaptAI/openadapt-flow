@@ -1,8 +1,9 @@
 # Third-party notices
 
 OpenAdapt Flow's original source code is licensed under the MIT License in
-[`LICENSE`](LICENSE). Some repository and source-distribution content has a
-different file-local license. Those files are not relicensed under MIT.
+[`LICENSE`](LICENSE). Some content in a Git checkout or GitHub-generated source
+archive has a different file-local license. Those files are not relicensed
+under MIT and are excluded from published PyPI wheels and source distributions.
 
 ## openIMIS distribution configuration
 

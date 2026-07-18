@@ -97,7 +97,8 @@ commit `cd6220d1f0578e56a589c47953250c2ad3d0caa5` and remain licensed under
 Each file carries its exact upstream path and SPDX identifier. The complete
 license is included at
 [`conf/nginx/LICENSE-AGPL-3.0.md`](conf/nginx/LICENSE-AGPL-3.0.md), and the
-aggregate repository/source-distribution boundary is recorded in the root
+aggregate Git-checkout/GitHub-generated-source-archive boundary is recorded in
+the root
 [`THIRD_PARTY_NOTICES.md`](../../../THIRD_PARTY_NOTICES.md). The MIT license
 does not relicense those adapted files.
 

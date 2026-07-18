@@ -117,6 +117,11 @@ def test_every_adapted_distribution_file_has_exact_license_and_provenance() -> N
         assert source_url in text
         assert "Full license:" in text
         assert re.fullmatch(r"[0-9a-f]{64}", provenance["upstream_sha256"])
+        assert provenance["modification_status"] == "adapted"
+        assert (
+            hashlib.sha256((REPO_ROOT / local_path).read_bytes()).hexdigest()
+            == (provenance["local_sha256"])
+        )
         for additional_path, digest in provenance.get(
             "additional_upstream_sources", {}
         ).items():
@@ -149,5 +154,8 @@ def test_complete_upstream_agpl_license_and_notices_are_retained() -> None:
         assert path.removeprefix("benchmark/openimis_claims/") in readme
     assert UPSTREAM_COMMIT in notice
     assert "does not relicense those adapted files." in readme
-    assert "[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)" in root_readme
-    assert "adapted openIMIS Compose topology" in root_readme
+    assert "Git checkout or GitHub-generated source archive" in root_readme
+    assert (
+        "https://github.com/OpenAdaptAI/openadapt-flow/blob/main/THIRD_PARTY_NOTICES.md"
+    ) in root_readme
+    assert "Published PyPI wheels and source distributions exclude" in root_readme

@@ -448,8 +448,11 @@ The demo GIF is generated from real run artifacts by
 ## License
 
 OpenAdapt-authored package code is licensed under the
-[MIT License](LICENSE). The repository and source distribution also aggregate
-an adapted openIMIS Compose topology and four nginx configuration files under
-`AGPL-3.0-only`; the MIT license does not relicense those files. Their exact
-provenance, file-local scope, and complete upstream license are recorded in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[MIT License](LICENSE). A Git checkout or GitHub-generated source archive also
+contains an isolated openIMIS reference environment with adapted configuration
+files under `AGPL-3.0-only`; the MIT license does not relicense those files.
+Their exact provenance, file-local scope, and complete upstream license are
+recorded in the repository-only
+[third-party notice](https://github.com/OpenAdaptAI/openadapt-flow/blob/main/THIRD_PARTY_NOTICES.md).
+Published PyPI wheels and source distributions exclude the openIMIS benchmark
+surface and remain within the declared MIT package boundary.

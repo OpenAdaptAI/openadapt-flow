@@ -186,10 +186,7 @@ packages = ["openadapt_flow"]
 # (including its launcher/test and repository-only notice) in the sdist.
 exclude = [
     "/THIRD_PARTY_NOTICES.md",
-    # Benchmarks are repository evidence, not package runtime. Excluding the
-    # entire root prevents a future copyleft benchmark from entering PyPI
-    # merely because its directory name differs from today's openIMIS fixture.
-    "/benchmark",
+    "/benchmark/openimis_claims",
     "/scripts/openimis_claims_demo.py",
     "/tests/test_openimis_claims_fixture.py",
 ]

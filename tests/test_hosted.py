@@ -38,6 +38,17 @@ def _isolate_home(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(hosted, "_keyring_token", lambda host: None)
     monkeypatch.setattr(hosted, "_store_keyring_token", lambda host, token: False)
+    monkeypatch.setattr(hosted, "_snapshot_keyring_token", lambda host: (True, None))
+    monkeypatch.setattr(
+        hosted,
+        "_store_staged_keyring_token",
+        lambda host, pairing_id, token: False,
+    )
+    monkeypatch.setattr(
+        hosted,
+        "_delete_staged_keyring_token",
+        lambda host, pairing_id: True,
+    )
     yield
     privacy.reset_scrubbers()
 
@@ -249,6 +260,527 @@ def test_login_network_error(monkeypatch):
     monkeypatch.setattr(httpx, "get", boom)
     with pytest.raises(hosted.HostedError, match="reach"):
         hosted.login(token="tok", host="https://h.test")
+
+
+# ---------------------------------------------------------------------------
+# one-click browser pairing
+# ---------------------------------------------------------------------------
+
+
+PAIRING = "oap_" + "A" * 43
+PAIRED_TOKEN = "oai_ingest_" + "b" * 43
+PRIOR_TOKEN = "oai_ingest_" + "c" * 43
+PAIRING_ID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def test_parse_connect_uri_accepts_only_the_fixed_action():
+    request = hosted.parse_connect_uri(
+        f"openadapt://connect?pairing={PAIRING}&host=https%3A%2F%2Fapp.openadapt.ai"
+    )
+    assert request == {
+        "pairing": PAIRING,
+        "host": "https://app.openadapt.ai",
+    }
+
+    for unsafe in [
+        f"openadapt://run?pairing={PAIRING}&host=https%3A%2F%2Fapp.openadapt.ai",
+        f"openadapt://connect/shell?pairing={PAIRING}&host=https%3A%2F%2Fapp.openadapt.ai",
+        f"openadapt://connect?pairing={PAIRING}&host=https%3A%2F%2Fapp.openadapt.ai&command=rm",
+        f"openadapt://connect?pairing={PAIRING}&pairing={PAIRING}&host=https%3A%2F%2Fapp.openadapt.ai",
+        f"openadapt://connect?pairing={PAIRING}&host=https%3A%2F%2Fapp.openadapt.ai#fragment",
+    ]:
+        with pytest.raises(hosted.HostedError):
+            hosted.parse_connect_uri(unsafe)
+
+
+def test_pairing_staging_account_is_pairing_specific_and_not_canonical():
+    other_pairing_id = "123e4567-e89b-12d3-a456-426614174000"
+    canonical = hosted.resolve_host("https://h.test")
+    account = hosted._pairing_staging_account(canonical, PAIRING_ID)
+
+    assert account != canonical
+    assert account != hosted._pairing_staging_account(canonical, other_pairing_id)
+    assert PAIRED_TOKEN not in account
+    assert PAIRING not in account
+
+
+def _install_connect_keyring(
+    monkeypatch,
+    *,
+    prior=PRIOR_TOKEN,
+    canonical_results=None,
+    staging_result=True,
+    delete_canonical_result=True,
+    delete_staging_result=True,
+):
+    state = {
+        "canonical": prior,
+        "staging": None,
+        "events": [],
+    }
+    results = list(canonical_results or [])
+    monkeypatch.setattr(hosted, "_keyring_available", lambda: True)
+
+    def snapshot(host):
+        state["events"].append("snapshot")
+        return True, state["canonical"]
+
+    def stage(host, pairing_id, token):
+        state["events"].append(("stage", pairing_id))
+        if staging_result:
+            state["staging"] = token
+        return staging_result
+
+    def store(host, token):
+        state["events"].append(("canonical", token))
+        stored = results.pop(0) if results else True
+        if stored:
+            state["canonical"] = token
+        return stored
+
+    def delete_canonical(host):
+        state["events"].append("delete-canonical")
+        if delete_canonical_result:
+            state["canonical"] = None
+        return delete_canonical_result
+
+    def delete_staging(host, pairing_id):
+        state["events"].append(("delete-stage", pairing_id))
+        if delete_staging_result:
+            state["staging"] = None
+        return delete_staging_result
+
+    monkeypatch.setattr(hosted, "_snapshot_keyring_token", snapshot)
+    monkeypatch.setattr(hosted, "_store_staged_keyring_token", stage)
+    monkeypatch.setattr(hosted, "_store_keyring_token", store)
+    monkeypatch.setattr(hosted, "_delete_keyring_token", delete_canonical)
+    monkeypatch.setattr(hosted, "_delete_staged_keyring_token", delete_staging)
+    return state
+
+
+def _install_connect_http(
+    monkeypatch,
+    *,
+    validation=None,
+    confirmations=None,
+    abort=None,
+):
+    calls = {"post": [], "get": []}
+    validation_result = (
+        httpx.Response(200, json={"count": 0}) if validation is None else validation
+    )
+    confirmation_results = list(
+        confirmations or [httpx.Response(200, json={"connected": True})]
+    )
+    abort_result = (
+        httpx.Response(200, json={"revoked": True}) if abort is None else abort
+    )
+
+    def resolve(result):
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def post(url, **kwargs):
+        calls["post"].append((url, kwargs))
+        if url.endswith("/claim"):
+            return httpx.Response(
+                201,
+                json={
+                    "paired": True,
+                    "pairing_id": PAIRING_ID,
+                    "ingest_token": PAIRED_TOKEN,
+                },
+            )
+        if url.endswith("/confirm"):
+            return resolve(confirmation_results.pop(0))
+        if url.endswith("/abort"):
+            return resolve(abort_result)
+        raise AssertionError(f"unexpected POST {url}")
+
+    def get(url, **kwargs):
+        calls["get"].append((url, kwargs))
+        return resolve(validation_result)
+
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(httpx, "get", get)
+    return calls
+
+
+def _connect_test():
+    return hosted.connect(
+        PAIRING,
+        host="https://h.test",
+        destination_kind="customer-managed",
+        trusted_hosts=["https://h.test"],
+    )
+
+
+def test_connect_claims_once_validates_and_saves_only_to_keyring(monkeypatch):
+    calls: dict = {"post": []}
+    events: list[str] = []
+    monkeypatch.setattr(hosted, "_keyring_available", lambda: True)
+    monkeypatch.setattr(
+        hosted,
+        "_snapshot_keyring_token",
+        lambda host: events.append("snapshot") or (True, PRIOR_TOKEN),
+    )
+    monkeypatch.setattr(
+        hosted,
+        "_store_staged_keyring_token",
+        lambda host, pairing_id, token: events.append("stage") or True,
+    )
+    monkeypatch.setattr(
+        hosted,
+        "_store_keyring_token",
+        lambda host, token: events.append("canonical") or True,
+    )
+    monkeypatch.setattr(
+        hosted,
+        "_delete_staged_keyring_token",
+        lambda host, pairing_id: events.append("delete-stage") or True,
+    )
+
+    def post(url, **kwargs):
+        calls["post"].append((url, kwargs))
+        events.append(url.rsplit("/", 1)[-1])
+        if url.endswith("/confirm"):
+            return httpx.Response(200, json={"connected": True})
+        return httpx.Response(
+            201,
+            json={
+                "paired": True,
+                "pairing_id": PAIRING_ID,
+                "org_id": "org",
+                "user_id": "user",
+                "ingest_token": PAIRED_TOKEN,
+            },
+        )
+
+    def get(url, **kwargs):
+        calls["get"] = (url, kwargs)
+        events.append("validate")
+        return httpx.Response(200, json={"count": 0})
+
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(httpx, "get", get)
+    result = hosted.connect(
+        PAIRING,
+        host="https://h.test",
+        device_name="Reception PC",
+        destination_kind="customer-managed",
+        trusted_hosts=["https://h.test"],
+    )
+
+    assert result["paired"] is True
+    assert result["token_storage"] == "keyring"
+    assert events == [
+        "snapshot",
+        "claim",
+        "stage",
+        "validate",
+        "canonical",
+        "confirm",
+        "delete-stage",
+    ]
+    assert calls["post"][0][0] == "https://h.test/api/local-bridge/pairings/claim"
+    assert calls["post"][0][1]["json"] == {
+        "pairing_secret": PAIRING,
+        "device_name": "Reception PC",
+    }
+    assert calls["post"][0][1]["follow_redirects"] is False
+    assert calls["get"][1]["headers"]["Authorization"] == f"Bearer {PAIRED_TOKEN}"
+    assert calls["post"][1][0] == "https://h.test/api/local-bridge/pairings/confirm"
+    assert calls["post"][1][1]["json"] == {"pairing_id": PAIRING_ID}
+    assert calls["post"][1][1]["headers"]["Authorization"] == f"Bearer {PAIRED_TOKEN}"
+    assert "token" not in hosted._hosted_config()
+    assert hosted._hosted_config()["host"] == "https://h.test"
+
+
+def test_connect_refuses_before_claim_without_a_keychain(monkeypatch):
+    monkeypatch.setattr(hosted, "_keyring_available", lambda: False)
+    monkeypatch.setattr(
+        httpx, "post", lambda *args, **kwargs: pytest.fail("must not consume pairing")
+    )
+    with pytest.raises(hosted.HostedError, match="OS keychain"):
+        hosted.connect(
+            PAIRING,
+            host="https://h.test",
+            destination_kind="customer-managed",
+            trusted_hosts=["https://h.test"],
+        )
+
+
+def test_connect_never_reports_expired_or_unverified_pairing_as_success(monkeypatch):
+    monkeypatch.setattr(hosted, "_keyring_available", lambda: True)
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: httpx.Response(410))
+    with pytest.raises(hosted.HostedError, match="expired"):
+        hosted.connect(
+            PAIRING,
+            host="https://h.test",
+            destination_kind="customer-managed",
+            trusted_hosts=["https://h.test"],
+        )
+
+
+def test_connect_refuses_before_claim_when_canonical_snapshot_fails(monkeypatch):
+    monkeypatch.setattr(hosted, "_keyring_available", lambda: True)
+    monkeypatch.setattr(hosted, "_snapshot_keyring_token", lambda host: (False, None))
+    monkeypatch.setattr(
+        httpx, "post", lambda *args, **kwargs: pytest.fail("must not consume pairing")
+    )
+    with pytest.raises(hosted.HostedError, match="could not read"):
+        _connect_test()
+
+
+def test_connect_aborts_and_restores_prior_when_canonical_set_fails(monkeypatch):
+    state = _install_connect_keyring(
+        monkeypatch,
+        canonical_results=[False, True],
+    )
+    calls = _install_connect_http(monkeypatch)
+
+    with pytest.raises(hosted.HostedError, match="refused to promote"):
+        _connect_test()
+
+    assert state["canonical"] == PRIOR_TOKEN
+    assert state["staging"] is None
+    abort_url, abort_kwargs = calls["post"][-1]
+    assert abort_url.endswith("/pairings/abort")
+    assert abort_kwargs["json"] == {"pairing_id": PAIRING_ID}
+    assert abort_kwargs["headers"]["Authorization"] == f"Bearer {PAIRED_TOKEN}"
+
+
+@pytest.mark.parametrize(
+    "validation",
+    [
+        httpx.Response(401),
+        httpx.Response(503),
+        httpx.ConnectError("validation unavailable"),
+    ],
+    ids=["401", "5xx", "transport"],
+)
+def test_connect_validation_failure_preserves_prior_and_aborts(monkeypatch, validation):
+    state = _install_connect_keyring(monkeypatch)
+    calls = _install_connect_http(monkeypatch, validation=validation)
+
+    with pytest.raises(hosted.HostedError) as error:
+        _connect_test()
+
+    assert state["canonical"] == PRIOR_TOKEN
+    assert state["staging"] is None
+    assert calls["post"][-1][0].endswith("/pairings/abort")
+    assert PAIRED_TOKEN not in str(error.value)
+    assert PAIRING not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "confirmations",
+    [
+        [httpx.Response(200, json={"connected": False})],
+        [httpx.Response(409, json={"connected": False})],
+        [
+            httpx.Response(503, json={"connected": False}),
+            httpx.Response(503, json={"connected": False}),
+        ],
+        [
+            httpx.ConnectError("confirmation unavailable"),
+            httpx.ConnectError("confirmation unavailable"),
+        ],
+    ],
+    ids=["false", "409", "5xx", "transport"],
+)
+def test_connect_confirmation_failure_aborts_before_restoring_prior(
+    monkeypatch, confirmations
+):
+    state = _install_connect_keyring(monkeypatch)
+    calls = _install_connect_http(monkeypatch, confirmations=confirmations)
+
+    with pytest.raises(hosted.HostedError, match="did not definitively confirm"):
+        _connect_test()
+
+    assert state["canonical"] == PRIOR_TOKEN
+    assert state["staging"] is None
+    assert calls["post"][-1][0].endswith("/pairings/abort")
+
+
+@pytest.mark.parametrize(
+    "first_confirmation",
+    [
+        httpx.Response(503, json={"connected": False}),
+        httpx.ConnectError("confirmation unavailable"),
+    ],
+    ids=["5xx", "transport"],
+)
+def test_connect_idempotently_retries_ambiguous_confirmation(
+    monkeypatch, first_confirmation
+):
+    state = _install_connect_keyring(monkeypatch)
+    calls = _install_connect_http(
+        monkeypatch,
+        confirmations=[
+            first_confirmation,
+            httpx.Response(200, json={"connected": True}),
+        ],
+    )
+
+    result = _connect_test()
+
+    assert result["paired"] is True
+    assert state["canonical"] == PAIRED_TOKEN
+    assert state["staging"] is None
+    confirm_calls = [
+        call for call in calls["post"] if call[0].endswith("/pairings/confirm")
+    ]
+    assert len(confirm_calls) == 2
+    assert not any(call[0].endswith("/pairings/abort") for call in calls["post"])
+
+
+def test_connect_abort_failure_retains_recovery_without_clobbering_prior(monkeypatch):
+    state = _install_connect_keyring(monkeypatch)
+    _install_connect_http(
+        monkeypatch,
+        validation=httpx.Response(503),
+        abort=httpx.ConnectError("abort unavailable"),
+    )
+
+    with pytest.raises(hosted.HostedError, match="recovery copy was retained") as error:
+        _connect_test()
+
+    assert state["canonical"] == PRIOR_TOKEN
+    assert state["staging"] == PAIRED_TOKEN
+    assert PAIRED_TOKEN not in str(error.value)
+    assert PAIRING not in str(error.value)
+
+
+def test_connect_abort_conflict_preserves_new_recoverable_state(monkeypatch):
+    state = _install_connect_keyring(monkeypatch)
+    _install_connect_http(
+        monkeypatch,
+        confirmations=[
+            httpx.ConnectError("confirmation unavailable"),
+            httpx.ConnectError("confirmation unavailable"),
+        ],
+        abort=httpx.Response(409),
+    )
+
+    with pytest.raises(hosted.HostedError, match="Retry confirmation"):
+        _connect_test()
+
+    assert state["canonical"] == PAIRED_TOKEN
+    assert state["staging"] == PAIRED_TOKEN
+
+
+def test_connect_restoration_failure_retains_staging_recovery(monkeypatch):
+    state = _install_connect_keyring(
+        monkeypatch,
+        canonical_results=[True, False],
+    )
+    _install_connect_http(
+        monkeypatch,
+        confirmations=[httpx.Response(200, json={"connected": False})],
+    )
+
+    with pytest.raises(hosted.HostedError, match="could not be restored"):
+        _connect_test()
+
+    assert state["canonical"] == PAIRED_TOKEN
+    assert state["staging"] == PAIRED_TOKEN
+
+
+def test_connect_with_no_prior_token_cleans_canonical_only_after_abort(monkeypatch):
+    state = _install_connect_keyring(monkeypatch, prior=None)
+    calls = _install_connect_http(
+        monkeypatch,
+        confirmations=[httpx.Response(200, json={"connected": False})],
+    )
+
+    with pytest.raises(hosted.HostedError):
+        _connect_test()
+
+    assert calls["post"][-1][0].endswith("/pairings/abort")
+    assert state["canonical"] is None
+    assert state["staging"] is None
+    assert "delete-canonical" in state["events"]
+
+
+def test_connect_staging_failure_aborts_without_touching_prior(monkeypatch):
+    state = _install_connect_keyring(monkeypatch, staging_result=False)
+    calls = _install_connect_http(monkeypatch)
+
+    with pytest.raises(hosted.HostedError, match="staging copy"):
+        _connect_test()
+
+    assert state["canonical"] == PRIOR_TOKEN
+    assert state["staging"] is None
+    assert calls["post"][-1][0].endswith("/pairings/abort")
+
+
+def test_connect_cli_failure_never_emits_pairing_or_ingest_secrets(monkeypatch, capsys):
+    _install_connect_keyring(monkeypatch)
+    _install_connect_http(
+        monkeypatch,
+        validation=httpx.Response(503),
+        abort=httpx.ConnectError("abort unavailable"),
+    )
+
+    assert (
+        main(
+            [
+                "connect",
+                "--pairing",
+                PAIRING,
+                "--host",
+                "https://h.test",
+                "--destination-kind",
+                "customer-managed",
+                "--trusted-host",
+                "https://h.test",
+            ]
+        )
+        == 1
+    )
+    output = capsys.readouterr().out
+    assert "connect failed:" in output
+    assert PAIRING not in output
+    assert PAIRED_TOKEN not in output
+
+
+def test_connect_cli_supports_pairing_and_strict_uri(monkeypatch, capsys):
+    captured: dict = {}
+
+    def fake_connect(pairing_secret, **kwargs):
+        captured.update(pairing=pairing_secret, **kwargs)
+        return {
+            "host": kwargs["host"],
+            "device_name": "Laptop",
+            "settings_url": f"{kwargs['host']}/dashboard/settings/ingest",
+        }
+
+    monkeypatch.setattr(hosted, "connect", fake_connect)
+    assert (
+        main(
+            [
+                "connect",
+                "--pairing",
+                PAIRING,
+                "--host",
+                "https://h.test",
+                "--destination-kind",
+                "customer-managed",
+                "--trusted-host",
+                "https://h.test",
+            ]
+        )
+        == 0
+    )
+    assert captured["pairing"] == PAIRING
+    assert "credential saved in the OS keychain" in capsys.readouterr().out
+
+    captured.clear()
+    uri = f"openadapt://connect?pairing={PAIRING}&host=https%3A%2F%2Fapp.openadapt.ai"
+    assert main(["connect", "--uri", uri]) == 0
+    assert captured["host"] == "https://app.openadapt.ai"
 
 
 # ---------------------------------------------------------------------------

@@ -1221,6 +1221,46 @@ def _cmd_login(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_connect(args: argparse.Namespace) -> int:
+    """Claim one browser-created pairing and store it in the OS keychain."""
+    from openadapt_flow.hosted import (
+        HostedError,
+        connect,
+        parse_connect_uri,
+    )
+
+    pairing = args.pairing
+    host = args.host
+    destination_kind = args.destination_kind
+    try:
+        if args.uri:
+            if host or destination_kind or args.trusted_host:
+                raise HostedError(
+                    "--uri cannot be combined with --host, --destination-kind, "
+                    "or --trusted-host"
+                )
+            request = parse_connect_uri(args.uri)
+            pairing = request["pairing"]
+            host = request["host"]
+            destination_kind = request.get("destination_kind")
+        result = connect(
+            pairing,
+            host=host,
+            device_name=args.device_name,
+            destination_kind=destination_kind,
+            trusted_hosts=args.trusted_host,
+        )
+    except HostedError as e:
+        print(f"connect failed: {e}")
+        return 1
+    print(
+        f"Connected local OpenAdapt to {result['host']} as "
+        f"{result['device_name']} (credential saved in the OS keychain)."
+    )
+    print(f"Manage or revoke this connection at {result['settings_url']}")
+    return 0
+
+
 def _cmd_push(args: argparse.Namespace) -> int:
     """Upload the exact approved sanitized archive to ``/api/ingest``.
 
@@ -2219,6 +2259,48 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_teach)
+
+    p = sub.add_parser(
+        "connect",
+        help=(
+            "Claim a one-time browser pairing and store the workspace credential "
+            "in the OS keychain"
+        ),
+    )
+    pairing_source = p.add_mutually_exclusive_group(required=True)
+    pairing_source.add_argument(
+        "--pairing",
+        default=None,
+        help="Five-minute one-time pairing code from Cloud settings",
+    )
+    pairing_source.add_argument(
+        "--uri",
+        default=None,
+        help="Exact openadapt://connect deep link supplied by the desktop app",
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Cloud origin (default: https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--device-name",
+        default=None,
+        help="Name shown for this computer (default: local hostname)",
+    )
+    p.add_argument(
+        "--destination-kind",
+        choices=["openadapt-managed", "customer-managed", "local"],
+        default=None,
+        help="Trust class for the pairing destination",
+    )
+    p.add_argument(
+        "--trusted-host",
+        action="append",
+        default=None,
+        help="Exact allowed customer-managed origin (repeatable)",
+    )
+    p.set_defaults(func=_cmd_connect)
 
     p = sub.add_parser(
         "login",

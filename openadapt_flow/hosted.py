@@ -41,12 +41,14 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import shutil
+import socket
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import httpx
@@ -61,6 +63,8 @@ __all__ = [
     "resolve_deployment_kind",
     "resolve_destination_policy",
     "find_latest_recording",
+    "connect",
+    "parse_connect_uri",
     "login",
     "push",
     "report_break",
@@ -74,6 +78,7 @@ DEFAULT_HOST = "https://app.openadapt.ai"
 #: BYOC-server path).
 TOKEN_ENV = "OPENADAPT_INGEST_TOKEN"
 KEYRING_SERVICE = "openadapt-flow"
+PAIRING_SECRET_RE = re.compile(r"^oap_[A-Za-z0-9_-]{43}$")
 
 #: Environment variable naming the deployment lane (``cloud`` | ``byoc`` |
 #: ``regulated``). Falls back to ``config.toml`` ``[hosted] deployment_lane``.
@@ -291,6 +296,74 @@ def _store_keyring_token(host: str, token: str) -> bool:
         return False
 
 
+def _delete_keyring_token(host: str) -> bool:
+    try:
+        import keyring
+
+        keyring.delete_password(KEYRING_SERVICE, _origin(host))
+        return True
+    except Exception:  # noqa: BLE001 - deletion is best-effort cleanup
+        return False
+
+
+def _snapshot_keyring_token(host: str) -> tuple[bool, Optional[str]]:
+    """Read the canonical credential without hiding a locked-keychain failure."""
+    try:
+        import keyring
+
+        return True, keyring.get_password(KEYRING_SERVICE, _origin(host))
+    except Exception:  # noqa: BLE001 - pairing must refuse before consuming its code
+        return False, None
+
+
+def _pairing_staging_account(host: str, pairing_id: str) -> str:
+    """Return a pairing-specific keyring account, separate from the canonical one."""
+    return f"{_origin(host)}#pairing:{UUID(pairing_id)}"
+
+
+def _store_staged_keyring_token(host: str, pairing_id: str, token: str) -> bool:
+    try:
+        import keyring
+
+        keyring.set_password(
+            KEYRING_SERVICE,
+            _pairing_staging_account(host, pairing_id),
+            token,
+        )
+        return True
+    except Exception:  # noqa: BLE001 - caller aborts the claimed pairing
+        return False
+
+
+def _delete_staged_keyring_token(host: str, pairing_id: str) -> bool:
+    try:
+        import keyring
+
+        keyring.delete_password(
+            KEYRING_SERVICE,
+            _pairing_staging_account(host, pairing_id),
+        )
+        return True
+    except Exception:  # noqa: BLE001 - retained staging remains keychain-protected
+        return False
+
+
+def _keyring_available() -> bool:
+    """Return whether a real OS-keychain backend is installed.
+
+    Pairing consumes a one-time server secret, so it refuses before the claim
+    when the credential cannot be stored safely. Manual token login remains
+    available for environment-injected and explicit plaintext fallback cases.
+    """
+    try:
+        import keyring
+
+        priority = getattr(keyring.get_keyring(), "priority", 0)
+        return bool(priority and priority > 0)
+    except Exception:  # noqa: BLE001 - unavailable/locked backend
+        return False
+
+
 def resolve_token(token: Optional[str] = None, *, host: Optional[str] = None) -> str:
     """Resolve the ingest token by precedence, or raise :class:`HostedError`.
 
@@ -475,6 +548,332 @@ def _auth_headers(token: str) -> dict[str, str]:
     """The bearer header every outbound call carries (also acceptable to the
     API as ``x-ingest-token``)."""
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---------------------------------------------------------------------------
+# one-click browser pairing
+# ---------------------------------------------------------------------------
+
+
+def parse_connect_uri(uri: str) -> dict[str, str]:
+    """Parse the narrow ``openadapt://connect`` desktop deep-link contract.
+
+    It accepts only the fixed connect action and known scalar fields. No path,
+    fragment, duplicate/unknown query field, shell command, or browser URL can
+    be smuggled through this protocol.
+    """
+    parsed = urlparse(str(uri).strip())
+    if (
+        parsed.scheme != "openadapt"
+        or parsed.netloc != "connect"
+        or parsed.path not in ("", "/")
+        or parsed.params
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+    ):
+        raise HostedError("Invalid OpenAdapt connect link")
+    query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+    allowed = {"pairing", "host", "destination_kind"}
+    if set(query) - allowed or any(len(values) != 1 for values in query.values()):
+        raise HostedError("Connect link contains unknown or duplicate fields")
+    if set(query) < {"pairing", "host"}:
+        raise HostedError("Connect link is missing pairing or host")
+    destination_kind = query.get("destination_kind", [None])[0]
+    if destination_kind not in (None, "openadapt-managed", "local"):
+        raise HostedError("Connect link has an unsupported destination kind")
+    result = {"pairing": query["pairing"][0], "host": query["host"][0]}
+    if destination_kind:
+        result["destination_kind"] = destination_kind
+    return result
+
+
+def _abort_pairing(
+    host: str,
+    pairing_id: str,
+    token: str,
+) -> str:
+    """Best-effort rollback with deliberately narrow, fail-closed semantics."""
+    try:
+        response = httpx.post(
+            f"{host}/api/local-bridge/pairings/abort",
+            json={"pairing_id": pairing_id},
+            headers=_auth_headers(token),
+            timeout=_API_TIMEOUT,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError:
+        return "indeterminate"
+    if response.status_code == 200:
+        try:
+            if response.json().get("revoked") is True:
+                return "revoked"
+        except (AttributeError, TypeError, ValueError):
+            pass
+        return "indeterminate"
+    if response.status_code == 401:
+        return "invalid"
+    if response.status_code == 409:
+        return "conflict"
+    return "indeterminate"
+
+
+def _rollback_pairing(
+    *,
+    host: str,
+    pairing_id: str,
+    token: str,
+    prior_token: Optional[str],
+    staged: bool,
+    canonical_may_be_new: bool,
+) -> str:
+    """Abort a failed claim and restore canonical state only when revocation is proven."""
+    abort_result = _abort_pairing(host, pairing_id, token)
+    if abort_result != "revoked":
+        if not staged:
+            return (
+                "The previous connection was preserved, but Cloud rollback could "
+                "not be proven and no recovery credential could be retained. "
+                "Inspect Cloud settings before retrying."
+            )
+        if canonical_may_be_new:
+            return (
+                "Cloud rollback could not be proven; the new credential and its "
+                "keychain recovery copy were retained. Retry confirmation or inspect "
+                "the connection in Cloud settings before changing credentials."
+            )
+        return (
+            "The previous connection was preserved. Cloud rollback could not be "
+            "proven, so the keychain recovery copy was retained; inspect Cloud "
+            "settings before retrying."
+        )
+
+    restored = True
+    if canonical_may_be_new:
+        if prior_token is None:
+            restored = _delete_keyring_token(host)
+        else:
+            restored = _store_keyring_token(host, prior_token)
+    if not restored:
+        return (
+            "Cloud revoked the new credential, but the previous canonical "
+            "credential could not be restored. The keychain recovery copy was "
+            "retained; repair the keychain before retrying."
+        )
+
+    staging_deleted = not staged or _delete_staged_keyring_token(host, pairing_id)
+    if not staging_deleted:
+        return (
+            "Cloud revoked the new credential and the previous connection was "
+            "restored, but keychain staging cleanup is still pending."
+        )
+    return "Cloud revoked the new credential and preserved the previous connection."
+
+
+def _confirm_pairing(
+    *,
+    host: str,
+    pairing_id: str,
+    token: str,
+) -> tuple[bool, str]:
+    """Confirm once, retrying the exact idempotent request after ambiguity."""
+    confirmation_url = f"{host}/api/local-bridge/pairings/confirm"
+    last_detail = "transport failure"
+    for _attempt in range(2):
+        try:
+            confirmation = httpx.post(
+                confirmation_url,
+                json={"pairing_id": pairing_id},
+                headers=_auth_headers(token),
+                timeout=_API_TIMEOUT,
+                follow_redirects=False,
+            )
+        except httpx.HTTPError:
+            last_detail = "transport failure"
+            continue
+        try:
+            confirmed = confirmation.json().get("connected") is True
+        except (AttributeError, TypeError, ValueError):
+            confirmed = False
+        if 200 <= confirmation.status_code < 300 and confirmed:
+            return True, "confirmed"
+        last_detail = f"status {confirmation.status_code}"
+        if confirmation.status_code < 500:
+            break
+    return False, last_detail
+
+
+def connect(
+    pairing_secret: str,
+    host: Optional[str] = None,
+    *,
+    device_name: Optional[str] = None,
+    destination_kind: Optional[str] = None,
+    trusted_hosts: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Claim a five-minute browser pairing without clobbering a working token.
+
+    The one-time secret authorizes only ``POST /api/local-bridge/pairings/claim``.
+    The previous canonical token is snapshotted before the claim. The returned
+    token is staged under a pairing-specific keyring account, validated from
+    memory, promoted to canonical, and then confirmed. Rollback restores the
+    prior token only after Cloud proves the unconfirmed token was revoked.
+    """
+    secret = str(pairing_secret).strip()
+    if not PAIRING_SECRET_RE.fullmatch(secret):
+        raise HostedError("Pairing code is malformed")
+    resolved_host = resolve_host(host)
+    resolve_destination_policy(
+        resolved_host,
+        destination_kind=destination_kind,
+        trusted_hosts=trusted_hosts,
+    )
+    if not _keyring_available():
+        raise HostedError(
+            "Secure pairing needs an OS keychain, but none is available. Install "
+            "'openadapt-flow[hosted]' and unlock the keychain, or use the manual "
+            "`openadapt-flow login` token flow."
+        )
+    snapshot_ok, prior_token = _snapshot_keyring_token(resolved_host)
+    if not snapshot_ok:
+        raise HostedError(
+            "Secure pairing could not read the current OS-keychain credential. "
+            "Unlock or repair the keychain before retrying."
+        )
+
+    clean_device = re.sub(r"[\x00-\x1f\x7f]", "", device_name or socket.gethostname())
+    clean_device = clean_device.strip()[:80] or "this computer"
+    claim_url = f"{resolved_host}/api/local-bridge/pairings/claim"
+    try:
+        response = httpx.post(
+            claim_url,
+            json={"pairing_secret": secret, "device_name": clean_device},
+            timeout=_API_TIMEOUT,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError as exc:
+        raise HostedError(f"Could not reach {resolved_host}: {exc}") from exc
+    if response.status_code == 410:
+        raise HostedError("Pairing code expired, was cancelled, or was already used")
+    if not 200 <= response.status_code < 300:
+        raise HostedError(
+            f"Pairing failed ({response.status_code}) against {claim_url}"
+        )
+    try:
+        body = response.json()
+        token = str(body["ingest_token"])
+        pairing_id = str(UUID(str(body["pairing_id"])))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HostedError(
+            "Pairing response did not contain a credential and pairing id"
+        ) from exc
+    if not re.fullmatch(r"oai_ingest_[A-Za-z0-9_-]{32,}", token):
+        raise HostedError("Pairing response contained a malformed credential")
+
+    if not _store_staged_keyring_token(resolved_host, pairing_id, token):
+        rollback = _rollback_pairing(
+            host=resolved_host,
+            pairing_id=pairing_id,
+            token=token,
+            prior_token=prior_token,
+            staged=False,
+            canonical_may_be_new=False,
+        )
+        raise HostedError(
+            "The pairing was claimed, but the OS keychain refused its protected "
+            f"staging copy. No plaintext copy was written. {rollback}"
+        )
+
+    # A second authenticated request prevents a successful claim response from
+    # being mistaken for a usable connection.
+    validation_url = f"{resolved_host}/api/needs-attention/count"
+    try:
+        validation = httpx.get(
+            validation_url,
+            headers=_auth_headers(token),
+            timeout=_API_TIMEOUT,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError as exc:
+        rollback = _rollback_pairing(
+            host=resolved_host,
+            pairing_id=pairing_id,
+            token=token,
+            prior_token=prior_token,
+            staged=True,
+            canonical_may_be_new=False,
+        )
+        raise HostedError(
+            "The paired credential could not be validated because Cloud was "
+            f"unreachable. {rollback}"
+        ) from exc
+    if validation.status_code == 401:
+        rollback = _rollback_pairing(
+            host=resolved_host,
+            pairing_id=pairing_id,
+            token=token,
+            prior_token=prior_token,
+            staged=True,
+            canonical_may_be_new=False,
+        )
+        raise HostedError(f"Cloud rejected the paired credential. {rollback}")
+    if not 200 <= validation.status_code < 300:
+        rollback = _rollback_pairing(
+            host=resolved_host,
+            pairing_id=pairing_id,
+            token=token,
+            prior_token=prior_token,
+            staged=True,
+            canonical_may_be_new=False,
+        )
+        raise HostedError(
+            "Cloud could not validate the paired credential "
+            f"(status {validation.status_code}). {rollback}"
+        )
+
+    if not _store_keyring_token(resolved_host, token):
+        rollback = _rollback_pairing(
+            host=resolved_host,
+            pairing_id=pairing_id,
+            token=token,
+            prior_token=prior_token,
+            staged=True,
+            canonical_may_be_new=True,
+        )
+        raise HostedError(
+            "The paired credential validated, but the OS keychain refused to "
+            f"promote it to the canonical account. {rollback}"
+        )
+
+    confirmed, confirmation_detail = _confirm_pairing(
+        host=resolved_host,
+        pairing_id=pairing_id,
+        token=token,
+    )
+    if not confirmed:
+        rollback = _rollback_pairing(
+            host=resolved_host,
+            pairing_id=pairing_id,
+            token=token,
+            prior_token=prior_token,
+            staged=True,
+            canonical_may_be_new=True,
+        )
+        raise HostedError(
+            "Cloud did not definitively confirm the new connection "
+            f"({confirmation_detail}). {rollback}"
+        )
+
+    _delete_staged_keyring_token(resolved_host, pairing_id)
+    _update_hosted_config({"host": resolved_host})
+    _remove_hosted_config_key("token")
+    return {
+        "host": resolved_host,
+        "paired": True,
+        "token_storage": "keyring",
+        "device_name": clean_device,
+        "settings_url": f"{resolved_host}/dashboard/settings/ingest",
+    }
 
 
 # ---------------------------------------------------------------------------

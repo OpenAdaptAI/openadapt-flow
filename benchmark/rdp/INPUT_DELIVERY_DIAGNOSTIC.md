@@ -35,3 +35,25 @@ the unchanged suspended original base afterward.
 The successor keeps Unicode for `type_text` but uses a separate, layout-bound
 physical-scancode path for `press` chords, with matched reverse releases and
 refusal for unsupported or implicit-modifier chord characters.
+
+## Successor proof
+
+One uncounted, snapshot-isolated proof then exercised exact candidate
+`82a658a6926ddac74b010b613535c023d0b5f079`. The post-`Meta+r` framebuffer
+changed by `0.080957` and visibly contained the Windows Run dialog. All 113
+input receipts returned without error, and the independent guest-tools oracle
+observed the exact expected value `oaflow-input-c02a4f5a0513fe0d`.
+
+| Frame | SHA-256 | Change from desktop |
+| --- | --- | ---: |
+| Desktop ready | `c30efb8a20685adc2c0f3baa2332159e426119b9e02f147ff3cad957077753c0` | `0.000000` |
+| After `Meta+r` | `e144dc9f2820b55ad66972c6db87dc03d8cfad899750e8fa8869afef182c08c5` | `0.080957` |
+| After typing | `b47b8a8c829a31acef488a60e9440c56bbaae95f2bcfb7583da7480b3f923ef0` | `0.081000` |
+| After Enter | `a49442596f765f50752456551cd255864df4cc2a6171359aa536ba6b5934a44e` | `0.000355` |
+
+The local proof report SHA-256 is
+`55d5379ca3ee50225aadad433353b5909931e447c11db3faafecbd29aed8b412`.
+Its screenshots remain local because the qualification desktop contains
+unrelated operator artifacts. Cleanup deleted only the proof-owned snapshot,
+restored the exact eight-ID inventory, and left the clean base suspended and
+current before the counted batch began.

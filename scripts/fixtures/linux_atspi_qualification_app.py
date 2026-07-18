@@ -119,7 +119,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    GLib.set_prgname("openadapt-linux-qualification")
+    # AT-SPI exposes the GLib program name as the application accessible name.
+    # Keep it identical to the qualifier's exact application selector.
+    GLib.set_prgname(APP_NAME)
     GLib.set_application_name(APP_NAME)
     root = Atk.get_root()
     if root is None:

@@ -440,16 +440,13 @@ class LinuxBackend:
             and candidate.name == locator.name
         )
 
-    def _unique_candidate(
-        self, locator: StructuralLocator
-    ) -> Optional[LinuxElement]:
+    def _unique_candidate(self, locator: StructuralLocator) -> Optional[LinuxElement]:
         result = self._candidate_set(locator)
         if not result.candidates:
             return None
         if len(result.candidates) != 1:
             raise StructuralResolutionRefused(
-                "AT-SPI locator is ambiguous: "
-                f"candidate_count={len(result.candidates)}"
+                f"AT-SPI locator is ambiguous: candidate_count={len(result.candidates)}"
             )
         candidate = result.candidates[0]
         if (
@@ -547,9 +544,7 @@ class LinuxBackend:
                 self._focused_fingerprint = current
             else:
                 self._clear_focused_element()
-            return _receipt(
-                concrete, native=True, target_fingerprint=expected
-            )
+            return _receipt(concrete, native=True, target_fingerprint=expected)
 
         if not self._allow_physical_input:
             detail = "double-click" if double else "click"
@@ -907,9 +902,7 @@ class AtspiLinuxClient:
         matches: list[LinuxWindow] = []
         desktop = self._desktop()
         for app_index, application in enumerate(self._children(desktop)):
-            app_name = _clean_text(
-                self._call(application, "get_name", default=None)
-            )
+            app_name = _clean_text(self._call(application, "get_name", default=None))
             if app_name is None or app_name.casefold() != app.casefold():
                 continue
             for window_index, node in enumerate(self._children(application)):
@@ -1002,9 +995,7 @@ class AtspiLinuxClient:
     ) -> Optional[LinuxElement]:
         nodes, truncated = self._walk(window)
         if truncated:
-            raise LinuxBackendError(
-                "AT-SPI tree exceeded the bounded traversal limit"
-            )
+            raise LinuxBackendError("AT-SPI tree exceeded the bounded traversal limit")
         matches: list[tuple[int, LinuxElement]] = []
         for node, path in nodes:
             candidate = self._element(node, path, window)
@@ -1017,11 +1008,7 @@ class AtspiLinuxClient:
             return None
         matches.sort(key=lambda item: item[0], reverse=True)
         actionable = next(
-            (
-                candidate
-                for _, candidate in matches
-                if candidate.supported_operations
-            ),
+            (candidate for _, candidate in matches if candidate.supported_operations),
             matches[0][1],
         )
         return actionable
@@ -1090,9 +1077,7 @@ class AtspiLinuxClient:
             name = _clean_text(self._call(child, "get_name", default=None))
             if name:
                 parts.append(name)
-            text_iface = self._call(
-                child, "get_text_iface", "queryText", default=None
-            )
+            text_iface = self._call(child, "get_text_iface", "queryText", default=None)
             if text_iface is None:
                 continue
             count = self._call(text_iface, "get_character_count", default=0)

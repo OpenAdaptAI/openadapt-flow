@@ -24,7 +24,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from openadapt_flow import __version__
 from openadapt_flow.backend import StructuralResolutionRefused
@@ -42,6 +42,8 @@ ENTRY_NAME = "Effect value"
 BUTTON_NAME = "Write effect"
 TRIALS_PER_CONDITION = 3
 POLL_SECONDS = 0.05
+
+_T = TypeVar("_T")
 
 
 def exact_file_oracle(path: Path, expected: bytes) -> dict[str, Any]:
@@ -155,11 +157,11 @@ def evaluate(
 
 
 def _wait_until(
-    predicate: Callable[[], Any],
+    predicate: Callable[[], _T | None],
     *,
     timeout_s: float,
     description: str,
-) -> Any:
+) -> _T:
     deadline = time.monotonic() + timeout_s
     last_error: Exception | None = None
     while time.monotonic() < deadline:

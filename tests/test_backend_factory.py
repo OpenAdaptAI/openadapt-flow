@@ -319,9 +319,7 @@ def test_config_backend_used_when_no_flag() -> None:
 
 
 @pytest.mark.parametrize("kind", ["windows", "macos", "linux", "rdp"])
-def test_record_desktop_backend_invokes_capture(
-    monkeypatch, tmp_path, kind
-) -> None:
+def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path, kind) -> None:
     """Every desktop selector routes to capture, not the web recorder."""
     from openadapt_flow.__main__ import _cmd_record
 

@@ -150,9 +150,7 @@ class FakeLinuxClient:
         return self.physical_succeeds
 
 
-def backend(
-    client: FakeLinuxClient | None = None, **kwargs
-) -> LinuxBackend:
+def backend(client: FakeLinuxClient | None = None, **kwargs) -> LinuxBackend:
     return LinuxBackend(
         client or FakeLinuxClient(),
         app="gedit",
@@ -180,9 +178,7 @@ def test_exact_window_scope_refuses_zero_or_multiple_before_capture() -> None:
         backend(missing).screenshot()
     assert not any(call[0] == "capture" for call in missing.calls)
 
-    duplicate = LinuxWindow(
-        "0.2", "gedit", "oa-trial.txt", 9002, (100, 200, 640, 480)
-    )
+    duplicate = LinuxWindow("0.2", "gedit", "oa-trial.txt", 9002, (100, 200, 640, 480))
     ambiguous = FakeLinuxClient(windows=[TARGET_WINDOW, duplicate])
     with pytest.raises(LinuxBackendError, match="ambiguous.*2 windows"):
         backend(ambiguous).screenshot()
@@ -193,9 +189,7 @@ def test_wayland_requires_a_live_portal_session() -> None:
     with pytest.raises(LinuxBackendError, match="operator-approved.*Portal"):
         backend(FakeLinuxClient(session_type="wayland"))
 
-    target = backend(
-        FakeLinuxClient(session_type="wayland", portal_ready=True)
-    )
+    target = backend(FakeLinuxClient(session_type="wayland", portal_ready=True))
     assert target.viewport == (640, 480)
 
 
@@ -261,10 +255,7 @@ def test_missing_window_name_or_target_is_an_ordinary_miss() -> None:
     )
     target._client.candidates = []
     assert (
-        target.locate_structural(
-            StructuralLocator(automation_id="save-button")
-        )
-        is None
+        target.locate_structural(StructuralLocator(automation_id="save-button")) is None
     )
 
 

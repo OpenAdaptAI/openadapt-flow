@@ -164,5 +164,5 @@ def test_sdist_requires_mit_license_and_excludes_openimis_surface(
     for index, forbidden in enumerate(sorted(forbidden_members)):
         mixed = tmp_path / f"mixed-{index}.tar.gz"
         _write_sdist(mixed, {*REQUIRED_SDIST_PATHS, forbidden})
-        with pytest.raises(ValueError, match="repository-only openIMIS"):
+        with pytest.raises(ValueError, match="repository-only benchmark"):
             validate_sdist_license_boundary(mixed)

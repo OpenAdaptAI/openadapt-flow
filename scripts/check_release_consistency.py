@@ -29,7 +29,7 @@ FORBIDDEN_SDIST_PATHS = frozenset(
         "tests/test_openimis_claims_fixture.py",
     }
 )
-FORBIDDEN_SDIST_PREFIXES = ("benchmark/openimis_claims/",)
+FORBIDDEN_SDIST_PREFIXES = ("benchmark/",)
 
 
 def _match(pattern: str, text: str, source: str) -> str:
@@ -114,7 +114,7 @@ def validate_sdist_license_boundary(sdist: Path) -> None:
     )
     if forbidden:
         raise ValueError(
-            "source distribution contains repository-only openIMIS benchmark "
+            "source distribution contains repository-only benchmark "
             f"material outside the MIT package boundary: {sorted(forbidden)}"
         )
 

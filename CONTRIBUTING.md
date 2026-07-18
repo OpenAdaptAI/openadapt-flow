@@ -15,7 +15,7 @@ playwright install chromium
 pytest -q
 ```
 
-Python 3.10–3.13 are supported and exercised in CI.
+Python 3.10–3.12 are supported and exercised in CI.
 
 ## The checks CI runs (run them locally first)
 
@@ -46,6 +46,28 @@ pytest -q                          # tests
 - Update docs (`README.md`, `DESIGN.md`, `docs/`) when behavior or contracts
   change. We prefer honest, measured claims — if something is experimental, say
   so.
+
+## Licensing and vendored files
+
+`openadapt-flow` package artifacts are MIT-licensed. Do not copy, adapt, vendor,
+embed, or redistribute GPL, AGPL, LGPL, SSPL, source-available, or
+field-of-use-restricted material in the wheel or source distribution without
+explicit reviewed approval from qualified licensing counsel.
+
+OpenAdapt-specific non-negotiable: do not ship AGPL benchmark files in a PyPI
+wheel or sdist. The openIMIS reference environment and any other copied or
+adapted AGPL benchmark material must remain repository-only or be obtained
+through a pinned, hash-verified, opt-in upstream fetch.
+
+Running or automating an external copyleft application is not the same as
+redistributing its source. For reference environments, prefer an opt-in fetch of
+the exact pinned, hash-verified upstream project. If repository-only benchmark
+material has a different file-local license, preserve its full license,
+provenance, modification notice, and source hashes, and exclude the entire
+surface from permissively licensed package artifacts.
+
+The release-consistency gate inspects the actual wheel and sdist. A source-tree
+notice alone is not sufficient.
 
 ## Safety-sensitive areas
 

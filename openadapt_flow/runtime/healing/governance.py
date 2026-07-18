@@ -135,14 +135,35 @@ def identity_preserved(
                 reason=f"heal changed {field} identity evidence",
             )
 
-    # (2) structured identity may never be dropped or changed by a heal.
-    if old_struct and new_struct != old_struct:
-        change = "dropped" if not new_struct else "changed"
+    # (2) structured identity may never be added, dropped, or changed by a
+    # heal. Adding a new identity tier is still an identity revision and needs
+    # reviewed compile/teach evidence; a locator repair may not smuggle it in.
+    if old_struct != new_struct:
+        if not old_struct:
+            change = "added"
+        elif not new_struct:
+            change = "dropped"
+        else:
+            change = "changed"
         return PreservationVerdict(
             preserved=False,
             reason=(
                 f"heal {change} structured_identity: the highest-fidelity "
-                "identity tier would be lost"
+                "identity tier requires a reviewed compile / teach revision"
+            ),
+        )
+
+    # A newly readable context band may be accepted only when this gate has
+    # recorded OCR/template evidence to verify it against below. An unarmed or
+    # structured-only anchor has no such band, so adding context_text would be
+    # an unreviewed identity-evidence change rather than locator repair.
+    if not old_has_band and old_anchor.context_text != new_anchor.context_text:
+        return PreservationVerdict(
+            preserved=False,
+            reason=(
+                "heal added context_text identity evidence without a recorded "
+                "context/template band to verify; this requires a reviewed "
+                "compile / teach revision"
             ),
         )
 

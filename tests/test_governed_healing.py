@@ -294,6 +294,29 @@ def test_invariant_blocks_changed_structured_identity():
     assert "changed structured_identity" in verdict.reason
 
 
+def test_invariant_blocks_added_structured_identity():
+    old = anchor()
+    new = old.model_copy(update={"structured_identity": "MRN 100200"}, deep=True)
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert "added structured_identity" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "old",
+    [
+        anchor(),
+        anchor(structured_identity="MRN 100200"),
+    ],
+    ids=["unarmed", "structured-only"],
+)
+def test_invariant_blocks_added_context_without_recorded_band(old):
+    new = old.model_copy(update={"context_text": ARMED_BAND}, deep=True)
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert "added context_text identity evidence" in verdict.reason
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

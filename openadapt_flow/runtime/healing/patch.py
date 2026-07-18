@@ -28,6 +28,7 @@ from openadapt_flow.ir import Anchor, HealEvent, Rung
 IDENTITY_FIELDS: tuple[str, ...] = (
     "context_text",
     "structured_identity",
+    "identity_template",
     "identifier_crop",
     "identifier_region",
 )

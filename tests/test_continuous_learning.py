@@ -45,7 +45,7 @@ from openadapt_flow.learning.synth_stream import (
     generate_stream,
     mockmed_base_program,
 )
-
+from openadapt_flow.runtime.identity_template import build_identity_template
 
 # -- stub inducers ------------------------------------------------------------
 
@@ -329,6 +329,30 @@ def test_program_gate_passes_for_additive_revision():
     # Every original step survives; the gate ruled on each.
     assert len(report.per_step) == 5
     assert not report.removed
+
+
+def test_program_gate_allows_locator_change_on_unchanged_template_armed_step():
+    base = mockmed_base_program()
+    old_anchor = base.states["s_open"].step.anchor
+    assert old_anchor is not None
+    tmpl = build_identity_template(
+        old_anchor.context_text,
+        salt_hex="22" * 16,
+    )
+    assert tmpl is not None
+    old_anchor.context_text = None
+    old_anchor.identity_template = tmpl
+
+    revised = base.model_copy(deep=True)
+    revised_anchor = revised.states["s_open"].step.anchor
+    assert revised_anchor is not None
+    revised_anchor.region = (125, 90, 20, 20)
+    revised_anchor.click_point = (135, 100)
+
+    report = program_regression_gate(base, revised)
+    assert report.passed, report.failures
+    verdict = next(v for v in report.per_step if v.step_id == "s_open")
+    assert verdict.result.identity_ok is True
 
 
 def test_program_gate_flags_removed_armed_step():

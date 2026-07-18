@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from openadapt_flow.ir import Anchor, Step
 from openadapt_flow.runtime import identity as identity_mod
-from openadapt_flow.runtime.healing.patch import HealPatch
+from openadapt_flow.runtime.healing.patch import IDENTITY_FIELDS, HealPatch
 
 # A verifier maps (recorded_band, observed_band) -> verdict status string.
 # Defaults to the production OCR identity matcher; injectable for tests.
@@ -83,6 +83,22 @@ def identity_preserved(
         A :class:`PreservationVerdict`; ``preserved=False`` means the patch
         must be quarantined and the run halted.
     """
+    # A program-level revision checks every surviving step, including anchors
+    # the revision did not touch.  An unchanged PHI-free identity template has
+    # no readable band to feed through the live-verification path below, but it
+    # also cannot have been weakened.  Admit that narrow no-op case only when
+    # *all* identity-bearing anchor fields are value-identical.  Locator fields
+    # are deliberately excluded: moving the region/click point or refreshing
+    # locator text is the legitimate work of a heal.
+    if all(
+        getattr(old_anchor, field) == getattr(new_anchor, field)
+        for field in IDENTITY_FIELDS
+    ):
+        return PreservationVerdict(
+            preserved=True,
+            reason="identity evidence unchanged",
+        )
+
     # PHI-free bundles (audit REM-2) carry a salted-hash ``identity_template``
     # in place of the plaintext ``context_text`` / ``structured_identity``. The
     # gate must treat a template-armed anchor as ARMED (else a heal silently
@@ -102,12 +118,30 @@ def identity_preserved(
         old_anchor.context_text or old_struct or (old_tmpl and old_tmpl.tokens)
     )
 
+    # Unlike a freshly OCR-read context band, these identity tiers cannot be
+    # re-verified by this gate.  A heal therefore must preserve them exactly.
+    # Any addition, removal, or mutation needs a separately reviewed compile /
+    # teach revision rather than being smuggled through as locator repair.
+    if old_tmpl != new_tmpl:
+        return PreservationVerdict(
+            preserved=False,
+            reason="heal changed identity_template evidence",
+        )
+
+    for field in ("identifier_crop", "identifier_region"):
+        if getattr(old_anchor, field) != getattr(new_anchor, field):
+            return PreservationVerdict(
+                preserved=False,
+                reason=f"heal changed {field} identity evidence",
+            )
+
     # (2) structured identity may never be dropped or changed by a heal.
-    if old_struct and not new_struct:
+    if old_struct and new_struct != old_struct:
+        change = "dropped" if not new_struct else "changed"
         return PreservationVerdict(
             preserved=False,
             reason=(
-                "heal dropped structured_identity: the highest-fidelity "
+                f"heal {change} structured_identity: the highest-fidelity "
                 "identity tier would be lost"
             ),
         )

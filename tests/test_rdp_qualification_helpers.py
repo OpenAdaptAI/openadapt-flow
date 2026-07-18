@@ -249,10 +249,10 @@ def test_wait_qualification_desktop_requires_transition_and_stability():
 
 def test_counted_desktop_wait_forwards_exact_evidence_bound_timeout(monkeypatch):
     marker = object()
-    calls: list[tuple[object, bytes, float]] = []
+    calls: list[tuple[object, bytes, float, int]] = []
 
-    def fake_wait(backend, baseline, *, timeout_s, **_kwargs):
-        calls.append((backend, baseline, timeout_s))
+    def fake_wait(backend, baseline, *, timeout_s, stable_frames, **_kwargs):
+        calls.append((backend, baseline, timeout_s, stable_frames))
         return marker
 
     monkeypatch.setattr(rdp, "_wait_qualification_desktop", fake_wait)
@@ -260,9 +260,36 @@ def test_counted_desktop_wait_forwards_exact_evidence_bound_timeout(monkeypatch)
     baseline = b"baseline"
     assert rdp._wait_counted_qualification_desktop(backend, baseline) is marker
     assert calls == [
-        (backend, baseline, rdp._COUNTED_DESKTOP_READINESS_TIMEOUT_S)
+        (
+            backend,
+            baseline,
+            rdp._COUNTED_DESKTOP_READINESS_TIMEOUT_S,
+            rdp._QUALIFICATION_STABLE_FRAMES,
+        )
     ]
     assert rdp._COUNTED_DESKTOP_READINESS_TIMEOUT_S == 75.0
+
+
+def test_qualification_readiness_report_binding_is_exact():
+    assert rdp._qualification_readiness_config() == {
+        "target_session": "one exact active RDP account session",
+        "explorer": "same exact session id",
+        "taskbar_bottom_fraction": 0.08,
+        "taskbar_min_luma": 161,
+        "taskbar_min_bright_fraction": 0.50,
+        "transition_fraction": 0.10,
+        "baseline_desktop_ready_bypasses_transition": True,
+        "stable_frames": 3,
+        "max_stable_change_fraction": 0.02,
+        "timeout_s": 75.0,
+    }
+    assert rdp._QUALIFICATION_READINESS_DESCRIPTION == (
+        "one exact active target-account RDP session with Explorer in the same "
+        "session id; fixed-VM Windows 11 light taskbar in the bottom 8% with at "
+        "least 50% of pixels at luma >=161; framebuffer transition >=0.10 from "
+        "the login baseline unless that baseline is already desktop-ready; three "
+        "consecutive ready frames with <=0.02 change; 75-second counted timeout"
+    )
 
 
 def test_wait_qualification_desktop_refuses_below_transition_floor(monkeypatch):

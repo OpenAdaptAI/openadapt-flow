@@ -54,6 +54,18 @@ _QUALIFICATION_TRANSITION_FRACTION = 0.10
 # three stable frames at 45 seconds. The counted path gets the full observed
 # 75-second diagnostic window rather than the rejected 30-second default.
 _COUNTED_DESKTOP_READINESS_TIMEOUT_S = 75.0
+_QUALIFICATION_STABLE_FRAMES = 3
+_QUALIFICATION_STABLE_CHANGE_FRACTION = 0.02
+_QUALIFICATION_TASKBAR_BOTTOM_FRACTION = 0.08
+_QUALIFICATION_TASKBAR_MIN_LUMA = 161
+_QUALIFICATION_TASKBAR_BRIGHT_FRACTION = 0.50
+_QUALIFICATION_READINESS_DESCRIPTION = (
+    "one exact active target-account RDP session with Explorer in the same "
+    "session id; fixed-VM Windows 11 light taskbar in the bottom 8% with at "
+    "least 50% of pixels at luma >=161; framebuffer transition >=0.10 from "
+    "the login baseline unless that baseline is already desktop-ready; three "
+    "consecutive ready frames with <=0.02 change; 75-second counted timeout"
+)
 
 pytestmark = [
     pytest.mark.skipif(
@@ -306,10 +318,19 @@ def _qualification_desktop_ready(png: bytes) -> bool:
         image = Image.open(io.BytesIO(png)).convert("L")
         if image.width < 100 or image.height < 100:
             return False
-        taskbar = image.crop((0, int(image.height * 0.92), image.width, image.height))
+        taskbar = image.crop(
+            (
+                0,
+                int(image.height * (1 - _QUALIFICATION_TASKBAR_BOTTOM_FRACTION)),
+                image.width,
+                image.height,
+            )
+        )
         histogram = taskbar.histogram()
-        bright_fraction = sum(histogram[161:]) / (taskbar.width * taskbar.height)
-        return bright_fraction >= 0.50
+        bright_fraction = sum(
+            histogram[_QUALIFICATION_TASKBAR_MIN_LUMA:]
+        ) / (taskbar.width * taskbar.height)
+        return bright_fraction >= _QUALIFICATION_TASKBAR_BRIGHT_FRACTION
     except Exception:  # noqa: BLE001 - malformed frame means not ready
         return False
 
@@ -333,7 +354,7 @@ def _wait_qualification_desktop(
     baseline: bytes,
     *,
     timeout_s: float = 30.0,
-    stable_frames: int = 3,
+    stable_frames: int = _QUALIFICATION_STABLE_FRAMES,
     settle_s: float = 0.5,
 ) -> bytes:
     """Wait for a materially transitioned, stable qualification desktop."""
@@ -353,7 +374,12 @@ def _wait_qualification_desktop(
             stable_change = (
                 0.0 if last_ready is None else _frame_change_fraction(last_ready, png)
             )
-            stable = stable + 1 if last_ready is None or stable_change <= 0.02 else 1
+            stable = (
+                stable + 1
+                if last_ready is None
+                or stable_change <= _QUALIFICATION_STABLE_CHANGE_FRACTION
+                else 1
+            )
             last_ready = png
             if stable >= stable_frames:
                 return png
@@ -379,7 +405,24 @@ def _wait_counted_qualification_desktop(backend, baseline: bytes) -> bytes:
         backend,
         baseline,
         timeout_s=_COUNTED_DESKTOP_READINESS_TIMEOUT_S,
+        stable_frames=_QUALIFICATION_STABLE_FRAMES,
     )
+
+
+def _qualification_readiness_config() -> dict[str, object]:
+    """Machine-readable binding for every fixed-VM readiness predicate."""
+    return {
+        "target_session": "one exact active RDP account session",
+        "explorer": "same exact session id",
+        "taskbar_bottom_fraction": _QUALIFICATION_TASKBAR_BOTTOM_FRACTION,
+        "taskbar_min_luma": _QUALIFICATION_TASKBAR_MIN_LUMA,
+        "taskbar_min_bright_fraction": _QUALIFICATION_TASKBAR_BRIGHT_FRACTION,
+        "transition_fraction": _QUALIFICATION_TRANSITION_FRACTION,
+        "baseline_desktop_ready_bypasses_transition": True,
+        "stable_frames": _QUALIFICATION_STABLE_FRAMES,
+        "max_stable_change_fraction": _QUALIFICATION_STABLE_CHANGE_FRACTION,
+        "timeout_s": _COUNTED_DESKTOP_READINESS_TIMEOUT_S,
+    }
 
 
 def _assert_painted_frame(png: bytes, expected_size: tuple[int, int]) -> None:
@@ -488,7 +531,7 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
         "framebuffer": [width, height],
         "transport": "aardwolf",
         "aardwolf_version": aardwolf_version,
-        "desktop_readiness_timeout_s": _COUNTED_DESKTOP_READINESS_TIMEOUT_S,
+        "desktop_readiness": _qualification_readiness_config(),
         "host_free_bytes_before": free_bytes_before,
     }
     qualified_session_ids: list[int] = []
@@ -501,10 +544,7 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
         "task": "create a unique file through the Windows Run dialog over RDP",
         "environment": environment,
         "oracle": "prlctl exec type <unique file written only via RDP input>",
-        "readiness": (
-            "current-frame valid/nonblank guard for protocol qualification; "
-            "not a deployment app-identity or lock-screen certification"
-        ),
+        "readiness": _QUALIFICATION_READINESS_DESCRIPTION,
         "failure_taxonomy": [
             "connect_or_frame_failure",
             "input_delivery_failure",

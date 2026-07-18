@@ -26,6 +26,11 @@ and the RDP library stays replaceable):
   ``rdp`` extra (``pip install 'openadapt-flow[rdp]'``); importing this module
   never imports aardwolf.
 
+``press`` additionally detects an optional ``supports_physical_key`` /
+``physical_key`` transport seam. Aardwolf implements it with layout-bound
+scancodes because Unicode text events cannot participate in physical Windows
+shortcuts; ``type_text`` deliberately stays on the Unicode ``key`` path.
+
 Coordinate space: the backend works entirely in **framebuffer pixels** — the
 same pixels the resolver emits and the same pixels :meth:`screenshot` encodes,
 because both come from :meth:`RDPTransport.framebuffer`. A transport that
@@ -340,21 +345,44 @@ class FreeRDPBackend:
         """
         parts = normalize_chord(key)
         with self._input_lock:
+            # Printable characters sent through Aardwolf's Unicode path cannot
+            # participate in physical shortcuts (Win+R, Ctrl+A, and similar).
+            # A transport may therefore expose a separate physical-key seam
+            # for press/chord only. Plain transports retain the original key()
+            # behavior, and type_text() always remains on key()/Unicode.
+            physical_key = getattr(self._transport, "physical_key", None)
+            supports_physical_key = getattr(
+                self._transport, "supports_physical_key", None
+            )
+            if callable(physical_key) and callable(supports_physical_key):
+                unsupported = [
+                    part for part in parts if not supports_physical_key(part)
+                ]
+                if unsupported:
+                    raise ValueError(
+                        "RDP transport cannot safely emit physical chord keys: "
+                        f"{unsupported!r}"
+                    )
+                sender = physical_key
+            else:
+                sender = self._transport.key
             self._ensure_input_ready()
             pressed: list[str] = []
             try:
                 for part in parts:
                     pressed.append(part)
-                    self._transport.key(part, True)
+                    sender(part, True)
             finally:
-                self._release_keys(reversed(pressed))
+                self._release_keys(reversed(pressed), sender=sender)
 
-    def _release_keys(self, parts) -> None:
+    def _release_keys(self, parts, *, sender=None) -> None:
         """Release each key token, best-effort: one failing release never
         blocks the others and never masks an in-flight exception."""
+        if sender is None:
+            sender = self._transport.key
         for part in parts:
             try:
-                self._transport.key(part, False)
+                sender(part, False)
             except Exception:  # noqa: BLE001 - release is best-effort teardown
                 pass
 
@@ -514,6 +542,9 @@ class AardwolfTransport:
         height: Requested remote desktop height (framebuffer height).
         connect_timeout_s: Seconds to wait for the session + first frame.
         op_timeout_s: Per-operation timeout for input/framebuffer calls.
+        keyboard_layout: Aardwolf keyboard-layout short name used to resolve
+            physical shortcut scancodes (default ``enus``).
+        keyboard_layout_id: RDP handshake layout id (default 1033 / en-US).
     """
 
     def __init__(
@@ -524,12 +555,17 @@ class AardwolfTransport:
         height: int = 800,
         connect_timeout_s: float = 30.0,
         op_timeout_s: float = 10.0,
+        keyboard_layout: str = "enus",
+        keyboard_layout_id: int = 1033,
     ) -> None:
         self._url = url
         self._width = int(width)
         self._height = int(height)
         self._connect_timeout_s = connect_timeout_s
         self._op_timeout_s = op_timeout_s
+        self._keyboard_layout = keyboard_layout
+        self._keyboard_layout_id = int(keyboard_layout_id)
+        self._physical_keyboard_layout = None
         self._loop = None
         self._thread = None
         self._conn = None
@@ -641,6 +677,11 @@ class AardwolfTransport:
         iosettings.video_out_format = VIDEO_FORMAT.PIL
         iosettings.video_bpp_min = 15
         iosettings.video_bpp_max = 32
+        # Bind physical shortcut resolution and the RDP handshake to an
+        # explicit, configurable keyboard layout. The qualification VM uses
+        # the default en-US handshake id (1033).
+        iosettings.client_keyboard = self._keyboard_layout
+        iosettings.keyboard_layout = self._keyboard_layout_id
 
         async def _connect():
             factory = RDPConnectionFactory.from_url(self._url, iosettings)
@@ -751,6 +792,85 @@ class AardwolfTransport:
                 self._op_timeout_s,
             )
             self._raise_embedded_error(result, "character input")
+
+    def supports_physical_key(self, keysym_or_char: str) -> bool:
+        """Return whether ``physical_key`` can emit this normalized token."""
+        try:
+            self._physical_scancode(keysym_or_char)
+            return True
+        except ValueError:
+            return False
+
+    def _physical_scancode(self, keysym_or_char: str) -> int:
+        """Resolve one normalized chord token without sending any input."""
+        if keysym_or_char not in _AARDWOLF_VK and not (
+            len(keysym_or_char) == 1
+            and keysym_or_char.isascii()
+            and keysym_or_char.isalnum()
+        ):
+            raise ValueError(
+                f"unsupported physical RDP chord key: {keysym_or_char!r}"
+            )
+
+        from aardwolf.keyboard import VK_MODIFIERS
+        from aardwolf.keyboard.layoutmanager import KeyboardLayoutManager
+
+        layout = self._physical_keyboard_layout
+        if layout is None:
+            layout = KeyboardLayoutManager().get_layout_by_shortname(
+                self._keyboard_layout
+            )
+            self._physical_keyboard_layout = layout
+        if layout is None:
+            raise ValueError(
+                f"unknown Aardwolf keyboard layout: {self._keyboard_layout!r}"
+            )
+        if keysym_or_char in _AARDWOLF_VK:
+            vk_name, _legacy_extended = _AARDWOLF_VK[keysym_or_char]
+            try:
+                scancode = layout.vk_to_scancode(vk_name)
+            except KeyError as exc:
+                raise ValueError(
+                    f"keyboard layout {self._keyboard_layout!r} has no {vk_name}"
+                ) from exc
+        else:
+            try:
+                scancode, modifiers = layout.char_to_scancode(
+                    keysym_or_char
+                )
+            except KeyError as exc:
+                raise ValueError(
+                    "keyboard layout cannot resolve physical chord key "
+                    f"{keysym_or_char!r}"
+                ) from exc
+            if modifiers != VK_MODIFIERS(0):
+                raise ValueError(
+                    "physical chord key requires implicit modifiers: "
+                    f"{keysym_or_char!r} -> {modifiers!r}"
+                )
+        return int(scancode)
+
+    def physical_key(self, keysym_or_char: str, down: bool) -> None:
+        """Send a physical scancode for a key used by ``Backend.press``.
+
+        This path is deliberately separate from :meth:`key`: text entry keeps
+        Aardwolf's Unicode events, while shortcuts require every chord member
+        to be a physical key. Printable chord members are limited to ASCII
+        alphanumerics with no layout modifier requirement; ambiguous symbols
+        fail before any input is sent.
+        """
+        if self._conn is None:
+            raise RuntimeError("transport not connected")
+        scancode = self._physical_scancode(keysym_or_char)
+
+        is_extended = scancode > 57000
+        result = self._run(
+            self._conn.send_key_scancode(
+                scancode, bool(down), is_extended
+            ),
+            self._op_timeout_s,
+        )
+        self._raise_embedded_error(result, "physical scancode input")
 
     def wheel(self, dx: int, dy: int) -> None:
         """Send a wheel gesture, dispatched under the last pointer position.

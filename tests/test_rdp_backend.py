@@ -583,6 +583,86 @@ def test_press_normal_chord_still_balanced_after_fix(
     assert held_keys(transport.key_events) == []
 
 
+def test_press_prefers_optional_physical_key_path_for_chords() -> None:
+    class _PhysicalTransport(FakeRDPTransport):
+        def __init__(self) -> None:
+            super().__init__(app_screens())
+            self.physical_events: list[tuple[str, bool]] = []
+
+        @staticmethod
+        def supports_physical_key(key: str) -> bool:
+            return key in {"meta", "ctrl", "shift", "enter"} or (
+                len(key) == 1 and key.isascii() and key.isalnum()
+            )
+
+        def physical_key(self, key: str, down: bool) -> None:
+            self.physical_events.append((key, down))
+
+    transport = _PhysicalTransport()
+    backend = FreeRDPBackend(transport)
+    backend.press("Meta+r")
+    assert transport.physical_events == [
+        ("meta", True),
+        ("r", True),
+        ("r", False),
+        ("meta", False),
+    ]
+    assert transport.key_events == []
+
+    backend.type_text("r")
+    assert transport.key_events == [("r", True), ("r", False)]
+    assert len(transport.physical_events) == 4
+
+
+@pytest.mark.parametrize("chord", ["Meta+?", "Meta+R"])
+def test_press_physical_path_refuses_unsupported_chord_before_input(chord) -> None:
+    class _PhysicalTransport(FakeRDPTransport):
+        physical_events: list[tuple[str, bool]] = []
+
+        @staticmethod
+        def supports_physical_key(key: str) -> bool:
+            return key == "meta" or (
+                len(key) == 1 and key.isascii() and key.isalnum() and key.islower()
+            )
+
+        def physical_key(self, key: str, down: bool) -> None:
+            self.physical_events.append((key, down))
+
+    transport = _PhysicalTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+    with pytest.raises(ValueError, match="cannot safely emit physical chord"):
+        backend.press(chord)
+    assert transport.physical_events == []
+    assert transport.key_events == []
+
+
+def test_press_physical_path_releases_every_attempted_key_on_error() -> None:
+    class _RaisingPhysicalTransport(FakeRDPTransport):
+        def __init__(self) -> None:
+            super().__init__(app_screens())
+            self.physical_events: list[tuple[str, bool]] = []
+
+        @staticmethod
+        def supports_physical_key(key: str) -> bool:
+            return key == "meta" or (len(key) == 1 and key.isalnum())
+
+        def physical_key(self, key: str, down: bool) -> None:
+            self.physical_events.append((key, down))
+            if key == "r" and down:
+                raise TransportError("physical r down failed")
+
+    transport = _RaisingPhysicalTransport()
+    backend = FreeRDPBackend(transport)
+    with pytest.raises(TransportError, match="physical r down failed"):
+        backend.press("Meta+r")
+    assert transport.physical_events == [
+        ("meta", True),
+        ("r", True),
+        ("r", False),
+        ("meta", False),
+    ]
+
+
 # -- scroll --------------------------------------------------------------------
 
 
@@ -714,6 +794,7 @@ class _FakeConn:
     def __init__(self) -> None:
         self.mouse_calls: list = []
         self.key_calls: list = []
+        self.scancode_calls: list = []
         self.terminated = 0
 
     async def send_mouse(self, button, x, y, pressed, steps=0):  # noqa: ANN001
@@ -724,6 +805,9 @@ class _FakeConn:
 
     async def send_key_char(self, key, pressed):  # noqa: ANN001
         self.key_calls.append(("char", key, pressed))
+
+    async def send_key_scancode(self, scancode, pressed, extended):  # noqa: ANN001
+        self.scancode_calls.append((scancode, pressed, extended))
 
     async def terminate(self):
         self.terminated += 1
@@ -787,6 +871,51 @@ def test_aardwolf_horizontal_wheel_dropped_and_warns() -> None:
         t.disconnect()
 
 
+def test_aardwolf_physical_meta_r_is_all_scancodes_and_balanced() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    conn = _FakeConn()
+    t = _make_connected_aardwolf(conn)
+    try:
+        t.physical_key("meta", True)
+        t.physical_key("r", True)
+        t.physical_key("r", False)
+        t.physical_key("meta", False)
+        assert conn.scancode_calls == [
+            (57435, True, True),
+            (19, True, False),
+            (19, False, False),
+            (57435, False, True),
+        ]
+        assert conn.key_calls == []
+
+        # Text entry deliberately stays on the Unicode path.
+        t.key("r", True)
+        t.key("r", False)
+        assert conn.key_calls == [("char", "r", True), ("char", "r", False)]
+        assert len(conn.scancode_calls) == 4
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_physical_key_refuses_unsupported_character() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    conn = _FakeConn()
+    t = _make_connected_aardwolf(conn)
+    try:
+        assert t.supports_physical_key("meta") is True
+        assert t.supports_physical_key("r") is True
+        assert t.supports_physical_key("R") is False
+        assert t.supports_physical_key("!") is False
+        with pytest.raises(ValueError, match="implicit modifiers"):
+            t.physical_key("R", True)
+        with pytest.raises(ValueError, match="unsupported physical RDP chord"):
+            t.physical_key("!", True)
+        assert conn.scancode_calls == []
+        assert conn.key_calls == []
+    finally:
+        t.disconnect()
+
+
 def test_aardwolf_framebuffer_snapshot_runs_on_transport_event_loop() -> None:
     pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
     import threading
@@ -827,6 +956,7 @@ def test_aardwolf_framebuffer_snapshot_runs_on_transport_event_loop() -> None:
         ("pointer input", lambda transport: transport.pointer(10, 20, "left", True)),
         ("virtual-key input", lambda transport: transport.key("Enter", True)),
         ("character input", lambda transport: transport.key("x", True)),
+        ("physical scancode input", lambda transport: transport.physical_key("r", True)),
         ("wheel input", lambda transport: transport.wheel(0, 120)),
     ],
 )
@@ -841,6 +971,9 @@ def test_aardwolf_input_receipt_errors_are_never_silent(operation, invoke) -> No
             return None, OSError(f"{operation} failed")
 
         async def send_key_char(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+        async def send_key_scancode(self, *args, **kwargs):  # noqa: ANN002, ANN003
             return None, OSError(f"{operation} failed")
 
     t = _make_connected_aardwolf(_ErrorConn())

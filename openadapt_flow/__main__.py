@@ -25,6 +25,8 @@ imported lazily inside each handler so ``--help`` always works):
 - ``bench`` — replay a bundle N times against MockMed and aggregate.
 - ``lint`` — report a bundle's coverage gaps (advice; exit code by severity).
 - ``certify`` — enforce a safety policy on a bundle (refuse it if it fails).
+- ``console`` — serve the localhost-only operator console (a read-first web
+  UI over bundles / runs / skill libraries; requires the ``console`` extra).
 - ``emit-skill`` — emit an Agent Skills folder for a bundle.
 - ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
 
@@ -2526,7 +2528,85 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=_cmd_report_break)
 
+    p = sub.add_parser(
+        "console",
+        help=(
+            "Serve the operator console: a localhost-only web UI over compiled "
+            "bundles, run reports/halt evidence, and skill-library lineage. "
+            "Read-only unless --allow-actions; needs `pip install "
+            "'openadapt-flow[console]'`"
+        ),
+    )
+    p.add_argument(
+        "--bundles",
+        default=".",
+        help=(
+            "Directory scanned (2 levels deep) for workflow bundle "
+            "directories (default: current directory)"
+        ),
+    )
+    p.add_argument(
+        "--runs",
+        default="runs",
+        help="Directory scanned for run directories (default: runs/)",
+    )
+    p.add_argument(
+        "--skills",
+        default=None,
+        help=(
+            "Extra directory scanned for skill libraries (skills.json); the "
+            "bundles directory is always scanned too"
+        ),
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=7863,
+        help="Port on 127.0.0.1 (the bind address is loopback-only, always)",
+    )
+    p.add_argument(
+        "--allow-actions",
+        action="store_true",
+        help=(
+            "Enable executing governed actions (approve / resume / certify / "
+            "promote / rollback) from the UI after an explicit confirm that "
+            "shows the exact command. Default: read-only — the UI renders the "
+            "command for the operator to copy instead"
+        ),
+    )
+    p.set_defaults(func=_cmd_console)
+
     return parser
+
+
+def _cmd_console(args: argparse.Namespace) -> int:
+    # find_spec first so "extra not installed" is distinguishable from "the
+    # console package itself is broken" (a wiring bug must surface, not hide
+    # behind an install hint).
+    from importlib.util import find_spec
+
+    missing = [m for m in ("fastapi", "uvicorn") if find_spec(m) is None]
+    if missing:
+        raise SystemExit(
+            f"the operator console needs {', '.join(missing)} — install the "
+            "console extra:  pip install 'openadapt-flow[console]'"
+        )
+    from openadapt_flow.console.server import LOOPBACK_HOST, serve
+
+    mode = "ACTIONS ENABLED (confirm-gated)" if args.allow_actions else "read-only"
+    print(
+        f"operator console on http://{LOOPBACK_HOST}:{args.port}  [{mode}]\n"
+        f"  bundles: {Path(args.bundles).resolve()}\n"
+        f"  runs:    {Path(args.runs).resolve()}"
+    )
+    serve(
+        args.bundles,
+        args.runs,
+        args.skills,
+        allow_actions=args.allow_actions,
+        port=args.port,
+    )
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

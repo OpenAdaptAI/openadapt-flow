@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Adapted by OpenAdapt.AI on 2026-07-17.
+# Source: https://github.com/openimis/openimis-dist_dkr/blob/cd6220d1f0578e56a589c47953250c2ad3d0caa5/conf/nginx/locations/backend.loc
+# Full license: ../LICENSE-AGPL-3.0.md
 
     location /${REACT_APP_API_URL}/ {
 
@@ -17,5 +21,3 @@
            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
            proxy_pass http://${backend}/${REACT_APP_API_URL}/core/users/current_user/;
         }
-
-

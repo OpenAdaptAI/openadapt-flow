@@ -443,4 +443,16 @@ list (`[[tool.mypy.overrides]]` in `pyproject.toml`), tighten its annotations,
 and remove it from the list.
 
 The demo GIF is generated from real run artifacts by
-`scripts/make_demo_gif.py`. MIT license.
+`scripts/make_demo_gif.py`.
+
+## License
+
+OpenAdapt-authored package code is licensed under the
+[MIT License](LICENSE). A Git checkout or GitHub-generated source archive also
+contains an isolated openIMIS reference environment with adapted configuration
+files under `AGPL-3.0-only`; the MIT license does not relicense those files.
+Their exact provenance, file-local scope, and complete upstream license are
+recorded in the repository-only
+[third-party notice](https://github.com/OpenAdaptAI/openadapt-flow/blob/main/THIRD_PARTY_NOTICES.md).
+Published PyPI wheels and source distributions exclude the openIMIS benchmark
+surface and remain within the declared MIT package boundary.

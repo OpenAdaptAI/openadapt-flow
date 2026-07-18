@@ -179,6 +179,18 @@ packages = ["openadapt_flow"]
 # package data hatchling already ships by default -- do NOT force-include it
 # (a duplicate-path entry fails the wheel build).
 
+[tool.hatch.build.targets.sdist]
+# Keep PyPI artifacts under the declared MIT package license. The source
+# checkout carries an isolated openIMIS reference environment whose adapted
+# deployment files remain AGPL-3.0-only; ship none of that benchmark surface
+# (including its launcher/test and repository-only notice) in the sdist.
+exclude = [
+    "/THIRD_PARTY_NOTICES.md",
+    "/benchmark/openimis_claims",
+    "/scripts/openimis_claims_demo.py",
+    "/tests/test_openimis_claims_fixture.py",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 600

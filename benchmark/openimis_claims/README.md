@@ -79,6 +79,29 @@ The 25.10 images publish `linux/amd64` only; on Apple Silicon they run under
 Docker Desktop's Rosetta emulation (verified 2026-07-17: first bring-up
 including migrations and demo-dataset load completed in a few minutes).
 
+## Mixed-license boundary
+
+OpenAdapt Flow's original code remains MIT-licensed under the repository-root
+`LICENSE`. The local `compose.yml` topology and four configuration files under
+`conf/nginx/` are adapted from the openIMIS Docker distribution at exact
+commit `cd6220d1f0578e56a589c47953250c2ad3d0caa5` and remain licensed under
+`AGPL-3.0-only`:
+
+* `compose.yml` (from upstream `compose.base.yml`, `compose.postgresql.yml`,
+  and `compose.cache.yml`)
+* `conf/nginx/openimis.conf`
+* `conf/nginx/locations/backend.loc`
+* `conf/nginx/locations/frontend.loc`
+* `conf/nginx/variables/var.conf`
+
+Each file carries its exact upstream path and SPDX identifier. The complete
+license is included at
+[`conf/nginx/LICENSE-AGPL-3.0.md`](conf/nginx/LICENSE-AGPL-3.0.md), and the
+aggregate Git-checkout/GitHub-generated-source-archive boundary is recorded in
+the root
+[`THIRD_PARTY_NOTICES.md`](../../../THIRD_PARTY_NOTICES.md). The MIT license
+does not relicense those adapted files.
+
 ## Reproduction commands
 
 Requirements: Docker-compatible API with Compose v2, network for the one-time

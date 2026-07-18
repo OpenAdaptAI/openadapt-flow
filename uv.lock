@@ -2224,6 +2224,10 @@ dependencies = [
 capture = [
     { name = "openadapt-capture" },
 ]
+console = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+]
 dev = [
     { name = "anthropic" },
     { name = "fastapi" },
@@ -2237,6 +2241,7 @@ dev = [
     { name = "requests" },
     { name = "ruff" },
     { name = "scikit-image" },
+    { name = "uvicorn" },
 ]
 grounder = [
     { name = "anthropic" },
@@ -2283,6 +2288,7 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'grounder'", specifier = ">=0.40" },
     { name = "click", marker = "extra == 'privacy'", specifier = ">=8.0,<9" },
     { name = "cryptography", specifier = ">=42.0" },
+    { name = "fastapi", marker = "extra == 'console'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'service'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'service-mlx'", specifier = ">=0.110" },
@@ -2318,6 +2324,8 @@ requires-dist = [
     { name = "scikit-image", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "transformers", marker = "extra == 'service-mlx'", specifier = ">=5.5,<5.13" },
+    { name = "uvicorn", marker = "extra == 'console'", specifier = ">=0.29" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.29" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'service'", specifier = ">=0.29" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'service-mlx'", specifier = ">=0.29" },
 ]

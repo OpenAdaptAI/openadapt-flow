@@ -484,10 +484,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Build wheel
+      - name: Build and validate publication artifacts
         run: |
           pip install build
-          python -m build --wheel
+          rm -rf dist
+          python -m build
+          python scripts/check_release_consistency.py --require-dist
 
       - name: Install the wheel in a clean venv and import
         run: |

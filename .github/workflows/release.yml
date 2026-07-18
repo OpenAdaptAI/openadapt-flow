@@ -36,6 +36,7 @@ jobs:
     concurrency: release
     environment: pypi
     permissions:
+      actions: read # inspect the exact-head CI run before publishing
       id-token: write # PyPI Trusted Publishing (OIDC)
       contents: write # push the version bump commit + tag, create the Release
 
@@ -54,6 +55,45 @@ jobs:
           if [ "$author" = "semantic-release" ] || printf '%s' "$subject" | grep -q '^chore: release'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Wait for exact-head CI
+        if: steps.check_skip.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$((SECONDS + 2700))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            response="$(
+              gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+                --raw-field head_sha="${GITHUB_SHA}" \
+                --raw-field event=push \
+                --raw-field per_page=20
+            )"
+            status="$(
+              printf '%s' "$response" |
+                jq -r --arg sha "$GITHUB_SHA" \
+                  '[.workflow_runs[] | select(.head_sha == $sha)]
+                   | sort_by(.created_at) | last | .status // "missing"'
+            )"
+            conclusion="$(
+              printf '%s' "$response" |
+                jq -r --arg sha "$GITHUB_SHA" \
+                  '[.workflow_runs[] | select(.head_sha == $sha)]
+                   | sort_by(.created_at) | last | .conclusion // "pending"'
+            )"
+            echo "Exact-head CI for ${GITHUB_SHA}: ${status}/${conclusion}"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                exit 0
+              fi
+              echo "Refusing to publish because exact-head CI concluded ${conclusion}."
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "Refusing to publish: exact-head CI did not succeed within 45 minutes."
+          exit 1
 
       - name: Set up Python
         if: steps.check_skip.outputs.skip != 'true'
@@ -85,10 +125,14 @@ jobs:
 
   # ---- Manual / recovery publish of an existing ref ----------------------
   manual-publish:
-    if: github.event_name == 'workflow_dispatch'
+    # Always run the current protected-main workflow as the guard. The target
+    # artifact ref is checked out separately below.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      actions: read # require successful CI for the exact target commit
+      contents: read # resolve the requested ref and protected-main guard
       id-token: write # PyPI Trusted Publishing (OIDC)
 
     steps:
@@ -96,6 +140,55 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          path: target
+
+      - name: Checkout the current protected-main release guard
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: guard
+
+      - name: Resolve and authorize requested ref
+        id: target
+        working-directory: target
+        run: |
+          target_sha="$(git rev-parse HEAD)"
+          git fetch origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$target_sha" origin/main; then
+            echo "Refusing to publish a ref that is not contained in protected main."
+            exit 1
+          fi
+          echo "sha=$target_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Require successful exact-target CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          response="$(
+            gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              --raw-field head_sha="${TARGET_SHA}" \
+              --raw-field event=push \
+              --raw-field per_page=20
+          )"
+          status="$(
+            printf '%s' "$response" |
+              jq -r --arg sha "$TARGET_SHA" \
+                '[.workflow_runs[] | select(.head_sha == $sha)]
+                 | sort_by(.created_at) | last | .status // "missing"'
+          )"
+          conclusion="$(
+            printf '%s' "$response" |
+              jq -r --arg sha "$TARGET_SHA" \
+                '[.workflow_runs[] | select(.head_sha == $sha)]
+                 | sort_by(.created_at) | last | .conclusion // "pending"'
+          )"
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            echo "Refusing to publish ${TARGET_SHA}: exact CI is ${status}/${conclusion}."
+            exit 1
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -106,7 +199,18 @@ jobs:
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
 
       - name: Build package
-        run: uv build
+        working-directory: target
+        run: |
+          rm -rf dist
+          uv build --wheel --sdist
+          python scripts/check_release_consistency.py --require-dist
+
+      - name: Independently validate publication artifacts
+        run: |
+          python guard/scripts/check_release_consistency.py \
+            --validate-dist-dir target/dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: target/dist/

@@ -66,6 +66,7 @@ def actions_for_run(
     halted: bool,
     paused: bool,
     bundle_dir: Optional[str] = None,
+    operator_identity: Optional[str] = None,
 ) -> list[ActionSpec]:
     run = str(run_dir)
     out: list[ActionSpec] = []
@@ -101,19 +102,24 @@ def actions_for_run(
             )
         )
     if paused:
+        approver = (operator_identity or "").strip()
         out.append(
             ActionSpec(
                 id="approve",
                 verb="approve",
                 title="Approve resume",
                 description=(
-                    "Record an authenticated approval (approver identity + "
-                    "chosen resolution) authorizing this durably-paused run "
-                    "to resume. Written to approval.json in the run dir."
+                    "Record approval attributed to the local OS account running "
+                    "this console, plus the chosen resolution, for this "
+                    "durably-paused run. Written to approval.json in the run dir."
                 ),
-                command=_cli("approve", run),
+                command=_cli(
+                    "approve",
+                    run,
+                    *(["--approver", approver] if approver else []),
+                ),
                 mutating=True,
-                executable=True,
+                executable=bool(approver),
             )
         )
         out.append(
@@ -123,12 +129,23 @@ def actions_for_run(
                 title="Resume from last verified checkpoint",
                 description=(
                     "Resume the paused run from its last verified checkpoint "
-                    "-- never re-running an already-confirmed write. Requires "
-                    "the recorded approval (--require-approval)."
+                    "-- never re-running an already-confirmed write. Resume "
+                    "needs the deployment's backend, effect verifier, and "
+                    "run-bound parameters, so the console never executes an "
+                    "unbound resume."
                 ),
-                command=_cli("resume", run, "--require-approval"),
+                command=_cli(
+                    "resume",
+                    run,
+                    "--require-approval",
+                    "--config",
+                    "<deployment.yaml>",
+                    "--params-file",
+                    "<params.json>",
+                ),
                 mutating=True,
-                executable=True,
+                executable=False,
+                placeholders=["<deployment.yaml>", "<params.json>"],
             )
         )
     return out
@@ -179,10 +196,20 @@ def actions_for_skill(
     ``SkillLibrary.quarantine``), invoked in-process. The rendered command is
     the equivalent invocation for the audit trail."""
     lib_root = str(library_file.parent)
-    py = (
-        'python -c "from openadapt_flow.learning.library import SkillLibrary; '
-        f"SkillLibrary({lib_root!r})" + '.{call}"'
-    )
+
+    def _library_command(method: str, *method_args: str) -> str:
+        # Pass every filesystem- and artifact-derived value as a positional
+        # argv entry.  Building Python source with an interpolated path inside a
+        # shell double-quoted string would make ``$()`` / backticks in a valid
+        # directory name execute when the displayed command is pasted.
+        source = (
+            "import sys; "
+            "from openadapt_flow.learning.library import SkillLibrary; "
+            f"getattr(SkillLibrary(sys.argv[1]), {method!r})"
+            "(*[int(v) if i == 1 else v for i, v in enumerate(sys.argv[2:])])"
+        )
+        return shlex.join([sys.executable, "-c", source, lib_root, *method_args])
+
     return [
         ActionSpec(
             id="promote",
@@ -194,7 +221,7 @@ def actions_for_skill(
                 "stays auditable). SkillLibrary.promote, the same entry point "
                 "the teach pipeline uses."
             ),
-            command=py.format(call=f"promote({skill_id!r}, {version})"),
+            command=_library_command("promote", skill_id, str(version)),
             mutating=True,
             executable=True,
         ),
@@ -209,7 +236,7 @@ def actions_for_skill(
                 "explicitly. SkillLibrary.quarantine, the same entry point "
                 "the teach pipeline's gate uses."
             ),
-            command=py.format(call=f"quarantine({skill_id!r}, {version}, '<reason>')"),
+            command=_library_command("quarantine", skill_id, str(version), "<reason>"),
             mutating=True,
             executable=True,
             placeholders=["<reason>"],
@@ -246,15 +273,20 @@ def execute_run_action(
     action_id: str,
     run_dir: Path,
     *,
-    approver: Optional[str] = None,
+    operator_identity: str,
     resolution: Optional[str] = None,
 ) -> ExecutionResult:
     """Execute an executable run-scoped verb (``approve`` / ``resume``) via
     the CLI. Anything else raises ``ValueError`` (the API returns 400)."""
     if action_id == "approve":
-        args = ["approve", str(run_dir)]
-        if approver:
-            args += ["--approver", approver]
+        if not operator_identity.strip():
+            raise ValueError("local operator identity is unavailable")
+        args = [
+            "approve",
+            str(run_dir),
+            "--approver",
+            operator_identity.strip(),
+        ]
         if resolution:
             args += ["--resolution", resolution]
     elif action_id == "resume":
@@ -330,7 +362,9 @@ def execute_skill_action(
 def collect_execution_kwargs(payload: dict[str, Any]) -> dict[str, str]:
     """Whitelist the free-text arguments an execution may carry."""
     out: dict[str, str] = {}
-    for key in ("approver", "resolution", "reason", "policy"):
+    # Approver identity is deliberately absent: the server derives it from the
+    # local OS account and a remote/browser caller cannot override attribution.
+    for key in ("resolution", "reason", "policy"):
         val = payload.get(key)
         if isinstance(val, str) and val.strip():
             out[key] = val.strip()

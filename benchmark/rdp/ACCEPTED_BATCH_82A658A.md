@@ -50,8 +50,10 @@ The exact raw counted report remains local with SHA-256
 The committed `results_82a658a_20260718.sanitized.json` is a deterministic
 derivative that retains the evidence-relevant environment, rows, counters,
 readiness, and cleanup booleans while replacing local machine identifiers and
-snapshot-ID arrays. It embeds the source hash, an explicit redaction manifest,
-and verifiable derivative-payload SHA-256
+snapshot-ID arrays. The committed sanitized file SHA-256 is
+`c6be771a567dfef8e924655ac165ea78c1eb32893bcf441908f4c6bc8c4c4246`.
+It embeds the raw source-report hash, an explicit redaction manifest, and
+verifiable self-excluding derivative-payload SHA-256
 `f1c5c4b9c83f99f89a0a5039c0fcbb7dca9ed458cccd49e37bc961e645565ae2`.
 
 Final cleanup passed. It deleted only the batch-owned snapshot, restored the

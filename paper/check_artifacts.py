@@ -184,6 +184,55 @@ def main() -> None:
             result["over_halt_rate"], over_halt_rate, f"{name} over-halt rate"
         )
 
+    windows = load("benchmark/windows_uia/results.json")
+    windows_counted = windows["matrix_summaries"]["20260717-candidate-56759c8-v2"]
+    require_equal(windows_counted["run_count"], 3, "Windows UIA counted trials")
+    require_equal(windows_counted["task_success_count"], 3, "Windows UIA effects")
+    require_equal(
+        windows_counted["stale_refusal_count"], 3, "Windows UIA stale refusals"
+    )
+    require_equal(
+        windows_counted["ambiguity_refusal_count"],
+        3,
+        "Windows UIA ambiguity refusals",
+    )
+    require_equal(
+        windows_counted["native_receipt_count"], 12, "Windows UIA native receipts"
+    )
+    require_equal(
+        windows_counted["silent_incorrect_success_count"],
+        0,
+        "Windows UIA silent incorrect successes",
+    )
+    require_equal(windows_counted["over_halt_count"], 0, "Windows UIA over-halts")
+
+    macos = load(
+        "benchmark/macos_native/"
+        "textedit_counted_3plus1_b1b61a5_20260717.adjudication.json"
+    )
+    macos_counted = macos["counted_run"]
+    require_equal(macos_counted["normal_trials_completed"], 3, "macOS effects")
+    require_equal(
+        macos_counted["ambiguity_refusal"]["status"],
+        "passed",
+        "macOS ambiguity refusal",
+    )
+    require_equal(
+        macos_counted["silent_incorrect_successes"],
+        0,
+        "macOS silent incorrect successes",
+    )
+    require_equal(macos_counted["over_halts"], 0, "macOS over-halts")
+
+    rdp = load("benchmark/rdp/results_82a658a_20260718.sanitized.json")
+    require_equal(rdp["run_count"], 3, "RDP counted trials")
+    require_equal(rdp["successes"], 3, "RDP effects")
+    require_equal(rdp["failures"], 0, "RDP failures")
+    require_equal(rdp["silent_incorrect_successes"], 0, "RDP silent successes")
+    require_equal(rdp["over_halts"], 0, "RDP over-halts")
+    require_equal(rdp["model_calls"], 0, "RDP model calls")
+    require_equal(rdp["cleanup"]["passed"], True, "RDP cleanup")
+
     # Bind the prose and table back to the artifacts. The assertions above catch
     # benchmark drift; these assertions also catch a paper edit that changes a
     # headline number without changing its source artifact.
@@ -301,6 +350,35 @@ def main() -> None:
         (f"zero false accepts at {pixel['over_halt_rate'] * 100:.0f}\\% over-halt"),
         "pixel identity safety and availability",
     )
+
+    require_contains(
+        results_tex,
+        "Windows UIA & 3/3 & stale 3/3; ambiguous 3/3 & SQLite row state",
+        "Windows UIA substrate row",
+    )
+    require_contains(
+        results_tex,
+        "Native macOS & 3/3 & ambiguous 1/1 & exact file bytes",
+        "macOS substrate row",
+    )
+    require_contains(
+        results_tex,
+        "Network RDP & 3/3 & readiness/timeout gate & guest-tools file readback",
+        "RDP substrate row",
+    )
+    require_contains(
+        results_tex,
+        f"recorded {windows_counted['native_receipt_count']} native structural-action receipts",
+        "Windows UIA native receipts",
+    )
+    require_contains(
+        results_tex,
+        "all three isolated TextEdit replace-and-save trials matched the exact expected file bytes",
+        "macOS exact effects",
+    )
+    rdp_values = [f"{trial['latency_s']:.3f}" for trial in rdp["trials"]]
+    rdp_latencies = f"{', '.join(rdp_values[:-1])}, and {rdp_values[-1]}"
+    require_contains(results_tex, rdp_latencies, "RDP trial latencies")
 
     print("paper artifact constants: OK")
 

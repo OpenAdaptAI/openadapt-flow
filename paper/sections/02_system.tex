@@ -31,8 +31,11 @@ Postconditions are necessary but not sufficient: a success banner is evidence
 about the screen, not independent evidence about a database write.
 
 \subsection{Backends}
-The browser backend is the reference implementation and the only backend with
-published end-to-end evidence against a real third-party application. Windows
-UI Automation has a bounded local proof. RDP and a pixel-only remote-display
-analog conform to the protocol but have not established production behavior on
-real Citrix/ICA/HDX environments.
+The browser backend is the reference implementation and supplies published
+end-to-end evidence against a real third-party application. Windows UI
+Automation adds structured candidate enumeration and native actions behind a
+typed, authenticated in-session contract. Native macOS binds capture and input
+to a unique application window. The RDP backend exposes the same runtime
+contract over a pixel-only network session. Section~4 reports scoped task and
+effect qualifications for all three mechanisms. Citrix/ICA/HDX remains a
+separate deployment environment and does not inherit RDP qualification.

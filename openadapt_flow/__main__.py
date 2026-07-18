@@ -241,7 +241,8 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
     """Merge the ``--backend`` family of CLI flags over ``cfg.backend``.
 
     A deployment ``--config`` supplies the backend section; direct flags
-    (``--backend`` / ``--agent-url`` / ``--macos-app`` / ``--rdp-host``) override individual
+    (``--backend`` / ``--agent-url`` / ``--macos-app`` / ``--linux-app`` /
+    ``--rdp-host``) override individual
     fields, exactly as the effects/actuation flags override their sections. With
     no flags the config's backend (default ``web``) is returned unchanged, so an
     unflagged web replay behaves precisely as before.
@@ -257,6 +258,14 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
         backend = backend.model_copy(
             update={"macos_window_title": args.macos_window_title}
         )
+    if getattr(args, "linux_app", None):
+        backend = backend.model_copy(update={"linux_app": args.linux_app})
+    if getattr(args, "linux_window_title", None):
+        backend = backend.model_copy(
+            update={"linux_window_title": args.linux_window_title}
+        )
+    if getattr(args, "linux_allow_physical_input", False):
+        backend = backend.model_copy(update={"linux_allow_physical_input": True})
     if getattr(args, "rdp_host", None):
         backend = backend.model_copy(update={"rdp_host": args.rdp_host})
     return backend
@@ -385,7 +394,7 @@ def _replay_desktop(
     durable: bool,
     governed_authorization=None,
 ) -> int:
-    """Replay against a NON-browser backend (windows / rdp) built by the factory.
+    """Replay against a non-browser native/remote backend built by the factory.
 
     No Playwright browser, no bundled MockMed, no session video — those are
     web-only. ``--drift`` (a MockMed teaching aid) is refused. The backend is
@@ -436,7 +445,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
     # SAME compile-ready recording format. Selection is fail-loud (a missing
     # target for the chosen backend raises rather than silently record web).
     backend = getattr(args, "backend", None) or "web"
-    if backend in ("windows", "macos", "rdp"):
+    if backend in ("windows", "macos", "linux", "rdp"):
         return _cmd_record_desktop(args, backend)
 
     if not args.url:
@@ -630,7 +639,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     ) = _deployment_runtime(args, params=params)
     worklists = _resolve_worklists(getattr(args, "worklist", None), workflow)
 
-    # Backend selection (--backend web|windows|rdp, overriding --config). A
+    # Backend selection (web/native/remote, overriding --config). A
     # non-web backend drives a native desktop / RDP / remote-display session with
     # no browser: delegate to the desktop path. Default web is unchanged below.
     backend_cfg = _resolve_backend_config(args, cfg)
@@ -907,7 +916,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                 finally:
                     browser.close()
         else:
-            # Desktop (windows / rdp): no browser, no --url; the factory builds
+            # Desktop/native/remote: no browser, no --url; the factory builds
             # the native backend from the resolved config (fail-loud on a missing
             # required field). RDP transports hold a live socket — close them.
             try:
@@ -1478,12 +1487,14 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
     """
     p.add_argument(
         "--backend",
-        choices=["web", "windows", "macos", "rdp"],
+        choices=["web", "windows", "macos", "linux", "rdp"],
         default=None,
         help=(
             "Backend to drive: 'web' (default; Playwright/Chromium), 'windows' "
             "(native Windows via the WAA HTTP agent — needs --agent-url), "
             "'macos' (one native Mac app window — needs --macos-app), or "
+            "'linux' (one exact AT-SPI app window — needs --linux-app and "
+            "--linux-window-title), or "
             "'rdp' (pixel-only remote desktop / Citrix — needs --rdp-host or a "
             "configured rdp_window). Overrides backend.kind from --config."
         ),
@@ -1513,6 +1524,32 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
         help=(
             "Window-title substring for --backend macos. Ambiguous matches "
             "are refused. Overrides backend.macos_window_title."
+        ),
+    )
+    p.add_argument(
+        "--linux-app",
+        default=None,
+        metavar="APP",
+        help=(
+            "Exact AT-SPI application name for --backend linux (e.g. gedit). "
+            "Overrides backend.linux_app."
+        ),
+    )
+    p.add_argument(
+        "--linux-window-title",
+        default=None,
+        metavar="TITLE",
+        help=(
+            "Exact top-level window title for --backend linux. Zero or "
+            "multiple matches are refused. Overrides backend.linux_window_title."
+        ),
+    )
+    p.add_argument(
+        "--linux-allow-physical-input",
+        action="store_true",
+        help=(
+            "Explicitly allow window-bound X11 pointer/keyboard fallback for "
+            "--backend linux when native AT-SPI actuation is unavailable."
         ),
     )
     p.add_argument(
@@ -1668,7 +1705,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Record a typed value as a PARAMETER; its demonstrated value "
             "becomes the default, overridable at replay with --param. For "
             "--backend web, FIELD is the field name/id. For --backend "
-            "windows/macos/rdp (no field identity on a pixel substrate), use "
+            "windows/macos/linux/rdp (capture has no field identity), use "
             "NAME=VALUE — the typed value equal to VALUE is marked as parameter "
             "NAME. Repeatable."
         ),
@@ -1677,8 +1714,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--task",
         default=None,
         help=(
-            "Task description for a desktop (--backend windows/macos/rdp) capture "
-            "session (stored in the recording metadata)."
+            "Task description for a desktop "
+            "(--backend windows/macos/linux/rdp) capture session "
+            "(stored in the recording metadata)."
         ),
     )
     p.add_argument(

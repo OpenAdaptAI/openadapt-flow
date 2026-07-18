@@ -117,7 +117,8 @@ class IdentityBackend(Protocol):
     - a browser backend (Playwright) reads the DOM element under the point
       (``elementFromPoint`` -> row/cell ``textContent`` + ``aria-label``);
     - a native desktop backend reads the accessibility tree -- Windows UI
-      Automation ``Name``/``Value``/text, or macOS AX attributes. Crucially,
+      Automation ``Name``/``Value``/text, macOS AX attributes, or Linux AT-SPI
+      accessible text. Crucially,
       an element lacking a stable ``AutomationId`` usually STILL exposes
       Name/Value text, so UIA/AX identity is viable on most native apps even
       where an AutomationId-keyed selector is not.
@@ -171,7 +172,8 @@ class StructuralActionBackend(Protocol):
 
     - ``structural_locator_at`` runs at RECORD time: given the demonstrated
       click point, return a STABLE structural locator the runtime can re-resolve
-      later (a DOM ``#id`` / role+name, a UIA ``AutomationId`` / role+name).
+      later (a DOM ``#id`` / role+name, a UIA ``AutomationId`` / role+name,
+      or an AT-SPI accessible ID / role+name).
     - ``locate_structural`` runs at REPLAY time: given that recorded locator,
       find the element on the LIVE surface and return its center point.
 

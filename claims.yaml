@@ -333,6 +333,37 @@ claims:
         The original counted report remains failed. The hash-bound adjudication
         accepts only its independently confirmed action/effect/refusal evidence.
 
+  # -------------------------- Native Linux AT-SPI (qualification implementation)
+  - id: linux-native-validating
+    claim: >-
+      Native Linux uses an exact-window AT-SPI backend with complete candidate
+      enumeration, native action delivery, and fail-closed ambiguity, staleness,
+      and Wayland portal boundaries.
+    surfaces: [README.md, docs]
+    tier: validating
+    evidence:
+      - path: tests/test_linux_backend.py
+        proves: >-
+          Default CI covers exact app/window binding, bounded candidate
+          enumeration, ambiguity and stale-target refusal, native invoke/focus
+          and editable-text delivery, window-scoped capture, physical-input
+          opt-in, and Wayland portal refusal through an injected Linux client.
+      - path: docs/desktop/LINUX_NATIVE.md
+        kind: doc
+        proves: >-
+          The operator contract, X11 and Wayland boundaries, configuration,
+          delivery-only receipt semantics, and >=3-trial real-machine
+          qualification plan.
+    caveats:
+      - >-
+        CI uses an injected client and does not establish live third-party
+        application acceptance. A clean Linux machine and at least three
+        independent trials per claimed condition remain required.
+      - >-
+        X11 is the initial built-in live transport. Wayland requires a real
+        operator-approved XDG RemoteDesktop/ScreenCast portal session; the
+        built-in client currently refuses rather than pretending a grant exists.
+
   # ----------------------------------------- RDP (scoped field acceptance)
   - id: rdp-validating
     claim: >-

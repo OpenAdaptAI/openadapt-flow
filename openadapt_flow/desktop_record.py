@@ -1,4 +1,4 @@
-"""Live desktop recording for ``record --backend windows|rdp``.
+"""Live desktop recording for ``record --backend windows|macos|linux|rdp``.
 
 Capturing the operator's REAL desktop demonstration is NOT reinvented here — it
 reuses the two tested pieces that already exist in this repo:
@@ -15,7 +15,7 @@ reuses the two tested pieces that already exist in this repo:
   (``tests/test_capture_adapter.py``).
 
 This module is the thin, genuinely-missing piece: the LIVE orchestration that
-``record --backend windows|rdp`` needs — start a capture session, let the
+``record --backend windows|macos|linux|rdp`` needs — start a capture session, let the
 operator perform the workflow, stop on Ctrl-C, then convert to a compile-ready
 recording:
 
@@ -29,7 +29,8 @@ What is REAL vs deferred (see ``docs/desktop/RECORDING.md`` for the full map):
   backends. Recording is substrate-agnostic (pixel frames + coordinates), so a
   recording made here drives the ``windows`` (WAA) or ``rdp`` (pixel-only)
   backend at replay.
-* DEFERRED: offline capture carries NO structural (UIA ``AutomationId``) locator
+* DEFERRED: offline capture carries NO structural (UIA ``AutomationId`` or
+  AT-SPI accessible ID) locator
   — replay uses the visual ladder (template/ocr/geometry). The deterministic
   structural top rung is armed only by the LIVE-over-``WindowsBackend`` path
   (:func:`openadapt_flow.adapters.desktop_recorder.record_desktop_demo`), which

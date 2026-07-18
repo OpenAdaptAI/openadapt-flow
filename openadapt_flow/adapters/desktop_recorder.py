@@ -33,7 +33,7 @@ bundle.
 
    FOLLOW-UP to close it (out of this module's file scope): re-arm a
    capture-converted recording against a live UIA tree — replay each recorded
-   click point through ``WindowsBackend.structural_locator_at`` on the live app
+   click point through the native backend's ``structural_locator_at`` on the live app
    and write the returned locator onto the anchor. That belongs next to the
    browser ``dom_arm`` step (``benchmark/dom_arm.py``) as a ``uia_arm`` pass and
    is tracked separately; it is not implemented here.
@@ -72,9 +72,9 @@ def record_desktop_demo(
 
     Constructs a :class:`~openadapt_flow.recorder.Recorder` over ``backend`` and
     hands it to ``driver`` to script the demonstration (clicks, typing, keys).
-    When ``backend`` is a structural backend (``WindowsBackend``) every click is
-    armed with a UIA locator, so the compiled bundle carries the deterministic
-    structural rung — matching a DOM-armed web bundle.
+    When ``backend`` is a structural backend (Windows UIA or Linux AT-SPI),
+    every click is armed with a native locator, so the compiled bundle carries
+    the deterministic structural rung — matching a DOM-armed web bundle.
 
     Args:
         backend: A live backend to both observe (screenshots) and drive.
@@ -111,7 +111,7 @@ def structural_armed_coverage(workflow: "Workflow") -> dict:
 
     The desktop→web parity metric: a web bundle armed by ``dom_arm`` puts a DOM
     locator on every clickable step; a live-recorded desktop bundle should
-    likewise carry a UIA locator on every click step, while an offline
+    likewise carry a native accessibility locator on every click step, while an offline
     capture-converted bundle carries none (see this module's docstring).
 
     Args:

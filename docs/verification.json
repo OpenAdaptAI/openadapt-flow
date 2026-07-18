@@ -1,5 +1,5 @@
 {
-  "generated_at": "committed registry state (regenerate: scripts/validate_claims.py --report)",
+  "generated_at": "2026-07-18T17:04:15+00:00 (git HEAD commit date)",
   "green_check_run": false,
   "ok": true,
   "claims": [
@@ -510,6 +510,46 @@
           "node_found": null,
           "junit_status": null,
           "proves": "Candidate b1b61a5 completed 3/3 exact-byte TextEdit effects and refused two ambiguous windows without modifying either file."
+        }
+      ],
+      "errors": []
+    },
+    {
+      "id": "linux-native-validating",
+      "claim": "Native Linux uses an exact-window AT-SPI backend with complete candidate enumeration, native action delivery, and fail-closed ambiguity, staleness, and Wayland portal boundaries.",
+      "tier": "validating",
+      "reproducibility": null,
+      "surfaces": [
+        "README.md",
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "CI uses an injected client and does not establish live third-party application acceptance. A clean Linux machine and at least three independent trials per claimed condition remain required.",
+        "X11 is the initial built-in live transport. Wayland requires a real operator-approved XDG RemoteDesktop/ScreenCast portal session; the built-in client currently refuses rather than pretending a grant exists."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_linux_backend.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "Default CI covers exact app/window binding, bounded candidate enumeration, ambiguity and stale-target refusal, native invoke/focus and editable-text delivery, window-scoped capture, physical-input opt-in, and Wayland portal refusal through an injected Linux client."
+        },
+        {
+          "path": "docs/desktop/LINUX_NATIVE.md",
+          "kind": "doc",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The operator contract, X11 and Wayland boundaries, configuration, delivery-only receipt semantics, and >=3-trial real-machine qualification plan."
         }
       ],
       "errors": []

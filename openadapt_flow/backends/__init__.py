@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
+    from openadapt_flow.backends.linux_backend import LinuxBackend
     from openadapt_flow.backends.macos_backend import MacOSBackend
     from openadapt_flow.backends.playwright_backend import PlaywrightBackend
     from openadapt_flow.backends.remote_display import RemoteDisplayBackend
@@ -17,6 +18,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "MacOSBackend",
+    "LinuxBackend",
     "PlaywrightBackend",
     "RemoteDisplayBackend",
     "WindowsBackend",
@@ -28,6 +30,10 @@ def __getattr__(name: str) -> object:
         from openadapt_flow.backends.macos_backend import MacOSBackend
 
         return MacOSBackend
+    if name == "LinuxBackend":
+        from openadapt_flow.backends.linux_backend import LinuxBackend
+
+        return LinuxBackend
     if name == "PlaywrightBackend":
         from openadapt_flow.backends.playwright_backend import (
             PlaywrightBackend,

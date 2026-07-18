@@ -109,7 +109,8 @@ class StructuralLocator(BaseModel):
 
     Fields are backend-neutral; a browser backend fills ``selector`` / ``role``
     / ``name`` from the DOM, a native backend fills ``automation_id`` / ``role``
-    / ``name`` from the UIA/AX tree. Each backend uses whichever fields it
+    / ``name`` from its accessibility tree (Windows UIA AutomationId or the
+    Linux AT-SPI accessible ID). Each backend uses whichever fields it
     recorded; unset fields are ignored.
     """
 
@@ -127,12 +128,15 @@ class StructuralLocator(BaseModel):
     )
     automation_id: Optional[str] = Field(
         default=None,
-        description="Windows UIA AutomationId (native desktop backends)",
+        description=(
+            "Stable native accessibility ID: Windows UIA AutomationId or "
+            "Linux AT-SPI accessible ID"
+        ),
     )
     window_name: Optional[str] = Field(
         default=None,
         description=(
-            "Exact top-level UIA window name captured with the target. Native "
+            "Exact top-level accessibility window name captured with the target. Native "
             "backends use it to scope candidate enumeration and refuse duplicate "
             "controls in a different application window."
         ),

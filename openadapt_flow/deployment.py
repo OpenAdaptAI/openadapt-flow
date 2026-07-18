@@ -48,6 +48,9 @@ class BackendConfig(BaseModel):
     - ``macos`` — a local native macOS application window. Requires
       ``macos_app``; ``macos_window_title`` should uniquely identify the target
       window when the application owns more than one.
+    - ``linux`` — one exact local Linux application window through AT-SPI.
+      Requires ``linux_app`` and ``linux_window_title``. Native accessibility
+      actions are preferred; global pointer/keyboard fallback is opt-in.
     - ``rdp`` — a pixel-only remote-desktop backend for the Citrix/legacy-EMR
       wedge. ``rdp_host`` drives a network RDP session (FreeRDP/aardwolf);
       ``rdp_window`` instead drives a local remote-display CLIENT WINDOW (the
@@ -58,7 +61,8 @@ class BackendConfig(BaseModel):
     ``web`` deployment (or an empty config) is byte-for-byte unchanged.
     """
 
-    #: Which backend to drive: ``web`` (default) | ``windows`` | ``macos`` | ``rdp``.
+    #: Which backend to drive:
+    #: ``web`` (default) | ``windows`` | ``macos`` | ``linux`` | ``rdp``.
     kind: str = "web"
 
     #: The GUI URL to drive (the app under automation). None => the caller's
@@ -87,6 +91,18 @@ class BackendConfig(BaseModel):
     #: Window-title substring. The backend refuses ambiguous matches rather
     #: than selecting the first window.
     macos_window_title: Optional[str] = None
+
+    # -- native Linux / AT-SPI -----------------------------------------------
+    #: Exact case-insensitive AT-SPI application name. REQUIRED for
+    #: ``kind: linux``.
+    linux_app: Optional[str] = None
+    #: Exact case-insensitive top-level AT-SPI window title. REQUIRED for
+    #: ``kind: linux``; zero or multiple matches are refused.
+    linux_window_title: Optional[str] = None
+    #: Permit window-bound X11 pointer/keyboard synthesis when the uniquely
+    #: resolved target exposes no suitable native AT-SPI action. Disabled by
+    #: default; consequential deployments qualify and enable it explicitly.
+    linux_allow_physical_input: bool = False
 
     # -- rdp (network RDP via FreeRDP/aardwolf) ------------------------------
     #: RDP host/IP for a network RDP session. REQUIRED for ``kind: rdp`` unless

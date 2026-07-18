@@ -20,6 +20,12 @@ backend:
   url: http://localhost:8080
   headed: false            # true => a visible browser (demo / debugging)
 
+  # Native Linux alternative (AT-SPI, one exact X11 app window):
+  # kind: linux
+  # linux_app: gedit
+  # linux_window_title: oa-trial.txt
+  # linux_allow_physical_input: false  # native AT-SPI actions only by default
+
 # -- actuation: the API/tool tier (top of the capability ladder) -------------
 # When api=true, a step carrying an ir.ApiBinding is PERFORMED via the API
 # (deterministic, $0, no GUI) and confirmed by the effects verifier below;

@@ -42,3 +42,48 @@ The successor candidate therefore refuses input until it proves all of:
 
 This diagnosis does not count as a qualification trial and makes no Citrix
 ICA/HDX claim.
+
+## Successor threshold measurement
+
+A later input-free owned-snapshot probe used the detached exact-ID logoff plus
+exact-ID reset fallback. It independently proved the original console session
+gone, reached the temporary account's exact RDP session, and observed Welcome
+through 20 seconds followed by the real desktop/taskbar from 25 through 75
+seconds. The real Welcome-to-desktop changed `0.124912` of pixels; the desktop
+predicate was true, and frames became byte-stable from 35 seconds onward. The
+earlier `0.50` transition floor was therefore unsupported by the fixed VM.
+
+The successor uses an evidence-bound `0.10` floor only in conjunction with the
+fixed-VM taskbar predicate, one exact active target-account RDP session,
+Explorer in that same session ID, and three stable frames. This threshold is a
+qualification-environment readiness guard, not a generic Windows, RDP, or
+application-identity claim. A unit test proves taskbar-like pixels below the
+transition floor still refuse.
+
+## Retained clean base and pre-freeze proof
+
+The original base snapshot retained an interactive console session, so it was
+preserved unchanged and a separate qualification base was prepared from it.
+Preparation receipt `rdp-base-prep-6aab3e2d2b6c39cb` proved three consecutive,
+parseable checks with no `query user` rows and an explicit successful
+`OAFLOW_EXPLORER_IDS=` sentinel. It sent no RDP input, suspended the VM, and
+created retained snapshot `{8f43c385-0566-44d3-9e50-f646777d315b}`. The
+preparation JSON SHA-256 is
+`aa0f1badc1ab9abdfdca1932c0e137ac1f5bf96b61a182b178c16c770323f033`.
+The original base and both preserved footage branches remained present.
+
+One input-free proof then ran from that retained base. It found no pre-existing
+interactive session, proved the temporary account owned exact active RDP
+session `3` with Explorer in the same session, observed the desktop predicate
+at 35 seconds, and required three stable frames through 45 seconds. The
+Welcome-to-desktop change was again `0.124912`. Cleanup deleted only the owned
+diagnostic snapshot and restored the exact eight-snapshot inventory with the
+qualification base suspended and current. Diagnostic JSON SHA-256:
+`4b834b41fc913b954fd12e3926a708fcee248180ee6619e1b73646d2e23aed88`.
+
+This was a non-counted, pre-freeze proof from the dirty successor working tree
+based on `b97af63dfb69059914c3e1cd7104997bb082e8a8`; the exact pre-documentation
+working-tree patch SHA-256 was
+`9631d9cb4db2d4a794aad66437f9ebb10cf070ca83b59fa957901826c16e383a`.
+It is only the gate for freezing a new candidate and is not accepted
+qualification evidence by itself.

@@ -46,6 +46,10 @@ CANDIDATE_ENV = "OAFLOW_RDP_QUAL_CANDIDATE"
 BASE_COMMIT_ENV = "OAFLOW_RDP_QUAL_BASE_COMMIT"
 BASE_SNAPSHOT_ENV = "OAFLOW_PARALLELS_BASE_SNAPSHOT_ID"
 HOST_STORAGE_PATH_ENV = "OAFLOW_PARALLELS_STORAGE_PATH"
+# Fixed-VM evidence: the real Welcome -> Windows desktop transition changed
+# 0.124912 of framebuffer pixels. Keep a measured margin while requiring the
+# separate taskbar predicate, exact session/Explorer proof, and stable frames.
+_QUALIFICATION_TRANSITION_FRACTION = 0.10
 
 pytestmark = [
     pytest.mark.skipif(
@@ -97,6 +101,7 @@ _QUERY_USER_ROW = re.compile(
     r"(?P<state>Active|Disc|Conn|Listen|Down|Idle)\b",
     re.IGNORECASE,
 )
+_EXPLORER_IDS_SENTINEL = "OAFLOW_EXPLORER_IDS="
 
 
 def _parse_query_user(stdout: str) -> list[_UserSession]:
@@ -131,8 +136,9 @@ def _query_user_sessions(vm) -> list[_UserSession]:
 
 def _explorer_session_ids(vm) -> set[int]:
     result = vm.exec_ps(
-        "Get-Process explorer -ErrorAction SilentlyContinue | "
-        "Select-Object -ExpandProperty SessionId",
+        "$ids = @(Get-Process explorer -ErrorAction SilentlyContinue | "
+        "ForEach-Object { $_.SessionId }); "
+        "Write-Output ('OAFLOW_EXPLORER_IDS=' + ($ids -join ',')); exit 0",
         timeout=20,
     )
     if result.returncode != 0:
@@ -140,9 +146,23 @@ def _explorer_session_ids(vm) -> set[int]:
     lines = [
         line.strip() for line in (result.stdout or "").splitlines() if line.strip()
     ]
-    if any(not line.isdigit() for line in lines):
+    if len(lines) != 1 or not lines[0].startswith(_EXPLORER_IDS_SENTINEL):
+        raise AssertionError("missing or ambiguous Explorer session sentinel")
+    payload = lines[0][len(_EXPLORER_IDS_SENTINEL) :]
+    if not payload:
+        return set()
+    if re.fullmatch(r"\d+(?:,\d+)*", payload) is None:
         raise AssertionError("could not safely parse Explorer session ids")
-    return {int(line) for line in lines}
+    ids = [int(value) for value in payload.split(",")]
+    if len(ids) != len(set(ids)):
+        raise AssertionError("duplicate Explorer session ids")
+    return set(ids)
+
+
+def _require_no_explorer_sessions(vm) -> None:
+    ids = _explorer_session_ids(vm)
+    if ids:
+        raise AssertionError(f"Explorer still exists in sessions: {sorted(ids)}")
 
 
 def _logoff_preexisting_interactive_sessions(
@@ -161,16 +181,50 @@ def _logoff_preexisting_interactive_sessions(
             )
         ids.add(session.session_id)
     for session_id in sorted(ids):
-        result = vm.exec_cmd(f"logoff {session_id}", timeout=20)
+        try:
+            # Detach logoff from the Parallels guest-tools command channel.
+            # An attached `logoff` can destroy its session while prlctl still
+            # waits for command completion, then time out or cancel the guest
+            # process. The exact query-user disappearance proof below remains
+            # the only success oracle.
+            result = vm.exec_cmd(f'start "" /b logoff {session_id}', timeout=20)
+        except subprocess.TimeoutExpired:
+            # logoff can tear down the interactive session while prlctl is
+            # still waiting for its guest command channel. This is an unknown
+            # delivery receipt, not success: only the independent query-user
+            # disappearance proof below may accept it.
+            continue
         if result.returncode != 0:
             raise AssertionError(result.stderr or result.stdout)
 
-    deadline = time.monotonic() + timeout_s
-    remaining = ids
-    while remaining and time.monotonic() < deadline:
-        remaining = {session.session_id for session in _query_user_sessions(vm)} & ids
-        if remaining:
-            time.sleep(1)
+    def wait_remaining(target_ids: set[int]) -> set[int]:
+        deadline = time.monotonic() + timeout_s
+        remaining_ids = target_ids
+        while remaining_ids and time.monotonic() < deadline:
+            remaining_ids = {
+                session.session_id for session in _query_user_sessions(vm)
+            } & target_ids
+            if remaining_ids:
+                time.sleep(1)
+        return remaining_ids
+
+    remaining = wait_remaining(ids)
+    if remaining:
+        # Exact-ID reset is the owned-snapshot-only fallback for a console
+        # session whose ordinary logoff remains stuck. Its command receipt is
+        # still not the oracle: require the same independent disappearance.
+        for session_id in sorted(remaining):
+            try:
+                result = vm.exec_cmd(f"reset session {session_id}", timeout=20)
+            except subprocess.TimeoutExpired:
+                continue
+            if result.returncode != 0:
+                # The exact session can disappear between the preceding poll
+                # and reset dispatch, yielding an empty non-zero receipt. Do
+                # not convert that receipt into either success or failure;
+                # the independent disappearance proof below is authoritative.
+                continue
+        remaining = wait_remaining(remaining)
     if remaining:
         raise AssertionError(
             f"pre-existing interactive sessions did not log off: {sorted(remaining)}"
@@ -290,7 +344,7 @@ def _wait_qualification_desktop(
         png = backend.screenshot()
         changed = _frame_change_fraction(baseline, png)
         desktop_ready = _qualification_desktop_ready(png)
-        transitioned = baseline_ready or changed >= 0.50
+        transitioned = baseline_ready or changed >= _QUALIFICATION_TRANSITION_FRACTION
         if transitioned and desktop_ready:
             stable_change = (
                 0.0 if last_ready is None else _frame_change_fraction(last_ready, png)

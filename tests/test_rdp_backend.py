@@ -956,7 +956,10 @@ def test_aardwolf_framebuffer_snapshot_runs_on_transport_event_loop() -> None:
         ("pointer input", lambda transport: transport.pointer(10, 20, "left", True)),
         ("virtual-key input", lambda transport: transport.key("Enter", True)),
         ("character input", lambda transport: transport.key("x", True)),
-        ("physical scancode input", lambda transport: transport.physical_key("r", True)),
+        (
+            "physical scancode input",
+            lambda transport: transport.physical_key("r", True),
+        ),
         ("wheel input", lambda transport: transport.wheel(0, 120)),
     ],
 )

@@ -327,9 +327,9 @@ def _qualification_desktop_ready(png: bytes) -> bool:
             )
         )
         histogram = taskbar.histogram()
-        bright_fraction = sum(
-            histogram[_QUALIFICATION_TASKBAR_MIN_LUMA:]
-        ) / (taskbar.width * taskbar.height)
+        bright_fraction = sum(histogram[_QUALIFICATION_TASKBAR_MIN_LUMA:]) / (
+            taskbar.width * taskbar.height
+        )
         return bright_fraction >= _QUALIFICATION_TASKBAR_BRIGHT_FRACTION
     except Exception:  # noqa: BLE001 - malformed frame means not ready
         return False

@@ -72,9 +72,7 @@ class _SessionVM:
 def test_explorer_session_query_accepts_explicit_empty_sentinel():
     vm = _SessionVM([], ["OAFLOW_EXPLORER_IDS=\n"])
     assert rdp._explorer_session_ids(vm) == set()
-    rdp._require_no_explorer_sessions(
-        _SessionVM([], ["OAFLOW_EXPLORER_IDS=\n"])
-    )
+    rdp._require_no_explorer_sessions(_SessionVM([], ["OAFLOW_EXPLORER_IDS=\n"]))
 
 
 @pytest.mark.parametrize(

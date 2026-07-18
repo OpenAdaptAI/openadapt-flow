@@ -808,9 +808,7 @@ class AardwolfTransport:
             and keysym_or_char.isascii()
             and keysym_or_char.isalnum()
         ):
-            raise ValueError(
-                f"unsupported physical RDP chord key: {keysym_or_char!r}"
-            )
+            raise ValueError(f"unsupported physical RDP chord key: {keysym_or_char!r}")
 
         from aardwolf.keyboard import VK_MODIFIERS
         from aardwolf.keyboard.layoutmanager import KeyboardLayoutManager
@@ -835,9 +833,7 @@ class AardwolfTransport:
                 ) from exc
         else:
             try:
-                scancode, modifiers = layout.char_to_scancode(
-                    keysym_or_char
-                )
+                scancode, modifiers = layout.char_to_scancode(keysym_or_char)
             except KeyError as exc:
                 raise ValueError(
                     "keyboard layout cannot resolve physical chord key "
@@ -865,9 +861,7 @@ class AardwolfTransport:
 
         is_extended = scancode > 57000
         result = self._run(
-            self._conn.send_key_scancode(
-                scancode, bool(down), is_extended
-            ),
+            self._conn.send_key_scancode(scancode, bool(down), is_extended),
             self._op_timeout_s,
         )
         self._raise_embedded_error(result, "physical scancode input")

@@ -74,20 +74,27 @@ the live session.
 
 ## Qualification
 
-CI exercises the backend through an injected AT-SPI client: exact-window
-selection, scoped candidate enumeration, ambiguity and traversal-bound
-refusal, stale-target refusal, native delivery receipts, editable text,
-active-window capture, Wayland portal gating, and disabled-by-default physical
-input.
+The required `linux-atspi-x11` CI job owns an isolated Xvfb display, session
+D-Bus, AT-SPI registry, and minimal GTK3 application. It runs exactly three
+fresh-process text-and-button trials, verifies each effect from exact file bytes
+outside the target UI, then runs three ambiguous-control and three stale-handle
+trials that must refuse with the effect file absent. Its artifact explicitly
+reports silent incorrect success, over-halt, refusal failures, native delivery,
+latency, cleanup, and model calls.
 
-This is implementation evidence, not arbitrary-application acceptance. Before
-promoting a Linux workflow, run at least three independent trials per condition
-on a clean Linux machine and retain:
+The default unit suite separately exercises exact-window selection, bounded
+candidate enumeration, traversal refusal, target-window capture, Wayland portal
+gating, and disabled-by-default physical input through an injected client.
+
+This is scoped acceptance evidence for the in-tree GTK workflow and CI image,
+not arbitrary-application acceptance. Before promoting a customer Linux
+workflow, repeat the same evidence contract against the exact deployment and
+retain:
 
 - Exact distribution, desktop environment, X11/portal transport, application
   version, display scale, and workflow.
 - Task and independent effect oracles.
 - Silent incorrect success, over-halt, operator intervention, and latency.
 - Duplicate-window/control ambiguity, app restart, window movement, and display
-  scale conditions.
+  scale conditions relevant to that deployment.
 - Zero falsely confirmed outcomes.

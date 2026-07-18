@@ -10,6 +10,7 @@ name: CI
 #       test (fast unit suite + enforced safety coverage floor),
 #       e2e-browser (record -> compile -> replay in a headless browser; no OS
 #         permissions needed, so it runs on PRs, NOT just nightly),
+#       linux-atspi-x11 (real GTK/AT-SPI actuation inside Xvfb + session D-Bus),
 #       wheel (clean-venv wheel install + CLI smoke).
 #   - push to main: re-validate main AND run the genuinely-heavy suites that are
 #     too slow/OS-bound for PRs (full Python matrix + macOS + windows-mock).
@@ -23,8 +24,8 @@ name: CI
 #
 # Which jobs to mark REQUIRED in branch protection (repo Settings, owner-only):
 #   lint, python-compatibility, mypy-strict-safety, phi-guard,
-#   docs-consistency, interop-types, test, e2e-browser, wheel. (test-matrix and
-#   windows-mock are post-merge/nightly -- NOT required.)
+#   docs-consistency, interop-types, test, e2e-browser, linux-atspi-x11, wheel.
+#   (test-matrix and windows-mock are post-merge/nightly -- NOT required.)
 on:
   pull_request:
   push:
@@ -363,6 +364,54 @@ jobs:
             runs/**/report.json
             runs/**/*.png
           if-no-files-found: warn
+
+  # --- Native Linux: real GTK3 + AT-SPI under isolated X11 (REQUIRED) ------
+  # This job owns its Xvfb display and session D-Bus. It never opens a window
+  # on a developer workstation. The fixed qualification matrix runs exactly
+  # three clean trials with an independent exact-file oracle, three ambiguous
+  # locator refusals, and three stale-handle refusals. This is scoped evidence
+  # for the in-tree GTK fixture, not a claim about arbitrary Linux apps.
+  linux-atspi-x11:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install isolated X11, D-Bus, GTK3, and AT-SPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            at-spi2-core \
+            dbus-x11 \
+            gir1.2-atspi-2.0 \
+            gir1.2-gtk-3.0 \
+            libatk-adaptor \
+            python3-gi \
+            python3-venv \
+            xauth \
+            xvfb
+          /usr/bin/python3 -m venv --system-site-packages \
+            "$RUNNER_TEMP/linux-atspi-venv"
+          "$RUNNER_TEMP/linux-atspi-venv/bin/pip" install -e .
+          "$RUNNER_TEMP/linux-atspi-venv/bin/python" -c \
+            "import gi; gi.require_version('Atspi', '2.0'); gi.require_version('Gtk', '3.0'); from gi.repository import Atspi, Gtk; print(Atspi, Gtk)"
+
+      - name: Qualify GTK workflow on real AT-SPI
+        run: |
+          mkdir -p runs/linux-atspi
+          dbus-run-session -- \
+            xvfb-run -a -s "-screen 0 1280x800x24" \
+            env XDG_SESSION_TYPE=x11 NO_AT_BRIDGE=0 GTK_MODULES=atk-bridge \
+            "$RUNNER_TEMP/linux-atspi-venv/bin/python" \
+            scripts/qualify_linux_atspi.py \
+            --output runs/linux-atspi/results.json
+
+      - name: Upload Linux AT-SPI qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-atspi-qualification
+          path: runs/linux-atspi/results.json
+          if-no-files-found: error
 
   # --- Post-merge / nightly: full Python matrix + macOS platform suite ------
   # NOT a required check and NOT run on PRs (so merges never block on it). Runs

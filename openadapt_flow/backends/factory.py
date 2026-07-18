@@ -13,7 +13,7 @@ field raises :class:`ValueError` (mirroring
 :func:`openadapt_flow.deployment.build_effect_verifier`) rather than silently
 falling back to a different substrate — a wrong backend is a wrong action.
 
-Backend dependencies (playwright, requests, aardwolf, pyobjc) are imported
+Backend dependencies (playwright, requests, aardwolf, pyobjc, AT-SPI) are imported
 lazily inside each branch, so importing this module — and building any one
 backend — never requires the others' extras.
 """
@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from playwright.sync_api import Page
 
     from openadapt_flow.backend import Backend
+    from openadapt_flow.backends.linux_backend import LinuxClient
     from openadapt_flow.backends.macos_backend import MacOSClient
     from openadapt_flow.backends.rdp_backend import RDPTransport
     from openadapt_flow.backends.remote_display import WindowClient
@@ -49,6 +50,7 @@ def build_backend(
     rdp_transport: Optional["RDPTransport"] = None,
     window_client: Optional["WindowClient"] = None,
     macos_client: Optional["MacOSClient"] = None,
+    linux_client: Optional["LinuxClient"] = None,
 ) -> "Backend":
     """Construct the backend selected by ``cfg.kind``.
 
@@ -65,6 +67,7 @@ def build_backend(
             ``kind: rdp`` local-window path. When omitted, the live macOS
             client is used. Primarily a test seam.
         macos_client: An injected native macOS client for ``kind: macos``.
+        linux_client: An injected native Linux/AT-SPI client for ``kind: linux``.
 
     Returns:
         A live backend implementing the :class:`Backend` protocol.
@@ -113,13 +116,34 @@ def build_backend(
             window_title=cfg.macos_window_title,
         )
 
+    if kind == "linux":
+        if not cfg.linux_app:
+            raise ValueError(
+                "backend.kind 'linux' requires backend.linux_app "
+                "(e.g. --linux-app gedit)"
+            )
+        if not cfg.linux_window_title:
+            raise ValueError(
+                "backend.kind 'linux' requires backend.linux_window_title "
+                "(an exact top-level window title)"
+            )
+        from openadapt_flow.backends.linux_backend import LinuxBackend
+
+        return LinuxBackend(
+            linux_client,
+            app=cfg.linux_app,
+            window_title=cfg.linux_window_title,
+            allow_physical_input=cfg.linux_allow_physical_input,
+        )
+
     if kind == "rdp":
         return _build_rdp_backend(
             cfg, rdp_transport=rdp_transport, window_client=window_client
         )
 
     raise ValueError(
-        f"unknown backend.kind {cfg.kind!r} (expected: web | windows | macos | rdp)"
+        "unknown backend.kind "
+        f"{cfg.kind!r} (expected: web | windows | macos | linux | rdp)"
     )
 
 

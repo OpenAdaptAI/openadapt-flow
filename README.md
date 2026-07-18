@@ -148,9 +148,15 @@ changing either file. Real-network Aardwolf RDP into Windows 11 passed 3/3
 fixed remote-input trials with independent guest-tools file verification.
 These are accepted scoped qualifications; a customer application is qualified
 against its own controls, session/display policy, identity evidence, and effect
-oracle. Citrix ICA/HDX uses the remote-display adapter contract and enters
+oracle. Native Linux now uses the same governed runtime through an exact-window
+AT-SPI backend. Required CI drives a real GTK3 workflow through an isolated
+X11/session-D-Bus environment for three independently verified effects, plus
+three ambiguous-target and three stale-target refusals; customer applications
+retain their own qualification boundary. Citrix ICA/HDX uses the remote-display
+adapter contract and enters
 design-partner qualification in the customer's exact published application
 ([`docs/backends/RDP.md`](docs/backends/RDP.md),
+[`docs/desktop/LINUX_NATIVE.md`](docs/desktop/LINUX_NATIVE.md),
 [`docs/desktop/CITRIX_PIXEL.md`](docs/desktop/CITRIX_PIXEL.md)).
 
 ## Proof

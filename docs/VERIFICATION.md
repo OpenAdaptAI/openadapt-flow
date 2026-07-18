@@ -11,7 +11,7 @@
 ## What is CI-proven today vs. being validated
 
 - **CI-proven today (6):** `web-supported`, `deterministic-zero-model-replay`, `effect-verification-silent-writes`, `identity-gate-halt-armed`, `halt-teach-promote`, `mockmed-benchmark-ci-reproducible`
-- **Being validated — opt-in / infra-gated or field (7):** `effect-verifier-kit`, `windows-desktop-validating`, `macos-native-validating`, `rdp-validating`, `desktop-recording-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
+- **Being validated — opt-in / infra-gated or field (8):** `effect-verifier-kit`, `windows-desktop-validating`, `macos-native-validating`, `linux-native-validating`, `rdp-validating`, `desktop-recording-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
 
 ## Claims
 
@@ -176,6 +176,25 @@
 
 - Acceptance covers TextEdit on one macOS 15.7.3 Apple Silicon host and active user session; each customer application is qualified separately.
 - The original counted report remains failed. The hash-bound adjudication accepts only its independently confirmed action/effect/refusal evidence.
+
+### `linux-native-validating` — validating — opt-in / infra-gated or field test
+
+> Native Linux uses an exact-window AT-SPI backend with complete candidate enumeration, native action delivery, and fail-closed ambiguity, staleness, and Wayland portal boundaries.
+
+- Surfaces: README.md, docs
+- Strongest evidence strength: **supported** (tier is `validating`)
+
+| Backing evidence | Kind | Gating / CI stage | Strength | Proves |
+|---|---|---|---|---|
+| `tests/test_linux_backend.py` | test | ci (required PR gate (test)) | supported | Default CI covers exact app/window binding, bounded candidate enumeration, ambiguity and stale-target refusal, native invoke/focus and editable-text delivery, window-scoped capture, physical-input opt-in, and Wayland portal refusal through an injected Linux client. |
+| `tests/test_linux_qualification.py` | test | ci (required PR gate (test)) | supported | Default CI enforces the live qualification's fixed three-trial matrix, independent exact-file and absence oracles, and separate silent-incorrect-success, over-halt, and refusal-failure accounting. |
+| `scripts/qualify_linux_atspi.py` | benchmark | artifact (doc/benchmark) | roadmap | The required linux-atspi-x11 job drives the real GTK3 fixture through AT-SPI on an isolated Xvfb display and session D-Bus, emitting a per-trial JSON evidence artifact. |
+| `docs/desktop/LINUX_NATIVE.md` | doc | artifact (doc/benchmark) | roadmap | The operator contract, X11 and Wayland boundaries, configuration, delivery-only receipt semantics, and required real GTK/AT-SPI CI qualification contract. |
+
+**Caveats (honest limits):**
+
+- Required CI establishes live scoped acceptance only for the in-tree GTK3 application on its isolated Xvfb image. Each third-party application and environment requires its own qualification.
+- X11 is the initial built-in live transport. Wayland requires a real operator-approved XDG RemoteDesktop/ScreenCast portal session; the built-in client currently refuses rather than pretending a grant exists.
 
 ### `rdp-validating` — validating — opt-in / infra-gated or field test
 

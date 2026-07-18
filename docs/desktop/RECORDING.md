@@ -1,4 +1,4 @@
-# Desktop recording — `record --backend windows|rdp`
+# Desktop recording — `record --backend windows|macos|linux|rdp`
 
 `openadapt-flow record` records a workflow **once** so it can be compiled into a
 deterministic, vision-anchored script and replayed. This page documents the
@@ -15,7 +15,8 @@ openadapt-flow replay bundle/ --backend windows --agent-url http://localhost:500
 
 ## What it does (and what it reuses)
 
-Desktop capture is **not reinvented**. The `record --backend windows|rdp` path
+Desktop capture is **not reinvented**. The
+`record --backend windows|macos|linux|rdp` path
 is a thin orchestration over two components that already exist and are tested:
 
 1. **[openadapt-capture](https://pypi.org/project/openadapt-capture/)** — the
@@ -82,7 +83,7 @@ re-arms the fixed workflow against the qualified application before release.
 The browser recorder blacks out a secret field's pixels using the field's DOM
 rectangle. A pixel/desktop capture has **no field geometry**, so it cannot
 redact the typed value from the captured frames. Rather than persist an
-unredacted secret frame, `record --backend windows|rdp` **refuses** `--secret`
+unredacted secret frame, desktop `record` **refuses** `--secret`
 on an unqualified pixel capture. Use a masked/password control or a deployment
 recorder with reviewed field geometry and fail-closed redaction.
 

@@ -27,6 +27,7 @@ from openadapt_flow.deployment import BackendConfig, DeploymentConfig
         ("WEB", "web"),
         (" windows ", "windows"),
         ("macos", "macos"),
+        ("linux", "linux"),
         ("rdp", "rdp"),
         ("remote-display", "rdp"),
         ("remote_display", "rdp"),
@@ -115,6 +116,26 @@ def test_macos_cli_flags_override_config() -> None:
     assert merged.kind == "macos"
     assert merged.macos_app == "TextEdit"
     assert merged.macos_window_title == "oa-trial"
+
+
+def test_linux_cli_flags_override_config() -> None:
+    cfg = DeploymentConfig()
+    args = _replay_args(
+        [
+            "--backend",
+            "linux",
+            "--linux-app",
+            "gedit",
+            "--linux-window-title",
+            "oa-trial.txt",
+            "--linux-allow-physical-input",
+        ]
+    )
+    merged = _resolve_backend_config(args, cfg)
+    assert merged.kind == "linux"
+    assert merged.linux_app == "gedit"
+    assert merged.linux_window_title == "oa-trial.txt"
+    assert merged.linux_allow_physical_input is True
 
 
 # --- rdp (network, via injected transport) ----------------------------------
@@ -297,9 +318,9 @@ def test_config_backend_used_when_no_flag() -> None:
 # --- record refuses non-web -------------------------------------------------
 
 
-def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path) -> None:
-    """`record --backend windows` now records via the desktop capture path
-    (openadapt-capture -> convert_capture), not the old refusal."""
+@pytest.mark.parametrize("kind", ["windows", "macos", "linux", "rdp"])
+def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path, kind) -> None:
+    """Every desktop selector routes to capture, not the web recorder."""
     from openadapt_flow.__main__ import _cmd_record
 
     captured: dict = {}
@@ -313,7 +334,7 @@ def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path) -> None:
         "openadapt_flow.desktop_record.record_desktop_capture", fake_record
     )
     args = build_parser().parse_args(
-        ["record", "--out", str(tmp_path / "rec"), "--backend", "windows"]
+        ["record", "--out", str(tmp_path / "rec"), "--backend", kind]
     )
     assert _cmd_record(args) == 0
     assert captured["params"] == {}

@@ -117,8 +117,8 @@ core never pulls it onto the replay hot path.
 
 Structural-identity gap (desktop→web parity). This offline conversion produces
 a recording of the SAME shape as a web recording, and it compiles into a valid
-bundle, but it CANNOT carry the ``structural`` locator (UIA ``AutomationId`` /
-role+name) that a DOM-armed web bundle gets: capture records only
+bundle, but it CANNOT carry the ``structural`` locator (UIA ``AutomationId`` or
+AT-SPI accessible ID / role+name) that a DOM-armed web bundle gets: capture records only
 mouse/keyboard/video, so there is no live accessibility tree at conversion time
 to read an element identity from. Every ``anchor.structural`` is therefore None
 and replay uses the VISUAL ladder (template/ocr/geometry). To get the

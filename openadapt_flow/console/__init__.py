@@ -16,6 +16,9 @@ local paths. The console invents no new engine semantics:
   refuse unless the operator opted in with ``--allow-actions``. APIs and
   artifacts require an unguessable fragment-delivered bearer capability;
   mutations additionally require same-origin JSON and a session CSRF token.
+- ``console --attend`` opens the redacted Needs Attention queue under a hard
+  read-only capability profile. It does not expose or execute governance
+  actions, even if ``--allow-actions`` is also supplied.
 
 Serve it with ``openadapt-flow console`` (requires the ``console`` extra:
 ``pip install 'openadapt-flow[console]'``).

@@ -22,6 +22,7 @@ def serve(
     skills_root: Path | str | None = None,
     *,
     allow_actions: bool = False,
+    attend: bool = False,
     port: int = DEFAULT_PORT,
 ) -> None:
     """Build the app and serve it on ``http://127.0.0.1:<port>`` (blocking)."""
@@ -35,6 +36,7 @@ def serve(
         runs_root,
         skills_root,
         allow_actions=allow_actions,
+        attend=attend,
         access_token=access_token,
     )
     # URL fragments are consumed entirely by the browser and are never sent in

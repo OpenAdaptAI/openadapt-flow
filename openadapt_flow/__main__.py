@@ -2574,6 +2574,14 @@ def build_parser() -> argparse.ArgumentParser:
             "command for the operator to copy instead"
         ),
     )
+    p.add_argument(
+        "--attend",
+        action="store_true",
+        help=(
+            "Open the authenticated local Needs Attention queue in a hard "
+            "read-only mode. --allow-actions is ignored when --attend is set"
+        ),
+    )
     p.set_defaults(func=_cmd_console)
 
     return parser
@@ -2593,7 +2601,10 @@ def _cmd_console(args: argparse.Namespace) -> int:
         )
     from openadapt_flow.console.server import LOOPBACK_HOST, serve
 
-    mode = "ACTIONS ENABLED (confirm-gated)" if args.allow_actions else "read-only"
+    allow_actions = args.allow_actions and not args.attend
+    mode = "ACTIONS ENABLED (confirm-gated)" if allow_actions else "read-only"
+    if args.attend:
+        mode += "; attention-first"
     print(
         f"operator console on http://{LOOPBACK_HOST}:{args.port}  [{mode}]\n"
         f"  bundles: {Path(args.bundles).resolve()}\n"
@@ -2603,7 +2614,8 @@ def _cmd_console(args: argparse.Namespace) -> int:
         args.bundles,
         args.runs,
         args.skills,
-        allow_actions=args.allow_actions,
+        allow_actions=allow_actions,
+        attend=args.attend,
         port=args.port,
     )
     return 0

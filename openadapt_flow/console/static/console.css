@@ -207,3 +207,38 @@ select {
 }
 h2.library-path { font-weight: 400; }
 a { color: var(--accent); }
+.attention-list {
+  display: grid;
+  gap: 12px;
+}
+.attention-card,
+.attention-empty {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.attention-card h3 {
+  margin: 10px 0 4px;
+  font-size: 16px;
+}
+.attention-card p { margin: 5px 0 10px; }
+.attention-card-head,
+.attention-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+.attention-card-head .muted:nth-child(2) { margin-left: auto; }
+.button-link {
+  display: inline-block;
+  background: var(--chip);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 12px;
+  text-decoration: none;
+}
+.button-link:hover { border-color: var(--accent); }

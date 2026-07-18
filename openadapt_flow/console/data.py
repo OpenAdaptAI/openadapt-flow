@@ -521,12 +521,17 @@ def _read_json_opt(
 
 def run_summary(root: Path, path: Path) -> RunSummary:
     report, err = _load_report(path)
-    paused = (path / "pending_escalation.json").is_file() or (
-        path / "pending_escalation.json.enc"
-    ).is_file()
-    approved = (path / "approval.json").is_file() or (
-        path / "approval.json.enc"
-    ).is_file()
+    paused = any(
+        _contained_file(path, path / filename) is not None
+        for filename in (
+            "pending_escalation.json",
+            "pending_escalation.json.enc",
+        )
+    )
+    approved = any(
+        _contained_file(path, path / filename) is not None
+        for filename in ("approval.json", "approval.json.enc")
+    )
     if report is None:
         return RunSummary(
             id=_rel_id(root, path),

@@ -5,7 +5,9 @@
 API and screenshot request requires an unguessable bearer capability. Browser
 mutations additionally require same-origin JSON and a session-bound CSRF
 token. With ``allow_actions=False`` (the default), mutating endpoints refuse
-with a browser-safe placeholder command the operator can copy.
+with a browser-safe placeholder command the operator can copy. ``attend=True``
+is a hard read-only profile: it suppresses action catalogs and refuses every
+generic mutation route even if ``allow_actions=True`` was also requested.
 
 Browser DTOs use opaque ids and explicit projections; protected workflow
 labels, parameters, identity evidence, local paths, and raw reports do not
@@ -30,6 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from openadapt_flow import __version__
 from openadapt_flow.console import actions as actions_mod
+from openadapt_flow.console import attention as attention_mod
 from openadapt_flow.console import data
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -265,9 +268,14 @@ def create_app(
     skills_root: Path | str | None = None,
     *,
     allow_actions: bool = False,
+    attend: bool = False,
     access_token: Optional[str] = None,
     csrf_token: Optional[str] = None,
 ) -> FastAPI:
+    # ``attend`` is a deliberately narrow read-only capability profile.  Keep
+    # this defense in the app factory (not only the CLI) so embedders and tests
+    # cannot combine attend=True with a mutation-enabled server.
+    allow_actions = allow_actions and not attend
     bundles = _validated_root(bundles_root, label="bundles")
     runs = _validated_root(runs_root, label="runs")
     skills = _validated_root(skills_root, label="skills") if skills_root else None
@@ -293,6 +301,7 @@ def create_app(
     app.state.console_access_token = token
     app.state.console_csrf_token = csrf
     app.state.console_operator_identity = operator
+    app.state.console_attend = attend
 
     @app.exception_handler(RequestValidationError)
     async def redacted_validation_error(
@@ -371,6 +380,7 @@ def create_app(
         return {
             "version": __version__,
             "read_only": not allow_actions,
+            "attend": attend,
             "csrf_token": csrf,
         }
 
@@ -380,6 +390,7 @@ def create_app(
             "status": "ok",
             "version": __version__,
             "read_only": not allow_actions,
+            "attend": attend,
         }
 
     # -- workflows ----------------------------------------------------------
@@ -404,6 +415,8 @@ def create_app(
 
     @app.get("/api/workflows/{bundle_id:path}/actions")
     def workflow_actions(bundle_id: str) -> list[dict[str, Any]]:
+        if attend:
+            return []
         path = _resolve_bundle(bundles, bundle_id)
         summary = data.bundle_summary(bundles, path)
         return [
@@ -448,6 +461,8 @@ def create_app(
 
     @app.get("/api/runs/{run_id:path}/actions")
     def run_actions(run_id: str) -> list[dict[str, Any]]:
+        if attend:
+            return []
         run_dir = _resolve_run(runs, run_id)
         summary = data.run_summary(runs, run_dir)
         bundle = _guess_bundle_for_run(bundles, runs, run_dir)
@@ -467,6 +482,27 @@ def create_app(
         run_dir = _resolve_run(runs, run_id)
         return data.run_detail(runs, run_dir)
 
+    # -- needs attention ----------------------------------------------------
+
+    @app.get("/api/attention")
+    def attention_list() -> list[dict[str, Any]]:
+        return [item.model_dump() for item in attention_mod.list_attention(runs)]
+
+    @app.get("/api/attention/notification")
+    def attention_notification() -> dict[str, Any]:
+        """PHI-free payload for a future desktop/tray OS notification."""
+        return attention_mod.notification(
+            attention_mod.list_attention(runs)
+        ).model_dump()
+
+    @app.get("/api/attention/{run_id:path}")
+    def attention_detail(run_id: str) -> dict[str, Any]:
+        run_dir = _resolve_run(runs, run_id)
+        item = attention_mod.attention_item(runs, run_dir)
+        if item is None:
+            raise HTTPException(status_code=404, detail="no open attention item")
+        return item.model_dump()
+
     # -- skills -------------------------------------------------------------
 
     @app.get("/api/skills")
@@ -482,6 +518,11 @@ def create_app(
     def execute_run_action(
         run_id: str, action_id: str, payload: dict[str, Any] | None = None
     ) -> JSONResponse:
+        if attend:
+            raise HTTPException(
+                status_code=404,
+                detail="actions are unavailable in attended read-only mode",
+            )
         run_dir = _resolve_run(runs, run_id)
         summary = data.run_summary(runs, run_dir)
         bundle = _guess_bundle_for_run(bundles, runs, run_dir)
@@ -529,6 +570,11 @@ def create_app(
     def execute_bundle_action(
         bundle_id: str, action_id: str, payload: dict[str, Any] | None = None
     ) -> JSONResponse:
+        if attend:
+            raise HTTPException(
+                status_code=404,
+                detail="actions are unavailable in attended read-only mode",
+            )
         path = _resolve_bundle(bundles, bundle_id)
         summary = data.bundle_summary(bundles, path)
         specs = {
@@ -576,6 +622,11 @@ def create_app(
     def execute_skill_action(
         skill_id: str, action_id: str, payload: dict[str, Any]
     ) -> JSONResponse:
+        if attend:
+            raise HTTPException(
+                status_code=404,
+                detail="actions are unavailable in attended read-only mode",
+            )
         library_id = payload.get("library")
         version = payload.get("version")
         if not isinstance(library_id, str) or not isinstance(version, int):

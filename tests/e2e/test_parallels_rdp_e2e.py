@@ -32,11 +32,13 @@ import secrets
 import socket
 import subprocess
 import time
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from importlib.metadata import version as package_version
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 RUN = os.environ.get("OAFLOW_PARALLELS_RDP_E2E") == "1"
 TRIALS = int(os.environ.get("OAFLOW_RDP_QUAL_TRIALS", "3"))
@@ -80,15 +82,125 @@ def _wait_tcp(host: str, port: int, *, timeout_s: float = 30.0) -> None:
     raise AssertionError(f"RDP listener {host}:{port} unreachable: {last_error}")
 
 
-def _wait_user_shell(vm, account: str, *, timeout_s: float = 90.0) -> None:
-    """Wait until the RDP account's Explorer shell is present after first logon."""
+@dataclass(frozen=True)
+class _UserSession:
+    username: str
+    session_name: str | None
+    session_id: int
+    state: str
+
+
+_QUERY_USER_ROW = re.compile(
+    r"^\s*>?(?P<username>\S+)\s+"
+    r"(?:(?P<session_name>\S+)\s+)?"
+    r"(?P<session_id>\d+)\s+"
+    r"(?P<state>Active|Disc|Conn|Listen|Down|Idle)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_query_user(stdout: str) -> list[_UserSession]:
+    """Parse ``query user`` without trusting its unreliable exit status."""
+    sessions: list[_UserSession] = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.upper().startswith("USERNAME"):
+            continue
+        if stripped.casefold().startswith("no user exists"):
+            continue
+        match = _QUERY_USER_ROW.match(line)
+        if match is None:
+            raise ValueError(f"unrecognized query-user row: {stripped!r}")
+        sessions.append(
+            _UserSession(
+                username=match.group("username"),
+                session_name=match.group("session_name"),
+                session_id=int(match.group("session_id")),
+                state=match.group("state"),
+            )
+        )
+    return sessions
+
+
+def _query_user_sessions(vm) -> list[_UserSession]:
+    # On this Parallels Windows 11 guest, query.exe returns rc=1 even while
+    # emitting a valid table. Parse its stdout and reject unknown row shapes.
+    result = vm.exec_cmd("query user", timeout=20)
+    return _parse_query_user(result.stdout or "")
+
+
+def _explorer_session_ids(vm) -> set[int]:
+    result = vm.exec_ps(
+        "Get-Process explorer -ErrorAction SilentlyContinue | "
+        "Select-Object -ExpandProperty SessionId",
+        timeout=20,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout)
+    lines = [
+        line.strip() for line in (result.stdout or "").splitlines() if line.strip()
+    ]
+    if any(not line.isdigit() for line in lines):
+        raise AssertionError("could not safely parse Explorer session ids")
+    return {int(line) for line in lines}
+
+
+def _logoff_preexisting_interactive_sessions(
+    vm, *, timeout_s: float = 30.0
+) -> list[_UserSession]:
+    """Log off pre-existing console/RDP users inside the owned snapshot only."""
+    sessions = _query_user_sessions(vm)
+    ids: set[int] = set()
+    for session in sessions:
+        name = (session.session_name or "").casefold()
+        if session.session_id <= 0 or not (
+            not name or name == "console" or name.startswith("rdp-")
+        ):
+            raise AssertionError(
+                f"refusing to log off an unrecognized interactive session: {session!r}"
+            )
+        ids.add(session.session_id)
+    for session_id in sorted(ids):
+        result = vm.exec_cmd(f"logoff {session_id}", timeout=20)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr or result.stdout)
+
     deadline = time.monotonic() + timeout_s
+    remaining = ids
+    while remaining and time.monotonic() < deadline:
+        remaining = {session.session_id for session in _query_user_sessions(vm)} & ids
+        if remaining:
+            time.sleep(1)
+    if remaining:
+        raise AssertionError(
+            f"pre-existing interactive sessions did not log off: {sorted(remaining)}"
+        )
+    return sessions
+
+
+def _wait_user_shell(vm, account: str, *, timeout_s: float = 90.0) -> int:
+    """Prove one active RDP account session owns an Explorer shell."""
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, object] = {}
     while time.monotonic() < deadline:
-        result = vm.exec_cmd('tasklist /V /FI "IMAGENAME eq explorer.exe"', timeout=20)
-        if result.returncode == 0 and account.lower() in (result.stdout or "").lower():
-            return
+        matches = [
+            session
+            for session in _query_user_sessions(vm)
+            if session.username.casefold() == account.casefold()
+            and session.state.casefold() == "active"
+            and (session.session_name or "").casefold().startswith("rdp-")
+        ]
+        explorer_ids = _explorer_session_ids(vm)
+        last = {
+            "account_session_ids": [session.session_id for session in matches],
+            "explorer_session_ids": sorted(explorer_ids),
+        }
+        if len(matches) == 1 and matches[0].session_id in explorer_ids:
+            return matches[0].session_id
         time.sleep(2)
-    raise AssertionError(f"RDP desktop shell did not become ready for {account}")
+    raise AssertionError(
+        f"RDP desktop shell did not become ready for {account}: {last}"
+    )
 
 
 def _oracle_read(vm, guest_path: str, *, timeout_s: float = 30.0) -> str | None:
@@ -122,6 +234,85 @@ def _painted_readiness(png: bytes) -> bool:
         return colors is None or len(colors) > 1
     except Exception:  # noqa: BLE001 - malformed frame means not ready
         return False
+
+
+def _qualification_desktop_ready(png: bytes) -> bool:
+    """Recognize the fixed Windows-11 qualification desktop, not login UI.
+
+    The preserved VM uses its light taskbar on the bottom eight percent of the
+    1280x800 desktop. Login, Welcome, disconnect, and account-conflict screens
+    are dark there. This is intentionally a deployment-specific readiness
+    predicate for this evidence task, not a generic Windows identity claim.
+    """
+    try:
+        image = Image.open(io.BytesIO(png)).convert("L")
+        if image.width < 100 or image.height < 100:
+            return False
+        taskbar = image.crop((0, int(image.height * 0.92), image.width, image.height))
+        histogram = taskbar.histogram()
+        bright_fraction = sum(histogram[161:]) / (taskbar.width * taskbar.height)
+        return bright_fraction >= 0.50
+    except Exception:  # noqa: BLE001 - malformed frame means not ready
+        return False
+
+
+def _frame_change_fraction(before: bytes, after: bytes) -> float:
+    """Return the fraction of pixels changed by more than trivial noise."""
+    try:
+        left = Image.open(io.BytesIO(before)).convert("RGB")
+        right = Image.open(io.BytesIO(after)).convert("RGB")
+        if left.size != right.size:
+            return 1.0
+        histogram = ImageChops.difference(left, right).convert("L").histogram()
+        changed = sum(histogram[9:])
+        return changed / (left.width * left.height)
+    except Exception:  # noqa: BLE001 - malformed comparison cannot establish change
+        return 0.0
+
+
+def _wait_qualification_desktop(
+    backend,
+    baseline: bytes,
+    *,
+    timeout_s: float = 30.0,
+    stable_frames: int = 3,
+    settle_s: float = 0.5,
+) -> bytes:
+    """Wait for a materially transitioned, stable qualification desktop."""
+    if stable_frames < 2:
+        raise ValueError("stable_frames must be at least 2")
+    deadline = time.monotonic() + timeout_s
+    baseline_ready = _qualification_desktop_ready(baseline)
+    last_ready: bytes | None = None
+    stable = 0
+    last: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        png = backend.screenshot()
+        changed = _frame_change_fraction(baseline, png)
+        desktop_ready = _qualification_desktop_ready(png)
+        transitioned = baseline_ready or changed >= 0.50
+        if transitioned and desktop_ready:
+            stable_change = (
+                0.0 if last_ready is None else _frame_change_fraction(last_ready, png)
+            )
+            stable = stable + 1 if last_ready is None or stable_change <= 0.02 else 1
+            last_ready = png
+            if stable >= stable_frames:
+                return png
+        else:
+            stable = 0
+            last_ready = None
+            stable_change = None
+        last = {
+            "baseline_change_fraction": round(changed, 6),
+            "desktop_ready": desktop_ready,
+            "stable_change_fraction": (
+                None if stable_change is None else round(stable_change, 6)
+            ),
+            "stable_frames": stable,
+        }
+        time.sleep(settle_s)
+    raise AssertionError(f"qualification desktop did not become ready: {last}")
 
 
 def _assert_painted_frame(png: bytes, expected_size: tuple[int, int]) -> None:
@@ -195,6 +386,12 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
         raise RuntimeError("declared preserved base snapshot is not current")
     storage_path = os.environ.get(HOST_STORAGE_PATH_ENV, os.getcwd())
     free_bytes_before = vm.require_host_free_space(storage_path=storage_path)
+    aardwolf_version = package_version("aardwolf")
+    if aardwolf_version != "0.2.14":
+        raise RuntimeError(
+            "counted RDP qualification requires exact aardwolf 0.2.14 "
+            f"(observed {aardwolf_version})"
+        )
 
     account = f"oaflowq_{secrets.token_hex(4)}"
     # 13 chars; upper/lower/special and usually digits, within legacy net.exe's
@@ -223,8 +420,11 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
         "snapshot_ids_before": [item.snapshot_id for item in snapshots_before],
         "framebuffer": [width, height],
         "transport": "aardwolf",
+        "aardwolf_version": aardwolf_version,
         "host_free_bytes_before": free_bytes_before,
     }
+    qualified_session_ids: list[int] = []
+    environment["qualified_session_ids"] = qualified_session_ids
     summary_base: dict[str, object] = {
         "schema_version": "openadapt.rdp-qualification.v1",
         "candidate_commit": candidate_commit,
@@ -302,11 +502,15 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
         computer_name = (vm.exec_cmd("hostname").stdout or "").strip()
         assert computer_name, "could not determine Windows computer name"
         guest_version = (vm.exec_cmd("ver").stdout or "").strip()
+        logged_off = _logoff_preexisting_interactive_sessions(vm)
         environment.update(
             {
                 "guest_ip": host,
                 "computer_name": computer_name,
                 "guest_version": guest_version,
+                "preexisting_sessions_logged_off": [
+                    asdict(session) for session in logged_off
+                ],
             }
         )
 
@@ -351,11 +555,13 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
                 backend = FreeRDPBackend(
                     transport,
                     max_frame_age_s=5.0,
-                    readiness_probe=_painted_readiness,
+                    readiness_probe=_qualification_desktop_ready,
                 )
-                _wait_user_shell(vm, account)
-                png = backend.wait_first_frame(retries=80, settle_s=0.25)
+                baseline = backend.screenshot()
+                session_id = _wait_user_shell(vm, account)
+                png = _wait_qualification_desktop(backend, baseline)
                 _assert_painted_frame(png, backend.viewport)
+                qualified_session_ids.append(session_id)
                 # The token reaches the guest only through RDP input. prlctl is
                 # used exclusively afterward as an independent read oracle.
                 phase = "input_delivery_failure"

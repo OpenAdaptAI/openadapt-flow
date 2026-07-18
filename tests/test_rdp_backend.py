@@ -713,10 +713,17 @@ class _FakeConn:
 
     def __init__(self) -> None:
         self.mouse_calls: list = []
+        self.key_calls: list = []
         self.terminated = 0
 
     async def send_mouse(self, button, x, y, pressed, steps=0):  # noqa: ANN001
         self.mouse_calls.append((button, x, y, pressed, steps))
+
+    async def send_key_virtualkey(self, key, pressed, extended):  # noqa: ANN001
+        self.key_calls.append(("virtual", key, pressed, extended))
+
+    async def send_key_char(self, key, pressed):  # noqa: ANN001
+        self.key_calls.append(("char", key, pressed))
 
     async def terminate(self):
         self.terminated += 1
@@ -776,6 +783,108 @@ def test_aardwolf_horizontal_wheel_dropped_and_warns() -> None:
         with pytest.warns(UserWarning, match="horizontal wheel"):
             t.wheel(120, 0)  # horizontal only: unsupported by aardwolf
         assert conn.mouse_calls == []  # nothing reached the wire (documented)
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_framebuffer_snapshot_runs_on_transport_event_loop() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    import threading
+
+    from aardwolf.commons.queuedata.constants import VIDEO_FORMAT
+
+    class _FrameConn(_FakeConn):
+        snapshot_thread_id: int | None = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.source = Image.new("RGB", (32, 24), "navy")
+
+        def get_desktop_buffer(self, encoding):  # noqa: ANN001
+            assert encoding == VIDEO_FORMAT.PIL
+            self.snapshot_thread_id = threading.get_ident()
+            return self.source
+
+    conn = _FrameConn()
+    caller_thread_id = threading.get_ident()
+    t = _make_connected_aardwolf(conn)
+    try:
+        image, width, height = t.framebuffer()
+        assert image.size == (32, 24)
+        assert (width, height) == (32, 24)
+        assert conn.snapshot_thread_id is not None
+        assert conn.snapshot_thread_id != caller_thread_id
+        assert conn.snapshot_thread_id == t._thread.ident
+        conn.source.paste("white", (0, 0, 32, 24))
+        assert image.getpixel((0, 0)) == (0, 0, 128)
+    finally:
+        t.disconnect()
+
+
+@pytest.mark.parametrize(
+    ("operation", "invoke"),
+    [
+        ("pointer input", lambda transport: transport.pointer(10, 20, "left", True)),
+        ("virtual-key input", lambda transport: transport.key("Enter", True)),
+        ("character input", lambda transport: transport.key("x", True)),
+        ("wheel input", lambda transport: transport.wheel(0, 120)),
+    ],
+)
+def test_aardwolf_input_receipt_errors_are_never_silent(operation, invoke) -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+
+    class _ErrorConn(_FakeConn):
+        async def send_mouse(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+        async def send_key_virtualkey(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+        async def send_key_char(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+    t = _make_connected_aardwolf(_ErrorConn())
+    try:
+        with pytest.raises(OSError, match=f"{operation} failed"):
+            invoke(t)
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_framebuffer_receipt_error_is_never_silent() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+
+    class _ErrorFrameConn(_FakeConn):
+        def get_desktop_buffer(self, _encoding):
+            return None, RuntimeError("frame copy failed")
+
+    t = _make_connected_aardwolf(_ErrorFrameConn())
+    try:
+        with pytest.raises(RuntimeError, match="frame copy failed"):
+            t.framebuffer()
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_accepts_none_and_success_tuple_receipts() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+
+    class _SuccessConn(_FakeConn):
+        async def send_mouse(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None
+
+        async def send_key_virtualkey(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return True, None
+
+        async def send_key_char(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return True, None
+
+    t = _make_connected_aardwolf(_SuccessConn())
+    try:
+        t.pointer(10, 20, "left", True)
+        t.wheel(0, 120)
+        t.key("Enter", True)
+        t.key("x", True)
     finally:
         t.disconnect()
 

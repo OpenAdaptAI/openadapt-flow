@@ -606,6 +606,23 @@ class AardwolfTransport:
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result(timeout)
 
+    @staticmethod
+    def _raise_embedded_error(result: object, operation: str) -> object:
+        """Raise errors Aardwolf returns as ``(value, error)`` receipts.
+
+        Several Aardwolf input methods catch their own exceptions and return
+        ``(None, exc)``. Treating that tuple as success would let the backend
+        report an input gesture as delivered when the wire write failed.
+        Successful methods are inconsistent (``None``, ``(True, None)``, or a
+        value), so only a non-null second tuple member is an error.
+        """
+        if isinstance(result, tuple) and len(result) == 2 and result[1] is not None:
+            error = result[1]
+            if isinstance(error, BaseException):
+                raise error
+            raise RuntimeError(f"Aardwolf {operation} failed: {error!r}")
+        return result
+
     # -- RDPTransport --------------------------------------------------------
 
     def connect(self) -> None:
@@ -679,7 +696,20 @@ class AardwolfTransport:
 
         if self._conn is None:
             raise RuntimeError("transport not connected")
-        img = self._conn.get_desktop_buffer(VIDEO_FORMAT.PIL)
+        conn = self._conn
+
+        async def _snapshot():
+            # Aardwolf's decoder mutates its PIL desktop buffer on this same
+            # event-loop thread. Deep-copying it from the caller thread can
+            # tear a frame while a bitmap update is being pasted.
+            snapshot = conn.get_desktop_buffer(VIDEO_FORMAT.PIL)
+            # Current Aardwolf returns a deep copy, but detach explicitly on
+            # the decoder thread so a future implementation cannot hand the
+            # caller its still-mutable internal PIL image.
+            return snapshot.copy() if isinstance(snapshot, Image.Image) else snapshot
+
+        result = self._run(_snapshot(), self._op_timeout_s)
+        img = self._raise_embedded_error(result, "framebuffer snapshot")
         if not isinstance(img, Image.Image):
             raise RuntimeError("aardwolf returned no desktop buffer")
         return img, img.width, img.height
@@ -696,10 +726,11 @@ class AardwolfTransport:
             raise RuntimeError("transport not connected")
         # Remember where the pointer is so wheel() can dispatch under it.
         self._last_pointer = (int(x), int(y))
-        self._run(
+        result = self._run(
             self._conn.send_mouse(btn, int(x), int(y), bool(down)),
             self._op_timeout_s,
         )
+        self._raise_embedded_error(result, "pointer input")
 
     def key(self, keysym_or_char: str, down: bool) -> None:
         if self._conn is None:
@@ -707,17 +738,19 @@ class AardwolfTransport:
         vk = _AARDWOLF_VK.get(keysym_or_char)
         if vk is not None:
             vk_name, is_extended = vk
-            self._run(
+            result = self._run(
                 self._conn.send_key_virtualkey(vk_name, bool(down), is_extended),
                 self._op_timeout_s,
             )
+            self._raise_embedded_error(result, "virtual-key input")
             return
         # A single printable character: let aardwolf resolve scancode+shift.
         for ch in keysym_or_char:
-            self._run(
+            result = self._run(
                 self._conn.send_key_char(ch, bool(down)),
                 self._op_timeout_s,
             )
+            self._raise_embedded_error(result, "character input")
 
     def wheel(self, dx: int, dy: int) -> None:
         """Send a wheel gesture, dispatched under the last pointer position.
@@ -764,7 +797,8 @@ class AardwolfTransport:
             x, y = self._last_pointer
         else:
             x, y = self._width // 2, self._height // 2
-        self._run(
+        result = self._run(
             self._conn.send_mouse(btn, x, y, False, steps),
             self._op_timeout_s,
         )
+        self._raise_embedded_error(result, "wheel input")

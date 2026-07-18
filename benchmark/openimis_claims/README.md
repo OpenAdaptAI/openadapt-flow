@@ -86,6 +86,81 @@ oracle then requires **exactly one** non-voided `tblClaim` row with that code,
 in status 2 ("Entered"), for the demonstrated insuree and health facility — a
 duplicate or missing row fails the run loudly.
 
+## The eligibility-check workflow (effect-verified)
+
+`scripts/openimis_eligibility_demo.py` demonstrates the second reference
+workflow on the same stack: a front-office **coverage / eligibility check** —
+look up a policyholder by insuree number in openIMIS's Insuree Enquiry,
+confirm the policy panel and a service-eligibility answer, and **certify the
+result against the system of record** with the effect-verifier kit
+(`docs/EFFECT_KIT.md`) instead of trusting the screen.
+
+Why the contract is the point: for a policyholder whose coverage has LAPSED,
+the enquiry dialog still renders a service-eligibility thumbs-up next to the
+selected service — a screen a hurried human (or any screen-scraping
+automation) can misread as "covered". The committed
+`deployment.eligibility.yaml` wires ONE read-only SELECT over openIMIS's own
+policy tables (`fixture.py::ELIGIBILITY_ORACLE_SQL`; a unit test pins the two
+to each other), executed as the dedicated read-only role
+`oa_eligibility_oracle` (SELECT on exactly three tables,
+`default_transaction_read_only=on` — the role, not the kit's statement
+filter, is the real enforcement). The bundle's two contracts bind to the
+run's `insurance_no` parameter:
+
+* `record_written` — exactly one in-force policy row exists for the checked
+  policyholder;
+* `field_equals` — that policy is `Active` and unexpired in the database.
+
+A replay for an in-force policyholder ends with both contracts CONFIRMED in
+the run report's effect-verification section; a replay for the lapsed
+policyholder completes the GUI lookup, then **HALTS** with
+`field_equals REFUTED — coverage 'Inactive', expected 'Active'` instead of
+reporting the check a success. Halt + evidence, never a guess.
+
+`bootstrap` (below) adds two more synthetic policyholders: **Jordan Roe,
+insuree no. 999000002** (policy expired 2026-05-31 — the halt scenario) and
+**Sam Poe, insuree no. 999000003** (in force through 2027-06-30), so the
+green replay parameterizes onto a policyholder the demonstration never saw.
+All values are invented.
+
+```bash
+# One-time: the SQL verifier needs a PostgreSQL DB-API driver.
+uv pip install "psycopg[binary]"
+
+.venv/bin/python scripts/openimis_eligibility_demo.py up         # same stack
+.venv/bin/python scripts/openimis_eligibility_demo.py bootstrap  # + role
+
+.venv/bin/python scripts/openimis_eligibility_demo.py record \
+  --out benchmark/openimis_claims/out/eligibility/recording --headed
+.venv/bin/python scripts/openimis_eligibility_demo.py compile \
+  --recording benchmark/openimis_claims/out/eligibility/recording \
+  --bundle benchmark/openimis_claims/out/eligibility/bundle
+.venv/bin/openadapt-flow lint benchmark/openimis_claims/out/eligibility/bundle
+.venv/bin/openadapt-flow certify \
+  benchmark/openimis_claims/out/eligibility/bundle --policy permissive
+
+# Green: coverage CONFIRMED for a policyholder the demo never saw.
+.venv/bin/python scripts/openimis_eligibility_demo.py replay \
+  --bundle benchmark/openimis_claims/out/eligibility/bundle \
+  --insuree 999000003 --headed
+
+# Halt-on-anomaly: lapsed coverage -> field_equals REFUTED -> HALT.
+.venv/bin/python scripts/openimis_eligibility_demo.py replay \
+  --bundle benchmark/openimis_claims/out/eligibility/bundle \
+  --insuree 999000002 --expect-halt --headed
+```
+
+Honesty box: this is a **contract-proven fixture demo** on synthetic data —
+the same status the effect kit's SQL substrate documents. It is not a
+benchmark, not a customer deployment, and not a claim about any commercial
+payer portal; a real dental-office eligibility deployment would target the
+payer portal / clearinghouse the office actually uses and would need its own
+read-only oracle. Under the `permissive` policy the bundle certifies clean;
+the stricter `clinical-write` policy still flags the two unlabeled dialog
+clicks (compile-time confidence 0.70 < 0.80) and the parameter-typing step's
+vacuous postcondition — accurate findings for an unattended-write posture,
+acceptable for a demonstrated read-only check.
+
 ## Pinning
 
 `environment.lock.json` pins every image by digest (openIMIS 25.10 backend /

@@ -47,6 +47,55 @@ ACTOR_PASSWORD = "admin123"
 POLICYHOLDER_CHF = "999000001"
 POLICYHOLDER_NAME = "Avery Doe"
 
+# Synthetic policyholders created by ``bootstrap_eligibility()`` for the
+# coverage / eligibility-check reference workflow (SYNTHETIC DATA ONLY):
+# one policyholder whose coverage LAPSED (the halt-on-anomaly scenario) and a
+# second in-force policyholder (so replay can parameterize onto a
+# policyholder the demonstration never saw).
+LAPSED_CHF = "999000002"
+LAPSED_NAME = "Jordan Roe"
+LAPSED_EXPIRY = "2026-05-31"  # in the past -> coverage lapsed
+SECOND_ACTIVE_CHF = "999000003"
+SECOND_ACTIVE_NAME = "Sam Poe"
+
+# openIMIS tblPolicy.PolicyStatus codes (upstream schema).
+POLICY_STATUS_ACTIVE = 2
+POLICY_STATUS_EXPIRED = 8
+
+# Read-only PostgreSQL role the SQL effect verifier connects as
+# (deployment.eligibility.yaml). Created by ``bootstrap_eligibility()`` with
+# SELECT on exactly the three policy-lookup tables and
+# default_transaction_read_only=on; its generated password lives in the
+# ignored ``out/state/secrets.json`` and is surfaced to the verifier ONLY via
+# the OPENIMIS_ORACLE_PASSWORD environment variable (kit convention: secrets
+# are references, never literals).
+ORACLE_ROLE = "oa_eligibility_oracle"
+ORACLE_PASSWORD_ENV = "OPENIMIS_ORACLE_PASSWORD"
+DB_PORT = 9402
+
+# The ONE read-only SELECT both the SQL effect verifier
+# (deployment.eligibility.yaml) and the fixture's own coverage oracle run:
+# resolve the checked policyholder's in-force policy row and derive
+# ``coverage`` (Active only when the policy is in status Active AND unexpired
+# — the same truth the enquiry UI renders, read from the system of record
+# instead of the screen). Kept here so the committed deployment YAML and the
+# fixture can never drift apart (tests assert they match).
+ELIGIBILITY_ORACLE_SQL = """\
+SELECT i."CHFID" AS chf_id,
+       i."LastName" AS last_name,
+       i."OtherNames" AS other_names,
+       CAST(p."PolicyStatus" AS text) AS policy_status,
+       CAST(p."ExpiryDate" AS text) AS expiry_date,
+       CASE WHEN p."PolicyStatus" = 2 AND p."ExpiryDate" >= CURRENT_DATE
+            THEN 'Active' ELSE 'Inactive' END AS coverage
+FROM "tblInsuree" i
+JOIN "tblInsureePolicy" ip ON ip."InsureeID" = i."InsureeID"
+JOIN "tblPolicy" p ON p."PolicyID" = ip."PolicyId"
+WHERE i."CHFID" = %(insurance_no)s
+  AND i."ValidityTo" IS NULL
+  AND p."ValidityTo" IS NULL
+"""
+
 # Demonstrated claim scenario (all values exist in the upstream synthetic
 # demo dataset).
 HEALTH_FACILITY_CODE = "VIHOS001"  # "Vida District Hospital" (fictional)
@@ -109,7 +158,16 @@ class OpenIMISFixture:
             }
             path.touch(mode=0o600)
             path.write_text(json.dumps(data, indent=2))
+        if "oracle_password" not in data:
+            # Backfill for state dirs created before the eligibility oracle
+            # existed; same generated-secret discipline as the stack secrets.
+            data["oracle_password"] = secrets.token_urlsafe(24)
+            path.write_text(json.dumps(data, indent=2))
         return data
+
+    def oracle_password(self) -> str:
+        """The read-only SQL-oracle role's generated fixture secret."""
+        return self._secrets()["oracle_password"]
 
     def _compose_env(self) -> dict[str, str]:
         creds = self._secrets()
@@ -296,6 +354,192 @@ COMMIT;
             "name": f"{other} {last}",
             "policy_status": status,
             "policy_expiry": expiry,
+        }
+
+    # -- eligibility scenario (SYNTHETIC DATA ONLY) --------------------------
+
+    # Same shape as BOOTSTRAP_SQL, parameterized over the policyholder. All
+    # values are fixture-controlled synthetic literals validated by
+    # ``_bootstrap_policyholder`` (never external input).
+    _POLICYHOLDER_SQL = """
+BEGIN;
+WITH ins AS (
+  INSERT INTO "tblInsuree" ("InsureeUUID","CHFID","LastName","OtherNames",
+    "DOB","Gender","Marital","IsHead","CardIssued","isOffline","AuditUserID",
+    "ValidityFrom","status")
+  VALUES (gen_random_uuid()::text,'{chf}','{last}','{other}','{dob}',
+    '{gender}','S',true,false,false,-1,now(),'AC')
+  RETURNING "InsureeID"
+), fam AS (
+  INSERT INTO "tblFamilies" ("FamilyUUID","InsureeID","LocationId","Poverty",
+    "isOffline","AuditUserID","ValidityFrom","FamilyAddress")
+  SELECT gen_random_uuid()::text,"InsureeID",35,false,false,-1,now(),
+    '{address}'
+  FROM ins
+  RETURNING "FamilyID","InsureeID"
+), upd AS (
+  UPDATE "tblInsuree" i SET "FamilyID"=f."FamilyID"
+  FROM fam f WHERE i."InsureeID"=f."InsureeID"
+  RETURNING i."InsureeID"
+), pol AS (
+  INSERT INTO "tblPolicy" ("PolicyUUID","PolicyStage","PolicyStatus",
+    "PolicyValue","EnrollDate","StartDate","EffectiveDate","ExpiryDate",
+    "isOffline","AuditUserID","FamilyID","OfficerID","ProdID","ValidityFrom")
+  SELECT gen_random_uuid()::text,'N',{status},10000,'{enroll}','{enroll}',
+    '{enroll}','{expiry}',false,-1,"FamilyID",1,4,now()
+  FROM fam
+  RETURNING "PolicyID"
+)
+INSERT INTO "tblInsureePolicy" ("InsureeID","PolicyId","EnrollmentDate",
+  "StartDate","EffectiveDate","ExpiryDate","isOffline","AuditUserID",
+  "ValidityFrom")
+SELECT f."InsureeID", p."PolicyID",'{enroll}','{enroll}','{enroll}',
+  '{expiry}',false,-1,now()
+FROM fam f, pol p;
+COMMIT;
+"""
+
+    def _bootstrap_policyholder(
+        self,
+        *,
+        chf: str,
+        last: str,
+        other: str,
+        dob: str,
+        gender: str,
+        address: str,
+        enroll: str,
+        expiry: str,
+        status: int,
+    ) -> None:
+        """Idempotently insert one synthetic policyholder + policy."""
+        for value in (chf, last, other, dob, gender, address, enroll, expiry):
+            if "'" in value or ";" in value:
+                raise FixtureError(f"refusing suspicious fixture value {value!r}")
+        existing = self._psql(
+            'SELECT count(*) FROM "tblInsuree" '
+            f'WHERE "CHFID"=\'{chf}\' AND "ValidityTo" IS NULL;'
+        ).strip()
+        if existing != "0":
+            return
+        self._psql(
+            self._POLICYHOLDER_SQL.format(
+                chf=chf,
+                last=last,
+                other=other,
+                dob=dob,
+                gender=gender,
+                address=address,
+                enroll=enroll,
+                expiry=expiry,
+                status=int(status),
+            )
+        )
+
+    def _bootstrap_oracle_role(self) -> None:
+        """Create/refresh the read-only SQL-oracle role (idempotent).
+
+        The role is the REAL read-only enforcement behind the SQL effect
+        verifier (the kit's statement filter is only defense in depth): LOGIN
+        with SELECT on exactly the three policy-lookup tables, plus
+        ``default_transaction_read_only=on``.
+        """
+        password = self.oracle_password().replace("'", "''")
+        exists = self._psql(
+            f"SELECT count(*) FROM pg_roles WHERE rolname='{ORACLE_ROLE}';"
+        ).strip()
+        if exists == "0":
+            self._psql(f"CREATE ROLE \"{ORACLE_ROLE}\" LOGIN PASSWORD '{password}';")
+        else:
+            self._psql(
+                f"ALTER ROLE \"{ORACLE_ROLE}\" WITH LOGIN PASSWORD '{password}';"
+            )
+        self._psql(
+            f'ALTER ROLE "{ORACLE_ROLE}" SET default_transaction_read_only = on;\n'
+            f'GRANT CONNECT ON DATABASE "IMIS" TO "{ORACLE_ROLE}";\n'
+            f'GRANT USAGE ON SCHEMA public TO "{ORACLE_ROLE}";\n'
+            f'GRANT SELECT ON "tblInsuree", "tblPolicy", "tblInsureePolicy" '
+            f'TO "{ORACLE_ROLE}";'
+        )
+
+    def bootstrap_eligibility(self) -> dict[str, dict[str, str]]:
+        """Provision the coverage-check scenario (idempotent, synthetic only).
+
+        Ensures three synthetic policyholders exist -- the claims demo's
+        in-force policyholder (Avery Doe), a LAPSED policyholder (Jordan Roe,
+        policy expired ``LAPSED_EXPIRY``, status Expired) for the halt-on-anomaly
+        scenario, and a second in-force policyholder (Sam Poe) so replay can
+        parameterize onto a policyholder the demonstration never saw -- and
+        creates the read-only SQL-oracle role the effect verifier connects as.
+        """
+        self.bootstrap()  # Avery Doe, in force (idempotent)
+        self._bootstrap_policyholder(
+            chf=LAPSED_CHF,
+            last="Roe",
+            other="Jordan",
+            dob="1985-06-02",
+            gender="M",
+            address="14 Synthetic Lane",
+            enroll="2025-01-01",
+            expiry=LAPSED_EXPIRY,
+            status=POLICY_STATUS_EXPIRED,
+        )
+        self._bootstrap_policyholder(
+            chf=SECOND_ACTIVE_CHF,
+            last="Poe",
+            other="Sam",
+            dob="1992-03-20",
+            gender="F",
+            address="16 Synthetic Lane",
+            enroll="2026-01-01",
+            expiry="2027-06-30",
+            status=POLICY_STATUS_ACTIVE,
+        )
+        self._bootstrap_oracle_role()
+        holders = {
+            chf: self.coverage(chf)
+            for chf in (POLICYHOLDER_CHF, LAPSED_CHF, SECOND_ACTIVE_CHF)
+        }
+        expected = {
+            POLICYHOLDER_CHF: "Active",
+            LAPSED_CHF: "Inactive",
+            SECOND_ACTIVE_CHF: "Active",
+        }
+        for chf, want in expected.items():
+            got = holders[chf]["coverage"]
+            if got != want:
+                raise FixtureError(
+                    f"eligibility bootstrap: {chf} coverage is {got!r}, "
+                    f"expected {want!r}"
+                )
+        return holders
+
+    def coverage(self, chf: str) -> dict[str, str]:
+        """The coverage oracle row for one policyholder (read-only).
+
+        Runs the SAME ``ELIGIBILITY_ORACLE_SQL`` the deployed effect verifier
+        uses, so the fixture's ground truth and the verifier's probe can never
+        diverge.
+        """
+        if not chf.isdigit():
+            raise FixtureError(f"refusing suspicious insuree number {chf!r}")
+        sql = ELIGIBILITY_ORACLE_SQL.replace("%(insurance_no)s", f"'{chf}'")
+        out = self._psql(sql + ";").strip()
+        if not out:
+            raise FixtureError(
+                f"no in-force policy row for insuree {chf!r}; "
+                "run bootstrap_eligibility first"
+            )
+        rows = out.splitlines()
+        if len(rows) > 1:
+            raise FixtureError(f"expected one policy row for {chf!r}, got {len(rows)}")
+        chf_id, last, other, status, expiry, coverage = rows[0].split("|")
+        return {
+            "chf_id": chf_id,
+            "name": f"{other} {last}",
+            "policy_status": status,
+            "policy_expiry": expiry,
+            "coverage": coverage,
         }
 
     # -- claim oracle --------------------------------------------------------

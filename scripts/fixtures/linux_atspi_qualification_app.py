@@ -9,8 +9,9 @@ from pathlib import Path
 
 import gi
 
+gi.require_version("Atk", "1.0")
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Atk, GLib, Gtk  # noqa: E402
 
 APP_NAME = "OpenAdapt Linux Qualification"
 ENTRY_NAME = "Effect value"
@@ -39,6 +40,7 @@ class QualificationWindow:
         self._replaced = False
 
         self.window = Gtk.Window(title=title)
+        _accessible_name(self.window, title)
         self.window.set_default_size(460, 190)
         self.window.set_border_width(18)
         self.window.connect("destroy", Gtk.main_quit)
@@ -119,6 +121,10 @@ def main() -> int:
 
     GLib.set_prgname("openadapt-linux-qualification")
     GLib.set_application_name(APP_NAME)
+    root = Atk.get_root()
+    if root is None:
+        raise RuntimeError("GTK did not expose an ATK application root")
+    root.set_name(APP_NAME)
     window = QualificationWindow(
         title=args.title,
         effect_path=args.effect_path,

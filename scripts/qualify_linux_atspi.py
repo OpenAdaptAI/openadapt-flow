@@ -197,7 +197,25 @@ def _wait_exact_window(client: AtspiLinuxClient, title: str) -> None:
     def unique() -> bool:
         return len(client.find_windows(APP_NAME, title)) == 1
 
-    _wait_until(unique, timeout_s=10, description=f"exact GTK window {title!r}")
+    try:
+        _wait_until(unique, timeout_s=10, description=f"exact GTK window {title!r}")
+    except RuntimeError as error:
+        # Preserve a bounded discovery snapshot in failed evidence. This does
+        # not relax the exact app/title selector or timeout; it makes an
+        # accessibility-registration defect diagnosable from the retained
+        # artifact instead of returning nine indistinguishable timeouts.
+        discovered: list[dict[str, Any]] = []
+        desktop = client._desktop()
+        for application in client._children(desktop)[:20]:
+            app_name = client._call(application, "get_name", default=None)
+            windows = [
+                client._call(window, "get_name", default=None)
+                for window in client._children(application)[:20]
+            ]
+            discovered.append({"application": app_name, "windows": windows})
+        raise RuntimeError(
+            f"{error}; discovered AT-SPI applications/windows={discovered!r}"
+        ) from error
 
 
 def _launch(

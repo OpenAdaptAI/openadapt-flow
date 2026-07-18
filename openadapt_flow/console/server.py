@@ -1,13 +1,13 @@
-"""Serve the operator console on loopback ONLY.
+"""Serve the capability-authenticated operator console on loopback only.
 
-The bind address is hardcoded to ``127.0.0.1`` -- the console has no auth
-layer, so it must never listen on a routable interface. Exposing it beyond the
-operator's machine is deliberately not supported (put it behind your own
-authenticated tunnel if you must).
+The bind address is hardcoded to ``127.0.0.1``. Each launch generates an
+unguessable bearer capability delivered in a URL fragment, which browsers do
+not send in HTTP requests or access logs.
 """
 
 from __future__ import annotations
 
+import secrets
 from pathlib import Path
 
 #: The only address the console ever binds. Not configurable.
@@ -29,5 +29,19 @@ def serve(
 
     from openadapt_flow.console.app import create_app
 
-    app = create_app(bundles_root, runs_root, skills_root, allow_actions=allow_actions)
+    access_token = secrets.token_urlsafe(32)
+    app = create_app(
+        bundles_root,
+        runs_root,
+        skills_root,
+        allow_actions=allow_actions,
+        access_token=access_token,
+    )
+    # URL fragments are consumed entirely by the browser and are never sent in
+    # HTTP requests or uvicorn access logs.  The UI removes the fragment before
+    # routing and keeps the capability in sessionStorage only.
+    print(
+        "Open this private console URL in your browser:\n"
+        f"  http://{LOOPBACK_HOST}:{port}/#token={access_token}"
+    )
     uvicorn.run(app, host=LOOPBACK_HOST, port=port, log_level="info")

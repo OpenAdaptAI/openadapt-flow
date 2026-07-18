@@ -18,6 +18,10 @@ Behavior under test (import-light -- no browser, no OCR):
 
 from __future__ import annotations
 
+import json
+import re
+import shlex
+import shutil
 import socket
 import threading
 import time
@@ -128,7 +132,12 @@ def _make_halted_run(runs_root: Path, dirname: str) -> Path:
                 step_id="s1",
                 intent="click s1",
                 ok=True,
-                identity=IdentityCheck(status="verified", mode="context"),
+                identity=IdentityCheck(
+                    status="verified",
+                    mode="context",
+                    expected="Jane Roe MRN-SECRET",
+                    observed="Jane Roe MRN-SECRET",
+                ),
                 effect_verified=True,
                 effect_results=["CONFIRMED record_written patient_id=p1"],
                 before_png="s1_before.png",
@@ -143,6 +152,7 @@ def _make_halted_run(runs_root: Path, dirname: str) -> Path:
                 elapsed_ms=15000.0,
             ),
         ],
+        params={"patient_id": "MRN-SECRET"},
         halt=HaltObservation(
             state_id="s2",
             intent="click s2",
@@ -231,9 +241,46 @@ def console_env(tmp_path: Path):
     }
 
 
+@pytest.fixture(autouse=True)
+def _server_derived_test_operator(monkeypatch):
+    """Keep attribution deterministic while production derives the OS account."""
+    monkeypatch.setattr(
+        "openadapt_flow.console.app._local_operator_identity",
+        lambda: "local-operator",
+    )
+
+
 def _client(env, *, allow_actions: bool = False) -> TestClient:
-    app = create_app(env["bundles"], env["runs"], allow_actions=allow_actions)
-    return TestClient(app)
+    app = create_app(
+        env["bundles"],
+        env["runs"],
+        allow_actions=allow_actions,
+    )
+    return TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={
+            "Authorization": f"Bearer {app.state.console_access_token}",
+            "Origin": "http://127.0.0.1",
+            "X-OpenAdapt-CSRF": app.state.console_csrf_token,
+        },
+    )
+
+
+def _workflow_id(client: TestClient, *, n_steps: int) -> str:
+    return next(
+        workflow["id"]
+        for workflow in client.get("/api/workflows").json()
+        if workflow["n_steps"] == n_steps
+    )
+
+
+def _run_id(client: TestClient, *, halted: bool = False, paused: bool = False) -> str:
+    return next(
+        run["id"]
+        for run in client.get("/api/runs").json()
+        if run["halted"] is halted and run["paused"] is paused
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +292,8 @@ def test_health_reports_read_only(console_env):
     body = _client(console_env).get("/api/health").json()
     assert body["status"] == "ok"
     assert body["read_only"] is True
+    assert "bundles_root" not in body
+    assert "runs_root" not in body
 
 
 def test_index_serves_ui(console_env):
@@ -255,24 +304,26 @@ def test_index_serves_ui(console_env):
 
 def test_workflow_list_with_last_run(console_env):
     body = _client(console_env).get("/api/workflows").json()
-    ids = {w["id"] for w in body}
-    assert {"triage-note", "triage-note-v2"} <= ids
-    w = next(x for x in body if x["id"] == "triage-note")
-    assert w["name"] == "triage-note"
+    assert len(body) == 2
+    assert all(len(w["id"]) == 24 for w in body)
+    assert all("name" not in w for w in body)
+    w = next(x for x in body if x["n_steps"] == 3)
     assert w["n_steps"] == 3
     assert w["compiler_version"]  # sealed by Workflow.save
     assert w["certified"] is False
-    # newest run for the workflow name is the paused one (11:00 > 10:00)
-    assert w["last_run"]["run_id"] == "replay-paused"
-    assert w["last_run"]["paused"] is True
+    # An unsealed legacy report has no digest join; never join by raw workflow
+    # name because that label can contain recorded identifiers.
+    assert w["last_run"] is None
 
 
 def test_workflow_detail_coverage_from_policy_helpers(console_env):
-    body = _client(console_env).get("/api/workflows/triage-note").json()
+    client = _client(console_env)
+    bundle_id = _workflow_id(client, n_steps=3)
+    body = client.get(f"/api/workflows/{bundle_id}").json()
     idc = body["identity_coverage"]
     assert idc["applicable"] == 2
     assert idc["armed"] == 1
-    assert idc["unarmed"][0]["step_id"] == "s2"
+    assert idc["unarmed"][0]["step_id"] == "step-002"
     efc = body["effect_coverage"]
     assert efc["consequential"] == 1
     assert efc["consequential_with_contract"] == 1
@@ -281,10 +332,10 @@ def test_workflow_detail_coverage_from_policy_helpers(console_env):
     codes = {f["code"] for f in body["lint"]["findings"]}
     assert "unarmed_click" in codes
     steps = {s["id"]: s for s in body["steps"]}
-    assert steps["s1"]["identity_armed"] is True
-    assert steps["s1"]["effects"][0]["kind"] == "record_written"
-    assert steps["s2"]["identity_armed"] is False
-    assert steps["s3"]["identity_applicable"] is False
+    assert steps["step-001"]["identity_armed"] is True
+    assert steps["step-001"]["effects"][0]["kind"] == "record_written"
+    assert steps["step-002"]["identity_armed"] is False
+    assert steps["step-003"]["identity_applicable"] is False
 
 
 def test_effect_coverage_degrades_to_none_without_consequential_steps(tmp_path):
@@ -296,35 +347,45 @@ def test_effect_coverage_degrades_to_none_without_consequential_steps(tmp_path):
     Workflow(name="benign", steps=[_armed_click("s1")]).save(b)
     runs = tmp_path / "r"
     runs.mkdir()
-    client = TestClient(create_app(bundles, runs))
-    efc = client.get("/api/workflows/benign").json()["effect_coverage"]
+    app = create_app(bundles, runs)
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={
+            "Authorization": f"Bearer {app.state.console_access_token}",
+            "Origin": "http://127.0.0.1",
+        },
+    )
+    bundle_id = _workflow_id(client, n_steps=1)
+    efc = client.get(f"/api/workflows/{bundle_id}").json()["effect_coverage"]
     assert efc["consequential"] == 0
     assert efc["coverage_pct"] is None  # honest n/a, not a fake 100%
 
 
 def test_workflow_detail_live_certification_via_policy_param(console_env):
-    body = (
-        _client(console_env)
-        .get("/api/workflows/triage-note", params={"policy": "clinical-write"})
-        .json()
-    )
+    client = _client(console_env)
+    bundle_id = _workflow_id(client, n_steps=3)
+    body = client.get(
+        f"/api/workflows/{bundle_id}", params={"policy": "clinical-write"}
+    ).json()
     cert = body["certification"]
     assert cert["sealed"]["certified"] is False
     live = cert["live"]
     assert live is not None and live["policy_name"] == "clinical-write"
     # the unarmed click must surface as a violation, not be hidden
     assert live["passed"] is False
-    assert any(v["step_id"] == "s2" for v in live["violations"])
+    assert any(v["rule"] == "prohibit_unarmed_clicks" for v in live["violations"])
+    assert all(set(v) == {"rule"} for v in live["violations"])
 
 
 def test_workflow_diff(console_env):
-    body = (
-        _client(console_env)
-        .get("/api/workflows/triage-note/diff/triage-note-v2")
-        .json()
-    )
-    assert body["steps_added"] == ["s4"]
-    assert body["steps_removed"] == []
+    client = _client(console_env)
+    original = _workflow_id(client, n_steps=3)
+    updated = _workflow_id(client, n_steps=4)
+    body = client.get(f"/api/workflows/{original}/diff/{updated}").json()
+    assert body["steps_added_count"] == 1
+    assert body["steps_removed_count"] == 0
+    assert body["steps_changed_count"] == 0
     assert body["identical"] is False
 
 
@@ -333,9 +394,9 @@ def test_unreadable_bundle_degrades(console_env):
     bad.mkdir()
     (bad / "workflow.json").write_text("{ not json")
     listed = _client(console_env).get("/api/workflows").json()
-    entry = next(w for w in listed if w["id"] == "corrupt")
+    entry = next(w for w in listed if w["load_error"])
     assert entry["load_error"]
-    body = _client(console_env).get("/api/workflows/corrupt").json()
+    body = _client(console_env).get(f"/api/workflows/{entry['id']}").json()
     assert body["load_error"]
 
 
@@ -352,48 +413,50 @@ def test_unknown_ids_404(console_env):
 
 def test_run_list_flags(console_env):
     runs = _client(console_env).get("/api/runs").json()
-    by_id = {r["id"]: r for r in runs}
-    halted = by_id["replay-halted"]
+    assert all(len(run["id"]) == 24 for run in runs)
+    halted = next(run for run in runs if run["halted"])
     assert halted["halted"] is True and halted["paused"] is False
     assert halted["n_failed"] == 1
     assert halted["identity_armed_steps"] == 1
-    paused = by_id["replay-paused"]
+    paused = next(run for run in runs if run["paused"])
     assert paused["paused"] is True and paused["approved"] is False
     # newest first
-    assert runs[0]["id"] == "replay-paused"
+    assert runs[0]["id"] == paused["id"]
 
 
 def test_run_detail_timeline_and_halt(console_env):
-    body = _client(console_env).get("/api/runs/replay-halted").json()
+    client = _client(console_env)
+    run_id = _run_id(client, halted=True)
+    body = client.get(f"/api/runs/{run_id}").json()
     t = body["timeline"]
-    assert [x["step_id"] for x in t] == ["s1", "s2"]
+    assert [x["step_id"] for x in t] == ["step-001", "step-002"]
     assert t[0]["identity"]["status"] == "verified"
     assert t[0]["effect_verified"] is True
-    assert t[0]["before_png"] == "s1_before.png"
+    assert t[0]["before_artifact_id"] == "step-001-before"
     halt = body["halt"]
-    assert halt["reason"].startswith("resolution failed")
-    assert "Session expired" in halt["observed_texts"]
-    assert halt["completed_intents"] == ["click s1"]
+    assert halt["observed_text_count"] == 2
+    assert halt["completed_intent_count"] == 1
 
 
 def test_run_detail_pause_checkpoints_manifest(console_env):
-    body = _client(console_env).get("/api/runs/replay-paused").json()
+    client = _client(console_env)
+    run_id = _run_id(client, paused=True)
+    body = client.get(f"/api/runs/{run_id}").json()
     pending = body["pending_escalation"]
-    assert pending["category"] == "effect_indeterminate"
+    assert pending["category"] == "operator_review"
     assert pending["resume_from_index"] == 1
-    assert body["manifest"]["bundle_dir"] == str(console_env["bundle"])
-    assert body["checkpoints"][0]["step_id"] == "s1"
+    assert body["manifest"] == {"present": True}
+    assert body["checkpoints"][0]["step_index"] == 0
 
 
 def test_artifact_served_and_traversal_refused(console_env):
     client = _client(console_env)
-    ok = client.get(
-        "/api/runs/replay-halted/artifact", params={"path": "s1_before.png"}
-    )
+    run_id = _run_id(client, halted=True)
+    ok = client.get(f"/api/runs/{run_id}/artifact", params={"id": "step-001-before"})
     assert ok.status_code == 200
     assert ok.content == _PNG
     for evil in ("../replay-paused/report.json", "/etc/passwd", "..%2f..", ".."):
-        r = client.get("/api/runs/replay-halted/artifact", params={"path": evil})
+        r = client.get(f"/api/runs/{run_id}/artifact", params={"id": evil})
         assert r.status_code == 404, evil
 
 
@@ -403,7 +466,9 @@ def test_artifact_served_and_traversal_refused(console_env):
 
 
 def test_halted_run_offers_teach_as_copy_only(console_env):
-    actions = _client(console_env).get("/api/runs/replay-halted/actions").json()
+    client = _client(console_env)
+    run_id = _run_id(client, halted=True)
+    actions = client.get(f"/api/runs/{run_id}/actions").json()
     by_id = {a["id"]: a for a in actions}
     teach = by_id["teach"]
     assert teach["executable"] is False
@@ -414,15 +479,23 @@ def test_halted_run_offers_teach_as_copy_only(console_env):
 
 
 def test_paused_run_offers_approve_resume_with_exact_commands(console_env):
-    actions = _client(console_env).get("/api/runs/replay-paused/actions").json()
+    client = _client(console_env)
+    run_id = _run_id(client, paused=True)
+    actions = client.get(f"/api/runs/{run_id}/actions").json()
     by_id = {a["id"]: a for a in actions}
     assert by_id["approve"]["executable"] is True
     assert by_id["approve"]["command"].startswith("openadapt-flow approve ")
-    assert by_id["resume"]["command"].endswith("--require-approval")
+    assert "--approver '<local-os-account>'" in by_id["approve"]["command"]
+    assert str(console_env["paused"]) not in str(actions)
+    assert by_id["resume"]["executable"] is False
+    assert "--require-approval" in by_id["resume"]["command"]
+    assert "<deployment.yaml>" in by_id["resume"]["command"]
 
 
 def test_read_only_refuses_mutation_with_command(console_env):
-    r = _client(console_env).post("/api/runs/replay-paused/actions/approve", json={})
+    client = _client(console_env)
+    run_id = _run_id(client, paused=True)
+    r = client.post(f"/api/runs/{run_id}/actions/approve", json={})
     assert r.status_code == 403
     detail = r.json()["detail"]
     assert "read-only" in detail["error"]
@@ -430,17 +503,17 @@ def test_read_only_refuses_mutation_with_command(console_env):
 
 
 def test_teach_never_executes_even_with_actions_enabled(console_env):
-    r = _client(console_env, allow_actions=True).post(
-        "/api/runs/replay-halted/actions/teach", json={}
-    )
+    client = _client(console_env, allow_actions=True)
+    run_id = _run_id(client, halted=True)
+    r = client.post(f"/api/runs/{run_id}/actions/teach", json={})
     assert r.status_code == 409
     assert "openadapt-flow teach" in r.json()["detail"]["command"]
 
 
 def test_unknown_action_404(console_env):
-    r = _client(console_env, allow_actions=True).post(
-        "/api/runs/replay-paused/actions/delete-everything", json={}
-    )
+    client = _client(console_env, allow_actions=True)
+    run_id = _run_id(client, paused=True)
+    r = client.post(f"/api/runs/{run_id}/actions/delete-everything", json={})
     assert r.status_code == 404
 
 
@@ -460,9 +533,11 @@ def test_approve_executes_cli_verb(console_env, monkeypatch):
         return P()
 
     monkeypatch.setattr(actions_mod.subprocess, "run", fake_run)
-    r = _client(console_env, allow_actions=True).post(
-        "/api/runs/replay-paused/actions/approve",
-        json={"approver": "dr-smith", "resolution": "retry after login"},
+    client = _client(console_env, allow_actions=True)
+    run_id = _run_id(client, paused=True)
+    r = client.post(
+        f"/api/runs/{run_id}/actions/approve",
+        json={"approver": "forged-user", "resolution": "retry after login"},
     )
     assert r.status_code == 200
     body = r.json()
@@ -471,7 +546,8 @@ def test_approve_executes_cli_verb(console_env, monkeypatch):
     assert calls["argv"][1:3] == ["-m", "openadapt_flow"]
     assert calls["argv"][3] == "approve"
     assert str(console_env["paused"]) in calls["argv"]
-    assert "dr-smith" in calls["argv"]
+    assert "local-operator" in calls["argv"]
+    assert "forged-user" not in calls["argv"]
 
 
 def test_certify_action_runs_without_allow_actions(console_env, monkeypatch):
@@ -487,8 +563,10 @@ def test_certify_action_runs_without_allow_actions(console_env, monkeypatch):
         return P()
 
     monkeypatch.setattr(actions_mod.subprocess, "run", fake_run)
-    r = _client(console_env).post(
-        "/api/workflows/triage-note/actions/certify",
+    client = _client(console_env)
+    bundle_id = _workflow_id(client, n_steps=3)
+    r = client.post(
+        f"/api/workflows/{bundle_id}/actions/certify",
         json={"policy": "clinical-write"},
     )
     assert r.status_code == 200
@@ -503,8 +581,11 @@ def test_certify_action_runs_without_allow_actions(console_env, monkeypatch):
 def test_skills_lineage_listed(console_env):
     libs = _client(console_env).get("/api/skills").json()
     assert len(libs) == 1
+    assert "path" not in libs[0]
+    assert len(libs[0]["id"]) == 24
     skill = libs[0]["skills"][0]
-    assert skill["skill_id"] == "triage-note"
+    assert len(skill["id"]) == 24
+    assert "skill_id" not in skill
     statuses = {v["version"]: v["status"] for v in skill["versions"]}
     assert statuses == {1: "active", 2: "candidate"}
 
@@ -512,9 +593,11 @@ def test_skills_lineage_listed(console_env):
 def test_promote_via_library_entry_point(console_env):
     client = _client(console_env, allow_actions=True)
     lib_path = str(console_env["library"])
+    library_id = client.get("/api/skills").json()[0]["id"]
+    skill_id = client.get("/api/skills").json()[0]["skills"][0]["id"]
     r = client.post(
-        "/api/skills/triage-note/actions/promote",
-        json={"library": lib_path, "version": 2},
+        f"/api/skills/{skill_id}/actions/promote",
+        json={"library": library_id, "version": 2},
     )
     assert r.status_code == 200 and r.json()["returncode"] == 0
     lib = SkillLibrary(Path(lib_path).parent)
@@ -525,9 +608,15 @@ def test_promote_via_library_entry_point(console_env):
 def test_rollback_via_library_entry_point(console_env):
     client = _client(console_env, allow_actions=True)
     lib_path = str(console_env["library"])
+    library_id = client.get("/api/skills").json()[0]["id"]
+    skill_id = client.get("/api/skills").json()[0]["skills"][0]["id"]
     r = client.post(
-        "/api/skills/triage-note/actions/rollback",
-        json={"library": lib_path, "version": 2, "reason": "regressed on validation"},
+        f"/api/skills/{skill_id}/actions/rollback",
+        json={
+            "library": library_id,
+            "version": 2,
+            "reason": "regressed on validation",
+        },
     )
     assert r.status_code == 200 and r.json()["returncode"] == 0
     lib = SkillLibrary(Path(lib_path).parent)
@@ -537,12 +626,17 @@ def test_rollback_via_library_entry_point(console_env):
 
 
 def test_skill_actions_read_only_refused_with_command(console_env):
-    r = _client(console_env).post(
-        "/api/skills/triage-note/actions/promote",
-        json={"library": str(console_env["library"]), "version": 2},
+    client = _client(console_env)
+    library_id = client.get("/api/skills").json()[0]["id"]
+    skill_id = client.get("/api/skills").json()[0]["skills"][0]["id"]
+    r = client.post(
+        f"/api/skills/{skill_id}/actions/promote",
+        json={"library": library_id, "version": 2},
     )
     assert r.status_code == 403
-    assert "SkillLibrary" in r.json()["detail"]["command"]
+    assert r.json()["detail"]["command"] == (
+        "server-bound governed skill action; no local path exported"
+    )
 
 
 def test_skill_library_outside_roots_404(console_env, tmp_path):
@@ -550,7 +644,7 @@ def test_skill_library_outside_roots_404(console_env, tmp_path):
     _make_library(foreign)
     r = _client(console_env, allow_actions=True).post(
         "/api/skills/triage-note/actions/promote",
-        json={"library": str(foreign / "skills.json"), "version": 2},
+        json={"library": "0" * 24, "version": 2},
     )
     assert r.status_code == 404
 
@@ -578,7 +672,13 @@ def test_server_boots_on_loopback(console_env):
         health = None
         while time.time() < deadline:
             try:
-                health = httpx.get(f"http://127.0.0.1:{port}/api/health", timeout=1.0)
+                health = httpx.get(
+                    f"http://127.0.0.1:{port}/api/health",
+                    headers={
+                        "Authorization": (f"Bearer {app.state.console_access_token}")
+                    },
+                    timeout=1.0,
+                )
                 break
             except httpx.HTTPError:
                 time.sleep(0.1)
@@ -586,15 +686,454 @@ def test_server_boots_on_loopback(console_env):
         assert health.json()["status"] == "ok"
         page = httpx.get(f"http://127.0.0.1:{port}/", timeout=5.0)
         assert "Operator Console" in page.text
-        wf = httpx.get(f"http://127.0.0.1:{port}/api/workflows", timeout=5.0)
-        assert any(w["id"] == "triage-note" for w in wf.json())
+        wf = httpx.get(
+            f"http://127.0.0.1:{port}/api/workflows",
+            headers={"Authorization": f"Bearer {app.state.console_access_token}"},
+            timeout=5.0,
+        )
+        assert len(wf.json()) == 2
+        assert all(len(w["id"]) == 24 for w in wf.json())
     finally:
         server.should_exit = True
         thread.join(timeout=10)
 
 
 # ---------------------------------------------------------------------------
-# 6. CLI wiring
+# 6. adversarial security boundary
+# ---------------------------------------------------------------------------
+
+
+def test_api_requires_bearer_but_fixed_shell_is_public(console_env):
+    app = create_app(
+        console_env["bundles"],
+        console_env["runs"],
+    )
+    client = TestClient(app, base_url="http://127.0.0.1")
+    shell = client.get("/")
+    assert shell.status_code == 200
+    assert app.state.console_access_token not in shell.text
+    assert client.get("/static/console.js").status_code == 200
+    denied = client.get("/api/health")
+    assert denied.status_code == 401
+    assert denied.headers["www-authenticate"] == "Bearer"
+    allowed = client.get(
+        "/api/health",
+        headers={"Authorization": f"Bearer {app.state.console_access_token}"},
+    )
+    assert allowed.status_code == 200
+
+
+def test_host_and_origin_are_strict(console_env):
+    app = create_app(
+        console_env["bundles"],
+        console_env["runs"],
+    )
+    client = TestClient(app, base_url="http://127.0.0.1")
+    auth = {"Authorization": f"Bearer {app.state.console_access_token}"}
+    assert client.get("/", headers={"Host": "attacker.example"}).status_code == 400
+    assert (
+        client.get(
+            "/api/health",
+            headers={
+                **auth,
+                "Host": "attacker.example",
+                "Origin": "https://attacker.example",
+            },
+        ).status_code
+        == 400
+    )
+    assert (
+        client.get(
+            "/api/health",
+            headers={**auth, "Origin": "https://attacker.example"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.get(
+            "/api/health",
+            headers={**auth, "Origin": "http://localhost"},
+        ).status_code
+        == 403
+    )
+
+
+def test_mutations_require_origin_json_and_csrf(console_env):
+    app = create_app(
+        console_env["bundles"],
+        console_env["runs"],
+        allow_actions=True,
+    )
+    client = TestClient(app, base_url="http://127.0.0.1")
+    auth = {"Authorization": f"Bearer {app.state.console_access_token}"}
+    list_client = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers=auth,
+    )
+    run_id = _run_id(list_client, paused=True)
+    path = f"/api/runs/{run_id}/actions/approve"
+    assert client.post(path, headers=auth, json={}).status_code == 403
+    same_origin = {**auth, "Origin": "http://127.0.0.1"}
+    assert client.post(path, headers=same_origin, json={}).status_code == 403
+    assert (
+        client.post(
+            path,
+            headers={
+                **same_origin,
+                "X-OpenAdapt-CSRF": app.state.console_csrf_token,
+                "Content-Type": "text/plain",
+            },
+            content="{}",
+        ).status_code
+        == 415
+    )
+
+
+def test_security_headers_and_strict_csp(console_env):
+    client = _client(console_env)
+    for path in ("/", "/static/console.js", "/api/health"):
+        response = client.get(path)
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        csp = response.headers["content-security-policy"]
+        assert "frame-ancestors 'none'" in csp
+        assert "script-src 'self'" in csp
+        assert "'unsafe-inline'" not in csp
+        assert "'unsafe-eval'" not in csp
+        assert "object-src 'none'" in csp
+        assert "base-uri 'none'" in csp
+        assert "data:" not in csp
+
+
+def test_static_ui_has_no_inline_handlers_or_artifact_paths(console_env):
+    client = _client(console_env)
+    html = client.get("/").text.lower()
+    script = client.get("/static/console.js").text
+    assert "<style" not in html
+    assert "<script src=" in html
+    assert re.search(r"\son[a-z]+\s*=", html) is None
+    assert "style=" not in html
+    assert "library.path" not in script
+    assert "payload.approver" not in script
+
+
+def test_sensitive_bundle_and_run_values_never_cross_api(console_env):
+    client = _client(console_env)
+    bundle_id = _workflow_id(client, n_steps=3)
+    workflow = client.get(f"/api/workflows/{bundle_id}").json()
+    assert "params" not in workflow
+    assert "param_specs" not in workflow
+    assert workflow["parameter_count"] == 1
+    assert "hello" not in str(workflow)
+    run_id = _run_id(client, halted=True)
+    run = client.get(f"/api/runs/{run_id}").json()
+    serialized = str(run)
+    assert "report" not in run
+    assert "MRN-SECRET" not in serialized
+    assert "Jane Roe" not in serialized
+    assert "Session expired" not in serialized
+    assert run["timeline"][0]["identity"] == {
+        "status": "verified",
+        "mode": "context",
+        "coverage": 0.0,
+    }
+
+
+def test_adversarial_labels_urls_mrns_and_paths_are_redacted(console_env):
+    """Every browser projection stays safe even when all source labels are PHI."""
+    secret = "Jane Roe MRN-7788 https://ehr.example/patient/7788"
+    path_label = "Jane-Roe-MRN-7788-ehr.example"
+
+    workflow = Workflow.load(console_env["bundle"])
+    workflow.name = secret
+    workflow.params = {secret: secret}
+    workflow.steps[0].id = secret
+    workflow.steps[0].intent = secret
+    workflow.steps[0].anchor.ocr_text = secret
+    workflow.steps[0].anchor.context_text = secret
+    assert workflow.manifest is not None
+    assert workflow.manifest.provenance is not None
+    workflow.manifest.provenance.certification_status = secret
+    workflow.save(console_env["bundle"])
+
+    report = RunReport.model_validate_json(
+        (console_env["halted"] / "report.json").read_text()
+    )
+    report.workflow_name = secret
+    report.params = {secret: secret}
+    report.terminal_outcome = secret
+    report.results[0].step_id = secret
+    report.results[0].intent = secret
+    report.results[0].actuation = secret
+    report.results[0].effect_results = [secret]
+    report.results[0].error = secret
+    protected_image = console_env["halted"] / f"{path_label}.png"
+    (console_env["halted"] / "s1_before.png").replace(protected_image)
+    report.results[0].before_png = protected_image.name
+    assert report.halt is not None
+    report.halt.state_id = secret
+    report.halt.intent = secret
+    report.halt.reason = secret
+    report.halt.outcome = secret
+    report.halt.observed_texts = [secret]
+    report.halt.completed_intents = [secret]
+    report.save(console_env["halted"])
+
+    pending_path = console_env["paused"] / "pending_escalation.json"
+    pending = json.loads(pending_path.read_text())
+    for field in (
+        "workflow_name",
+        "step_id",
+        "intent",
+        "category",
+        "reason",
+    ):
+        pending[field] = secret
+    pending["proposed_options"] = [secret]
+    pending_path.write_text(json.dumps(pending))
+    checkpoint_path = next((console_env["paused"] / "checkpoints").glob("step_*.json"))
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint["step_index"] = secret
+    checkpoint["created_at"] = secret
+    checkpoint_path.write_text(json.dumps(checkpoint))
+
+    library = SkillLibrary(console_env["library"].parent)
+    graph = library.active_version("triage-note").graph
+    library.create_skill(secret, graph)
+    protected_skill = library.get(secret).versions[0]
+    protected_skill.provenance.note = secret
+    protected_skill.reason = secret
+    protected_skill.provenance.trace_ids = [secret]
+    library.save()
+
+    client = _client(console_env)
+    bundle_id = _workflow_id(client, n_steps=3)
+    halted_id = _run_id(client, halted=True)
+    paused_id = _run_id(client, paused=True)
+    responses = [
+        client.get("/api/workflows"),
+        client.get(f"/api/workflows/{bundle_id}"),
+        client.get(f"/api/workflows/{bundle_id}/actions"),
+        client.get("/api/runs"),
+        client.get(f"/api/runs/{halted_id}"),
+        client.get(f"/api/runs/{halted_id}/actions"),
+        client.get(f"/api/runs/{paused_id}"),
+        client.get(f"/api/runs/{paused_id}/actions"),
+        client.get("/api/skills"),
+        client.post(f"/api/runs/{paused_id}/actions/approve", json={}),
+    ]
+    assert all(response.status_code in {200, 403} for response in responses)
+    serialized = "\n".join(response.text for response in responses)
+    for forbidden in (
+        "Jane Roe",
+        "MRN-7788",
+        "ehr.example",
+        path_label,
+        str(console_env["bundle"]),
+        str(console_env["halted"]),
+        str(console_env["paused"]),
+        str(console_env["library"]),
+    ):
+        assert forbidden not in serialized
+
+    artifact = client.get(
+        f"/api/runs/{halted_id}/artifact",
+        params={"id": "step-001-before"},
+    )
+    assert artifact.status_code == 200
+    assert artifact.content == _PNG
+    assert path_label not in str(artifact.headers)
+
+
+def test_validation_errors_never_echo_rejected_payload(console_env):
+    secret = "Jane Roe MRN-9988 https://ehr.example/patient/9988 /private/phi"
+    client = _client(console_env, allow_actions=True)
+    run_id = _run_id(client, paused=True)
+    path = f"/api/runs/{run_id}/actions/approve"
+
+    wrong_shape = client.post(path, json=[secret])
+    assert wrong_shape.status_code == 422
+    assert wrong_shape.json() == {
+        "detail": "request did not match the console action schema"
+    }
+    assert secret not in wrong_shape.text
+
+    malformed = client.post(
+        path,
+        content=f'{{"resolution": "{secret}"',
+        headers={"Content-Type": "application/json"},
+    )
+    assert malformed.status_code == 422
+    assert secret not in malformed.text
+
+
+def test_symlinked_run_metadata_is_never_read(console_env, tmp_path):
+    secret = "Jane Roe MRN-5544 https://ehr.example/private"
+    paused = console_env["paused"]
+
+    pending = paused / "pending_escalation.json"
+    pending.unlink()
+    outside_pending = tmp_path / "outside-pending.json"
+    outside_pending.write_text(json.dumps({"status": secret, "reason": secret}))
+    pending.symlink_to(outside_pending)
+
+    outside_approval = tmp_path / "outside-approval.json"
+    outside_approval.write_text(json.dumps({"approved_at": secret}))
+    (paused / "approval.json").symlink_to(outside_approval)
+
+    checkpoints = paused / "checkpoints"
+    shutil.rmtree(checkpoints)
+    outside_checkpoints = tmp_path / "outside-checkpoints"
+    outside_checkpoints.mkdir()
+    (outside_checkpoints / "step_000001.json").write_text(
+        json.dumps({"step_index": secret, "created_at": secret})
+    )
+    (outside_checkpoints / "_manifest.json").write_text(
+        json.dumps({"bundle_dir": secret})
+    )
+    checkpoints.symlink_to(outside_checkpoints, target_is_directory=True)
+
+    client = _client(console_env)
+    run_id = _run_id(client, paused=True)
+    response = client.get(f"/api/runs/{run_id}")
+    assert response.status_code == 200
+    assert response.json()["pending_escalation"] is None
+    assert response.json()["approval"] is None
+    assert response.json()["manifest"] is None
+    assert response.json()["checkpoints"] == []
+    assert secret not in response.text
+
+
+def test_artifact_requires_bearer(console_env):
+    authorized = _client(console_env)
+    run_id = _run_id(authorized, halted=True)
+    app = create_app(console_env["bundles"], console_env["runs"])
+    unauthenticated = TestClient(app, base_url="http://127.0.0.1")
+    response = unauthenticated.get(
+        f"/api/runs/{run_id}/artifact",
+        params={"id": "step-001-before"},
+    )
+    assert response.status_code == 401
+    assert response.json() == {"detail": "console bearer token required"}
+
+
+def test_artifact_endpoint_allows_only_report_referenced_real_png(console_env):
+    client = _client(console_env)
+    run_id = _run_id(client, halted=True)
+    run = console_env["halted"]
+    (run / "unreferenced.png").write_bytes(_PNG)
+    (run / "notes.txt").write_text("protected value")
+    for artifact_id in ("unreferenced.png", "notes.txt", "report.json"):
+        assert (
+            client.get(
+                f"/api/runs/{run_id}/artifact", params={"id": artifact_id}
+            ).status_code
+            == 404
+        )
+    assert (
+        client.get(
+            f"/api/runs/{run_id}/artifact",
+            params={"id": "step-001-before"},
+        ).status_code
+        == 200
+    )
+
+
+def test_symlinked_run_and_artifact_are_never_followed(console_env, tmp_path):
+    outside_run = tmp_path / "outside-run"
+    outside_run.mkdir()
+    (outside_run / "secret.png").write_bytes(_PNG)
+    RunReport(
+        workflow_name="outside",
+        started_at="2026-07-18T00:00:00+00:00",
+        results=[
+            StepResult(
+                step_id="s1",
+                intent="outside",
+                ok=True,
+                before_png="secret.png",
+            )
+        ],
+    ).save(outside_run)
+    (console_env["runs"] / "linked").symlink_to(outside_run, target_is_directory=True)
+    client = _client(console_env)
+    assert len(client.get("/api/runs").json()) == 2
+    assert client.get("/api/runs/linked").status_code == 404
+
+    run_id = _run_id(client, halted=True)
+    outside_file = tmp_path / "outside.png"
+    outside_file.write_bytes(_PNG)
+    linked_file = console_env["halted"] / "linked.png"
+    linked_file.symlink_to(outside_file)
+    report = RunReport.model_validate_json(
+        (console_env["halted"] / "report.json").read_text()
+    )
+    report.results[0].before_png = "linked.png"
+    report.save(console_env["halted"])
+    assert (
+        client.get(
+            f"/api/runs/{run_id}/artifact",
+            params={"id": "step-001-before"},
+        ).status_code
+        == 404
+    )
+
+
+def test_configured_symlink_root_is_refused(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ValueError, match="must not traverse a symlink"):
+        create_app(linked, real)
+
+
+def test_skill_copy_command_quotes_hostile_library_path(tmp_path):
+    from openadapt_flow.console.actions import actions_for_skill
+
+    hostile = tmp_path / "lib-$(touch PWNED)-`id`" / "skills.json"
+    command = actions_for_skill(hostile, "skill';print(1)", 2)[0].command
+    argv = shlex.split(command)
+    assert argv[3] == str(hostile.parent)
+    assert argv[4] == "skill';print(1)"
+    assert "$(" not in argv[2]
+    assert "`" not in argv[2]
+
+
+def test_public_command_placeholders_are_literal_shell_arguments(console_env):
+    client = _client(console_env)
+    run_id = _run_id(client, paused=True)
+    commands = [
+        action["command"] for action in client.get(f"/api/runs/{run_id}/actions").json()
+    ]
+    bundle_id = _workflow_id(client, n_steps=3)
+    commands.extend(
+        action["command"]
+        for action in client.get(f"/api/workflows/{bundle_id}/actions").json()
+    )
+    for command in commands:
+        argv = shlex.split(command)
+        assert argv[0] == "openadapt-flow"
+        assert all("\n" not in arg and "\r" not in arg for arg in argv)
+        for placeholder in (arg for arg in argv if arg.startswith("<")):
+            assert placeholder.endswith(">")
+            assert shlex.quote(placeholder) in command
+
+
+def test_custom_policy_paths_are_not_read_by_console(console_env, tmp_path):
+    policy = tmp_path / "secret.yaml"
+    policy.write_text("name: private\nsecret: MRN-SECRET\n")
+    client = _client(console_env)
+    bundle_id = _workflow_id(client, n_steps=3)
+    response = client.get(f"/api/workflows/{bundle_id}", params={"policy": str(policy)})
+    assert response.status_code == 400
+    assert "MRN-SECRET" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# 7. CLI wiring
 # ---------------------------------------------------------------------------
 
 
@@ -618,7 +1157,13 @@ def test_encrypted_pending_escalation_flagged(console_env):
         run
     )
     (run / "pending_escalation.json.enc").write_bytes(b"sealed")
-    body = _client(console_env).get("/api/runs/replay-enc").json()
+    client = _client(console_env)
+    run_id = next(
+        item["id"]
+        for item in client.get("/api/runs").json()
+        if item["paused"] and item["started_at"] == "2026-07-17T12:00:00+00:00"
+    )
+    body = client.get(f"/api/runs/{run_id}").json()
     assert body["summary"]["paused"] is True
     assert body["pending_escalation"] is None
     assert body["pending_escalation_encrypted"] is True

@@ -1,0 +1,118 @@
+# Adapted from openIMIS's distribution compose (openimis-dist_dkr commit
+# cd6220d1f0578e56a589c47953250c2ad3d0caa5), trimmed to the services the
+# claims-intake reference workflow needs (no OpenSearch / dashboards /
+# certbot). Local synthetic reference environment only; every image is pinned
+# by digest through the required *_IMAGE variables (see
+# environment.lock.json), and all published ports bind to loopback so the
+# synthetic credentials and data never reach a LAN interface.
+x-api: &default-api
+  image: ${OPENIMIS_BE_IMAGE:?pinned OPENIMIS_BE_IMAGE required}
+  environment:
+    - DB_DEFAULT=postgresql
+    - DB_HOST=db
+    - DB_PORT=5432
+    - DB_NAME=IMIS
+    - DB_USER=IMISuser
+    - DB_PASSWORD=${OPENIMIS_DB_PASSWORD:?generated fixture secret required}
+    - SECRET_KEY=${OPENIMIS_SECRET_KEY:?generated fixture secret required}
+    - SITE_ROOT=api
+    - SITE_URL=localhost
+    - CELERY_BROKER_URL=amqp://rabbitmq
+    - MODE=Prod
+    - HOSTS=localhost
+    - CSRF_TRUSTED_ORIGINS=http://localhost:${OPENIMIS_HTTP_PORT:-9401}
+    - CACHE_BACKEND=django.core.cache.backends.redis.RedisCache
+    - CACHE_URL=redis://:${OPENIMIS_REDIS_PASSWORD:?generated fixture secret required}@redis:6379
+    - CACHE_OPTIONS={}
+    - DJANGO_LOG_LEVEL=WARNING
+    - DJANGO_MIGRATE=True
+  volumes:
+    - photos:/openimis-be/openIMIS/images/insurees
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: ${OPENIMIS_PGSQL_IMAGE:?pinned OPENIMIS_PGSQL_IMAGE required}
+    environment:
+      - POSTGRES_PASSWORD=${OPENIMIS_DB_PASSWORD:?generated fixture secret required}
+      - POSTGRES_DB=IMIS
+      - POSTGRES_USER=IMISuser
+      # The openIMIS demo dataset is a synthetic fixture shipped by the
+      # upstream project (fictional regions, insurees, and tariffs). It is the
+      # baseline this reference environment records against.
+      - DEMO_DATASET=true
+      - DB_ENGINE=django.db.backends.postgresql
+    healthcheck:
+      test: pg_isready -U IMISuser -d IMIS
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - database:/var/lib/postgresql/data
+
+  migrations:
+    <<: *default-api
+    command: init
+    restart: "no"
+
+  backend:
+    <<: *default-api
+    command: start
+    restart: unless-stopped
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *default-api
+    command: worker
+    restart: unless-stopped
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  frontend:
+    image: ${OPENIMIS_FE_IMAGE:?pinned OPENIMIS_FE_IMAGE required}
+    restart: unless-stopped
+    environment:
+      - REACT_APP_API_URL=api
+      - NEW_OPENIMIS_HOST=localhost
+      - REACT_APP_SENTRY_DSN=
+    ports:
+      # Synthetic credentials and data must never bind to a LAN interface.
+      - "127.0.0.1:${OPENIMIS_HTTP_PORT:-9401}:80"
+    depends_on:
+      - backend
+    volumes:
+      # Vendored verbatim (minus the OpenSearch/lightning/certbot proxy
+      # locations this trimmed stack does not run) from the pinned
+      # openimis-dist_dkr commit above; the frontend entrypoint templates
+      # /conf into its nginx config and self-signs the unused TLS listener.
+      - ./conf/nginx:/conf/
+
+  redis:
+    image: ${OPENIMIS_REDIS_IMAGE:?pinned OPENIMIS_REDIS_IMAGE required}
+    restart: unless-stopped
+    command: redis-server --requirepass ${OPENIMIS_REDIS_PASSWORD:?generated fixture secret required}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    environment:
+      - REDIS_PASSWORD=${OPENIMIS_REDIS_PASSWORD:?generated fixture secret required}
+
+  rabbitmq:
+    image: ${OPENIMIS_RABBITMQ_IMAGE:?pinned OPENIMIS_RABBITMQ_IMAGE required}
+    restart: unless-stopped
+
+volumes:
+  database:
+  photos:

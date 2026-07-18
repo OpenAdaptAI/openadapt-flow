@@ -84,6 +84,22 @@ def test_release_workflow_uses_pinned_actions() -> None:
     assert "# v10.6.1" in workflow
 
 
+def test_auto_release_waits_for_exact_head_ci_before_semantic_release() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+
+    wait_index = workflow.index("- name: Wait for exact-head CI")
+    release_index = workflow.index("- name: Python Semantic Release")
+
+    assert "actions: read # inspect the exact-head CI run before publishing" in workflow
+    assert wait_index < release_index
+    assert "actions/workflows/ci.yml/runs" in workflow
+    assert '--raw-field head_sha="${GITHUB_SHA}"' in workflow
+    assert "--raw-field event=push" in workflow
+    assert "select(.head_sha == $sha)" in workflow
+    assert 'if [ "$conclusion" = "success" ]' in workflow
+    assert "Refusing to publish because exact-head CI concluded" in workflow
+
+
 def _write_sdist(path: Path, members: set[str]) -> None:
     with tarfile.open(path, mode="w:gz") as archive:
         for relative in sorted(members):

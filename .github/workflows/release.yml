@@ -36,6 +36,7 @@ jobs:
     concurrency: release
     environment: pypi
     permissions:
+      actions: read # inspect the exact-head CI run before publishing
       id-token: write # PyPI Trusted Publishing (OIDC)
       contents: write # push the version bump commit + tag, create the Release
 
@@ -54,6 +55,45 @@ jobs:
           if [ "$author" = "semantic-release" ] || printf '%s' "$subject" | grep -q '^chore: release'; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Wait for exact-head CI
+        if: steps.check_skip.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$((SECONDS + 2700))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            response="$(
+              gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+                --raw-field head_sha="${GITHUB_SHA}" \
+                --raw-field event=push \
+                --raw-field per_page=20
+            )"
+            status="$(
+              printf '%s' "$response" |
+                jq -r --arg sha "$GITHUB_SHA" \
+                  '[.workflow_runs[] | select(.head_sha == $sha)]
+                   | sort_by(.created_at) | last | .status // "missing"'
+            )"
+            conclusion="$(
+              printf '%s' "$response" |
+                jq -r --arg sha "$GITHUB_SHA" \
+                  '[.workflow_runs[] | select(.head_sha == $sha)]
+                   | sort_by(.created_at) | last | .conclusion // "pending"'
+            )"
+            echo "Exact-head CI for ${GITHUB_SHA}: ${status}/${conclusion}"
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                exit 0
+              fi
+              echo "Refusing to publish because exact-head CI concluded ${conclusion}."
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "Refusing to publish: exact-head CI did not succeed within 45 minutes."
+          exit 1
 
       - name: Set up Python
         if: steps.check_skip.outputs.skip != 'true'

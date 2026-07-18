@@ -35,6 +35,11 @@ workflow and adds digest pinning and fail-closed local bindings.
 
 Each adapted file carries an SPDX license identifier and exact source URLs.
 The adapted files remain under `AGPL-3.0-only`; the repository's MIT license
-continues to cover OpenAdapt-authored code outside file-local exceptions. A
-source distribution containing both is an aggregate with these separate
-license scopes.
+continues to cover OpenAdapt-authored code outside file-local exceptions.
+
+Published `openadapt-flow` wheels and source distributions exclude the complete
+`benchmark/openimis_claims/` surface, its launcher/test, and this repository-only
+notice. The package artifacts therefore contain no copied or adapted openIMIS
+material and remain under the declared MIT package license. A Git source
+checkout retains the isolated benchmark and this notice for reproducible
+development evidence.

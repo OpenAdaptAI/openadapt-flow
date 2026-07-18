@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import tarfile
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,17 +17,19 @@ LOCK_PACKAGE_PATTERN = re.compile(
     r'[^\"]+(?P<suffix>"\nsource = \{ editable = "\." \})',
     flags=re.MULTILINE,
 )
-REQUIRED_SDIST_LICENSE_PATHS = frozenset(
+REQUIRED_SDIST_PATHS = frozenset(
     {
-        "THIRD_PARTY_NOTICES.md",
-        "benchmark/openimis_claims/compose.yml",
-        "benchmark/openimis_claims/conf/nginx/LICENSE-AGPL-3.0.md",
-        "benchmark/openimis_claims/conf/nginx/openimis.conf",
-        "benchmark/openimis_claims/conf/nginx/locations/backend.loc",
-        "benchmark/openimis_claims/conf/nginx/locations/frontend.loc",
-        "benchmark/openimis_claims/conf/nginx/variables/var.conf",
+        "LICENSE",
     }
 )
+FORBIDDEN_SDIST_PATHS = frozenset(
+    {
+        "THIRD_PARTY_NOTICES.md",
+        "scripts/openimis_claims_demo.py",
+        "tests/test_openimis_claims_fixture.py",
+    }
+)
+FORBIDDEN_SDIST_PREFIXES = ("benchmark/openimis_claims/",)
 
 
 def _match(pattern: str, text: str, source: str) -> str:
@@ -90,19 +93,49 @@ def sync_lock_version(root: Path = ROOT) -> str:
     return version
 
 
-def validate_sdist_license_files(sdist: Path) -> None:
-    """Require mixed-license notices beside every redistributed adapted file."""
+def validate_sdist_license_boundary(sdist: Path) -> None:
+    """Require an MIT-only sdist with no openIMIS benchmark material."""
     with tarfile.open(sdist, mode="r:gz") as archive:
         members = {
             "/".join(Path(member.name).parts[1:])
             for member in archive.getmembers()
             if len(Path(member.name).parts) > 1
         }
-    missing = REQUIRED_SDIST_LICENSE_PATHS - members
+    missing = REQUIRED_SDIST_PATHS - members
     if missing:
         raise ValueError(
-            "source distribution is missing required third-party licensing "
-            f"files: {sorted(missing)}"
+            f"source distribution is missing required files: {sorted(missing)}"
+        )
+    forbidden = set(FORBIDDEN_SDIST_PATHS & members)
+    forbidden.update(
+        member
+        for member in members
+        if any(member.startswith(prefix) for prefix in FORBIDDEN_SDIST_PREFIXES)
+    )
+    if forbidden:
+        raise ValueError(
+            "source distribution contains repository-only openIMIS benchmark "
+            f"material outside the MIT package boundary: {sorted(forbidden)}"
+        )
+
+
+def validate_wheel_license_boundary(wheel: Path) -> None:
+    """Require the MIT license and no openIMIS material in the wheel."""
+    with zipfile.ZipFile(wheel) as archive:
+        members = set(archive.namelist())
+    if not any(member.endswith(".dist-info/licenses/LICENSE") for member in members):
+        raise ValueError("wheel is missing the MIT LICENSE")
+    forbidden = {
+        member
+        for member in members
+        if "openimis" in member.lower()
+        or "agpl" in member.lower()
+        or member.endswith("THIRD_PARTY_NOTICES.md")
+    }
+    if forbidden:
+        raise ValueError(
+            "wheel contains openIMIS/AGPL material outside the MIT package "
+            f"boundary: {sorted(forbidden)}"
         )
 
 
@@ -130,9 +163,11 @@ def main() -> int:
             parser.error(
                 f"missing wheel or source distribution for {version}: {distributions}"
             )
+        wheel = next(path for path in distributions if path.name.endswith(".whl"))
         sdist = next(path for path in distributions if path.name.endswith(".tar.gz"))
         try:
-            validate_sdist_license_files(sdist)
+            validate_wheel_license_boundary(wheel)
+            validate_sdist_license_boundary(sdist)
         except ValueError as error:
             parser.error(str(error))
 

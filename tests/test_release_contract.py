@@ -3,6 +3,7 @@
 import io
 import re
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -13,10 +14,13 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 CI
     import tomli as tomllib
 
 from scripts.check_release_consistency import (
-    REQUIRED_SDIST_LICENSE_PATHS,
+    FORBIDDEN_SDIST_PATHS,
+    FORBIDDEN_SDIST_PREFIXES,
+    REQUIRED_SDIST_PATHS,
     release_versions,
     sync_lock_version,
-    validate_sdist_license_files,
+    validate_sdist_license_boundary,
+    validate_wheel_license_boundary,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,15 +113,56 @@ def _write_sdist(path: Path, members: set[str]) -> None:
             archive.addfile(info, io.BytesIO(payload))
 
 
-def test_sdist_requires_all_mixed_license_files(tmp_path: Path) -> None:
-    complete = tmp_path / "complete.tar.gz"
-    _write_sdist(complete, set(REQUIRED_SDIST_LICENSE_PATHS))
-    validate_sdist_license_files(complete)
+def _write_wheel(path: Path, members: set[str]) -> None:
+    with zipfile.ZipFile(path, mode="w") as archive:
+        for relative in sorted(members):
+            archive.writestr(relative, "fixture")
 
-    missing_notice = tmp_path / "missing-notice.tar.gz"
-    _write_sdist(
-        missing_notice,
-        set(REQUIRED_SDIST_LICENSE_PATHS) - {"THIRD_PARTY_NOTICES.md"},
-    )
-    with pytest.raises(ValueError, match="THIRD_PARTY_NOTICES.md"):
-        validate_sdist_license_files(missing_notice)
+
+def test_wheel_requires_mit_license_and_excludes_openimis_surface(
+    tmp_path: Path,
+) -> None:
+    license_path = "openadapt_flow-1.0.dist-info/licenses/LICENSE"
+    clean = tmp_path / "clean.whl"
+    _write_wheel(clean, {license_path, "openadapt_flow/__init__.py"})
+    validate_wheel_license_boundary(clean)
+
+    missing_license = tmp_path / "missing-license.whl"
+    _write_wheel(missing_license, {"openadapt_flow/__init__.py"})
+    with pytest.raises(ValueError, match="missing the MIT LICENSE"):
+        validate_wheel_license_boundary(missing_license)
+
+    for index, forbidden in enumerate(
+        (
+            "benchmark/openimis_claims/compose.yml",
+            "licenses/LICENSE-AGPL-3.0.md",
+            "THIRD_PARTY_NOTICES.md",
+        )
+    ):
+        mixed = tmp_path / f"mixed-{index}.whl"
+        _write_wheel(mixed, {license_path, forbidden})
+        with pytest.raises(ValueError, match="outside the MIT package boundary"):
+            validate_wheel_license_boundary(mixed)
+
+
+def test_sdist_requires_mit_license_and_excludes_openimis_surface(
+    tmp_path: Path,
+) -> None:
+    clean = tmp_path / "clean.tar.gz"
+    _write_sdist(clean, set(REQUIRED_SDIST_PATHS))
+    validate_sdist_license_boundary(clean)
+
+    missing_license = tmp_path / "missing-license.tar.gz"
+    _write_sdist(missing_license, set())
+    with pytest.raises(ValueError, match="missing required files.*LICENSE"):
+        validate_sdist_license_boundary(missing_license)
+
+    forbidden_members = {
+        *FORBIDDEN_SDIST_PATHS,
+        f"{FORBIDDEN_SDIST_PREFIXES[0]}compose.yml",
+    }
+    for index, forbidden in enumerate(sorted(forbidden_members)):
+        mixed = tmp_path / f"mixed-{index}.tar.gz"
+        _write_sdist(mixed, {*REQUIRED_SDIST_PATHS, forbidden})
+        with pytest.raises(ValueError, match="repository-only openIMIS"):
+            validate_sdist_license_boundary(mixed)

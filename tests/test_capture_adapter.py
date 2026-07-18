@@ -10,16 +10,17 @@ clicks/drags/typed text) and real frame extraction, so the test cannot silently
 pass against a schema that no longer exists. The converted recording is fed to
 the UNMODIFIED compiler — the format bridge, proven end to end.
 
-openadapt-capture >=0.5.4 imports clean headless (the historical
-screenshot-at-import side effect was removed in 0.5.3/0.5.4), so this module
-runs for real in headless CI — the `test` job installs the ``capture`` extra.
-It is skipped only when that optional extra is not installed.
+openadapt-capture >=0.6.0 imports clean headless and exposes the exact
+window-scoped producer contract, so this module runs for real in headless CI —
+the `test` job installs the ``capture`` extra. It is skipped only when that
+optional extra is not installed.
 """
 
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -39,7 +40,7 @@ from openadapt_capture.db.models import ActionEvent, Recording, WindowEvent
 from openadapt_capture.video import VideoWriter
 from PIL import Image, ImageDraw
 
-from openadapt_flow.adapters.capture import convert_capture
+from openadapt_flow.adapters.capture import _reject_out_of_window, convert_capture
 
 # Physical (video) pixels; logical screen is half that (pixel_ratio 2.0, the
 # macOS Retina case where capture coords and frame pixels disagree).
@@ -440,9 +441,8 @@ def test_missing_recording_db_rejected(tmp_path: Path) -> None:
 # ``capture_window`` scoping dict that capture's window mode persists
 # (window_capture.WindowFrameSource.snapshot()), with action coordinates
 # ALREADY in the captured frame's pixel space. Against the PyPI 0.5.4 package
-# (what CI installs — it predates the CaptureSession.window_capture property)
-# this exercises the adapter's defensive config-JSON fallback; against a newer
-# capture the property path reads the same dict.
+# (what CI installs) exposes this dict through CaptureSession.window_capture;
+# the adapter's defensive config-JSON fallback reads the same persisted source.
 
 WINDOW_OWNER = "MockMedRemote"
 WINDOW_TITLE = "MockMed - Ward A"
@@ -559,12 +559,12 @@ def test_window_mode_out_of_window_scroll_rejected(tmp_path: Path) -> None:
 
 
 def test_window_mode_bounds_timeline_honored(tmp_path: Path) -> None:
-    """A mid-recording resize (bounds-timeline WindowEvent) is honored.
+    """A mid-recording resize is refused even when actions remain in bounds.
 
-    The same coordinates are IN-window before the resize and OUT after it:
-    the second click must be rejected against the post-resize viewport.
+    Capture's fixed-size MP4 skips resized frames and Flow has one viewport.
+    Accepting the resize could pair new-space coordinates with an old frame.
     """
-    x, y = 1000.0, 700.0  # inside 1280x800, outside 640x400
+    x, y = 100.0, 100.0  # deliberately inside both 1280x800 and 640x400
     rows = _click_rows(T0 + 1.0, x, y) + _click_rows(T0 + 2.0, x, y)
     small = (640, 400)
     window_event_rows = [
@@ -604,7 +604,7 @@ def test_window_mode_bounds_timeline_honored(tmp_path: Path) -> None:
         config=window_capture_config(),
         window_event_rows=window_event_rows,
     )
-    with pytest.raises(ValueError, match=r"640x400"):
+    with pytest.raises(ValueError, match=r"changed viewport.*640x400"):
         convert_capture(capture_dir, tmp_path / "recording")
 
 
@@ -618,11 +618,153 @@ def test_window_mode_unknown_coordinate_space_rejected(tmp_path: Path) -> None:
         convert_capture(capture_dir, tmp_path / "recording")
 
 
+def test_malformed_window_capture_marker_rejected(tmp_path: Path) -> None:
+    """A corrupt marker cannot silently fall back to full-screen scaling."""
+    capture_dir = make_capture(
+        tmp_path,
+        window_demo_rows(),
+        screens=app_screens()[:1],
+        config={"pixel_ratio": PIXEL_RATIO, "capture_window": ["corrupt"]},
+    )
+    with pytest.raises(ValueError, match="malformed window-capture metadata"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
 def test_window_mode_missing_viewport_rejected(tmp_path: Path) -> None:
-    """No bounds timeline AND no config viewport -> cannot screen -> refuse."""
+    """The pre-listener static viewport is mandatory, even with no timeline."""
     config = window_capture_config(viewport=None)
     capture_dir = make_capture(
         tmp_path, window_demo_rows(), screens=app_screens()[:1], config=config
     )
-    with pytest.raises(ValueError, match="cannot be screened"):
+    with pytest.raises(ValueError, match="no valid initial"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+def test_window_mode_action_before_every_timeline_sample_refused() -> None:
+    """Never borrow a future viewport for an earlier action."""
+    action = SimpleNamespace(
+        type="mouse.singleclick",
+        x=10.0,
+        y=10.0,
+        timestamp=T0,
+    )
+    with pytest.raises(ValueError, match="precedes every known viewport sample"):
+        _reject_out_of_window(
+            [action],
+            [(T0 + 1.0, FRAME_SIZE)],
+        )
+
+
+def test_window_mode_rounding_outside_viewport_rejected() -> None:
+    """A raw in-range float may not round into an out-of-range Flow click."""
+    action = SimpleNamespace(
+        type="mouse.singleclick",
+        x=FRAME_SIZE[0] - 0.25,
+        y=100.0,
+        timestamp=T0,
+    )
+    with pytest.raises(ValueError, match=r"rounds outside it as \(1280, 100\)"):
+        _reject_out_of_window(
+            [action],
+            [(float("-inf"), FRAME_SIZE)],
+        )
+
+
+def test_window_mode_missing_pointer_coordinate_rejected() -> None:
+    """Window-scoped pointer actions cannot be verified without x and y."""
+    action = SimpleNamespace(
+        type="mouse.scroll",
+        x=None,
+        y=100.0,
+        timestamp=T0,
+    )
+    with pytest.raises(ValueError, match="no complete pointer coordinates"):
+        _reject_out_of_window(
+            [action],
+            [(float("-inf"), FRAME_SIZE)],
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_viewport",
+    [
+        [True, FRAME_SIZE[1]],
+        [float("inf"), FRAME_SIZE[1]],
+        [FRAME_SIZE[0] + 0.5, FRAME_SIZE[1]],
+    ],
+)
+def test_window_mode_malformed_initial_viewport_rejected(
+    tmp_path: Path, bad_viewport: list
+) -> None:
+    """Viewport dimensions must be finite positive integer pixels."""
+    config = window_capture_config(viewport=bad_viewport)
+    capture_dir = make_capture(
+        tmp_path, window_demo_rows(), screens=app_screens()[:1], config=config
+    )
+    with pytest.raises(ValueError, match="no valid initial"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+def test_window_mode_malformed_timeline_row_rejected(tmp_path: Path) -> None:
+    """A corrupt resize row cannot be silently skipped in favor of metadata."""
+    window_event_rows = [
+        {
+            "timestamp": T0,
+            "title": WINDOW_TITLE,
+            "left": 100,
+            "top": 50,
+            "width": FRAME_SIZE[0] // 2,
+            "height": FRAME_SIZE[1] // 2,
+            "window_id": "42",
+            "state": {
+                "window_capture": True,
+                "owner": WINDOW_OWNER,
+                "viewport": None,
+            },
+        }
+    ]
+    capture_dir = make_capture(
+        tmp_path,
+        window_demo_rows(),
+        screens=app_screens()[:1],
+        config=window_capture_config(),
+        window_event_rows=window_event_rows,
+    )
+    with pytest.raises(ValueError, match="malformed bounds-timeline"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        ["not", "an", "object"],
+        {"owner": 42, "title": None},
+        {"owner": "   ", "title": None},
+    ],
+)
+def test_window_mode_malformed_target_metadata_rejected(
+    tmp_path: Path, target: object
+) -> None:
+    """Replay selector hints must not contain arbitrary JSON values."""
+    config = window_capture_config(target=target)
+    capture_dir = make_capture(
+        tmp_path, window_demo_rows(), screens=app_screens()[:1], config=config
+    )
+    with pytest.raises(ValueError, match="metadata"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+def test_window_mode_frame_size_must_match_recorded_viewport(
+    tmp_path: Path,
+) -> None:
+    """Coordinates and visual evidence must share one exact pixel space."""
+    viewport = [640, 400]
+    rows = _click_rows(T0 + 1.0, 100.0, 100.0)
+    capture_dir = make_capture(
+        tmp_path,
+        rows,
+        screens=app_screens()[:1],  # encoded at 1280x800
+        config=window_capture_config(viewport=viewport),
+    )
+    with pytest.raises(ValueError, match=r"frame.*1280x800.*viewport.*640x400"):
         convert_capture(capture_dir, tmp_path / "recording")

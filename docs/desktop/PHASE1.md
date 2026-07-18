@@ -153,9 +153,12 @@ is authoritative, not the stored ratio.
 space, so the adapter applies **no** scaling (rescaling would double-scale
 every click), screens each mouse action against the recorded bounds-timeline
 window events (out-of-window input refuses conversion — it targeted a
-different window), and stamps the output `meta.json` with `window_capture`
-provenance plus `backend_hints` (`rdp_window` / `rdp_window_title`) naming
-the recorded target window for `replay --backend rdp`.
+different window), refuses sessions where the target window was resized
+(capture video and Flow recordings currently use one fixed viewport), verifies
+extracted frames have that exact viewport, and stamps the output `meta.json`
+with `window_capture` provenance plus `backend_hints` (`rdp_window` /
+`rdp_window_title`) naming the recorded target window for
+`replay --backend rdp`.
 
 **Frame selection.** For an event at wall-clock `T`: *before* = last video
 frame at/before `T`; *after* = frame at `T + settle_s` (default 1.0 s),

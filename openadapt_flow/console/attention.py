@@ -156,9 +156,9 @@ def _last_failed_result(report: Any) -> tuple[Optional[Any], Optional[int]]:
     return None, None
 
 
-def _artifact_ids(result: Any, one_based_index: Optional[int]) -> tuple[
-    Optional[str], Optional[str]
-]:
+def _artifact_ids(
+    result: Any, one_based_index: Optional[int]
+) -> tuple[Optional[str], Optional[str]]:
     if result is None or one_based_index is None:
         return None, None
     before = f"step-{one_based_index:03d}-before" if result.before_png else None
@@ -175,7 +175,12 @@ def attention_item(root: Path, path: Path) -> Optional[AttentionItem]:
         data._contained_file(path, path / "pending_escalation.json.enc") is not None
     )
 
-    if report is not None and report.success and pending is None and not encrypted_pause:
+    if (
+        report is not None
+        and report.success
+        and pending is None
+        and not encrypted_pause
+    ):
         return None
     if report is None and pending is None and not encrypted_pause:
         return None

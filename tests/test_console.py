@@ -1357,8 +1357,9 @@ def test_attention_requires_bearer_and_preserves_host_origin_boundary(console_en
     assert client.get("/api/attention").status_code == 401
     auth = {"Authorization": f"Bearer {app.state.console_access_token}"}
     assert (
-        client.get("/api/attention", headers={**auth, "Host": "attacker.test"})
-        .status_code
+        client.get(
+            "/api/attention", headers={**auth, "Host": "attacker.test"}
+        ).status_code
         == 400
     )
     assert (
@@ -1509,7 +1510,7 @@ def test_attend_is_attention_first_and_hard_read_only(console_env, monkeypatch):
     assert health["read_only"] is True
     script = client.get("/static/console.js").text
     html = client.get("/").text
-    assert "HEALTH.attend ? \"#/attention\"" in script
+    assert 'HEALTH.attend ? "#/attention"' in script
     assert "Needs Attention" in html
     assert "<script src=" in html
     assert re.search(r"\son[a-z]+\s*=", html.lower()) is None

@@ -13,9 +13,9 @@ compiler produces the deterministic, self-healing script that acquires the
 artifacts on every subsequent run — locally, with no per-run model calls on
 the happy path.
 
-## What works today (v0)
+## Current product path
 
-- **Record → compile → replay → heal** end-to-end, vision-only (PNG in,
+- **Record → compile → replay → governed repair** end-to-end, vision-only (PNG in,
   clicks/keys out), validated against a mock EMR-like app including four
   drift scenarios (theme, layout move, label rename, unexpected modal) in CI.
 - **Postconditions per step** derived from the recording (what actually
@@ -44,44 +44,34 @@ ref = emit_l1_artifact(
 )
 ```
 
-## Honest gaps (the roadmap, in order)
+## Desktop and remote deployment
 
-1. **Native (macOS/Windows-local) backend.** The `Backend` protocol
-   (screenshot / click / type / press) is designed for it; a native
-   macOS backend is a remaining adapter. The compiled bundles and the
-   runtime do not change. *(The RDP backend below has landed as a spike;
-   the WAA/Windows backend already covers native Windows over HTTP.)*
+The compiler and governed runtime are shared across browser, Windows UIA,
+native macOS, and RDP. The substrate driver supplies observations and action
+delivery; OpenAdapt remains responsible for target uniqueness, identity,
+policy, postconditions, independent effects, repair, and audit.
 
-   **RDP backend — spike landed** (`openadapt_flow/backends/rdp_backend.py`,
-   `docs/backends/RDP.md`). The load-bearing L1/Retinology case reaches a
-   legacy ophthalmology EMR over **RDP**, read **pixel-only** (no
-   accessibility tree) — exactly the vision-only substrate the runtime was
-   built for, so RDP is *an adapter, not a rewrite*. `FreeRDPBackend`
-   implements the `Backend` protocol on top of a minimal, swappable
-   `RDPTransport` (`connect` / `disconnect` / `framebuffer` / `pointer` /
-   `key` / `wheel`); a real `AardwolfTransport` (pure-Python async RDP client,
-   bridged to sync, behind the optional `rdp` extra) and a `FakeRDPTransport`
-   sit under it. The unmodified Recorder → compiler → Replayer stack drives it
-   end-to-end in the mock-tested conformance test — **zero compiler/replayer
-   changes**. Status: adapter shape proven (mock-tested in CI + a gated live
-   smoke test); the real transport installs, imports lazily and constructs
-   valid connections, but **validation against a real clinic EMR over RDP is
-   pending a screen recording** — OCR/grounding quality under RDP compression
-   is the open question, and the VLM fallback is expected to matter there.
-   RDP is pixel-only, so the backend deliberately does **not** claim the
-   optional `IdentityBackend` / `StructuralBackend` capabilities; identity
-   falls back to the OCR name+DOB-primary tier (docs/LIMITS.md).
-2. **Tier-0 per-workflow detector.** The current ladder is template → OCR →
-   geometry → optional VLM grounder. Distilling a per-workflow YOLO-class
-   detector from recordings (clicks auto-label crops) is planned as the
-   sub-10ms rung and removes manual labeling.
-3. **Local grounder serving.** The `Grounder` protocol exists with a null and
-   an API-based implementation; an MLX-served small grounding model (e.g.
-   Holo3.1-4B class) is the intended local default so the entire ladder runs
-   offline.
-4. **Read-back extraction.** v0 verifies screens and clicks reliably; pulling
-   *data* off screens (beyond what workflows download as files) will prefer
-   clipboard/select-all patterns with OCR as verification, not primary.
+- **Windows UIA:** a fixed WinForms workflow passed 3/3 trials with
+  independently confirmed SQLite effects. Native UIA actions produced 12
+  delivery receipts, while stale and ambiguous targets each refused 3/3.
+- **Native macOS:** a fixed TextEdit workflow passed 3/3 exact file-byte
+  effect checks and refused a two-window ambiguous selector without modifying
+  either file.
+- **RDP:** real Aardwolf RDP into Windows 11 passed 3/3 trials for a fixed
+  remote-input task, with exact file readback through an independent guest-tools
+  oracle and no model calls. See [`backends/RDP.md`](backends/RDP.md).
+
+These accepted tasks establish working substrate paths. A clinical deployment
+qualifies the exact EMR, OS/session policy, display conditions, identity rules,
+and system-of-record effect oracle before supervised production writes. Citrix
+ICA/HDX follows the same adapter contract but requires qualification in the
+customer's published application; RDP evidence is not treated as Citrix
+evidence.
+
+For artifact acquisition, downloaded files should remain the primary extraction
+path. When data must be read from a screen, use structured/native value access
+where available, with clipboard or OCR observations verified against the
+workflow's declared postcondition or external effect.
 
 ## Trying it
 

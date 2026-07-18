@@ -50,6 +50,10 @@ HOST_STORAGE_PATH_ENV = "OAFLOW_PARALLELS_STORAGE_PATH"
 # 0.124912 of framebuffer pixels. Keep a measured margin while requiring the
 # separate taskbar predicate, exact session/Explorer proof, and stable frames.
 _QUALIFICATION_TRANSITION_FRACTION = 0.10
+# The clean-base proof first recognized the desktop at 35 seconds and reached
+# three stable frames at 45 seconds. The counted path gets the full observed
+# 75-second diagnostic window rather than the rejected 30-second default.
+_COUNTED_DESKTOP_READINESS_TIMEOUT_S = 75.0
 
 pytestmark = [
     pytest.mark.skipif(
@@ -369,6 +373,15 @@ def _wait_qualification_desktop(
     raise AssertionError(f"qualification desktop did not become ready: {last}")
 
 
+def _wait_counted_qualification_desktop(backend, baseline: bytes) -> bytes:
+    """Apply the evidence-bound readiness budget used by counted trials."""
+    return _wait_qualification_desktop(
+        backend,
+        baseline,
+        timeout_s=_COUNTED_DESKTOP_READINESS_TIMEOUT_S,
+    )
+
+
 def _assert_painted_frame(png: bytes, expected_size: tuple[int, int]) -> None:
     assert _painted_readiness(png), "RDP returned an invalid/blank frame"
     assert Image.open(io.BytesIO(png)).size == expected_size
@@ -475,6 +488,7 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
         "framebuffer": [width, height],
         "transport": "aardwolf",
         "aardwolf_version": aardwolf_version,
+        "desktop_readiness_timeout_s": _COUNTED_DESKTOP_READINESS_TIMEOUT_S,
         "host_free_bytes_before": free_bytes_before,
     }
     qualified_session_ids: list[int] = []
@@ -613,7 +627,7 @@ def test_real_rdp_three_trial_independent_oracle(tmp_path) -> None:
                 )
                 baseline = backend.screenshot()
                 session_id = _wait_user_shell(vm, account)
-                png = _wait_qualification_desktop(backend, baseline)
+                png = _wait_counted_qualification_desktop(backend, baseline)
                 _assert_painted_frame(png, backend.viewport)
                 qualified_session_ids.append(session_id)
                 # The token reaches the guest only through RDP input. prlctl is

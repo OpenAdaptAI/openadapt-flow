@@ -247,6 +247,24 @@ def test_wait_qualification_desktop_requires_transition_and_stability():
     )
 
 
+def test_counted_desktop_wait_forwards_exact_evidence_bound_timeout(monkeypatch):
+    marker = object()
+    calls: list[tuple[object, bytes, float]] = []
+
+    def fake_wait(backend, baseline, *, timeout_s, **_kwargs):
+        calls.append((backend, baseline, timeout_s))
+        return marker
+
+    monkeypatch.setattr(rdp, "_wait_qualification_desktop", fake_wait)
+    backend = object()
+    baseline = b"baseline"
+    assert rdp._wait_counted_qualification_desktop(backend, baseline) is marker
+    assert calls == [
+        (backend, baseline, rdp._COUNTED_DESKTOP_READINESS_TIMEOUT_S)
+    ]
+    assert rdp._COUNTED_DESKTOP_READINESS_TIMEOUT_S == 75.0
+
+
 def test_wait_qualification_desktop_refuses_below_transition_floor(monkeypatch):
     baseline = _png(background=0)
     taskbar_only = _png(background=0, taskbar=True)

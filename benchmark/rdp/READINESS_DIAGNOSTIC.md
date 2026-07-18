@@ -87,3 +87,11 @@ working-tree patch SHA-256 was
 `9631d9cb4db2d4a794aad66437f9ebb10cf070ca83b59fa957901826c16e383a`.
 It is only the gate for freezing a new candidate and is not accepted
 qualification evidence by itself.
+
+The first frozen successor, `309fa24152ee8ef22ecf3020614fdff46be53ebe`,
+was rejected before counted input because the counted path still inherited a
+30-second desktop-readiness timeout. That could not cover the proof's first
+recognized desktop at 35 seconds or its third stable frame at 45 seconds. The
+replacement candidate uses and reports an explicit 75-second counted timeout,
+matching the complete diagnostic observation window. A focused unit test binds
+the counted wrapper to that exact value.

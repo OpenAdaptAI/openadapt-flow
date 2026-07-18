@@ -147,6 +147,16 @@ to the flow recording format the compiler consumes.
 points are scaled by `video_frame_width / capture.screen_width` — the video
 is authoritative, not the stored ratio.
 
+**Window-scoped sessions.** A session recorded with capture's window mode
+(`CaptureSession.window_capture` not None, `coordinate_space:
+"window_pixels"`) already stores coordinates in the captured frame's pixel
+space, so the adapter applies **no** scaling (rescaling would double-scale
+every click), screens each mouse action against the recorded bounds-timeline
+window events (out-of-window input refuses conversion — it targeted a
+different window), and stamps the output `meta.json` with `window_capture`
+provenance plus `backend_hints` (`rdp_window` / `rdp_window_title`) naming
+the recorded target window for `replay --backend rdp`.
+
 **Frame selection.** For an event at wall-clock `T`: *before* = last video
 frame at/before `T`; *after* = frame at `T + settle_s` (default 1.0 s),
 clamped to just before the next event. This approximates the live

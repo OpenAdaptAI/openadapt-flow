@@ -65,6 +65,36 @@ defaults to 1.0 and coordinates pass through unscaled — on such a legacy HiDPI
 session click coordinates would be under-scaled, an honest limitation of the
 old metadata that this adapter cannot recover from pixels alone.
 
+Window-scoped sessions (capture's window recording mode, capture PR #30). A
+session recorded with ``Recorder(window=...)`` is scoped to ONE window: frames
+are that window's own pixels (the same viewport flow's ``rdp_window`` replay
+backend captures) and action coordinates were translated *at capture time*
+into the captured frame's pixel space
+(``CaptureSession.window_capture["coordinate_space"] == "window_pixels"``).
+This adapter detects such a session and:
+
+  * does NOT apply ``pixel_ratio`` — the coordinates are already frame
+    pixels, and rescaling them would double-scale every click (the exact
+    silent-mis-conversion this detection exists to prevent);
+  * takes frames as-is (already the client-window viewport);
+  * screens every mouse action against the recording's bounds-timeline
+    window events (capture appends one whenever the resolved bounds/title
+    change; ``state.viewport`` is the captured frame size in effect): window
+    capture records out-of-window input at out-of-range coordinates instead
+    of clamping, and such an action targeted a DIFFERENT window, so
+    conversion refuses loudly (dropping it would silently lose a
+    demonstrated action; keeping it would compile a wrong-target step);
+  * stamps the output ``meta.json`` with the recorded scoping
+    (``window_capture``) plus ``backend_hints`` naming the recorded target
+    owner/title in ``BackendConfig`` terms (``rdp_window`` /
+    ``rdp_window_title``) so a ``replay --backend rdp`` invocation can
+    resolve the same client window. Both fields are additive; the compiler
+    ignores unknown ``meta.json`` keys, and nothing in the replay path reads
+    them yet (wiring them into the backend factory is a follow-up).
+
+A window-scoped session that declares a coordinate space this adapter does
+not understand is refused loudly rather than converted with guessed scaling.
+
 Frame selection: openadapt-capture records **action-gated** video (frames are
 encoded around user actions, not continuously). For an event at wall-clock time
 ``T`` the *before* frame is ``get_frame_at(T)`` and the *after* frame is
@@ -104,7 +134,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, TypeGuard
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_capture.capture import Action, CaptureSession
@@ -118,6 +148,11 @@ SCROLL_PIXELS_PER_NOTCH = 100
 # Search window (seconds) for get_frame_at. Capture is action-gated, so frames
 # cluster around action timestamps; a generous window finds the nearest one.
 FRAME_TOLERANCE_S = 2.0
+
+# The one coordinate space a window-scoped capture session may declare today:
+# action coordinates already translated into the captured frame's pixel space
+# (see openadapt_capture.window_capture). Any other declared space is refused.
+WINDOW_PIXEL_SPACE = "window_pixels"
 
 # pynput key names (openadapt-capture ``key_name`` / ``.keys``) ->
 # flow/Playwright names.
@@ -182,6 +217,128 @@ def _require_capture() -> "type[CaptureSession]":
             "    pip install 'openadapt-flow[capture]'\n"
         ) from exc
     return CaptureSession
+
+
+def _window_capture_meta(session: "CaptureSession") -> Optional[dict[str, Any]]:
+    """Window-scoping metadata for a window-scoped session, else None.
+
+    Reads the ``CaptureSession.window_capture`` property (openadapt-capture
+    releases after 0.5.4) with a defensive fallback to the recording's
+    ``config`` JSON — the persisted source of the same dict (key
+    ``capture_window``) — for installed capture versions that predate the
+    property. A window-scoped session loaded through an older package MUST
+    still be recognized: missing the scoping would silently rescale
+    already-frame-pixel coordinates by ``pixel_ratio`` (double-scaling every
+    click), the exact mis-conversion this detection exists to prevent.
+    """
+    window_capture = getattr(session, "window_capture", None)
+    if isinstance(window_capture, dict):
+        return window_capture
+    recording = getattr(session, "_recording", None)
+    config = getattr(recording, "config", None)
+    if isinstance(config, dict):
+        fallback = config.get("capture_window")
+        if isinstance(fallback, dict):
+            return fallback
+    return None
+
+
+def _is_viewport(value: Any) -> TypeGuard[Sequence[float]]:
+    """True when ``value`` is a plausible (width, height) pixel pair."""
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(v, (int, float)) and v > 0 for v in value)
+    )
+
+
+def _window_viewport_timeline(
+    session: "CaptureSession", window_capture: dict[str, Any]
+) -> list[tuple[float, tuple[int, int]]]:
+    """Time-ordered ``(timestamp, (width, height))`` of the captured frame size.
+
+    Built from the recording's bounds-timeline window events: capture's window
+    mode appends one whenever the resolved window's bounds/title change, with
+    the captured frame's pixel size in ``state["viewport"]`` — so a
+    mid-recording resize is honored per-action. Read via a public
+    ``session.window_events`` accessor when the installed capture exposes one,
+    else via the session's underlying recording model (same rows). Falls back
+    to the static ``window_capture["viewport"]`` when the session carries no
+    timeline rows.
+
+    Raises:
+        ValueError: When neither source yields a viewport — without one,
+            out-of-window input cannot be screened, and converting unscreened
+            window-space coordinates could compile wrong-target steps.
+    """
+    entries: list[tuple[float, tuple[int, int]]] = []
+    rows: Any = getattr(session, "window_events", None)
+    if callable(rows):
+        rows = rows()
+    if rows is None:
+        rows = getattr(getattr(session, "_recording", None), "window_events", None)
+    for row in rows or []:
+        state = getattr(row, "state", None)
+        if not isinstance(state, dict) or not state.get("window_capture"):
+            continue
+        ts = getattr(row, "timestamp", None)
+        viewport = state.get("viewport")
+        if ts is None or not _is_viewport(viewport):
+            continue
+        entries.append((float(ts), (int(viewport[0]), int(viewport[1]))))
+    entries.sort(key=lambda entry: entry[0])
+    if not entries:
+        viewport = window_capture.get("viewport")
+        if not _is_viewport(viewport):
+            raise ValueError(
+                "window-scoped capture session carries no captured-frame "
+                "viewport (no bounds-timeline window events and no viewport "
+                "in its window-capture metadata); out-of-window input cannot "
+                "be screened, so the session cannot be converted safely — "
+                "re-record with a capture version that persists the window "
+                "viewport"
+            )
+        entries.append((float("-inf"), (int(viewport[0]), int(viewport[1]))))
+    return entries
+
+
+def _reject_out_of_window(
+    actions: "list[Action]",
+    timeline: list[tuple[float, tuple[int, int]]],
+) -> None:
+    """Refuse loudly on any mouse action outside the captured window.
+
+    Window-scoped recording translates GLOBAL input into the captured frame's
+    pixel space *without clamping*, so input aimed at another window (or the
+    desktop) lands at out-of-range coordinates. Such an action cannot replay
+    faithfully inside the window: dropping it would silently lose a
+    demonstrated action, and keeping it would compile a wrong-target step —
+    so, per this module's loud-rejection policy, conversion refuses. Each
+    action is checked against the viewport in effect at its timestamp (the
+    latest bounds-timeline entry at or before it).
+    """
+    for action in actions:
+        if not action.type.startswith("mouse."):
+            continue
+        x, y = action.x, action.y
+        if x is None or y is None:
+            continue
+        ts = float(action.timestamp)
+        width, height = timeline[0][1]
+        for entry_ts, size in timeline:
+            if entry_ts <= ts:
+                width, height = size
+            else:
+                break
+        if not (0 <= x < width and 0 <= y < height):
+            raise ValueError(
+                f"out-of-window input: {action.type} at ({x:.0f}, {y:.0f}) "
+                f"(t={ts:.3f}) falls outside the captured window viewport "
+                f"{width}x{height}; the demonstrated action targeted a "
+                "different window or the desktop, so converting it would "
+                "compile a wrong-target step — re-record keeping all input "
+                "inside the captured window"
+            )
 
 
 def _flow_events(
@@ -342,6 +499,15 @@ def convert_capture(
     (``CaptureSession.load(dir).actions()``) and writes a compile-ready
     recording (``meta.json`` + ``events.jsonl`` + ``frames/``).
 
+    A WINDOW-SCOPED session (``CaptureSession.window_capture`` not None; see
+    the module docstring) is converted in its own pixel space: coordinates
+    pass through unscaled (they are already captured-frame pixels), every
+    mouse action is screened against the recorded bounds-timeline (an
+    out-of-window action refuses conversion), and the output ``meta.json``
+    additionally carries ``window_capture`` provenance plus ``backend_hints``
+    (``rdp_window`` / ``rdp_window_title``) naming the recorded target window
+    for ``replay --backend rdp``.
+
     Args:
         capture_dir: An openadapt-capture session directory (contains
             ``recording.db`` and an ``oa_recording-*.mp4`` video).
@@ -365,7 +531,10 @@ def convert_capture(
             flow equivalent (drag, non-left click, modifier chord, unmapped
             named key, unknown input type), multiple params demonstrating the
             same value, or a click whose before frame is missing from the
-            action-gated video.
+            action-gated video. Also, for a window-scoped session: on an
+            out-of-window action, an unknown declared coordinate space, or
+            missing viewport metadata (out-of-window input could not be
+            screened) — refusing loudly instead of mis-converting.
     """
     CaptureSession = _require_capture()
     capture_dir = Path(capture_dir)
@@ -383,8 +552,29 @@ def convert_capture(
 
     session = CaptureSession.load(capture_dir)
     try:
-        scale = float(session.pixel_ratio or 1.0)
+        window_capture = _window_capture_meta(session)
+        if window_capture is not None:
+            space = window_capture.get("coordinate_space")
+            if space != WINDOW_PIXEL_SPACE:
+                raise ValueError(
+                    "window-scoped capture session declares "
+                    f"coordinate_space={space!r}, which this adapter does not "
+                    f"understand (expected {WINDOW_PIXEL_SPACE!r}); converting "
+                    "it could silently mis-scale action coordinates — upgrade "
+                    "openadapt-flow to a version that supports this session's "
+                    "coordinate space"
+                )
+            # Window mode: coordinates were translated at capture time into
+            # the captured frame's pixel space. Applying pixel_ratio here
+            # would DOUBLE-scale them; frames are already the window viewport.
+            scale = 1.0
+        else:
+            scale = float(session.pixel_ratio or 1.0)
         actions = list(session.actions(include_moves=False))
+        if window_capture is not None:
+            _reject_out_of_window(
+                actions, _window_viewport_timeline(session, window_capture)
+            )
         events = _flow_events(actions, scale, value_to_param)
         if not events:
             raise ValueError(
@@ -434,7 +624,7 @@ def convert_capture(
 
         (out_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
 
-        meta = {
+        meta: dict[str, Any] = {
             "id": uuid.uuid4().hex,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "viewport": viewport,
@@ -443,6 +633,34 @@ def convert_capture(
             "source": "openadapt-capture",
             "task_description": session.task_description,
         }
+        if window_capture is not None:
+            # Additive provenance + replay hints (the compiler ignores unknown
+            # meta.json keys; a non-window session's meta is unchanged). The
+            # hints carry the recorded TARGET owner/title substrings — the
+            # user's proven-to-resolve intent, stabler across replays than the
+            # resolved window's live title — in BackendConfig terms
+            # (rdp_window / rdp_window_title), so `replay --backend rdp` can
+            # resolve the same client window. Resolved values are kept as
+            # provenance and used only when the target carried neither field.
+            target = window_capture.get("target") or {}
+            owner = target.get("owner")
+            title = target.get("title")
+            if owner is None and title is None:
+                owner = window_capture.get("owner")
+                title = window_capture.get("title")
+            meta["window_capture"] = {
+                "coordinate_space": WINDOW_PIXEL_SPACE,
+                "target_owner": owner,
+                "target_title": title,
+                "resolved_owner": window_capture.get("owner"),
+                "resolved_title": window_capture.get("title"),
+            }
+            hints: dict[str, Any] = {"backend": "rdp"}
+            if owner:
+                hints["rdp_window"] = owner
+            if title:
+                hints["rdp_window_title"] = title
+            meta["backend_hints"] = hints
         (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
         return out_dir
     finally:

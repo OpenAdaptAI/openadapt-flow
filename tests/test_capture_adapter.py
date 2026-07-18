@@ -35,7 +35,7 @@ if importlib.util.find_spec("openadapt_capture") is None:
 
 import openadapt_capture  # noqa: F401
 from openadapt_capture.db import create_db
-from openadapt_capture.db.models import ActionEvent, Recording
+from openadapt_capture.db.models import ActionEvent, Recording, WindowEvent
 from openadapt_capture.video import VideoWriter
 from PIL import Image, ImageDraw
 
@@ -119,7 +119,12 @@ def write_video(path: Path, states: list[Image.Image]) -> None:
     writer.close()
 
 
-def write_recording_db(path: Path, action_rows: list[dict]) -> None:
+def write_recording_db(
+    path: Path,
+    action_rows: list[dict],
+    config: dict | None = None,
+    window_event_rows: list[dict] | None = None,
+) -> None:
     """Write a real capture recording.db via capture's SQLAlchemy models."""
     engine, Session = create_db(str(path))
     session = Session()
@@ -135,22 +140,35 @@ def write_recording_db(path: Path, action_rows: list[dict]) -> None:
             double_click_distance_pixels=5.0,
             # config-JSON pixel_ratio: the legacy (pre-0.5.4) persistence path,
             # which CaptureSession.pixel_ratio still honors as a fallback.
-            config={"pixel_ratio": PIXEL_RATIO},
+            config=config if config is not None else {"pixel_ratio": PIXEL_RATIO},
         )
         session.add(recording)
         session.flush()
         for row in action_rows:
             session.add(ActionEvent(recording_id=recording.id, **row))
+        for row in window_event_rows or []:
+            session.add(WindowEvent(recording_id=recording.id, **row))
         session.commit()
     finally:
         session.close()
         engine.dispose()
 
 
-def make_capture(tmp_path: Path, action_rows: list[dict], screens=None) -> Path:
+def make_capture(
+    tmp_path: Path,
+    action_rows: list[dict],
+    screens=None,
+    config: dict | None = None,
+    window_event_rows: list[dict] | None = None,
+) -> Path:
     capture_dir = tmp_path / "capture"
     capture_dir.mkdir()
-    write_recording_db(capture_dir / "recording.db", action_rows)
+    write_recording_db(
+        capture_dir / "recording.db",
+        action_rows,
+        config=config,
+        window_event_rows=window_event_rows,
+    )
     screens = screens if screens is not None else app_screens()
     write_video(capture_dir / f"oa_recording-{T0}.mp4", screens)
     return capture_dir
@@ -256,6 +274,17 @@ def test_meta_matches_recorder_contract(converted: Path) -> None:
     assert meta["app_url"] is None
     assert meta["source"] == "openadapt-capture"
     assert meta["task_description"] == "add a note"
+    # Regression: a NON-window session's meta carries exactly the recorder
+    # contract keys — no window-mode fields may leak into it.
+    assert set(meta.keys()) == {
+        "id",
+        "created_at",
+        "viewport",
+        "app_url",
+        "params",
+        "source",
+        "task_description",
+    }
 
 
 def test_frames_selected_from_video(converted: Path) -> None:
@@ -403,3 +432,197 @@ def test_missing_recording_db_rejected(tmp_path: Path) -> None:
     empty.mkdir()
     with pytest.raises(FileNotFoundError):
         convert_capture(empty, tmp_path / "recording")
+
+
+# -- window-scoped sessions (capture's window recording mode) -----------------
+#
+# These build a real capture session whose recording config carries the
+# ``capture_window`` scoping dict that capture's window mode persists
+# (window_capture.WindowFrameSource.snapshot()), with action coordinates
+# ALREADY in the captured frame's pixel space. Against the PyPI 0.5.4 package
+# (what CI installs — it predates the CaptureSession.window_capture property)
+# this exercises the adapter's defensive config-JSON fallback; against a newer
+# capture the property path reads the same dict.
+
+WINDOW_OWNER = "MockMedRemote"
+WINDOW_TITLE = "MockMed - Ward A"
+
+
+def window_capture_config(**overrides) -> dict:
+    """Recording config for a window-scoped session (window pixels = frame)."""
+    capture_window = {
+        "target": {"owner": WINDOW_OWNER, "title": None},
+        "coordinate_space": "window_pixels",
+        "window_id": "42",
+        "owner": WINDOW_OWNER,
+        "title": WINDOW_TITLE,
+        "pid": 4242,
+        "initial_bounds": [100.0, 50.0, FRAME_SIZE[0] / 2, FRAME_SIZE[1] / 2],
+        "scale": 2.0,
+        "viewport": list(FRAME_SIZE),
+    }
+    capture_window.update(overrides)
+    # pixel_ratio deliberately present AND non-1.0: window mode must IGNORE it.
+    return {"pixel_ratio": PIXEL_RATIO, "capture_window": capture_window}
+
+
+def window_demo_rows() -> list[dict]:
+    """Same demo as demo_rows(), but the click is in captured-frame pixels."""
+    x, y = BUTTON_CENTER_PHYSICAL
+    rows: list[dict] = []
+    rows += _click_rows(T0 + 1.0, float(x), float(y))
+    rows += _type_rows(T0 + 2.0, NOTE_VALUE)
+    rows += _named_key_rows(T0 + 3.0, "enter")
+    return rows
+
+
+@pytest.fixture(scope="module")
+def window_converted(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    tmp_path = tmp_path_factory.mktemp("window_adapter")
+    capture_dir = make_capture(
+        tmp_path, window_demo_rows(), config=window_capture_config()
+    )
+    recording_dir = tmp_path / "recording"
+    convert_capture(
+        capture_dir, recording_dir, params={"note": NOTE_VALUE}, settle_s=1.0
+    )
+    return recording_dir
+
+
+def test_window_mode_coordinates_not_rescaled(window_converted: Path) -> None:
+    """Double-scale regression: window-space coordinates pass through EXACTLY.
+
+    The session's pixel_ratio is 2.0; a regression that applies it in window
+    mode would double every coordinate (and land this click off-frame).
+    """
+    events = events_of(window_converted)
+    assert [e["kind"] for e in events] == ["click", "type", "key"]
+    click = events[0]
+    assert (click["x"], click["y"]) == BUTTON_CENTER_PHYSICAL
+    assert events[1]["text"] == NOTE_VALUE
+    assert events[2]["key"] == "Enter"
+
+
+def test_window_mode_frames_taken_as_is(window_converted: Path) -> None:
+    """Frames pass through at the captured (window) size, untouched."""
+    import json
+
+    meta = json.loads((window_converted / "meta.json").read_text())
+    assert meta["viewport"] == list(FRAME_SIZE)
+    assert (window_converted / "frames" / "0000_before.png").is_file()
+
+
+def test_window_mode_meta_stamps_backend_hints(window_converted: Path) -> None:
+    """meta.json carries the scoping provenance + rdp replay hints."""
+    import json
+
+    meta = json.loads((window_converted / "meta.json").read_text())
+    assert meta["window_capture"] == {
+        "coordinate_space": "window_pixels",
+        "target_owner": WINDOW_OWNER,
+        "target_title": None,
+        "resolved_owner": WINDOW_OWNER,
+        "resolved_title": WINDOW_TITLE,
+    }
+    # The recorded TARGET had owner only (title=None): hints carry exactly the
+    # user's proven-to-resolve substrings, not the volatile resolved title.
+    assert meta["backend_hints"] == {"backend": "rdp", "rdp_window": WINDOW_OWNER}
+
+
+def test_window_mode_out_of_window_click_rejected(tmp_path: Path) -> None:
+    """Out-of-range coordinates (input aimed at another window) refuse loudly."""
+    rows = _click_rows(T0 + 1.0, float(FRAME_SIZE[0] + 50), 100.0)
+    capture_dir = make_capture(
+        tmp_path, rows, screens=app_screens()[:1], config=window_capture_config()
+    )
+    with pytest.raises(ValueError, match="out-of-window input"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+def test_window_mode_out_of_window_scroll_rejected(tmp_path: Path) -> None:
+    """A scroll at a negative (off-window) position is screened too."""
+    rows = [
+        {
+            "name": "scroll",
+            "timestamp": T0 + 1.0,
+            "mouse_x": -30.0,
+            "mouse_y": 100.0,
+            "mouse_dx": 0.0,
+            "mouse_dy": -3.0,
+        },
+    ]
+    capture_dir = make_capture(
+        tmp_path, rows, screens=app_screens()[:1], config=window_capture_config()
+    )
+    with pytest.raises(ValueError, match="out-of-window input"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+def test_window_mode_bounds_timeline_honored(tmp_path: Path) -> None:
+    """A mid-recording resize (bounds-timeline WindowEvent) is honored.
+
+    The same coordinates are IN-window before the resize and OUT after it:
+    the second click must be rejected against the post-resize viewport.
+    """
+    x, y = 1000.0, 700.0  # inside 1280x800, outside 640x400
+    rows = _click_rows(T0 + 1.0, x, y) + _click_rows(T0 + 2.0, x, y)
+    small = (640, 400)
+    window_event_rows = [
+        {
+            "timestamp": T0,
+            "title": WINDOW_TITLE,
+            "left": 100,
+            "top": 50,
+            "width": FRAME_SIZE[0] // 2,
+            "height": FRAME_SIZE[1] // 2,
+            "window_id": "42",
+            "state": {
+                "window_capture": True,
+                "owner": WINDOW_OWNER,
+                "viewport": list(FRAME_SIZE),
+            },
+        },
+        {
+            "timestamp": T0 + 1.5,
+            "title": WINDOW_TITLE,
+            "left": 100,
+            "top": 50,
+            "width": small[0] // 2,
+            "height": small[1] // 2,
+            "window_id": "42",
+            "state": {
+                "window_capture": True,
+                "owner": WINDOW_OWNER,
+                "viewport": list(small),
+            },
+        },
+    ]
+    capture_dir = make_capture(
+        tmp_path,
+        rows,
+        screens=app_screens()[:1],
+        config=window_capture_config(),
+        window_event_rows=window_event_rows,
+    )
+    with pytest.raises(ValueError, match=r"640x400"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+def test_window_mode_unknown_coordinate_space_rejected(tmp_path: Path) -> None:
+    """A declared coordinate space the adapter doesn't know refuses loudly."""
+    config = window_capture_config(coordinate_space="screen_points")
+    capture_dir = make_capture(
+        tmp_path, window_demo_rows(), screens=app_screens()[:1], config=config
+    )
+    with pytest.raises(ValueError, match="coordinate_space='screen_points'"):
+        convert_capture(capture_dir, tmp_path / "recording")
+
+
+def test_window_mode_missing_viewport_rejected(tmp_path: Path) -> None:
+    """No bounds timeline AND no config viewport -> cannot screen -> refuse."""
+    config = window_capture_config(viewport=None)
+    capture_dir = make_capture(
+        tmp_path, window_demo_rows(), screens=app_screens()[:1], config=config
+    )
+    with pytest.raises(ValueError, match="cannot be screened"):
+        convert_capture(capture_dir, tmp_path / "recording")

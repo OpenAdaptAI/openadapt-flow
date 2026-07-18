@@ -61,8 +61,27 @@ def test_deployment_query_is_read_only() -> None:
     assert_read_only_sql(config.effects.sql_query)
 
 
+def _stub_psycopg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand a stub DB-API module in for psycopg (an optional deployment dep).
+
+    ``build_effect_verifier`` imports the configured ``sql_driver`` before the
+    secret/param checks run, so the fast suite (which does not install
+    PostgreSQL drivers) stubs it: construction must not open a connection (the
+    verifier connects per-read), so the stub also proves the driver is only
+    imported, never dialed, at build time.
+    """
+    stub = types.ModuleType("psycopg")
+
+    def _connect(**kwargs: object) -> None:  # pragma: no cover - never dialed
+        raise AssertionError("construction must not open a connection")
+
+    stub.connect = _connect  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg", stub)
+
+
 def test_verifier_requires_the_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Kit convention: a missing secret env var fails LOUD at construction."""
+    _stub_psycopg(monkeypatch)
     monkeypatch.delenv(oi.ORACLE_PASSWORD_ENV, raising=False)
     config = load_deployment(DEPLOYMENT_YAML)
     with pytest.raises(ValueError, match=oi.ORACLE_PASSWORD_ENV):
@@ -72,19 +91,8 @@ def test_verifier_requires_the_secret_env(monkeypatch: pytest.MonkeyPatch) -> No
 def test_verifier_builds_with_secret_and_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The YAML constructs a SqlRecordVerifier bound to the run's insuree.
-
-    A stub DB-API module stands in for psycopg: construction must not open a
-    connection (the verifier connects per-read), so the stub proves the
-    driver is only imported, never dialed, at build time.
-    """
-    stub = types.ModuleType("psycopg")
-
-    def _connect(**kwargs: object) -> None:  # pragma: no cover - never dialed
-        raise AssertionError("construction must not open a connection")
-
-    stub.connect = _connect  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "psycopg", stub)
+    """The YAML constructs a SqlRecordVerifier bound to the run's insuree."""
+    _stub_psycopg(monkeypatch)
     monkeypatch.setenv(oi.ORACLE_PASSWORD_ENV, "synthetic-test-secret")
     config = load_deployment(DEPLOYMENT_YAML)
     verifier = build_effect_verifier(config.effects, {"insurance_no": oi.LAPSED_CHF})
@@ -95,6 +103,7 @@ def test_verifier_builds_with_secret_and_params(
 def test_verifier_refuses_an_unbound_run_param(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _stub_psycopg(monkeypatch)
     monkeypatch.setenv(oi.ORACLE_PASSWORD_ENV, "synthetic-test-secret")
     config = load_deployment(DEPLOYMENT_YAML)
     with pytest.raises(ValueError, match="insurance_no"):

@@ -19,11 +19,11 @@ Left: the UI the demo was recorded on. Right: a theme it had never seen — each
 step re-resolves through OCR or geometry, and each fix is written back to the
 script as a reviewable diff. Zero model calls on either side.*
 
-**Safety, stated honestly.** It halts instead of guessing, and we measure how
-often it could still resolve the wrong target under UI drift — then publish it.
-Read [what it doesn't do yet](docs/LIMITS.md) and
-[how we test it](docs/validation/VALIDATION.md), including five adversarial
-rounds against our own wrong-target check.
+**Verified execution.** It halts instead of guessing, and qualification reports
+measure silent incorrect success, over-halt, effect confirmation, latency, and
+model calls. Read the technical [limits](docs/LIMITS.md) and
+[validation method](docs/validation/VALIDATION.md), including five adversarial
+rounds against the wrong-target check.
 
 ## Try it
 
@@ -57,8 +57,8 @@ permissive policy is only a smoke gate. Replay serves MockMed and writes
 
 The nightly clean-machine test runs this complete install-to-uninstall journey
 on Linux, macOS, and Windows. See the
-[product maturity matrix](docs/PRODUCT_STATUS.md) for what each result does and
-does not establish.
+[capability and qualification matrix](docs/PRODUCT_STATUS.md) for the accepted
+scope of each substrate.
 
 ### Record your own app
 
@@ -110,8 +110,10 @@ a structural locator, and postconditions derived from what the demo actually
 changed on screen. At replay time a resolution ladder tries them in order: a
 structural element match where the backend owns a DOM/UIA tree, then local
 template match, global template match, OCR, landmark geometry, then
-(optionally) a grounding model. Healthy scripts never leave the first rung.
-Milliseconds, no model calls, no per-run cost.
+(optionally) a grounding model. Healthy scripts normally resolve on the first
+rung. Individual deterministic resolution steps complete in milliseconds;
+end-to-end workflow time depends on the target application. The healthy path
+makes no model calls and incurs no per-run model cost.
 
 When bounded UI drift preserves enough evidence, a lower rung can find the same
 target and the fix lands in the bundle as a diff you can review. An optional
@@ -121,7 +123,7 @@ promise of adaptation. When the screen stops matching
 expectations entirely, the run halts with a report instead of guessing, and
 steps tagged irreversible won't act on a low-confidence match at all.
 
-The runtime is **vision-first**: it can always operate a pure pixel surface
+The runtime is **vision-first**: it can operate a pure pixel surface
 (PNG in, clicks and keys out), but it is not limited to pixels. Where a backend
 owns a structured layer — a browser DOM, a native UI Automation / accessibility
 tree — the ladder's top rung re-finds the recorded target as an *element* and
@@ -136,22 +138,20 @@ bundle armed 4-7 of 12) — an **unarmed click has no identity check at all**. T
 per-step coverage is auditable in `workflow.json` and reported in every run;
 see [what it doesn't do yet](docs/LIMITS.md).
 
-It all sits behind a small four-method `Backend` protocol, and backend maturity
-is uneven — stated plainly rather than blurred together. The **shipped** backend
-is a headless browser (which is why the whole loop runs in CI with no OS
-permissions) and is the only path proven end to end against a real third-party
-app. A `WindowsBackend` (UI Automation over the WindowsAgentArena server) is
-**proven structurally on a local Windows-on-ARM VM** — record → compile → replay,
-judged against the app's own database. A FreeRDP `RDPBackend` and a
-Citrix/remote-display pixel-only backend also exist, but they are **spikes, not
-validated integrations**: they conform to the protocol and pass mocked/offline
-tests, and the Citrix work is a *pixel-only remote-display analog spike*, **not a
-validated Citrix integration**. HDX compression and latency, ICA DPI and
-coordinate mapping, synthetic-input acceptance, lock/credential screens,
-independent effect verification, and the identity over-halt rate on real charts
-are all deferred and unmeasured (see [`docs/backends/RDP.md`](docs/backends/RDP.md)
-and [`docs/desktop/CITRIX_PIXEL.md`](docs/desktop/CITRIX_PIXEL.md)). All are
-adapters onto the one protocol, not rewrites.
+It all sits behind a small `Backend` protocol shared by browser, native desktop,
+and remote-display drivers. The browser lifecycle runs on every CI build and
+has published third-party application evidence. Windows UIA passed 3/3 fixed
+WinForms trials with independently confirmed SQLite effects, plus 3/3 refusal
+for both stale and ambiguous targets. Native macOS passed 3/3 fixed TextEdit
+trials with exact file-byte effects and refused a two-window ambiguity without
+changing either file. Real-network Aardwolf RDP into Windows 11 passed 3/3
+fixed remote-input trials with independent guest-tools file verification.
+These are accepted scoped qualifications; a customer application is qualified
+against its own controls, session/display policy, identity evidence, and effect
+oracle. Citrix ICA/HDX uses the remote-display adapter contract and enters
+design-partner qualification in the customer's exact published application
+([`docs/backends/RDP.md`](docs/backends/RDP.md),
+[`docs/desktop/CITRIX_PIXEL.md`](docs/desktop/CITRIX_PIXEL.md)).
 
 ## Proof
 
@@ -274,21 +274,18 @@ correct rows with zero silent wrong writes, zero over-halts, and $0 model
 cost**. The paid agent arm and full per-cell trial counts are the next stage
 of the matrix.
 
-## Status
+## Capability and qualification
 
-Early, and honest about it — maturity is uneven across the surface. The
-reference **browser** backend is the proven path: solid end to end, with a drift
-matrix and a broad unit suite in CI (a consistency gate keeps this README honest
-— see `scripts/check_consistency.py`). Everything else is earlier. The
-desktop/RDP/Citrix backends are spikes (see the backend status under
-[How it works](#how-it-works)), and the Phase-2 workflow-program IR (induction,
-program graphs, effect verification) is **specified and prototyped against
-synthetic fixtures — no real recording exercises it yet**; treat it as
-experimental, not production. `DESIGN.md` has the module contracts; the Phase-2
-IR is specified in
-[`docs/design/WORKFLOW_PROGRAM_IR.md`](docs/design/WORKFLOW_PROGRAM_IR.md), and
-[`docs/L1_INTEGRATION.md`](docs/L1_INTEGRATION.md) covers feeding layered
-clinical-data platforms.
+The reference browser path runs record, compile, policy-check, deterministic
+replay, refusal, and report generation in CI. Windows UIA, native macOS, and
+RDP each have retained 3/3 accepted task evidence with independent effects or
+oracles. Citrix and each new third-party application are qualified with a design
+partner in the exact deployment environment. The workflow-program IR adds
+parameters, branches, loops, effect verification, and governed recovery on the
+same runtime. `DESIGN.md` has the module contracts;
+[`docs/design/WORKFLOW_PROGRAM_IR.md`](docs/design/WORKFLOW_PROGRAM_IR.md)
+describes the program IR, and [`docs/L1_INTEGRATION.md`](docs/L1_INTEGRATION.md)
+covers feeding layered clinical-data platforms.
 
 The integrated status of the engine, browser, desktop, remote-display, safety,
 GUI, hosted, and deployment surfaces is published in
@@ -297,11 +294,10 @@ start with [`docs/ENTERPRISE_ARCHITECTURE.md`](docs/ENTERPRISE_ARCHITECTURE.md),
 which maps screenshot/credential flows, cryptographic guarantees, hosted
 boundaries, and unmet controls.
 
-**Machine-checked claims.** OpenAdapt is the only automation vendor whose
-public maturity claims are enforced by CI. Every claim above is registered in
-[`claims.yaml`](claims.yaml), tiered (supported / validating / roadmap /
-research) and mapped to the specific tests and benchmark artifacts that back
-it. CI runs `scripts/validate_claims.py`, which **fails the build whenever a
+**Machine-checked claims.** Product claims are enforced by CI. Every registered
+claim is tiered and mapped to the specific tests and benchmark artifacts that
+back it in [`claims.yaml`](claims.yaml). CI runs `scripts/validate_claims.py`,
+which **fails the build whenever a
 claim's tier outranks its strongest evidence** and regenerates
 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the claim-by-claim
 verification report — from the registry, so the adjectives in this README

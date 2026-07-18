@@ -3,7 +3,7 @@
 # WHY THIS FILE EXISTS
 # --------------------
 # Every public maturity claim about openadapt-flow ("web is supported today",
-# "Windows/Citrix are being validated") must be a FUNCTION of automated
+# "Windows has scoped acceptance") must be a FUNCTION of automated
 # evidence, not a hand-written adjective that quietly rots. This registry maps
 # each claim -> a maturity `tier` -> the specific backing test(s)/benchmark(s)
 # that prove it. `scripts/validate_claims.py` enforces the tier<->evidence
@@ -66,9 +66,9 @@ claims:
           enforces postconditions and the risk gate — no model in the loop.
     caveats:
       - >-
-        "Supported" is scoped to the reference headless-browser backend (the v0
-        surface). Desktop (Windows) and Citrix are NOT supported — see their
-        own `validating` claims below.
+        "Supported" is scoped to the reference headless-browser backend in this
+        registry. Desktop and remote-display workflows use the separately scoped
+        acceptance and design-partner claims below.
       - >-
         The full record->compile->replay e2e runs in the post-merge/nightly
         full suite; the fast required PR gate covers the replayer + demo units.
@@ -268,9 +268,9 @@ claims:
   # ------------------------------ Windows desktop (validating, opt-in gated)
   - id: windows-desktop-validating
     claim: >-
-      Windows desktop workflows are being validated with design partners (not a
-      supported surface yet): the deterministic structural (UIA) rung resolves
-      recorded clicks by AutomationId on a real Windows app.
+      Windows UIA has scoped acceptance: the deterministic structural rung
+      delivered native actions in a fixed WinForms workflow with independent
+      effects and fail-closed stale/ambiguity refusal.
     surfaces: [README.md, docs, website]
     tier: validating
     evidence:
@@ -288,22 +288,84 @@ claims:
         proves: >-
           Desktop drift benchmark: the structural rung resolved 21/21 targets
           where visual replay alone managed 6/21.
+      - path: benchmark/windows_uia/results.json
+        kind: benchmark
+        proves: >-
+          Accepted candidate 20260717-candidate-56759c8-v2: 3/3 exact task and
+          SQLite effects, 12 UIA receipts, and 3/3 stale plus 3/3 ambiguity
+          refusals with zero silent incorrect success, over-halt, or model calls.
     caveats:
       - >-
         The live desktop e2e is OPT-IN and infra-gated (needs a Parallels
         Win11-ARM VM; `OAFLOW_PARALLELS_E2E=1`); it never runs on default CI.
         Only the mocked backend protocol runs in CI.
       - >-
-        DataGridView rows are only partially UIA-armable (see
-        docs/desktop/LIMITS.md). This harness does not replace third-party
-        design-partner validation.
+        Acceptance covers the named in-tree workflow and exact Windows VM.
+        Third-party applications require workflow-specific qualification.
+
+  # ------------------------------- Native macOS (scoped field acceptance)
+  - id: macos-native-validating
+    claim: >-
+      Native macOS has scoped acceptance for exact-window-bound text delivery,
+      independent file effects, and ambiguity refusal on a fixed TextEdit task.
+    surfaces: [README.md, docs, website]
+    tier: validating
+    reproducibility: field
+    evidence:
+      - path: tests/test_macos_backend.py
+        proves: >-
+          CI covers unique-window binding, foreground/focus proof, exact-element
+          text delivery, and refusal before physical input when proof fails.
+      - path: tests/test_macos_qualification.py
+        proves: >-
+          CI validates the qualification oracle, failure taxonomy, evidence
+          hashes, cleanup adjudication, and ambiguity-refusal accounting.
+      - path: benchmark/macos_native/textedit_counted_3plus1_b1b61a5_20260717.adjudication.json
+        kind: benchmark
+        proves: >-
+          Candidate b1b61a5 completed 3/3 exact-byte TextEdit effects and
+          refused two ambiguous windows without modifying either file.
+    caveats:
+      - >-
+        Acceptance covers TextEdit on one macOS 15.7.3 Apple Silicon host and
+        active user session; each customer application is qualified separately.
+      - >-
+        The original counted report remains failed. The hash-bound adjudication
+        accepts only its independently confirmed action/effect/refusal evidence.
+
+  # ----------------------------------------- RDP (scoped field acceptance)
+  - id: rdp-validating
+    claim: >-
+      RDP has scoped acceptance for real-network framebuffer decode and input
+      delivery into Windows 11 with independent exact file-effect verification.
+    surfaces: [README.md, docs, website]
+    tier: validating
+    reproducibility: field
+    evidence:
+      - path: tests/e2e/test_parallels_rdp_e2e.py
+        proves: >-
+          Opt-in snapshot-safe real RDP qualification harness with exactly three
+          trials, independent guest-tools oracle, failure taxonomy, and cleanup.
+      - path: tests/test_rdp_backend.py
+        proves: >-
+          CI covers the backend/transport contract, framebuffer conversion,
+          pointer and keyboard delivery, and record-compile-replay conformance.
+      - path: benchmark/rdp/results_82a658a_20260718.sanitized.json
+        kind: benchmark
+        proves: >-
+          Candidate 82a658a passed 3/3 at 51.845, 10.467, and 7.477 seconds,
+          with zero failures, silent incorrect successes, over-halts, or model calls.
+    caveats:
+      - >-
+        Acceptance covers the named 1280x800 Windows Run/file task and exact VM
+        environment, not arbitrary applications, identity policies, or Citrix.
 
   # ------------------------------ Desktop recording via the CLI (validating)
   - id: desktop-recording-validating
     claim: >-
-      Recording a desktop workflow through the product CLI is being validated:
+      The product CLI records desktop workflows through openadapt-capture and
       `record --backend windows|rdp` captures the operator's real demonstration
-      (via openadapt-capture) and emits the compile-ready recording format, so
+      and emits the compile-ready recording format, so
       record -> compile -> replay closes on the desktop substrate, not just the
       browser.
     surfaces: [README.md, docs, website]
@@ -325,8 +387,8 @@ claims:
       - path: docs/desktop/RECORDING.md
         kind: doc
         proves: >-
-          The precise REAL-vs-deferred map (visual-ladder-only structural rung,
-          secret redaction, rdp coordinate space) and the reuse of
+          The capture-assisted and live-observer paths, fail-closed secret
+          handling, RDP coordinate binding, and reuse of
           openadapt-capture + the capture adapter.
     caveats:
       - >-
@@ -337,17 +399,16 @@ claims:
         replay, not a live recorder run (the live recorder has its own
         integration suite in the openadapt-capture repo).
       - >-
-        `--secret` is refused on the pixel/desktop substrate (no field geometry
-        to redact), and `rdp` recording must be captured in the same pixel space
-        the backend replays in (no cross-machine coordinate remap yet).
+        `--secret` is refused on an unqualified pixel/desktop capture with no
+        field geometry, and RDP recording uses the replay pixel space or a
+        deployment-calibrated client-window mapping.
 
   # ------------------------------- Citrix pixel-only (validating, opt-in gated)
   - id: citrix-pixel-validating
     claim: >-
-      Citrix / remote-display (pixel-only) is a spike being validated with
-      design partners: the compiler's visual floor drives a real remote-display
-      window with the structural rung unavailable, plus identity gate on pixels
-      and halt on ambiguity.
+      Citrix uses the governed pixel-only remote-display contract and enters
+      design-partner qualification in the customer's exact ICA/HDX application,
+      with identity, ambiguity refusal, and independent effects above the driver.
     surfaces: [README.md, docs, website]
     tier: validating
     evidence:
@@ -363,8 +424,8 @@ claims:
       - path: docs/desktop/CITRIX_PIXEL.md
         kind: doc
         proves: >-
-          The Citrix-analog methodology and the honest gaps (HDX compression,
-          latency, DPI/credential/lock-screen drift NOT simulated).
+          The Citrix driver model, reusable evidence, design-partner acceptance
+          contract, independent-effect boundary, and customer-controlled posture.
     caveats:
       - >-
         PIXEL-ONLY: no UIA/DOM crosses to the driver. On-screen OCR read-back is

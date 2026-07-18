@@ -9,8 +9,8 @@ certification, legal advice, a BAA, or an SLA.
 | Lane | Execution location | Network posture | Current status |
 | --- | --- | --- | --- |
 | Local evaluation | Operator workstation; bundled browser app or an explicitly supplied URL | No model or telemetry egress by default. The target URL is still network traffic when it is remote. | **Beta** on the reference browser path. |
-| On-prem / air-gapped | Customer-controlled host and optional LAN VLM appliance | Site firewall is the primary boundary; systemd/Docker denial and `verify-airgap.sh` add defence in depth. | **Experimental scaffold**; see [`ON_PREM.md`](ON_PREM.md). |
-| Hosted control-plane connection | Execution remains local; `login`, governed `push`, and `report-break` make explicit HTTPS requests | Opt-in only. Artifact egress requires a verified derivative and trusted destination. | **Launch path; operated outside this repository.** |
+| On-prem / air-gapped | Customer-controlled host and optional LAN VLM appliance | Site firewall is the primary boundary; systemd/Docker denial and `verify-airgap.sh` add defence in depth. | **Beta deployment foundation** with signed offline update and atomic rollback; see [`ON_PREM.md`](ON_PREM.md). |
+| Hosted control-plane connection | Execution remains local; `login`, governed `push`, and `report-break` make explicit HTTPS requests | Opt-in only. Artifact egress requires a verified derivative and trusted destination. | **Live beta; operated outside this repository.** |
 | Hosted execution | Runner/control-plane implementation is outside this engine repository | Engine installation alone does not move execution. | Consult the deployed service status and substrate matrix. |
 
 ## Components and data flows
@@ -61,8 +61,10 @@ The field-level PHI inventory is maintained in [`PRIVACY.md`](PRIVACY.md).
 - The on-prem audit index is SHA-256 hash-chained and detects ordinary edits or
   deletion. A local root user can recompute it. Use an append-only filesystem or
   customer-controlled WORM/SIEM export for stronger assurance.
-- Offline release signature verification and atomic blue/green update are the
-  target procedure, but the current `install.sh --update` apply path is a stub.
+- Offline release updates verify signed archives, install into a fresh
+  blue/green environment, run smoke and air-gap checks, and atomically switch
+  the active release. Rollback restores the recorded previous release. Signer
+  trust and customer-site rehearsal remain operator responsibilities.
 
 ## Model-assisted repair
 

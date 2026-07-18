@@ -59,12 +59,16 @@ python scripts/qualify_macos_textedit.py --trials 3 \
   --output /tmp/openadapt-macos-textedit-evidence.json
 ```
 
-The harness creates isolated `/tmp` documents in new TextEdit processes,
-performs three replace-and-save trials, verifies exact file bytes independently,
-requires an ambiguous two-window selector to halt without changing either file,
-then restores the previously frontmost application and removes its artifacts.
+The accepted candidate `b1b61a5` completed all three replace-and-save trials
+with exact file-byte effects and refused the ambiguous two-window selector
+without changing either file. Silent incorrect successes and over-halts were
+zero. The retained
+[evidence adjudication](../../benchmark/macos_native/textedit_counted_3plus1_b1b61a5_20260717.adjudication.json)
+preserves the original report and binds the accepted action/effect/refusal
+scope to one macOS 15.7.3 Apple Silicon host and TextEdit.
 
-Until those live trials pass, this implementation is not Beta evidence. It also
-makes no AX structural-resolution claim: AX is used for exact window focus and
-focused-text delivery, while target resolution remains on the existing visual
-ladder pending permissioned cross-application AX validation.
+AX is used for exact window focus and focused-text delivery. Target resolution
+uses the existing visual ladder unless the customer application's qualification
+adds structural AX evidence. Each additional application is accepted against
+its own selector uniqueness, permissions, effect oracle, and display/session
+conditions.

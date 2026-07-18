@@ -96,15 +96,24 @@ class BackendConfig(BaseModel):
     rdp_password: Optional[str] = None
     rdp_domain: Optional[str] = None
     rdp_port: int = 3389
+    #: A resolved coordinate/input lease older than this is refused. The backend
+    #: intentionally halts so the governed runtime can capture and re-resolve.
+    rdp_max_frame_age_s: float = Field(default=10.0, gt=0)
+    #: Optional text that must be OCR-visible on the CURRENT remote frame before
+    #: each input. Deployments use stable app chrome here to reject lock/login/
+    #: disconnect or wrong-application screens. None leaves the generic hook
+    #: unwired and is not suitable for a governed consequential RDP write.
+    rdp_readiness_text: Optional[str] = None
+    rdp_readiness_min_ratio: float = Field(default=0.85, ge=0.0, le=1.0)
 
     # -- rdp (local remote-display client window — the Citrix analog) --------
-    #: Owner-app substring of the local client WINDOW to drive (e.g.
-    #: ``"Citrix"`` / ``"Parallels"``). When set (and ``rdp_host`` is not), the
-    #: ``rdp`` backend captures and injects into that on-screen window instead
-    #: of opening a network RDP session (macOS host).
+    #: Exact case-insensitive owner-app name of the local client WINDOW to drive
+    #: (e.g. ``"Citrix Workspace"`` / ``"Parallels Desktop"``). When set (and
+    #: ``rdp_host`` is not), the backend captures and injects into that on-screen
+    #: window instead of opening a network RDP session (macOS host).
     rdp_window: Optional[str] = None
-    #: Optional window-title substring disambiguating multiple windows of the
-    #: same owner (used with ``rdp_window``).
+    #: Optional exact case-insensitive title. Zero or multiple exact matches are
+    #: refused; the backend never selects a largest partial match.
     rdp_window_title: Optional[str] = None
 
 

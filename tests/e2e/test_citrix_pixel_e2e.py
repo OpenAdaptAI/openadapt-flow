@@ -170,7 +170,9 @@ def test_citrix_pixel_only_record_replay_identity_verify_halt(tmp_path) -> None:
     if vm.status() != "running" or not _guest_ready(vm):
         pytest.skip("Parallels VM not running / guest tools unreachable")
 
-    backend = RemoteDisplayBackend(owner_substr="Parallels", title_substr=WINDOW_TITLE)
+    backend = RemoteDisplayBackend(
+        owner_substr="Parallels Desktop", title_substr=WINDOW_TITLE
+    )
     try:
         backend.ensure_foreground()
     except RemoteDisplayError as e:

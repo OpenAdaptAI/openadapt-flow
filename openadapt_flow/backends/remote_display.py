@@ -50,9 +50,10 @@ from __future__ import annotations
 
 import io
 import struct
+import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Protocol, runtime_checkable
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -264,10 +265,16 @@ class WindowClient(Protocol):
         """PID of the frontmost application, or None if unknown."""
         ...
 
-    def find_window(
-        self, owner_substr: str, title_substr: Optional[str]
-    ) -> Optional[WindowInfo]:
-        """Return the front-most on-screen window matching owner/title, or None."""
+    def find_windows(self, owner: str, title: Optional[str]) -> list[WindowInfo]:
+        """Return every exact owner/title match in window-server z-order."""
+        ...
+
+    def key_window_id(self, pid: int) -> Optional[int]:
+        """Return the front/key normal-window id for ``pid``, or None."""
+        ...
+
+    def window_at_point(self, x: float, y: float) -> Optional[int]:
+        """Return the topmost visible window id accepting a screen point."""
         ...
 
     def capture(self, window_id: int) -> tuple[bytes, int, int]:
@@ -307,28 +314,38 @@ class RemoteDisplayBackend:
     Args:
         client: The host-OS window client (real :class:`MacWindowClient` or a
             fake). Defaults to a live :class:`MacWindowClient`.
-        owner_substr: Case-insensitive substring of the window's owner app
-            (default ``"Parallels"`` — the VM window; set ``"Citrix"`` /
-            ``"Workspace"`` for a real ICA session).
-        title_substr: Optional case-insensitive substring of the window title,
-            to disambiguate multiple windows of the same owner.
+        owner_substr: Exact case-insensitive owner-app name (default
+            ``"Parallels Desktop"``; use the exact Citrix Workspace owner name
+            for a real ICA client).
+        title_substr: Optional exact case-insensitive window title. Zero or
+            multiple matches fail closed; the backend never picks the largest
+            result from a partial match.
         require_input_trust: When True (default) every input method raises if the
             process is not Accessibility-trusted, so a silently-dropped click can
             never masquerade as a completed action.
         activate_before_input: When True (default) raise the target app frontmost
             before each input burst so keystrokes route to it.
         settle_s: Seconds to pause after activating / between click edges.
+        max_frame_age_s: Maximum age of the captured frame whose pixel geometry
+            an input may use. Older coordinates are refused and must be
+            re-captured/re-resolved.
+        readiness_probe: Optional deployment-specific pixel predicate evaluated
+            before every input. Return False on a lock/login/disconnect or
+            unexpected application screen to fail closed. Generic client-window
+            capture cannot identify a remote session lock state portably.
     """
 
     def __init__(
         self,
         client: Optional[WindowClient] = None,
         *,
-        owner_substr: str = "Parallels",
+        owner_substr: str = "Parallels Desktop",
         title_substr: Optional[str] = None,
         require_input_trust: bool = True,
         activate_before_input: bool = True,
         settle_s: float = 0.03,
+        max_frame_age_s: float = 10.0,
+        readiness_probe: Optional[Callable[[bytes], bool]] = None,
     ) -> None:
         self._client = client if client is not None else MacWindowClient()
         self._owner_substr = owner_substr
@@ -336,9 +353,21 @@ class RemoteDisplayBackend:
         self._require_input_trust = require_input_trust
         self._activate_before_input = activate_before_input
         self._settle_s = settle_s
+        self._max_frame_age_s = float(max_frame_age_s)
+        if self._max_frame_age_s <= 0:
+            raise ValueError("max_frame_age_s must be positive")
+        self._readiness_probe = readiness_probe
         self._window: Optional[WindowInfo] = None
         self._viewport: Optional[tuple[int, int]] = None
         self._scale: float = 1.0
+        self._scale_x: float = 1.0
+        self._scale_y: float = 1.0
+        self._frame_window: Optional[WindowInfo] = None
+        self._last_frame_monotonic: Optional[float] = None
+        # Serialize capture/geometry validation with the entire input gesture;
+        # otherwise another thread can replace the frame lease between mouse
+        # down and up or between a key's down/up edges.
+        self._input_lock = threading.RLock()
 
     # -- window resolution ---------------------------------------------------
 
@@ -350,15 +379,23 @@ class RemoteDisplayBackend:
         """
         if self._window is not None and not refresh:
             return self._window
-        win = self._client.find_window(self._owner_substr, self._title_substr)
-        if win is None:
+        matches = self._client.find_windows(self._owner_substr, self._title_substr)
+        if not matches:
             raise RemoteDisplayError(
-                "no on-screen window matching owner "
+                "no window exactly matching owner "
                 f"{self._owner_substr!r} title {self._title_substr!r}; "
                 "is the remote-display client window open and visible?"
             )
-        self._window = win
-        return win
+        if len(matches) != 1:
+            identities = [
+                (w.window_id, w.pid, w.owner, w.title, w.bounds) for w in matches
+            ]
+            raise RemoteDisplayError(
+                "ambiguous remote-display target: expected one exact owner/title "
+                f"match, found {len(matches)}: {identities!r}"
+            )
+        self._window = matches[0]
+        return matches[0]
 
     def ensure_foreground(self, *, retries: int = 10, settle_s: float = 0.4) -> None:
         """Un-hide + activate the client window and wait until it is on screen.
@@ -371,16 +408,20 @@ class RemoteDisplayBackend:
         Raises:
             RemoteDisplayError: If the window never comes on screen.
         """
-        win = self._resolve_window(refresh=True)
-        for _ in range(max(1, retries)):
-            self._client.activate(win.pid)
-            time.sleep(settle_s)
+        with self._input_lock:
             win = self._resolve_window(refresh=True)
-            # on_screen alone is insufficient: a window occluded by another app
-            # is still "on screen", yet clicks would hit the occluder. Require
-            # the client app to be FRONTMOST (unoccluded) too.
-            if win.on_screen and self._client.frontmost_pid() == win.pid:
-                return
+            for _ in range(max(1, retries)):
+                self._client.activate(win.pid)
+                time.sleep(settle_s)
+                win = self._resolve_window(refresh=True)
+                # on_screen alone is insufficient: a window occluded by another
+                # app is still "on screen", yet clicks would hit the occluder.
+                if (
+                    win.on_screen
+                    and self._client.frontmost_pid() == win.pid
+                    and self._client.key_window_id(win.pid) == win.window_id
+                ):
+                    return
         raise RemoteDisplayError(
             f"client window {self._owner_substr!r}/{self._title_substr!r} "
             "did not come to the foreground (frontmost check failed)"
@@ -408,41 +449,72 @@ class RemoteDisplayBackend:
         Raises:
             RemoteDisplayError: If the window is gone or capture returns nothing.
         """
-        win = self._resolve_window()
-        try:
-            png, px_w, px_h = self._client.capture(win.window_id)
-        except RemoteDisplayError:
-            # The window id may be stale (window reopened); re-resolve once.
+        with self._input_lock:
+            # Refresh on every capture: a cached id/bounds is unsafe after the
+            # user moves, resizes, zooms, or reopens a remote-display window.
             win = self._resolve_window(refresh=True)
-            png, px_w, px_h = self._client.capture(win.window_id)
-        if not png or px_w <= 0 or px_h <= 0:
-            raise RemoteDisplayError("client-window capture returned no pixels")
-        # Validate and record the frame's true pixel size.
-        w, h = _png_size(png)
-        self._viewport = (w, h)
-        bounds_w = win.bounds[2] or float(w)
-        self._scale = (w / bounds_w) if bounds_w else 1.0
-        return png
+            try:
+                png, px_w, px_h = self._client.capture(win.window_id)
+            except RemoteDisplayError:
+                # The window id may be stale (window reopened); re-resolve once.
+                win = self._resolve_window(refresh=True)
+                png, px_w, px_h = self._client.capture(win.window_id)
+            if not png or px_w <= 0 or px_h <= 0:
+                raise RemoteDisplayError("client-window capture returned no pixels")
+            # Validate and record the frame's true pixel size.
+            w, h = _png_size(png)
+            if (w, h) != (int(px_w), int(px_h)):
+                raise RemoteDisplayError(
+                    f"capture metadata {(px_w, px_h)!r} disagrees with PNG {(w, h)!r}"
+                )
+            bounds_w, bounds_h = win.bounds[2], win.bounds[3]
+            if bounds_w <= 0 or bounds_h <= 0:
+                raise RemoteDisplayError(
+                    f"client window has invalid bounds {win.bounds!r}"
+                )
+            scale_x, scale_y = w / bounds_w, h / bounds_h
+            # One captured-pixel coordinate must map to one unambiguous screen
+            # point. Anisotropic scaling indicates chrome/crop/zoom geometry we
+            # have not calibrated; guessing would mis-target clicks.
+            if abs(scale_x - scale_y) > max(0.01, 0.01 * max(scale_x, scale_y)):
+                raise RemoteDisplayError(
+                    "captured frame and client bounds have inconsistent DPI scale "
+                    f"({scale_x:.4f}x vs {scale_y:.4f}y); refusing uncalibrated input"
+                )
+            self._viewport = (w, h)
+            self._scale_x, self._scale_y = scale_x, scale_y
+            self._scale = scale_x  # compatibility for existing diagnostics
+            self._frame_window = win
+            self._last_frame_monotonic = time.monotonic()
+            return png
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at captured-pixel coordinates (x, y)."""
-        sx, sy = self._to_screen(x, y)
-        self._ensure_input_ready()
-        self._client.mouse_move(sx, sy)
-        time.sleep(self._settle_s)
-        counts = 2 if double else 1
-        for i in range(counts):
-            self._client.mouse(sx, sy, button="left", down=True, click_count=i + 1)
+        with self._input_lock:
+            self._ensure_input_ready(point=(int(x), int(y)))
+            sx, sy = self._to_screen(int(x), int(y))
+            self._assert_click_target(sx, sy)
+            self._assert_frame_fresh()
+            self._client.mouse_move(sx, sy)
             time.sleep(self._settle_s)
-            self._client.mouse(sx, sy, button="left", down=False, click_count=i + 1)
-            time.sleep(self._settle_s)
+            counts = 2 if double else 1
+            for i in range(counts):
+                # Activation/focus and the move/settle call above can block.
+                # Revalidate immediately before every pointer-down edge.
+                self._assert_click_target(sx, sy)
+                self._assert_frame_fresh()
+                self._client.mouse(sx, sy, button="left", down=True, click_count=i + 1)
+                time.sleep(self._settle_s)
+                self._client.mouse(sx, sy, button="left", down=False, click_count=i + 1)
+                time.sleep(self._settle_s)
 
     def type_text(self, text: str) -> None:
         """Type ``text`` into the focused control (hardware-like key codes)."""
         if not text:
             return
-        self._ensure_input_ready()
-        self._client.type_chars(text)
+        with self._input_lock:
+            self._ensure_input_ready()
+            self._client.type_chars(text)
 
     def press(self, key: str) -> None:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``.
@@ -453,37 +525,39 @@ class RemoteDisplayBackend:
         latched (a stuck Ctrl silently corrupts the next input — a wrong action).
         """
         mods, final = _split_chord(key)
-        self._ensure_input_ready()
-        # A bare printable key with no modifiers: type it as a character.
-        if len(final) == 1 and not mods:
-            self._client.type_chars(final)
-            return
-        # Named key, or a modified key: resolve a key code (named table first,
-        # then the printable-character table so chords like Ctrl+A work).
-        code = _MAC_KEYCODES.get(final.lower())
-        shift = False
-        if code is None:
-            char = _CHAR_KEYCODES.get(final)
-            if char is not None:
-                code, shift = char
-        if code is None:
-            raise RemoteDisplayError(f"no key mapping for {final!r} in {key!r}")
-        flags = list(mods) + (["shift"] if shift else [])
-        try:
-            self._client.key(code, down=True, flags=flags)
-        finally:
-            self._client.key(code, down=False, flags=flags)
+        with self._input_lock:
+            self._ensure_input_ready()
+            # A bare printable key with no modifiers: type it as a character.
+            if len(final) == 1 and not mods:
+                self._client.type_chars(final)
+                return
+            # Named key, or a modified key: resolve a key code (named table first,
+            # then the printable-character table so chords like Ctrl+A work).
+            code = _MAC_KEYCODES.get(final.lower())
+            shift = False
+            if code is None:
+                char = _CHAR_KEYCODES.get(final)
+                if char is not None:
+                    code, shift = char
+            if code is None:
+                raise RemoteDisplayError(f"no key mapping for {final!r} in {key!r}")
+            flags = list(mods) + (["shift"] if shift else [])
+            try:
+                self._client.key(code, down=True, flags=flags)
+            finally:
+                self._client.key(code, down=False, flags=flags)
 
     def scroll(self, dx: int, dy: int) -> None:
         """Dispatch a wheel gesture by ``(dx, dy)`` pixels."""
         if dx == 0 and dy == 0:
             return
-        self._ensure_input_ready()
-        self._client.scroll(int(dx), int(dy))
+        with self._input_lock:
+            self._ensure_input_ready()
+            self._client.scroll(int(dx), int(dy))
 
     # -- internals -----------------------------------------------------------
 
-    def _ensure_input_ready(self) -> None:
+    def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
         """Fail LOUD if input can't actually be delivered; else focus the app.
 
         A silently-dropped synthetic event (Accessibility not granted) would let
@@ -499,20 +573,114 @@ class RemoteDisplayBackend:
                 "cannot be delivered (a dropped click must never look like "
                 "success)."
             )
+        if point is not None and self._last_frame_monotonic is None:
+            raise RemoteDisplayError(
+                "no captured frame lease for coordinate input; capture and resolve "
+                "the target before clicking"
+            )
         if self._activate_before_input:
-            win = self._resolve_window()
+            win = self._resolve_window(refresh=True)
             self._client.activate(win.pid)
             time.sleep(self._settle_s)
+        current = self._resolve_window(refresh=True)
+        if (
+            not current.on_screen
+            or self._client.frontmost_pid() != current.pid
+            or self._client.key_window_id(current.pid) != current.window_id
+        ):
+            raise RemoteDisplayError(
+                "the exact remote-display window is not visible, app-frontmost, "
+                "and keyboard-frontmost after activation; refusing input"
+            )
+        if self._last_frame_monotonic is None:
+            # Establish a frame lease for direct Backend callers. Once a lease
+            # exists, staleness fails closed so pixel coordinates are never
+            # silently refreshed without resolver involvement.
+            self.screenshot()
+            current = self._resolve_window(refresh=True)
+        assert self._last_frame_monotonic is not None
+        self._assert_frame_fresh()
+        assert self._frame_window is not None
+        lease = self._frame_window
+        if (
+            current.window_id != lease.window_id
+            or current.pid != lease.pid
+            or current.bounds != lease.bounds
+        ):
+            raise RemoteDisplayError(
+                "remote-display window identity or geometry changed since capture; "
+                "capture and re-resolve before input"
+            )
+        assert self._viewport is not None
+        if point is not None:
+            x, y = point
+            if not (0 <= x < self._viewport[0] and 0 <= y < self._viewport[1]):
+                raise RemoteDisplayError(
+                    f"input point {(x, y)!r} is outside captured frame "
+                    f"{self._viewport!r}"
+                )
+        if self._readiness_probe is not None:
+            # Check current pixels without replacing the resolver's coordinate
+            # lease. This detects a lock/disconnect that appears after capture
+            # while preserving the requirement to re-resolve before acting on
+            # changed content.
+            png, px_w, px_h = self._client.capture(current.window_id)
+            if _png_size(png) != self._viewport or (px_w, px_h) != self._viewport:
+                raise RemoteDisplayError(
+                    "remote-display dimensions changed during readiness check; "
+                    "capture and re-resolve before input"
+                )
+            if not self._readiness_probe(png):
+                raise RemoteDisplayError(
+                    "remote-display readiness probe rejected the current frame "
+                    "(locked, disconnected, or unexpected session); refusing input"
+                )
+        # Activation, window resolution, capture and readiness/OCR may all
+        # block. Re-resolve the exact window/key identity and age again at the
+        # last common point before input.
+        post = self._resolve_window(refresh=True)
+        if (
+            not post.on_screen
+            or self._client.frontmost_pid() != post.pid
+            or self._client.key_window_id(post.pid) != post.window_id
+            or post.window_id != lease.window_id
+            or post.pid != lease.pid
+            or post.bounds != lease.bounds
+        ):
+            raise RemoteDisplayError(
+                "remote-display window identity, key-window state, or geometry "
+                "changed during readiness validation; refusing input"
+            )
+        self._assert_frame_fresh()
+
+    def _assert_frame_fresh(self) -> None:
+        if self._last_frame_monotonic is None:
+            raise RemoteDisplayError("no captured frame lease")
+        age = time.monotonic() - self._last_frame_monotonic
+        if age > self._max_frame_age_s:
+            raise RemoteDisplayError(
+                f"remote-display frame is stale ({age:.3f}s > "
+                f"{self._max_frame_age_s:.3f}s); halting intentionally so the "
+                "runtime can capture, re-resolve, and re-check identity"
+            )
+
+    def _assert_click_target(self, sx: float, sy: float) -> None:
+        assert self._frame_window is not None
+        hit = self._client.window_at_point(sx, sy)
+        if hit != self._frame_window.window_id:
+            raise RemoteDisplayError(
+                f"screen point {(sx, sy)!r} is covered by window {hit!r}, not "
+                f"the leased remote-display window {self._frame_window.window_id}; "
+                "refusing a click that could hit an occluder"
+            )
 
     def _to_screen(self, px: int, py: int) -> tuple[float, float]:
         """Map a captured-pixel point to a screen point (for CGEvent)."""
-        win = self._resolve_window()
-        if self._viewport is None:
-            self.screenshot()
-            win = self._resolve_window()
-        scale = self._scale or 1.0
+        if self._frame_window is None or self._viewport is None:
+            raise RemoteDisplayError("no captured frame lease; capture before input")
+        win = self._frame_window
         ox, oy = win.bounds[0], win.bounds[1]
-        return (ox + px / scale, oy + py / scale)
+        return (ox + px / self._scale_x, oy + py / self._scale_y)
 
 
 # =============================================================================
@@ -574,23 +742,31 @@ class MacWindowClient:
         except Exception:  # noqa: BLE001
             return False
 
-    def find_windows(
-        self, owner_substr: str, title_substr: Optional[str]
-    ) -> list[WindowInfo]:
-        """Return every normal window matching owner/title, front to back."""
+    def find_windows(self, owner: str, title: Optional[str]) -> list[WindowInfo]:
+        """Return every exact owner/title match, front to back.
+
+        Both the native macOS and remote-display backends perform their own
+        uniqueness gate. Exact case-insensitive matching here keeps a broad
+        substring from silently expanding the candidate set between capture
+        and input while still tolerating harmless case variation.
+        """
         import Quartz
 
-        owner_l = owner_substr.lower()
-        title_l = title_substr.lower() if title_substr else None
+        owner_l = owner.casefold()
+        title_l = title.casefold() if title is not None else None
+        # kCGWindowListOptionAll (not OnScreenOnly): a remote-display client is
+        # sometimes momentarily HIDDEN (Cmd+H / focus loss) — we still need its
+        # pid to un-hide + foreground it, and CGWindowListCreateImage can capture
+        # a de-fronted window. on_screen is recorded so a caller can foreground.
         opts = Quartz.kCGWindowListOptionAll
         wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
         matches: list[WindowInfo] = []
         for w in wins or []:
-            owner = str(w.get("kCGWindowOwnerName", "") or "")
+            actual_owner = str(w.get("kCGWindowOwnerName", "") or "")
             name = str(w.get("kCGWindowName", "") or "")
-            if owner_l not in owner.lower():
+            if actual_owner.casefold() != owner_l:
                 continue
-            if title_l is not None and title_l not in name.lower():
+            if title_l is not None and name.casefold() != title_l:
                 continue
             if int(w.get("kCGWindowLayer", 0) or 0) != 0:
                 continue
@@ -608,7 +784,7 @@ class MacWindowClient:
             matches.append(
                 WindowInfo(
                     window_id=window_id,
-                    owner=owner,
+                    owner=actual_owner,
                     title=name,
                     pid=pid,
                     bounds=bounds,
@@ -617,21 +793,41 @@ class MacWindowClient:
             )
         return matches
 
-    def find_window(
-        self, owner_substr: str, title_substr: Optional[str]
-    ) -> Optional[WindowInfo]:
-        # kCGWindowListOptionAll (not OnScreenOnly): a remote-display client is
-        # sometimes momentarily HIDDEN (Cmd+H / focus loss) — we still need its
-        # pid to un-hide + foreground it, and CGWindowListCreateImage can capture
-        # a de-fronted window. on_screen is recorded so a caller can foreground.
+    def find_window(self, owner: str, title: Optional[str]) -> Optional[WindowInfo]:
+        """Compatibility helper over the exact, ambiguity-visible candidate API."""
         best: Optional[WindowInfo] = None
         best_area = -1.0
-        for window in self.find_windows(owner_substr, title_substr):
+        for window in self.find_windows(owner, title):
             area = window.bounds[2] * window.bounds[3]
             if area > best_area:
                 best_area = area
                 best = window
         return best
+
+    def key_window_id(self, pid: int) -> Optional[int]:
+        """Best public window-server proxy for an app's keyboard/key window.
+
+        CoreGraphics returns on-screen windows front-to-back. The first normal
+        layer window owned by the frontmost app is the only window we admit for
+        keyboard input; multiple same-process windows therefore cannot be
+        confused by merely checking the PID.
+        """
+        import Quartz
+
+        wins = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID
+        )
+        for w in wins or []:
+            if int(w.get("kCGWindowLayer", 0) or 0) != 0:
+                continue
+            if int(w.get("kCGWindowOwnerPID", 0) or 0) != int(pid):
+                continue
+            return int(w.get("kCGWindowNumber", 0) or 0) or None
+        return None
+
+    def window_at_point(self, x: float, y: float) -> Optional[int]:
+        """Return the topmost visible window accepting a screen point."""
+        return self.window_id_at_point(x, y)
 
     def frontmost_window_id(self) -> Optional[int]:
         """ID of the topmost on-screen normal window, or None if unknown."""

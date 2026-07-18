@@ -138,6 +138,7 @@ def _build_rdp_backend(
     """
     has_host = bool(cfg.rdp_host)
     has_window = bool(cfg.rdp_window)
+    readiness_probe = _build_rdp_readiness_probe(cfg)
 
     if rdp_transport is not None or has_host:
         from openadapt_flow.backends.rdp_backend import FreeRDPBackend
@@ -153,7 +154,11 @@ def _build_rdp_backend(
                 domain=cfg.rdp_domain,
                 port=cfg.rdp_port,
             )
-        return FreeRDPBackend(transport)
+        return FreeRDPBackend(
+            transport,
+            max_frame_age_s=cfg.rdp_max_frame_age_s,
+            readiness_probe=readiness_probe,
+        )
 
     if window_client is not None or has_window:
         from openadapt_flow.backends.remote_display import RemoteDisplayBackend
@@ -163,6 +168,8 @@ def _build_rdp_backend(
             kwargs["owner_substr"] = cfg.rdp_window
         if cfg.rdp_window_title:
             kwargs["title_substr"] = cfg.rdp_window_title
+        kwargs["max_frame_age_s"] = cfg.rdp_max_frame_age_s
+        kwargs["readiness_probe"] = readiness_probe
         return RemoteDisplayBackend(window_client, **kwargs)
 
     raise ValueError(
@@ -170,3 +177,27 @@ def _build_rdp_backend(
         "--rdp-host 10.0.0.5) or backend.rdp_window (a local remote-display "
         "client window, e.g. a Citrix/Parallels window title)"
     )
+
+
+def _build_rdp_readiness_probe(cfg: "BackendConfig"):
+    """Build the configured current-frame OCR readiness predicate.
+
+    The import stays lazy with the backend factory. A stable deployment-level
+    text marker (for example application chrome) is intentionally distinct from
+    target resolution: it is a coarse lock/login/disconnect/wrong-app refusal.
+    """
+    expected = (cfg.rdp_readiness_text or "").strip()
+    if not expected:
+        return None
+
+    def _probe(png: bytes) -> bool:
+        from openadapt_flow import vision
+
+        return (
+            vision.find_text(
+                png, expected, min_ratio=float(cfg.rdp_readiness_min_ratio)
+            )
+            is not None
+        )
+
+    return _probe

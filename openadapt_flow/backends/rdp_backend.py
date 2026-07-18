@@ -26,6 +26,11 @@ and the RDP library stays replaceable):
   ``rdp`` extra (``pip install 'openadapt-flow[rdp]'``); importing this module
   never imports aardwolf.
 
+``press`` additionally detects an optional ``supports_physical_key`` /
+``physical_key`` transport seam. Aardwolf implements it with layout-bound
+scancodes because Unicode text events cannot participate in physical Windows
+shortcuts; ``type_text`` deliberately stays on the Unicode ``key`` path.
+
 Coordinate space: the backend works entirely in **framebuffer pixels** — the
 same pixels the resolver emits and the same pixels :meth:`screenshot` encodes,
 because both come from :meth:`RDPTransport.framebuffer`. A transport that
@@ -45,7 +50,9 @@ docs/LIMITS.md). This mirrors how WindowsBackend omits StructuralBackend.
 from __future__ import annotations
 
 import io
-from typing import Optional, Protocol, Union, runtime_checkable
+import threading
+import time
+from typing import Callable, Optional, Protocol, Union, runtime_checkable
 
 from PIL import Image
 
@@ -191,6 +198,14 @@ class FreeRDPBackend:
             derived once from the first framebuffer and cached.
         connect: When True (default) connect the transport on construction.
             Pass False if the caller manages the transport lifecycle.
+        max_frame_age_s: Maximum age of the screenshot that established an
+            action's coordinate/session context. A stale frame is refused
+            instead of sending input into a desktop that may have changed.
+        readiness_probe: Optional deployment-specific pixel predicate. It is
+            evaluated on the last screenshot before every input and should
+            return False for lock/login/disconnect or unexpected-app screens.
+            Generic RDP has no portable structured lock-state signal, so a
+            consequential deployment should supply this fail-closed hook.
     """
 
     def __init__(
@@ -199,9 +214,20 @@ class FreeRDPBackend:
         *,
         viewport: Optional[tuple[int, int]] = None,
         connect: bool = True,
+        max_frame_age_s: float = 10.0,
+        readiness_probe: Optional[Callable[[bytes], bool]] = None,
     ) -> None:
         self._transport = transport
         self._viewport = viewport
+        self._max_frame_age_s = float(max_frame_age_s)
+        if self._max_frame_age_s <= 0:
+            raise ValueError("max_frame_age_s must be positive")
+        self._readiness_probe = readiness_probe
+        self._last_frame_monotonic: Optional[float] = None
+        # Keep capture/geometry validation and a complete input gesture in one
+        # critical section. A concurrent screenshot may otherwise replace the
+        # coordinate lease between pointer-down and pointer-up.
+        self._input_lock = threading.RLock()
         if connect:
             self._transport.connect()
 
@@ -227,14 +253,17 @@ class FreeRDPBackend:
         Raises:
             RuntimeError: If the transport hands back nothing usable.
         """
-        frame, w, h = self._transport.framebuffer()
-        img = self._to_image(frame, int(w), int(h))
-        # Cache the viewport from the frame we actually encoded, so viewport
-        # and screenshot can never disagree.
-        self._viewport = img.size
-        buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="PNG")
-        return buf.getvalue()
+        with self._input_lock:
+            frame, w, h = self._transport.framebuffer()
+            img = self._to_image(frame, int(w), int(h))
+            # Cache the viewport from the frame we actually encoded, so viewport
+            # and screenshot can never disagree.
+            self._viewport = img.size
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="PNG")
+            png = buf.getvalue()
+            self._last_frame_monotonic = time.monotonic()
+            return png
 
     def wait_first_frame(self, *, retries: int = 20, settle_s: float = 0.25) -> bytes:
         """Poll :meth:`screenshot` until a non-blank frame, returning its PNG.
@@ -270,10 +299,13 @@ class FreeRDPBackend:
         A single click is a pointer down then up at (x, y); a double click is
         that press/release sequence sent twice.
         """
-        presses = 2 if double else 1
-        for _ in range(presses):
-            self._transport.pointer(int(x), int(y), "left", True)
-            self._transport.pointer(int(x), int(y), "left", False)
+        with self._input_lock:
+            self._ensure_input_ready(point=(int(x), int(y)))
+            presses = 2 if double else 1
+            for _ in range(presses):
+                self._assert_frame_fresh()
+                self._transport.pointer(int(x), int(y), "left", True)
+                self._transport.pointer(int(x), int(y), "left", False)
 
     def type_text(self, text: str) -> None:
         """Type text into the focused control, one key down/up per character.
@@ -285,11 +317,15 @@ class FreeRDPBackend:
         a modifier). Releasing a key that never actually registered is a
         harmless no-op on the target, so the guarantee costs nothing.
         """
-        for ch in text:
-            try:
-                self._transport.key(ch, True)
-            finally:
-                self._release_keys((ch,))
+        if not text:
+            return
+        with self._input_lock:
+            self._ensure_input_ready()
+            for ch in text:
+                try:
+                    self._transport.key(ch, True)
+                finally:
+                    self._release_keys((ch,))
 
     def press(self, key: str) -> None:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``.
@@ -308,20 +344,45 @@ class FreeRDPBackend:
         released; a redundant release is a no-op on the target.
         """
         parts = normalize_chord(key)
-        pressed: list[str] = []
-        try:
-            for part in parts:
-                pressed.append(part)
-                self._transport.key(part, True)
-        finally:
-            self._release_keys(reversed(pressed))
+        with self._input_lock:
+            # Printable characters sent through Aardwolf's Unicode path cannot
+            # participate in physical shortcuts (Win+R, Ctrl+A, and similar).
+            # A transport may therefore expose a separate physical-key seam
+            # for press/chord only. Plain transports retain the original key()
+            # behavior, and type_text() always remains on key()/Unicode.
+            physical_key = getattr(self._transport, "physical_key", None)
+            supports_physical_key = getattr(
+                self._transport, "supports_physical_key", None
+            )
+            if callable(physical_key) and callable(supports_physical_key):
+                unsupported = [
+                    part for part in parts if not supports_physical_key(part)
+                ]
+                if unsupported:
+                    raise ValueError(
+                        "RDP transport cannot safely emit physical chord keys: "
+                        f"{unsupported!r}"
+                    )
+                sender = physical_key
+            else:
+                sender = self._transport.key
+            self._ensure_input_ready()
+            pressed: list[str] = []
+            try:
+                for part in parts:
+                    pressed.append(part)
+                    sender(part, True)
+            finally:
+                self._release_keys(reversed(pressed), sender=sender)
 
-    def _release_keys(self, parts) -> None:
+    def _release_keys(self, parts, *, sender=None) -> None:
         """Release each key token, best-effort: one failing release never
         blocks the others and never masks an in-flight exception."""
+        if sender is None:
+            sender = self._transport.key
         for part in parts:
             try:
-                self._transport.key(part, False)
+                sender(part, False)
             except Exception:  # noqa: BLE001 - release is best-effort teardown
                 pass
 
@@ -338,7 +399,9 @@ class FreeRDPBackend:
         """
         if dx == 0 and dy == 0:
             return
-        self._transport.wheel(int(dx), int(dy))
+        with self._input_lock:
+            self._ensure_input_ready()
+            self._transport.wheel(int(dx), int(dy))
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -347,6 +410,67 @@ class FreeRDPBackend:
         self._transport.disconnect()
 
     # -- internals -----------------------------------------------------------
+
+    def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
+        """Validate the frame lease, dimensions, bounds and readiness hook.
+
+        The resolver acts on screenshot pixels. Sending those coordinates after
+        the frame ages out or the negotiated desktop size changes risks a
+        silent wrong-target action, so both conditions fail closed and force a
+        new screenshot/resolution cycle.
+        """
+        if self._last_frame_monotonic is None and point is not None:
+            raise RuntimeError(
+                "no captured RDP frame lease for coordinate input; capture and "
+                "resolve the target before clicking"
+            )
+        if self._last_frame_monotonic is None:
+            # Keyboard/wheel callers still need a current session-readiness
+            # lease even though they do not carry screenshot coordinates.
+            self.screenshot()
+        self._assert_frame_fresh()
+
+        frame, w, h = self._transport.framebuffer()
+        current = (int(w), int(h))
+        if current[0] <= 0 or current[1] <= 0:
+            raise RuntimeError(f"RDP framebuffer has invalid dimensions {current!r}")
+        if self._viewport != current:
+            raise RuntimeError(
+                f"RDP framebuffer changed from {self._viewport!r} to {current!r}; "
+                "capture and re-resolve before sending input"
+            )
+        if point is not None:
+            x, y = point
+            if not (0 <= x < current[0] and 0 <= y < current[1]):
+                raise RuntimeError(
+                    f"RDP input point {(x, y)!r} is outside framebuffer {current!r}"
+                )
+        if self._readiness_probe is not None:
+            # Evaluate readiness on the current framebuffer, not merely the
+            # resolver's leased image: a lock/disconnect can appear while the
+            # dimensions stay unchanged.
+            current_img = self._to_image(frame, current[0], current[1])
+            buf = io.BytesIO()
+            current_img.convert("RGB").save(buf, format="PNG")
+            if not self._readiness_probe(buf.getvalue()):
+                raise RuntimeError(
+                    "RDP readiness probe rejected the current frame "
+                    "(locked, disconnected, or unexpected session); refusing input"
+                )
+        # framebuffer/readiness work can block on the network; recheck at the
+        # last common point before an input edge.
+        self._assert_frame_fresh()
+
+    def _assert_frame_fresh(self) -> None:
+        if self._last_frame_monotonic is None:
+            raise RuntimeError("no captured RDP frame lease")
+        age = time.monotonic() - self._last_frame_monotonic
+        if age > self._max_frame_age_s:
+            raise RuntimeError(
+                f"RDP frame is stale ({age:.3f}s > {self._max_frame_age_s:.3f}s); "
+                "halting intentionally so the runtime can capture, re-resolve, "
+                "and re-check identity"
+            )
 
     @staticmethod
     def _to_image(frame: Union["Image.Image", bytes], w: int, h: int) -> Image.Image:
@@ -418,6 +542,9 @@ class AardwolfTransport:
         height: Requested remote desktop height (framebuffer height).
         connect_timeout_s: Seconds to wait for the session + first frame.
         op_timeout_s: Per-operation timeout for input/framebuffer calls.
+        keyboard_layout: Aardwolf keyboard-layout short name used to resolve
+            physical shortcut scancodes (default ``enus``).
+        keyboard_layout_id: RDP handshake layout id (default 1033 / en-US).
     """
 
     def __init__(
@@ -428,12 +555,17 @@ class AardwolfTransport:
         height: int = 800,
         connect_timeout_s: float = 30.0,
         op_timeout_s: float = 10.0,
+        keyboard_layout: str = "enus",
+        keyboard_layout_id: int = 1033,
     ) -> None:
         self._url = url
         self._width = int(width)
         self._height = int(height)
         self._connect_timeout_s = connect_timeout_s
         self._op_timeout_s = op_timeout_s
+        self._keyboard_layout = keyboard_layout
+        self._keyboard_layout_id = int(keyboard_layout_id)
+        self._physical_keyboard_layout = None
         self._loop = None
         self._thread = None
         self._conn = None
@@ -510,6 +642,23 @@ class AardwolfTransport:
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result(timeout)
 
+    @staticmethod
+    def _raise_embedded_error(result: object, operation: str) -> object:
+        """Raise errors Aardwolf returns as ``(value, error)`` receipts.
+
+        Several Aardwolf input methods catch their own exceptions and return
+        ``(None, exc)``. Treating that tuple as success would let the backend
+        report an input gesture as delivered when the wire write failed.
+        Successful methods are inconsistent (``None``, ``(True, None)``, or a
+        value), so only a non-null second tuple member is an error.
+        """
+        if isinstance(result, tuple) and len(result) == 2 and result[1] is not None:
+            error = result[1]
+            if isinstance(error, BaseException):
+                raise error
+            raise RuntimeError(f"Aardwolf {operation} failed: {error!r}")
+        return result
+
     # -- RDPTransport --------------------------------------------------------
 
     def connect(self) -> None:
@@ -528,6 +677,11 @@ class AardwolfTransport:
         iosettings.video_out_format = VIDEO_FORMAT.PIL
         iosettings.video_bpp_min = 15
         iosettings.video_bpp_max = 32
+        # Bind physical shortcut resolution and the RDP handshake to an
+        # explicit, configurable keyboard layout. The qualification VM uses
+        # the default en-US handshake id (1033).
+        iosettings.client_keyboard = self._keyboard_layout
+        iosettings.keyboard_layout = self._keyboard_layout_id
 
         async def _connect():
             factory = RDPConnectionFactory.from_url(self._url, iosettings)
@@ -583,7 +737,20 @@ class AardwolfTransport:
 
         if self._conn is None:
             raise RuntimeError("transport not connected")
-        img = self._conn.get_desktop_buffer(VIDEO_FORMAT.PIL)
+        conn = self._conn
+
+        async def _snapshot():
+            # Aardwolf's decoder mutates its PIL desktop buffer on this same
+            # event-loop thread. Deep-copying it from the caller thread can
+            # tear a frame while a bitmap update is being pasted.
+            snapshot = conn.get_desktop_buffer(VIDEO_FORMAT.PIL)
+            # Current Aardwolf returns a deep copy, but detach explicitly on
+            # the decoder thread so a future implementation cannot hand the
+            # caller its still-mutable internal PIL image.
+            return snapshot.copy() if isinstance(snapshot, Image.Image) else snapshot
+
+        result = self._run(_snapshot(), self._op_timeout_s)
+        img = self._raise_embedded_error(result, "framebuffer snapshot")
         if not isinstance(img, Image.Image):
             raise RuntimeError("aardwolf returned no desktop buffer")
         return img, img.width, img.height
@@ -600,10 +767,11 @@ class AardwolfTransport:
             raise RuntimeError("transport not connected")
         # Remember where the pointer is so wheel() can dispatch under it.
         self._last_pointer = (int(x), int(y))
-        self._run(
+        result = self._run(
             self._conn.send_mouse(btn, int(x), int(y), bool(down)),
             self._op_timeout_s,
         )
+        self._raise_embedded_error(result, "pointer input")
 
     def key(self, keysym_or_char: str, down: bool) -> None:
         if self._conn is None:
@@ -611,17 +779,92 @@ class AardwolfTransport:
         vk = _AARDWOLF_VK.get(keysym_or_char)
         if vk is not None:
             vk_name, is_extended = vk
-            self._run(
+            result = self._run(
                 self._conn.send_key_virtualkey(vk_name, bool(down), is_extended),
                 self._op_timeout_s,
             )
+            self._raise_embedded_error(result, "virtual-key input")
             return
         # A single printable character: let aardwolf resolve scancode+shift.
         for ch in keysym_or_char:
-            self._run(
+            result = self._run(
                 self._conn.send_key_char(ch, bool(down)),
                 self._op_timeout_s,
             )
+            self._raise_embedded_error(result, "character input")
+
+    def supports_physical_key(self, keysym_or_char: str) -> bool:
+        """Return whether ``physical_key`` can emit this normalized token."""
+        try:
+            self._physical_scancode(keysym_or_char)
+            return True
+        except ValueError:
+            return False
+
+    def _physical_scancode(self, keysym_or_char: str) -> int:
+        """Resolve one normalized chord token without sending any input."""
+        if keysym_or_char not in _AARDWOLF_VK and not (
+            len(keysym_or_char) == 1
+            and keysym_or_char.isascii()
+            and keysym_or_char.isalnum()
+        ):
+            raise ValueError(f"unsupported physical RDP chord key: {keysym_or_char!r}")
+
+        from aardwolf.keyboard import VK_MODIFIERS
+        from aardwolf.keyboard.layoutmanager import KeyboardLayoutManager
+
+        layout = self._physical_keyboard_layout
+        if layout is None:
+            layout = KeyboardLayoutManager().get_layout_by_shortname(
+                self._keyboard_layout
+            )
+            self._physical_keyboard_layout = layout
+        if layout is None:
+            raise ValueError(
+                f"unknown Aardwolf keyboard layout: {self._keyboard_layout!r}"
+            )
+        if keysym_or_char in _AARDWOLF_VK:
+            vk_name, _legacy_extended = _AARDWOLF_VK[keysym_or_char]
+            try:
+                scancode = layout.vk_to_scancode(vk_name)
+            except KeyError as exc:
+                raise ValueError(
+                    f"keyboard layout {self._keyboard_layout!r} has no {vk_name}"
+                ) from exc
+        else:
+            try:
+                scancode, modifiers = layout.char_to_scancode(keysym_or_char)
+            except KeyError as exc:
+                raise ValueError(
+                    "keyboard layout cannot resolve physical chord key "
+                    f"{keysym_or_char!r}"
+                ) from exc
+            if modifiers != VK_MODIFIERS(0):
+                raise ValueError(
+                    "physical chord key requires implicit modifiers: "
+                    f"{keysym_or_char!r} -> {modifiers!r}"
+                )
+        return int(scancode)
+
+    def physical_key(self, keysym_or_char: str, down: bool) -> None:
+        """Send a physical scancode for a key used by ``Backend.press``.
+
+        This path is deliberately separate from :meth:`key`: text entry keeps
+        Aardwolf's Unicode events, while shortcuts require every chord member
+        to be a physical key. Printable chord members are limited to ASCII
+        alphanumerics with no layout modifier requirement; ambiguous symbols
+        fail before any input is sent.
+        """
+        if self._conn is None:
+            raise RuntimeError("transport not connected")
+        scancode = self._physical_scancode(keysym_or_char)
+
+        is_extended = scancode > 57000
+        result = self._run(
+            self._conn.send_key_scancode(scancode, bool(down), is_extended),
+            self._op_timeout_s,
+        )
+        self._raise_embedded_error(result, "physical scancode input")
 
     def wheel(self, dx: int, dy: int) -> None:
         """Send a wheel gesture, dispatched under the last pointer position.
@@ -668,7 +911,8 @@ class AardwolfTransport:
             x, y = self._last_pointer
         else:
             x, y = self._width // 2, self._height // 2
-        self._run(
+        result = self._run(
             self._conn.send_mouse(btn, x, y, False, steps),
             self._op_timeout_s,
         )
+        self._raise_embedded_error(result, "wheel input")

@@ -18,6 +18,37 @@ def _window() -> WindowInfo:
     return WindowInfo(41, "TextEdit", "oa-trial.txt", 9001, (0, 0, 400, 300))
 
 
+def test_find_windows_requires_exact_case_insensitive_identity(monkeypatch) -> None:
+    quartz = types.ModuleType("Quartz")
+    quartz.kCGWindowListOptionAll = 1
+    quartz.kCGNullWindowID = 0
+    quartz.CGWindowListCopyWindowInfo = lambda _opts, _window_id: [
+        {
+            "kCGWindowNumber": 41,
+            "kCGWindowOwnerPID": 9001,
+            "kCGWindowOwnerName": "TEXTEDIT",
+            "kCGWindowName": "OA-TRIAL.TXT",
+            "kCGWindowLayer": 0,
+            "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 400, "Height": 300},
+            "kCGWindowIsOnscreen": True,
+        },
+        {
+            "kCGWindowNumber": 42,
+            "kCGWindowOwnerPID": 9002,
+            "kCGWindowOwnerName": "TextEdit Helper",
+            "kCGWindowName": "oa-trial.txt",
+            "kCGWindowLayer": 0,
+            "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 400, "Height": 300},
+            "kCGWindowIsOnscreen": True,
+        },
+    ]
+    monkeypatch.setitem(sys.modules, "Quartz", quartz)
+
+    matches = MacWindowClient().find_windows("TextEdit", "oa-trial.txt")
+
+    assert [window.window_id for window in matches] == [41]
+
+
 def test_activate_uses_source_aware_appkit_handoff(monkeypatch) -> None:
     calls: list[tuple] = []
 

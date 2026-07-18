@@ -43,6 +43,8 @@ class FakeClient:
         frontmost: bool = True,
         window: WindowInfo | None = None,
         px: tuple[int, int] = (3024, 1888),
+        key_window_id: int | None = None,
+        hit_window_id: int | None = None,
     ) -> None:
         self.trusted = trusted
         self._frontmost = frontmost
@@ -59,6 +61,9 @@ class FakeClient:
                 on_screen=True,
             )
         )
+        self.windows = [self.window]
+        self._key_window_id = key_window_id
+        self._hit_window_id = hit_window_id
         self.calls: list[tuple] = []
 
     def input_trusted(self) -> bool:
@@ -67,8 +72,21 @@ class FakeClient:
     def frontmost_pid(self):
         return self.window.pid if self._frontmost else 7
 
-    def find_window(self, owner, title):
-        return self.window
+    def find_windows(self, owner, title):
+        return [
+            win
+            for win in self.windows
+            if win.owner.casefold() == owner.casefold()
+            and (title is None or win.title.casefold() == title.casefold())
+        ]
+
+    def key_window_id(self, pid):
+        if not self._frontmost:
+            return None
+        return self._key_window_id or self.window.window_id
+
+    def window_at_point(self, x, y):
+        return self._hit_window_id or self.window.window_id
 
     def capture(self, window_id):
         img = Image.new("RGB", self.px, (11, 22, 33))
@@ -131,14 +149,177 @@ def test_screenshot_returns_png() -> None:
 def test_click_maps_captured_pixels_to_screen_points() -> None:
     """captured (px) -> origin + px/scale. Window at (0,38), scale 2.0."""
     backend, client = _backend()
+    backend.screenshot()
     backend.click(1000, 500)
     downs = [c for c in client.calls if c[0] == "mouse" and c[4] is True]
     assert downs and downs[0][1] == pytest.approx(500.0)  # 0 + 1000/2
     assert downs[0][2] == pytest.approx(288.0)  # 38 + 500/2
 
 
+def test_click_refuses_point_outside_captured_frame() -> None:
+    backend, client = _backend()
+    backend.screenshot()
+    with pytest.raises(RemoteDisplayError, match="outside captured frame"):
+        backend.click(client.px[0], 20)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_click_refuses_stale_frame_lease(monkeypatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr(
+        "openadapt_flow.backends.remote_display.time.monotonic",
+        lambda: now["value"],
+    )
+    client = FakeClient()
+    backend = RemoteDisplayBackend(client=client, settle_s=0.0, max_frame_age_s=1.0)
+    backend.screenshot()
+    now["value"] = 101.01
+    with pytest.raises(RemoteDisplayError, match="frame is stale"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_click_refuses_window_move_after_capture() -> None:
+    backend, client = _backend()
+    backend.screenshot()
+    old = client.window
+    client.window = WindowInfo(
+        window_id=old.window_id,
+        owner=old.owner,
+        title=old.title,
+        pid=old.pid,
+        bounds=(old.bounds[0] + 80.0, *old.bounds[1:]),
+        on_screen=True,
+    )
+    client.windows = [client.window]
+    with pytest.raises(RemoteDisplayError, match="geometry changed"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_input_requires_frontmost_after_activation() -> None:
+    backend, client = _backend(frontmost=False)
+    backend.screenshot()
+    with pytest.raises(RemoteDisplayError, match="not visible, app-frontmost"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_capture_refuses_uncalibrated_anisotropic_dpi() -> None:
+    backend, _ = _backend(px=(2800, 1888))
+    with pytest.raises(RemoteDisplayError, match="inconsistent DPI scale"):
+        backend.screenshot()
+
+
+def test_readiness_probe_refuses_locked_or_unexpected_session() -> None:
+    client = FakeClient()
+    backend = RemoteDisplayBackend(
+        client=client,
+        settle_s=0.0,
+        readiness_probe=lambda _png: False,
+    )
+    backend.screenshot()
+    with pytest.raises(RemoteDisplayError, match="readiness probe rejected"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_coordinate_click_requires_prior_frame_lease() -> None:
+    backend, client = _backend()
+    with pytest.raises(RemoteDisplayError, match="no captured frame lease"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_duplicate_exact_windows_refused_instead_of_largest_selection() -> None:
+    backend, client = _backend()
+    old = client.window
+    client.windows.append(
+        WindowInfo(
+            window_id=2,
+            owner=old.owner,
+            title=old.title,
+            pid=old.pid,
+            bounds=(20.0, 58.0, 900.0, 700.0),
+            on_screen=True,
+        )
+    )
+    with pytest.raises(RemoteDisplayError, match="ambiguous remote-display target"):
+        backend.screenshot()
+
+
+def test_partial_owner_match_is_not_accepted() -> None:
+    client = FakeClient()
+    backend = RemoteDisplayBackend(
+        client=client, owner_substr="Parallels", settle_s=0.0
+    )
+    with pytest.raises(RemoteDisplayError, match="no window exactly matching"):
+        backend.screenshot()
+
+
+def test_same_pid_front_window_mismatch_refuses_keyboard_and_click() -> None:
+    backend, client = _backend(key_window_id=2)
+    backend.screenshot()
+    with pytest.raises(RemoteDisplayError, match="keyboard-frontmost"):
+        backend.click(100, 100)
+    with pytest.raises(RemoteDisplayError, match="keyboard-frontmost"):
+        backend.type_text("x")
+    assert not any(c[0] in {"mouse", "type"} for c in client.calls)
+
+
+def test_click_point_occluded_by_other_window_is_refused() -> None:
+    backend, client = _backend(hit_window_id=2)
+    backend.screenshot()
+    with pytest.raises(RemoteDisplayError, match="covered by window 2"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_frame_age_rechecked_after_blocking_readiness(monkeypatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr(
+        "openadapt_flow.backends.remote_display.time.monotonic",
+        lambda: now["value"],
+    )
+
+    def slow_probe(_png):
+        now["value"] = 102.0
+        return True
+
+    client = FakeClient()
+    backend = RemoteDisplayBackend(
+        client=client,
+        settle_s=0.0,
+        max_frame_age_s=1.0,
+        readiness_probe=slow_probe,
+    )
+    backend.screenshot()
+    with pytest.raises(RemoteDisplayError, match="frame is stale"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
+def test_key_window_rechecked_after_blocking_readiness() -> None:
+    client = FakeClient()
+
+    def focus_changing_probe(_png):
+        client._key_window_id = 2
+        return True
+
+    backend = RemoteDisplayBackend(
+        client=client,
+        settle_s=0.0,
+        readiness_probe=focus_changing_probe,
+    )
+    backend.screenshot()
+    with pytest.raises(RemoteDisplayError, match="changed during readiness"):
+        backend.click(100, 100)
+    assert not any(c[0] == "mouse" for c in client.calls)
+
+
 def test_double_click_click_state() -> None:
     backend, client = _backend()
+    backend.screenshot()
     backend.click(200, 200, double=True)
     click_states = [c[5] for c in client.calls if c[0] == "mouse" and c[4] is True]
     assert click_states == [1, 2]
@@ -208,11 +389,11 @@ def test_require_input_trust_can_be_disabled_for_capture_only() -> None:
 
 def test_window_not_found_raises() -> None:
     class NoWindow(FakeClient):
-        def find_window(self, owner, title):
-            return None
+        def find_windows(self, owner, title):
+            return []
 
     backend = RemoteDisplayBackend(client=NoWindow(), settle_s=0.0)
-    with pytest.raises(RemoteDisplayError, match="no on-screen window"):
+    with pytest.raises(RemoteDisplayError, match="no window exactly matching"):
         backend.screenshot()
 
 

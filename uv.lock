@@ -2278,7 +2278,7 @@ windows = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aardwolf", marker = "extra == 'rdp'", specifier = ">=0.2.13" },
+    { name = "aardwolf", marker = "extra == 'rdp'", specifier = "==0.2.14" },
     { name = "anthropic", marker = "extra == 'dev'", specifier = ">=0.40" },
     { name = "anthropic", marker = "extra == 'grounder'", specifier = ">=0.40" },
     { name = "click", marker = "extra == 'privacy'", specifier = ">=8.0,<9" },

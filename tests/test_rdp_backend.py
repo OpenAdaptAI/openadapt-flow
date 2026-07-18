@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 
 import cv2
 import numpy as np
@@ -341,6 +342,7 @@ def test_viewport_override(transport: FakeRDPTransport) -> None:
 def test_click_sends_pointer_down_then_up(
     transport: FakeRDPTransport, backend: FreeRDPBackend
 ) -> None:
+    backend.screenshot()
     backend.click(10, 20)
     assert transport.pointer_events == [
         (10, 20, "left", True),
@@ -351,6 +353,7 @@ def test_click_sends_pointer_down_then_up(
 def test_double_click_sends_sequence_twice(
     transport: FakeRDPTransport, backend: FreeRDPBackend
 ) -> None:
+    backend.screenshot()
     backend.click(30, 40, double=True)
     assert transport.pointer_events == [
         (30, 40, "left", True),
@@ -363,9 +366,80 @@ def test_double_click_sends_sequence_twice(
 def test_click_coordinates_pass_through(
     transport: FakeRDPTransport, backend: FreeRDPBackend
 ) -> None:
+    backend.screenshot()
     backend.click(*BUTTON_CENTER)
     xs = {(x, y) for (x, y, _b, _d) in transport.pointer_events}
     assert xs == {BUTTON_CENTER}
+
+
+def test_click_refuses_point_outside_current_framebuffer(
+    transport: FakeRDPTransport, backend: FreeRDPBackend
+) -> None:
+    backend.screenshot()
+    with pytest.raises(RuntimeError, match="outside framebuffer"):
+        backend.click(VIEWPORT[0], 10)
+    assert transport.pointer_events == []
+
+
+def test_click_refuses_stale_frame_lease(monkeypatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr(
+        "openadapt_flow.backends.rdp_backend.time.monotonic",
+        lambda: now["value"],
+    )
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, max_frame_age_s=1.0)
+    backend.screenshot()
+    now["value"] = 101.01
+    with pytest.raises(RuntimeError, match="frame is stale"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
+
+
+def test_click_refuses_framebuffer_resize_after_capture() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+    backend.screenshot()
+    transport.screens[0] = transport.screens[0].resize((640, 480))
+    with pytest.raises(RuntimeError, match="framebuffer changed"):
+        backend.click(320, 240)
+    assert transport.pointer_events == []
+
+
+def test_readiness_probe_refuses_locked_or_unexpected_session() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, readiness_probe=lambda _png: False)
+    backend.screenshot()
+    with pytest.raises(RuntimeError, match="readiness probe rejected"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
+
+
+def test_coordinate_click_requires_prior_frame_lease(
+    transport: FakeRDPTransport, backend: FreeRDPBackend
+) -> None:
+    with pytest.raises(RuntimeError, match="no captured RDP frame lease"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
+
+
+def test_frame_age_rechecked_after_blocking_readiness(monkeypatch) -> None:
+    now = {"value": 100.0}
+    monkeypatch.setattr(
+        "openadapt_flow.backends.rdp_backend.time.monotonic",
+        lambda: now["value"],
+    )
+
+    def slow_probe(_png):
+        now["value"] = 102.0
+        return True
+
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, max_frame_age_s=1.0, readiness_probe=slow_probe)
+    backend.screenshot()
+    with pytest.raises(RuntimeError, match="frame is stale"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
 
 
 # -- type_text -----------------------------------------------------------------
@@ -509,6 +583,86 @@ def test_press_normal_chord_still_balanced_after_fix(
     assert held_keys(transport.key_events) == []
 
 
+def test_press_prefers_optional_physical_key_path_for_chords() -> None:
+    class _PhysicalTransport(FakeRDPTransport):
+        def __init__(self) -> None:
+            super().__init__(app_screens())
+            self.physical_events: list[tuple[str, bool]] = []
+
+        @staticmethod
+        def supports_physical_key(key: str) -> bool:
+            return key in {"meta", "ctrl", "shift", "enter"} or (
+                len(key) == 1 and key.isascii() and key.isalnum()
+            )
+
+        def physical_key(self, key: str, down: bool) -> None:
+            self.physical_events.append((key, down))
+
+    transport = _PhysicalTransport()
+    backend = FreeRDPBackend(transport)
+    backend.press("Meta+r")
+    assert transport.physical_events == [
+        ("meta", True),
+        ("r", True),
+        ("r", False),
+        ("meta", False),
+    ]
+    assert transport.key_events == []
+
+    backend.type_text("r")
+    assert transport.key_events == [("r", True), ("r", False)]
+    assert len(transport.physical_events) == 4
+
+
+@pytest.mark.parametrize("chord", ["Meta+?", "Meta+R"])
+def test_press_physical_path_refuses_unsupported_chord_before_input(chord) -> None:
+    class _PhysicalTransport(FakeRDPTransport):
+        physical_events: list[tuple[str, bool]] = []
+
+        @staticmethod
+        def supports_physical_key(key: str) -> bool:
+            return key == "meta" or (
+                len(key) == 1 and key.isascii() and key.isalnum() and key.islower()
+            )
+
+        def physical_key(self, key: str, down: bool) -> None:
+            self.physical_events.append((key, down))
+
+    transport = _PhysicalTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+    with pytest.raises(ValueError, match="cannot safely emit physical chord"):
+        backend.press(chord)
+    assert transport.physical_events == []
+    assert transport.key_events == []
+
+
+def test_press_physical_path_releases_every_attempted_key_on_error() -> None:
+    class _RaisingPhysicalTransport(FakeRDPTransport):
+        def __init__(self) -> None:
+            super().__init__(app_screens())
+            self.physical_events: list[tuple[str, bool]] = []
+
+        @staticmethod
+        def supports_physical_key(key: str) -> bool:
+            return key == "meta" or (len(key) == 1 and key.isalnum())
+
+        def physical_key(self, key: str, down: bool) -> None:
+            self.physical_events.append((key, down))
+            if key == "r" and down:
+                raise TransportError("physical r down failed")
+
+    transport = _RaisingPhysicalTransport()
+    backend = FreeRDPBackend(transport)
+    with pytest.raises(TransportError, match="physical r down failed"):
+        backend.press("Meta+r")
+    assert transport.physical_events == [
+        ("meta", True),
+        ("r", True),
+        ("r", False),
+        ("meta", False),
+    ]
+
+
 # -- scroll --------------------------------------------------------------------
 
 
@@ -639,10 +793,21 @@ class _FakeConn:
 
     def __init__(self) -> None:
         self.mouse_calls: list = []
+        self.key_calls: list = []
+        self.scancode_calls: list = []
         self.terminated = 0
 
     async def send_mouse(self, button, x, y, pressed, steps=0):  # noqa: ANN001
         self.mouse_calls.append((button, x, y, pressed, steps))
+
+    async def send_key_virtualkey(self, key, pressed, extended):  # noqa: ANN001
+        self.key_calls.append(("virtual", key, pressed, extended))
+
+    async def send_key_char(self, key, pressed):  # noqa: ANN001
+        self.key_calls.append(("char", key, pressed))
+
+    async def send_key_scancode(self, scancode, pressed, extended):  # noqa: ANN001
+        self.scancode_calls.append((scancode, pressed, extended))
 
     async def terminate(self):
         self.terminated += 1
@@ -702,6 +867,160 @@ def test_aardwolf_horizontal_wheel_dropped_and_warns() -> None:
         with pytest.warns(UserWarning, match="horizontal wheel"):
             t.wheel(120, 0)  # horizontal only: unsupported by aardwolf
         assert conn.mouse_calls == []  # nothing reached the wire (documented)
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_physical_meta_r_is_all_scancodes_and_balanced() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    conn = _FakeConn()
+    t = _make_connected_aardwolf(conn)
+    try:
+        t.physical_key("meta", True)
+        t.physical_key("r", True)
+        t.physical_key("r", False)
+        t.physical_key("meta", False)
+        assert conn.scancode_calls == [
+            (57435, True, True),
+            (19, True, False),
+            (19, False, False),
+            (57435, False, True),
+        ]
+        assert conn.key_calls == []
+
+        # Text entry deliberately stays on the Unicode path.
+        t.key("r", True)
+        t.key("r", False)
+        assert conn.key_calls == [("char", "r", True), ("char", "r", False)]
+        assert len(conn.scancode_calls) == 4
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_physical_key_refuses_unsupported_character() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    conn = _FakeConn()
+    t = _make_connected_aardwolf(conn)
+    try:
+        assert t.supports_physical_key("meta") is True
+        assert t.supports_physical_key("r") is True
+        assert t.supports_physical_key("R") is False
+        assert t.supports_physical_key("!") is False
+        with pytest.raises(ValueError, match="implicit modifiers"):
+            t.physical_key("R", True)
+        with pytest.raises(ValueError, match="unsupported physical RDP chord"):
+            t.physical_key("!", True)
+        assert conn.scancode_calls == []
+        assert conn.key_calls == []
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_framebuffer_snapshot_runs_on_transport_event_loop() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+    import threading
+
+    from aardwolf.commons.queuedata.constants import VIDEO_FORMAT
+
+    class _FrameConn(_FakeConn):
+        snapshot_thread_id: int | None = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.source = Image.new("RGB", (32, 24), "navy")
+
+        def get_desktop_buffer(self, encoding):  # noqa: ANN001
+            assert encoding == VIDEO_FORMAT.PIL
+            self.snapshot_thread_id = threading.get_ident()
+            return self.source
+
+    conn = _FrameConn()
+    caller_thread_id = threading.get_ident()
+    t = _make_connected_aardwolf(conn)
+    try:
+        image, width, height = t.framebuffer()
+        assert image.size == (32, 24)
+        assert (width, height) == (32, 24)
+        assert conn.snapshot_thread_id is not None
+        assert conn.snapshot_thread_id != caller_thread_id
+        assert conn.snapshot_thread_id == t._thread.ident
+        conn.source.paste("white", (0, 0, 32, 24))
+        assert image.getpixel((0, 0)) == (0, 0, 128)
+    finally:
+        t.disconnect()
+
+
+@pytest.mark.parametrize(
+    ("operation", "invoke"),
+    [
+        ("pointer input", lambda transport: transport.pointer(10, 20, "left", True)),
+        ("virtual-key input", lambda transport: transport.key("Enter", True)),
+        ("character input", lambda transport: transport.key("x", True)),
+        (
+            "physical scancode input",
+            lambda transport: transport.physical_key("r", True),
+        ),
+        ("wheel input", lambda transport: transport.wheel(0, 120)),
+    ],
+)
+def test_aardwolf_input_receipt_errors_are_never_silent(operation, invoke) -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+
+    class _ErrorConn(_FakeConn):
+        async def send_mouse(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+        async def send_key_virtualkey(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+        async def send_key_char(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+        async def send_key_scancode(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None, OSError(f"{operation} failed")
+
+    t = _make_connected_aardwolf(_ErrorConn())
+    try:
+        with pytest.raises(OSError, match=f"{operation} failed"):
+            invoke(t)
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_framebuffer_receipt_error_is_never_silent() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+
+    class _ErrorFrameConn(_FakeConn):
+        def get_desktop_buffer(self, _encoding):
+            return None, RuntimeError("frame copy failed")
+
+    t = _make_connected_aardwolf(_ErrorFrameConn())
+    try:
+        with pytest.raises(RuntimeError, match="frame copy failed"):
+            t.framebuffer()
+    finally:
+        t.disconnect()
+
+
+def test_aardwolf_accepts_none_and_success_tuple_receipts() -> None:
+    pytest.importorskip("aardwolf", reason="install the 'rdp' extra")
+
+    class _SuccessConn(_FakeConn):
+        async def send_mouse(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return None
+
+        async def send_key_virtualkey(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return True, None
+
+        async def send_key_char(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return True, None
+
+    t = _make_connected_aardwolf(_SuccessConn())
+    try:
+        t.pointer(10, 20, "left", True)
+        t.wheel(0, 120)
+        t.key("Enter", True)
+        t.key("x", True)
     finally:
         t.disconnect()
 
@@ -769,8 +1088,6 @@ def test_aardwolf_connect_failure_terminates_and_stops_thread(monkeypatch) -> No
 #   export OPENADAPT_FLOW_RDP_PASS=password
 #   # optional: OPENADAPT_FLOW_RDP_DOMAIN, OPENADAPT_FLOW_RDP_WIDTH/_HEIGHT
 #   pytest tests/test_rdp_backend.py -k live_smoke -s
-
-import os
 
 
 @pytest.mark.skipif(

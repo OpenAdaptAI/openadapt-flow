@@ -174,7 +174,13 @@ class _FakeWindowClient:
     def frontmost_pid(self):  # pragma: no cover - unused here
         return None
 
-    def find_window(self, owner_substr, title_substr):  # pragma: no cover
+    def find_windows(self, owner, title):  # pragma: no cover
+        return []
+
+    def key_window_id(self, pid):  # pragma: no cover - unused here
+        return None
+
+    def window_at_point(self, x, y):  # pragma: no cover - unused here
         return None
 
     def capture(self, window_id):  # pragma: no cover - unused here
@@ -201,12 +207,39 @@ class _FakeWindowClient:
 
 def test_rdp_window_builds_remote_display_backend() -> None:
     backend = build_backend(
-        BackendConfig(kind="rdp", rdp_window="Parallels", rdp_window_title="Win11"),
+        BackendConfig(
+            kind="rdp", rdp_window="Parallels Desktop", rdp_window_title="Win11"
+        ),
         window_client=_FakeWindowClient(),
     )
     assert type(backend).__name__ == "RemoteDisplayBackend"
-    assert backend._owner_substr == "Parallels"
+    assert backend._owner_substr == "Parallels Desktop"
     assert backend._title_substr == "Win11"
+
+
+def test_rdp_safety_config_threads_frame_age_and_readiness(monkeypatch) -> None:
+    transport = _FakeRDPTransport()
+    seen: dict[str, object] = {}
+
+    def fake_find_text(png, expected, *, min_ratio):
+        seen.update(png=png, expected=expected, min_ratio=min_ratio)
+        return object()
+
+    monkeypatch.setattr("openadapt_flow.vision.find_text", fake_find_text)
+    backend = build_backend(
+        BackendConfig(
+            kind="rdp",
+            rdp_host="10.0.0.5",
+            rdp_max_frame_age_s=3.5,
+            rdp_readiness_text="Expected App",
+            rdp_readiness_min_ratio=0.9,
+        ),
+        rdp_transport=transport,
+    )
+    assert backend._max_frame_age_s == 3.5
+    assert backend._readiness_probe is not None
+    assert backend._readiness_probe(b"png") is True
+    assert seen == {"png": b"png", "expected": "Expected App", "min_ratio": 0.9}
 
 
 # --- unknown kind -----------------------------------------------------------

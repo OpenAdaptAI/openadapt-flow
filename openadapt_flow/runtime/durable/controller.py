@@ -28,6 +28,7 @@ pure bookkeeping over the ``StepResult`` the replayer already produces.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -40,6 +41,45 @@ from openadapt_flow.runtime.durable.checkpoint import (
     RunManifest,
 )
 from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
+
+HUMAN_REQUIRED_MARKERS: tuple[str, ...] = (
+    "captcha",
+    "verify you are human",
+    "verify that you are human",
+    "i'm not a robot",
+    "i am not a robot",
+    "unusual traffic",
+    "press and hold",
+    "multi-factor",
+    "multifactor",
+    "two-factor",
+    "one-time passcode",
+    "one-time code",
+    "enter the verification code",
+    "enter verification code",
+    "code sent to",
+    "session expired",
+    "sign in again",
+    "log in again",
+)
+_HUMAN_REQUIRED_TOKEN_RE = re.compile(r"(?<![a-z0-9])(?:2fa|mfa)(?![a-z0-9])")
+
+
+def looks_like_human_required(*texts: Optional[str]) -> bool:
+    """Recognize a visible human-presence/authentication interruption.
+
+    The result is only a halt classification.  It never triggers a solver,
+    retry, click, key entry, or model call.
+    """
+    for text in texts:
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(marker in lowered for marker in HUMAN_REQUIRED_MARKERS):
+            return True
+        if _HUMAN_REQUIRED_TOKEN_RE.search(lowered):
+            return True
+    return False
 
 
 def classify_halt(step: Optional[Step], result: StepResult) -> tuple[str, list[str]]:
@@ -65,6 +105,16 @@ def classify_halt(step: Optional[Step], result: StepResult) -> tuple[str, list[s
         "this step onward; already-confirmed steps are not repeated)"
     )
     abort = "Abort the run and discard the pending escalation"
+
+    # CAPTCHA, MFA, and re-authentication are human-presence requirements.
+    # OpenAdapt only halts and leaves the live application to the operator.
+    if looks_like_human_required(error):
+        return "human_required", [
+            "Complete the challenge or authentication in the LIVE application "
+            "yourself; OpenAdapt never answers, solves, or retries it",
+            resume,
+            abort,
+        ]
 
     # System-of-record effect halts (the richest signal -- effect_verified is
     # explicitly False and the verdict lines carry the cause).

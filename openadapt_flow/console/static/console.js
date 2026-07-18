@@ -273,6 +273,42 @@ async function viewRuns() {
     '<tr><td colspan="7" class="muted">no runs found under the runs root</td></tr>'}</table>`;
 }
 
+async function viewAttention() {
+  const items = await api("/api/attention");
+  if (!items.length) {
+    return `<h2>Needs Attention</h2>
+      <div class="attention-empty">
+        <span class="chip ok">clear</span>
+        <p>No halted workflow is waiting for local review.</p>
+      </div>`;
+  }
+  return `<h2>Needs Attention <span class="chip warn">${safeNumber(items.length, "0")}</span></h2>
+    <p class="muted">Protected values and paths stay in the local run artifacts.
+      This attended view is read-only; it never approves or resumes a run.
+      Only the person at this computer should complete CAPTCHA, MFA, or sign-in
+      in the live application.</p>
+    <div class="attention-list">${items.map((item) => `
+      <article class="attention-card">
+        <div class="attention-card-head">
+          <span class="chip ${item.human_required ? "info" : "warn"}">${esc(item.category)}</span>
+          <span class="muted">${fmtTime(item.created_at)}</span>
+          <span class="mono muted">${esc(String(item.id).slice(0, 8))}</span>
+        </div>
+        <h3>${esc(item.headline)}</h3>
+        <p>${esc(item.next_action)}</p>
+        <p class="muted">${safeNumber(item.observed_text_count, "0")} protected observation(s) ·
+          ${safeNumber(item.completed_intent_count, "0")} prior verified step label(s)</p>
+        <p>
+          <span class="chip">local evidence only</span>
+          ${item.encrypted_pause ? '<span class="chip info">encrypted pause</span>' : ""}
+          ${item.status === "approved" ? '<span class="chip ok">approved</span>' : ""}
+        </p>
+        <div class="attention-actions">
+          <a class="button-link" href="#/runs/${enc(item.id)}">Review protected evidence</a>
+        </div>
+      </article>`).join("")}</div>`;
+}
+
 function shot(runId, artifactId, caption) {
   if (!artifactId) return "";
   const artifactUrl = `/api/runs/${enc(runId)}/artifact?id=${enc(artifactId)}`;
@@ -381,7 +417,7 @@ async function viewSkills() {
       <tr><th>Version</th><th>Status</th><th>Score</th><th>Provenance</th><th>Note</th><th>Actions</th></tr>
       ${skill.versions.map((version) => {
         const actions = [];
-        if (version.status === "candidate") {
+        if (!HEALTH.attend && version.status === "candidate") {
           const index = currentSkillActions.push({
             library: library.id,
             skillId: skill.id,
@@ -390,7 +426,7 @@ async function viewSkills() {
           }) - 1;
           actions.push(`<button data-skill-action="${index}">Promote</button>`);
         }
-        if (version.status !== "rolled_back") {
+        if (!HEALTH.attend && version.status !== "rolled_back") {
           const index = currentSkillActions.push({
             library: library.id,
             skillId: skill.id,
@@ -528,7 +564,7 @@ async function hydrateAuthenticatedImages() {
 }
 
 async function route() {
-  const hash = window.location.hash || "#/workflows";
+  const hash = window.location.hash || (HEALTH.attend ? "#/attention" : "#/workflows");
   const [path, query] = hash.slice(2).split("?");
   const parts = path.split("/").map(decodeURIComponent);
   const nav = parts[0] || "workflows";
@@ -540,7 +576,9 @@ async function route() {
   try {
     let html;
     const diffIndex = parts.indexOf("diff");
-    if (nav === "workflows" && diffIndex > 0) {
+    if (nav === "attention") {
+      html = await viewAttention();
+    } else if (nav === "workflows" && diffIndex > 0) {
       html = await viewDiff(
         enc(parts.slice(1, diffIndex).join("/")),
         enc(parts.slice(diffIndex + 1).join("/")),
@@ -596,6 +634,7 @@ document.addEventListener("click", async (event) => {
   if (skillTarget) {
     const spec = currentSkillActions[Number(skillTarget.dataset.skillAction)];
     if (spec) await skillAction(spec);
+    return;
   }
 });
 
@@ -620,7 +659,11 @@ async function bootstrap() {
       enabled.textContent = "actions enabled";
       mode.append(enabled, document.createTextNode(` · v${HEALTH.version}`));
     }
-    await route();
+    if (HEALTH.attend && !window.location.hash) {
+      window.location.hash = "#/attention";
+    } else {
+      await route();
+    }
   } catch (error) {
     $("#mode").textContent = "authentication required";
     $("#main").textContent = error.status === 401 || error.status === 403

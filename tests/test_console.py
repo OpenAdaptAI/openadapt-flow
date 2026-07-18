@@ -996,7 +996,14 @@ def test_symlinked_run_metadata_is_never_read(console_env, tmp_path):
     checkpoints.symlink_to(outside_checkpoints, target_is_directory=True)
 
     client = _client(console_env)
-    run_id = _run_id(client, paused=True)
+    run_summary = next(
+        item
+        for item in client.get("/api/runs").json()
+        if item["started_at"] == "2026-07-17T11:00:00+00:00"
+    )
+    assert run_summary["paused"] is False
+    assert run_summary["approved"] is False
+    run_id = run_summary["id"]
     response = client.get(f"/api/runs/{run_id}")
     assert response.status_code == 200
     assert response.json()["pending_escalation"] is None
@@ -1167,3 +1174,342 @@ def test_encrypted_pending_escalation_flagged(console_env):
     assert body["summary"]["paused"] is True
     assert body["pending_escalation"] is None
     assert body["pending_escalation_encrypted"] is True
+
+
+# ---------------------------------------------------------------------------
+# 8. staff-attended exception queue
+# ---------------------------------------------------------------------------
+
+
+def _make_human_required_pause(console_env):
+    run = console_env["runs"] / "replay-human"
+    run.mkdir()
+    (run / "challenge.png").write_bytes(_PNG)
+    result = StepResult(
+        step_id="s2",
+        intent="protected intent",
+        ok=False,
+        error="MFA verification code required for Jane Roe MRN-7788",
+        before_png="challenge.png",
+    )
+    RunReport(
+        workflow_name="Jane Roe eligibility",
+        started_at="2026-07-18T12:00:00+00:00",
+        success=False,
+        results=[result],
+        params={"patient": "Jane Roe MRN-7788"},
+        halt=HaltObservation(
+            state_id="s2",
+            intent="protected intent",
+            reason=result.error or "",
+            observed_texts=[
+                "Enter code sent to jane@example.com",
+                "MRN-7788",
+            ],
+        ),
+    ).save(run)
+    store = CheckpointStore(run)
+    store.write_manifest(
+        RunManifest(
+            workflow_name="Jane Roe eligibility",
+            bundle_dir=str(console_env["bundle"]),
+        )
+    )
+    store.write_checkpoint(
+        RunCheckpoint(
+            workflow_name="Jane Roe eligibility",
+            step_index=0,
+            step_id="s1",
+            next_step_index=1,
+        )
+    )
+    store.write_pending(
+        PendingEscalation(
+            workflow_name="Jane Roe eligibility",
+            step_index=1,
+            step_id="s2",
+            intent="protected intent",
+            category="human_required",
+            reason=result.error or "",
+            proposed_options=["enter Jane Roe's private verification code"],
+            params={"patient": "Jane Roe MRN-7788"},
+            resume_from_index=1,
+        )
+    )
+    return run
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Please verify you are human",
+        "Complete the CAPTCHA",
+        "Enter your one-time passcode",
+        "Session expired; sign in again",
+    ],
+)
+def test_human_presence_interruptions_only_classify_as_halts(message):
+    from openadapt_flow.runtime.durable.controller import classify_halt
+
+    category, options = classify_halt(
+        None,
+        StepResult(step_id="s", intent="i", ok=False, error=message),
+    )
+    assert category == "human_required"
+    joined = " ".join(options)
+    assert "LIVE application" in joined
+    assert "never answers, solves, or retries" in joined
+
+
+def test_human_presence_token_does_not_match_inside_opaque_identifier():
+    from openadapt_flow.runtime.durable.controller import looks_like_human_required
+
+    assert looks_like_human_required("MFA required") is True
+    assert looks_like_human_required("opaque request id e2fa9d") is False
+
+
+def test_attention_dto_is_opaque_and_redacted(console_env):
+    _make_human_required_pause(console_env)
+    response = _client(console_env).get("/api/attention")
+    assert response.status_code == 200
+    items = response.json()
+    human = next(item for item in items if item["human_required"])
+    assert re.fullmatch(r"[a-f0-9]{24}", human["id"])
+    assert human["category"] == "human_required"
+    assert human["before_artifact_id"] == "step-001-before"
+    assert "can_approve_human_step" not in human
+    assert "resume_requires_fresh_validation" not in human
+    assert "prior_verified_steps_will_not_repeat" not in human
+    serialized = response.text
+    for protected in (
+        "Jane Roe",
+        "MRN-7788",
+        "jane@example.com",
+        "verification code",
+        str(console_env["runs"]),
+        str(console_env["bundle"]),
+    ):
+        assert protected not in serialized
+
+
+def test_attention_uses_program_action_evidence_not_synthetic_terminal(console_env):
+    run = console_env["runs"] / "replay-program-human"
+    run.mkdir()
+    (run / "challenge.png").write_bytes(_PNG)
+    failure = StepResult(
+        step_id="enter-code",
+        intent="protected intent",
+        ok=False,
+        error="one-time passcode required",
+        before_png="challenge.png",
+    )
+    RunReport(
+        workflow_name="protected workflow",
+        started_at="2026-07-18T12:05:00+00:00",
+        results=[
+            failure,
+            StepResult(
+                step_id="<terminal>",
+                intent="program halt",
+                ok=False,
+                error=failure.error,
+            ),
+        ],
+        halt=HaltObservation(state_id="code-state", reason=failure.error or ""),
+    ).save(run)
+    CheckpointStore(run).write_pending(
+        PendingEscalation(
+            workflow_name="protected workflow",
+            step_index=0,
+            step_id="code-state",
+            category="human_required",
+            reason=failure.error or "",
+            program=True,
+        )
+    )
+
+    item = next(
+        item
+        for item in _client(console_env).get("/api/attention").json()
+        if item["created_at"] == "2026-07-18T12:05:00+00:00"
+    )
+    assert item["before_artifact_id"] == "step-001-before"
+    assert "can_approve_human_step" not in item
+
+
+def test_attention_notification_payload_is_phi_free(console_env):
+    _make_human_required_pause(console_env)
+    response = _client(console_env).get("/api/attention/notification")
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"title", "body", "open_count", "route"}
+    assert body["title"] == "OpenAdapt needs attention"
+    assert body["route"] == "#/attention"
+    assert body["open_count"] >= 1
+    assert "Jane" not in response.text
+    assert "MRN" not in response.text
+    assert "workflow" not in response.text.lower()
+
+
+def test_attention_requires_bearer_and_preserves_host_origin_boundary(console_env):
+    app = create_app(console_env["bundles"], console_env["runs"], attend=True)
+    client = TestClient(app, base_url="http://127.0.0.1")
+    assert client.get("/api/attention").status_code == 401
+    auth = {"Authorization": f"Bearer {app.state.console_access_token}"}
+    assert (
+        client.get("/api/attention", headers={**auth, "Host": "attacker.test"})
+        .status_code
+        == 400
+    )
+    assert (
+        client.get(
+            "/api/attention",
+            headers={**auth, "Origin": "https://attacker.test"},
+        ).status_code
+        == 403
+    )
+
+
+def test_attention_preserves_typed_effect_category_over_incidental_marker(console_env):
+    pending_path = console_env["paused"] / "pending_escalation.json"
+    pending = json.loads(pending_path.read_text())
+    pending["category"] = "effect_indeterminate"
+    pending["reason"] = "verifier session expired while checking the write"
+    pending_path.write_text(json.dumps(pending))
+    client = _client(console_env)
+    run = next(
+        item
+        for item in client.get("/api/attention").json()
+        if item["created_at"] == "2026-07-17T11:00:00+00:00"
+    )
+    assert run["category"] == "effect_indeterminate"
+    assert run["human_required"] is False
+
+
+def test_attend_mode_exposes_no_browser_mutations_even_when_requested(
+    console_env, monkeypatch
+):
+    from openadapt_flow.console import actions as actions_mod
+
+    _make_human_required_pause(console_env)
+
+    def should_not_execute(_args):
+        raise AssertionError("attended mode must never execute a CLI action")
+
+    monkeypatch.setattr(actions_mod, "_run_cli", should_not_execute)
+    app = create_app(
+        console_env["bundles"],
+        console_env["runs"],
+        allow_actions=True,
+        attend=True,
+    )
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={
+            "Authorization": f"Bearer {app.state.console_access_token}",
+            "Origin": "http://127.0.0.1",
+            "X-OpenAdapt-CSRF": app.state.console_csrf_token,
+        },
+    )
+    assert client.get("/api/health").json()["read_only"] is True
+
+    human = next(
+        item for item in client.get("/api/attention").json() if item["human_required"]
+    )
+    paused_id = next(
+        item["id"] for item in client.get("/api/runs").json() if item["paused"]
+    )
+    workflow_id = _workflow_id(client, n_steps=3)
+
+    assert client.get(f"/api/runs/{paused_id}/actions").json() == []
+    assert client.get(f"/api/workflows/{workflow_id}/actions").json() == []
+    for path, payload in (
+        (f"/api/runs/{paused_id}/actions/approve", {}),
+        (f"/api/workflows/{workflow_id}/actions/certify", {}),
+        ("/api/skills/not-a-skill/actions/promote", {}),
+    ):
+        response = client.post(path, json=payload)
+        assert response.status_code == 404
+        assert response.json() == {
+            "detail": "actions are unavailable in attended read-only mode"
+        }
+        assert "command" not in response.text
+
+    route_paths = {getattr(route, "path", "") for route in app.routes}
+    assert "/api/attention/{run_id:path}/actions/approve-human-step" not in route_paths
+    removed = client.post(
+        f"/api/attention/{human['id']}/actions/approve-human-step", json={}
+    )
+    assert removed.status_code in {404, 405}
+
+    script = client.get("/static/console.js").text
+    assert "data-approve-human" not in script
+    assert "approve-human-step" not in script
+    assert "I completed the human step" not in script
+
+
+def test_symlinked_pause_never_enters_attention_queue_or_leaks(console_env, tmp_path):
+    secret = "Jane Roe MRN-9911 https://ehr.example/private"
+    pending = console_env["paused"] / "pending_escalation.json"
+    pending.unlink()
+    outside = tmp_path / "outside-pause.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "category": "human_required",
+                "reason": secret,
+                "status": "pending",
+            }
+        )
+    )
+    pending.symlink_to(outside)
+    client = _client(console_env)
+    listing = client.get("/api/attention")
+    assert listing.status_code == 200
+    assert secret not in listing.text
+    run = next(
+        item
+        for item in client.get("/api/runs").json()
+        if item["started_at"] == "2026-07-17T11:00:00+00:00"
+    )
+    assert run["paused"] is False
+
+
+def test_attend_is_attention_first_and_hard_read_only(console_env, monkeypatch):
+    from openadapt_flow.__main__ import build_parser
+
+    args = build_parser().parse_args(["console", "--attend", "--allow-actions"])
+    assert args.attend is True
+    assert args.allow_actions is True
+
+    served = {}
+
+    def fake_serve(_bundles, _runs, _skills, **kwargs):
+        served.update(kwargs)
+
+    monkeypatch.setattr("openadapt_flow.console.server.serve", fake_serve)
+    assert args.func(args) == 0
+    assert served["attend"] is True
+    assert served["allow_actions"] is False
+
+    app = create_app(
+        console_env["bundles"],
+        console_env["runs"],
+        allow_actions=True,
+        attend=True,
+    )
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        headers={"Authorization": f"Bearer {app.state.console_access_token}"},
+    )
+    health = client.get("/api/health").json()
+    assert health["attend"] is True
+    assert health["read_only"] is True
+    script = client.get("/static/console.js").text
+    html = client.get("/").text
+    assert "HEALTH.attend ? \"#/attention\"" in script
+    assert "Needs Attention" in html
+    assert "<script src=" in html
+    assert re.search(r"\son[a-z]+\s*=", html.lower()) is None

@@ -149,7 +149,9 @@ class PendingEscalation(BaseModel):
     #: Coarse machine category (see :func:`classify_halt`): ``effect_refuted``,
     #: ``effect_indeterminate``, ``effect_escalated``, ``placeholder_effect``,
     #: ``effect_unverifiable``, ``unmet_guard``, ``disambiguation``,
-    #: ``identity``, ``postcondition``, ``resolution``, or ``halt``.
+    #: ``identity``, ``postcondition``, ``resolution``, ``human_required``, or
+    #: ``halt``. ``human_required`` means CAPTCHA/MFA/re-authentication must be
+    #: completed by the present operator; no automation acts on the challenge.
     category: str
     #: The verbatim halt reason (``result.error``) -- WHY it paused.
     reason: str = ""

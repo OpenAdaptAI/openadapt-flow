@@ -1,6 +1,8 @@
 """Guard the publication path against version and artifact drift."""
 
+import io
 import re
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -10,7 +12,12 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 CI
     import tomli as tomllib
 
-from scripts.check_release_consistency import release_versions, sync_lock_version
+from scripts.check_release_consistency import (
+    REQUIRED_SDIST_LICENSE_PATHS,
+    release_versions,
+    sync_lock_version,
+    validate_sdist_license_files,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,3 +82,26 @@ def test_release_workflow_uses_pinned_actions() -> None:
     assert uses
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in uses)
     assert "# v10.6.1" in workflow
+
+
+def _write_sdist(path: Path, members: set[str]) -> None:
+    with tarfile.open(path, mode="w:gz") as archive:
+        for relative in sorted(members):
+            payload = b"fixture"
+            info = tarfile.TarInfo(f"openadapt_flow-test/{relative}")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+
+def test_sdist_requires_all_mixed_license_files(tmp_path: Path) -> None:
+    complete = tmp_path / "complete.tar.gz"
+    _write_sdist(complete, set(REQUIRED_SDIST_LICENSE_PATHS))
+    validate_sdist_license_files(complete)
+
+    missing_notice = tmp_path / "missing-notice.tar.gz"
+    _write_sdist(
+        missing_notice,
+        set(REQUIRED_SDIST_LICENSE_PATHS) - {"THIRD_PARTY_NOTICES.md"},
+    )
+    with pytest.raises(ValueError, match="THIRD_PARTY_NOTICES.md"):
+        validate_sdist_license_files(missing_notice)

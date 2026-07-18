@@ -8,6 +8,7 @@ values, and the claim-code limit the openIMIS form enforces.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -17,6 +18,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BENCH_DIR = REPO_ROOT / "benchmark" / "openimis_claims"
+UPSTREAM_COMMIT = "cd6220d1f0578e56a589c47953250c2ad3d0caa5"
+AGPL_LICENSE = BENCH_DIR / "conf" / "nginx" / "LICENSE-AGPL-3.0.md"
+AGPL_LICENSE_SHA256 = "f5b26d7915d3528f340e14e14abc97518e6235be9a4286fa37cda4c882061fd6"
 
 sys.path.insert(0, str(REPO_ROOT / "benchmark"))
 
@@ -86,3 +90,64 @@ def test_scenario_values_are_synthetic_fixture_values() -> None:
     assert oc.POLICYHOLDER_NAME == "Avery Doe"
     assert oc.HEALTH_FACILITY_CODE == "VIHOS001"
     assert oc.ACTOR_USER == "Admin"  # upstream demo-dataset credential
+
+
+def test_every_adapted_distribution_file_has_exact_license_and_provenance() -> None:
+    lock = json.loads((BENCH_DIR / "environment.lock.json").read_text())
+    upstream = lock["upstreams"]["openimis-dist_dkr"]
+    adapted = upstream["adapted_files"]
+    config_root = BENCH_DIR / "conf" / "nginx"
+    actual_configs = {
+        str(path.relative_to(REPO_ROOT))
+        for path in config_root.rglob("*")
+        if path.is_file() and path != AGPL_LICENSE
+    }
+    actual_configs.add(str((BENCH_DIR / "compose.yml").relative_to(REPO_ROOT)))
+
+    assert upstream["commit"] == UPSTREAM_COMMIT
+    assert upstream["license"] == "AGPL-3.0-only"
+    assert set(adapted) == actual_configs
+    for local_path, provenance in adapted.items():
+        text = (REPO_ROOT / local_path).read_text()
+        source_url = (
+            "https://github.com/openimis/openimis-dist_dkr/blob/"
+            f"{UPSTREAM_COMMIT}/{provenance['upstream_path']}"
+        )
+        assert text.startswith("# SPDX-License-Identifier: AGPL-3.0-only\n")
+        assert source_url in text
+        assert "Full license:" in text
+        assert re.fullmatch(r"[0-9a-f]{64}", provenance["upstream_sha256"])
+        for additional_path, digest in provenance.get(
+            "additional_upstream_sources", {}
+        ).items():
+            assert (
+                "https://github.com/openimis/openimis-dist_dkr/blob/"
+                f"{UPSTREAM_COMMIT}/{additional_path}"
+            ) in text
+            assert re.fullmatch(r"[0-9a-f]{64}", digest)
+
+
+def test_complete_upstream_agpl_license_and_notices_are_retained() -> None:
+    license_bytes = AGPL_LICENSE.read_bytes()
+    # The upstream Markdown file omits a final newline; normalize only that
+    # transport-level difference and require every license byte to match.
+    assert hashlib.sha256(license_bytes.rstrip(b"\n")).hexdigest() == (
+        AGPL_LICENSE_SHA256
+    )
+    license_text = license_bytes.decode()
+    assert "GNU AFFERO GENERAL PUBLIC LICENSE" in license_text
+    assert "Version 3, 19 November 2007" in license_text
+    assert "END OF TERMS AND CONDITIONS" in license_text
+
+    notice = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text()
+    readme = (BENCH_DIR / "README.md").read_text()
+    root_readme = (REPO_ROOT / "README.md").read_text()
+    for path in json.loads((BENCH_DIR / "environment.lock.json").read_text())[
+        "upstreams"
+    ]["openimis-dist_dkr"]["adapted_files"]:
+        assert path in notice
+        assert path.removeprefix("benchmark/openimis_claims/") in readme
+    assert UPSTREAM_COMMIT in notice
+    assert "does not relicense those adapted files." in readme
+    assert "[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)" in root_readme
+    assert "adapted openIMIS Compose topology" in root_readme

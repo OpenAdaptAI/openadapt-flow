@@ -1,5 +1,12 @@
-# Adapted from openIMIS's distribution compose (openimis-dist_dkr commit
-# cd6220d1f0578e56a589c47953250c2ad3d0caa5), trimmed to the services the
+# SPDX-License-Identifier: AGPL-3.0-only
+# Adapted by OpenAdapt.AI on 2026-07-17 from openimis-dist_dkr commit
+# cd6220d1f0578e56a589c47953250c2ad3d0caa5:
+# https://github.com/openimis/openimis-dist_dkr/blob/cd6220d1f0578e56a589c47953250c2ad3d0caa5/compose.base.yml
+# https://github.com/openimis/openimis-dist_dkr/blob/cd6220d1f0578e56a589c47953250c2ad3d0caa5/compose.postgresql.yml
+# https://github.com/openimis/openimis-dist_dkr/blob/cd6220d1f0578e56a589c47953250c2ad3d0caa5/compose.cache.yml
+# Full license: conf/nginx/LICENSE-AGPL-3.0.md
+#
+# Trimmed to the services the
 # claims-intake reference workflow needs (no OpenSearch / dashboards /
 # certbot). Local synthetic reference environment only; every image is pinned
 # by digest through the required *_IMAGE variables (see

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import tarfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,17 @@ LOCK_PACKAGE_PATTERN = re.compile(
     r'(?P<prefix>\[\[package\]\]\nname = "openadapt-flow"\nversion = ")'
     r'[^\"]+(?P<suffix>"\nsource = \{ editable = "\." \})',
     flags=re.MULTILINE,
+)
+REQUIRED_SDIST_LICENSE_PATHS = frozenset(
+    {
+        "THIRD_PARTY_NOTICES.md",
+        "benchmark/openimis_claims/compose.yml",
+        "benchmark/openimis_claims/conf/nginx/LICENSE-AGPL-3.0.md",
+        "benchmark/openimis_claims/conf/nginx/openimis.conf",
+        "benchmark/openimis_claims/conf/nginx/locations/backend.loc",
+        "benchmark/openimis_claims/conf/nginx/locations/frontend.loc",
+        "benchmark/openimis_claims/conf/nginx/variables/var.conf",
+    }
 )
 
 
@@ -78,6 +90,22 @@ def sync_lock_version(root: Path = ROOT) -> str:
     return version
 
 
+def validate_sdist_license_files(sdist: Path) -> None:
+    """Require mixed-license notices beside every redistributed adapted file."""
+    with tarfile.open(sdist, mode="r:gz") as archive:
+        members = {
+            "/".join(Path(member.name).parts[1:])
+            for member in archive.getmembers()
+            if len(Path(member.name).parts) > 1
+        }
+    missing = REQUIRED_SDIST_LICENSE_PATHS - members
+    if missing:
+        raise ValueError(
+            "source distribution is missing required third-party licensing "
+            f"files: {sorted(missing)}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sync", action="store_true")
@@ -102,6 +130,11 @@ def main() -> int:
             parser.error(
                 f"missing wheel or source distribution for {version}: {distributions}"
             )
+        sdist = next(path for path in distributions if path.name.endswith(".tar.gz"))
+        try:
+            validate_sdist_license_files(sdist)
+        except ValueError as error:
+            parser.error(str(error))
 
     print(
         f"Release version {version} is synchronized across project, module, and lock."

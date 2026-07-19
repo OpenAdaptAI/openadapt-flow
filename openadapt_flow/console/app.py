@@ -6,8 +6,9 @@ API and screenshot request requires an unguessable bearer capability. Browser
 mutations additionally require same-origin JSON and a session-bound CSRF
 token. With ``allow_actions=False`` (the default), mutating endpoints refuse
 with a browser-safe placeholder command the operator can copy. ``attend=True``
-is a hard read-only profile: it suppresses action catalogs and refuses every
-generic mutation route even if ``allow_actions=True`` was also requested.
+makes the secure Needs Attention queue the first view; it does not weaken or
+remove the normal console.  Attended mutations additionally require an exact
+engine-issued pause capability and a deployment-bound executor.
 
 Browser DTOs use opaque ids and explicit projections; protected workflow
 labels, parameters, identity evidence, local paths, and raw reports do not
@@ -34,6 +35,13 @@ from openadapt_flow import __version__
 from openadapt_flow.console import actions as actions_mod
 from openadapt_flow.console import attention as attention_mod
 from openadapt_flow.console import data
+from openadapt_flow.runtime.durable.approval import ResumeRefused
+from openadapt_flow.runtime.durable.attended import (
+    AttendedActionExecutor,
+    AttendedActionRefused,
+    AttendedActionRequest,
+    execute_attended_action,
+)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _MAX_BODY_BYTES = 16 * 1024
@@ -271,11 +279,8 @@ def create_app(
     attend: bool = False,
     access_token: Optional[str] = None,
     csrf_token: Optional[str] = None,
+    attended_executor: Optional[AttendedActionExecutor] = None,
 ) -> FastAPI:
-    # ``attend`` is a deliberately narrow read-only capability profile.  Keep
-    # this defense in the app factory (not only the CLI) so embedders and tests
-    # cannot combine attend=True with a mutation-enabled server.
-    allow_actions = allow_actions and not attend
     bundles = _validated_root(bundles_root, label="bundles")
     runs = _validated_root(runs_root, label="runs")
     skills = _validated_root(skills_root, label="skills") if skills_root else None
@@ -381,6 +386,10 @@ def create_app(
             "version": __version__,
             "read_only": not allow_actions,
             "attend": attend,
+            "attended_decisions_ready": bool(attend and allow_actions),
+            "attended_actions_ready": bool(
+                attend and allow_actions and attended_executor is not None
+            ),
             "csrf_token": csrf,
         }
 
@@ -391,6 +400,10 @@ def create_app(
             "version": __version__,
             "read_only": not allow_actions,
             "attend": attend,
+            "attended_decisions_ready": bool(attend and allow_actions),
+            "attended_actions_ready": bool(
+                attend and allow_actions and attended_executor is not None
+            ),
         }
 
     # -- workflows ----------------------------------------------------------
@@ -415,8 +428,6 @@ def create_app(
 
     @app.get("/api/workflows/{bundle_id:path}/actions")
     def workflow_actions(bundle_id: str) -> list[dict[str, Any]]:
-        if attend:
-            return []
         path = _resolve_bundle(bundles, bundle_id)
         summary = data.bundle_summary(bundles, path)
         return [
@@ -461,8 +472,6 @@ def create_app(
 
     @app.get("/api/runs/{run_id:path}/actions")
     def run_actions(run_id: str) -> list[dict[str, Any]]:
-        if attend:
-            return []
         run_dir = _resolve_run(runs, run_id)
         summary = data.run_summary(runs, run_dir)
         bundle = _guess_bundle_for_run(bundles, runs, run_dir)
@@ -503,6 +512,44 @@ def create_app(
             raise HTTPException(status_code=404, detail="no open attention item")
         return item.model_dump()
 
+    @app.post("/api/attention/{run_id:path}/actions/{action_id}")
+    def execute_attention_action(
+        run_id: str,
+        action_id: str,
+        payload: AttendedActionRequest,
+    ) -> dict[str, Any]:
+        if not attend:
+            raise HTTPException(status_code=404, detail="no such action")
+        _refuse_or_none(
+            allow_actions,
+            "start `openadapt-flow console --attend --allow-actions` with "
+            "a qualified deployment executor",
+        )
+        if action_id != payload.action:
+            raise HTTPException(
+                status_code=400,
+                detail="action path and capability request do not match",
+            )
+        run_dir = _resolve_run(runs, run_id)
+        try:
+            decision = execute_attended_action(
+                run_dir,
+                payload,
+                operator=operator,
+                executor=attended_executor,
+            )
+        except (AttendedActionRefused, ResumeRefused) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # The durable audit keeps operator, request, capability, and transition
+        # bindings. The browser needs only the decision outcome; never reflect
+        # those protected identifiers back across the presentation boundary.
+        return {
+            "action": decision.action,
+            "status": decision.status,
+            "message": decision.message,
+            "report_success": decision.report_success,
+        }
+
     # -- skills -------------------------------------------------------------
 
     @app.get("/api/skills")
@@ -518,11 +565,6 @@ def create_app(
     def execute_run_action(
         run_id: str, action_id: str, payload: dict[str, Any] | None = None
     ) -> JSONResponse:
-        if attend:
-            raise HTTPException(
-                status_code=404,
-                detail="actions are unavailable in attended read-only mode",
-            )
         run_dir = _resolve_run(runs, run_id)
         summary = data.run_summary(runs, run_dir)
         bundle = _guess_bundle_for_run(bundles, runs, run_dir)
@@ -570,11 +612,6 @@ def create_app(
     def execute_bundle_action(
         bundle_id: str, action_id: str, payload: dict[str, Any] | None = None
     ) -> JSONResponse:
-        if attend:
-            raise HTTPException(
-                status_code=404,
-                detail="actions are unavailable in attended read-only mode",
-            )
         path = _resolve_bundle(bundles, bundle_id)
         summary = data.bundle_summary(bundles, path)
         specs = {
@@ -622,11 +659,6 @@ def create_app(
     def execute_skill_action(
         skill_id: str, action_id: str, payload: dict[str, Any]
     ) -> JSONResponse:
-        if attend:
-            raise HTTPException(
-                status_code=404,
-                detail="actions are unavailable in attended read-only mode",
-            )
         library_id = payload.get("library")
         version = payload.get("version")
         if not isinstance(library_id, str) or not isinstance(version, int):

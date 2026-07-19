@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from openadapt_flow.ir import Step, StepResult, Workflow
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
@@ -41,6 +41,9 @@ from openadapt_flow.runtime.durable.checkpoint import (
     RunManifest,
 )
 from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
+
+if TYPE_CHECKING:
+    from openadapt_flow.runtime.durable.attended import TransitionObservation
 
 HUMAN_REQUIRED_MARKERS: tuple[str, ...] = (
     "captcha",
@@ -225,6 +228,7 @@ class DurableRun:
         self,
         run_dir: Path | str,
         *,
+        run_id: str,
         workflow_name: str,
         bundle_dir: Path | str,
         params: dict[str, str],
@@ -236,12 +240,15 @@ class DurableRun:
         # ``key`` (None by default) opts the durable artifacts into AES-256-GCM
         # encryption-at-rest; unset => plaintext, exactly as before.
         self.store = CheckpointStore(run_dir, key=key)
+        self.run_id = run_id
         self.workflow_name = workflow_name
+        self.bundle_dir = Path(bundle_dir).resolve()
         self.governed_authorization = governed_authorization
         self.store.write_manifest(
             RunManifest(
+                run_id=run_id,
                 workflow_name=workflow_name,
-                bundle_dir=str(Path(bundle_dir).resolve()),
+                bundle_dir=str(self.bundle_dir),
                 params=dict(params),
                 worklists=worklists,
                 governed_authorization=governed_authorization,
@@ -255,6 +262,9 @@ class DurableRun:
         step: Step,
         result: StepResult,
         params: dict[str, str],
+        *,
+        workflow: Optional[Workflow] = None,
+        transition_observation: Optional["TransitionObservation"] = None,
     ) -> None:
         """Persist the durable artifact for one completed step.
 
@@ -297,21 +307,33 @@ class DurableRun:
         last = self.store.last_checkpoint()
         resume_from = last.next_step_index if last is not None else 0
         category, options = classify_halt(step, result)
-        self.store.write_pending(
-            PendingEscalation(
-                workflow_name=self.workflow_name,
-                step_index=step_index,
-                step_id=step.id,
-                intent=step.intent,
-                category=category,
-                reason=result.error or "",
-                detail=list(result.effect_results or []),
-                proposed_options=options,
-                resume_from_index=resume_from,
-                resume_from_step_id=(last.step_id if last is not None else None),
-                params=dict(params),
-            )
+        pending = PendingEscalation(
+            workflow_name=self.workflow_name,
+            step_index=step_index,
+            step_id=step.id,
+            intent=step.intent,
+            category=category,
+            reason=result.error or "",
+            detail=list(result.effect_results or []),
+            proposed_options=options,
+            resume_from_index=resume_from,
+            resume_from_step_id=(last.step_id if last is not None else None),
+            params=dict(params),
         )
+        self.store.write_pending(pending)
+        if workflow is not None:
+            from openadapt_flow.runtime.durable.attended import (
+                issue_attended_capability,
+            )
+
+            issue_attended_capability(
+                self.store.run_dir,
+                store=self.store,
+                pending=pending,
+                workflow=workflow,
+                result=result,
+                transition_observation=transition_observation,
+            )
 
     # -- Phase-2 program (state-machine) durability --------------------------
 
@@ -332,6 +354,8 @@ class DurableRun:
         intent: str,
         result: StepResult,
         params: dict[str, str],
+        workflow: Optional[Workflow] = None,
+        transition_observation: Optional["TransitionObservation"] = None,
     ) -> None:
         """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
 
@@ -344,24 +368,34 @@ class DurableRun:
         marks the pause as a state-machine pause."""
         last = self.store.last_program_checkpoint()
         category, options = classify_halt(None, result)
-        self.store.write_pending(
-            PendingEscalation(
-                workflow_name=self.workflow_name,
-                step_index=0,
-                step_id=state_id,
-                intent=intent,
-                state_id=state_id,
-                category=category,
-                reason=result.error or "",
-                detail=list(result.effect_results or []),
-                proposed_options=options,
-                resume_from_step_id=(
-                    last.verified_state_id if last is not None else None
-                ),
-                params=dict(params),
-                program=True,
-            )
+        pending = PendingEscalation(
+            workflow_name=self.workflow_name,
+            step_index=0,
+            step_id=state_id,
+            intent=intent,
+            state_id=state_id,
+            category=category,
+            reason=result.error or "",
+            detail=list(result.effect_results or []),
+            proposed_options=options,
+            resume_from_step_id=(last.verified_state_id if last is not None else None),
+            params=dict(params),
+            program=True,
         )
+        self.store.write_pending(pending)
+        if workflow is not None:
+            from openadapt_flow.runtime.durable.attended import (
+                issue_attended_capability,
+            )
+
+            issue_attended_capability(
+                self.store.run_dir,
+                store=self.store,
+                pending=pending,
+                workflow=workflow,
+                result=result,
+                transition_observation=transition_observation,
+            )
 
 
 def resumed_step_results(

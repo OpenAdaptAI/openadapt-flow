@@ -25,7 +25,9 @@ import shutil
 import socket
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -292,6 +294,8 @@ def test_health_reports_read_only(console_env):
     body = _client(console_env).get("/api/health").json()
     assert body["status"] == "ok"
     assert body["read_only"] is True
+    assert body["attended_decisions_ready"] is False
+    assert body["attended_actions_ready"] is False
     assert "bundles_root" not in body
     assert "runs_root" not in body
 
@@ -1387,17 +1391,10 @@ def test_attention_preserves_typed_effect_category_over_incidental_marker(consol
     assert run["human_required"] is False
 
 
-def test_attend_mode_exposes_no_browser_mutations_even_when_requested(
-    console_env, monkeypatch
+def test_attend_mode_preserves_normal_console_and_requires_pause_capability(
+    console_env,
 ):
-    from openadapt_flow.console import actions as actions_mod
-
     _make_human_required_pause(console_env)
-
-    def should_not_execute(_args):
-        raise AssertionError("attended mode must never execute a CLI action")
-
-    monkeypatch.setattr(actions_mod, "_run_cli", should_not_execute)
     app = create_app(
         console_env["bundles"],
         console_env["runs"],
@@ -1413,7 +1410,7 @@ def test_attend_mode_exposes_no_browser_mutations_even_when_requested(
             "X-OpenAdapt-CSRF": app.state.console_csrf_token,
         },
     )
-    assert client.get("/api/health").json()["read_only"] is True
+    assert client.get("/api/health").json()["read_only"] is False
 
     human = next(
         item for item in client.get("/api/attention").json() if item["human_required"]
@@ -1423,31 +1420,32 @@ def test_attend_mode_exposes_no_browser_mutations_even_when_requested(
     )
     workflow_id = _workflow_id(client, n_steps=3)
 
-    assert client.get(f"/api/runs/{paused_id}/actions").json() == []
-    assert client.get(f"/api/workflows/{workflow_id}/actions").json() == []
-    for path, payload in (
-        (f"/api/runs/{paused_id}/actions/approve", {}),
-        (f"/api/workflows/{workflow_id}/actions/certify", {}),
-        ("/api/skills/not-a-skill/actions/promote", {}),
-    ):
-        response = client.post(path, json=payload)
-        assert response.status_code == 404
-        assert response.json() == {
-            "detail": "actions are unavailable in attended read-only mode"
-        }
-        assert "command" not in response.text
+    # Attended mode is additive: the normal console catalogs remain available.
+    assert client.get(f"/api/runs/{paused_id}/actions").json()
+    assert client.get(f"/api/workflows/{workflow_id}/actions").json()
 
     route_paths = {getattr(route, "path", "") for route in app.routes}
-    assert "/api/attention/{run_id:path}/actions/approve-human-step" not in route_paths
-    removed = client.post(
-        f"/api/attention/{human['id']}/actions/approve-human-step", json={}
+    assert "/api/attention/{run_id:path}/actions/{action_id}" in route_paths
+    # This manually assembled legacy pause has no engine-issued capability;
+    # enabling actions cannot manufacture authority for it.
+    refused = client.post(
+        f"/api/attention/{human['id']}/actions/continue",
+        json={
+            "capability_digest": "sha256:" + ("0" * 64),
+            "idempotency_key": "request-key-legacy-pause",
+            "action": "continue",
+            "disposition": "completed_by_operator",
+        },
     )
-    assert removed.status_code in {404, 405}
+    assert refused.status_code == 409
+    assert "capability" in refused.text.lower()
 
     script = client.get("/static/console.js").text
-    assert "data-approve-human" not in script
-    assert "approve-human-step" not in script
-    assert "I completed the human step" not in script
+    assert "I fixed it — Continue" in script
+    assert "Teach the fix" in script
+    assert "!HEALTH.attend" not in script
+    assert "captcha_answer" not in script
+    assert "verification_code" not in script
 
 
 def test_symlinked_pause_never_enters_attention_queue_or_leaks(console_env, tmp_path):
@@ -1477,7 +1475,7 @@ def test_symlinked_pause_never_enters_attention_queue_or_leaks(console_env, tmp_
     assert run["paused"] is False
 
 
-def test_attend_is_attention_first_and_hard_read_only(console_env, monkeypatch):
+def test_attend_is_attention_first_and_actions_are_explicit(console_env, monkeypatch):
     from openadapt_flow.__main__ import build_parser
 
     args = build_parser().parse_args(["console", "--attend", "--allow-actions"])
@@ -1489,10 +1487,16 @@ def test_attend_is_attention_first_and_hard_read_only(console_env, monkeypatch):
     def fake_serve(_bundles, _runs, _skills, **kwargs):
         served.update(kwargs)
 
+    executor = object()
+    monkeypatch.setattr(
+        "openadapt_flow.__main__._attended_executor_from_args",
+        lambda _args: nullcontext(executor),
+    )
     monkeypatch.setattr("openadapt_flow.console.server.serve", fake_serve)
     assert args.func(args) == 0
     assert served["attend"] is True
-    assert served["allow_actions"] is False
+    assert served["allow_actions"] is True
+    assert served["attended_executor"] is executor
 
     app = create_app(
         console_env["bundles"],
@@ -1507,10 +1511,138 @@ def test_attend_is_attention_first_and_hard_read_only(console_env, monkeypatch):
     )
     health = client.get("/api/health").json()
     assert health["attend"] is True
-    assert health["read_only"] is True
+    assert health["read_only"] is False
+    assert health["attended_decisions_ready"] is True
+    assert health["attended_actions_ready"] is False
     script = client.get("/static/console.js").text
     html = client.get("/").text
     assert 'HEALTH.attend ? "#/attention"' in script
     assert "Needs Attention" in html
     assert "<script src=" in html
     assert re.search(r"\son[a-z]+\s*=", html.lower()) is None
+
+
+def test_attended_action_console_requires_explicit_live_target():
+    from openadapt_flow.__main__ import _attended_executor_from_args, build_parser
+
+    args = build_parser().parse_args(["console", "--attend", "--allow-actions"])
+    with pytest.raises(SystemExit, match="explicit --config or --backend"):
+        with _attended_executor_from_args(args):
+            pass
+
+    web = build_parser().parse_args(
+        ["console", "--attend", "--allow-actions", "--backend", "web"]
+    )
+    with pytest.raises(SystemExit, match="require --url"):
+        with _attended_executor_from_args(web):
+            pass
+
+    hidden = build_parser().parse_args(
+        [
+            "console",
+            "--attend",
+            "--allow-actions",
+            "--backend",
+            "web",
+            "--url",
+            "https://example.test",
+        ]
+    )
+    with pytest.raises(SystemExit, match="visible live session"):
+        with _attended_executor_from_args(hidden):
+            pass
+
+
+def test_attended_console_owns_one_backend_and_closes_it(monkeypatch):
+    import openadapt_flow.__main__ as cli
+
+    args = cli.build_parser().parse_args(
+        [
+            "console",
+            "--attend",
+            "--allow-actions",
+            "--backend",
+            "windows",
+            "--agent-url",
+            "http://127.0.0.1:5001",
+        ]
+    )
+
+    class Backend:
+        closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    backend = Backend()
+    built: list[object] = []
+
+    def fake_build(_cfg, **_kwargs):
+        built.append(backend)
+        return backend
+
+    configured: list[dict] = []
+
+    def fake_configured(live_backend, **kwargs):
+        configured.append({"backend": live_backend, **kwargs})
+        return object()
+
+    monkeypatch.setattr("openadapt_flow.backends.factory.build_backend", fake_build)
+    monkeypatch.setattr(cli, "_configured_replayer", fake_configured)
+
+    with cli._attended_executor_from_args(args) as executor:
+        assert executor is not None
+        manifest = SimpleNamespace(params={}, governed_authorization=None)
+        first = executor.replayer_factory(manifest)
+        second = executor.replayer_factory(manifest)
+        assert first is not second
+        assert built == [backend]
+        assert [item["backend"] for item in configured] == [backend, backend]
+        assert all(item["durable"] is True for item in configured)
+        assert all(item["use_structural"] is True for item in configured)
+        assert backend.closed == 0
+    assert backend.closed == 1
+
+
+def test_attended_console_closes_backend_when_server_path_raises(monkeypatch):
+    import openadapt_flow.__main__ as cli
+
+    args = cli.build_parser().parse_args(
+        [
+            "console",
+            "--attend",
+            "--allow-actions",
+            "--backend",
+            "windows",
+            "--agent-url",
+            "http://127.0.0.1:5001",
+        ]
+    )
+
+    class Backend:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    backend = Backend()
+    monkeypatch.setattr(
+        "openadapt_flow.backends.factory.build_backend",
+        lambda _cfg, **_kwargs: backend,
+    )
+    with pytest.raises(RuntimeError, match="server stopped"):
+        with cli._attended_executor_from_args(args):
+            raise RuntimeError("server stopped")
+    assert backend.closed is True
+
+
+def test_ordinary_console_does_not_construct_attended_backend(monkeypatch):
+    import openadapt_flow.__main__ as cli
+
+    args = cli.build_parser().parse_args(["console", "--allow-actions"])
+    monkeypatch.setattr(
+        "openadapt_flow.backends.factory.build_backend",
+        lambda *_args, **_kwargs: pytest.fail("ordinary console built a backend"),
+    )
+    with cli._attended_executor_from_args(args) as executor:
+        assert executor is None

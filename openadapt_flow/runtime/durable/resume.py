@@ -175,6 +175,7 @@ def resume(
             worklists=resolved_worklists,
             save_healed_to=resolved_healed,
             live_bundle_version=live_bundle_version,
+            run_id=(manifest.run_id if manifest is not None else None),
         )
 
     # -- linear resume (unchanged control flow; now gated by approval) --------
@@ -188,6 +189,7 @@ def resume(
         run_dir=run_dir,
         save_healed_to=(Path(resolved_healed) if resolved_healed else None),
         resume_from=start_index,
+        run_id=(manifest.run_id if manifest is not None else None),
     )
 
 
@@ -202,6 +204,7 @@ def _resume_program(
     worklists: dict[str, list[dict[str, str]]],
     save_healed_to: Optional[Path | str],
     live_bundle_version: str,
+    run_id: Optional[str],
 ) -> RunReport:
     """Restore and continue a Phase-2 PROGRAM run from its interpreter checkpoint.
 
@@ -235,4 +238,5 @@ def _resume_program(
         run_dir=store.run_dir,
         save_healed_to=(Path(save_healed_to) if save_healed_to else None),
         resume_program=checkpoint,
+        run_id=run_id,
     )

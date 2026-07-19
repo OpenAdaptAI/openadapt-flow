@@ -40,7 +40,7 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from openadapt_flow.backend import Backend, StructuralResolutionRefused
 from openadapt_flow.bundle_validation import compute_parameter_schema_digest
@@ -413,6 +413,7 @@ class Replayer:
         save_healed_to: Optional[Path] = None,
         resume_from: Optional[int] = None,
         resume_program: Optional[ProgramCheckpoint] = None,
+        run_id: Optional[str] = None,
         execution_origin: Optional[str] = None,
         execution_entry_url: Optional[str] = None,
     ) -> RunReport:
@@ -457,6 +458,10 @@ class Replayer:
                 paused state -- never from the graph entry, never re-performing an
                 already-confirmed write. Supplied by
                 ``openadapt_flow.runtime.durable.resume``, not by hand.
+            run_id: Stable run-instance identity supplied only by durable resume.
+                New runs generate one; resumed legs preserve the manifest value
+                so attended capabilities and effect idempotency remain bound to
+                the same logical run.
             execution_origin: Actual browser origin loaded before replay. It is
                 evidence metadata only; hosted validation requires an exact
                 match to its signed target origin.
@@ -477,7 +482,7 @@ class Replayer:
         # ``__run_id__`` param so an idempotency key can be bound PER-RUN (via
         # ``ValueExpr(param="__run_id__")``) instead of reusing a frozen demo
         # literal across unrelated runs.
-        self._run_id = (
+        self._run_id = run_id or (
             self.governed_authorization.authorization_id
             if self.governed_authorization is not None
             else uuid.uuid4().hex
@@ -602,6 +607,7 @@ class Replayer:
 
             durable_run = DurableRun(
                 run_dir,
+                run_id=self._run_id,
                 workflow_name=workflow.name,
                 bundle_dir=bundle_dir,
                 params=params,
@@ -657,7 +663,18 @@ class Replayer:
                 if durable_run is not None:
                     # Tier-3: verified step -> checkpoint; halt -> pending
                     # escalation (resumable from the last checkpoint).
-                    durable_run.record(step_index, step, result, params)
+                    durable_run.record(
+                        step_index,
+                        step,
+                        result,
+                        params,
+                        workflow=workflow,
+                        transition_observation=(
+                            self._attended_transition_observation()
+                            if not result.ok
+                            else None
+                        ),
+                    )
                 self._account_result(report, result)
                 if not result.ok:
                     break
@@ -930,7 +947,7 @@ class Replayer:
             # Durably PAUSE (never just die): capture WHERE we stopped so an
             # approved resume can RESTORE the interpreter from here.
             if self._program_durable is not None:
-                self._record_program_pause(halt, report)
+                self._record_program_pause(halt, report, workflow=workflow)
             report.results.append(
                 StepResult(
                     step_id="<terminal>",
@@ -1484,7 +1501,9 @@ class Replayer:
         )
         durable.record_program_checkpoint(checkpoint)
 
-    def _record_program_pause(self, halt: "_ProgramHalt", report: RunReport) -> None:
+    def _record_program_pause(
+        self, halt: "_ProgramHalt", report: RunReport, *, workflow: Workflow
+    ) -> None:
         """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
 
         Uses the last executed state's failing result (an action failure) or, for
@@ -1509,6 +1528,8 @@ class Replayer:
             intent=self._current_intent or failing.intent,
             result=failing,
             params=self._current_params,
+            workflow=workflow,
+            transition_observation=self._attended_transition_observation(),
         )
 
     def revalidate_program_checkpoint(
@@ -1555,6 +1576,254 @@ class Replayer:
                         "refusing to resume; the system of record diverged from "
                         "the checkpoint"
                     )
+
+    def revalidate_attended_completion(
+        self,
+        workflow: Workflow,
+        *,
+        step_index: int,
+        params: dict[str, str],
+        bundle_dir: Path,
+        run_dir: Path,
+        run_id: str,
+        transition_baseline: Any,
+        transition_digest: Callable[[str, str], str],
+    ) -> StepResult:
+        """Verify a human-completed linear step without actuating it.
+
+        This is intentionally not ``_run_step``: the person already completed
+        the challenge/task in the live application, so invoking the action
+        again could duplicate a consequential write.  The method observes only:
+
+        * the paused step's screen postconditions;
+        * its independently declared effects against the *current* system of
+          record, when the contract is meaningful without a pre-action delta;
+        * the next step's unique target and armed identity, proving the expected
+          continuation is actually available.
+
+        Delivery receipts are never consulted. Transition-relative
+        postconditions are compared against the PHI-safe keyed baseline bound
+        into the signed pause capability. Delta/collateral-loss effects still
+        require a protected pre-delivery record baseline and are refused when
+        one is unavailable.
+        """
+        from openadapt_flow.runtime.effects import EffectState
+        from openadapt_flow.runtime.effects._common import judge_records
+
+        if not (0 <= step_index < len(workflow.steps)):
+            raise StateDiverged("the attended pause references no workflow step")
+        step = workflow.steps[step_index]
+        result = StepResult(
+            step_id=step.id,
+            intent=step.intent,
+            ok=False,
+            actuation="human_attended",
+        )
+        self._run_id = run_id
+        (Path(run_dir) / "steps").mkdir(parents=True, exist_ok=True)
+        frame = self.vision.wait_settled(self.backend)
+        result.before_png = self._save_step_png(
+            run_dir, step.id, "attended-before", frame
+        )
+
+        relative_kinds = {"url_changed", "title_changed", "new_tab_opened"}
+        relative = [
+            pc
+            for pc in step.expect
+            if (pc.kind.value if hasattr(pc.kind, "value") else pc.kind)
+            in relative_kinds
+        ]
+        live_structural = self._structural_state() if relative else {}
+        for condition in relative:
+            kind = (
+                condition.kind.value
+                if hasattr(condition.kind, "value")
+                else str(condition.kind)
+            )
+            if kind == "url_changed":
+                current = live_structural.get("url")
+                baseline_digest = getattr(transition_baseline, "url_digest", None)
+                changed = (
+                    isinstance(current, str)
+                    and baseline_digest is not None
+                    and transition_digest("url", current) != baseline_digest
+                )
+            elif kind == "title_changed":
+                current = live_structural.get("page_title")
+                baseline_digest = getattr(transition_baseline, "title_digest", None)
+                changed = (
+                    isinstance(current, str)
+                    and baseline_digest is not None
+                    and transition_digest("page_title", current) != baseline_digest
+                )
+            else:
+                current = live_structural.get("page_count")
+                baseline_count = getattr(transition_baseline, "page_count", None)
+                changed = (
+                    isinstance(current, int)
+                    and isinstance(baseline_count, int)
+                    and current > baseline_count
+                )
+            if not changed:
+                result.postconditions_ok = False
+                result.error = (
+                    "the human-completed step's signed structural transition "
+                    "was unavailable or unchanged; Continue is refused"
+                )
+                result.after_png = result.before_png
+                return result
+
+        nonrelative = [
+            pc
+            for pc in step.expect
+            if (pc.kind.value if hasattr(pc.kind, "value") else pc.kind)
+            not in relative_kinds
+        ]
+        if nonrelative:
+            verification_step = step.model_copy(update={"expect": nonrelative})
+            post_ok, frame, failed = self._check_postconditions(
+                verification_step, frame, bundle_dir, {}, result
+            )
+            result.postconditions_ok = post_ok
+            if not post_ok:
+                # The failed descriptions can contain demonstrated text (and
+                # therefore PHI). Keep them out of the browser-facing decision
+                # message; protected screenshots remain in the local run dir.
+                result.error = (
+                    "the human-completed step's live postconditions are not "
+                    f"satisfied ({len(failed)} condition(s) failed)"
+                )
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+
+        if step.effects:
+            if self.effect_verifier is None:
+                result.effect_verified = False
+                result.error = (
+                    "the human-completed consequential step has no independent "
+                    "effect verifier; outcome is uncertain and Continue is refused"
+                )
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+            current = self.effect_verifier.capture_pre_state()
+            if not current.reachable:
+                result.effect_verified = False
+                result.error = (
+                    "the system of record is unreachable; outcome is uncertain "
+                    "and Continue is refused"
+                )
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+            effects = self._resolve_effects(step.effects, params)
+            for effect in effects:
+                if effect.needs_operator_confirmation:
+                    result.effect_verified = False
+                    result.error = (
+                        "the effect contract is still a placeholder; a human "
+                        "statement cannot replace independent verification"
+                    )
+                    break
+                if effect.count_new_only or effect.forbid_collateral_loss:
+                    result.effect_verified = False
+                    result.error = (
+                        "the effect requires a pre-delivery delta or collateral-"
+                        "loss baseline that is unavailable after human delivery; "
+                        "outcome is uncertain and Continue is refused"
+                    )
+                    break
+                baseline = EffectState(
+                    substrate=current.substrate,
+                    reachable=True,
+                    records=[],
+                    detail={"attended_current_state_readback": True},
+                )
+                verdict = judge_records(
+                    effect,
+                    baseline,
+                    current.records,
+                    substrate=current.substrate,
+                )
+                result.effect_contract_hashes.append(effect.contract_hash())
+                result.effect_results.append(
+                    f"[attended-current-readback] {effect.kind.value}: "
+                    f"{verdict.verdict.value} — {verdict.reason}"
+                )
+                if not verdict.confirmed:
+                    result.effect_verified = False
+                    result.error = (
+                        "the independent current-state effect readback did not "
+                        f"confirm the outcome ({verdict.verdict.value})"
+                    )
+                    break
+            else:
+                result.effect_verified = True
+            if result.error is not None:
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+
+        if not step.expect and not step.effects:
+            result.error = (
+                "the human-completed step declares neither a postcondition nor "
+                "an independent effect; delivery cannot be confused with outcome "
+                "verification, so Continue is refused"
+            )
+            result.after_png = self._save_step_png(
+                run_dir, step.id, "attended-after", frame
+            )
+            return result
+
+        # Prove the expected continuation's target is unique and, where the
+        # workflow armed identity, still identifies the intended entity.
+        next_index = step_index + 1
+        if next_index < len(workflow.steps):
+            next_step = workflow.steps[next_index]
+            if next_step.anchor is not None:
+                resolution, _region, error = self._resolve_step(
+                    next_step, frame, bundle_dir, workflow
+                )
+                if error is not None or resolution is None:
+                    result.error = (
+                        "the expected next transition's target did not resolve "
+                        "uniquely; live state diverged and Continue is refused"
+                    )
+                    result.after_png = self._save_step_png(
+                        run_dir, step.id, "attended-after", frame
+                    )
+                    return result
+                if next_step.identity_armed:
+                    identity = self._verify_identity(
+                        next_step,
+                        resolution,
+                        frame,
+                        params,
+                        workflow,
+                        bundle_dir,
+                    )
+                    result.identity = identity
+                    if identity.status != "verified":
+                        result.error = (
+                            "the expected next transition's target identity "
+                            f"was {identity.status}; Continue is refused"
+                        )
+                        result.after_png = self._save_step_png(
+                            run_dir, step.id, "attended-after", frame
+                        )
+                        return result
+
+        result.ok = True
+        result.postconditions_ok = True if step.expect else None
+        result.after_png = self._save_step_png(
+            run_dir, step.id, "attended-after", frame
+        )
+        return result
 
     def _resolve_graph(self, workflow: Workflow, graph_id: str) -> ProgramGraph:
         """Resolve a durable ``graph_id`` back to a :class:`ProgramGraph`
@@ -3474,6 +3743,25 @@ class Replayer:
             if value is not None:
                 state[key] = value
         return state
+
+    def _attended_transition_observation(self) -> Any:
+        """Capture ephemeral browser structure for a signed pause baseline.
+
+        Raw URL/title values live only in this return object long enough for
+        :class:`AttendedActionStore` to HMAC them. They are never written into
+        a checkpoint, report, pending escalation, or capability.
+        """
+        from openadapt_flow.runtime.durable.attended import TransitionObservation
+
+        state = self._structural_state()
+        url = state.get("url")
+        title = state.get("page_title")
+        page_count = state.get("page_count")
+        return TransitionObservation(
+            url=url if isinstance(url, str) else None,
+            page_title=title if isinstance(title, str) else None,
+            page_count=page_count if isinstance(page_count, int) else None,
+        )
 
     def _structural_changed(
         self, key: str, start_state: dict[str, Any]

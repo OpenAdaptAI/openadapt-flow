@@ -40,8 +40,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Optional, Sequence
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -179,27 +180,9 @@ def _resolve_worklists(
     return worklists
 
 
-def _deployment_runtime(args: argparse.Namespace, params: dict[str, str] | None = None):
-    """Resolve the deployment wiring for a replay/run from ``--config`` + flags.
-
-    Returns ``(cfg, effect_verifier, api_actuator, durable, allow_egress)``.
-    A ``--config`` deployment YAML supplies the full surface (records paths,
-    FHIR search params, ...); direct flags override the common fields. With
-    neither, everything is default: no verifier, no actuator, non-durable, and
-    egress only if ``--allow-model-grounding`` was passed (fully back-compatible).
-
-    ``params`` (the governed ``--params-file`` / ``--param`` values) binds an
-    effect-verifier config's explicit ``{param: ...}`` references
-    (``effects.path_params`` / ``search_param_exprs`` / ``sql_query_params``)
-    at construction — see ``docs/EFFECT_KIT.md``. A config with no references
-    ignores it.
-    """
-    from openadapt_flow.deployment import (
-        DeploymentConfig,
-        build_api_actuator,
-        build_effect_verifier,
-        load_deployment,
-    )
+def _deployment_sections(args: argparse.Namespace):
+    """Snapshot deployment config plus direct effects/actuation overrides."""
+    from openadapt_flow.deployment import DeploymentConfig, load_deployment
 
     cfg = (
         load_deployment(args.config)
@@ -222,7 +205,27 @@ def _deployment_runtime(args: argparse.Namespace, params: dict[str, str] | None 
         )
     elif getattr(args, "api_actuator", False):
         actuation = actuation.model_copy(update={"api": True})
+    return cfg, effects, actuation
 
+
+def _deployment_runtime(args: argparse.Namespace, params: dict[str, str] | None = None):
+    """Resolve the deployment wiring for a replay/run from ``--config`` + flags.
+
+    Returns ``(cfg, effect_verifier, api_actuator, durable, allow_egress)``.
+    A ``--config`` deployment YAML supplies the full surface (records paths,
+    FHIR search params, ...); direct flags override the common fields. With
+    neither, everything is default: no verifier, no actuator, non-durable, and
+    egress only if ``--allow-model-grounding`` was passed (fully back-compatible).
+
+    ``params`` (the governed ``--params-file`` / ``--param`` values) binds an
+    effect-verifier config's explicit ``{param: ...}`` references
+    (``effects.path_params`` / ``search_param_exprs`` / ``sql_query_params``)
+    at construction — see ``docs/EFFECT_KIT.md``. A config with no references
+    ignores it.
+    """
+    from openadapt_flow.deployment import build_api_actuator, build_effect_verifier
+
+    cfg, effects, actuation = _deployment_sections(args)
     try:
         effect_verifier = build_effect_verifier(effects, params=params)
         api_actuator = build_api_actuator(actuation)
@@ -271,32 +274,22 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
     return backend
 
 
-def _build_and_run_replayer(
+def _configured_replayer(
     backend,
     *,
-    workflow,
-    params: dict[str, str],
-    worklists: dict[str, list[dict[str, str]]],
-    bundle: Path,
-    run_dir: Path,
-    save_healed_to: Optional[Path],
     allow_egress: bool,
     effect_verifier,
     api_actuator,
     durable: bool,
     use_structural: bool,
     governed_authorization=None,
-    execution_origin: Optional[str] = None,
-    execution_entry_url: Optional[str] = None,
 ):
-    """Wire the grounding / identity-VLM ladder and run the replayer.
+    """Wire the grounding, verification, and actuation layers into a Replayer.
 
     Backend-agnostic: the on-prem VLM appliance (opt-in, egress-guarded), the
     OCR grounding rung, and the deployment wiring (effect verifier / API
-    actuator / durable runtime) are identical whether the backend is the
-    browser, the Windows agent, or an RDP/remote-display session. Returns the
-    run report. Extracted verbatim from the historical inline web path so the
-    web behavior is unchanged and every backend shares one code path.
+    actuator / durable runtime) are identical for browser, Windows, macOS, and
+    RDP/remote-display sessions. The caller owns the backend lifecycle.
     """
     import os
 
@@ -346,6 +339,36 @@ def _build_and_run_replayer(
         # Deployment wiring resolved from --config / flags: verify consequential
         # writes against the system of record, actuate bound steps via the API
         # tier, and checkpoint for resume.
+        effect_verifier=effect_verifier,
+        api_actuator=api_actuator,
+        durable=durable,
+        use_structural=use_structural,
+        governed_authorization=governed_authorization,
+    )
+
+
+def _build_and_run_replayer(
+    backend,
+    *,
+    workflow,
+    params: dict[str, str],
+    worklists: dict[str, list[dict[str, str]]],
+    bundle: Path,
+    run_dir: Path,
+    save_healed_to: Optional[Path],
+    allow_egress: bool,
+    effect_verifier,
+    api_actuator,
+    durable: bool,
+    use_structural: bool,
+    governed_authorization=None,
+    execution_origin: Optional[str] = None,
+    execution_entry_url: Optional[str] = None,
+):
+    """Build the shared Replayer configuration and execute one workflow."""
+    return _configured_replayer(
+        backend,
+        allow_egress=allow_egress,
         effect_verifier=effect_verifier,
         api_actuator=api_actuator,
         durable=durable,
@@ -2698,13 +2721,144 @@ def build_parser() -> argparse.ArgumentParser:
         "--attend",
         action="store_true",
         help=(
-            "Open the authenticated local Needs Attention queue in a hard "
-            "read-only mode. --allow-actions is ignored when --attend is set"
+            "Open the authenticated local Needs Attention queue first. It is "
+            "read-only unless --allow-actions is also supplied; attended "
+            "mutations additionally require an engine-issued pause capability "
+            "and qualified deployment executor"
         ),
     )
+    p.add_argument(
+        "--url",
+        default=None,
+        help=(
+            "Live browser URL for attended verification/continuation. Required "
+            "for --backend web unless backend.url is set in --config."
+        ),
+    )
+    p.add_argument(
+        "--headed",
+        action="store_true",
+        help=(
+            "Keep the attended browser visible for the operator. The web "
+            "attended-action path requires a headed session."
+        ),
+    )
+    p.add_argument(
+        "--allow-model-grounding",
+        action="store_true",
+        help=(
+            "EGRESS OPT-IN: permit configured off-box model components during "
+            "fresh attended verification and deterministic continuation"
+        ),
+    )
+    _add_backend_flags(p)
+    _add_deployment_flags(p)
     p.set_defaults(func=_cmd_console)
 
     return parser
+
+
+@contextmanager
+def _attended_executor_from_args(args: argparse.Namespace) -> Iterator[Any]:
+    """Own one qualified live backend for the blocking attended console.
+
+    Ordinary console modes do not inspect deployment flags or construct a
+    backend. With both ``--attend`` and ``--allow-actions``, the operator must
+    explicitly select a deployment/backend. The same browser, desktop, or
+    remote-display session is then reused for fresh verification and the
+    deterministic continuation, and is closed exactly once when the console
+    exits.
+    """
+    if not (args.attend and args.allow_actions):
+        yield None
+        return
+    if not (getattr(args, "config", None) or getattr(args, "backend", None)):
+        raise SystemExit(
+            "console --attend --allow-actions requires an explicit --config "
+            "or --backend target; refusing to attach mutations to a demo or "
+            "implicit default"
+        )
+
+    from openadapt_flow.backends.factory import _normalize_kind, build_backend
+    from openadapt_flow.deployment import build_api_actuator, build_effect_verifier
+    from openadapt_flow.runtime.durable.attended import (
+        AttendedActionRefused,
+        BoundAttendedExecutor,
+    )
+
+    try:
+        cfg, effects_cfg, actuation_cfg = _deployment_sections(args)
+        backend_cfg = _resolve_backend_config(args, cfg)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    allow_egress = bool(
+        cfg.runtime.allow_model_grounding
+        or getattr(args, "allow_model_grounding", False)
+    )
+
+    def _executor(backend: Any) -> BoundAttendedExecutor:
+        def _replayer_for_manifest(manifest: Any):
+            try:
+                effect_verifier = build_effect_verifier(
+                    effects_cfg, params=dict(manifest.params)
+                )
+                api_actuator = build_api_actuator(actuation_cfg)
+            except ValueError as exc:
+                raise AttendedActionRefused(str(exc)) from exc
+            return _configured_replayer(
+                backend,
+                allow_egress=allow_egress,
+                effect_verifier=effect_verifier,
+                api_actuator=api_actuator,
+                durable=True,
+                use_structural=True,
+                governed_authorization=manifest.governed_authorization,
+            )
+
+        return BoundAttendedExecutor(_replayer_for_manifest)
+
+    if _normalize_kind(backend_cfg.kind) == "web":
+        target_url = getattr(args, "url", None) or backend_cfg.url
+        if not target_url:
+            raise SystemExit(
+                "attended web actions require --url or backend.url in --config"
+            )
+        headed = bool(getattr(args, "headed", False) or backend_cfg.headed)
+        if not headed:
+            raise SystemExit(
+                "attended web actions require a visible live session; pass "
+                "--headed or set backend.headed: true"
+            )
+
+        from playwright.sync_api import sync_playwright
+
+        from openadapt_flow._browser_setup import ensure_chromium_installed
+
+        ensure_chromium_installed()
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=False)
+            try:
+                page = browser.new_page(viewport=_VIEWPORT)
+                page.goto(target_url)
+                try:
+                    backend = build_backend(backend_cfg, page=page)
+                except ValueError as exc:
+                    raise SystemExit(str(exc)) from exc
+                yield _executor(backend)
+            finally:
+                browser.close()
+        return
+
+    try:
+        backend = build_backend(backend_cfg)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    try:
+        yield _executor(backend)
+    finally:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            close()
 
 
 def _cmd_console(args: argparse.Namespace) -> int:
@@ -2721,7 +2875,7 @@ def _cmd_console(args: argparse.Namespace) -> int:
         )
     from openadapt_flow.console.server import LOOPBACK_HOST, serve
 
-    allow_actions = args.allow_actions and not args.attend
+    allow_actions = args.allow_actions
     mode = "ACTIONS ENABLED (confirm-gated)" if allow_actions else "read-only"
     if args.attend:
         mode += "; attention-first"
@@ -2730,14 +2884,16 @@ def _cmd_console(args: argparse.Namespace) -> int:
         f"  bundles: {Path(args.bundles).resolve()}\n"
         f"  runs:    {Path(args.runs).resolve()}"
     )
-    serve(
-        args.bundles,
-        args.runs,
-        args.skills,
-        allow_actions=allow_actions,
-        attend=args.attend,
-        port=args.port,
-    )
+    with _attended_executor_from_args(args) as attended_executor:
+        serve(
+            args.bundles,
+            args.runs,
+            args.skills,
+            allow_actions=allow_actions,
+            attend=args.attend,
+            attended_executor=attended_executor,
+            port=args.port,
+        )
     return 0
 
 

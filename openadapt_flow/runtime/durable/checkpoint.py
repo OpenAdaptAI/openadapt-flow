@@ -74,6 +74,10 @@ class RunManifest(BaseModel):
     """
 
     schema_version: int = 1
+    #: Random run-instance identity, distinct from workflow/bundle identity.
+    #: Attended capabilities bind to this so a capability copied between two
+    #: runs of the same bundle is refused.
+    run_id: str = ""
     workflow_name: str
     #: The workflow bundle directory (absolute), source of ``workflow.json``
     #: and the template crops.

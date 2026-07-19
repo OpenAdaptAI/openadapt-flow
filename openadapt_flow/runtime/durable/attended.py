@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterator, Literal, Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openadapt_flow.ir import StepResult, Workflow
+from openadapt_flow.ir import State, StateKind, Step, StepResult, Workflow
 from openadapt_flow.runtime.durable.approval import (
     ApprovalRecord,
     ApprovalRequired,
@@ -46,13 +46,19 @@ from openadapt_flow.runtime.durable.checkpoint import (
     PendingEscalation,
     RunCheckpoint,
 )
-from openadapt_flow.runtime.durable.program_checkpoint import bundle_version
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    ProgramCheckpoint,
+    ProgramTransitionReceipt,
+    bundle_version,
+    control_frames_hash,
+)
 
 CAPABILITY_FILENAME = "attended_capability.json"
 CAPABILITY_HISTORY_FILENAME = "attended_capability_history.json"
 CAPABILITY_KEY_FILENAME = ".attended_capability.key"
 DECISIONS_FILENAME = "attended_decisions.json"
 LEASE_FILENAME = ".attended_action.lease"
+PROGRAM_RECEIPTS_DIRNAME = ".attended_program_receipts"
 DEFAULT_CAPABILITY_TTL_S = 24 * 3600.0
 DEFAULT_LEASE_TTL_S = 15 * 60.0
 
@@ -147,6 +153,7 @@ class AttendedPauseCapability(BaseModel):
     pause_digest: str
     expected_next_transition: Optional[str] = None
     expected_transition_digest: str
+    program_cursor_digest: Optional[str] = None
     transition_baseline: SignedTransitionBaseline = Field(
         default_factory=SignedTransitionBaseline
     )
@@ -199,6 +206,7 @@ class AttendedExecutionResult(BaseModel):
     report_success: Optional[bool] = None
     resumed_from: Optional[str] = None
     next_transition: Optional[str] = None
+    transition_receipt_digest: Optional[str] = None
 
 
 class AttendedDecision(BaseModel):
@@ -227,6 +235,7 @@ class AttendedDecision(BaseModel):
     created_at: str = Field(default_factory=lambda: _iso(_now()))
     report_success: Optional[bool] = None
     next_transition: Optional[str] = None
+    transition_receipt_digest: Optional[str] = None
 
 
 class AttendedDecisionLog(BaseModel):
@@ -256,10 +265,10 @@ def _expected_transition(
     workflow: Workflow, pending: PendingEscalation
 ) -> Optional[str]:
     if pending.program:
-        # The complete interpreter frame is held in the last program
-        # checkpoint.  The paused state is the only transition identity the
-        # controller can safely name without re-evaluating guarded edges.
-        return pending.state_id or pending.step_id
+        # A guarded successor can be selected only after fresh human-completion
+        # verification. The engine persists that one target in a receipt before
+        # resume instead of guessing it at capability-issuance time.
+        return "<program-transition-receipt>"
     next_index = pending.step_index + 1
     if 0 <= next_index < len(workflow.steps):
         return workflow.steps[next_index].id
@@ -283,8 +292,46 @@ def _transition_payload(
         "state_id": pending.state_id,
         "resume_from_index": pending.resume_from_index,
         "resume_from_step_id": pending.resume_from_step_id,
+        "program_cursor_digest": _program_cursor_digest(pending),
         "expected_next_transition": expected_next_transition,
     }
+
+
+def _program_cursor_digest(pending: PendingEscalation) -> Optional[str]:
+    if not pending.program or not pending.program_frames:
+        return None
+    return _digest(
+        {
+            "state_id": pending.state_id,
+            "checkpoint_seq": pending.program_checkpoint_seq,
+            "history_hash": pending.program_history_hash,
+            "control_frames_hash": control_frames_hash(pending.program_frames),
+        }
+    )
+
+
+def _program_pause_state(
+    workflow: Workflow, pending: PendingEscalation
+) -> Optional[State]:
+    if (
+        workflow.program is None
+        or not pending.program
+        or not pending.program_frames
+        or pending.state_id is None
+    ):
+        return None
+    leaf = pending.program_frames[-1]
+    graph = (
+        workflow.program
+        if leaf.graph_id == "__program__"
+        else workflow.subflows.get(leaf.graph_id)
+    )
+    if graph is None or leaf.state_id != pending.state_id:
+        return None
+    state = graph.states.get(leaf.state_id)
+    if state is None or state.kind is not StateKind.ACTION or state.step is None:
+        return None
+    return state
 
 
 def _relative_postcondition_kinds(step: Any) -> set[str]:
@@ -306,10 +353,17 @@ def _allowed_actions(
         "teach",
         "escalate",
     ]
-    if pending.program or not 0 <= pending.step_index < len(workflow.steps):
-        return tuple(actions)
-    step = workflow.steps[pending.step_index]
-    if step.id != pending.step_id:
+    step: Optional[Step]
+    if pending.program:
+        state = _program_pause_state(workflow, pending)
+        step = state.step if state is not None else None
+    elif 0 <= pending.step_index < len(workflow.steps):
+        step = workflow.steps[pending.step_index]
+        if step.id != pending.step_id:
+            step = None
+    else:
+        step = None
+    if step is None:
         return tuple(actions)
 
     relative = _relative_postcondition_kinds(step)
@@ -421,6 +475,74 @@ class AttendedActionStore:
             ).hexdigest()
         )
 
+    def _receipt_path(self, pause_id: str) -> Path:
+        if len(pause_id) != 32 or any(ch not in "0123456789abcdef" for ch in pause_id):
+            raise AttendedActionRefused("the program receipt pause id is invalid")
+        return self.run_dir / PROGRAM_RECEIPTS_DIRNAME / f"{pause_id}.json"
+
+    def _sign_program_receipt(self, receipt: ProgramTransitionReceipt) -> str:
+        return (
+            "hmac-sha256:"
+            + hmac.new(
+                self._key(create=False),
+                _canonical(receipt.unsigned()),
+                hashlib.sha256,
+            ).hexdigest()
+        )
+
+    def seal_program_receipt(
+        self, receipt: ProgramTransitionReceipt
+    ) -> ProgramTransitionReceipt:
+        """Bind an exact interpreter transition to the signed per-run trust root."""
+        sealed = receipt.model_copy(update={"signature": ""})
+        return sealed.model_copy(
+            update={"signature": self._sign_program_receipt(sealed)}
+        )
+
+    def write_program_receipt(
+        self, receipt: ProgramTransitionReceipt
+    ) -> ProgramTransitionReceipt:
+        """Atomically persist one private, HMAC-authenticated transition receipt."""
+        sealed = self.seal_program_receipt(receipt)
+        path = self._receipt_path(sealed.pause_id)
+        if path.parent.is_symlink() or path.is_symlink():
+            raise AttendedActionRefused(
+                "the private program receipt path must not be a symlink"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            os.chmod(path.parent, 0o700)
+        if path.is_file():
+            existing = self.read_program_receipt(sealed.pause_id)
+            if existing != sealed:
+                raise AttendedActionRefused(
+                    "a different program transition receipt already exists for "
+                    "this pause"
+                )
+            return existing
+        self._atomic_write(path, sealed.model_dump_json(indent=2).encode("utf-8"))
+        return sealed
+
+    def read_program_receipt(self, pause_id: str) -> ProgramTransitionReceipt:
+        """Read and authenticate one exact program transition receipt."""
+        path = self._receipt_path(pause_id)
+        if path.parent.is_symlink() or path.is_symlink():
+            raise AttendedActionRefused(
+                "the private program receipt path must not be a symlink"
+            )
+        try:
+            receipt = ProgramTransitionReceipt.model_validate_json(path.read_text())
+        except (FileNotFoundError, ValueError) as exc:
+            raise AttendedActionRefused(
+                "the exact program transition receipt is missing or invalid"
+            ) from exc
+        expected = self._sign_program_receipt(receipt)
+        if not hmac.compare_digest(receipt.signature, expected):
+            raise AttendedActionRefused(
+                "the program transition receipt signature does not verify"
+            )
+        return receipt
+
     def transition_value_digest(self, field: str, value: str) -> str:
         """Keyed digest for one transient URL/title observation."""
         if field not in {"url", "page_title"}:
@@ -527,6 +649,7 @@ class AttendedActionStore:
             pause_digest=pause_digest,
             expected_next_transition=expected,
             expected_transition_digest=_digest(transition),
+            program_cursor_digest=_program_cursor_digest(pending),
             transition_baseline=baseline,
             delivery_state=_delivery_state(result),
             issued_at=_iso(now),
@@ -593,6 +716,10 @@ class AttendedActionStore:
         if _digest(transition) != capability.expected_transition_digest:
             raise AttendedActionRefused(
                 "the expected attended transition binding no longer verifies"
+            )
+        if capability.program_cursor_digest != _program_cursor_digest(pending):
+            raise AttendedActionRefused(
+                "the exact program interpreter cursor no longer verifies"
             )
         if (
             pending.step_id != capability.step_id
@@ -699,6 +826,83 @@ class AttendedActionStore:
                 self._fsync_parent(self.lease_path)
             except FileNotFoundError:
                 pass
+
+
+def validate_attended_program_receipt(
+    run_dir: Path | str,
+    *,
+    checkpoint: ProgramCheckpoint,
+    pending: Optional[PendingEscalation],
+    manifest: Any,
+    live_bundle_version: str,
+) -> ProgramTransitionReceipt:
+    """Authenticate and bind a receipt before interpreter restoration."""
+    receipt = checkpoint.attended_transition
+    if receipt is None:
+        raise AttendedActionRefused("the attended program checkpoint has no receipt")
+    actions = AttendedActionStore(run_dir)
+    stored = actions.read_program_receipt(receipt.pause_id)
+    if stored != receipt:
+        raise AttendedActionRefused(
+            "the program checkpoint does not match its atomic transition receipt"
+        )
+    if (
+        not checkpoint.frames
+        or receipt.run_id != manifest.run_id
+        or receipt.workflow_name != manifest.workflow_name
+        or receipt.workflow_name != checkpoint.workflow_name
+        or receipt.bundle_version != live_bundle_version
+        or receipt.bundle_version != checkpoint.bundle_version
+        or checkpoint.seq != receipt.source_checkpoint_seq + 1
+        or checkpoint.frames[-1].graph_id != receipt.source_graph_id
+        or checkpoint.frames[-1].state_id != receipt.source_state_id
+        or checkpoint.verified_state_id != receipt.source_state_id
+        or receipt.control_frames_hash != control_frames_hash(checkpoint.frames)
+    ):
+        raise AttendedActionRefused(
+            "the attended program receipt does not match its signed "
+            "run/bundle/pause/state/frame lineage"
+        )
+    is_current_pause = (
+        pending is not None
+        and pending.program
+        and bool(pending.program_frames)
+        and pending.program_checkpoint_seq == receipt.source_checkpoint_seq
+        and pending.program_frames[-1].graph_id == receipt.source_graph_id
+        and pending.program_frames[-1].state_id == receipt.source_state_id
+        and pending.state_id == receipt.source_state_id
+    )
+    if is_current_pause:
+        assert pending is not None
+        capability = actions.read()
+        if (
+            receipt.pause_id != capability.pause_id
+            or receipt.pause_digest != capability.pause_digest
+            or receipt.action not in capability.allowed_actions
+            or receipt.control_frames_hash
+            != control_frames_hash(pending.program_frames)
+            or receipt.cursor_digest != _program_cursor_digest(pending)
+            or receipt.cursor_digest != capability.program_cursor_digest
+            or checkpoint.transition_history_hash != pending.program_history_hash
+            or capability.run_id != manifest.run_id
+            or capability.workflow_name != manifest.workflow_name
+            or capability.bundle_version != live_bundle_version
+            or capability.state_id != pending.state_id
+        ):
+            raise AttendedActionRefused(
+                "the attended program receipt does not match its current signed "
+                "pause and interpreter cursor"
+            )
+    elif (
+        pending is None
+        or not pending.program
+        or pending.program_checkpoint_seq != checkpoint.seq
+    ):
+        raise AttendedActionRefused(
+            "the durable program pause does not continue from the receipt's "
+            "exact checkpoint lineage"
+        )
+    return receipt
 
 
 def issue_attended_capability(
@@ -942,6 +1146,7 @@ def execute_attended_action(
             message=result.message,
             report_success=result.report_success,
             next_transition=result.next_transition,
+            transition_receipt_digest=result.transition_receipt_digest,
         )
         actions.append(decision)
         return decision
@@ -1043,23 +1248,36 @@ class BoundAttendedExecutor:
                 "workflow identity changed after attended capability issuance"
             )
         if workflow.program is not None:
-            raise AttendedActionRefused(
-                "program-graph attended completion requires an exact interpreter "
-                "transition receipt; generic program continuation is refused"
+            pending = store.read_pending()
+            state = (
+                _program_pause_state(workflow, pending) if pending is not None else None
             )
-        if (
-            not 0 <= capability.step_index < len(workflow.steps)
-            or workflow.steps[capability.step_index].id != capability.step_id
-        ):
-            raise AttendedActionRefused(
-                "paused step identity no longer matches the qualified workflow"
-            )
-        if self._expected(workflow, capability.step_index) != (
-            capability.expected_next_transition
-        ):
-            raise AttendedActionRefused(
-                "the expected next transition no longer matches the workflow"
-            )
+            if (
+                pending is None
+                or state is None
+                or capability.program_cursor_digest is None
+                or capability.program_cursor_digest != _program_cursor_digest(pending)
+                or capability.state_id != state.id
+                or capability.expected_next_transition != "<program-transition-receipt>"
+            ):
+                raise AttendedActionRefused(
+                    "the exact attended interpreter cursor no longer matches "
+                    "the qualified program action"
+                )
+        else:
+            if (
+                not 0 <= capability.step_index < len(workflow.steps)
+                or workflow.steps[capability.step_index].id != capability.step_id
+            ):
+                raise AttendedActionRefused(
+                    "paused step identity no longer matches the qualified workflow"
+                )
+            if self._expected(workflow, capability.step_index) != (
+                capability.expected_next_transition
+            ):
+                raise AttendedActionRefused(
+                    "the expected next transition no longer matches the workflow"
+                )
         return store, manifest, workflow
 
     @staticmethod
@@ -1143,6 +1361,168 @@ class BoundAttendedExecutor:
             next_transition=capability.expected_next_transition,
         )
 
+    @staticmethod
+    def _program_context(
+        store: CheckpointStore,
+        workflow: Workflow,
+        capability: AttendedPauseCapability,
+    ) -> tuple[PendingEscalation, State, dict[str, str]]:
+        pending = store.read_pending()
+        state = _program_pause_state(workflow, pending) if pending is not None else None
+        if (
+            pending is None
+            or state is None
+            or not pending.program_frames
+            or capability.program_cursor_digest is None
+            or capability.program_cursor_digest != _program_cursor_digest(pending)
+        ):
+            raise AttendedActionRefused(
+                "the exact attended interpreter cursor is unavailable or changed"
+            )
+        return pending, state, dict(pending.program_frames[-1].params)
+
+    def _resume_program(
+        self,
+        *,
+        run_dir: Path,
+        store: CheckpointStore,
+        manifest: Any,
+        workflow: Workflow,
+        capability: AttendedPauseCapability,
+        approval: ApprovalRecord,
+        pending: PendingEscalation,
+        state: State,
+        params: dict[str, str],
+        result: StepResult,
+        skipped: bool,
+        target_state_id: Optional[str],
+        resume_replayer: Any,
+    ) -> AttendedExecutionResult:
+        if state.step is None or not pending.program_frames:
+            raise AttendedActionRefused("the paused program action is unavailable")
+        source_seq = pending.program_checkpoint_seq
+        cursor_digest = capability.program_cursor_digest
+        if cursor_digest is None:
+            raise AttendedActionRefused("the program cursor is not signed")
+        receipt = ProgramTransitionReceipt(
+            run_id=capability.run_id,
+            workflow_name=capability.workflow_name,
+            bundle_version=capability.bundle_version,
+            pause_id=capability.pause_id,
+            pause_digest=capability.pause_digest,
+            action="skip" if skipped else "continue",
+            source_checkpoint_seq=source_seq,
+            source_graph_id=pending.program_frames[-1].graph_id,
+            source_state_id=state.id,
+            target_state_id=target_state_id,
+            control_frames_hash=control_frames_hash(pending.program_frames),
+            cursor_digest=cursor_digest,
+            created_at=capability.issued_at,
+        )
+        action_store = AttendedActionStore(run_dir)
+        receipt = action_store.seal_program_receipt(receipt)
+        resolved_effects = (
+            [
+                effect.model_dump(mode="json")
+                for effect in resume_replayer._resolve_effects(
+                    state.step.effects, params
+                )
+            ]
+            if result.effect_verified is True and state.step.effects
+            else []
+        )
+        expected_texts = (
+            [
+                condition.text
+                for condition in state.step.expect
+                if (
+                    condition.kind.value
+                    if hasattr(condition.kind, "value")
+                    else str(condition.kind)
+                )
+                == "text_present"
+                and condition.text
+            ]
+            if not skipped
+            else []
+        )
+        checkpoint = ProgramCheckpoint(
+            workflow_name=capability.workflow_name,
+            seq=source_seq + 1,
+            verified_state_id=state.id,
+            intent=state.step.intent,
+            frames=list(pending.program_frames),
+            bound_params=params,
+            new_effect_keys=(
+                list(result.effect_contract_hashes)
+                if result.effect_verified is True
+                else []
+            ),
+            new_effects=resolved_effects,
+            governed_authorization_id=(
+                manifest.governed_authorization.authorization_id
+                if manifest.governed_authorization is not None
+                else None
+            ),
+            governed_approval_source=(
+                manifest.governed_authorization.approval_source
+                if manifest.governed_authorization is not None
+                else None
+            ),
+            expected_texts=expected_texts,
+            transition_history_hash=pending.program_history_hash,
+            bundle_version=capability.bundle_version,
+            attended_transition=receipt,
+            created_at=capability.issued_at,
+        )
+        existing = store.last_program_checkpoint()
+        existing_seq = existing.seq if existing is not None else 0
+        if existing_seq != source_seq and (
+            existing_seq != checkpoint.seq or existing != checkpoint
+        ):
+            raise AttendedActionRefused(
+                "the program checkpoint sequence advanced differently; refusing "
+                "a non-idempotent attended transition"
+            )
+        receipt = action_store.write_program_receipt(receipt)
+        checkpoint = checkpoint.model_copy(update={"attended_transition": receipt})
+        if existing_seq == source_seq:
+            store.write_program_checkpoint(checkpoint)
+        store.write_approval(approval)
+        live_pending = store.read_pending()
+        if live_pending is None or _digest(live_pending) != capability.pause_digest:
+            raise AttendedActionRefused("the program pause changed before resume")
+        store.write_pending(live_pending.model_copy(update={"status": "approved"}))
+
+        from openadapt_flow.runtime.durable.resume import resume
+
+        resumed = resume(
+            run_dir,
+            resume_replayer,
+            approval=approval,
+            key=self.key,
+        )
+        receipt_digest = _digest(receipt)
+        target = target_state_id or "<return>"
+        return AttendedExecutionResult(
+            status="completed" if resumed.success else "halted",
+            message=(
+                "Human-completed program action verified; exact interpreter "
+                "transition receipt committed and resumed without re-actuation."
+                if resumed.success and not skipped
+                else (
+                    "Declared optional program action skipped; exact interpreter "
+                    "transition receipt committed without actuation."
+                    if resumed.success
+                    else "The exact program continuation halted and remains auditable."
+                )
+            ),
+            report_success=resumed.success,
+            resumed_from=state.id,
+            next_transition=target,
+            transition_receipt_digest=receipt_digest,
+        )
+
     def continue_run(
         self,
         run_dir: Path,
@@ -1167,21 +1547,42 @@ class BoundAttendedExecutor:
         capability: AttendedPauseCapability,
         approval: ApprovalRecord,
     ) -> AttendedExecutionResult:
+        program_context: Optional[
+            tuple[PendingEscalation, State, dict[str, str], Optional[str]]
+        ] = None
         try:
             store, manifest, workflow = self._load(run_dir, capability)
             replayer = self.replayer_factory(manifest)
             self._bind_authorization(replayer, manifest)
             attended_store = AttendedActionStore(run_dir)
-            result = replayer.revalidate_attended_completion(
-                workflow,
-                step_index=capability.step_index,
-                params=dict(manifest.params),
-                bundle_dir=Path(manifest.bundle_dir),
-                run_dir=run_dir,
-                run_id=manifest.run_id,
-                transition_baseline=capability.transition_baseline,
-                transition_digest=attended_store.transition_value_digest,
-            )
+            if workflow.program is not None:
+                pending, state, params = self._program_context(
+                    store, workflow, capability
+                )
+                leaf = pending.program_frames[-1]
+                result, target = replayer.revalidate_attended_program_completion(
+                    workflow,
+                    graph_id=leaf.graph_id,
+                    state_id=state.id,
+                    params=params,
+                    bundle_dir=Path(manifest.bundle_dir),
+                    run_dir=run_dir,
+                    run_id=manifest.run_id,
+                    transition_baseline=capability.transition_baseline,
+                    transition_digest=attended_store.transition_value_digest,
+                )
+                program_context = (pending, state, params, target)
+            else:
+                result = replayer.revalidate_attended_completion(
+                    workflow,
+                    step_index=capability.step_index,
+                    params=dict(manifest.params),
+                    bundle_dir=Path(manifest.bundle_dir),
+                    run_dir=run_dir,
+                    run_id=manifest.run_id,
+                    transition_baseline=capability.transition_baseline,
+                    transition_digest=attended_store.transition_value_digest,
+                )
             if not result.ok:
                 return AttendedExecutionResult(
                     status="refused",
@@ -1213,6 +1614,23 @@ class BoundAttendedExecutor:
                 next_transition=capability.expected_next_transition,
             )
         try:
+            if program_context is not None:
+                pending, state, params, target = program_context
+                return self._resume_program(
+                    run_dir=run_dir,
+                    store=store,
+                    manifest=manifest,
+                    workflow=workflow,
+                    capability=capability,
+                    approval=approval,
+                    pending=pending,
+                    state=state,
+                    params=params,
+                    result=result,
+                    skipped=False,
+                    target_state_id=target,
+                    resume_replayer=replayer,
+                )
             return self._resume(
                 run_dir=run_dir,
                 store=store,
@@ -1257,9 +1675,22 @@ class BoundAttendedExecutor:
         capability: AttendedPauseCapability,
         approval: ApprovalRecord,
     ) -> AttendedExecutionResult:
+        program_context: Optional[
+            tuple[PendingEscalation, State, dict[str, str], Optional[str]]
+        ] = None
         try:
             store, manifest, workflow = self._load(run_dir, capability)
-            step = workflow.steps[capability.step_index]
+            if workflow.program is not None:
+                pending, state, params = self._program_context(
+                    store, workflow, capability
+                )
+                assert state.step is not None
+                step = state.step
+            else:
+                pending = None
+                state = None
+                params = dict(manifest.params)
+                step = workflow.steps[capability.step_index]
             if (
                 step.risk == "irreversible"
                 or step.effects
@@ -1284,7 +1715,7 @@ class BoundAttendedExecutor:
                 step.guard.predicate,
                 frame,
                 Path(manifest.bundle_dir),
-                dict(manifest.params),
+                params,
             ):
                 return AttendedExecutionResult(
                     status="refused",
@@ -1304,6 +1735,15 @@ class BoundAttendedExecutor:
                 postconditions_ok=None,
                 actuation="human_attended_skip",
             )
+            if pending is not None and state is not None:
+                target = replayer.select_attended_program_transition(
+                    workflow,
+                    graph_id=pending.program_frames[-1].graph_id,
+                    state_id=state.id,
+                    params=params,
+                    bundle_dir=Path(manifest.bundle_dir),
+                )
+                program_context = (pending, state, params, target)
         except ResumeRefused as exc:
             return AttendedExecutionResult(
                 status="refused",
@@ -1324,6 +1764,23 @@ class BoundAttendedExecutor:
                 next_transition=capability.expected_next_transition,
             )
         try:
+            if program_context is not None:
+                pending, state, params, target = program_context
+                return self._resume_program(
+                    run_dir=run_dir,
+                    store=store,
+                    manifest=manifest,
+                    workflow=workflow,
+                    capability=capability,
+                    approval=approval,
+                    pending=pending,
+                    state=state,
+                    params=params,
+                    result=result,
+                    skipped=True,
+                    target_state_id=target,
+                    resume_replayer=replayer,
+                )
             return self._resume(
                 run_dir=run_dir,
                 store=store,

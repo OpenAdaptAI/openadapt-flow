@@ -40,7 +40,10 @@ from openadapt_flow.runtime.durable.checkpoint import (
     RunCheckpoint,
     RunManifest,
 )
-from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    GraphFrame,
+    ProgramCheckpoint,
+)
 
 if TYPE_CHECKING:
     from openadapt_flow.runtime.durable.attended import TransitionObservation
@@ -356,6 +359,9 @@ class DurableRun:
         params: dict[str, str],
         workflow: Optional[Workflow] = None,
         transition_observation: Optional["TransitionObservation"] = None,
+        program_frames: Optional[list[GraphFrame]] = None,
+        program_checkpoint_seq: int = 0,
+        program_history_hash: str = "",
     ) -> None:
         """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
 
@@ -381,6 +387,9 @@ class DurableRun:
             resume_from_step_id=(last.verified_state_id if last is not None else None),
             params=dict(params),
             program=True,
+            program_frames=list(program_frames or []),
+            program_checkpoint_seq=program_checkpoint_seq,
+            program_history_hash=program_history_hash,
         )
         self.store.write_pending(pending)
         if workflow is not None:

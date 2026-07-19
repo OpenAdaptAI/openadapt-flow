@@ -77,6 +77,8 @@ from openadapt_flow.runtime.durable.program_checkpoint import (
     GraphFrame,
     LoopCursor,
     ProgramCheckpoint,
+    ProgramTransitionReceipt,
+    control_frames_hash,
 )
 from openadapt_flow.runtime.durable.program_checkpoint import (
     bundle_version as _bundle_version,
@@ -195,6 +197,12 @@ class _ProgramHalt(Exception):
         self.outcome = outcome
         self.reason = reason
         self.safety = safety
+        # Populated at an ACTION-state failure before graph frames unwind.
+        # Empty means the halt is not eligible for a generic attended
+        # Continue/Skip transition.
+        self.program_frames: list[GraphFrame] = []
+        self.program_params: dict[str, str] = {}
+        self.program_history_hash: str = ""
 
 
 def _all_workflow_steps(workflow: Workflow):
@@ -1216,11 +1224,17 @@ class Replayer:
             if state.on_exception is not None and not result.safety_halt:
                 result.exception_handled = True
                 return state.on_exception  # graph try/except: route + continue
-            raise _ProgramHalt(
+            halt = _ProgramHalt(
                 "halt",
                 result.error or f"action state '{state.id}' failed — run aborted",
                 safety=result.safety_halt,
             )
+            halt.program_frames = [
+                self._frame_to_model(frame) for frame in self._frame_stack
+            ]
+            halt.program_params = dict(params)
+            halt.program_history_hash = _history_hash(report.visited_states)
+            raise halt
         # Tier-3 durable checkpoint: this action state VERIFIED (identity +
         # effects + postconditions); capture the whole interpreter state so an
         # approved resume can RESTORE it from exactly here. Persist BEFORE
@@ -1527,9 +1541,12 @@ class Replayer:
             state_id=self._current_state_id or failing.step_id,
             intent=self._current_intent or failing.intent,
             result=failing,
-            params=self._current_params,
+            params=halt.program_params or self._current_params,
             workflow=workflow,
             transition_observation=self._attended_transition_observation(),
+            program_frames=halt.program_frames,
+            program_checkpoint_seq=self._program_seq,
+            program_history_hash=halt.program_history_hash,
         )
 
     def revalidate_program_checkpoint(
@@ -1576,6 +1593,124 @@ class Replayer:
                         "refusing to resume; the system of record diverged from "
                         "the checkpoint"
                     )
+
+    def revalidate_attended_program_completion(
+        self,
+        workflow: Workflow,
+        *,
+        graph_id: str,
+        state_id: str,
+        params: dict[str, str],
+        bundle_dir: Path,
+        run_dir: Path,
+        run_id: str,
+        transition_baseline: Any,
+        transition_digest: Callable[[str, str], str],
+    ) -> tuple[StepResult, Optional[str]]:
+        """Verify one human-completed ACTION state and select one exact edge.
+
+        The source action is observed through the same postcondition/effect
+        contract as a linear attended completion. Only after it verifies do we
+        evaluate its guarded transitions once against the live session. The
+        caller persists that selected target in a transition receipt before
+        resume, so neither the source action nor its edge selection is repeated.
+        """
+        graph = self._resolve_graph(workflow, graph_id)
+        state = graph.states.get(state_id)
+        if state is None or state.kind is not StateKind.ACTION or state.step is None:
+            raise StateDiverged(
+                "the attended program cursor does not name an action state"
+            )
+        verification_workflow = Workflow(
+            name=workflow.name,
+            steps=[state.step],
+            params=dict(workflow.params),
+            param_specs=dict(workflow.param_specs),
+        )
+        result = self.revalidate_attended_completion(
+            verification_workflow,
+            step_index=0,
+            params=params,
+            bundle_dir=bundle_dir,
+            run_dir=run_dir,
+            run_id=run_id,
+            transition_baseline=transition_baseline,
+            transition_digest=transition_digest,
+        )
+        if not result.ok:
+            return result, None
+        target = self.select_attended_program_transition(
+            workflow,
+            graph_id=graph_id,
+            state_id=state_id,
+            params=params,
+            bundle_dir=bundle_dir,
+        )
+        return result, target
+
+    def select_attended_program_transition(
+        self,
+        workflow: Workflow,
+        *,
+        graph_id: str,
+        state_id: str,
+        params: dict[str, str],
+        bundle_dir: Path,
+    ) -> Optional[str]:
+        """Select and prove one exact successor for an attended action state."""
+        graph = self._resolve_graph(workflow, graph_id)
+        state = graph.states.get(state_id)
+        if state is None or state.kind is not StateKind.ACTION or state.step is None:
+            raise StateDiverged(
+                "the attended program cursor does not name an action state"
+            )
+        try:
+            target = self._select_transition(
+                state, params=params, bundle_dir=bundle_dir
+            )
+        except _ProgramHalt as exc:
+            raise StateDiverged(
+                "no exact outgoing program transition matched after attended completion"
+            ) from exc
+        if target is not None and target not in graph.states:
+            raise StateDiverged(
+                "the selected attended program transition targets an undefined state"
+            )
+
+        # When the exact successor is another action, prove its target is
+        # uniquely available (and its identity, when armed) before committing
+        # the receipt. Non-action successors carry their own deterministic
+        # branch/loop/subflow semantics and need no action-target proof here.
+        next_state = graph.states.get(target) if target is not None else None
+        if (
+            next_state is not None
+            and next_state.kind is StateKind.ACTION
+            and next_state.step is not None
+            and next_state.step.anchor is not None
+        ):
+            frame = self.vision.wait_settled(self.backend)
+            resolution, _region, error = self._resolve_step(
+                next_state.step, frame, bundle_dir, workflow
+            )
+            if error is not None or resolution is None:
+                raise StateDiverged(
+                    "the exact attended program successor target did not resolve "
+                    "uniquely"
+                )
+            if next_state.step.identity_armed:
+                identity = self._verify_identity(
+                    next_state.step,
+                    resolution,
+                    frame,
+                    params,
+                    workflow,
+                    bundle_dir,
+                )
+                if identity.status != "verified":
+                    raise StateDiverged(
+                        "the exact attended program successor identity did not verify"
+                    )
+        return target
 
     def revalidate_attended_completion(
         self,
@@ -1859,6 +1994,41 @@ class Replayer:
         mid-loop pause finishes the in-progress row and runs the remaining rows.
         """
         assert workflow.program is not None
+        receipt = checkpoint.attended_transition
+        if receipt is not None:
+            if (
+                receipt.source_checkpoint_seq != checkpoint.seq - 1
+                or receipt.control_frames_hash != control_frames_hash(checkpoint.frames)
+                or not checkpoint.frames
+                or checkpoint.frames[-1].graph_id != receipt.source_graph_id
+                or checkpoint.frames[-1].state_id != receipt.source_state_id
+                or checkpoint.verified_state_id != receipt.source_state_id
+            ):
+                raise _ProgramHalt(
+                    "halt",
+                    "the attended interpreter transition receipt does not match "
+                    "its checkpoint cursor",
+                )
+            graph = self._resolve_graph(workflow, receipt.source_graph_id)
+            source = graph.states.get(receipt.source_state_id)
+            if source is None or source.kind is not StateKind.ACTION:
+                raise _ProgramHalt(
+                    "halt",
+                    "the attended interpreter transition receipt source is not "
+                    "an action state",
+                )
+            declared_targets = {transition.target for transition in source.transitions}
+            if (
+                receipt.target_state_id is None
+                and source.transitions
+                or receipt.target_state_id is not None
+                and receipt.target_state_id not in declared_targets
+            ):
+                raise _ProgramHalt(
+                    "halt",
+                    "the attended interpreter transition receipt names an "
+                    "undeclared successor",
+                )
         if not checkpoint.frames:
             # Nothing verified pre-pause (halted on the very first state): there
             # is no interpreter state to restore, so re-walk from the top.
@@ -1884,6 +2054,7 @@ class Replayer:
             run_dir=run_dir,
             report=report,
             new_crops=new_crops,
+            attended_transition=receipt,
         )
 
     def _resume_descend(
@@ -1897,6 +2068,7 @@ class Replayer:
         run_dir: Path,
         report: RunReport,
         new_crops: dict[str, bytes],
+        attended_transition: Optional[ProgramTransitionReceipt] = None,
     ) -> None:
         """Restore one frame of the interpreter stack and continue it.
 
@@ -1929,8 +2101,12 @@ class Replayer:
             if is_leaf:
                 # The verified state: re-drive from its SUCCESSOR (never re-run
                 # the verified state itself).
-                nxt = self._select_transition(
-                    state, params=params, bundle_dir=bundle_dir
+                nxt = (
+                    attended_transition.target_state_id
+                    if attended_transition is not None
+                    else self._select_transition(
+                        state, params=params, bundle_dir=bundle_dir
+                    )
                 )
                 if nxt is not None:
                     live["state_id"] = nxt
@@ -1958,6 +2134,7 @@ class Replayer:
                 run_dir=run_dir,
                 report=report,
                 new_crops=new_crops,
+                attended_transition=attended_transition,
             )
             if state.kind is StateKind.LOOP:
                 loop = state.loop

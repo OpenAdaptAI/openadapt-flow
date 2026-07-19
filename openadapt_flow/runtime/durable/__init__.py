@@ -63,7 +63,9 @@ from openadapt_flow.runtime.durable.program_checkpoint import (  # noqa: F401
     GraphFrame,
     LoopCursor,
     ProgramCheckpoint,
+    ProgramTransitionReceipt,
     bundle_version,
+    control_frames_hash,
 )
 from openadapt_flow.runtime.durable.resume import (  # noqa: F401
     resume,
@@ -76,10 +78,12 @@ __all__ = [
     "RunCheckpoint",
     "RunManifest",
     "ProgramCheckpoint",
+    "ProgramTransitionReceipt",
     "GraphFrame",
     "LoopCursor",
     "TOP_GRAPH_ID",
     "bundle_version",
+    "control_frames_hash",
     "ApprovalRecord",
     "ApprovalRequired",
     "BundleMismatch",

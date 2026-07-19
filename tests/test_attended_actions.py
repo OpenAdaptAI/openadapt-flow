@@ -17,13 +17,19 @@ from openadapt_flow.ir import (
     ActionKind,
     Guard,
     HaltObservation,
+    LoopSpec,
     Postcondition,
     PostconditionKind,
     Predicate,
     PredicateKind,
+    ProgramGraph,
+    Relation,
     RunReport,
+    State,
+    StateKind,
     Step,
     StepResult,
+    Transition,
     Workflow,
 )
 from openadapt_flow.runtime.durable.approval import ApprovalRecord
@@ -35,12 +41,14 @@ from openadapt_flow.runtime.durable.attended import (
     TransitionObservation,
     execute_attended_action,
     issue_attended_capability,
+    validate_attended_program_receipt,
 )
 from openadapt_flow.runtime.durable.checkpoint import (
     CheckpointStore,
     PendingEscalation,
     RunManifest,
 )
+from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
 from openadapt_flow.runtime.effects import Effect, EffectKind, EffectState
 from openadapt_flow.runtime.replayer import Replayer
 from tests.test_replayer import FakeBackend, FakeVision, Match
@@ -464,6 +472,462 @@ def test_program_pause_never_advertises_generic_continue_or_skip(tmp_path):
         transition_observation=TransitionObservation(url="https://payer.example/mfa"),
     )
     assert capability.allowed_actions == ("teach", "escalate")
+
+
+def _attended_program(*, guarded_transition: bool = False, skippable: bool = False):
+    transitions = (
+        [
+            Transition(
+                guard=Predicate(
+                    kind=PredicateKind.TEXT_PRESENT,
+                    text="ROUTE_A",
+                ),
+                target="route-a",
+            ),
+            Transition(target="route-b"),
+        ]
+        if guarded_transition
+        else [Transition(target="next")]
+    )
+    human = Step(
+        id="human-step",
+        intent="complete challenge",
+        action=ActionKind.KEY,
+        key="A",
+        expect=[
+            Postcondition(
+                kind=PostconditionKind.TEXT_PRESENT,
+                text="DONE",
+                timeout_s=0.01,
+            )
+        ],
+        guard=(
+            Guard(
+                predicate=Predicate(
+                    kind=PredicateKind.TEXT_PRESENT,
+                    text="OPTIONAL",
+                ),
+                on_unmet="skip",
+            )
+            if skippable
+            else None
+        ),
+    )
+    states = {
+        "human": State(
+            id="human",
+            kind=StateKind.ACTION,
+            step=human,
+            transitions=transitions,
+        ),
+        "next": State(
+            id="next",
+            kind=StateKind.ACTION,
+            step=_step("next-step", "B"),
+            transitions=[Transition(target="done")],
+        ),
+        "route-a": State(
+            id="route-a",
+            kind=StateKind.ACTION,
+            step=_step("route-a-step", "X"),
+            transitions=[Transition(target="done")],
+        ),
+        "route-b": State(
+            id="route-b",
+            kind=StateKind.ACTION,
+            step=_step("route-b-step", "Y"),
+            transitions=[Transition(target="done")],
+        ),
+        "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+    }
+    return Workflow(
+        name="attended-program",
+        program=ProgramGraph(entry="human", states=states),
+    )
+
+
+def _run_attended_program_to_pause(tmp_path, workflow, *, optional_visible=False):
+    bundle = tmp_path / "bundle"
+    run = tmp_path / "run"
+    workflow.save(bundle)
+    vision = FakeVision()
+    if optional_visible:
+        vision.text_results["OPTIONAL"] = Match(
+            point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+        )
+    initial_backend = FakeBackend()
+    report = Replayer(
+        initial_backend,
+        vision=vision,
+        durable=True,
+        poll_interval_s=0.0,
+    ).run(workflow, bundle_dir=bundle, run_dir=run)
+    assert report.success is False
+    return (
+        bundle,
+        run,
+        initial_backend,
+        CheckpointStore(run),
+        AttendedActionStore(run).read(),
+    )
+
+
+def test_program_continue_commits_exact_receipt_without_reactuating_source(tmp_path):
+    workflow = _attended_program()
+    _bundle, run, initial_backend, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    assert initial_backend.actions == [("press", "A")]
+    assert capability.allowed_actions == ("continue", "teach", "escalate")
+    pending = store.read_pending()
+    assert pending is not None
+    assert [frame.state_id for frame in pending.program_frames] == ["human"]
+    assert capability.program_cursor_digest is not None
+
+    backend = FakeBackend()
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-continue-request"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(backend, vision=vision, poll_interval_s=0.0)
+        ),
+    )
+    assert decision.status == "completed"
+    assert decision.next_transition == "next"
+    assert decision.transition_receipt_digest is not None
+    assert backend.actions == [("press", "B")]
+    checkpoint = store.program_checkpoints()[0]
+    assert checkpoint is not None
+    assert checkpoint.verified_state_id == "human"
+    assert checkpoint.attended_transition is not None
+    assert checkpoint.attended_transition.source_state_id == "human"
+    assert checkpoint.attended_transition.target_state_id == "next"
+    assert checkpoint.attended_transition.action == "continue"
+    assert checkpoint.attended_transition.run_id == capability.run_id
+    assert checkpoint.attended_transition.workflow_name == workflow.name
+    assert checkpoint.attended_transition.bundle_version == capability.bundle_version
+    assert checkpoint.attended_transition.pause_id == capability.pause_id
+    assert checkpoint.attended_transition.pause_digest == capability.pause_digest
+    assert checkpoint.attended_transition.signature.startswith("hmac-sha256:")
+    receipt_path = (
+        run
+        / ".attended_program_receipts"
+        / f"{checkpoint.attended_transition.pause_id}.json"
+    )
+    receipt_bytes = receipt_path.read_bytes()
+    assert json.loads(receipt_bytes) == checkpoint.attended_transition.model_dump(
+        mode="json"
+    )
+    assert AttendedActionStore(run).read_program_receipt(capability.pause_id) == (
+        checkpoint.attended_transition
+    )
+    assert not any(
+        sensitive in receipt_bytes.lower()
+        for sensitive in (b"url", b"title", b"observed_text", b"done")
+    )
+    if os.name != "nt":
+        assert receipt_path.parent.stat().st_mode & 0o077 == 0
+        assert receipt_path.stat().st_mode & 0o077 == 0
+
+
+def test_program_guarded_edge_is_selected_once_and_receipted(tmp_path):
+    workflow = _attended_program(guarded_transition=True)
+    _bundle, run, _initial, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    backend = FakeBackend()
+    vision = FakeVision()
+    match = Match(point=(10, 10), region=(0, 0, 20, 20), confidence=1.0)
+    vision.text_results["DONE"] = match
+    # The guarded edge sees ROUTE_A once. Resume must consume the receipt
+    # rather than evaluating the guard a second time (which would now fail).
+    vision.text_results["ROUTE_A"] = [match, None]
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-guarded-request"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(backend, vision=vision, poll_interval_s=0.0)
+        ),
+    )
+    assert decision.status == "completed"
+    assert decision.next_transition == "route-a"
+    assert backend.actions == [("press", "X")]
+    checkpoint = store.program_checkpoints()[0]
+    assert checkpoint is not None and checkpoint.attended_transition is not None
+    assert checkpoint.attended_transition.target_state_id == "route-a"
+
+
+def test_program_skip_uses_declared_guard_and_exact_receipt(tmp_path):
+    workflow = _attended_program(skippable=True)
+    _bundle, run, initial_backend, store, capability = _run_attended_program_to_pause(
+        tmp_path,
+        workflow,
+        optional_visible=True,
+    )
+    assert initial_backend.actions == [("press", "A")]
+    assert "skip" in capability.allowed_actions
+    backend = FakeBackend()
+    decision = execute_attended_action(
+        run,
+        _request(capability, action="skip", key="program-skip-request"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                backend, vision=FakeVision(), poll_interval_s=0.0
+            )
+        ),
+    )
+    assert decision.status == "completed"
+    assert backend.actions == [("press", "B")]
+    checkpoint = store.program_checkpoints()[0]
+    assert checkpoint is not None and checkpoint.attended_transition is not None
+    assert checkpoint.attended_transition.action == "skip"
+    assert checkpoint.attended_transition.target_state_id == "next"
+
+
+def test_program_cursor_tamper_refuses_before_executor(tmp_path):
+    workflow = _attended_program()
+    _bundle, run, _initial, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    pending = store.read_pending()
+    assert pending is not None
+    frames = list(pending.program_frames)
+    frames[-1] = frames[-1].model_copy(update={"state_id": "next"})
+    store.write_pending(pending.model_copy(update={"program_frames": frames}))
+    executor = _ResultExecutor()
+    with pytest.raises(AttendedActionRefused, match="pause changed"):
+        execute_attended_action(
+            run,
+            _request(capability, key="program-cursor-tamper"),
+            operator="staff",
+            executor=executor,
+        )
+    assert executor.calls == 0
+
+
+def test_program_receipt_preserves_nested_loop_cursor_and_remaining_rows(tmp_path):
+    body = ProgramGraph(
+        entry="human",
+        states={
+            "human": State(
+                id="human",
+                kind=StateKind.ACTION,
+                step=Step(
+                    id="human-step",
+                    intent="complete row",
+                    action=ActionKind.KEY,
+                    key="A",
+                    expect=[
+                        Postcondition(
+                            kind=PostconditionKind.TEXT_PRESENT,
+                            text="DONE",
+                            timeout_s=0.01,
+                        )
+                    ],
+                ),
+                transitions=[Transition(target="body-done")],
+            ),
+            "body-done": State(
+                id="body-done",
+                kind=StateKind.TERMINAL,
+                outcome="success",
+            ),
+        },
+    )
+    workflow = Workflow(
+        name="attended-loop",
+        program=ProgramGraph(
+            entry="loop",
+            states={
+                "loop": State(
+                    id="loop",
+                    kind=StateKind.LOOP,
+                    loop=LoopSpec(relation="queue", body="body"),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+        subflows={"body": body},
+        data_sources=(
+            {
+                "queue": Relation(
+                    name="queue",
+                    rows=[{"row": "one"}, {"row": "two"}],
+                )
+            }
+        ),
+    )
+    _bundle, run, initial_backend, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    assert initial_backend.actions == [("press", "A")]
+    pending = store.read_pending()
+    assert pending is not None
+    assert [frame.graph_id for frame in pending.program_frames] == [
+        "__program__",
+        "body",
+    ]
+    assert pending.program_frames[-1].loop is not None
+    assert pending.program_frames[-1].loop.row_index == 0
+
+    backend = FakeBackend()
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-loop-receipt"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(backend, vision=vision, poll_interval_s=0.0)
+        ),
+    )
+    assert decision.status == "completed"
+    # Row one was completed by the person. Only row two is actuated by resume.
+    assert backend.actions == [("press", "A")]
+    receipt_checkpoint = store.program_checkpoints()[0]
+    assert receipt_checkpoint.attended_transition is not None
+    assert receipt_checkpoint.frames[-1].loop is not None
+    assert receipt_checkpoint.frames[-1].loop.row_index == 0
+    assert receipt_checkpoint.attended_transition.target_state_id == "body-done"
+
+
+def test_program_transition_refuses_a_different_checkpoint_at_reserved_sequence(
+    tmp_path,
+):
+    workflow = _attended_program()
+    _bundle, run, _initial, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    pending = store.read_pending()
+    assert pending is not None
+    store.write_program_checkpoint(
+        ProgramCheckpoint(
+            workflow_name=workflow.name,
+            seq=1,
+            verified_state_id="unrelated",
+            frames=list(pending.program_frames),
+            bound_params={},
+            bundle_version=capability.bundle_version,
+        )
+    )
+    backend = FakeBackend()
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-sequence-conflict"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(backend, vision=vision, poll_interval_s=0.0)
+        ),
+    )
+    assert decision.status == "refused"
+    assert "sequence advanced differently" in decision.message
+    assert not backend.actions
+    assert store.read_pending() is not None
+
+
+def test_program_resume_refuses_tampered_receipt_target(tmp_path):
+    workflow = _attended_program(guarded_transition=True)
+    _bundle, run, _initial, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    pending = store.read_pending()
+    assert pending is not None
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+    vision.text_results["ROUTE_A"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-receipt-before-tamper"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                FakeBackend(), vision=vision, poll_interval_s=0.0
+            )
+        ),
+    )
+    assert decision.status == "completed"
+    checkpoint = store.program_checkpoints()[0]
+    assert checkpoint is not None and checkpoint.attended_transition is not None
+    assert checkpoint.attended_transition.target_state_id == "route-a"
+    tampered_receipt = checkpoint.attended_transition.model_copy(
+        # route-b is also declared, so structure-only validation would accept
+        # it. The signed atomic receipt must still reject the substitution.
+        update={"target_state_id": "route-b"}
+    )
+    manifest = store.read_manifest()
+    assert manifest is not None
+    with pytest.raises(AttendedActionRefused, match="atomic transition receipt"):
+        validate_attended_program_receipt(
+            run,
+            checkpoint=checkpoint.model_copy(
+                update={"attended_transition": tampered_receipt}
+            ),
+            pending=pending.model_copy(update={"status": "approved"}),
+            manifest=manifest,
+            live_bundle_version=capability.bundle_version,
+        )
+
+
+def test_program_receipt_cannot_replay_across_run_identity(tmp_path):
+    workflow = _attended_program()
+    _bundle, run, _initial, store, capability = _run_attended_program_to_pause(
+        tmp_path / "source", workflow
+    )
+    pending = store.read_pending()
+    assert pending is not None
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-cross-run-source"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                FakeBackend(), vision=vision, poll_interval_s=0.0
+            )
+        ),
+    )
+    assert decision.status == "completed"
+
+    copied = tmp_path / "copied-run"
+    shutil.copytree(run, copied)
+    copied_store = CheckpointStore(copied)
+    manifest = copied_store.read_manifest()
+    assert manifest is not None
+    copied_store.write_manifest(manifest.model_copy(update={"run_id": "other-run"}))
+    copied_store.write_pending(pending.model_copy(update={"status": "approved"}))
+    copied_manifest = copied_store.read_manifest()
+    receipt_checkpoint = copied_store.program_checkpoints()[0]
+    copied_pending = copied_store.read_pending()
+    assert copied_manifest is not None and copied_pending is not None
+    with pytest.raises(AttendedActionRefused, match="run/bundle/pause/state/frame"):
+        validate_attended_program_receipt(
+            copied,
+            checkpoint=receipt_checkpoint,
+            pending=copied_pending,
+            manifest=copied_manifest,
+            live_bundle_version=capability.bundle_version,
+        )
 
 
 def test_bound_executor_serializes_its_shared_live_session(tmp_path):

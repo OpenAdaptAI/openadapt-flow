@@ -65,6 +65,17 @@ live application and system of record. A successful Continue resumes from the
 new verified checkpoint, so neither prior confirmed work nor the
 human-completed step is actuated again.
 
+For a structured program, loop, or subflow, the pause also retains the exact
+interpreter control-frame stack and checkpoint sequence. After fresh
+action-specific verification, OpenAdapt selects one guarded successor and
+writes an idempotent `ProgramTransitionReceipt`. The receipt contains no raw UI
+text, URL, or title; it is HMAC-bound to the run, bundle, signed pause, source
+state, checkpoint sequence, and exact control-frame digest, then persisted as
+an atomic private local artifact. Resume consumes that one selected successor,
+so it neither repeats the human-completed source action nor re-evaluates its
+edge; nested loops continue with their remaining rows. A changed, conflicting,
+replayed, or undeclared cursor or receipt refuses instead of guessing.
+
 ## Security boundary
 
 - The server binds only to `127.0.0.1`.

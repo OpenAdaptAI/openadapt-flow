@@ -1386,6 +1386,405 @@ def test_report_break_omits_free_text_when_scrub_unavailable(tmp_path, monkeypat
 
 
 # ---------------------------------------------------------------------------
+# report_run (SUCCESS rail)
+# ---------------------------------------------------------------------------
+
+
+def _successful_run(run_dir: Path, **overrides) -> Path:
+    """A rich SUCCESSFUL run report whose free-text fields all carry PHI —
+    the payload builder must never read any of them."""
+    from openadapt_flow.ir import IdentityCheck
+
+    fields: dict = dict(
+        workflow_name="eligibility for Jane's Dental",
+        started_at="2026-07-19T00:00:00Z",
+        execution_origin="https://emr.example-clinic.test",
+        bundle_content_digest="ab" * 32,
+        success=True,
+        total_ms=61500.0,
+        params={"patient_name": "Jane Doe", "mrn": "12345"},
+        rung_counts={"structural": 3, "ocr": 1},
+        heal_count=1,
+        model_calls=2,
+        est_model_cost_usd=0.0123,
+        identity_applicable_steps=2,
+        identity_armed_steps=2,
+        results=[
+            StepResult(
+                step_id="s1",
+                intent="click Save for Jane Doe",
+                ok=True,
+                resolution=Resolution(
+                    rung="structural", point=(0, 0), confidence=1.0, elapsed_ms=1.0
+                ),
+                identity=IdentityCheck(
+                    status="verified",
+                    expected="Jane Doe 1980-01-01",
+                    observed="Jane Doe 1980-01-01",
+                ),
+                effect_verified=True,
+                effect_results=["CONFIRMED eligibility write for MRN 12345"],
+                effect_contract_hashes=["cd" * 32],
+            ),
+            StepResult(
+                step_id="s2",
+                intent="type MRN 12345",
+                ok=True,
+                resolution=Resolution(
+                    rung="ocr", point=(1, 1), confidence=0.9, elapsed_ms=2.0
+                ),
+                identity=IdentityCheck(
+                    status="abstain", expected="Jane Doe", observed="Jane D0e"
+                ),
+                effect_approved_unverified=True,
+            ),
+            StepResult(
+                step_id="s3", intent="skip Jane's recall", ok=True, skipped=True
+            ),
+        ],
+    )
+    fields.update(overrides)
+    report = RunReport(**fields)
+    report.save(run_dir)
+    return run_dir / "report.json"
+
+
+def test_report_run_success(tmp_path, monkeypatch):
+    import hashlib
+
+    run_dir = tmp_path / "runs" / "r1"
+    report_path = _successful_run(run_dir)
+    recorder: dict = {}
+    body = {"run_id": "run_9", "status": "success"}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, body))
+    result = hosted.report_run(
+        run_dir,
+        workflow_id="wf_1",
+        org_id="org_1",
+        backend="web",
+        host="https://h.test",
+        token="tok",
+    )
+    assert result["emitted"] is True
+    assert result["run_id"] == "run_9"
+    assert recorder["url"] == "https://h.test/api/runs/ingest-report"
+    posted = recorder["kw"]["json"]
+    assert posted["kind"] == "run_summary"
+    assert posted["schema"] == hosted.RUN_SUMMARY_SCHEMA
+    assert posted["status"] == "success"
+    assert posted["workflow_id"] == "wf_1"
+    assert posted["org_id"] == "org_1"
+    assert posted["deployment_kind"] == "local"
+    assert posted["backend"] == "web"
+    assert posted["flow_version"]
+    assert posted["phi_minimal"] is True
+    # Idempotency pair: a persisted client-generated run UUID + the sha256 of
+    # the exact local report.json bytes (red-team: content hash alone could
+    # collapse two identical successful runs).
+    from uuid import UUID as _UUID
+
+    assert str(_UUID(posted["client_run_id"])) == posted["client_run_id"]
+    assert posted["run_content_hash"] == (
+        hashlib.sha256(report_path.read_bytes()).hexdigest()
+    )
+    assert posted["metrics"] == {
+        "steps": 3,
+        "steps_ok": 3,
+        "steps_skipped": 1,
+        "duration_s": 61.5,
+        "heal_count": 1,
+        "model_calls": 2,
+        "est_model_cost_usd": 0.0123,
+        "rung_counts": {"structural": 3, "ocr": 1},
+        "identity": {
+            "verified": 1,
+            "mismatch": 0,
+            "abstain": 1,
+            "unreadable": 0,
+            "applicable": 2,
+            "armed": 2,
+        },
+        "effects": {
+            "verified": 1,
+            "approved_unverified": 1,
+            "contract_hash_count": 1,
+        },
+    }
+    assert posted["effect_contract_hashes"] == ["cd" * 32]
+
+
+def test_report_run_binds_by_digest_without_workflow_id(tmp_path, monkeypatch):
+    import hashlib
+
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    hosted.report_run(run_dir, host="https://h.test", token="tok")
+    posted = recorder["kw"]["json"]
+    assert "workflow_id" not in posted
+    assert posted["bundle_content_digest"] == "ab" * 32
+    # The raw workflow NAME never leaves the machine — only its digest.
+    assert posted["workflow_name_digest"] == (
+        hashlib.sha256("eligibility for Jane's Dental".encode("utf-8")).hexdigest()
+    )
+    assert "eligibility" not in json.dumps(posted)
+
+
+def test_report_run_payload_carries_no_phi(tmp_path, monkeypatch):
+    import hashlib
+
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    hosted.report_run(run_dir, workflow_id="wf_1", host="https://h.test", token="tok")
+    posted = recorder["kw"]["json"]
+    blob = json.dumps(posted)
+    # No PHI values: names, identifiers, param values, raw origins/URLs.
+    assert "Jane" not in blob
+    assert "12345" not in blob
+    assert "example-clinic" not in blob
+    assert "https://emr" not in blob
+    # Excluded field SHAPES are absent entirely (fail-closed contract keys).
+    for excluded in (
+        "params",
+        "observed_texts",
+        "error",
+        "expected",
+        "observed",
+        "intent",
+        "screenshots",
+        "url",
+        "report_path",
+        "workflow_name",
+        "effect_results",
+    ):
+        assert excluded not in posted, excluded
+    # Only the one-way hostname hash remains of the execution origin.
+    assert (
+        posted["origin_domain_hash"]
+        == (hashlib.sha256(b"emr.example-clinic.test").hexdigest()[:16])
+    )
+
+
+def test_report_run_refuses_non_success(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _halted_run(run_dir)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *a, **k: pytest.fail("should not POST for a non-successful run"),
+    )
+    result = hosted.report_run(
+        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+    )
+    assert result["emitted"] is False
+    assert "report-break" in result["reason"]
+
+
+def test_report_run_missing_binding_raises(tmp_path):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir, bundle_content_digest=None)
+    with pytest.raises(hosted.HostedError, match="binding"):
+        hosted.report_run(run_dir, host="https://h.test", token="tok")
+
+
+def test_report_run_missing_report_raises(tmp_path):
+    with pytest.raises(hosted.HostedError, match="report.json"):
+        hosted.report_run(
+            tmp_path, workflow_id="wf_1", host="https://h.test", token="tok"
+        )
+
+
+def test_report_run_422_falls_back_local(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(
+        httpx, "post", lambda url, **kw: httpx.Response(422, json={"error": "phi"})
+    )
+    result = hosted.report_run(
+        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+    )
+    assert result["emitted"] is False
+    assert result["local_only"] is True
+
+
+def test_report_run_422_no_fallback_raises(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(422))
+    with pytest.raises(hosted.HostedError, match="422"):
+        hosted.report_run(
+            run_dir,
+            workflow_id="wf_1",
+            host="https://h.test",
+            token="tok",
+            allow_local_fallback=False,
+        )
+
+
+def test_report_run_401_raises(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(401))
+    with pytest.raises(hosted.HostedError, match="401"):
+        hosted.report_run(
+            run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+        )
+
+
+def test_report_run_idempotency_pair_stable_per_run_distinct_across_runs(
+    tmp_path, monkeypatch
+):
+    """Re-reporting the SAME run reuses the persisted (client_run_id,
+    run_content_hash) pair; a DIFFERENT run — even one with an identical
+    report — gets a different client_run_id so it can never dedupe away."""
+    run_a = tmp_path / "runs" / "r1"
+    run_b = tmp_path / "runs" / "r2"
+    _successful_run(run_a)
+    _successful_run(run_b)  # byte-identical report.json
+    pairs = []
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **kw: (
+            pairs.append((kw["json"]["client_run_id"], kw["json"]["run_content_hash"])),
+            httpx.Response(202, json={"ok": True}),
+        )[1],
+    )
+    for target in (run_a, run_a, run_b):
+        hosted.report_run(
+            target, workflow_id="wf_1", host="https://h.test", token="tok"
+        )
+    assert pairs[0] == pairs[1]  # same run: idempotent
+    assert pairs[2][1] == pairs[0][1]  # identical bytes: same content hash
+    assert pairs[2][0] != pairs[0][0]  # distinct run: distinct UUID
+    assert (run_a / ".report_run_id").is_file()
+
+
+def test_report_run_backend_is_a_closed_enum(tmp_path, monkeypatch):
+    """Red-team PHI-1: `backend` may only carry a fixed substrate token —
+    free text (e.g. a recorded rdp window title / backend_hints) is dropped
+    client-side, never sent."""
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    hosted.report_run(
+        run_dir,
+        workflow_id="wf_1",
+        backend="rdp:Jane Doe - Dentrix",  # PHI-bearing free text
+        host="https://h.test",
+        token="tok",
+    )
+    posted = recorder["kw"]["json"]
+    assert posted["backend"] is None
+    assert "Jane" not in json.dumps(posted)
+    assert "backend_hints" not in posted
+
+
+def test_report_run_caps_effect_contract_hashes(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    many = [f"{i:064x}" for i in range(300)]
+    _successful_run(
+        run_dir,
+        results=[
+            StepResult(
+                step_id="s1",
+                intent="bulk write",
+                ok=True,
+                effect_verified=True,
+                effect_contract_hashes=many,
+            )
+        ],
+    )
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    hosted.report_run(run_dir, workflow_id="wf_1", host="https://h.test", token="tok")
+    posted = recorder["kw"]["json"]
+    assert posted["metrics"]["effects"]["contract_hash_count"] == 300
+    assert len(posted["effect_contract_hashes"]) == 256
+
+
+# --- opt-in post-run hook ---------------------------------------------------
+
+
+def test_maybe_report_run_requires_explicit_opt_in(tmp_path, monkeypatch):
+    from openadapt_flow.__main__ import _maybe_report_run
+
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.delenv("OPENADAPT_FLOW_REPORT_RUN", raising=False)
+    monkeypatch.setattr(
+        hosted,
+        "report_run",
+        lambda *a, **k: pytest.fail("must never upload without opt-in"),
+    )
+    import argparse as _argparse
+
+    report = RunReport.model_validate_json(
+        (run_dir / "report.json").read_text(encoding="utf-8")
+    )
+    _maybe_report_run(run_dir, report, _argparse.Namespace())  # no --report
+    _maybe_report_run(run_dir, report, None)  # no args at all
+
+
+def test_maybe_report_run_fires_on_opt_in_success_only(tmp_path, monkeypatch, capsys):
+    from openadapt_flow.__main__ import _maybe_report_run
+
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    calls: list = []
+
+    def fake_report_run(run_dir, **kw):
+        calls.append(kw)
+        return {"emitted": True, "run_id": "run_9"}
+
+    monkeypatch.setattr(hosted, "report_run", fake_report_run)
+    monkeypatch.setenv("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID", "wf_1")
+    import argparse as _argparse
+
+    report = RunReport.model_validate_json(
+        (run_dir / "report.json").read_text(encoding="utf-8")
+    )
+    args = _argparse.Namespace(report=True, backend="web")
+    _maybe_report_run(run_dir, report, args)
+    assert calls and calls[0]["workflow_id"] == "wf_1"
+    assert calls[0]["backend"] == "web"
+    assert calls[0]["deployment_kind"] == "local"
+    assert "Run summary reported" in capsys.readouterr().out
+
+    # A halted run never fires the SUCCESS hook, even when opted in.
+    halted_dir = tmp_path / "runs" / "r2"
+    _halted_run(halted_dir)
+    halted = RunReport.model_validate_json(
+        (halted_dir / "report.json").read_text(encoding="utf-8")
+    )
+    _maybe_report_run(halted_dir, halted, args)
+    assert len(calls) == 1
+
+
+def test_maybe_report_run_env_opt_in_and_swallows_errors(tmp_path, monkeypatch, capsys):
+    from openadapt_flow.__main__ import _maybe_report_run
+
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+
+    def exploding_report_run(run_dir, **kw):
+        raise hosted.HostedError("network down")
+
+    monkeypatch.setattr(hosted, "report_run", exploding_report_run)
+    monkeypatch.setenv("OPENADAPT_FLOW_REPORT_RUN", "1")
+    report = RunReport.model_validate_json(
+        (run_dir / "report.json").read_text(encoding="utf-8")
+    )
+    # Must never raise: the hook cannot change the run's outcome.
+    _maybe_report_run(run_dir, report, None)
+    assert "run summary report skipped" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # CLI wiring
 # ---------------------------------------------------------------------------
 
@@ -1401,6 +1800,7 @@ def test_parser_has_new_commands():
         "validate-hosted",
         "push",
         "report-break",
+        "report-run",
     ):
         assert cmd in parser._subparsers._group_actions[0].choices
 
@@ -1591,6 +1991,51 @@ def test_cli_report_break_dispatch(monkeypatch, capsys):
         "token": "tok",
     }
     assert "Break reported" in capsys.readouterr().out
+
+
+def test_cli_report_run_dispatch(monkeypatch, capsys):
+    captured: dict = {}
+
+    def fake_report_run(run_dir, **kw):
+        captured.update(run_dir=run_dir, **kw)
+        return {"emitted": True, "run_id": "run_9", "status": "success"}
+
+    monkeypatch.setattr(hosted, "report_run", fake_report_run)
+    rc = main(
+        [
+            "report-run",
+            "runs/r1",
+            "--workflow-id",
+            "wf_1",
+            "--deployment-kind",
+            "local",
+            "--backend",
+            "windows",
+            "--org-id",
+            "org_1",
+            "--host",
+            "https://h.test",
+            "--destination-kind",
+            "customer-managed",
+            "--trusted-host",
+            "https://h.test",
+            "--token",
+            "tok",
+        ]
+    )
+    assert rc == 0
+    assert captured == {
+        "run_dir": "runs/r1",
+        "workflow_id": "wf_1",
+        "deployment_kind": "local",
+        "backend": "windows",
+        "org_id": "org_1",
+        "host": "https://h.test",
+        "destination_kind": "customer-managed",
+        "trusted_hosts": ["https://h.test"],
+        "token": "tok",
+    }
+    assert "Run summary reported" in capsys.readouterr().out
 
 
 def test_cli_validate_hosted_dispatches_every_contract_flag(

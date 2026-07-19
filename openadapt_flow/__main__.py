@@ -291,54 +291,11 @@ def _configured_replayer(
     actuator / durable runtime) are identical for browser, Windows, macOS, and
     RDP/remote-display sessions. The caller owns the backend lifecycle.
     """
-    import os
+    from openadapt_flow.deployment import build_replayer
 
-    from openadapt_flow.runtime import Replayer
-    from openadapt_flow.runtime.grounder import build_grounder
-    from openadapt_flow.runtime.remote_vlm import appliance_from_env
-
-    # An on-prem VLM appliance is opt-in (OPENADAPT_FLOW_VLM_URL). Unset -> the
-    # identity veto tier stays off. Configured -> the identity veto tier and the
-    # remote-VLM grounder come online, both fail-safe (an appliance outage halts,
-    # never mis-clicks).
-    #
-    # EGRESS GUARD (PHI audit REM-3): the appliance grounder / identity-VLM /
-    # state-verifier send screenshots OFF the box, so they are wired ONLY when
-    # the operator explicitly passes --allow-model-grounding. Without it the
-    # replay is fully local and makes zero outbound calls.
-    appliance = appliance_from_env()
-    if appliance is not None and not allow_egress:
-        print(
-            "On-prem VLM appliance is configured "
-            f"({os.environ.get('OPENADAPT_FLOW_VLM_URL')}) but NOT "
-            "wired: pass --allow-model-grounding to send screenshots "
-            "to it. Replaying FULLY LOCAL (zero outbound calls)."
-        )
-        appliance = None
-    if appliance is not None:
-        print(
-            "Using on-prem VLM appliance at "
-            f"{os.environ.get('OPENADAPT_FLOW_VLM_URL')} "
-            "(identity veto tier + remote-VLM grounder fallback; "
-            "fail-safe to halt). WARNING: screenshots WILL leave "
-            "the box for this run (--allow-model-grounding)."
-        )
-    # Grounding rung: OCR text-anchoring (openadapt-grounding) is PRIMARY
-    # whenever the 'grounding' extra is installed; the remote-VLM grounder (if
-    # an appliance is configured) is the fallback for text-less surfaces. None
-    # when neither is present (the model-free default).
-    grounder = build_grounder(fallback=appliance.grounder if appliance else None)
-    if grounder is not None:
-        print(f"Grounding rung active: {type(grounder).__name__}")
-    return Replayer(
+    return build_replayer(
         backend,
-        grounder=grounder,
-        identity_vlm=appliance.identity_vlm if appliance else None,
-        state_verifier=(appliance.state_verifier if appliance else None),
-        allow_model_grounding=allow_egress,
-        # Deployment wiring resolved from --config / flags: verify consequential
-        # writes against the system of record, actuate bound steps via the API
-        # tier, and checkpoint for resume.
+        allow_egress=allow_egress,
         effect_verifier=effect_verifier,
         api_actuator=api_actuator,
         durable=durable,
@@ -386,7 +343,9 @@ def _build_and_run_replayer(
     )
 
 
-def _finish_replay(run_dir: Path, report) -> int:
+def _finish_replay(
+    run_dir: Path, report, args: Optional[argparse.Namespace] = None
+) -> int:
     """Render the run report, print the outcome, and map it to an exit code."""
     from openadapt_flow.report import render_run_report
 
@@ -399,6 +358,7 @@ def _finish_replay(run_dir: Path, report) -> int:
             "screenshots could have left the box (see REPORT.md)."
         )
     _maybe_report_break(run_dir, report)
+    _maybe_report_run(run_dir, report, args)
     return 0 if report.success else 1
 
 
@@ -458,7 +418,7 @@ def _replay_desktop(
         close = getattr(backend, "close", None)
         if callable(close):
             close()  # RDP transports hold a live socket; browsers/agents don't
-    return _finish_replay(run_dir, report)
+    return _finish_replay(run_dir, report, args)
 
 
 def _cmd_record(args: argparse.Namespace) -> int:
@@ -764,7 +724,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if stop is not None:
             stop()
 
-    return _finish_replay(run_dir, report)
+    return _finish_replay(run_dir, report, args)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -1475,6 +1435,46 @@ def _cmd_report_break(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_run(args: argparse.Namespace) -> int:
+    """Emit a PHI-free SUCCESS summary from a completed run's ``report.json``.
+
+    The success counterpart of ``report-break`` (same endpoint, same paired
+    ingest credential, same fail-closed PHI boundary): posts a schema-minimal
+    summary — counts, durations, one-way digests, never values — to
+    ``/api/runs/ingest-report`` so the control plane can show and meter local
+    runs. The recording never leaves the machine.
+    """
+    from openadapt_flow.hosted import HostedError, report_run
+
+    try:
+        result = report_run(
+            args.run_dir,
+            workflow_id=args.workflow_id,
+            host=args.host,
+            token=args.token,
+            deployment_kind=args.deployment_kind,
+            org_id=args.org_id,
+            backend=args.backend,
+            destination_kind=args.destination_kind,
+            trusted_hosts=args.trusted_host,
+        )
+    except HostedError as e:
+        print(f"report-run failed: {e}")
+        return 1
+    if not result.get("emitted"):
+        if result.get("local_only"):
+            print(f"Run summary kept LOCAL-ONLY: {result.get('reason')}")
+        else:
+            print(f"Nothing emitted: {result.get('reason')}")
+        return 0
+    duplicate = " (already reported)" if result.get("duplicate") else ""
+    print(
+        f"Run summary reported (run_id={result.get('run_id')}, "
+        f"status={result.get('status')}){duplicate}."
+    )
+    return 0
+
+
 def _maybe_report_break(run_dir: Path, report) -> None:
     """Opt-in post-run hook: emit a break diagnostic when a run halts.
 
@@ -1501,6 +1501,43 @@ def _maybe_report_break(run_dir: Path, report) -> None:
             print(f"Break reported to hosted control plane (workflow {workflow_id}).")
     except Exception as e:  # noqa: BLE001 — a diagnostic hook must never fail a run
         print(f"(break report skipped: {e})")
+
+
+def _maybe_report_run(run_dir: Path, report, args=None) -> None:
+    """Opt-in post-run hook: emit a PHI-free SUCCESS summary (the L0 rail).
+
+    NEVER auto-uploads: it fires only when the operator explicitly opted in —
+    ``run --report`` on this invocation, or ``OPENADAPT_FLOW_REPORT_RUN=1``
+    in the environment/config — and the run SUCCEEDED. Fully best-effort:
+    any failure is swallowed so the hook never changes the run's outcome or
+    exit code (mirrors ``_maybe_report_break``).
+    """
+    import os
+
+    opted_in = bool(getattr(args, "report", False)) or os.environ.get(
+        "OPENADAPT_FLOW_REPORT_RUN", ""
+    ).lower() in ("1", "true", "yes")
+    if not opted_in or not getattr(report, "success", False):
+        return
+    try:
+        from openadapt_flow.hosted import report_run
+
+        result = report_run(
+            run_dir,
+            workflow_id=os.environ.get("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID"),
+            deployment_kind=os.environ.get("OPENADAPT_FLOW_DEPLOYMENT_KIND", "local"),
+            org_id=os.environ.get("OPENADAPT_FLOW_ORG_ID"),
+            backend=getattr(args, "backend", None),
+        )
+        if result.get("emitted"):
+            print(
+                "Run summary reported to hosted control plane "
+                f"(run_id={result.get('run_id')})."
+            )
+        elif result.get("local_only"):
+            print(f"(run summary kept LOCAL-ONLY: {result.get('reason')})")
+    except Exception as e:  # noqa: BLE001 — a reporting hook must never fail a run
+        print(f"(run summary report skipped: {e})")
 
 
 def _cmd_teach(args: argparse.Namespace) -> int:
@@ -2035,6 +2072,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         action="store_true",
         help="Print the fail-closed coverage report and exit WITHOUT executing",
+    )
+    p.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "OPT-IN: after a SUCCESSFUL run, emit the PHI-free run summary to "
+            "the paired hosted control plane (see `report-run`). Off by "
+            "default — nothing is ever uploaded without this flag (or "
+            "OPENADAPT_FLOW_REPORT_RUN=1)"
+        ),
     )
     p.set_defaults(func=_cmd_run)
 
@@ -2672,6 +2719,66 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_report_break)
 
     p = sub.add_parser(
+        "report-run",
+        help=(
+            "Emit a PHI-free SUCCESS summary from a completed run's "
+            "report.json to /api/runs/ingest-report (counts, durations, and "
+            "one-way digests only — the recording stays local)"
+        ),
+    )
+    p.add_argument("run_dir", help="The completed run directory (holds report.json)")
+    p.add_argument(
+        "--workflow-id",
+        default=None,
+        help=(
+            "Hosted workflow id (from `push`/dashboard). When omitted the "
+            "summary binds by workflow-name digest + bundle content digest"
+        ),
+    )
+    p.add_argument(
+        "--deployment-kind",
+        choices=["local", "cloud", "byoc"],
+        default="local",
+        help="Deployment lane (default: local — a customer-machine run)",
+    )
+    p.add_argument(
+        "--backend",
+        default=None,
+        help="Backend/substrate this run executed on (web/windows/macos/linux/rdp)",
+    )
+    p.add_argument(
+        "--org-id",
+        default=None,
+        help="Org id, carried in the body until the per-user token store is canonical",
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--destination-kind",
+        choices=["openadapt-managed", "customer-managed", "local"],
+        default=None,
+        help="Trust class for the run-summary destination",
+    )
+    p.add_argument(
+        "--trusted-host",
+        action="append",
+        default=None,
+        help="Exact allowed customer-managed origin (repeatable)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Ingest token (default: OPENADAPT_INGEST_TOKEN env, OS keychain, "
+            "then an existing config migration token)"
+        ),
+    )
+    p.set_defaults(func=_cmd_report_run)
+
+    p = sub.add_parser(
         "console",
         help=(
             "Serve the operator console: a localhost-only web UI over compiled "
@@ -2724,7 +2831,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Open the authenticated local Needs Attention queue first. It is "
             "read-only unless --allow-actions is also supplied; attended "
             "mutations additionally require an engine-issued pause capability "
-            "and qualified deployment executor"
+            "and qualified deployment service"
         ),
     )
     p.add_argument(
@@ -2759,16 +2866,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 @contextmanager
-def _attended_executor_from_args(args: argparse.Namespace) -> Iterator[Any]:
-    """Own one qualified live backend for the blocking attended console.
-
-    Ordinary console modes do not inspect deployment flags or construct a
-    backend. With both ``--attend`` and ``--allow-actions``, the operator must
-    explicitly select a deployment/backend. The same browser, desktop, or
-    remote-display session is then reused for fresh verification and the
-    deterministic continuation, and is closed exactly once when the console
-    exits.
-    """
+def _attended_service_from_args(args: argparse.Namespace) -> Iterator[Any]:
+    """Resolve CLI overrides into the public persistent attended service."""
     if not (args.attend and args.allow_actions):
         yield None
         return
@@ -2779,11 +2878,9 @@ def _attended_executor_from_args(args: argparse.Namespace) -> Iterator[Any]:
             "implicit default"
         )
 
-    from openadapt_flow.backends.factory import _normalize_kind, build_backend
-    from openadapt_flow.deployment import build_api_actuator, build_effect_verifier
-    from openadapt_flow.runtime.durable.attended import (
-        AttendedActionRefused,
-        BoundAttendedExecutor,
+    from openadapt_flow.backends.factory import _normalize_kind
+    from openadapt_flow.runtime.durable.attended_service import (
+        AttendedActionService,
     )
 
     try:
@@ -2795,27 +2892,6 @@ def _attended_executor_from_args(args: argparse.Namespace) -> Iterator[Any]:
         cfg.runtime.allow_model_grounding
         or getattr(args, "allow_model_grounding", False)
     )
-
-    def _executor(backend: Any) -> BoundAttendedExecutor:
-        def _replayer_for_manifest(manifest: Any):
-            try:
-                effect_verifier = build_effect_verifier(
-                    effects_cfg, params=dict(manifest.params)
-                )
-                api_actuator = build_api_actuator(actuation_cfg)
-            except ValueError as exc:
-                raise AttendedActionRefused(str(exc)) from exc
-            return _configured_replayer(
-                backend,
-                allow_egress=allow_egress,
-                effect_verifier=effect_verifier,
-                api_actuator=api_actuator,
-                durable=True,
-                use_structural=True,
-                governed_authorization=manifest.governed_authorization,
-            )
-
-        return BoundAttendedExecutor(_replayer_for_manifest)
 
     if _normalize_kind(backend_cfg.kind) == "web":
         target_url = getattr(args, "url", None) or backend_cfg.url
@@ -2829,36 +2905,25 @@ def _attended_executor_from_args(args: argparse.Namespace) -> Iterator[Any]:
                 "attended web actions require a visible live session; pass "
                 "--headed or set backend.headed: true"
             )
+        backend_cfg = backend_cfg.model_copy(
+            update={"url": target_url, "headed": headed}
+        )
 
-        from playwright.sync_api import sync_playwright
-
-        from openadapt_flow._browser_setup import ensure_chromium_installed
-
-        ensure_chromium_installed()
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=False)
-            try:
-                page = browser.new_page(viewport=_VIEWPORT)
-                page.goto(target_url)
-                try:
-                    backend = build_backend(backend_cfg, page=page)
-                except ValueError as exc:
-                    raise SystemExit(str(exc)) from exc
-                yield _executor(backend)
-            finally:
-                browser.close()
-        return
-
+    deployment = cfg.model_copy(
+        update={
+            "backend": backend_cfg,
+            "effects": effects_cfg,
+            "actuation": actuation_cfg,
+            "runtime": cfg.runtime.model_copy(
+                update={"allow_model_grounding": allow_egress}
+            ),
+        }
+    )
     try:
-        backend = build_backend(backend_cfg)
+        with AttendedActionService(deployment) as service:
+            yield service
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    try:
-        yield _executor(backend)
-    finally:
-        close = getattr(backend, "close", None)
-        if callable(close):
-            close()
 
 
 def _cmd_console(args: argparse.Namespace) -> int:
@@ -2884,14 +2949,14 @@ def _cmd_console(args: argparse.Namespace) -> int:
         f"  bundles: {Path(args.bundles).resolve()}\n"
         f"  runs:    {Path(args.runs).resolve()}"
     )
-    with _attended_executor_from_args(args) as attended_executor:
+    with _attended_service_from_args(args) as attended_service:
         serve(
             args.bundles,
             args.runs,
             args.skills,
             allow_actions=allow_actions,
             attend=args.attend,
-            attended_executor=attended_executor,
+            attended_service=attended_service,
             port=args.port,
         )
     return 0

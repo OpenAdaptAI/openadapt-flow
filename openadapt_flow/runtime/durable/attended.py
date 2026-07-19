@@ -1490,6 +1490,15 @@ class BoundAttendedExecutor:
                 "the program checkpoint sequence advanced differently; refusing "
                 "a non-idempotent attended transition"
             )
+        # Live verification and guarded edge selection can take long enough for
+        # an independent durable CLI/operator process to replace the pause.
+        # Re-bind the exact signed pause before writing any receipt, checkpoint,
+        # or approval; a newer pause must remain completely untouched.
+        live_pending = store.read_pending()
+        if live_pending is None or _digest(live_pending) != capability.pause_digest:
+            raise AttendedActionRefused(
+                "the exact attended program pause changed before transition commit"
+            )
         receipt = action_store.write_program_receipt(receipt)
         checkpoint = checkpoint.model_copy(update={"attended_transition": receipt})
         if existing_seq == source_seq:

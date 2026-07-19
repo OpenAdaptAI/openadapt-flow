@@ -635,6 +635,57 @@ def test_program_continue_commits_exact_receipt_without_reactuating_source(tmp_p
         assert receipt_path.stat().st_mode & 0o077 == 0
 
 
+def test_program_continue_rebinds_exact_pause_before_transition_commit(tmp_path):
+    workflow = _attended_program()
+    _bundle, run, _initial, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    backend = FakeBackend()
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+
+    def factory(_manifest):
+        replayer = Replayer(backend, vision=vision, poll_interval_s=0.0)
+        original = replayer.revalidate_attended_program_completion
+
+        def replace_pause_after_live_verification(*args, **kwargs):
+            result = original(*args, **kwargs)
+            pending = store.read_pending()
+            assert pending is not None
+            store.write_pending(
+                pending.model_copy(
+                    update={
+                        "step_id": "independently-replaced-program-pause",
+                        "created_at": "2026-07-18T13:00:00+00:00",
+                    }
+                )
+            )
+            return result
+
+        replayer.revalidate_attended_program_completion = (
+            replace_pause_after_live_verification
+        )
+        return replayer
+
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-pause-race-request"),
+        operator="staff",
+        executor=BoundAttendedExecutor(factory),
+    )
+    assert decision.status == "refused"
+    assert "program pause changed before transition commit" in decision.message
+    assert not backend.actions
+    assert store.program_checkpoints() == []
+    assert store.read_approval() is None
+    assert not (run / ".attended_program_receipts").exists()
+    pending = store.read_pending()
+    assert pending is not None
+    assert pending.step_id == "independently-replaced-program-pause"
+
+
 def test_program_guarded_edge_is_selected_once_and_receipted(tmp_path):
     workflow = _attended_program(guarded_transition=True)
     _bundle, run, _initial, store, capability = _run_attended_program_to_pause(

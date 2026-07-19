@@ -3350,7 +3350,7 @@ class Replayer:
         def identifier_crops() -> tuple[Optional[bytes], Optional[bytes]]:
             if "rec" not in _crops:
                 _crops["rec"], _crops["live"] = self._identifier_crops(
-                    anchor, resolution, before_png, bundle_dir
+                    anchor, resolution, before_png, bundle_dir, workflow=workflow
                 )
             return _crops["rec"], _crops["live"]
 
@@ -3396,11 +3396,16 @@ class Replayer:
         resolution: Resolution,
         before_png: bytes,
         bundle_dir: Optional[Path],
+        *,
+        workflow: Optional[Workflow] = None,
     ) -> tuple[Optional[bytes], Optional[bytes]]:
         """(recorded, live) identifier-crop PNGs for the pixel/VLM tiers.
 
-        The recorded crop is ``anchor.identifier_crop`` from the bundle; the
-        live crop is the same-sized box re-cut from ``before_png`` at
+        The recorded crop is ``anchor.identifier_crop`` from the bundle (read
+        through the ENCRYPTED bundle's in-memory decrypted store when the
+        crop is sealed at rest -- identifier pixels are PHI and never land
+        cleartext on disk for an encrypted bundle); the live crop is the
+        same-sized box re-cut from ``before_png`` at
         ``anchor.identifier_region`` translated to the RESOLVED point (the
         same offset the region had from the recorded click point -- the OCR
         exclude region is translated identically). Returns (None, None) when
@@ -3413,7 +3418,9 @@ class Replayer:
             or anchor.identifier_region is None
         ):
             return None, None
-        recorded_png = self._asset_bytes(bundle_dir, anchor.identifier_crop)
+        recorded_png = self._asset_bytes(
+            bundle_dir, anchor.identifier_crop, workflow=workflow
+        )
         if recorded_png is None:
             return None, None
         rx, ry, rw, rh = anchor.identifier_region

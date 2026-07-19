@@ -279,15 +279,22 @@ class Anchor(BaseModel):
         default=None,
         description=(
             "Bundle-relative PNG crop of the target row's DISCRIMINATIVE"
-            " IDENTIFIER cell (the MRN / name+DOB region), captured at record"
-            " time on PIXEL-ONLY substrates that expose no structured text."
-            " Feeds the pixel-compare and optional VLM tiers of the identity"
-            " ladder (see runtime.identity): the rendered PIXELS retain the"
-            " O/0 and l/1 distinction OCR collapses, so a crop-vs-crop compare"
-            " catches the glyph-collapse wrong-patient where the DOM/a11y"
-            " tree is unavailable. None on browser/desktop substrates (the"
-            " structured tier handles those) or bundles recorded before this"
-            " capability; the ladder then falls through to the OCR band tier."
+            " IDENTIFIER cell (the MRN / name+DOB region), emitted by the"
+            " COMPILER (templates/identifiers/<step>.png -- under templates/"
+            " so it is sealed with the other image crops in an encrypted"
+            " bundle) for identity-armed steps that captured no structured"
+            " text (Citrix / RDP / remote-display pixel recordings), or for"
+            " any step whose identifier region was explicitly marked at"
+            " record time (--identifier). Feeds the pixel-compare and"
+            " optional VLM tiers of the identity ladder (see"
+            " runtime.identity): the rendered PIXELS retain the O/0 and l/1"
+            " distinction OCR collapses, so a crop-vs-crop compare catches"
+            " the glyph-collapse wrong-patient where the DOM/a11y tree is"
+            " unavailable. None on structured (browser/UIA) recordings"
+            " unless marked (the structured tier owns identity there; no"
+            " identity pixels at rest) and on bundles compiled before this"
+            " capability -- Step.identifier_crop_missing_reason records WHY;"
+            " the ladder then falls through to the OCR band tier."
         ),
     )
     identifier_region: Optional[Region] = Field(
@@ -628,6 +635,21 @@ class Step(BaseModel):
             "Why an applicable step compiled unarmed (no readable band"
             " text, band too generic, ...); None when armed or not"
             " applicable."
+        ),
+    )
+    identifier_crop_missing_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why this identity-applicable step compiled WITHOUT a pixel"
+            " identifier crop (anchor.identifier_crop) — the explicit"
+            " degrade record for the pixel identity tier, mirroring"
+            " identity_unarmed_reason: e.g. structured identity owns the"
+            " step, no readable identity band, a marked --identifier region"
+            " was invalid. None when a crop WAS emitted, on non-applicable"
+            " steps, and on bundles compiled before this field existed."
+            " Without a crop the pixel-compare tier abstains on"
+            " remote-display/pixel replays and identity falls to the OCR"
+            " band tier (docs/LIMITS.md)."
         ),
     )
 

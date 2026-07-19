@@ -269,10 +269,11 @@ def _run_cli(argv: list[str], monkeypatch: Any = None) -> int:
 def test_cli_record_windows_invokes_capture(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params):
+    def fake_record(out_dir, *, task_description, params, identifier_region=None):
         captured["out"] = Path(out_dir)
         captured["task"] = task_description
         captured["params"] = params
+        captured["identifier_region"] = identifier_region
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         return Path(out_dir)
 
@@ -301,7 +302,7 @@ def test_cli_record_windows_invokes_capture(tmp_path: Path, monkeypatch) -> None
 def test_cli_record_rdp_invokes_capture(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params):
+    def fake_record(out_dir, *, task_description, params, identifier_region=None):
         captured["params"] = params
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         return Path(out_dir)
@@ -312,6 +313,75 @@ def test_cli_record_rdp_invokes_capture(tmp_path: Path, monkeypatch) -> None:
     rc = _run_cli(["record", "--backend", "rdp", "--out", str(tmp_path / "rec")])
     assert rc == 0
     assert captured["params"] == {}
+
+
+def test_cli_record_desktop_identifier_region(tmp_path: Path, monkeypatch) -> None:
+    """`record --backend rdp --identifier X,Y,W,H` threads the marked
+    record-identifying region through to the capture orchestration."""
+    captured: dict = {}
+
+    def fake_record(out_dir, *, task_description, params, identifier_region=None):
+        captured["identifier_region"] = identifier_region
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return Path(out_dir)
+
+    monkeypatch.setattr(
+        "openadapt_flow.desktop_record.record_desktop_capture", fake_record
+    )
+    rc = _run_cli(
+        [
+            "record",
+            "--backend",
+            "rdp",
+            "--identifier",
+            "10,20,300,40",
+            "--out",
+            str(tmp_path / "rec"),
+        ]
+    )
+    assert rc == 0
+    assert captured["identifier_region"] == (10, 20, 300, 40)
+
+
+def test_cli_record_desktop_identifier_rejects_field_name(tmp_path: Path) -> None:
+    """A pixel capture has no field identity: field-name syntax (the web
+    form) is refused loudly rather than silently recording unmarked."""
+    with pytest.raises(SystemExit, match="X,Y,W,H"):
+        _run_cli(
+            [
+                "record",
+                "--backend",
+                "windows",
+                "--identifier",
+                "patient-banner",
+                "--out",
+                str(tmp_path / "r"),
+            ]
+        )
+
+
+def test_orchestration_stamps_identifier_region_into_meta(tmp_path: Path) -> None:
+    """The marked region lands additively in the recording's meta.json — the
+    key the compiler reads to scope the identifier crop."""
+    log: list = []
+
+    def fake_convert(cap_dir, out_dir, *, params=None):
+        (Path(out_dir) / "meta.json").write_text(
+            json.dumps({"id": "x", "viewport": [800, 600], "params": {}})
+        )
+        return Path(out_dir)
+
+    out = record_desktop_capture(
+        tmp_path / "rec",
+        identifier_region=(10, 20, 300, 40),
+        recorder_factory=_make(log),
+        convert=fake_convert,
+        stop=lambda: True,
+        announce=False,
+    )
+    meta = json.loads((Path(out) / "meta.json").read_text())
+    assert meta["identifier_region"] == [10, 20, 300, 40]
+    assert meta["id"] == "x"  # existing keys preserved (additive stamp)
 
 
 def test_cli_record_desktop_rejects_secret(tmp_path: Path) -> None:

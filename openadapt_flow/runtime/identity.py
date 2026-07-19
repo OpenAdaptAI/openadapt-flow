@@ -463,8 +463,40 @@ def context_from_lines(
         The joined band text, or None when the surviving text is too short
         (< ``MIN_CONTEXT_CHARS`` squashed chars) to discriminate anything.
     """
+    kept = _kept_context_lines(
+        lines,
+        exclude_region=exclude_region,
+        band=band,
+        point=point,
+        min_confidence=min_confidence,
+        reference_date=reference_date,
+    )
+    if not kept:
+        return None
+    kept.sort(key=lambda item: item[0])
+    joined = " ".join(text for _, _, text in kept)
+    if len(squash(joined)) < MIN_CONTEXT_CHARS:
+        return None
+    return joined
+
+
+def _kept_context_lines(
+    lines: Iterable[Any],
+    *,
+    exclude_region: Region,
+    band: Region,
+    point: Optional[Point],
+    min_confidence: float,
+    reference_date: Optional[date],
+) -> list[tuple[int, Any, str]]:
+    """The confident, in-band, non-excluded, non-volatile identity lines.
+
+    Shared by :func:`context_from_lines` (which joins the text) and
+    :func:`context_region_from_lines` (which bounds them), so the identity
+    band filter has a single definition. Each item is ``(left_x, line, text)``.
+    """
     _, band_y, _, band_h = band
-    kept = []
+    kept: list[tuple[int, Any, str]] = []
     for line in lines:
         text = (getattr(line, "text", "") or "").strip()
         if not text or getattr(line, "confidence", 0.0) < min_confidence:
@@ -481,13 +513,44 @@ def context_from_lines(
     if point is not None:
         near = lines_near_point([line for _, line, _ in kept], point[1])
         kept = [item for item in kept if item[1] in near]
+    return kept
+
+
+def context_region_from_lines(
+    lines: Iterable[Any],
+    *,
+    exclude_region: Region,
+    band: Region,
+    point: Optional[Point] = None,
+    min_confidence: float = 0.5,
+    reference_date: Optional[date] = None,
+) -> Optional[Region]:
+    """Bounding box of the identity lines :func:`context_from_lines` keeps.
+
+    Same filter, same arguments; returns the tight ``(x, y, w, h)`` box (in the
+    recorded frame's coordinates) enclosing the surviving identity-band lines,
+    or None when none survive. The compiler stores this as
+    ``anchor.identifier_region`` on a PIXEL-ONLY substrate so the pixel-compare
+    identity tier (:func:`verify_pixel_identity`) can re-cut the SAME box at the
+    resolved point on replay. Unlike :func:`context_from_lines` it applies no
+    minimum-length floor: any surviving identity pixels are worth arming the
+    MISMATCH-only pixel tier with (it can never false-accept).
+    """
+    kept = _kept_context_lines(
+        lines,
+        exclude_region=exclude_region,
+        band=band,
+        point=point,
+        min_confidence=min_confidence,
+        reference_date=reference_date,
+    )
     if not kept:
         return None
-    kept.sort(key=lambda item: item[0])
-    joined = " ".join(text for _, _, text in kept)
-    if len(squash(joined)) < MIN_CONTEXT_CHARS:
-        return None
-    return joined
+    x0 = min(line.region[0] for _, line, _ in kept)
+    y0 = min(line.region[1] for _, line, _ in kept)
+    x1 = max(line.region[0] + line.region[2] for _, line, _ in kept)
+    y1 = max(line.region[1] + line.region[3] for _, line, _ in kept)
+    return (int(x0), int(y0), int(x1 - x0), int(y1 - y0))
 
 
 def required_run(length: int) -> int:
@@ -1605,11 +1668,12 @@ PIXEL_SPREAD_EPS = 0.06  # per-column mean-diff over which a column is "active"
 # single-glyph granularity. So the VERIFY path cannot be made safe by any
 # threshold, and it is HARD-GATED (PIXEL_VERIFY_ENABLED=False): the tier may
 # only MISMATCH (a localized spike -> safe HALT) or ABSTAIN (fall through),
-# never VERIFY, until (a) the compiler captures a FIXED-SIZE identifier crop at
-# record time and (b) a jitter-robust distance is validated end to end. The
-# pixel tier is not production-reachable today (the compiler does not populate
-# identifier_crop), so this gate has no production impact -- it prevents a
-# latent false-accept from ever shipping. Disclosed in docs/LIMITS.md.
+# never VERIFY, until a jitter-robust distance is validated end to end. The
+# compiler now DOES emit identifier crops (compiler.compile, identity-armed
+# steps without structured identity, or explicitly marked ones), so the tier
+# is production-reachable -- but only on its safe half: arming it can add a
+# safe HALT on a different identifier, never a pixel false-accept.
+# Disclosed in docs/LIMITS.md.
 PIXEL_VERIFY_ENABLED = False
 PIXEL_SI_HEIGHT = 48  # canonical HEIGHT (aspect preserved)
 PIXEL_SI_WIN_FRAC = 0.55  # sliding window width as a fraction of height (~1 glyph)

@@ -73,6 +73,28 @@ def is_identity_armed(step: Step) -> bool:
     )
 
 
+def has_identifier_crop(step: Step) -> bool:
+    """True when the step carries a compiler-emitted pixel identifier crop
+    (``anchor.identifier_crop``) — the artifact that arms the pixel-compare
+    identity tier on remote-display/pixel replays (Citrix/RDP), where no
+    DOM/UIA text exists to verify \"right record\" with."""
+    return step.anchor is not None and bool(step.anchor.identifier_crop)
+
+
+def has_structured_identity(step: Step) -> bool:
+    """True when the step's identity rests on STRUCTURED (DOM/UIA/AX) text —
+    plaintext (``structured_identity``) or its PHI-free salted-hash form
+    (``identity_template.structured``). Such a step verifies identity on the
+    structured tier wherever the replay backend exposes structured text; the
+    pixel crop only matters for it on a pixel-only replay substrate."""
+    a = step.anchor
+    if a is None:
+        return False
+    if a.structured_identity:
+        return True
+    return a.identity_template is not None and bool(a.identity_template.structured)
+
+
 def expects_effect(step: Step) -> bool:
     """True for steps that should carry an effect assertion (see
     ``_EFFECT_ACTIONS``)."""
@@ -613,6 +635,16 @@ class LintReport(BaseModel):
     #: falls back to screen evidence at run time.
     consequential_steps: int = 0
     effect_covered_consequential_steps: int = 0
+    #: Pixel-identity coverage over the bundle's IDENTITY-ARMED steps: how
+    #: many there are, and how many carry a compiler-emitted identifier crop
+    #: (``anchor.identifier_crop``) arming the pixel-compare identity tier on
+    #: remote-display/pixel replays. An armed step WITHOUT a crop still
+    #: verifies identity on the structured/OCR tiers where available, but on
+    #: a pixel-only substrate its wrong-record defense leans on the OCR band
+    #: alone (docs/LIMITS.md); ``Step.identifier_crop_missing_reason`` says
+    #: why the crop is absent.
+    identity_armed_steps: int = 0
+    identifier_crop_armed_steps: int = 0
 
     @property
     def effect_coverage(self) -> Optional[float]:
@@ -624,6 +656,17 @@ class LintReport(BaseModel):
         if self.consequential_steps == 0:
             return None
         return self.effect_covered_consequential_steps / self.consequential_steps
+
+    @property
+    def identifier_crop_coverage(self) -> Optional[float]:
+        """Fraction of identity-armed steps carrying a pixel identifier crop.
+
+        ``None`` when the bundle has no identity-armed steps (coverage of
+        nothing is not 100%).
+        """
+        if self.identity_armed_steps == 0:
+            return None
+        return self.identifier_crop_armed_steps / self.identity_armed_steps
 
     @property
     def max_severity(self) -> str:
@@ -659,6 +702,15 @@ class LintReport(BaseModel):
                 f"/{self.consequential_steps} consequential step(s) declare a "
                 f"system-of-record effect ({coverage:.0%})"
             )
+        idcrop = self.identifier_crop_coverage
+        if idcrop is None:
+            lines.append("  pixel identity coverage: n/a (no identity-armed steps)")
+        else:
+            lines.append(
+                f"  pixel identity coverage: {self.identifier_crop_armed_steps}"
+                f"/{self.identity_armed_steps} identity-armed step(s) carry an "
+                f"identifier crop ({idcrop:.0%})"
+            )
         if not ordered:
             lines.append("  no coverage gaps found.")
         for f in ordered:
@@ -687,14 +739,28 @@ def lint_workflow(workflow: Workflow) -> LintReport:
       falls back to screen evidence for that write. Always ``warn`` here
       (advice); a policy escalates the same gap to a certification FAILURE via
       ``require_effects_for_irreversible`` (warn-vs-fail is policy-configurable).
+    - ``missing_identifier_crop`` — an IDENTITY-ARMED step with no pixel
+      identifier crop (``anchor.identifier_crop``): on a remote-display/pixel
+      replay (Citrix/RDP) the pixel-compare identity tier abstains and the
+      wrong-record defense leans on the OCR band alone. ``warn`` when the
+      step's identity rests ONLY on the OCR band (a pixel recording compiled
+      without a crop — recompile with the current compiler, or mark the
+      region with ``record --identifier``); ``info`` when structured identity
+      covers the step (the crop only matters for a cross-substrate pixel
+      replay).
 
     The report also carries the bundle's effect-contract coverage over its
     consequential steps (``consequential_steps`` /
-    ``effect_covered_consequential_steps`` / ``effect_coverage``).
+    ``effect_covered_consequential_steps`` / ``effect_coverage``) and its
+    pixel-identity coverage over its identity-armed steps
+    (``identity_armed_steps`` / ``identifier_crop_armed_steps`` /
+    ``identifier_crop_coverage``).
     """
     findings: list[Finding] = []
     consequential = 0
     effect_covered = 0
+    identity_armed = 0
+    idcrop_armed = 0
     # Same canonical traversal the certifier uses: lint a program-mode bundle's
     # graph/subflow action states, not just its (often empty) linear steps.
     steps = list(iter_workflow_steps(workflow))
@@ -741,6 +807,40 @@ def lint_workflow(workflow: Workflow) -> LintReport:
                 )
             )
 
+        if is_identity_applicable(step) and is_identity_armed(step):
+            identity_armed += 1
+            if has_identifier_crop(step):
+                idcrop_armed += 1
+            else:
+                structured = has_structured_identity(step)
+                why = step.identifier_crop_missing_reason or (
+                    "compiled before identifier-crop emission — recompile to "
+                    "capture one"
+                )
+                findings.append(
+                    Finding(
+                        # Band-only identity on a pixel replay is exactly the
+                        # under-armed Citrix/RDP case -> warn. With structured
+                        # identity the crop only matters for a cross-substrate
+                        # pixel replay -> info.
+                        severity="info" if structured else "warn",
+                        code="missing_identifier_crop",
+                        step_id=step.id,
+                        message=(
+                            f"{step.action.value} carries no pixel identifier "
+                            f"crop ({why}) — on a remote-display/pixel replay "
+                            "the pixel-compare identity tier abstains and "
+                            "wrong-record detection leans on the "
+                            + (
+                                "OCR band alone"
+                                if not structured
+                                else "OCR band (structured identity does not "
+                                "cross the pixel boundary)"
+                            )
+                        ),
+                    )
+                )
+
         if is_vacuous(step):
             findings.append(
                 Finding(
@@ -775,4 +875,6 @@ def lint_workflow(workflow: Workflow) -> LintReport:
         findings=findings,
         consequential_steps=consequential,
         effect_covered_consequential_steps=effect_covered,
+        identity_armed_steps=identity_armed,
+        identifier_crop_armed_steps=idcrop_armed,
     )

@@ -41,7 +41,12 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.risk import classify_step_risk
-from openadapt_flow.runtime.identity import band_region, context_from_lines, coverage
+from openadapt_flow.runtime.identity import (
+    band_region,
+    context_from_lines,
+    context_region_from_lines,
+    coverage,
+)
 from openadapt_flow.vision.hashing import phash_distance, phash_png
 from openadapt_flow.vision.ocr import OcrLine, normalize_text, ocr
 
@@ -756,6 +761,160 @@ def _identity_unarmed_reason(
     )
 
 
+# -- pixel identifier-crop emission ------------------------------------------
+#
+# Degrade-reason taxonomy for ``Step.identifier_crop_missing_reason``: every
+# identity-applicable click that compiles WITHOUT a pixel identifier crop
+# records WHY (never a silent gap), mirroring ``identity_unarmed_reason``.
+IDCROP_REASON_STRUCTURED = (
+    "structured identity (DOM/UIA/AX) owns this step's identity; no identifier "
+    "pixels persisted at rest — mark the identifier field/region at record "
+    "time (--identifier) to also arm the pixel tier for remote-display replays"
+)
+IDCROP_REASON_UNARMED = (
+    "identity is not armed on this step (see identity_unarmed_reason) — "
+    "there is no identity evidence to crop"
+)
+IDCROP_REASON_NO_BAND_REGION = (
+    "the OCR identity band kept no lines to bound a crop from at compile time"
+)
+IDCROP_REASON_MARKED_INVALID = (
+    "the marked identifier region is empty after clamping to the recorded "
+    "frame (degenerate or fully outside the frame)"
+)
+
+#: Bundle subdirectory for compiler-emitted identifier crops. Deliberately
+#: under ``templates/`` so the crops — pixels of the record-identifying region,
+#: PHI by construction — ride the SAME at-rest handling as every other image
+#: crop: hashed into the integrity manifest (bundle_validation), sealed to
+#: ``.enc`` in an encrypted bundle (ir._seal_template_assets, TEMPLATE_AAD),
+#: and surfaced by the run gate's cleartext-asset check (run_gate gate 5).
+IDENTIFIER_CROP_DIR = "templates/identifiers"
+
+
+def _clamp_to_frame(region: Region, frame_size: tuple[int, int]) -> Optional[Region]:
+    """Intersect ``region`` with the frame; None when nothing remains."""
+    fw, fh = frame_size
+    x, y, w, h = region
+    x0, y0 = max(0, int(x)), max(0, int(y))
+    x1, y1 = min(fw, int(x) + int(w)), min(fh, int(y) + int(h))
+    if x1 - x0 <= 0 or y1 - y0 <= 0:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _marked_identifier_region(value: object, *, source: str) -> Optional[Region]:
+    """Validate an explicitly marked identifier region from the recording.
+
+    ``value`` comes from a click event's ``identifier_region`` (web recorder
+    ``--identifier FIELD`` rect) or ``meta.json``'s ``identifier_region``
+    (desktop ``--identifier X,Y,W,H``). Malformed shapes fail LOUDLY — an
+    operator who marked the identifying region must not get a silently
+    unmarked bundle.
+    """
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 4
+        or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value
+        )
+    ):
+        raise ValueError(
+            f"malformed identifier_region in {source}: expected [x, y, w, h] "
+            f"integers, got {value!r}"
+        )
+    return (int(value[0]), int(value[1]), int(value[2]), int(value[3]))
+
+
+def _emit_identifier_crop(
+    bundle: Path,
+    step_id: str,
+    before_png: bytes,
+    *,
+    frame_size: tuple[int, int],
+    marked_region: Optional[Region],
+    context_text: Optional[str],
+    structured_identity: Optional[str],
+    frame_lines: list[OcrLine],
+    crop_region: Region,
+    click: Point,
+    reference_date: Optional[date],
+) -> tuple[Optional[str], Optional[Region], Optional[str]]:
+    """Emit the pixel identifier crop for one click step, or say why not.
+
+    Returns ``(crop_rel, region, missing_reason)`` — exactly one of
+    ``crop_rel`` / ``missing_reason`` is set. Source precedence:
+
+    1. an EXPLICITLY MARKED region (record-time ``--identifier``) wins and is
+       honored even when structured identity was captured (the operator's
+       stated intent: also arm the pixel tier, e.g. for a bundle recorded on a
+       structured substrate but replayed over Citrix/RDP);
+    2. otherwise, when structured identity was captured, NO crop is written
+       (the structured tier owns identity; no identifier pixels at rest);
+    3. otherwise, when the OCR identity band armed identity, the crop is the
+       tight bounding box of the surviving band lines
+       (:func:`~openadapt_flow.runtime.identity.context_region_from_lines`) —
+       the automatic pixel-substrate path that makes
+       ``verify_pixel_identity`` reachable on Citrix/RDP recordings;
+    4. otherwise identity is unarmed and there is nothing to crop.
+
+    The crop lands in :data:`IDENTIFIER_CROP_DIR` (under ``templates/``) so it
+    is sealed/hashed with the other image crops. Arming the pixel tier is
+    MISMATCH-or-ABSTAIN only (``identity.PIXEL_VERIFY_ENABLED`` is False), so
+    a crop can only add a safe HALT on a wrong identifier — never a pixel
+    false-accept.
+    """
+    region: Optional[Region] = None
+    marked_invalid = False
+    if marked_region is not None:
+        region = _clamp_to_frame(marked_region, frame_size)
+        if region is None:
+            marked_invalid = True
+            logger.warning(
+                "identifier-crop %s: marked region %s is outside the recorded "
+                "frame %s; falling back to the automatic identity band",
+                step_id,
+                marked_region,
+                frame_size,
+            )
+    if region is None:
+        if structured_identity is not None and not marked_invalid:
+            return None, None, IDCROP_REASON_STRUCTURED
+        if context_text is None and structured_identity is None:
+            reason = IDCROP_REASON_UNARMED
+            if marked_invalid:
+                reason = f"{IDCROP_REASON_MARKED_INVALID}; {reason}"
+            return None, None, reason
+        band_box = context_region_from_lines(
+            frame_lines,
+            exclude_region=crop_region,
+            band=band_region(click, crop_region[3], frame_size),
+            point=click,
+            min_confidence=MIN_OCR_CONFIDENCE,
+            reference_date=reference_date,
+        )
+        region = _clamp_to_frame(band_box, frame_size) if band_box else None
+        if region is None:
+            if structured_identity is not None:
+                # Marked region invalid AND structured present: fall back to
+                # the structured tier owning identity (band may be empty).
+                return (
+                    None,
+                    None,
+                    (f"{IDCROP_REASON_MARKED_INVALID}; {IDCROP_REASON_STRUCTURED}"),
+                )
+            reason = IDCROP_REASON_NO_BAND_REGION
+            if marked_invalid:
+                reason = f"{IDCROP_REASON_MARKED_INVALID}; {reason}"
+            return None, None, reason
+    crop_rel = f"{IDENTIFIER_CROP_DIR}/{step_id}.png"
+    (bundle / IDENTIFIER_CROP_DIR).mkdir(parents=True, exist_ok=True)
+    (bundle / crop_rel).write_bytes(_crop_png(before_png, region))
+    return crop_rel, region, None
+
+
 def compile_recording(
     recording_dir: Path | str,
     out_bundle_dir: Path | str,
@@ -773,7 +932,13 @@ def compile_recording(
     derive up to two landmarks from nearby OCR lines outside the crop,
     record the target's identity context band (``anchor.context_text`` —
     row text outside the crop, verified before every click at replay time;
-    see :mod:`openadapt_flow.runtime.identity`), and derive postconditions
+    see :mod:`openadapt_flow.runtime.identity`), emit a pixel identifier
+    crop (``anchor.identifier_crop`` under ``templates/identifiers/``) for
+    identity-armed steps without structured identity or with a record-time
+    ``--identifier`` marking — arming the pixel-compare identity tier on
+    remote-display/pixel replays, with every crop-less identity-applicable
+    step recording WHY in ``Step.identifier_crop_missing_reason`` (see
+    :func:`_emit_identifier_crop`) — and derive postconditions
     (REGION_STABLE on the largest changed region plus TEXT_PRESENT for the
     most STABLE new text — volatile candidates such as clock fragments,
     near dates and counters are rejected, and candidates must persist into
@@ -855,6 +1020,14 @@ def compile_recording(
     events = _load_events(recording)
     params: dict[str, str] = dict(meta.get("params") or {})
     viewport = meta.get("viewport")
+    # Recording-wide marked identifier region (desktop `record --identifier
+    # X,Y,W,H` — a pixel capture has no field identity, so the operator marks
+    # the record-identifying region once, e.g. the patient banner). A click
+    # event's own `identifier_region` (web `--identifier FIELD` rect) takes
+    # precedence per step.
+    meta_identifier_region = _marked_identifier_region(
+        meta.get("identifier_region"), source="meta.json"
+    )
 
     # Parameterized values vary per run, so they must never be asserted in
     # ANY step's postconditions — not just the TYPE step's own: the typed
@@ -971,6 +1144,37 @@ def compile_recording(
                 if structural_raw
                 else None
             )
+            # Pixel identifier crop: persist the record-identifying pixels
+            # (MRN / name+DOB region) so the pixel-compare identity tier
+            # (runtime.identity.verify_pixel_identity) arms on remote-display
+            # /pixel replays — the substrates where no DOM/UIA text exists to
+            # verify "right record" with. Emitted for identity-armed steps
+            # without structured identity (automatic band box) or when the
+            # operator marked the region at record time (--identifier); every
+            # crop-less identity-applicable step records WHY
+            # (Step.identifier_crop_missing_reason). See _emit_identifier_crop.
+            event_marked = _marked_identifier_region(
+                event.get("identifier_region"), source=f"events.jsonl event {i}"
+            )
+            identifier_crop_rel, identifier_region, idcrop_missing = (
+                _emit_identifier_crop(
+                    bundle,
+                    step_id,
+                    before_png,
+                    frame_size=(frame.shape[1], frame.shape[0]),
+                    marked_region=(
+                        event_marked
+                        if event_marked is not None
+                        else meta_identifier_region
+                    ),
+                    context_text=context_text,
+                    structured_identity=structured_identity,
+                    frame_lines=frame_lines,
+                    crop_region=crop_region,
+                    click=click,
+                    reference_date=reference_date,
+                )
+            )
             anchor = Anchor(
                 template=template_rel,
                 region=crop_region,
@@ -980,6 +1184,8 @@ def compile_recording(
                 structured_identity=structured_identity,
                 structural=structural,
                 landmarks=landmarks,
+                identifier_crop=identifier_crop_rel,
+                identifier_region=identifier_region,
             )
             # Identity-protection audit trail: an UNARMED click proceeds
             # with NO identity verification at replay (docs/LIMITS.md), so
@@ -1016,6 +1222,7 @@ def compile_recording(
                         anchor=anchor,
                         identity_armed=identity_armed,
                         identity_unarmed_reason=unarmed_reason,
+                        identifier_crop_missing_reason=idcrop_missing,
                     ),
                     before_png,
                     after_png,

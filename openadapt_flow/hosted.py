@@ -1606,7 +1606,7 @@ def _client_run_id(run_path: Path) -> str:
         last_error: Optional[Exception] = None
         if not stat.S_ISREG(metadata.st_mode):
             raise HostedError("run report id must be a regular file (symlinks refused)")
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         if nofollow:
             flags |= nofollow
@@ -1707,7 +1707,7 @@ def _client_run_id(run_path: Path) -> str:
         return read_existing(existing)
 
     fresh = str(uuid.uuid4())
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -1724,10 +1724,17 @@ def _client_run_id(run_path: Path) -> str:
         return read_existing(existing)
     except OSError as exc:
         raise HostedError("could not persist the run report id") from exc
-    created = os.fstat(fd)
-
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        created = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise HostedError("could not persist the run report id") from exc
+
+    unowned_fd: Optional[int] = fd
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+        unowned_fd = None  # ownership transferred to the file object
+        with handle:
             handle.write(fresh + "\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -1758,6 +1765,9 @@ def _client_run_id(run_path: Path) -> str:
         # failed-create entry behind so subsequent reports fail closed instead
         # of risking deletion of a path replacement between lstat and unlink.
         raise HostedError("could not persist the run report id") from exc
+    finally:
+        if unowned_fd is not None:
+            os.close(unowned_fd)
     return fresh
 
 

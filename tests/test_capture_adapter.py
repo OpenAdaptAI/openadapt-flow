@@ -523,10 +523,37 @@ def test_window_mode_meta_stamps_backend_hints(window_converted: Path) -> None:
         "target_title": None,
         "resolved_owner": WINDOW_OWNER,
         "resolved_title": WINDOW_TITLE,
+        # Resolved-window identity (OS handle + owning pid) — provenance for the
+        # local recording; window_id "42" coerced from the persisted string.
+        "resolved_pid": 4242,
+        "resolved_window_id": 42,
     }
     # The recorded TARGET had owner only (title=None): hints carry exactly the
     # user's proven-to-resolve substrings, not the volatile resolved title.
     assert meta["backend_hints"] == {"backend": "rdp", "rdp_window": WINDOW_OWNER}
+
+
+def test_window_mode_identity_omitted_when_absent(tmp_path: Path) -> None:
+    """A session without a resolved pid/window id simply omits those keys.
+
+    A missing OS handle (older capture, or a resolver that could not read it)
+    must not fail conversion nor serialize a null identity; the other scoping
+    provenance is unaffected.
+    """
+    import json
+
+    config = window_capture_config(window_id=None, pid=None)
+    capture_dir = make_capture(tmp_path, window_demo_rows(), config=config)
+    recording_dir = tmp_path / "recording"
+    convert_capture(
+        capture_dir, recording_dir, params={"note": NOTE_VALUE}, settle_s=1.0
+    )
+    wc = json.loads((recording_dir / "meta.json").read_text())["window_capture"]
+    assert "resolved_pid" not in wc
+    assert "resolved_window_id" not in wc
+    # Core scoping provenance still present.
+    assert wc["coordinate_space"] == "window_pixels"
+    assert wc["resolved_owner"] == WINDOW_OWNER
 
 
 def test_window_mode_out_of_window_click_rejected(tmp_path: Path) -> None:

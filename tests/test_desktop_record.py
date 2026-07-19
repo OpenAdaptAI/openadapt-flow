@@ -269,7 +269,7 @@ def _run_cli(argv: list[str], monkeypatch: Any = None) -> int:
 def test_cli_record_windows_invokes_capture(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params, identifier_region=None):
+    def fake_record(out_dir, *, task_description, params, identifier_region=None, window=None):
         captured["out"] = Path(out_dir)
         captured["task"] = task_description
         captured["params"] = params
@@ -302,7 +302,7 @@ def test_cli_record_windows_invokes_capture(tmp_path: Path, monkeypatch) -> None
 def test_cli_record_rdp_invokes_capture(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params, identifier_region=None):
+    def fake_record(out_dir, *, task_description, params, identifier_region=None, window=None):
         captured["params"] = params
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         return Path(out_dir)
@@ -320,7 +320,7 @@ def test_cli_record_desktop_identifier_region(tmp_path: Path, monkeypatch) -> No
     record-identifying region through to the capture orchestration."""
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params, identifier_region=None):
+    def fake_record(out_dir, *, task_description, params, identifier_region=None, window=None):
         captured["identifier_region"] = identifier_region
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         return Path(out_dir)
@@ -417,3 +417,186 @@ def test_cli_record_desktop_param_must_be_kv(tmp_path: Path) -> None:
 def test_cli_record_web_requires_url(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="requires --url"):
         _run_cli(["record", "--out", str(tmp_path / "r")])
+
+
+# -- Window-scoped recording (--window) --------------------------------------
+
+
+def _fake_desktop_record(captured: dict):
+    def fake_record(
+        out_dir, *, task_description, params, identifier_region=None, window=None
+    ):
+        captured["window"] = window
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return Path(out_dir)
+
+    return fake_record
+
+
+def test_cli_record_window_threads_owner_and_title(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`record --window OWNER --window-title T` builds the capture window spec."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "openadapt_flow.desktop_record.record_desktop_capture",
+        _fake_desktop_record(captured),
+    )
+    rc = _run_cli(
+        [
+            "record",
+            "--backend",
+            "rdp",
+            "--window",
+            "Parallels",
+            "--window-title",
+            "Windows 11",
+            "--out",
+            str(tmp_path / "rec"),
+        ]
+    )
+    assert rc == 0
+    assert captured["window"] == {"owner": "Parallels", "title": "Windows 11"}
+
+
+def test_cli_record_window_owner_only(tmp_path: Path, monkeypatch) -> None:
+    """Owner substring alone is a valid selector (title stays None)."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "openadapt_flow.desktop_record.record_desktop_capture",
+        _fake_desktop_record(captured),
+    )
+    rc = _run_cli(
+        [
+            "record",
+            "--backend",
+            "windows",
+            "--window",
+            "Citrix Workspace",
+            "--out",
+            str(tmp_path / "rec"),
+        ]
+    )
+    assert rc == 0
+    assert captured["window"] == {"owner": "Citrix Workspace", "title": None}
+
+
+def test_cli_record_no_window_is_full_screen(tmp_path: Path, monkeypatch) -> None:
+    """Without --window the desktop capture stays full-screen (window=None)."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "openadapt_flow.desktop_record.record_desktop_capture",
+        _fake_desktop_record(captured),
+    )
+    rc = _run_cli(
+        ["record", "--backend", "windows", "--out", str(tmp_path / "rec")]
+    )
+    assert rc == 0
+    assert captured["window"] is None
+
+
+def test_cli_record_web_rejects_window(tmp_path: Path) -> None:
+    """--window is a desktop/pixel-capture concept; the web recorder refuses it."""
+    with pytest.raises(SystemExit, match="apply only to the desktop"):
+        _run_cli(
+            [
+                "record",
+                "--url",
+                "http://example.test",
+                "--window",
+                "Parallels",
+                "--out",
+                str(tmp_path / "r"),
+            ]
+        )
+
+
+def test_default_recorder_factory_passes_window(monkeypatch) -> None:
+    """The default factory forwards the window spec to openadapt_capture.Recorder."""
+    import sys
+    import types
+
+    from openadapt_flow import desktop_record
+
+    seen: dict = {}
+
+    class _FakeCaptureRecorder:
+        def __init__(self, *, task_description, capture_dir, window=None):
+            seen["task"] = task_description
+            seen["capture_dir"] = capture_dir
+            seen["window"] = window
+
+    fake_module = types.ModuleType("openadapt_capture")
+    fake_module.Recorder = _FakeCaptureRecorder  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openadapt_capture", fake_module)
+
+    spec = {"owner": "Parallels", "title": None}
+    desktop_record._default_recorder_factory("t", "/tmp/cap", window=spec)
+    assert seen["window"] == spec
+    assert seen["capture_dir"] == "/tmp/cap"
+
+
+def test_record_desktop_window_forwarded_to_factory(tmp_path: Path) -> None:
+    """`record_desktop_capture(window=...)` reaches the default factory closure."""
+    from openadapt_flow import desktop_record
+
+    seen: dict = {}
+    log: list = []
+
+    def spy_default(task, cap_dir, window=None):
+        seen["window"] = window
+        return _FakeRecorder(task, cap_dir, log)
+
+    # Replace the default factory; record_desktop_capture binds `window` into it
+    # via functools.partial when no factory is injected.
+    orig = desktop_record._default_recorder_factory
+    desktop_record._default_recorder_factory = spy_default  # type: ignore[assignment]
+    try:
+        record_desktop_capture(
+            tmp_path / "rec",
+            window={"owner": "Parallels", "title": None},
+            convert=lambda cap_dir, out_dir, *, params=None: Path(out_dir),
+            stop=lambda: True,
+            announce=False,
+        )
+    finally:
+        desktop_record._default_recorder_factory = orig  # type: ignore[assignment]
+    assert seen["window"] == {"owner": "Parallels", "title": None}
+
+
+def test_record_desktop_window_unsupported_platform(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """On a host with no per-window capture primitive, --window fails LOUD.
+
+    A silent full-screen fallback would record coordinates in the wrong pixel
+    space; we refuse before any capture starts.
+    """
+    from openadapt_flow import desktop_record
+
+    monkeypatch.setattr(desktop_record.sys, "platform", "linux")
+    with pytest.raises(SystemExit, match="not supported on this host"):
+        record_desktop_capture(
+            tmp_path / "rec",
+            window={"owner": "Parallels", "title": None},
+            stop=lambda: True,
+            announce=False,
+        )
+
+
+def test_record_desktop_no_window_ok_on_any_platform(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Full-screen desktop capture (window=None) is unaffected by the guard."""
+    from openadapt_flow import desktop_record
+
+    monkeypatch.setattr(desktop_record.sys, "platform", "linux")
+    log: list = []
+    out = record_desktop_capture(
+        tmp_path / "rec",
+        recorder_factory=_make(log),
+        convert=lambda cap_dir, out_dir, *, params=None: Path(out_dir),
+        stop=lambda: True,
+        announce=False,
+    )
+    assert out == tmp_path / "rec"

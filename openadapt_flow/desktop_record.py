@@ -44,10 +44,20 @@ pulls it onto the replay hot path.
 
 from __future__ import annotations
 
+import functools
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Optional, Protocol
+
+# Platforms where openadapt-capture's window-scoped capture is implemented
+# (openadapt_capture.window_capture.resolve_window / capture_window). Kept in
+# lock-step with that module: recording ONE window in its own pixel space needs
+# a per-window capture primitive (macOS CGWindowListCreateImage / Windows
+# Win32 + region grab). Elsewhere we refuse UP FRONT rather than start a
+# full-screen capture that silently ignores the requested --window scope.
+WINDOW_CAPTURE_PLATFORMS = ("darwin", "win32")
 
 
 class _CaptureRecorder(Protocol):
@@ -71,9 +81,19 @@ ConvertFn = Callable[..., Path]
 
 
 def _default_recorder_factory(
-    task_description: str, capture_dir: str
+    task_description: str,
+    capture_dir: str,
+    window: Optional[dict[str, Optional[str]]] = None,
 ) -> ContextManager[_CaptureRecorder]:
-    """Build a live ``openadapt_capture.Recorder`` (lazy import of the extra)."""
+    """Build a live ``openadapt_capture.Recorder`` (lazy import of the extra).
+
+    ``window`` is the openadapt-capture window-scoping spec
+    (``{"owner": <app-substring>, "title": <title-substring>}`` or ``None``).
+    When set, capture records ONE window in that window's own pixel space
+    (``openadapt_capture.window_capture``) instead of the full screen; the
+    resolved window's identity (owner/title/pid/window id) is persisted on the
+    capture session and surfaced by the capture adapter into ``meta.json``.
+    """
     try:
         from openadapt_capture import Recorder as CaptureRecorder
     except ImportError as exc:  # pragma: no cover - exercised via install state
@@ -82,7 +102,9 @@ def _default_recorder_factory(
             "not installed. Install the optional extra:\n\n"
             "    pip install 'openadapt-flow[capture]'\n"
         ) from exc
-    return CaptureRecorder(task_description=task_description, capture_dir=capture_dir)
+    return CaptureRecorder(
+        task_description=task_description, capture_dir=capture_dir, window=window
+    )
 
 
 def _wait_for_stop(stop: Optional[Callable[[], bool]]) -> None:
@@ -106,6 +128,7 @@ def record_desktop_capture(
     task_description: str = "openadapt-flow desktop recording",
     params: Optional[dict[str, str]] = None,
     identifier_region: Optional[tuple[int, int, int, int]] = None,
+    window: Optional[dict[str, Optional[str]]] = None,
     capture_dir: Optional[Path | str] = None,
     ready_timeout_s: float = 60.0,
     recorder_factory: Optional[RecorderFactory] = None,
@@ -134,6 +157,16 @@ def record_desktop_capture(
             identity tier arms on remote-display replays. A pixel capture has
             no field identity, so the region is marked once for the
             recording (the identifying banner is static app chrome).
+        window: Window-scoping spec
+            ``{"owner": <app-substring>, "title": <title-substring>}`` (either
+            value may be ``None``). When set, capture records ONE window in
+            that window's OWN pixel space (``record --window``) instead of the
+            full screen — closing the coordinate-space gap with the pixel
+            (``rdp``) replay surface. The window's identity (target + resolved
+            owner/title/pid/window id) rides on the capture session and is
+            surfaced into ``meta.json`` by the capture adapter. Refused up front
+            on hosts where capture has no per-window primitive
+            (see :data:`WINDOW_CAPTURE_PLATFORMS`).
         capture_dir: Where the raw capture session is written (default: a
             ``.capture`` subdir of ``out_dir``). Kept so the raw session is
             inspectable / re-convertible.
@@ -149,20 +182,46 @@ def record_desktop_capture(
     Returns:
         The recording directory (compile-ready).
     """
+    if window is not None and sys.platform not in WINDOW_CAPTURE_PLATFORMS:
+        # Fail LOUD before starting: a full-screen fallback would silently
+        # ignore the requested --window scope and record coordinates in the
+        # wrong pixel space (the exact corruption window-scoping prevents).
+        raise SystemExit(
+            "window-scoped recording (--window) is not supported on this host "
+            f"(platform {sys.platform!r}); openadapt-capture implements "
+            "per-window capture only on "
+            f"{' and '.join(WINDOW_CAPTURE_PLATFORMS)}. Record on a supported "
+            "host, or omit --window to capture the full screen."
+        )
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cap_dir = Path(capture_dir) if capture_dir is not None else out_dir / ".capture"
     cap_dir.mkdir(parents=True, exist_ok=True)
 
-    factory = recorder_factory or _default_recorder_factory
+    # Injected factories keep the tested 2-arg ``(task, capture_dir)`` shape;
+    # the DEFAULT factory carries the window spec through to the capture
+    # Recorder (functools.partial keeps the call site's arity unchanged).
+    factory = recorder_factory or functools.partial(
+        _default_recorder_factory, window=window
+    )
     if convert is None:
         from openadapt_flow.adapters.capture import convert_capture
 
         convert = convert_capture
 
     if announce:
+        scope_line = ""
+        if window is not None:
+            owner = window.get("owner")
+            title = window.get("title")
+            scope_line = (
+                f"  Window-scoped: owner={owner!r} title={title!r} "
+                "(recording that window's own pixels).\n"
+            )
         print(
             f"Recording desktop workflow (task: {task_description!r}).\n"
+            f"{scope_line}"
             "  Perform your workflow on the target desktop now.\n"
             "  Press Ctrl-C here to finish."
         )

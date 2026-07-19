@@ -246,8 +246,8 @@ def _window_capture_meta(session: "CaptureSession") -> Optional[dict[str, Any]]:
         if fallback is not None:
             if not isinstance(fallback, dict):
                 raise ValueError(
-                    "capture session config declares malformed capture_window "
-                    "metadata; expected an object or null"
+                    "capture session config declares malformed window-capture "
+                    "metadata; expected capture_window to be an object or null"
                 )
             return fallback
     return None

@@ -538,9 +538,15 @@ def test_default_recorder_factory_passes_window(monkeypatch) -> None:
     assert seen["capture_dir"] == "/tmp/cap"
 
 
-def test_record_desktop_window_forwarded_to_factory(tmp_path: Path) -> None:
+def test_record_desktop_window_forwarded_to_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`record_desktop_capture(window=...)` reaches the default factory closure."""
     from openadapt_flow import desktop_record
+
+    # The platform guard only permits window capture on darwin/win32; force a
+    # supported platform so this forwarding test runs on the Linux CI host.
+    monkeypatch.setattr(desktop_record.sys, "platform", "darwin")
 
     seen: dict = {}
     log: list = []

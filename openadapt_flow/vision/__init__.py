@@ -2,7 +2,7 @@
 
 Public API (see DESIGN.md "Vision API"):
 
-- :class:`Match`, :func:`find_template`
+- :class:`Match`, :func:`find_template`, :func:`find_structural_template`
 - :class:`OcrLine`, :func:`ocr`, :func:`find_text`, :func:`text_present`,
   :func:`upscale_png`
 - :func:`phash_png`, :func:`phash_distance`
@@ -11,7 +11,12 @@ Public API (see DESIGN.md "Vision API"):
 """
 
 from openadapt_flow.vision.hashing import phash_distance, phash_png
-from openadapt_flow.vision.match import Match, find_template, pixels_changed
+from openadapt_flow.vision.match import (
+    Match,
+    find_structural_template,
+    find_template,
+    pixels_changed,
+)
 from openadapt_flow.vision.ocr import (
     OcrLine,
     find_text,
@@ -24,6 +29,7 @@ from openadapt_flow.vision.settle import wait_settled
 __all__ = [
     "Match",
     "OcrLine",
+    "find_structural_template",
     "find_template",
     "find_text",
     "ocr",

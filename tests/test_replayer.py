@@ -51,6 +51,8 @@ class FakeVision:
     def __init__(self):
         self.template_results: list = []
         self.template_calls: list = []
+        self.structural_template_results: list = []
+        self.structural_template_calls: list = []
         # Template-crop bytes the resolver handed each find_template call
         # (the decrypted in-memory crop for an encrypted bundle).
         self.template_png_calls: list = []
@@ -82,6 +84,21 @@ class FakeVision:
         self.template_png_calls.append(template_png)
         if self.template_results:
             return self.template_results.pop(0)
+        return None
+
+    def find_structural_template(
+        self,
+        screen_png,
+        template_png,
+        *,
+        search_region=None,
+        prefer_near=None,
+        scales=(0.85, 1.0, 1.18),
+        threshold=0.8,
+    ):
+        self.structural_template_calls.append(search_region)
+        if self.structural_template_results:
+            return self.structural_template_results.pop(0)
         return None
 
     def find_text(self, screen_png, text, *, region=None, min_ratio=0.8):
@@ -573,6 +590,44 @@ def test_region_stable_template_tolerates_layout_shift(bundle, run_dir):
     # The template search was constrained to the padded region.
     assert vision.template_calls, "find_template was not consulted"
     assert vision.template_calls[0] is not None
+
+
+def test_region_stable_structural_template_tolerates_theme(bundle, run_dir):
+    """A strict edge-map match rescues palette drift when grayscale and the
+    exact-position pHash miss; the REGION_STABLE evidence remains armed."""
+    vision = FakeVision()
+    vision.phash_dist = 99
+    vision.structural_template_results = [
+        Match(point=(120, 60), region=(80, 48, 100, 40), confidence=0.86)
+    ]
+    (bundle / "templates" / "pc.png").write_bytes(make_png((100, 40)))
+    pc = Postcondition(
+        kind=PostconditionKind.REGION_STABLE,
+        region=(80, 40, 100, 40),
+        phash="aa",
+        template="templates/pc.png",
+        timeout_s=0.2,
+    )
+    workflow = Workflow(
+        name="wf",
+        steps=[
+            Step(
+                id="k1",
+                intent="press enter",
+                action=ActionKind.KEY,
+                key="Enter",
+                expect=[pc],
+            )
+        ],
+    )
+
+    report = Replayer(FakeBackend(), vision=vision, poll_interval_s=0.01).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is True
+    assert vision.template_calls
+    assert vision.structural_template_calls
 
 
 def test_region_stable_fails_when_template_and_phash_miss(bundle, run_dir):

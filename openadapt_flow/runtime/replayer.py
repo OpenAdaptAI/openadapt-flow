@@ -97,6 +97,12 @@ from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 # and the minimum template-match score to accept it.
 PC_TEMPLATE_SEARCH_PAD = 80
 PC_TEMPLATE_THRESHOLD = 0.9
+# REGION_STABLE asserts recorded structure, not palette.  The ordinary
+# grayscale template matcher remains the first (stricter) check; this edge-map
+# threshold is a color-invariant fallback.  Exact v1.16.1 MockMed evidence
+# measured correct theme+parameter substitution at 0.86 and a true blocking
+# modal at 0.24, leaving a deliberate margin on both sides.
+PC_STRUCTURAL_TEMPLATE_THRESHOLD = 0.8
 
 # Typed-input verification: size of the "field region" diffed/OCRed around
 # the focusing click point after a TYPE action. Generous on purpose — the
@@ -3666,6 +3672,24 @@ class Replayer:
                 )
                 if match is not None:
                     return True
+                # A region-stability check is about the recorded structure,
+                # not its light/dark palette.  Use the same sealed template
+                # and localized search on edge maps before falling back to the
+                # exact-position structural pHash.  This preserves the
+                # postcondition: a blocking modal or changed layout still
+                # fails; only the representation becomes palette-invariant.
+                structural_matcher = getattr(
+                    self.vision, "find_structural_template", None
+                )
+                if callable(structural_matcher):
+                    match = structural_matcher(
+                        frame_png,
+                        template_png,
+                        search_region=search,
+                        threshold=PC_STRUCTURAL_TEMPLATE_THRESHOLD,
+                    )
+                    if match is not None:
+                        return True
             live = self.vision.phash_png(frame_png, region=region)
             distance = self.vision.phash_distance(live, pc.phash)
             return distance <= pc.phash_tolerance

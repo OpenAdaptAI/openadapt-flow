@@ -20,8 +20,13 @@ driver uses the capabilities available outside that boundary:
 - return action-delivery receipts separately from outcome verification; and
 - expose no structural capability when none is available.
 
-`openadapt_flow/backends/remote_display.py` implements this contract on macOS.
-The backend deliberately remains small: target uniqueness, identity, policy,
+`openadapt_flow/backends/remote_display.py` implements this contract on macOS
+(Quartz), and `openadapt_flow/backends/win32_window_client.py` provides the
+Windows-host client for the same backend (PrintWindow/BitBlt client-area
+capture, SendInput injection, per-monitor-v2 DPI, UIPI refusal). The win32
+client is mock-contract-tested only — no counted batch on a real Windows host
+exists yet (`claims.yaml` `win32-window-replay-roadmap`). The backend
+deliberately remains small: target uniqueness, identity, policy,
 postconditions, independent effects, retries, repair, and audit belong to the
 OpenAdapt runtime rather than the display driver.
 

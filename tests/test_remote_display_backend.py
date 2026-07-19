@@ -30,6 +30,7 @@ from openadapt_flow.backends.remote_display import (
     RemoteDisplayError,
     WindowInfo,
     _split_chord,
+    resolve_mac_key,
 )
 
 
@@ -113,6 +114,10 @@ class FakeClient:
 
     def scroll(self, dx, dy):
         self.calls.append(("scroll", dx, dy))
+
+    def resolve_key(self, token):
+        # The mac resolution rules: named keys unshifted, chars may add Shift.
+        return resolve_mac_key(token)
 
 
 def _backend(**kw) -> tuple[RemoteDisplayBackend, FakeClient]:

@@ -225,6 +225,9 @@ class _FakeWindowClient:
     def scroll(self, dx, dy) -> None:  # pragma: no cover - unused here
         pass
 
+    def resolve_key(self, token):  # pragma: no cover - unused here
+        return None
+
 
 def test_rdp_window_builds_remote_display_backend() -> None:
     backend = build_backend(

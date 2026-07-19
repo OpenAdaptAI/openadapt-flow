@@ -12,6 +12,7 @@
 
 - **CI-proven today (7):** `web-supported`, `deterministic-zero-model-replay`, `effect-verification-silent-writes`, `identity-gate-halt-armed`, `identifier-crop-compile-emission`, `halt-teach-promote`, `mockmed-benchmark-ci-reproducible`
 - **Being validated — opt-in / infra-gated or field (8):** `effect-verifier-kit`, `windows-desktop-validating`, `macos-native-validating`, `linux-native-validating`, `rdp-validating`, `desktop-recording-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
+- **Roadmap / research (1):** `win32-window-replay-roadmap`
 
 ## Claims
 
@@ -266,6 +267,22 @@
 
 - PIXEL-ONLY: no UIA/DOM crosses to the driver. On-screen OCR read-back is SAME-SURFACE, not an independent system-of-record check.
 - A Parallels VM window is a Citrix ANALOG; real HDX/latency/DPI/lock- screen drift is not simulated. OPT-IN + infra-gated (`OAFLOW_CITRIX_PIXEL_E2E=1`, macOS screen-recording + accessibility); never runs on default CI, and does not replace design-partner validation.
+
+### `win32-window-replay-roadmap` — roadmap — designed, not yet proven
+
+> Windows hosts can replay window-scoped remote-display workflows (the Citrix/RDP client window on a Windows endpoint) through the same governed pixel contract already proven on macOS hosts.
+
+- Surfaces: docs
+- Strongest evidence strength: **supported** (tier is `roadmap`)
+
+| Backing evidence | Kind | Gating / CI stage | Strength | Proves |
+|---|---|---|---|---|
+| `tests/test_win32_window_client.py` | test | ci (required PR gate (test)) | supported | MOCK-ONLY conformance: the win32 WindowClient implements the remote-display WindowClient seam (exact process/title/class selection with ambiguity halt, client-area coordinate mapping under per-monitor DPI awareness, PrintWindow-then-BitBlt capture fallback, focus-verification refusal, and the UIPI elevation guard) against a scripted Win32 API — never against a real Windows host. |
+| `docs/desktop/CITRIX_PIXEL.md` | doc | artifact (doc/benchmark) | roadmap | The remote-display contract the client implements and the evidence ladder for qualifying it (Parallels/RDP client-window analog first, then design-partner Citrix). |
+
+**Caveats (honest limits):**
+
+- NOT qualified: no counted end-to-end batch on a real Windows host or a real client window exists. The contract tests mock every Win32 call; real DPI virtualization, UIPI, foreground-arbitration, and PrintWindow rendering behavior remain unproven until the Parallels/real-Windows validation procedure is executed and counted.
 
 ### `openemr-field-benchmark` — validating — opt-in / infra-gated or field test
 

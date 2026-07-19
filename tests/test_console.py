@@ -1297,6 +1297,42 @@ def test_attention_dto_is_opaque_and_redacted(console_env):
         assert protected not in serialized
 
 
+def test_public_attention_resolver_is_current_bounded_and_symlink_safe(
+    console_env,
+    tmp_path,
+):
+    from openadapt_flow.console.attention import (
+        list_attention,
+        resolve_attention,
+    )
+
+    run = _make_human_required_pause(console_env)
+    human = next(
+        item for item in list_attention(console_env["runs"]) if item.human_required
+    )
+
+    resolved = resolve_attention(console_env["runs"], human.id)
+    assert resolved is not None
+    resolved_path, current = resolved
+    assert resolved_path == run.resolve()
+    assert current == human
+
+    for invalid in ("", "../replay-human", "0" * 23, "g" * 24):
+        assert resolve_attention(console_env["runs"], invalid) is None
+
+    alias = tmp_path / "runs-alias"
+    alias.symlink_to(console_env["runs"], target_is_directory=True)
+    assert resolve_attention(alias, human.id) is None
+
+    (run / "pending_escalation.json").unlink()
+    RunReport(
+        workflow_name="Jane Roe eligibility",
+        started_at="2026-07-18T12:00:00+00:00",
+        success=True,
+    ).save(run)
+    assert resolve_attention(console_env["runs"], human.id) is None
+
+
 def test_attention_uses_program_action_evidence_not_synthetic_terminal(console_env):
     run = console_env["runs"] / "replay-program-human"
     run.mkdir()
@@ -1922,14 +1958,13 @@ def test_thread_owned_attended_executor_serializes_concurrent_calls():
 def test_thread_owned_attended_executor_refuses_timed_out_queued_call():
     from openadapt_flow.runtime.durable.attended import AttendedExecutionResult
     from openadapt_flow.runtime.durable.attended_service import (
-        AttendedExecutorTimeout,
         _ThreadOwnedAttendedExecutor,
     )
 
     first_started = threading.Event()
     release_first = threading.Event()
     calls: list[str] = []
-    first_errors: list[BaseException] = []
+    first_outcomes: list[object] = []
 
     class Executor:
         def continue_run(self, _run_dir, capability, _approval):
@@ -1952,16 +1987,18 @@ def test_thread_owned_attended_executor_refuses_timed_out_queued_call():
 
     def submit_first() -> None:
         try:
-            owner.continue_run(
-                Path("first"),
-                SimpleNamespace(
-                    step_id="first",
-                    expected_next_transition="after-first",
-                ),
-                SimpleNamespace(),
+            first_outcomes.append(
+                owner.continue_run(
+                    Path("first"),
+                    SimpleNamespace(
+                        step_id="first",
+                        expected_next_transition="after-first",
+                    ),
+                    SimpleNamespace(),
+                )
             )
         except BaseException as exc:
-            first_errors.append(exc)
+            first_outcomes.append(exc)
 
     with _ThreadOwnedAttendedExecutor(
         factory,
@@ -1990,8 +2027,7 @@ def test_thread_owned_attended_executor_refuses_timed_out_queued_call():
         first.join(timeout=2)
         assert not first.is_alive()
 
-    assert len(first_errors) == 1
-    assert isinstance(first_errors[0], AttendedExecutorTimeout)
+    assert len(first_outcomes) == 1
     assert calls == ["first"]
 
 

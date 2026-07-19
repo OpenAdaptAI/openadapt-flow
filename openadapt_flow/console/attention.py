@@ -13,6 +13,7 @@ deployment-bound action service are present.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -36,6 +37,7 @@ _KNOWN_CATEGORIES = {
     "human_required",
     "halt",
 }
+_ATTENTION_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 
 _COPY: dict[str, tuple[str, str]] = {
     "human_required": (
@@ -246,6 +248,33 @@ def list_attention(root: Path) -> list[AttentionItem]:
         if (item := attention_item(root, path)) is not None
     ]
     return sorted(items, key=lambda item: item.created_at or "", reverse=True)
+
+
+def resolve_attention(
+    root: Path,
+    attention_id: str,
+) -> Optional[tuple[Path, AttentionItem]]:
+    """Resolve one current opaque queue id without exposing scan internals.
+
+    The returned path is guaranteed to be one of the fresh, bounded,
+    symlink-refusing run-directory scan results under ``root``. Closed or
+    changed items resolve to ``None`` rather than granting stale authority.
+    """
+    root = Path(root)
+    if (
+        root.is_symlink()
+        or not root.is_dir()
+        or not isinstance(attention_id, str)
+        or _ATTENTION_ID_RE.fullmatch(attention_id) is None
+    ):
+        return None
+    path = data.resolve_scanned_dir(root, attention_id, data._is_run_dir)
+    if path is None:
+        return None
+    item = attention_item(root, path)
+    if item is None or item.id != attention_id:
+        return None
+    return path, item
 
 
 def notification(items: list[AttentionItem]) -> AttentionNotification:

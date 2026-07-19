@@ -46,7 +46,10 @@ from pydantic import BaseModel, Field
 
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import ApprovalRecord
-from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    GraphFrame,
+    ProgramCheckpoint,
+)
 
 CHECKPOINTS_DIRNAME = "checkpoints"
 MANIFEST_FILENAME = "_manifest.json"
@@ -74,6 +77,10 @@ class RunManifest(BaseModel):
     """
 
     schema_version: int = 1
+    #: Random run-instance identity, distinct from workflow/bundle identity.
+    #: Attended capabilities bind to this so a capability copied between two
+    #: runs of the same bundle is refused.
+    run_id: str = ""
     workflow_name: str
     #: The workflow bundle directory (absolute), source of ``workflow.json``
     #: and the template crops.
@@ -176,6 +183,13 @@ class PendingEscalation(BaseModel):
     #: True when this pause is over a Phase-2 PROGRAM run (its resume point is a
     #: :class:`~.program_checkpoint.ProgramCheckpoint`, not a linear step index).
     program: bool = False
+    #: Exact interpreter cursor at an ACTION-state halt. Empty for non-action
+    #: program halts, which therefore cannot issue Continue/Skip authority.
+    program_frames: list[GraphFrame] = Field(default_factory=list)
+    #: Highest verified program-checkpoint sequence before this halted action.
+    program_checkpoint_seq: int = Field(default=0, ge=0)
+    #: Rolling visited-state digest captured at the halt, for audit continuity.
+    program_history_hash: str = ""
     created_at: str = Field(default_factory=_now)
 
 

@@ -6,10 +6,9 @@ returns opaque run ids, category-derived operator copy, counts, timestamps,
 and existing opaque screenshot ids.  Protected screenshots remain behind the
 console's authenticated, symlink-safe artifact endpoint.
 
-This module is projection-only.  The attended surface does not approve, resume,
-retry, solve, click, type, or otherwise mutate a run.  Human-intervention and
-durable-resume semantics remain deployment-bound CLI/runtime concerns until
-they can be tied to an immutable pause and explicit action-delivery phase.
+This module remains projection-only.  Engine-owned attended mutations live in
+``runtime.durable.attended`` and appear only when an exact pause capability and
+deployment-bound executor are present.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from openadapt_flow.console import data
+from openadapt_flow.runtime.durable.attended import attended_capability_summary
 from openadapt_flow.runtime.durable.controller import looks_like_human_required
 
 _KNOWN_CATEGORIES = {
@@ -41,7 +41,8 @@ _COPY: dict[str, tuple[str, str]] = {
     "human_required": (
         "The application needs a person before the workflow can continue.",
         "Complete the challenge, sign-in, or verification in the live "
-        "application. OpenAdapt never answers it; this queue remains read-only.",
+        "application. OpenAdapt never answers it; Continue only verifies the "
+        "resulting live state before deterministic resume.",
     ),
     "identity": (
         "The target identity could not be certified.",
@@ -109,6 +110,7 @@ class AttentionItem(BaseModel):
     completed_intent_count: int = 0
     before_artifact_id: Optional[str] = None
     after_artifact_id: Optional[str] = None
+    capability: Optional[dict[str, Any]] = None
 
 
 class AttentionNotification(BaseModel):
@@ -124,8 +126,8 @@ def _normal_category(raw: Any, *protected_texts: Any) -> str:
     value = raw if isinstance(raw, str) else ""
     # Preserve a runtime-produced typed category.  An observed phrase such as
     # "session expired" must not re-label an effect/identity/postcondition halt.
-    # The queue is read-only, so an imported/tampered category can at worst
-    # affect fixed explanatory copy; it cannot authorize an action.
+    # A category never authorizes an action. Mutations require a separately
+    # signed engine capability tied to the exact pause.
     if value in _KNOWN_CATEGORIES:
         return value
     marker_present = looks_like_human_required(
@@ -233,6 +235,7 @@ def attention_item(root: Path, path: Path) -> Optional[AttentionItem]:
         completed_intent_count=completed_count,
         before_artifact_id=before_id,
         after_artifact_id=after_id,
+        capability=attended_capability_summary(path),
     )
 
 

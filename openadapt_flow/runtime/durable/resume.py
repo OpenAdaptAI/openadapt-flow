@@ -38,6 +38,7 @@ from openadapt_flow.ir import RunReport, Workflow
 from openadapt_flow.runtime.durable.approval import (
     ApprovalRecord,
     BundleMismatch,
+    StateDiverged,
     enforce_resume_authorization,
 )
 from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
@@ -175,6 +176,9 @@ def resume(
             worklists=resolved_worklists,
             save_healed_to=resolved_healed,
             live_bundle_version=live_bundle_version,
+            run_id=(manifest.run_id if manifest is not None else None),
+            manifest=manifest,
+            pending=pending,
         )
 
     # -- linear resume (unchanged control flow; now gated by approval) --------
@@ -188,6 +192,7 @@ def resume(
         run_dir=run_dir,
         save_healed_to=(Path(resolved_healed) if resolved_healed else None),
         resume_from=start_index,
+        run_id=(manifest.run_id if manifest is not None else None),
     )
 
 
@@ -202,6 +207,9 @@ def _resume_program(
     worklists: dict[str, list[dict[str, str]]],
     save_healed_to: Optional[Path | str],
     live_bundle_version: str,
+    run_id: Optional[str],
+    manifest: Any,
+    pending: Any,
 ) -> RunReport:
     """Restore and continue a Phase-2 PROGRAM run from its interpreter checkpoint.
 
@@ -212,6 +220,31 @@ def _resume_program(
     None): there is nothing verified to restore, so it resumes from the top.
     """
     if checkpoint is not None:
+        if checkpoint.attended_transition is not None:
+            if manifest is None:
+                raise BundleMismatch(
+                    "the attended interpreter transition has no run manifest"
+                )
+            from openadapt_flow.runtime.durable.attended import (
+                validate_attended_program_receipt,
+            )
+
+            validate_attended_program_receipt(
+                store.run_dir,
+                checkpoint=checkpoint,
+                pending=pending,
+                manifest=manifest,
+                live_bundle_version=live_bundle_version,
+            )
+        elif (
+            pending is not None
+            and pending.program
+            and pending.program_checkpoint_seq != checkpoint.seq
+        ):
+            raise StateDiverged(
+                "the durable program pause does not continue from the last "
+                "verified interpreter checkpoint"
+            )
         if (
             checkpoint.bundle_version
             and checkpoint.bundle_version != live_bundle_version
@@ -235,4 +268,5 @@ def _resume_program(
         run_dir=store.run_dir,
         save_healed_to=(Path(save_healed_to) if save_healed_to else None),
         resume_program=checkpoint,
+        run_id=run_id,
     )

@@ -19,11 +19,12 @@ Import-light (pydantic + hashlib + pathlib): no vision, no backend, no model.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 #: The synthetic ``graph_id`` of the top-level ``Workflow.program`` graph (every
 #: OTHER graph is a named entry in ``Workflow.subflows`` -- including a loop
@@ -113,6 +114,47 @@ class GraphFrame(BaseModel):
     loop: Optional[LoopCursor] = None
 
 
+def control_frames_hash(frames: list[GraphFrame]) -> str:
+    """Stable digest of an exact interpreter cursor/control-frame stack."""
+    payload = [frame.model_dump(mode="json") for frame in frames]
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+class ProgramTransitionReceipt(BaseModel):
+    """Exact, idempotent attended transition admitted at a program pause.
+
+    The human-completed action is represented by a new verified-state
+    checkpoint instead of being re-actuated. This receipt binds that checkpoint
+    to the signed pause/cursor and to one selected successor (including an
+    explicit ``None`` fall-off/return).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+    run_id: str
+    workflow_name: str
+    bundle_version: str
+    pause_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    pause_digest: str
+    action: Literal["continue", "skip"]
+    source_checkpoint_seq: int = Field(ge=0)
+    source_graph_id: str
+    source_state_id: str
+    target_state_id: Optional[str] = None
+    control_frames_hash: str
+    cursor_digest: str
+    created_at: str = Field(default_factory=_now)
+    signature: str = ""
+
+    def unsigned(self) -> dict[str, Any]:
+        """Canonical HMAC payload; never includes raw UI observations."""
+        return self.model_dump(exclude={"signature"}, mode="json")
+
+
 class ProgramCheckpoint(BaseModel):
     """A durable marker that a program STATE verified and the run may resume.
 
@@ -160,6 +202,10 @@ class ProgramCheckpoint(BaseModel):
     expected_texts: list[str] = Field(default_factory=list)
     #: Rolling digest of the visited-state history up to and including this state.
     transition_history_hash: str = ""
+    #: Present only when staff completed/skipped the action represented by this
+    #: checkpoint. Resume consumes its exact target instead of re-evaluating a
+    #: guarded edge or re-actuating the source action.
+    attended_transition: Optional[ProgramTransitionReceipt] = None
     #: Content hash of the bundle this checkpoint was captured against.
     bundle_version: str = ""
     created_at: str = Field(default_factory=_now)

@@ -40,7 +40,7 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from openadapt_flow.backend import Backend, StructuralResolutionRefused
 from openadapt_flow.bundle_validation import compute_parameter_schema_digest
@@ -77,6 +77,8 @@ from openadapt_flow.runtime.durable.program_checkpoint import (
     GraphFrame,
     LoopCursor,
     ProgramCheckpoint,
+    ProgramTransitionReceipt,
+    control_frames_hash,
 )
 from openadapt_flow.runtime.durable.program_checkpoint import (
     bundle_version as _bundle_version,
@@ -195,6 +197,12 @@ class _ProgramHalt(Exception):
         self.outcome = outcome
         self.reason = reason
         self.safety = safety
+        # Populated at an ACTION-state failure before graph frames unwind.
+        # Empty means the halt is not eligible for a generic attended
+        # Continue/Skip transition.
+        self.program_frames: list[GraphFrame] = []
+        self.program_params: dict[str, str] = {}
+        self.program_history_hash: str = ""
 
 
 def _all_workflow_steps(workflow: Workflow):
@@ -413,6 +421,7 @@ class Replayer:
         save_healed_to: Optional[Path] = None,
         resume_from: Optional[int] = None,
         resume_program: Optional[ProgramCheckpoint] = None,
+        run_id: Optional[str] = None,
         execution_origin: Optional[str] = None,
         execution_entry_url: Optional[str] = None,
     ) -> RunReport:
@@ -457,6 +466,10 @@ class Replayer:
                 paused state -- never from the graph entry, never re-performing an
                 already-confirmed write. Supplied by
                 ``openadapt_flow.runtime.durable.resume``, not by hand.
+            run_id: Stable run-instance identity supplied only by durable resume.
+                New runs generate one; resumed legs preserve the manifest value
+                so attended capabilities and effect idempotency remain bound to
+                the same logical run.
             execution_origin: Actual browser origin loaded before replay. It is
                 evidence metadata only; hosted validation requires an exact
                 match to its signed target origin.
@@ -477,7 +490,7 @@ class Replayer:
         # ``__run_id__`` param so an idempotency key can be bound PER-RUN (via
         # ``ValueExpr(param="__run_id__")``) instead of reusing a frozen demo
         # literal across unrelated runs.
-        self._run_id = (
+        self._run_id = run_id or (
             self.governed_authorization.authorization_id
             if self.governed_authorization is not None
             else uuid.uuid4().hex
@@ -602,6 +615,7 @@ class Replayer:
 
             durable_run = DurableRun(
                 run_dir,
+                run_id=self._run_id,
                 workflow_name=workflow.name,
                 bundle_dir=bundle_dir,
                 params=params,
@@ -657,7 +671,18 @@ class Replayer:
                 if durable_run is not None:
                     # Tier-3: verified step -> checkpoint; halt -> pending
                     # escalation (resumable from the last checkpoint).
-                    durable_run.record(step_index, step, result, params)
+                    durable_run.record(
+                        step_index,
+                        step,
+                        result,
+                        params,
+                        workflow=workflow,
+                        transition_observation=(
+                            self._attended_transition_observation()
+                            if not result.ok
+                            else None
+                        ),
+                    )
                 self._account_result(report, result)
                 if not result.ok:
                     break
@@ -930,7 +955,7 @@ class Replayer:
             # Durably PAUSE (never just die): capture WHERE we stopped so an
             # approved resume can RESTORE the interpreter from here.
             if self._program_durable is not None:
-                self._record_program_pause(halt, report)
+                self._record_program_pause(halt, report, workflow=workflow)
             report.results.append(
                 StepResult(
                     step_id="<terminal>",
@@ -1199,11 +1224,17 @@ class Replayer:
             if state.on_exception is not None and not result.safety_halt:
                 result.exception_handled = True
                 return state.on_exception  # graph try/except: route + continue
-            raise _ProgramHalt(
+            halt = _ProgramHalt(
                 "halt",
                 result.error or f"action state '{state.id}' failed — run aborted",
                 safety=result.safety_halt,
             )
+            halt.program_frames = [
+                self._frame_to_model(frame) for frame in self._frame_stack
+            ]
+            halt.program_params = dict(params)
+            halt.program_history_hash = _history_hash(report.visited_states)
+            raise halt
         # Tier-3 durable checkpoint: this action state VERIFIED (identity +
         # effects + postconditions); capture the whole interpreter state so an
         # approved resume can RESTORE it from exactly here. Persist BEFORE
@@ -1484,7 +1515,9 @@ class Replayer:
         )
         durable.record_program_checkpoint(checkpoint)
 
-    def _record_program_pause(self, halt: "_ProgramHalt", report: RunReport) -> None:
+    def _record_program_pause(
+        self, halt: "_ProgramHalt", report: RunReport, *, workflow: Workflow
+    ) -> None:
         """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
 
         Uses the last executed state's failing result (an action failure) or, for
@@ -1508,7 +1541,12 @@ class Replayer:
             state_id=self._current_state_id or failing.step_id,
             intent=self._current_intent or failing.intent,
             result=failing,
-            params=self._current_params,
+            params=halt.program_params or self._current_params,
+            workflow=workflow,
+            transition_observation=self._attended_transition_observation(),
+            program_frames=halt.program_frames,
+            program_checkpoint_seq=self._program_seq,
+            program_history_hash=halt.program_history_hash,
         )
 
     def revalidate_program_checkpoint(
@@ -1556,6 +1594,372 @@ class Replayer:
                         "the checkpoint"
                     )
 
+    def revalidate_attended_program_completion(
+        self,
+        workflow: Workflow,
+        *,
+        graph_id: str,
+        state_id: str,
+        params: dict[str, str],
+        bundle_dir: Path,
+        run_dir: Path,
+        run_id: str,
+        transition_baseline: Any,
+        transition_digest: Callable[[str, str], str],
+    ) -> tuple[StepResult, Optional[str]]:
+        """Verify one human-completed ACTION state and select one exact edge.
+
+        The source action is observed through the same postcondition/effect
+        contract as a linear attended completion. Only after it verifies do we
+        evaluate its guarded transitions once against the live session. The
+        caller persists that selected target in a transition receipt before
+        resume, so neither the source action nor its edge selection is repeated.
+        """
+        graph = self._resolve_graph(workflow, graph_id)
+        state = graph.states.get(state_id)
+        if state is None or state.kind is not StateKind.ACTION or state.step is None:
+            raise StateDiverged(
+                "the attended program cursor does not name an action state"
+            )
+        verification_workflow = Workflow(
+            name=workflow.name,
+            steps=[state.step],
+            params=dict(workflow.params),
+            param_specs=dict(workflow.param_specs),
+        )
+        result = self.revalidate_attended_completion(
+            verification_workflow,
+            step_index=0,
+            params=params,
+            bundle_dir=bundle_dir,
+            run_dir=run_dir,
+            run_id=run_id,
+            transition_baseline=transition_baseline,
+            transition_digest=transition_digest,
+        )
+        if not result.ok:
+            return result, None
+        target = self.select_attended_program_transition(
+            workflow,
+            graph_id=graph_id,
+            state_id=state_id,
+            params=params,
+            bundle_dir=bundle_dir,
+        )
+        return result, target
+
+    def select_attended_program_transition(
+        self,
+        workflow: Workflow,
+        *,
+        graph_id: str,
+        state_id: str,
+        params: dict[str, str],
+        bundle_dir: Path,
+    ) -> Optional[str]:
+        """Select and prove one exact successor for an attended action state."""
+        graph = self._resolve_graph(workflow, graph_id)
+        state = graph.states.get(state_id)
+        if state is None or state.kind is not StateKind.ACTION or state.step is None:
+            raise StateDiverged(
+                "the attended program cursor does not name an action state"
+            )
+        try:
+            target = self._select_transition(
+                state, params=params, bundle_dir=bundle_dir
+            )
+        except _ProgramHalt as exc:
+            raise StateDiverged(
+                "no exact outgoing program transition matched after attended completion"
+            ) from exc
+        if target is not None and target not in graph.states:
+            raise StateDiverged(
+                "the selected attended program transition targets an undefined state"
+            )
+
+        # When the exact successor is another action, prove its target is
+        # uniquely available (and its identity, when armed) before committing
+        # the receipt. Non-action successors carry their own deterministic
+        # branch/loop/subflow semantics and need no action-target proof here.
+        next_state = graph.states.get(target) if target is not None else None
+        if (
+            next_state is not None
+            and next_state.kind is StateKind.ACTION
+            and next_state.step is not None
+            and next_state.step.anchor is not None
+        ):
+            frame = self.vision.wait_settled(self.backend)
+            resolution, _region, error = self._resolve_step(
+                next_state.step, frame, bundle_dir, workflow
+            )
+            if error is not None or resolution is None:
+                raise StateDiverged(
+                    "the exact attended program successor target did not resolve "
+                    "uniquely"
+                )
+            if next_state.step.identity_armed:
+                identity = self._verify_identity(
+                    next_state.step,
+                    resolution,
+                    frame,
+                    params,
+                    workflow,
+                    bundle_dir,
+                )
+                if identity.status != "verified":
+                    raise StateDiverged(
+                        "the exact attended program successor identity did not verify"
+                    )
+        return target
+
+    def revalidate_attended_completion(
+        self,
+        workflow: Workflow,
+        *,
+        step_index: int,
+        params: dict[str, str],
+        bundle_dir: Path,
+        run_dir: Path,
+        run_id: str,
+        transition_baseline: Any,
+        transition_digest: Callable[[str, str], str],
+    ) -> StepResult:
+        """Verify a human-completed linear step without actuating it.
+
+        This is intentionally not ``_run_step``: the person already completed
+        the challenge/task in the live application, so invoking the action
+        again could duplicate a consequential write.  The method observes only:
+
+        * the paused step's screen postconditions;
+        * its independently declared effects against the *current* system of
+          record, when the contract is meaningful without a pre-action delta;
+        * the next step's unique target and armed identity, proving the expected
+          continuation is actually available.
+
+        Delivery receipts are never consulted. Transition-relative
+        postconditions are compared against the PHI-safe keyed baseline bound
+        into the signed pause capability. Delta/collateral-loss effects still
+        require a protected pre-delivery record baseline and are refused when
+        one is unavailable.
+        """
+        from openadapt_flow.runtime.effects import EffectState
+        from openadapt_flow.runtime.effects._common import judge_records
+
+        if not (0 <= step_index < len(workflow.steps)):
+            raise StateDiverged("the attended pause references no workflow step")
+        step = workflow.steps[step_index]
+        result = StepResult(
+            step_id=step.id,
+            intent=step.intent,
+            ok=False,
+            actuation="human_attended",
+        )
+        self._run_id = run_id
+        (Path(run_dir) / "steps").mkdir(parents=True, exist_ok=True)
+        frame = self.vision.wait_settled(self.backend)
+        result.before_png = self._save_step_png(
+            run_dir, step.id, "attended-before", frame
+        )
+
+        relative_kinds = {"url_changed", "title_changed", "new_tab_opened"}
+        relative = [
+            pc
+            for pc in step.expect
+            if (pc.kind.value if hasattr(pc.kind, "value") else pc.kind)
+            in relative_kinds
+        ]
+        live_structural = self._structural_state() if relative else {}
+        for condition in relative:
+            kind = (
+                condition.kind.value
+                if hasattr(condition.kind, "value")
+                else str(condition.kind)
+            )
+            if kind == "url_changed":
+                current = live_structural.get("url")
+                baseline_digest = getattr(transition_baseline, "url_digest", None)
+                changed = (
+                    isinstance(current, str)
+                    and baseline_digest is not None
+                    and transition_digest("url", current) != baseline_digest
+                )
+            elif kind == "title_changed":
+                current = live_structural.get("page_title")
+                baseline_digest = getattr(transition_baseline, "title_digest", None)
+                changed = (
+                    isinstance(current, str)
+                    and baseline_digest is not None
+                    and transition_digest("page_title", current) != baseline_digest
+                )
+            else:
+                current = live_structural.get("page_count")
+                baseline_count = getattr(transition_baseline, "page_count", None)
+                changed = (
+                    isinstance(current, int)
+                    and isinstance(baseline_count, int)
+                    and current > baseline_count
+                )
+            if not changed:
+                result.postconditions_ok = False
+                result.error = (
+                    "the human-completed step's signed structural transition "
+                    "was unavailable or unchanged; Continue is refused"
+                )
+                result.after_png = result.before_png
+                return result
+
+        nonrelative = [
+            pc
+            for pc in step.expect
+            if (pc.kind.value if hasattr(pc.kind, "value") else pc.kind)
+            not in relative_kinds
+        ]
+        if nonrelative:
+            verification_step = step.model_copy(update={"expect": nonrelative})
+            post_ok, frame, failed = self._check_postconditions(
+                verification_step, frame, bundle_dir, {}, result
+            )
+            result.postconditions_ok = post_ok
+            if not post_ok:
+                # The failed descriptions can contain demonstrated text (and
+                # therefore PHI). Keep them out of the browser-facing decision
+                # message; protected screenshots remain in the local run dir.
+                result.error = (
+                    "the human-completed step's live postconditions are not "
+                    f"satisfied ({len(failed)} condition(s) failed)"
+                )
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+
+        if step.effects:
+            if self.effect_verifier is None:
+                result.effect_verified = False
+                result.error = (
+                    "the human-completed consequential step has no independent "
+                    "effect verifier; outcome is uncertain and Continue is refused"
+                )
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+            current = self.effect_verifier.capture_pre_state()
+            if not current.reachable:
+                result.effect_verified = False
+                result.error = (
+                    "the system of record is unreachable; outcome is uncertain "
+                    "and Continue is refused"
+                )
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+            effects = self._resolve_effects(step.effects, params)
+            for effect in effects:
+                if effect.needs_operator_confirmation:
+                    result.effect_verified = False
+                    result.error = (
+                        "the effect contract is still a placeholder; a human "
+                        "statement cannot replace independent verification"
+                    )
+                    break
+                if effect.count_new_only or effect.forbid_collateral_loss:
+                    result.effect_verified = False
+                    result.error = (
+                        "the effect requires a pre-delivery delta or collateral-"
+                        "loss baseline that is unavailable after human delivery; "
+                        "outcome is uncertain and Continue is refused"
+                    )
+                    break
+                baseline = EffectState(
+                    substrate=current.substrate,
+                    reachable=True,
+                    records=[],
+                    detail={"attended_current_state_readback": True},
+                )
+                verdict = judge_records(
+                    effect,
+                    baseline,
+                    current.records,
+                    substrate=current.substrate,
+                )
+                result.effect_contract_hashes.append(effect.contract_hash())
+                result.effect_results.append(
+                    f"[attended-current-readback] {effect.kind.value}: "
+                    f"{verdict.verdict.value} — {verdict.reason}"
+                )
+                if not verdict.confirmed:
+                    result.effect_verified = False
+                    result.error = (
+                        "the independent current-state effect readback did not "
+                        f"confirm the outcome ({verdict.verdict.value})"
+                    )
+                    break
+            else:
+                result.effect_verified = True
+            if result.error is not None:
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+
+        if not step.expect and not step.effects:
+            result.error = (
+                "the human-completed step declares neither a postcondition nor "
+                "an independent effect; delivery cannot be confused with outcome "
+                "verification, so Continue is refused"
+            )
+            result.after_png = self._save_step_png(
+                run_dir, step.id, "attended-after", frame
+            )
+            return result
+
+        # Prove the expected continuation's target is unique and, where the
+        # workflow armed identity, still identifies the intended entity.
+        next_index = step_index + 1
+        if next_index < len(workflow.steps):
+            next_step = workflow.steps[next_index]
+            if next_step.anchor is not None:
+                resolution, _region, error = self._resolve_step(
+                    next_step, frame, bundle_dir, workflow
+                )
+                if error is not None or resolution is None:
+                    result.error = (
+                        "the expected next transition's target did not resolve "
+                        "uniquely; live state diverged and Continue is refused"
+                    )
+                    result.after_png = self._save_step_png(
+                        run_dir, step.id, "attended-after", frame
+                    )
+                    return result
+                if next_step.identity_armed:
+                    identity = self._verify_identity(
+                        next_step,
+                        resolution,
+                        frame,
+                        params,
+                        workflow,
+                        bundle_dir,
+                    )
+                    result.identity = identity
+                    if identity.status != "verified":
+                        result.error = (
+                            "the expected next transition's target identity "
+                            f"was {identity.status}; Continue is refused"
+                        )
+                        result.after_png = self._save_step_png(
+                            run_dir, step.id, "attended-after", frame
+                        )
+                        return result
+
+        result.ok = True
+        result.postconditions_ok = True if step.expect else None
+        result.after_png = self._save_step_png(
+            run_dir, step.id, "attended-after", frame
+        )
+        return result
+
     def _resolve_graph(self, workflow: Workflow, graph_id: str) -> ProgramGraph:
         """Resolve a durable ``graph_id`` back to a :class:`ProgramGraph`
         (``TOP_GRAPH_ID`` -> ``workflow.program``, else a named subflow)."""
@@ -1590,6 +1994,41 @@ class Replayer:
         mid-loop pause finishes the in-progress row and runs the remaining rows.
         """
         assert workflow.program is not None
+        receipt = checkpoint.attended_transition
+        if receipt is not None:
+            if (
+                receipt.source_checkpoint_seq != checkpoint.seq - 1
+                or receipt.control_frames_hash != control_frames_hash(checkpoint.frames)
+                or not checkpoint.frames
+                or checkpoint.frames[-1].graph_id != receipt.source_graph_id
+                or checkpoint.frames[-1].state_id != receipt.source_state_id
+                or checkpoint.verified_state_id != receipt.source_state_id
+            ):
+                raise _ProgramHalt(
+                    "halt",
+                    "the attended interpreter transition receipt does not match "
+                    "its checkpoint cursor",
+                )
+            graph = self._resolve_graph(workflow, receipt.source_graph_id)
+            source = graph.states.get(receipt.source_state_id)
+            if source is None or source.kind is not StateKind.ACTION:
+                raise _ProgramHalt(
+                    "halt",
+                    "the attended interpreter transition receipt source is not "
+                    "an action state",
+                )
+            declared_targets = {transition.target for transition in source.transitions}
+            if (
+                receipt.target_state_id is None
+                and source.transitions
+                or receipt.target_state_id is not None
+                and receipt.target_state_id not in declared_targets
+            ):
+                raise _ProgramHalt(
+                    "halt",
+                    "the attended interpreter transition receipt names an "
+                    "undeclared successor",
+                )
         if not checkpoint.frames:
             # Nothing verified pre-pause (halted on the very first state): there
             # is no interpreter state to restore, so re-walk from the top.
@@ -1615,6 +2054,7 @@ class Replayer:
             run_dir=run_dir,
             report=report,
             new_crops=new_crops,
+            attended_transition=receipt,
         )
 
     def _resume_descend(
@@ -1628,6 +2068,7 @@ class Replayer:
         run_dir: Path,
         report: RunReport,
         new_crops: dict[str, bytes],
+        attended_transition: Optional[ProgramTransitionReceipt] = None,
     ) -> None:
         """Restore one frame of the interpreter stack and continue it.
 
@@ -1660,8 +2101,12 @@ class Replayer:
             if is_leaf:
                 # The verified state: re-drive from its SUCCESSOR (never re-run
                 # the verified state itself).
-                nxt = self._select_transition(
-                    state, params=params, bundle_dir=bundle_dir
+                nxt = (
+                    attended_transition.target_state_id
+                    if attended_transition is not None
+                    else self._select_transition(
+                        state, params=params, bundle_dir=bundle_dir
+                    )
                 )
                 if nxt is not None:
                     live["state_id"] = nxt
@@ -1689,6 +2134,7 @@ class Replayer:
                 run_dir=run_dir,
                 report=report,
                 new_crops=new_crops,
+                attended_transition=attended_transition,
             )
             if state.kind is StateKind.LOOP:
                 loop = state.loop
@@ -3474,6 +3920,25 @@ class Replayer:
             if value is not None:
                 state[key] = value
         return state
+
+    def _attended_transition_observation(self) -> Any:
+        """Capture ephemeral browser structure for a signed pause baseline.
+
+        Raw URL/title values live only in this return object long enough for
+        :class:`AttendedActionStore` to HMAC them. They are never written into
+        a checkpoint, report, pending escalation, or capability.
+        """
+        from openadapt_flow.runtime.durable.attended import TransitionObservation
+
+        state = self._structural_state()
+        url = state.get("url")
+        title = state.get("page_title")
+        page_count = state.get("page_count")
+        return TransitionObservation(
+            url=url if isinstance(url, str) else None,
+            page_title=title if isinstance(title, str) else None,
+            page_count=page_count if isinstance(page_count, int) else None,
+        )
 
     def _structural_changed(
         self, key: str, start_state: dict[str, Any]

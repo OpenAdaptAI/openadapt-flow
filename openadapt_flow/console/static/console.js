@@ -284,9 +284,10 @@ async function viewAttention() {
   }
   return `<h2>Needs Attention <span class="chip warn">${safeNumber(items.length, "0")}</span></h2>
     <p class="muted">Protected values and paths stay in the local run artifacts.
-      This attended view is read-only; it never approves or resumes a run.
       Only the person at this computer should complete CAPTCHA, MFA, or sign-in
-      in the live application.</p>
+      in the live application. ${HEALTH.read_only
+        ? "Start with explicit action enablement to make governed decisions."
+        : "Continue verifies live outcomes before deterministic resume; it never answers the challenge."}</p>
     <div class="attention-list">${items.map((item) => `
       <article class="attention-card">
         <div class="attention-card-head">
@@ -305,8 +306,69 @@ async function viewAttention() {
         </p>
         <div class="attention-actions">
           <a class="button-link" href="#/runs/${enc(item.id)}">Review protected evidence</a>
+          ${HEALTH.attended_decisions_ready && item.capability ? `
+            ${HEALTH.attended_actions_ready &&
+              item.capability.allowed_actions.includes("continue") ? `
+              <button data-attended-action="continue" data-run-id="${esc(item.id)}"
+                data-capability="${esc(item.capability.digest)}">I fixed it — Continue</button>` : ""}
+            ${HEALTH.attended_actions_ready &&
+              item.capability.allowed_actions.includes("skip") ? `
+              <button data-attended-action="skip" data-run-id="${esc(item.id)}"
+                data-capability="${esc(item.capability.digest)}">Skip / disposition</button>` : ""}
+            ${item.capability.allowed_actions.includes("teach") ? `
+              <button data-attended-action="teach" data-run-id="${esc(item.id)}"
+                data-capability="${esc(item.capability.digest)}">Teach the fix</button>` : ""}
+            ${item.capability.allowed_actions.includes("escalate") ? `
+              <button data-attended-action="escalate" data-run-id="${esc(item.id)}"
+                data-capability="${esc(item.capability.digest)}">Needs more time</button>` : ""}
+          ` : ""}
         </div>
+        <p class="attention-result muted" aria-live="polite"></p>
       </article>`).join("")}</div>`;
+}
+
+async function attendedAction(button) {
+  const card = button.closest(".attention-card");
+  const output = card ? card.querySelector(".attention-result") : null;
+  const action = button.dataset.attendedAction;
+  const runId = button.dataset.runId;
+  const capability = button.dataset.capability;
+  if (!action || !runId || !capability) return;
+  const siblings = card ? [...card.querySelectorAll("[data-attended-action]")] : [button];
+  siblings.forEach((item) => { item.disabled = true; });
+  if (output) output.textContent = "Submitting governed decision…";
+  const disposition = {
+    continue: "completed_by_operator",
+    skip: "not_applicable",
+    teach: "teach_requested",
+    escalate: "needs_assistance",
+  }[action];
+  try {
+    const result = await api(
+      `/api/attention/${enc(runId)}/actions/${enc(action)}`,
+      {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          capability_digest: capability,
+          idempotency_key: crypto.randomUUID().replaceAll("-", ""),
+          action,
+          disposition,
+        }),
+      },
+    );
+    if (output) output.textContent = result.message || result.status;
+    if (result.status === "completed" || result.status === "halted") {
+      await route();
+    }
+  } catch (error) {
+    const detail = error.body && error.body.detail;
+    if (output) output.textContent = typeof detail === "string"
+      ? detail
+      : "Decision refused; reload the current pause and review live state.";
+  } finally {
+    siblings.forEach((item) => { item.disabled = false; });
+  }
 }
 
 function shot(runId, artifactId, caption) {
@@ -417,7 +479,7 @@ async function viewSkills() {
       <tr><th>Version</th><th>Status</th><th>Score</th><th>Provenance</th><th>Note</th><th>Actions</th></tr>
       ${skill.versions.map((version) => {
         const actions = [];
-        if (!HEALTH.attend && version.status === "candidate") {
+        if (version.status === "candidate") {
           const index = currentSkillActions.push({
             library: library.id,
             skillId: skill.id,
@@ -426,7 +488,7 @@ async function viewSkills() {
           }) - 1;
           actions.push(`<button data-skill-action="${index}">Promote</button>`);
         }
-        if (!HEALTH.attend && version.status !== "rolled_back") {
+        if (version.status !== "rolled_back") {
           const index = currentSkillActions.push({
             library: library.id,
             skillId: skill.id,
@@ -634,6 +696,11 @@ document.addEventListener("click", async (event) => {
   if (skillTarget) {
     const spec = currentSkillActions[Number(skillTarget.dataset.skillAction)];
     if (spec) await skillAction(spec);
+    return;
+  }
+  const attendedTarget = event.target.closest("[data-attended-action]");
+  if (attendedTarget) {
+    await attendedAction(attendedTarget);
     return;
   }
 });

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import secrets
 from pathlib import Path
+from typing import Optional
+
+from openadapt_flow.runtime.durable.attended import AttendedActionExecutor
 
 #: The only address the console ever binds. Not configurable.
 LOOPBACK_HOST = "127.0.0.1"
@@ -23,6 +26,7 @@ def serve(
     *,
     allow_actions: bool = False,
     attend: bool = False,
+    attended_executor: Optional[AttendedActionExecutor] = None,
     port: int = DEFAULT_PORT,
 ) -> None:
     """Build the app and serve it on ``http://127.0.0.1:<port>`` (blocking)."""
@@ -38,6 +42,7 @@ def serve(
         allow_actions=allow_actions,
         attend=attend,
         access_token=access_token,
+        attended_executor=attended_executor,
     )
     # URL fragments are consumed entirely by the browser and are never sent in
     # HTTP requests or uvicorn access logs.  The UI removes the fragment before

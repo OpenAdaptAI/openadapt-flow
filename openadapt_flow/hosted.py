@@ -37,15 +37,17 @@ dependency is introduced.
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import json
 import os
 import re
 import shutil
 import socket
+import stat
 import tempfile
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -68,6 +70,7 @@ __all__ = [
     "login",
     "push",
     "report_break",
+    "report_run",
 ]
 
 #: The hosted control plane. Overridable per call (``--host``) or via
@@ -1348,12 +1351,6 @@ def _body_snippet(resp: httpx.Response, limit: int = 300) -> str:
         return "<unreadable body>"
 
 
-def _drift_signature(workflow_id: str, rung: Optional[str], steps: int) -> str:
-    """A stable fingerprint built only from non-free-text structural fields."""
-    digest = hashlib.sha256(f"{workflow_id}|{rung}|{steps}".encode("utf-8")).hexdigest()
-    return digest[:16]
-
-
 def _last_failed_rung(report: Any) -> Optional[str]:
     """The resolution rung of the last non-ok step, if any (diagnostic)."""
     for step in reversed(report.results):
@@ -1366,31 +1363,46 @@ def _build_break_payload(
     report: Any,
     *,
     workflow_id: str,
-    deployment_kind: str,
-    org_id: Optional[str],
+    client_run_id: str,
 ) -> dict[str, Any]:
-    """Assemble the schema-minimal break payload.
+    """Assemble the schema-minimal ``break-summary/v2`` payload.
 
     Screenshots, DOM, field values, report bodies, and all free-text
-    intent/reason/error fields are excluded. The one-way drift signature and
-    coarse numeric fields remain useful for deduplication and triage.
+    intent/reason/error fields are excluded. The stable run UUID links a later
+    resumed success without exposing or hashing report contents.
     """
     halt = report.halt
     status = "halt" if halt is not None else "failed"
-    steps = len(report.results)
-    duration_s = round(report.total_ms / 1000.0, 3)
     resolver_rung = _last_failed_rung(report)
+    if resolver_rung is not None and resolver_rung not in _RUN_SUMMARY_RUNGS:
+        raise HostedError("report contains an unknown resolution rung")
 
     payload: dict[str, Any] = {
-        "org_id": org_id,
-        "workflow_id": workflow_id,
-        "deployment_kind": deployment_kind,
+        "kind": "break_summary",
+        "schema": BREAK_SUMMARY_SCHEMA,
+        "workflow_id": _optional_uuid(workflow_id, field="workflow_id"),
+        "bundle_content_digest": _hex64(
+            report.bundle_content_digest,
+            field="bundle_content_digest",
+        ),
         "status": status,
-        "resolver_rung": resolver_rung,
-        "drift_signature": _drift_signature(workflow_id, resolver_rung, steps),
-        "metrics": {"steps": steps, "duration_s": duration_s},
+        "client_run_id": _optional_uuid(client_run_id, field="client_run_id"),
+        "started_at": _run_summary_timestamp(report.started_at),
+        "metrics": {
+            "steps": _bounded_int(len(report.results), field="metrics.steps"),
+            "duration_s": round(
+                _bounded_float(
+                    report.total_ms / 1000.0,
+                    field="metrics.duration_s",
+                    maximum=_MAX_DURATION_S,
+                ),
+                3,
+            ),
+        },
         "phi_minimal": True,
     }
+    if resolver_rung is not None:
+        payload["resolver_rung"] = resolver_rung
     return payload
 
 
@@ -1420,9 +1432,10 @@ def report_break(
             :func:`push` / the dashboard).
         host: Hosted base URL (default resolution).
         token: Ingest token (default resolution).
-        deployment_kind: ``"cloud"`` or ``"byoc"`` (routes the teach target).
-        org_id: The org id, carried in the body until the per-user token store
-            is canonical server-side (§3c note).
+        deployment_kind: Backward-compatible caller hint; v2 provenance is
+            derived by the server and this value never enters the payload.
+        org_id: Backward-compatible caller hint; token ownership is canonical
+            server-side and this value never enters the payload.
         allow_local_fallback: When the server rejects the payload as a PHI
             boundary violation (422) even after a harder scrub — or the
             scrubber is unavailable under a fail-closed policy — return a
@@ -1444,10 +1457,35 @@ def report_break(
     report_path = run_path / "report.json"
     if not report_path.is_file():
         raise HostedError(f"No report.json in {run_path} — nothing to report.")
-    report = RunReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    try:
+        report_size = report_path.stat().st_size
+    except OSError as exc:
+        raise HostedError("Could not inspect report.json") from exc
+    if report_size > _MAX_RUN_REPORT_BYTES:
+        raise HostedError(
+            f"report.json exceeds the {_MAX_RUN_REPORT_BYTES}-byte reporting limit"
+        )
+    try:
+        report = RunReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HostedError("report.json is unreadable or invalid") from exc
 
     if report.halt is None and report.success:
         return {"emitted": False, "reason": "run succeeded; no halt to report"}
+
+    # Launch contract: auto-upload only the schema-minimal descriptor. Even
+    # scrubbed free text needs a separately reviewed, hash-bound sanitization
+    # artifact before the control plane can trust it.
+    payload = _build_break_payload(
+        report,
+        workflow_id=workflow_id,
+        client_run_id=_client_run_id(run_path),
+    )
+    if (
+        len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        > _MAX_RUN_SUMMARY_BYTES
+    ):
+        raise HostedError("break summary exceeds the outbound size limit")
 
     resolved_host = resolve_host(host)
     resolve_destination_policy(
@@ -1457,16 +1495,6 @@ def report_break(
     )
     resolved_token = resolve_token(token, host=resolved_host)
     url = f"{resolved_host}/api/runs/ingest-report"
-
-    # Launch contract: auto-upload only the schema-minimal descriptor. Even
-    # scrubbed free text needs a separately reviewed, hash-bound sanitization
-    # artifact before the control plane can trust it.
-    payload = _build_break_payload(
-        report,
-        workflow_id=workflow_id,
-        deployment_kind=deployment_kind,
-        org_id=org_id,
-    )
 
     resp = _post_report(url, resolved_token, payload)
 
@@ -1503,7 +1531,7 @@ def _post_report(url: str, token: str, payload: dict[str, Any]) -> httpx.Respons
     try:
         return httpx.post(
             url,
-            headers={**_auth_headers(token), "x-ingest-token": token},
+            headers=_auth_headers(token),
             json=payload,
             timeout=_API_TIMEOUT,
             follow_redirects=False,
@@ -1519,66 +1547,116 @@ def _post_report(url: str, token: str, payload: dict[str, Any]) -> httpx.Respons
 # ---------------------------------------------------------------------------
 
 #: Wire-schema tag for the success payload; version it if the shape changes.
-RUN_SUMMARY_SCHEMA = "run-summary/v1"
-
-#: Upper bound on the one-way effect-contract digests carried per run. The
-#: full count is always reported; only the digest LIST is truncated so a
-#: pathological worklist run cannot balloon the payload.
-_MAX_EFFECT_CONTRACT_HASHES = 256
+RUN_SUMMARY_SCHEMA = "run-summary/v2"
+BREAK_SUMMARY_SCHEMA = "break-summary/v2"
 
 #: CLOSED substrate enum (red-team PHI-1): the payload's ``backend`` field may
 #: only carry one of these fixed tokens, never a free-text hint. In particular
 #: recorded window titles / ``backend_hints`` (meta.json) are PHI-bearing
 #: (PMS titles embed patient names) and are NEVER read by this rail.
 _BACKEND_ENUM = frozenset({"web", "windows", "macos", "linux", "rdp"})
+_RUN_SUMMARY_RUNGS = frozenset(
+    {"structural", "template", "template_global", "ocr", "geometry", "grounder", "api"}
+)
+_HEX64_RE = re.compile(r"^[a-f0-9]{64}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_FLOW_VERSION_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:[-+][0-9A-Za-z.-]{1,32})?$"
+)
+_MAX_COUNTER = 1_000_000
+_MAX_DURATION_S = 365 * 24 * 60 * 60
+_MAX_MODEL_COST_USD = 1_000_000.0
+_MAX_RUN_REPORT_BYTES = 8 * 1024 * 1024
+_MAX_RUN_SUMMARY_BYTES = 16 * 1024
 
 #: Sidecar file persisting this run's client-generated report UUID, so
-#: re-reporting the SAME run is idempotent while DISTINCT runs never collide
-#: (red-team correction: content-hash alone could collapse two identical
-#: successful runs into one).
+#: re-reporting the SAME run is idempotent while DISTINCT runs never collide.
 _RUN_REPORT_ID_FILE = ".report_run_id"
-
-
-def _sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _client_run_id(run_path: Path) -> str:
     """The stable, client-generated UUID for this run directory.
 
-    Generated once per run dir and persisted beside ``report.json``; a random
-    UUID carries no PHI. Together with ``run_content_hash`` it forms the
-    server-side idempotency pair.
+    The UUID is created with an exclusive, no-overwrite file operation beside
+    ``report.json``. Existing symlinks/non-files and persistence failures are
+    refused: silently minting a fresh id would turn a retry into a duplicate
+    Cloud run, while following a symlink could overwrite an unrelated file.
     """
     import uuid
 
     id_path = run_path / _RUN_REPORT_ID_FILE
+
+    def read_existing(*, wait_for_writer: bool = False) -> str:
+        deadline = time.monotonic() + 1.0
+        last_error: Optional[Exception] = None
+        while True:
+            try:
+                metadata = id_path.lstat()
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise HostedError(
+                        "run report id must be a regular file (symlinks refused)"
+                    )
+                return str(UUID(id_path.read_text(encoding="utf-8").strip()))
+            except FileNotFoundError as exc:
+                last_error = exc
+                if not wait_for_writer:
+                    raise
+            except (OSError, ValueError) as exc:
+                last_error = exc
+                if not wait_for_writer:
+                    raise HostedError("run report id is unreadable or invalid") from exc
+            if time.monotonic() >= deadline:
+                raise HostedError(
+                    "run report id is unreadable or invalid"
+                ) from last_error
+            time.sleep(0.005)
+
     try:
-        existing = id_path.read_text(encoding="utf-8").strip()
-        return str(UUID(existing))
-    except (OSError, ValueError):
-        fresh = str(uuid.uuid4())
+        return read_existing()
+    except FileNotFoundError:
+        pass
+    except HostedError:
+        raise
+
+    fresh = str(uuid.uuid4())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(id_path, flags, 0o600)
+    except FileExistsError:
+        return read_existing(wait_for_writer=True)
+    except OSError as exc:
+        raise HostedError("could not persist the run report id") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(fresh + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # POSIX requires the containing directory to be flushed as well before
+        # the newly created name is durable across a crash. Windows does not
+        # expose a portable directory fsync through Python; FlushFileBuffers on
+        # the file handle above is the strongest supported local primitive.
+        if os.name != "nt":
+            directory_flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                directory_flags |= os.O_DIRECTORY
+            directory_fd = os.open(run_path, directory_flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    except OSError as exc:
         try:
-            id_path.write_text(fresh + "\n", encoding="utf-8")
+            id_path.unlink()
         except OSError:
-            pass  # still report; idempotency degrades to content-hash only
-        return fresh
-
-
-def _origin_domain_hash(origin: Optional[str]) -> Optional[str]:
-    """A 16-hex one-way fingerprint of the execution origin's HOSTNAME only.
-
-    The raw origin/URL never enters the payload (path/query could carry
-    record identifiers); the hash lets the control plane group runs by the
-    registered target without learning anything it was not already told at
-    workflow-registration time.
-    """
-    if not origin:
-        return None
-    host = urlparse(origin).hostname
-    if not host:
-        return None
-    return _sha256_hex(host.lower().encode("utf-8"))[:16]
+            pass
+        raise HostedError("could not persist the run report id") from exc
+    return fresh
 
 
 def _identity_summary(report: Any) -> dict[str, int]:
@@ -1596,105 +1674,176 @@ def _identity_summary(report: Any) -> dict[str, int]:
     return counts
 
 
-def _effect_summary(report: Any) -> tuple[dict[str, int], list[str]]:
-    """Effect-verdict counts + the one-way per-effect contract digests.
+def _effect_summary(report: Any) -> dict[str, int]:
+    """Return categorical effect-verdict counts only.
 
-    ``effect_contract_hashes`` are already SHA-256 digests of the bound
-    ValueExpr contracts (ir.StepResult docs: recorded so an auditor can
-    confirm two runs resolved differently WITHOUT persisting the underlying
-    value). ``effect_results`` (human-readable verdict lines) may embed
-    resolved values and is deliberately never read here — the one-way
-    evidence rule.
+    ``StepResult.effect_contract_hashes`` intentionally remain local. They bind
+    resolved record/value/idempotency fields for local authorization and audit,
+    so even a SHA-256 representation can be dictionary-recoverable when an
+    identifier has a small candidate space. Cloud needs coverage counts, not
+    those per-record fingerprints.
     """
     verified = 0
     approved_unverified = 0
-    hashes: list[str] = []
+    contract_count = 0
     for step in report.results:
         if step.effect_verified is True:
             verified += 1
         if step.effect_approved_unverified:
             approved_unverified += 1
-        hashes.extend(step.effect_contract_hashes)
-    counts = {
+        contract_count += len(step.effect_contract_hashes)
+    return {
         "verified": verified,
         "approved_unverified": approved_unverified,
-        "contract_hash_count": len(hashes),
+        "contract_count": contract_count,
     }
-    return counts, hashes[:_MAX_EFFECT_CONTRACT_HASHES]
+
+
+def _bounded_int(value: Any, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HostedError(f"{field} must be an integer")
+    if value < 0 or value > _MAX_COUNTER:
+        raise HostedError(f"{field} is outside the accepted range")
+    return value
+
+
+def _bounded_float(value: Any, *, field: str, maximum: float) -> float:
+    import math
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HostedError(f"{field} must be numeric")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0 or parsed > maximum:
+        raise HostedError(f"{field} is outside the accepted range")
+    return parsed
+
+
+def _run_summary_timestamp(value: Any) -> str:
+    if not isinstance(value, str):
+        raise HostedError("started_at must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HostedError("started_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise HostedError("started_at must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _optional_uuid(value: Optional[str], *, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _UUID_RE.fullmatch(value):
+        raise HostedError(f"{field} must be a canonical UUID")
+    try:
+        return str(UUID(value))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HostedError(f"{field} must be a canonical UUID") from exc
+
+
+def _hex64(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
+        raise HostedError(f"{field} must be a lowercase 64-hex SHA-256 digest")
+    return value
 
 
 def _build_run_summary_payload(
     report: Any,
-    report_bytes: bytes,
     *,
     workflow_id: Optional[str],
-    deployment_kind: str,
-    org_id: Optional[str],
     backend: Optional[str],
     client_run_id: str,
 ) -> dict[str, Any]:
     """Assemble the schema-minimal SUCCESS payload.
 
     PHI posture (mirrors ``_build_break_payload``, one-way evidence rules):
-    every field is either a categorical count, a duration, a fixed enum
-    token, or a one-way SHA-256 digest. Screenshots, params, URLs (beyond
-    the origin-hostname hash), free text (intents / reasons / errors /
-    observed_texts / meta.json backend_hints such as recorded window
-    titles), and identity expected/observed strings are never read.
-    ``(client_run_id, run_content_hash)`` is the idempotency pair:
-    re-uploading the SAME run dedupes server-side, while two distinct runs
-    that happen to produce identical reports never collapse.
+    every field is validated locally before the request is created. Screenshots,
+    params, URLs, workflow names/digests, resolved effect-contract hashes,
+    report hashes, free text, and identity expected/observed strings are never
+    sent. ``client_run_id`` is the sole run-scoped idempotency key.
     """
-    steps = len(report.results)
-    steps_ok = sum(1 for s in report.results if s.ok)
-    steps_skipped = sum(1 for s in report.results if s.skipped)
+    normalized_workflow_id = _optional_uuid(workflow_id, field="workflow_id")
+    if backend is not None and backend not in _BACKEND_ENUM:
+        raise HostedError("backend must be web, windows, macos, linux, or rdp")
+    normalized_client_run_id = _optional_uuid(
+        client_run_id,
+        field="client_run_id",
+    )
+    if normalized_client_run_id is None:  # pragma: no cover - required argument
+        raise HostedError("client_run_id must be a canonical UUID")
+    flow_version = _flow_version()
+    if not _FLOW_VERSION_RE.fullmatch(flow_version):
+        raise HostedError("flow_version is not a safe release identifier")
+
+    steps = _bounded_int(len(report.results), field="metrics.steps")
+    steps_ok = _bounded_int(
+        sum(1 for step in report.results if step.ok), field="metrics.steps_ok"
+    )
+    steps_skipped = _bounded_int(
+        sum(1 for step in report.results if step.skipped),
+        field="metrics.steps_skipped",
+    )
     identity = _identity_summary(report)
-    effects, effect_hashes = _effect_summary(report)
-    rung_counts = {
-        str(rung): int(count)
-        for rung, count in dict(report.rung_counts).items()
-        if isinstance(count, int) and count >= 0
+    identity = {
+        key: _bounded_int(value, field=f"metrics.identity.{key}")
+        for key, value in identity.items()
     }
+    effects = {
+        key: _bounded_int(value, field=f"metrics.effects.{key}")
+        for key, value in _effect_summary(report).items()
+    }
+    rung_counts: dict[str, int] = {}
+    for rung, count in dict(report.rung_counts).items():
+        if rung not in _RUN_SUMMARY_RUNGS:
+            raise HostedError("report contains an unknown resolution rung")
+        rung_counts[rung] = _bounded_int(count, field=f"metrics.rung_counts.{rung}")
+    duration_s = round(
+        _bounded_float(
+            report.total_ms / 1000.0,
+            field="metrics.duration_s",
+            maximum=_MAX_DURATION_S,
+        ),
+        3,
+    )
+    model_cost = round(
+        _bounded_float(
+            report.est_model_cost_usd,
+            field="metrics.est_model_cost_usd",
+            maximum=_MAX_MODEL_COST_USD,
+        ),
+        6,
+    )
     payload: dict[str, Any] = {
         "kind": "run_summary",
         "schema": RUN_SUMMARY_SCHEMA,
-        "org_id": org_id,
-        "deployment_kind": deployment_kind,
         "status": "success",
-        "flow_version": _flow_version(),
-        # Closed enum only (red-team PHI-1): anything else — including
-        # free-text backend hints — is dropped client-side, never sent.
-        "backend": backend if backend in _BACKEND_ENUM else None,
-        "started_at": report.started_at,
-        "origin_domain_hash": _origin_domain_hash(report.execution_origin),
-        "client_run_id": client_run_id,
-        "run_content_hash": _sha256_hex(report_bytes),
+        "flow_version": flow_version,
+        "started_at": _run_summary_timestamp(report.started_at),
+        "client_run_id": normalized_client_run_id,
         "phi_minimal": True,
         "metrics": {
             "steps": steps,
             "steps_ok": steps_ok,
             "steps_skipped": steps_skipped,
-            "duration_s": round(report.total_ms / 1000.0, 3),
-            "heal_count": int(report.heal_count),
-            "model_calls": int(report.model_calls),
-            "est_model_cost_usd": round(float(report.est_model_cost_usd), 6),
+            "duration_s": duration_s,
+            "heal_count": _bounded_int(report.heal_count, field="metrics.heal_count"),
+            "model_calls": _bounded_int(
+                report.model_calls, field="metrics.model_calls"
+            ),
+            "est_model_cost_usd": model_cost,
             "rung_counts": rung_counts,
             "identity": identity,
             "effects": effects,
         },
-        "effect_contract_hashes": effect_hashes,
+        "bundle_content_digest": _hex64(
+            report.bundle_content_digest,
+            field="bundle_content_digest",
+        ),
     }
-    # Workflow binding: the hosted workflow id when the bundle came from the
-    # control plane; otherwise the (name-digest, bundle-content-digest) pair.
-    # The raw workflow NAME never leaves the machine — names routinely embed
-    # client/site identifiers.
-    if workflow_id:
-        payload["workflow_id"] = workflow_id
-    else:
-        payload["workflow_name_digest"] = _sha256_hex(
-            report.workflow_name.encode("utf-8")
-        )
-        payload["bundle_content_digest"] = report.bundle_content_digest
+    if backend is not None:
+        payload["backend"] = backend
+    if normalized_workflow_id:
+        payload["workflow_id"] = normalized_workflow_id
     return payload
 
 
@@ -1710,20 +1859,19 @@ def report_run(
     workflow_id: Optional[str] = None,
     host: Optional[str] = None,
     token: Optional[str] = None,
-    deployment_kind: str = "local",
-    org_id: Optional[str] = None,
     backend: Optional[str] = None,
     allow_local_fallback: bool = True,
     destination_kind: Optional[str] = None,
     trusted_hosts: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Emit a PHI-free SUCCESS summary of a completed run to
-    ``POST /api/runs/ingest-report`` (the success/metering rail; L0 in the
+    ``POST /api/runs/ingest-report`` (the local visibility rail; L0 in the
     multi-substrate design).
 
     Reads ``run_dir/report.json`` and, when the run SUCCEEDED, posts the
-    schema-minimal summary so the control plane can show "last run: success"
-    for locally-executed workflows. Halted/failed runs are ``report_break``'s
+    schema-minimal summary so the control plane can show a locally reported
+    completion for locally executed workflows. Halted/failed runs are
+    ``report_break``'s
     contract — this function refuses them (``emitted=False``) rather than
     blurring the two rails. The recording, screenshots, params, and all free
     text NEVER leave the machine; see ``_build_run_summary_payload``.
@@ -1734,10 +1882,8 @@ def report_run(
     Args:
         run_dir: The run directory holding ``report.json``.
         workflow_id: Hosted workflow id when known (from ``push``/dashboard).
-            When omitted the payload binds by workflow-name digest + bundle
-            content digest instead; one of the two bindings must exist.
-        deployment_kind: ``"local"`` (default — a customer-machine run),
-            ``"cloud"``, or ``"byoc"``.
+            The exact pushed bundle content digest is always required as the
+            execution binding; the id only avoids an extra server lookup.
         backend: The backend/substrate kind this run executed on (``web`` /
             ``windows`` / ``macos`` / ``linux`` / ``rdp``), when known.
         allow_local_fallback: On a server-side PHI-boundary rejection (422),
@@ -1759,19 +1905,44 @@ def report_run(
     report_path = run_path / "report.json"
     if not report_path.is_file():
         raise HostedError(f"No report.json in {run_path} — nothing to report.")
-    report_bytes = report_path.read_bytes()
-    report = RunReport.model_validate_json(report_bytes.decode("utf-8"))
+    try:
+        report_size = report_path.stat().st_size
+    except OSError as exc:
+        raise HostedError("Could not inspect report.json") from exc
+    if report_size > _MAX_RUN_REPORT_BYTES:
+        raise HostedError(
+            f"report.json exceeds the {_MAX_RUN_REPORT_BYTES}-byte reporting limit"
+        )
+    try:
+        report = RunReport.model_validate_json(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HostedError("report.json is unreadable or invalid") from exc
 
     if not report.success:
         return {
             "emitted": False,
             "reason": ("run did not succeed; the halt/failure rail is `report-break`"),
         }
-    if not workflow_id and not report.bundle_content_digest:
+    if not report.bundle_content_digest:
         raise HostedError(
-            "No workflow binding: pass --workflow-id, or run a sealed bundle "
-            "(report.json carries no bundle_content_digest)."
+            "No exact bundle binding: run a sealed bundle whose report.json "
+            "carries bundle_content_digest."
         )
+
+    # Build and validate the complete outbound payload before resolving a
+    # credential or creating a request. Server-side 4xx handling is defense in
+    # depth, not the client privacy boundary.
+    payload = _build_run_summary_payload(
+        report,
+        workflow_id=workflow_id,
+        backend=backend,
+        client_run_id=_client_run_id(run_path),
+    )
+    if (
+        len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        > _MAX_RUN_SUMMARY_BYTES
+    ):
+        raise HostedError("run summary exceeds the outbound size limit")
 
     resolved_host = resolve_host(host)
     resolve_destination_policy(
@@ -1781,16 +1952,6 @@ def report_run(
     )
     resolved_token = resolve_token(token, host=resolved_host)
     url = f"{resolved_host}/api/runs/ingest-report"
-
-    payload = _build_run_summary_payload(
-        report,
-        report_bytes,
-        workflow_id=workflow_id,
-        deployment_kind=deployment_kind,
-        org_id=org_id,
-        backend=backend,
-        client_run_id=_client_run_id(run_path),
-    )
 
     resp = _post_report(url, resolved_token, payload)
 
@@ -1812,7 +1973,12 @@ def report_run(
             f"ingest-report returned {resp.status_code} (expected 202): "
             f"{_body_snippet(resp)}"
         )
-    body = resp.json() if resp.content else {}
-    result = dict(body) if isinstance(body, dict) else {"response": body}
+    try:
+        body = resp.json() if resp.content else {}
+    except ValueError as exc:
+        raise HostedError("ingest-report returned malformed JSON") from exc
+    if not isinstance(body, dict):
+        raise HostedError("ingest-report returned an unexpected response shape")
+    result = dict(body)
     result["emitted"] = True
     return result

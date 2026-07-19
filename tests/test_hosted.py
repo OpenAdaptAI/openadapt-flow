@@ -14,6 +14,7 @@ import json
 import stat
 import zipfile
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import pytest
@@ -1196,11 +1197,14 @@ def test_push_refuses_symlinked_artifact(tmp_path, monkeypatch):
 # report_break
 # ---------------------------------------------------------------------------
 
+_WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
+
 
 def _halted_run(run_dir: Path) -> Path:
     report = RunReport(
         workflow_name="triage",
         started_at="2026-01-01T00:00:00Z",
+        bundle_content_digest="ab" * 32,
         success=False,
         total_ms=2500.0,
         results=[
@@ -1240,7 +1244,7 @@ def test_report_break_success(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, body))
     result = hosted.report_break(
         run_dir,
-        workflow_id="wf_1",
+        workflow_id=_WORKFLOW_UUID,
         deployment_kind="byoc",
         org_id="org_1",
         host="https://h.test",
@@ -1249,16 +1253,41 @@ def test_report_break_success(tmp_path, monkeypatch):
     assert result["emitted"] is True
     assert result["teach_url"] == "https://h.test/dashboard/runs/run_1/teach"
     posted = recorder["kw"]["json"]
-    assert posted["workflow_id"] == "wf_1"
-    assert posted["deployment_kind"] == "byoc"
-    assert posted["org_id"] == "org_1"
+    assert posted["kind"] == "break_summary"
+    assert posted["schema"] == hosted.BREAK_SUMMARY_SCHEMA
+    assert posted["workflow_id"] == _WORKFLOW_UUID
+    assert posted["bundle_content_digest"] == "ab" * 32
+    assert "deployment_kind" not in posted
+    assert "org_id" not in posted
     assert posted["status"] == "halt"
     assert posted["resolver_rung"] == "ocr"
     assert posted["metrics"] == {"steps": 1, "duration_s": 2.5}
     assert "report_path" not in posted
-    assert len(posted["drift_signature"]) == 16
+    assert "drift_signature" not in posted
+    assert str(UUID(posted["client_run_id"])) == posted["client_run_id"]
     # no screenshots / dom / field values leak
     assert "screenshots" not in posted
+
+
+def test_report_break_omits_optional_resolver_rung_when_unavailable(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "runs" / "r1"
+    RunReport(
+        workflow_name="triage",
+        started_at="2026-01-01T00:00:00Z",
+        bundle_content_digest="ab" * 32,
+        success=False,
+        total_ms=125.0,
+        results=[StepResult(step_id="s1", intent="wait", ok=False)],
+        halt=HaltObservation(state_id="st1"),
+    ).save(run_dir)
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    hosted.report_break(
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+    )
+    assert "resolver_rung" not in recorder["kw"]["json"]
 
 
 def test_report_break_scrubs_phi(tmp_path, monkeypatch):
@@ -1272,7 +1301,9 @@ def test_report_break_scrubs_phi(tmp_path, monkeypatch):
     privacy.set_text_scrubber(FakeScrubber())
     recorder: dict = {}
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
-    hosted.report_break(run_dir, workflow_id="wf_1", host="https://h.test", token="tok")
+    hosted.report_break(
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+    )
     posted = recorder["kw"]["json"]
     assert "Jane Doe" not in json.dumps(posted)
     assert "12345" not in json.dumps(posted)
@@ -1289,7 +1320,7 @@ def test_report_break_422_falls_back_local(tmp_path, monkeypatch):
         httpx, "post", lambda url, **kw: httpx.Response(422, json={"error": "phi"})
     )
     result = hosted.report_break(
-        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
     assert result["emitted"] is False
     assert result["local_only"] is True
@@ -1302,7 +1333,7 @@ def test_report_break_422_no_fallback_raises(tmp_path, monkeypatch):
     with pytest.raises(hosted.HostedError, match="422"):
         hosted.report_break(
             run_dir,
-            workflow_id="wf_1",
+            workflow_id=_WORKFLOW_UUID,
             host="https://h.test",
             token="tok",
             allow_local_fallback=False,
@@ -1323,7 +1354,7 @@ def test_report_break_success_run_emits_nothing(tmp_path, monkeypatch):
         lambda *a, **k: pytest.fail("should not POST for a successful run"),
     )
     result = hosted.report_break(
-        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
     assert result["emitted"] is False
 
@@ -1331,7 +1362,7 @@ def test_report_break_success_run_emits_nothing(tmp_path, monkeypatch):
 def test_report_break_missing_report(tmp_path):
     with pytest.raises(hosted.HostedError, match="report.json"):
         hosted.report_break(
-            tmp_path, workflow_id="wf_1", host="https://h.test", token="tok"
+            tmp_path, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
         )
 
 
@@ -1349,7 +1380,7 @@ def test_report_break_scrubber_unavailable_still_emits_minimal(tmp_path, monkeyp
     recorder: dict = {}
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
     result = hosted.report_break(
-        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
     assert result["emitted"] is True
     assert recorder["kw"]["json"]["phi_minimal"] is True
@@ -1366,7 +1397,7 @@ def test_report_break_omits_free_text_when_scrub_unavailable(tmp_path, monkeypat
     recorder: dict = {}
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
     result = hosted.report_break(
-        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
     assert result["emitted"] is True
     posted = recorder["kw"]["json"]
@@ -1381,7 +1412,7 @@ def test_report_break_omits_free_text_when_scrub_unavailable(tmp_path, monkeypat
     assert posted["phi_minimal"] is True
     assert posted["status"] == "halt"
     assert posted["resolver_rung"] == "ocr"
-    assert len(posted["drift_signature"]) == 16
+    assert "drift_signature" not in posted
     assert posted["metrics"] == {"steps": 1, "duration_s": 2.5}
 
 
@@ -1424,7 +1455,7 @@ def _successful_run(run_dir: Path, **overrides) -> Path:
                 ),
                 effect_verified=True,
                 effect_results=["CONFIRMED eligibility write for MRN 12345"],
-                effect_contract_hashes=["cd" * 32],
+                effect_contract_hashes=["sha256:" + "cd" * 32],
             ),
             StepResult(
                 step_id="s2",
@@ -1450,17 +1481,14 @@ def _successful_run(run_dir: Path, **overrides) -> Path:
 
 
 def test_report_run_success(tmp_path, monkeypatch):
-    import hashlib
-
     run_dir = tmp_path / "runs" / "r1"
-    report_path = _successful_run(run_dir)
+    _successful_run(run_dir)
     recorder: dict = {}
     body = {"run_id": "run_9", "status": "success"}
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, body))
     result = hosted.report_run(
         run_dir,
-        workflow_id="wf_1",
-        org_id="org_1",
+        workflow_id=_WORKFLOW_UUID,
         backend="web",
         host="https://h.test",
         token="tok",
@@ -1472,21 +1500,19 @@ def test_report_run_success(tmp_path, monkeypatch):
     assert posted["kind"] == "run_summary"
     assert posted["schema"] == hosted.RUN_SUMMARY_SCHEMA
     assert posted["status"] == "success"
-    assert posted["workflow_id"] == "wf_1"
-    assert posted["org_id"] == "org_1"
-    assert posted["deployment_kind"] == "local"
+    assert posted["workflow_id"] == _WORKFLOW_UUID
+    assert posted["bundle_content_digest"] == "ab" * 32
+    assert "org_id" not in posted
+    assert "deployment_kind" not in posted
     assert posted["backend"] == "web"
     assert posted["flow_version"]
     assert posted["phi_minimal"] is True
-    # Idempotency pair: a persisted client-generated run UUID + the sha256 of
-    # the exact local report.json bytes (red-team: content hash alone could
-    # collapse two identical successful runs).
+    # A persisted random UUID is the idempotency key. The raw report hash stays
+    # local because the report can contain low-entropy identifiers.
     from uuid import UUID as _UUID
 
     assert str(_UUID(posted["client_run_id"])) == posted["client_run_id"]
-    assert posted["run_content_hash"] == (
-        hashlib.sha256(report_path.read_bytes()).hexdigest()
-    )
+    assert "run_content_hash" not in posted
     assert posted["metrics"] == {
         "steps": 3,
         "steps_ok": 3,
@@ -1507,15 +1533,13 @@ def test_report_run_success(tmp_path, monkeypatch):
         "effects": {
             "verified": 1,
             "approved_unverified": 1,
-            "contract_hash_count": 1,
+            "contract_count": 1,
         },
     }
-    assert posted["effect_contract_hashes"] == ["cd" * 32]
+    assert "effect_contract_hashes" not in posted
 
 
 def test_report_run_binds_by_digest_without_workflow_id(tmp_path, monkeypatch):
-    import hashlib
-
     run_dir = tmp_path / "runs" / "r1"
     _successful_run(run_dir)
     recorder: dict = {}
@@ -1523,22 +1547,20 @@ def test_report_run_binds_by_digest_without_workflow_id(tmp_path, monkeypatch):
     hosted.report_run(run_dir, host="https://h.test", token="tok")
     posted = recorder["kw"]["json"]
     assert "workflow_id" not in posted
+    assert "backend" not in posted
     assert posted["bundle_content_digest"] == "ab" * 32
-    # The raw workflow NAME never leaves the machine — only its digest.
-    assert posted["workflow_name_digest"] == (
-        hashlib.sha256("eligibility for Jane's Dental".encode("utf-8")).hexdigest()
-    )
+    assert "workflow_name_digest" not in posted
     assert "eligibility" not in json.dumps(posted)
 
 
 def test_report_run_payload_carries_no_phi(tmp_path, monkeypatch):
-    import hashlib
-
     run_dir = tmp_path / "runs" / "r1"
     _successful_run(run_dir)
     recorder: dict = {}
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
-    hosted.report_run(run_dir, workflow_id="wf_1", host="https://h.test", token="tok")
+    hosted.report_run(
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+    )
     posted = recorder["kw"]["json"]
     blob = json.dumps(posted)
     # No PHI values: names, identifiers, param values, raw origins/URLs.
@@ -1559,13 +1581,49 @@ def test_report_run_payload_carries_no_phi(tmp_path, monkeypatch):
         "report_path",
         "workflow_name",
         "effect_results",
+        "workflow_name_digest",
+        "origin_domain_hash",
+        "effect_contract_hashes",
+        "run_content_hash",
     ):
         assert excluded not in posted, excluded
-    # Only the one-way hostname hash remains of the execution origin.
-    assert (
-        posted["origin_domain_hash"]
-        == (hashlib.sha256(b"emr.example-clinic.test").hexdigest()[:16])
+
+
+def test_report_run_never_egresses_actual_resolved_effect_contract_hash(
+    tmp_path, monkeypatch
+):
+    from openadapt_flow.runtime.effects.effect import Effect, EffectKind, ValueExpr
+
+    effect = Effect(
+        kind=EffectKind.FIELD_EQUALS,
+        match={"mrn": ValueExpr(param="mrn")},
+        field="eligibility_status",
+        value=ValueExpr(param="status"),
+        idempotency_key=ValueExpr(param="mrn"),
+    ).resolve({"mrn": "12345", "status": "active"})
+    resolved_hash = effect.contract_hash()
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(
+        run_dir,
+        results=[
+            StepResult(
+                step_id="s1",
+                intent="write eligibility for MRN 12345",
+                ok=True,
+                effect_verified=True,
+                effect_contract_hashes=[resolved_hash],
+            )
+        ],
     )
+    recorder: dict = {}
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    hosted.report_run(
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+    )
+    blob = json.dumps(recorder["kw"]["json"])
+    assert resolved_hash not in blob
+    assert "12345" not in blob
+    assert recorder["kw"]["json"]["metrics"]["effects"]["contract_count"] == 1
 
 
 def test_report_run_refuses_non_success(tmp_path, monkeypatch):
@@ -1577,7 +1635,7 @@ def test_report_run_refuses_non_success(tmp_path, monkeypatch):
         lambda *a, **k: pytest.fail("should not POST for a non-successful run"),
     )
     result = hosted.report_run(
-        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
     assert result["emitted"] is False
     assert "report-break" in result["reason"]
@@ -1593,7 +1651,7 @@ def test_report_run_missing_binding_raises(tmp_path):
 def test_report_run_missing_report_raises(tmp_path):
     with pytest.raises(hosted.HostedError, match="report.json"):
         hosted.report_run(
-            tmp_path, workflow_id="wf_1", host="https://h.test", token="tok"
+            tmp_path, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
         )
 
 
@@ -1604,7 +1662,7 @@ def test_report_run_422_falls_back_local(tmp_path, monkeypatch):
         httpx, "post", lambda url, **kw: httpx.Response(422, json={"error": "phi"})
     )
     result = hosted.report_run(
-        run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
     assert result["emitted"] is False
     assert result["local_only"] is True
@@ -1617,7 +1675,7 @@ def test_report_run_422_no_fallback_raises(tmp_path, monkeypatch):
     with pytest.raises(hosted.HostedError, match="422"):
         hosted.report_run(
             run_dir,
-            workflow_id="wf_1",
+            workflow_id=_WORKFLOW_UUID,
             host="https://h.test",
             token="tok",
             allow_local_fallback=False,
@@ -1630,63 +1688,102 @@ def test_report_run_401_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(401))
     with pytest.raises(hosted.HostedError, match="401"):
         hosted.report_run(
-            run_dir, workflow_id="wf_1", host="https://h.test", token="tok"
+            run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
         )
 
 
-def test_report_run_idempotency_pair_stable_per_run_distinct_across_runs(
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(202, content=b"{not-json"),
+        httpx.Response(202, json=["unexpected", "list"]),
+    ],
+)
+def test_report_run_refuses_malformed_success_response(tmp_path, monkeypatch, response):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: response)
+    with pytest.raises(hosted.HostedError, match="malformed JSON|unexpected response"):
+        hosted.report_run(
+            run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+        )
+
+
+def test_report_run_idempotency_key_stable_per_run_distinct_across_runs(
     tmp_path, monkeypatch
 ):
-    """Re-reporting the SAME run reuses the persisted (client_run_id,
-    run_content_hash) pair; a DIFFERENT run — even one with an identical
-    report — gets a different client_run_id so it can never dedupe away."""
+    """A retry reuses its UUID; a distinct run gets a distinct UUID."""
     run_a = tmp_path / "runs" / "r1"
     run_b = tmp_path / "runs" / "r2"
     _successful_run(run_a)
     _successful_run(run_b)  # byte-identical report.json
-    pairs = []
+    ids = []
     monkeypatch.setattr(
         httpx,
         "post",
         lambda url, **kw: (
-            pairs.append((kw["json"]["client_run_id"], kw["json"]["run_content_hash"])),
+            ids.append(kw["json"]["client_run_id"]),
             httpx.Response(202, json={"ok": True}),
         )[1],
     )
     for target in (run_a, run_a, run_b):
         hosted.report_run(
-            target, workflow_id="wf_1", host="https://h.test", token="tok"
+            target, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
         )
-    assert pairs[0] == pairs[1]  # same run: idempotent
-    assert pairs[2][1] == pairs[0][1]  # identical bytes: same content hash
-    assert pairs[2][0] != pairs[0][0]  # distinct run: distinct UUID
+    assert ids[0] == ids[1]
+    assert ids[2] != ids[0]
     assert (run_a / ".report_run_id").is_file()
 
 
-def test_report_run_backend_is_a_closed_enum(tmp_path, monkeypatch):
+def test_break_and_resumed_success_share_attempt_id(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _halted_run(run_dir)
+    payloads: list[dict] = []
+
+    def capture(url, **kwargs):
+        payloads.append(kwargs["json"])
+        return httpx.Response(
+            202, json={"ok": True, "status": kwargs["json"]["status"]}
+        )
+
+    monkeypatch.setattr(httpx, "post", capture)
+    hosted.report_break(
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+    )
+    _successful_run(run_dir)
+    hosted.report_run(
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+    )
+    assert payloads[0]["schema"] == hosted.BREAK_SUMMARY_SCHEMA
+    assert payloads[1]["schema"] == hosted.RUN_SUMMARY_SCHEMA
+    assert payloads[0]["client_run_id"] == payloads[1]["client_run_id"]
+    assert payloads[0]["bundle_content_digest"] == payloads[1]["bundle_content_digest"]
+
+
+def test_report_run_backend_is_a_closed_enum_before_egress(tmp_path, monkeypatch):
     """Red-team PHI-1: `backend` may only carry a fixed substrate token —
     free text (e.g. a recorded rdp window title / backend_hints) is dropped
     client-side, never sent."""
     run_dir = tmp_path / "runs" / "r1"
     _successful_run(run_dir)
-    recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
-    hosted.report_run(
-        run_dir,
-        workflow_id="wf_1",
-        backend="rdp:Jane Doe - Dentrix",  # PHI-bearing free text
-        host="https://h.test",
-        token="tok",
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("invalid backend must not egress"),
     )
-    posted = recorder["kw"]["json"]
-    assert posted["backend"] is None
-    assert "Jane" not in json.dumps(posted)
-    assert "backend_hints" not in posted
+    with pytest.raises(hosted.HostedError, match="backend"):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            backend="rdp:Jane Doe - Dentrix",
+            host="https://h.test",
+            token="tok",
+        )
 
 
-def test_report_run_caps_effect_contract_hashes(tmp_path, monkeypatch):
+def test_report_run_keeps_resolved_effect_hashes_local(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "r1"
-    many = [f"{i:064x}" for i in range(300)]
+    many = [f"sha256:{i:064x}" for i in range(300)]
     _successful_run(
         run_dir,
         results=[
@@ -1701,10 +1798,242 @@ def test_report_run_caps_effect_contract_hashes(tmp_path, monkeypatch):
     )
     recorder: dict = {}
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
-    hosted.report_run(run_dir, workflow_id="wf_1", host="https://h.test", token="tok")
+    hosted.report_run(
+        run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+    )
     posted = recorder["kw"]["json"]
-    assert posted["metrics"]["effects"]["contract_hash_count"] == 300
-    assert len(posted["effect_contract_hashes"]) == 256
+    assert posted["metrics"]["effects"]["contract_count"] == 300
+    assert "effect_contract_hashes" not in posted
+    assert all(value not in json.dumps(posted) for value in many)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"started_at": "Jane Doe MRN 12345"}, "started_at"),
+        ({"rung_counts": {"Jane Doe MRN 12345": 1}}, "resolution rung"),
+        ({"total_ms": float("inf")}, "report.json"),
+    ],
+)
+def test_report_run_refuses_malformed_report_fields_before_egress(
+    tmp_path, monkeypatch, overrides, message
+):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir, **overrides)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("invalid summary must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match=message):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            host="https://h.test",
+            token="tok",
+        )
+
+
+def test_report_run_refuses_malformed_bundle_digest_before_egress(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "runs" / "r1"
+    report_path = _successful_run(run_dir)
+    raw = json.loads(report_path.read_text(encoding="utf-8"))
+    raw["bundle_content_digest"] = "Jane Doe MRN 12345"
+    report_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("invalid report must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="report.json"):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            host="https://h.test",
+            token="tok",
+        )
+
+
+def test_report_run_refuses_non_uuid_workflow_before_egress(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("invalid workflow id must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="workflow_id"):
+        hosted.report_run(
+            run_dir,
+            workflow_id="Jane Doe MRN 12345",
+            host="https://h.test",
+            token="tok",
+        )
+
+
+def test_report_run_refuses_noncanonical_uuid_before_egress(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("invalid workflow id must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="canonical UUID"):
+        hosted.report_run(
+            run_dir,
+            workflow_id="00000000-0000-0000-0000-000000000000",
+            host="https://h.test",
+            token="tok",
+        )
+
+
+def test_report_run_refuses_non_semver_flow_version_before_egress(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(hosted, "_flow_version", lambda: "local-dev")
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("invalid version must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="flow_version"):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            host="https://h.test",
+            token="tok",
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"total_ms": (hosted._MAX_DURATION_S + 0.001) * 1000},
+        {"est_model_cost_usd": hosted._MAX_MODEL_COST_USD + 0.001},
+        {"rung_counts": {"structural": hosted._MAX_COUNTER + 1}},
+    ],
+)
+def test_report_run_enforces_exact_cloud_numeric_bounds_before_egress(
+    tmp_path, monkeypatch, overrides
+):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir, **overrides)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("out-of-range summary must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="accepted range"):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            host="https://h.test",
+            token="tok",
+        )
+
+
+def test_report_run_refuses_symlink_id_without_overwriting_target(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    target = tmp_path / "do-not-touch.txt"
+    target.write_text("preserve me", encoding="utf-8")
+    try:
+        (run_dir / ".report_run_id").symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable on this platform")
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("unsafe sidecar must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="regular file"):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            host="https://h.test",
+            token="tok",
+        )
+    assert target.read_text(encoding="utf-8") == "preserve me"
+
+
+def test_report_run_refuses_when_id_cannot_be_persisted(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    real_open = hosted.os.open
+
+    def fail_sidecar(path, flags, mode=0o777):
+        if str(path).endswith(".report_run_id"):
+            raise PermissionError("read only")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(hosted.os, "open", fail_sidecar)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("unstable id must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="persist"):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            host="https://h.test",
+            token="tok",
+        )
+
+
+@pytest.mark.skipif(hosted.os.name == "nt", reason="directory fsync is POSIX-only")
+def test_client_run_id_fsyncs_file_and_parent_directory(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    real_fsync = hosted.os.fsync
+    fsynced_modes: list[int] = []
+
+    def record_fsync(fd):
+        fsynced_modes.append(hosted.os.fstat(fd).st_mode)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(hosted.os, "fsync", record_fsync)
+    hosted._client_run_id(run_dir)
+    assert any(hosted.stat.S_ISREG(mode) for mode in fsynced_modes)
+    assert any(hosted.stat.S_ISDIR(mode) for mode in fsynced_modes)
+
+
+def test_client_run_id_is_race_safe(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        ids = list(pool.map(lambda _: hosted._client_run_id(run_dir), range(200)))
+    assert len(set(ids)) == 1
+    if hosted.os.name != "nt":
+        assert (run_dir / ".report_run_id").stat().st_mode & 0o777 == 0o600
+
+
+def test_report_run_refuses_oversized_report_before_egress(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    report_path = _successful_run(run_dir)
+    with report_path.open("ab") as handle:
+        handle.write(b" " * (hosted._MAX_RUN_REPORT_BYTES + 1))
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("oversized report must not egress"),
+    )
+    with pytest.raises(hosted.HostedError, match="exceeds"):
+        hosted.report_run(
+            run_dir,
+            workflow_id=_WORKFLOW_UUID,
+            host="https://h.test",
+            token="tok",
+        )
 
 
 # --- opt-in post-run hook ---------------------------------------------------
@@ -1752,7 +2081,7 @@ def test_maybe_report_run_fires_on_opt_in_success_only(tmp_path, monkeypatch, ca
     _maybe_report_run(run_dir, report, args)
     assert calls and calls[0]["workflow_id"] == "wf_1"
     assert calls[0]["backend"] == "web"
-    assert calls[0]["deployment_kind"] == "local"
+    assert "deployment_kind" not in calls[0]
     assert "Run summary reported" in capsys.readouterr().out
 
     # A halted run never fires the SUCCESS hook, even when opted in.
@@ -2006,13 +2335,9 @@ def test_cli_report_run_dispatch(monkeypatch, capsys):
             "report-run",
             "runs/r1",
             "--workflow-id",
-            "wf_1",
-            "--deployment-kind",
-            "local",
+            _WORKFLOW_UUID,
             "--backend",
             "windows",
-            "--org-id",
-            "org_1",
             "--host",
             "https://h.test",
             "--destination-kind",
@@ -2026,10 +2351,8 @@ def test_cli_report_run_dispatch(monkeypatch, capsys):
     assert rc == 0
     assert captured == {
         "run_dir": "runs/r1",
-        "workflow_id": "wf_1",
-        "deployment_kind": "local",
+        "workflow_id": _WORKFLOW_UUID,
         "backend": "windows",
-        "org_id": "org_1",
         "host": "https://h.test",
         "destination_kind": "customer-managed",
         "trusted_hosts": ["https://h.test"],

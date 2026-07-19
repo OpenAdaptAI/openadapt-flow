@@ -964,6 +964,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     report_md = render_run_report(run_dir)
     outcome = "success" if report.success else "FAILED"
     print(f"Resume {outcome}: {report_md}")
+    _maybe_report_run(run_dir, report, args)
     return 0 if report.success else 1
 
 
@@ -1442,9 +1443,10 @@ def _cmd_report_break(args: argparse.Namespace) -> int:
     """Emit a PHI-free break diagnostic from a halted run's ``report.json``.
 
     Reads ``run_dir/report.json`` (``RunReport.halt`` / ``HaltObservation``) —
-    halt is read from the report, NOT a process exit code — scrubs it
-    fail-closed, and POSTs it to ``/api/runs/ingest-report`` so the break is
-    triageable centrally. The recording never leaves the machine.
+    halt is read from the report, NOT a process exit code — then builds a
+    closed-schema summary from bounded counts and enums only. Free text,
+    screenshots, record values, and report/effect hashes never enter the
+    request. The recording never leaves the machine.
     """
     from openadapt_flow.hosted import HostedError, report_break
 
@@ -1482,9 +1484,10 @@ def _cmd_report_run(args: argparse.Namespace) -> int:
 
     The success counterpart of ``report-break`` (same endpoint, same paired
     ingest credential, same fail-closed PHI boundary): posts a schema-minimal
-    summary — counts, durations, one-way digests, never values — to
-    ``/api/runs/ingest-report`` so the control plane can show and meter local
-    runs. The recording never leaves the machine.
+    summary — validated enums and bounded counts/durations, never record values
+    or resolved-effect fingerprints — to ``/api/runs/ingest-report`` so the
+    control plane can show locally reported runs. The recording never leaves
+    the machine, and self-reported rows are not a billing meter.
     """
     from openadapt_flow.hosted import HostedError, report_run
 
@@ -1494,8 +1497,6 @@ def _cmd_report_run(args: argparse.Namespace) -> int:
             workflow_id=args.workflow_id,
             host=args.host,
             token=args.token,
-            deployment_kind=args.deployment_kind,
-            org_id=args.org_id,
             backend=args.backend,
             destination_kind=args.destination_kind,
             trusted_hosts=args.trusted_host,
@@ -1567,8 +1568,6 @@ def _maybe_report_run(run_dir: Path, report, args=None) -> None:
         result = report_run(
             run_dir,
             workflow_id=os.environ.get("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID"),
-            deployment_kind=os.environ.get("OPENADAPT_FLOW_DEPLOYMENT_KIND", "local"),
-            org_id=os.environ.get("OPENADAPT_FLOW_ORG_ID"),
             backend=getattr(args, "backend", None),
         )
         if result.get("emitted"):
@@ -2167,6 +2166,15 @@ def build_parser() -> argparse.ArgumentParser:
             "(see `approve`)"
         ),
     )
+    p.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "After a successful resume, send the PHI-minimal local completion "
+            "summary to the paired control plane (also enabled by "
+            "OPENADAPT_FLOW_REPORT_RUN=1)"
+        ),
+    )
     # A deployment whose effect verifier binds run parameters
     # (effects.path_params / search_param_exprs / sql_query_params) needs the
     # SAME params to rebuild the verifier on resume — without them the
@@ -2744,12 +2752,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--deployment-kind",
         choices=["cloud", "byoc"],
         default="cloud",
-        help="Deployment lane (routes the teach target; default: cloud)",
+        help=(
+            "Backward-compatible hint; v2 provenance is derived server-side "
+            "and this value is not sent"
+        ),
     )
     p.add_argument(
         "--org-id",
         default=None,
-        help="Org id, carried in the body until the per-user token store is canonical",
+        help=(
+            "Backward-compatible hint; token ownership is derived server-side "
+            "and this value is not sent"
+        ),
     )
     p.add_argument(
         "--host",
@@ -2782,8 +2796,8 @@ def build_parser() -> argparse.ArgumentParser:
         "report-run",
         help=(
             "Emit a PHI-free SUCCESS summary from a completed run's "
-            "report.json to /api/runs/ingest-report (counts, durations, and "
-            "one-way digests only — the recording stays local)"
+            "report.json to /api/runs/ingest-report (bounded counts, duration, "
+            "and exact pushed-bundle identity — the recording stays local)"
         ),
     )
     p.add_argument("run_dir", help="The completed run directory (holds report.json)")
@@ -2792,24 +2806,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Hosted workflow id (from `push`/dashboard). When omitted the "
-            "summary binds by workflow-name digest + bundle content digest"
+            "summary binds by the exact pushed bundle content digest"
         ),
     )
     p.add_argument(
-        "--deployment-kind",
-        choices=["local", "cloud", "byoc"],
-        default="local",
-        help="Deployment lane (default: local — a customer-machine run)",
-    )
-    p.add_argument(
         "--backend",
+        choices=["web", "windows", "macos", "linux", "rdp"],
         default=None,
         help="Backend/substrate this run executed on (web/windows/macos/linux/rdp)",
-    )
-    p.add_argument(
-        "--org-id",
-        default=None,
-        help="Org id, carried in the body until the per-user token store is canonical",
     )
     p.add_argument(
         "--host",

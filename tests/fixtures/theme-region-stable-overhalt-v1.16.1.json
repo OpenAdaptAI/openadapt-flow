@@ -15,7 +15,11 @@
   "task": "MockMed triage save",
   "condition": "?drift=theme",
   "recording_note": "Exact-current setup 3",
-  "replay_note": "Referral letter faxed to cardiology. [A03]",
+  "replay_notes": [
+    "Referral letter faxed to cardiology. [A03]",
+    "Home BP log reviewed; stable readings. [A04]",
+    "Flu shot offered; patient declined. [A05]"
+  ],
   "failed_step": "step_010",
   "failed_postcondition": "region_stable",
   "region": [0, 43, 968, 169],

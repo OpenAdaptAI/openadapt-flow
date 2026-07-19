@@ -31,6 +31,7 @@ def _load_regression() -> dict:
     assert fixture["artifact_policy"].startswith("metadata only")
     assert fixture["observed_count"] == 3
     assert fixture["outcomes"]["over_halt"] == 3
+    assert len(fixture["replay_notes"]) == fixture["observed_count"]
     return fixture
 
 
@@ -65,15 +66,20 @@ def regression_bundle(
     return regression, bundle
 
 
+@pytest.mark.parametrize("note_index", range(3))
 def test_theme_parameter_substitution_keeps_structural_outcome_evidence(
-    mockmed_url: str, tmp_path: Path, regression_bundle: tuple[dict, Path]
+    mockmed_url: str,
+    tmp_path: Path,
+    regression_bundle: tuple[dict, Path],
+    note_index: int,
 ) -> None:
     regression, bundle = regression_bundle
+    note = regression["replay_notes"][note_index]
 
     report, verdict = _run(
         bundle,
         f"{mockmed_url}{regression['condition']}",
-        regression["replay_note"],
+        note,
         tmp_path / "theme-run",
     )
 
@@ -93,7 +99,7 @@ def test_true_region_change_still_refuses_after_structural_theme_match(
     report, verdict = _run(
         bundle,
         f"{mockmed_url}?drift=theme,modal",
-        regression["replay_note"],
+        regression["replay_notes"][0],
         tmp_path / "theme-modal-run",
     )
 

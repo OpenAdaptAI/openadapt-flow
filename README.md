@@ -5,6 +5,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/openadapt-flow)](https://pypi.org/project/openadapt-flow/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+**Lifecycle: Beta.** The browser record → compile → replay path is the reference
+Beta surface. The Windows UIA, native macOS, and RDP/Citrix backends are
+Experimental/Research and are qualified per application — see
+[`docs/LIMITS.md`](docs/LIMITS.md).
+
 OpenAdapt is built for repeated workflows behind browser, legacy desktop, and
 remote-display interfaces. It compiles demonstrated GUI workflows into
 deterministic, locally executable programs. Each target application and

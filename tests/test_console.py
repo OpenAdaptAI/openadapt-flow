@@ -18,6 +18,7 @@ Behavior under test (import-light -- no browser, no OCR):
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import shlex
@@ -25,7 +26,7 @@ import shutil
 import socket
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1296,6 +1297,42 @@ def test_attention_dto_is_opaque_and_redacted(console_env):
         assert protected not in serialized
 
 
+def test_public_attention_resolver_is_current_bounded_and_symlink_safe(
+    console_env,
+    tmp_path,
+):
+    from openadapt_flow.console.attention import (
+        list_attention,
+        resolve_attention,
+    )
+
+    run = _make_human_required_pause(console_env)
+    human = next(
+        item for item in list_attention(console_env["runs"]) if item.human_required
+    )
+
+    resolved = resolve_attention(console_env["runs"], human.id)
+    assert resolved is not None
+    resolved_path, current = resolved
+    assert resolved_path == run.resolve()
+    assert current == human
+
+    for invalid in ("", "../replay-human", "0" * 23, "g" * 24):
+        assert resolve_attention(console_env["runs"], invalid) is None
+
+    alias = tmp_path / "runs-alias"
+    alias.symlink_to(console_env["runs"], target_is_directory=True)
+    assert resolve_attention(alias, human.id) is None
+
+    (run / "pending_escalation.json").unlink()
+    RunReport(
+        workflow_name="Jane Roe eligibility",
+        started_at="2026-07-18T12:00:00+00:00",
+        success=True,
+    ).save(run)
+    assert resolve_attention(console_env["runs"], human.id) is None
+
+
 def test_attention_uses_program_action_evidence_not_synthetic_terminal(console_env):
     run = console_env["runs"] / "replay-program-human"
     run.mkdir()
@@ -1487,16 +1524,16 @@ def test_attend_is_attention_first_and_actions_are_explicit(console_env, monkeyp
     def fake_serve(_bundles, _runs, _skills, **kwargs):
         served.update(kwargs)
 
-    executor = object()
+    service = object()
     monkeypatch.setattr(
-        "openadapt_flow.__main__._attended_executor_from_args",
-        lambda _args: nullcontext(executor),
+        "openadapt_flow.__main__._attended_service_from_args",
+        lambda _args: nullcontext(service),
     )
     monkeypatch.setattr("openadapt_flow.console.server.serve", fake_serve)
     assert args.func(args) == 0
     assert served["attend"] is True
     assert served["allow_actions"] is True
-    assert served["attended_executor"] is executor
+    assert served["attended_service"] is service
 
     app = create_app(
         console_env["bundles"],
@@ -1523,18 +1560,18 @@ def test_attend_is_attention_first_and_actions_are_explicit(console_env, monkeyp
 
 
 def test_attended_action_console_requires_explicit_live_target():
-    from openadapt_flow.__main__ import _attended_executor_from_args, build_parser
+    from openadapt_flow.__main__ import _attended_service_from_args, build_parser
 
     args = build_parser().parse_args(["console", "--attend", "--allow-actions"])
     with pytest.raises(SystemExit, match="explicit --config or --backend"):
-        with _attended_executor_from_args(args):
+        with _attended_service_from_args(args):
             pass
 
     web = build_parser().parse_args(
         ["console", "--attend", "--allow-actions", "--backend", "web"]
     )
     with pytest.raises(SystemExit, match="require --url"):
-        with _attended_executor_from_args(web):
+        with _attended_service_from_args(web):
             pass
 
     hidden = build_parser().parse_args(
@@ -1549,12 +1586,13 @@ def test_attended_action_console_requires_explicit_live_target():
         ]
     )
     with pytest.raises(SystemExit, match="visible live session"):
-        with _attended_executor_from_args(hidden):
+        with _attended_service_from_args(hidden):
             pass
 
 
 def test_attended_console_owns_one_backend_and_closes_it(monkeypatch):
     import openadapt_flow.__main__ as cli
+    from openadapt_flow.runtime.durable.attended import AttendedExecutionResult
 
     args = cli.build_parser().parse_args(
         [
@@ -1568,40 +1606,93 @@ def test_attended_console_owns_one_backend_and_closes_it(monkeypatch):
         ]
     )
 
+    main_thread = threading.get_ident()
+    event_threads: dict[str, list[int]] = {
+        "build": [],
+        "executor": [],
+        "configured": [],
+        "close": [],
+    }
+
     class Backend:
         closed = 0
 
         def close(self):
             self.closed += 1
+            event_threads["close"].append(threading.get_ident())
 
     backend = Backend()
     built: list[object] = []
 
     def fake_build(_cfg, **_kwargs):
+        event_threads["build"].append(threading.get_ident())
         built.append(backend)
         return backend
 
     configured: list[dict] = []
 
     def fake_configured(live_backend, **kwargs):
+        event_threads["configured"].append(threading.get_ident())
         configured.append({"backend": live_backend, **kwargs})
         return object()
 
-    monkeypatch.setattr("openadapt_flow.backends.factory.build_backend", fake_build)
-    monkeypatch.setattr(cli, "_configured_replayer", fake_configured)
+    class FakeBoundAttendedExecutor:
+        def __init__(self, replayer_factory, *, key=None):
+            assert key is None
+            self.replayer_factory = replayer_factory
+            event_threads["executor"].append(threading.get_ident())
 
-    with cli._attended_executor_from_args(args) as executor:
-        assert executor is not None
-        manifest = SimpleNamespace(params={}, governed_authorization=None)
-        first = executor.replayer_factory(manifest)
-        second = executor.replayer_factory(manifest)
-        assert first is not second
+        def continue_run(self, _run_dir, capability, _approval):
+            event_threads["executor"].append(threading.get_ident())
+            manifest = SimpleNamespace(params={}, governed_authorization=None)
+            self.replayer_factory(manifest)
+            return AttendedExecutionResult(
+                status="completed",
+                message="continued",
+                resumed_from=capability.step_id,
+            )
+
+        def skip_run(self, _run_dir, _capability, _approval):
+            raise AssertionError("skip was not requested")
+
+    monkeypatch.setattr("openadapt_flow.backends.factory.build_backend", fake_build)
+    monkeypatch.setattr("openadapt_flow.deployment.build_replayer", fake_configured)
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.durable.attended_service.BoundAttendedExecutor",
+        FakeBoundAttendedExecutor,
+    )
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.durable.attended_service.execute_attended_action",
+        lambda _run_dir, _request, *, operator, executor, key: executor.continue_run(
+            Path("run"),
+            SimpleNamespace(step_id=f"step-for-{operator}"),
+            SimpleNamespace(),
+        ),
+    )
+
+    with cli._attended_service_from_args(args) as service:
+        assert service is not None
+        owner_thread = service._owner.owner_thread_id
+        result = service.execute(
+            Path("run"),
+            SimpleNamespace(),
+            operator="staff",
+        )
+        assert result.status == "completed"
         assert built == [backend]
-        assert [item["backend"] for item in configured] == [backend, backend]
+        assert [item["backend"] for item in configured] == [backend]
         assert all(item["durable"] is True for item in configured)
         assert all(item["use_structural"] is True for item in configured)
         assert backend.closed == 0
     assert backend.closed == 1
+    assert owner_thread is not None
+    assert owner_thread != main_thread
+    assert {
+        *event_threads["build"],
+        *event_threads["executor"],
+        *event_threads["configured"],
+        *event_threads["close"],
+    } == {owner_thread}
 
 
 def test_attended_console_closes_backend_when_server_path_raises(monkeypatch):
@@ -1631,9 +1722,137 @@ def test_attended_console_closes_backend_when_server_path_raises(monkeypatch):
         lambda _cfg, **_kwargs: backend,
     )
     with pytest.raises(RuntimeError, match="server stopped"):
-        with cli._attended_executor_from_args(args):
+        with cli._attended_service_from_args(args):
             raise RuntimeError("server stopped")
     assert backend.closed is True
+
+
+def test_attended_web_playwright_lifecycle_stays_on_owner_thread(monkeypatch):
+    import openadapt_flow.__main__ as cli
+    from openadapt_flow.runtime.durable.attended import AttendedExecutionResult
+
+    args = cli.build_parser().parse_args(
+        [
+            "console",
+            "--attend",
+            "--allow-actions",
+            "--backend",
+            "web",
+            "--url",
+            "https://example.test",
+            "--headed",
+        ]
+    )
+    main_thread = threading.get_ident()
+    lifecycle: list[tuple[str, int]] = []
+
+    def mark(name: str) -> None:
+        lifecycle.append((name, threading.get_ident()))
+
+    class Page:
+        def goto(self, url):
+            assert url == "https://example.test"
+            mark("goto")
+
+    class Browser:
+        def new_page(self, *, viewport):
+            assert viewport == {"width": 1280, "height": 800}
+            mark("new-page")
+            return Page()
+
+        def close(self):
+            mark("browser-close")
+
+    class Chromium:
+        def launch(self, *, headless):
+            assert headless is False
+            mark("browser-launch")
+            return Browser()
+
+    class PlaywrightContext:
+        def __enter__(self):
+            mark("playwright-enter")
+            return SimpleNamespace(chromium=Chromium())
+
+        def __exit__(self, *_args):
+            mark("playwright-exit")
+
+    class FakeBoundAttendedExecutor:
+        def __init__(self, replayer_factory, *, key=None):
+            assert key is None
+            self.replayer_factory = replayer_factory
+            mark("executor-construct")
+
+        def continue_run(self, _run_dir, capability, _approval):
+            mark("execute")
+            self.replayer_factory(
+                SimpleNamespace(params={}, governed_authorization=None)
+            )
+            return AttendedExecutionResult(
+                status="completed",
+                message="continued",
+                resumed_from=capability.step_id,
+            )
+
+        def skip_run(self, _run_dir, _capability, _approval):
+            raise AssertionError("skip was not requested")
+
+    def fake_build(_cfg, *, page):
+        assert isinstance(page, Page)
+        mark("backend-build")
+        return object()
+
+    def fake_configured(_backend, **_kwargs):
+        mark("replayer-build")
+        return object()
+
+    monkeypatch.setattr(
+        "openadapt_flow._browser_setup.ensure_chromium_installed",
+        lambda: mark("ensure-browser"),
+    )
+    monkeypatch.setattr(
+        "playwright.sync_api.sync_playwright",
+        lambda: PlaywrightContext(),
+    )
+    monkeypatch.setattr("openadapt_flow.backends.factory.build_backend", fake_build)
+    monkeypatch.setattr("openadapt_flow.deployment.build_replayer", fake_configured)
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.durable.attended_service.BoundAttendedExecutor",
+        FakeBoundAttendedExecutor,
+    )
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.durable.attended_service.execute_attended_action",
+        lambda _run_dir, _request, *, operator, executor, key: executor.continue_run(
+            Path("run"),
+            SimpleNamespace(step_id=f"step-for-{operator}"),
+            SimpleNamespace(),
+        ),
+    )
+
+    with cli._attended_service_from_args(args) as service:
+        result = service.execute(
+            Path("run"),
+            SimpleNamespace(),
+            operator="staff",
+        )
+        owner_thread = service._owner.owner_thread_id
+    assert result.status == "completed"
+    assert owner_thread is not None
+    assert owner_thread != main_thread
+    assert {thread_id for _, thread_id in lifecycle} == {owner_thread}
+    assert [name for name, _ in lifecycle] == [
+        "ensure-browser",
+        "playwright-enter",
+        "browser-launch",
+        "new-page",
+        "goto",
+        "backend-build",
+        "executor-construct",
+        "execute",
+        "replayer-build",
+        "browser-close",
+        "playwright-exit",
+    ]
 
 
 def test_ordinary_console_does_not_construct_attended_backend(monkeypatch):
@@ -1644,5 +1863,308 @@ def test_ordinary_console_does_not_construct_attended_backend(monkeypatch):
         "openadapt_flow.backends.factory.build_backend",
         lambda *_args, **_kwargs: pytest.fail("ordinary console built a backend"),
     )
-    with cli._attended_executor_from_args(args) as executor:
-        assert executor is None
+    with cli._attended_service_from_args(args) as service:
+        assert service is None
+
+
+def test_thread_owned_attended_executor_serializes_concurrent_calls():
+    from openadapt_flow.runtime.durable.attended import (
+        AttendedExecutionResult,
+    )
+    from openadapt_flow.runtime.durable.attended_service import (
+        _ThreadOwnedAttendedExecutor,
+    )
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    lifecycle: list[tuple[str, int]] = []
+    call_lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    call_number = 0
+
+    class Executor:
+        def continue_run(self, _run_dir, capability, _approval):
+            nonlocal active, call_number, maximum_active
+            with call_lock:
+                call_number += 1
+                current = call_number
+                active += 1
+                maximum_active = max(maximum_active, active)
+            lifecycle.append((f"call-{current}", threading.get_ident()))
+            if current == 1:
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            with call_lock:
+                active -= 1
+            return AttendedExecutionResult(
+                status="completed",
+                message=f"continued {current}",
+                resumed_from=capability.step_id,
+            )
+
+        def skip_run(self, _run_dir, _capability, _approval):
+            raise AssertionError("skip was not requested")
+
+    @contextmanager
+    def factory():
+        lifecycle.append(("construct", threading.get_ident()))
+        try:
+            yield Executor()
+        finally:
+            lifecycle.append(("close", threading.get_ident()))
+
+    results: dict[str, AttendedExecutionResult] = {}
+
+    def submit(name: str) -> None:
+        results[name] = owner.continue_run(
+            Path(name),
+            SimpleNamespace(step_id=name),
+            SimpleNamespace(),
+        )
+
+    with _ThreadOwnedAttendedExecutor(
+        factory,
+        startup_timeout_s=2,
+        action_timeout_s=2,
+        shutdown_timeout_s=2,
+    ) as owner:
+        first = threading.Thread(target=submit, args=("first",))
+        second = threading.Thread(target=submit, args=("second",))
+        first.start()
+        assert first_started.wait(timeout=2)
+        second.start()
+        time.sleep(0.05)
+        assert second.is_alive()
+        release_first.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        assert not first.is_alive()
+        assert not second.is_alive()
+        owner_thread = owner.owner_thread_id
+
+    assert set(results) == {"first", "second"}
+    assert maximum_active == 1
+    assert owner_thread is not None
+    assert {thread_id for _, thread_id in lifecycle} == {owner_thread}
+    assert [name for name, _ in lifecycle] == [
+        "construct",
+        "call-1",
+        "call-2",
+        "close",
+    ]
+
+
+def test_thread_owned_attended_executor_refuses_timed_out_queued_call():
+    from openadapt_flow.runtime.durable.attended import AttendedExecutionResult
+    from openadapt_flow.runtime.durable.attended_service import (
+        _ThreadOwnedAttendedExecutor,
+    )
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls: list[str] = []
+    first_outcomes: list[object] = []
+
+    class Executor:
+        def continue_run(self, _run_dir, capability, _approval):
+            calls.append(capability.step_id)
+            if capability.step_id == "first":
+                first_started.set()
+                assert release_first.wait(timeout=2)
+            return AttendedExecutionResult(
+                status="completed",
+                message="continued",
+                resumed_from=capability.step_id,
+            )
+
+        def skip_run(self, _run_dir, _capability, _approval):
+            raise AssertionError("skip was not requested")
+
+    @contextmanager
+    def factory():
+        yield Executor()
+
+    def submit_first() -> None:
+        try:
+            first_outcomes.append(
+                owner.continue_run(
+                    Path("first"),
+                    SimpleNamespace(
+                        step_id="first",
+                        expected_next_transition="after-first",
+                    ),
+                    SimpleNamespace(),
+                )
+            )
+        except BaseException as exc:
+            first_outcomes.append(exc)
+
+    with _ThreadOwnedAttendedExecutor(
+        factory,
+        startup_timeout_s=2,
+        action_timeout_s=0.2,
+        shutdown_timeout_s=2,
+    ) as owner:
+        first = threading.Thread(target=submit_first)
+        first.start()
+        assert first_started.wait(timeout=2)
+        queued = owner.continue_run(
+            Path("second"),
+            SimpleNamespace(
+                step_id="second",
+                expected_next_transition="after-second",
+            ),
+            SimpleNamespace(),
+        )
+        assert queued.status == "refused"
+        assert queued.report_success is False
+        assert queued.resumed_from == "second"
+        assert queued.next_transition == "after-second"
+        assert "cancelled before execution began" in queued.message
+        assert calls == ["first"]
+        release_first.set()
+        first.join(timeout=2)
+        assert not first.is_alive()
+
+    assert len(first_outcomes) == 1
+    assert calls == ["first"]
+
+
+def test_thread_owned_attended_executor_propagates_action_failure_and_recovers():
+    from openadapt_flow.runtime.durable.attended import (
+        AttendedExecutionResult,
+    )
+    from openadapt_flow.runtime.durable.attended_service import (
+        _ThreadOwnedAttendedExecutor,
+    )
+
+    class Executor:
+        def continue_run(self, _run_dir, _capability, _approval):
+            raise ValueError("live verification failed")
+
+        def skip_run(self, _run_dir, capability, _approval):
+            return AttendedExecutionResult(
+                status="completed",
+                message="skipped",
+                resumed_from=capability.step_id,
+            )
+
+    @contextmanager
+    def factory():
+        yield Executor()
+
+    with _ThreadOwnedAttendedExecutor(
+        factory,
+        startup_timeout_s=30,
+        action_timeout_s=300,
+        shutdown_timeout_s=30,
+    ) as owner:
+        with pytest.raises(ValueError, match="live verification failed"):
+            owner.continue_run(
+                Path("run"),
+                SimpleNamespace(step_id="step-1"),
+                SimpleNamespace(),
+            )
+        result = owner.skip_run(
+            Path("run"),
+            SimpleNamespace(step_id="step-1"),
+            SimpleNamespace(),
+        )
+    assert result.status == "completed"
+
+
+def test_thread_owned_attended_executor_timeout_is_not_a_refusal_receipt():
+    from openadapt_flow.runtime.durable.attended import (
+        AttendedExecutionResult,
+    )
+    from openadapt_flow.runtime.durable.attended_service import (
+        AttendedExecutorTimeout,
+        _ThreadOwnedAttendedExecutor,
+    )
+
+    release = threading.Event()
+
+    class Executor:
+        def continue_run(self, _run_dir, capability, _approval):
+            assert release.wait(timeout=2)
+            return AttendedExecutionResult(
+                status="completed",
+                message="continued after caller deadline",
+                resumed_from=capability.step_id,
+            )
+
+        def skip_run(self, _run_dir, _capability, _approval):
+            raise AssertionError("skip was not requested")
+
+    @contextmanager
+    def factory():
+        yield Executor()
+
+    with _ThreadOwnedAttendedExecutor(
+        factory,
+        startup_timeout_s=2,
+        action_timeout_s=0.02,
+        shutdown_timeout_s=2,
+    ) as owner:
+        with pytest.raises(
+            AttendedExecutorTimeout, match="did not return a terminal receipt"
+        ):
+            owner.continue_run(
+                Path("run"),
+                SimpleNamespace(step_id="step-1"),
+                SimpleNamespace(),
+            )
+        release.set()
+
+
+def test_thread_owned_attended_executor_propagates_startup_failure():
+    from openadapt_flow.runtime.durable.attended_service import (
+        _ThreadOwnedAttendedExecutor,
+    )
+
+    @contextmanager
+    def factory():
+        raise RuntimeError("backend construction failed")
+        yield  # pragma: no cover
+
+    with pytest.raises(RuntimeError, match="backend construction failed"):
+        with _ThreadOwnedAttendedExecutor(
+            factory,
+            startup_timeout_s=2,
+            action_timeout_s=2,
+            shutdown_timeout_s=2,
+        ):
+            pass
+
+
+def test_public_attended_action_service_contract_is_stable():
+    from openadapt_flow.deployment import DeploymentConfig
+    from openadapt_flow.runtime.durable import AttendedActionService
+
+    assert list(inspect.signature(AttendedActionService).parameters) == [
+        "deployment",
+        "key",
+        "startup_timeout_s",
+        "action_timeout_s",
+        "shutdown_timeout_s",
+    ]
+    execute = inspect.signature(AttendedActionService.execute)
+    assert list(execute.parameters) == [
+        "self",
+        "run_dir",
+        "request",
+        "operator",
+    ]
+    assert execute.parameters["operator"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    service = AttendedActionService(DeploymentConfig())
+    assert not hasattr(service, "continue_run")
+    assert not hasattr(service, "skip_run")
+    with pytest.raises(RuntimeError, match="not open"):
+        service.execute(
+            Path("run"),
+            SimpleNamespace(),
+            operator="staff",
+        )
+    service.close()

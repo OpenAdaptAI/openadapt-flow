@@ -47,6 +47,10 @@ from openadapt_flow.runtime.durable.attended import (  # noqa: F401
     execute_attended_action,
     issue_attended_capability,
 )
+from openadapt_flow.runtime.durable.attended_service import (  # noqa: F401
+    AttendedActionService,
+    AttendedExecutorTimeout,
+)
 from openadapt_flow.runtime.durable.checkpoint import (  # noqa: F401
     CheckpointStore,
     PendingEscalation,
@@ -95,6 +99,8 @@ __all__ = [
     "AttendedActionStore",
     "AttendedDecision",
     "AttendedExecutionResult",
+    "AttendedActionService",
+    "AttendedExecutorTimeout",
     "AttendedPauseCapability",
     "BoundAttendedExecutor",
     "SignedTransitionBaseline",

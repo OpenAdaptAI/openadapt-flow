@@ -312,6 +312,63 @@ def load_deployment(source: str | Path) -> DeploymentConfig:
         raise ValueError(f"invalid deployment config {path}: {e}") from e
 
 
+def build_replayer(
+    backend: Any,
+    *,
+    allow_egress: bool,
+    effect_verifier: Any,
+    api_actuator: Any,
+    durable: bool,
+    use_structural: bool,
+    governed_authorization: Any = None,
+) -> Any:
+    """Wire one deployment-qualified backend into the governed Replayer.
+
+    The caller owns the backend lifecycle. Keeping this construction in the
+    public deployment module lets CLI, console, and embedding services share
+    one egress/grounding/effect/actuation posture without importing CLI-private
+    helpers.
+    """
+    import os
+
+    from openadapt_flow.runtime import Replayer
+    from openadapt_flow.runtime.grounder import build_grounder
+    from openadapt_flow.runtime.remote_vlm import appliance_from_env
+
+    appliance = appliance_from_env()
+    if appliance is not None and not allow_egress:
+        print(
+            "On-prem VLM appliance is configured "
+            f"({os.environ.get('OPENADAPT_FLOW_VLM_URL')}) but NOT "
+            "wired: enable model grounding to send screenshots to it. "
+            "Replaying FULLY LOCAL (zero outbound calls)."
+        )
+        appliance = None
+    if appliance is not None:
+        print(
+            "Using on-prem VLM appliance at "
+            f"{os.environ.get('OPENADAPT_FLOW_VLM_URL')} "
+            "(identity veto tier + remote-VLM grounder fallback; "
+            "fail-safe to halt). WARNING: screenshots WILL leave "
+            "the box for this run (model grounding is enabled)."
+        )
+    grounder = build_grounder(fallback=appliance.grounder if appliance else None)
+    if grounder is not None:
+        print(f"Grounding rung active: {type(grounder).__name__}")
+    return Replayer(
+        backend,
+        grounder=grounder,
+        identity_vlm=appliance.identity_vlm if appliance else None,
+        state_verifier=(appliance.state_verifier if appliance else None),
+        allow_model_grounding=allow_egress,
+        effect_verifier=effect_verifier,
+        api_actuator=api_actuator,
+        durable=durable,
+        use_structural=use_structural,
+        governed_authorization=governed_authorization,
+    )
+
+
 def _resolve_config_exprs(
     section: str,
     exprs: Mapping[str, ValueExpr],

@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import stat
+import threading
 import zipfile
 from pathlib import Path
 from uuid import UUID
@@ -2164,6 +2165,67 @@ def test_client_run_id_is_race_safe(tmp_path):
     assert len(set(ids)) == 1
     if hosted.os.name != "nt":
         assert (run_dir / ".report_run_id").stat().st_mode & 0o777 == 0o600
+
+
+def test_client_run_id_waits_for_exact_exclusive_creator(tmp_path, monkeypatch):
+    """A loser may observe O_EXCL's empty entry before the winner writes it."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    writer_created = threading.Event()
+    allow_writer = threading.Event()
+    reader_saw_empty = threading.Event()
+    real_fdopen = hosted.os.fdopen
+    real_read = hosted.os.read
+    paused = False
+
+    def paused_fdopen(fd, *args, **kwargs):
+        nonlocal paused
+        if not paused and stat.S_ISREG(hosted.os.fstat(fd).st_mode):
+            paused = True
+            writer_created.set()
+            assert allow_writer.wait(timeout=2), "test did not release id writer"
+        return real_fdopen(fd, *args, **kwargs)
+
+    def recording_read(fd, size):
+        raw = real_read(fd, size)
+        if raw == b"" and id_path.exists():
+            reader_saw_empty.set()
+        return raw
+
+    monkeypatch.setattr(hosted.os, "fdopen", paused_fdopen)
+    monkeypatch.setattr(hosted.os, "read", recording_read)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner = pool.submit(hosted._client_run_id, run_dir)
+        assert writer_created.wait(timeout=2), "winner did not create id entry"
+        loser = pool.submit(hosted._client_run_id, run_dir)
+        assert reader_saw_empty.wait(timeout=2), "loser did not observe empty entry"
+        allow_writer.set()
+        assert winner.result(timeout=2) == loser.result(timeout=2)
+
+
+def test_client_run_id_refuses_inode_swap_while_waiting(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.touch()
+    real_sleep = hosted.time.sleep
+    swapped = False
+
+    def swap_entry(_delay):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            id_path.unlink()
+            id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+        real_sleep(0)
+
+    monkeypatch.setattr(hosted.time, "sleep", swap_entry)
+    with pytest.raises(hosted.HostedError, match="changed while waiting"):
+        hosted._client_run_id(run_dir)
 
 
 def test_report_run_refuses_oversized_report_before_egress(tmp_path, monkeypatch):

@@ -1304,6 +1304,15 @@ class BoundAttendedExecutor:
         skipped: bool,
         resume_replayer: Any,
     ) -> AttendedExecutionResult:
+        # Fresh verification can take long enough for an independent durable
+        # CLI/operator process to replace or clear the pause.  Re-bind the
+        # exact signed pause immediately before committing the human-completed
+        # checkpoint; never approve a newer pause under an older capability.
+        pending = store.read_pending()
+        if pending is None or _digest(pending) != capability.pause_digest:
+            raise AttendedActionRefused(
+                "the exact attended pause changed before checkpoint commit"
+            )
         checkpoint = RunCheckpoint(
             workflow_name=capability.workflow_name,
             step_index=capability.step_index,
@@ -1330,9 +1339,6 @@ class BoundAttendedExecutor:
         )
         store.write_checkpoint(checkpoint)
         store.write_approval(approval)
-        pending = store.read_pending()
-        if pending is None:
-            raise AttendedActionRefused("pause disappeared before resume")
         store.write_pending(pending.model_copy(update={"status": "approved"}))
 
         # Import lazily to avoid a durable-module cycle.

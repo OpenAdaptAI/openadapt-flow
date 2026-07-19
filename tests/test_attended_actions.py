@@ -1182,6 +1182,51 @@ def test_bound_continue_verifies_then_resumes_after_human_step(tmp_path):
     assert manifest is not None and manifest.run_id == "run-instance-a"
 
 
+def test_linear_continue_rebinds_exact_pause_before_checkpoint_commit(tmp_path):
+    _workflow, _bundle, run, store, capability = _paused(tmp_path)
+    backend = FakeBackend()
+    vision = FakeVision()
+    vision.text_results = {
+        "DONE": Match(point=(10, 10), region=(0, 0, 20, 20), confidence=1.0)
+    }
+
+    def factory(_manifest):
+        replayer = Replayer(backend, vision=vision, poll_interval_s=0.0)
+        original = replayer.revalidate_attended_completion
+
+        def replace_pause_after_live_verification(*args, **kwargs):
+            result = original(*args, **kwargs)
+            pending = store.read_pending()
+            assert pending is not None
+            store.write_pending(
+                pending.model_copy(
+                    update={
+                        "step_id": "independently-replaced-pause",
+                        "created_at": "2026-07-18T13:00:00+00:00",
+                    }
+                )
+            )
+            return result
+
+        replayer.revalidate_attended_completion = replace_pause_after_live_verification
+        return replayer
+
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="request-key-pause-race"),
+        operator="front-desk",
+        executor=BoundAttendedExecutor(factory),
+    )
+    assert decision.status == "refused"
+    assert "pause changed before checkpoint commit" in decision.message
+    assert not backend.actions
+    assert store.checkpoints() == []
+    assert store.read_approval() is None
+    pending = store.read_pending()
+    assert pending is not None
+    assert pending.step_id == "independently-replaced-pause"
+
+
 def test_continue_refuses_live_postcondition_failure_without_actuation(tmp_path):
     _workflow, _bundle, run, store, capability = _paused(tmp_path)
     backends: list[FakeBackend] = []

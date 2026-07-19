@@ -24,7 +24,6 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     HealEvent,
-    Resolution,
     Step,
     Workflow,
 )
@@ -41,6 +40,7 @@ from openadapt_flow.runtime.healing import (
     risk_regression,
     run_promotion,
 )
+from openadapt_flow.runtime.identity_template import build_identity_template
 from openadapt_flow.runtime.replayer import Replayer
 
 VIEWPORT = (300, 200)
@@ -225,6 +225,113 @@ def test_invariant_noop_on_unarmed_step():
     assert identity_preserved(old, new).preserved is True
 
 
+def _template_armed_anchor() -> Anchor:
+    tmpl = build_identity_template(
+        ARMED_BAND,
+        structured_identity="MRN 100200",
+        salt_hex="11" * 16,
+    )
+    assert tmpl is not None
+    return anchor(
+        context_text=None,
+        structured_identity=None,
+        identity_template=tmpl,
+        identifier_crop="identity/s1.png",
+        identifier_region=(20, 100, 60, 20),
+    )
+
+
+def test_invariant_allows_locator_only_change_on_identical_template_anchor():
+    old = _template_armed_anchor()
+    new = old.model_copy(
+        update={
+            "template": "templates/s1-healed.png",
+            "region": (140, 100, 50, 20),
+            "click_point": (150, 105),
+            "ocr_text": "Save",
+        },
+        deep=True,
+    )
+
+    def verifier_must_not_run(recorded: str, observed: str) -> str:
+        raise AssertionError((recorded, observed))
+
+    verdict = identity_preserved(old, new, band_verifier=verifier_must_not_run)
+    assert verdict.preserved is True
+    assert verdict.reason == "identity evidence unchanged"
+
+
+def test_invariant_blocks_removed_identity_template():
+    old = _template_armed_anchor()
+    new = old.model_copy(update={"identity_template": None}, deep=True)
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert "identity_template" in verdict.reason
+
+
+@pytest.mark.parametrize("mutation", ["band_len", "token", "structured"])
+def test_invariant_blocks_changed_identity_template(mutation):
+    old = _template_armed_anchor()
+    changed = old.identity_template.model_copy(deep=True)
+    if mutation == "band_len":
+        changed.band_len += 1
+    elif mutation == "token":
+        changed.tokens[0].c = "00" * 32
+    else:
+        changed.structured = "ff" * 32
+    new = old.model_copy(update={"identity_template": changed}, deep=True)
+
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert "identity_template" in verdict.reason
+
+
+def test_invariant_blocks_changed_structured_identity():
+    old = anchor(structured_identity="MRN 100200")
+    new = old.model_copy(update={"structured_identity": "MRN 100201"}, deep=True)
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert "changed structured_identity" in verdict.reason
+
+
+def test_invariant_blocks_added_structured_identity():
+    old = anchor()
+    new = old.model_copy(update={"structured_identity": "MRN 100200"}, deep=True)
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert "added structured_identity" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    "old",
+    [
+        anchor(),
+        anchor(structured_identity="MRN 100200"),
+    ],
+    ids=["unarmed", "structured-only"],
+)
+def test_invariant_blocks_added_context_without_recorded_band(old):
+    new = old.model_copy(update={"context_text": ARMED_BAND}, deep=True)
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert "added context_text identity evidence" in verdict.reason
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("identifier_crop", "identity/other.png"),
+        ("identifier_region", (21, 100, 60, 20)),
+    ],
+)
+def test_invariant_blocks_changed_pixel_identity_evidence(field, value):
+    old = _template_armed_anchor()
+    new = old.model_copy(update={field: value}, deep=True)
+    verdict = identity_preserved(old, new)
+    assert verdict.preserved is False
+    assert field in verdict.reason
+
+
 # --------------------------------------------------------------------------- #
 # 2. HealPatch -- reviewable diff
 # --------------------------------------------------------------------------- #
@@ -245,6 +352,16 @@ def test_patch_classifies_identity_vs_locator_changes():
     text = patch.diff()
     assert "identity changes:" in text
     assert "locator changes:" in text
+
+
+def test_patch_classifies_identity_template_change_as_identity():
+    old = _template_armed_anchor()
+    new = old.model_copy(update={"identity_template": None}, deep=True)
+    patch = HealPatch.from_event(
+        HealEvent(step_id="s1", rung_used="ocr", old_anchor=old, new_anchor=new)
+    )
+    fields = {change.field: change for change in patch.changes}
+    assert fields["identity_template"].identity is True
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +405,48 @@ def test_gate_fails_on_identity_and_reports_all_failures():
     assert result.passed is False
     assert result.identity_ok is False
     assert any("identity regression" in f for f in result.failures)
+
+
+def test_unchanged_template_does_not_bypass_effect_or_risk_regressions():
+    old_anchor = _template_armed_anchor()
+    new_anchor = old_anchor.model_copy(
+        update={"click_point": (150, 150)},
+        deep=True,
+    )
+    old_step = Step(
+        id="s1",
+        intent="write",
+        action=ActionKind.CLICK,
+        anchor=old_anchor,
+        risk="irreversible",
+    )
+    new_step = old_step.model_copy(
+        update={"anchor": new_anchor, "risk": "reversible"},
+        deep=True,
+    )
+    patch = HealPatch.from_event(
+        HealEvent(
+            step_id="s1",
+            rung_used="ocr",
+            old_anchor=old_anchor,
+            new_anchor=new_anchor,
+        )
+    )
+    result = RegressionGate().evaluate(
+        patch,
+        old_anchor,
+        new_anchor,
+        old_step=old_step,
+        new_step=new_step,
+        effect_baseline={"record-written": True},
+        effect_now={"record-written": lambda: False},
+    )
+    assert result.identity_ok is True
+    assert result.effect_ok is False
+    assert result.risk_ok is False
+    assert result.passed is False
+    assert any("effect regression" in failure for failure in result.failures)
+    assert any("risk regression" in failure for failure in result.failures)
 
 
 # --------------------------------------------------------------------------- #

@@ -44,6 +44,7 @@ pulls it onto the replay hot path.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Optional, Protocol
@@ -104,6 +105,7 @@ def record_desktop_capture(
     *,
     task_description: str = "openadapt-flow desktop recording",
     params: Optional[dict[str, str]] = None,
+    identifier_region: Optional[tuple[int, int, int, int]] = None,
     capture_dir: Optional[Path | str] = None,
     ready_timeout_s: float = 60.0,
     recorder_factory: Optional[RecorderFactory] = None,
@@ -124,6 +126,14 @@ def record_desktop_capture(
             demonstrated value is marked as that parameter (overridable at
             replay). Desktop has no field identity, so parameters are keyed by
             their demonstrated VALUE (mirrors ``convert_capture``).
+        identifier_region: Operator-marked RECORD-IDENTIFYING region
+            ``(x, y, w, h)`` in the recording's pixel space (the patient
+            banner / MRN cell — ``record --identifier X,Y,W,H``). Stamped
+            additively into the recording's ``meta.json`` so the compiler
+            crops those pixels (``anchor.identifier_crop``) and the pixel
+            identity tier arms on remote-display replays. A pixel capture has
+            no field identity, so the region is marked once for the
+            recording (the identifying banner is static app chrome).
         capture_dir: Where the raw capture session is written (default: a
             ``.capture`` subdir of ``out_dir``). Kept so the raw session is
             inspectable / re-convertible.
@@ -164,4 +174,13 @@ def record_desktop_capture(
         _wait_for_stop(stop)
     # The recorder context has exited: capture threads joined, the session is
     # fully written to disk. Convert it into the compile-ready recording.
-    return convert(cap_dir, out_dir, params=params or {})
+    recording = convert(cap_dir, out_dir, params=params or {})
+    if identifier_region is not None:
+        # Additive meta.json stamp (the compiler reads `identifier_region`;
+        # everything else ignores unknown keys). Written post-convert so the
+        # converter contract stays unchanged.
+        meta_path = Path(recording) / "meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta["identifier_region"] = [int(v) for v in identifier_region]
+        meta_path.write_text(json.dumps(meta, indent=2))
+    return recording

@@ -207,3 +207,44 @@ def test_replay_succeeds_with_secret_and_new_param(
     report = _replay(bundle, server_url, tmp_path / "run_ok")
     assert report.success, [r.error for r in report.results if not r.ok]
     assert len(report.results) == 11
+
+
+def test_identifier_field_marking_records_region_and_compiles_crop(
+    server_url: str, tmp_path: Path
+) -> None:
+    """``record --identifier FIELD``: the marked field's rect is captured
+    in-page on every click (``identifier_region`` on the event), and the
+    compiler crops those pixels (``anchor.identifier_crop``) — forcing the
+    pixel identity tier armed even though this is a structured (DOM)
+    recording, so the bundle stays identity-armed on a later remote-display
+    replay."""
+
+    def drive(page, pump) -> None:
+        page.wait_for_selector("#username", state="visible", timeout=20000)
+        page.click("#username")
+        pump()
+        pump()
+
+    rec = record_interactive(
+        server_url,
+        tmp_path / "rec",
+        identifier_fields=("brand",),  # the always-present MockMed topbar
+        headless=True,
+        script=drive,
+    )
+    clicks = [e for e in _events(rec) if e["kind"] == "click"]
+    assert clicks
+    region = clicks[0].get("identifier_region")
+    assert region and len(region) == 4
+    x, y, w, h = region
+    assert w > 0 and h > 0
+
+    bundle = tmp_path / "bundle"
+    workflow = compile_recording(rec, bundle, name="marked-identifier")
+    click_steps = [s for s in workflow.steps if s.anchor is not None]
+    assert click_steps
+    anchor = click_steps[0].anchor
+    assert anchor.identifier_crop is not None
+    assert anchor.identifier_region == tuple(region)
+    assert (bundle / anchor.identifier_crop).is_file()
+    assert click_steps[0].identifier_crop_missing_reason is None

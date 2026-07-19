@@ -325,7 +325,7 @@ def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path, kind) -> 
 
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params):
+    def fake_record(out_dir, *, task_description, params, identifier_region=None):
         captured["out"] = out_dir
         captured["params"] = params
         return out_dir

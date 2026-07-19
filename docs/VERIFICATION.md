@@ -10,7 +10,7 @@
 
 ## What is CI-proven today vs. being validated
 
-- **CI-proven today (6):** `web-supported`, `deterministic-zero-model-replay`, `effect-verification-silent-writes`, `identity-gate-halt-armed`, `halt-teach-promote`, `mockmed-benchmark-ci-reproducible`
+- **CI-proven today (7):** `web-supported`, `deterministic-zero-model-replay`, `effect-verification-silent-writes`, `identity-gate-halt-armed`, `identifier-crop-compile-emission`, `halt-teach-promote`, `mockmed-benchmark-ci-reproducible`
 - **Being validated — opt-in / infra-gated or field (8):** `effect-verifier-kit`, `windows-desktop-validating`, `macos-native-validating`, `linux-native-validating`, `rdp-validating`, `desktop-recording-validating`, `citrix-pixel-validating`, `openemr-field-benchmark`
 
 ## Claims
@@ -105,6 +105,23 @@
 **Caveats (honest limits):**
 
 - Identity verification covers ONLY armed steps. Real bundles arm a MINORITY of clicks (4 of 12 on a recent live OpenEMR bundle); an UNARMED click proceeds with no identity check whatsoever. Coverage is an auditable per-step metric, but disclosure does not close the gap.
+
+### `identifier-crop-compile-emission` — supported — CI-proven today
+
+> The compiler emits a pixel identifier crop (anchor.identifier_crop) for identity-armed steps without structured identity — and for any step whose identifying region is marked at record time (--identifier) — so the pixel-compare identity tier arms on remote-display/pixel replays; every crop-less identity-applicable step records an explicit degrade reason, and lint surfaces per-bundle pixel-identity coverage.
+
+- Surfaces: docs
+- Strongest evidence strength: **supported** (tier is `supported`)
+
+| Backing evidence | Kind | Gating / CI stage | Strength | Proves |
+|---|---|---|---|---|
+| `tests/test_compile_identifier_crop.py` | test | ci (required PR gate (test)) | supported | Synthetic-fixture proof of the emission mechanism: a pixel-only recording compiles WITH a crop under templates/identifiers/ (sealed + manifest-hashed like every image crop); a structured recording writes NO identity pixels and records why; explicit --identifier markings (event rect / meta region) win; encrypted save seals the crop and the sealed crop still reaches the tier; the compiled crop drives a wrong-MRN MISMATCH through the real replayer ladder while pixel VERIFY stays hard-gated off (zero-false-accept preserved). |
+| `tests/test_identifier_crop_lint.py` | test | ci (required PR gate (test)) | supported | Lint coverage surfacing: identity-armed steps with vs without crops (missing_identifier_crop findings carry the compiler's degrade reason; warn on band-only identity, info under structured identity). |
+
+**Caveats (honest limits):**
+
+- Mechanism proven on synthetic fixtures and the bundled demo app only — this does NOT re-qualify any desktop/remote-display substrate, and the pixel tier remains MISMATCH-or-ABSTAIN (it can add a safe halt on a wrong identifier, never authorize a match; PIXEL_VERIFY_ENABLED stays off pending a jitter-robust distance).
+- Automatic emission requires an OCR-readable identity band at compile time; icon-only or unreadable rows still compile crop-less (with the recorded reason) and fall back to the OCR band tier at replay.
 
 ### `halt-teach-promote` — supported — CI-proven today
 

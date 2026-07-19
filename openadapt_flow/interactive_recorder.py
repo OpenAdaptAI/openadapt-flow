@@ -70,7 +70,29 @@ _INIT_JS = r"""
   if (window.__oaflowInstalled) return;
   window.__oaflowInstalled = true;
   const SECRET_NAMES = __SECRET_NAMES__;
+  const IDENT_NAMES = __IDENT_NAMES__;
   const SPECIAL = __SPECIAL_KEYS__;
+
+  function identifierRect() {
+    // Bounding rect of the operator-marked record-identifying field
+    // (--identifier FIELD): the patient-banner / MRN element whose PIXELS the
+    // compiler crops (anchor.identifier_crop) to arm the pixel-compare
+    // identity tier on remote-display replays. Captured at CLICK time (the
+    // rect the clicked frame shows), first marked field present wins.
+    try {
+      for (const key of IDENT_NAMES) {
+        const el = document.getElementsByName(key)[0]
+          || document.getElementById(key);
+        if (!el || !el.getBoundingClientRect) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          return [Math.round(r.left), Math.round(r.top),
+                  Math.round(r.width), Math.round(r.height)];
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
 
   function structuredIdentity(px, py) {
     // Mirrors PlaywrightBackend.structured_text_at: the REAL characters of the
@@ -114,6 +136,7 @@ _INIT_JS = r"""
       kind: 'click',
       x: Math.round(e.clientX), y: Math.round(e.clientY),
       sid: structuredIdentity(e.clientX, e.clientY),
+      idr: identifierRect(),
       url: location.href, title: document.title,
     });
   }, true);
@@ -167,6 +190,7 @@ class InteractiveRecorder:
         *,
         secret_fields: tuple[str, ...] = (),
         param_fields: tuple[str, ...] = (),
+        identifier_fields: tuple[str, ...] = (),
         headless: bool = False,
         poll_ms: int = 60,
         settle_timeout_s: float = 5.0,
@@ -178,6 +202,7 @@ class InteractiveRecorder:
         self._out_dir = Path(out_dir)
         self._secret_fields = set(secret_fields)
         self._param_fields = set(param_fields)
+        self._identifier_fields = set(identifier_fields)
         self._headless = headless
         self._poll_ms = poll_ms
         self._viewport = viewport
@@ -225,9 +250,13 @@ class InteractiveRecorder:
             "__oaflow_emit",
             lambda source, detail: self._pyq.append(detail),
         )
-        init_js = _INIT_JS.replace(
-            "__SECRET_NAMES__", json.dumps(sorted(self._secret_fields))
-        ).replace("__SPECIAL_KEYS__", json.dumps(list(_SPECIAL_KEYS)))
+        init_js = (
+            _INIT_JS.replace(
+                "__SECRET_NAMES__", json.dumps(sorted(self._secret_fields))
+            )
+            .replace("__IDENT_NAMES__", json.dumps(sorted(self._identifier_fields)))
+            .replace("__SPECIAL_KEYS__", json.dumps(list(_SPECIAL_KEYS)))
+        )
         self.page.add_init_script(init_js)
         self.page.goto(self._url)
         try:
@@ -431,8 +460,15 @@ class InteractiveRecorder:
 
     def _record_click(self, ev: dict[str, Any]) -> None:
         assert self.recorder is not None
+        event: dict[str, Any] = {"kind": "click", "x": int(ev["x"]), "y": int(ev["y"])}
+        # Marked identifier field rect (--identifier FIELD), captured in-page
+        # at click time: the compiler crops these pixels
+        # (anchor.identifier_crop) to arm the pixel identity tier.
+        idr = ev.get("idr")
+        if idr:
+            event["identifier_region"] = [int(v) for v in idr]
         self.recorder.record_observed(
-            {"kind": "click", "x": int(ev["x"]), "y": int(ev["y"])},
+            event,
             before_png=self._last_frame,
             structural_before=self._last_structural,
             structured_identity=ev.get("sid"),
@@ -494,6 +530,7 @@ def record_interactive(
     *,
     secret_fields: tuple[str, ...] = (),
     param_fields: tuple[str, ...] = (),
+    identifier_fields: tuple[str, ...] = (),
     headless: bool = False,
     script: Optional[Callable[[Any, Callable[[], None]], None]] = None,
     **kwargs: Any,
@@ -511,6 +548,13 @@ def record_interactive(
             (their demonstrated value becomes the default, overridable at
             replay with ``--param``); all other non-secret typed fields are
             recorded as literals.
+        identifier_fields: Field ``name``/``id`` values marking the
+            RECORD-IDENTIFYING region (patient banner / MRN field). At each
+            click the first marked field present on the page contributes its
+            bounding rect to the event (``identifier_region``); the compiler
+            crops those pixels (``anchor.identifier_crop``) so the pixel
+            identity tier arms — including on a bundle later replayed over a
+            remote-display/pixel substrate (Citrix/RDP).
         headless: Run the browser headless (used by scripted/CI recording;
             a human recording is headed).
         script: Test hook — ``script(page, pump)`` drives synthetic input and
@@ -524,6 +568,7 @@ def record_interactive(
         out_dir,
         secret_fields=secret_fields,
         param_fields=param_fields,
+        identifier_fields=identifier_fields,
         headless=headless,
         **kwargs,
     )

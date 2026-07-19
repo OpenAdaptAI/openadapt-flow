@@ -107,6 +107,25 @@ is marked as parameter `NAME`; its demonstrated value becomes the default,
 overridable at replay with `--param NAME=<new value>`. (This mirrors
 `convert_capture`'s `params` contract and the replay `--param` contract.)
 
+## Marking the record-identifying region (`--identifier`)
+
+The compiler automatically emits a **pixel identifier crop**
+(`anchor.identifier_crop`, stored under `templates/identifiers/` so it is
+sealed with the other image crops) for every identity-armed click that
+captured no structured identity — exactly the pixel-recording case — from the
+OCR identity band. That crop arms the pixel-compare identity tier
+(MISMATCH-or-ABSTAIN: it can add a safe halt on a wrong MRN, never authorize
+a match) on remote-display replays.
+
+To scope the crop to the operator-designated identifying region instead (the
+patient banner / MRN cell), mark it once per recording:
+`record --backend rdp --identifier X,Y,W,H` (recording pixels; a pixel
+capture has no field identity, so the region is given literally — on
+`--backend web` the same flag takes a field `name`/`id`). Steps that compile
+without a crop record why in `Step.identifier_crop_missing_reason`, and
+`lint` reports per-bundle pixel-identity coverage
+(`missing_identifier_crop`).
+
 ## Where recording happens
 
 `record --backend windows` captures the desktop **the recorder process runs

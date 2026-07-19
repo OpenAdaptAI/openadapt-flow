@@ -63,6 +63,38 @@ def _parse_params(pairs: Sequence[str] | None) -> dict[str, str]:
     return params
 
 
+def _parse_identifier_region_arg(
+    values: Sequence[str], *, backend: str
+) -> tuple[int, int, int, int] | None:
+    """Parse a desktop ``record --identifier X,Y,W,H`` region (fail-loud).
+
+    A pixel capture has no field identity, so ``--identifier`` on a desktop
+    backend takes the record-identifying REGION itself, once. A field-name
+    argument (the web syntax) or a repeated/malformed region is refused
+    rather than silently recording an unmarked session.
+    """
+    if not values:
+        return None
+    if len(values) > 1:
+        raise SystemExit(
+            f"record --backend {backend}: --identifier takes ONE region "
+            f"(X,Y,W,H) on the pixel/desktop substrate, got {len(values)}."
+        )
+    parts = values[0].split(",")
+    try:
+        region = tuple(int(p.strip()) for p in parts)
+    except ValueError:
+        region = ()
+    if len(region) != 4 or region[2] <= 0 or region[3] <= 0:
+        raise SystemExit(
+            f"record --backend {backend}: --identifier expects X,Y,W,H "
+            "(recording pixels, positive size) on the pixel/desktop "
+            f"substrate — field names only apply to --backend web. Got "
+            f"{values[0]!r}."
+        )
+    return (region[0], region[1], region[2], region[3])
+
+
 def _replay_params(
     pairs: Sequence[str] | None,
     params_file: str | None = None,
@@ -443,6 +475,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
         Path(args.out),
         secret_fields=tuple(args.secret or ()),
         param_fields=tuple(args.param or ()),
+        identifier_fields=tuple(getattr(args, "identifier", None) or ()),
         headless=args.headless,
     )
     print(f"Recording written to {out}")
@@ -490,6 +523,14 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
     # convert_capture / the replay --param contract).
     params = _parse_params(args.param)
 
+    # Record-identifying region: a pixel capture has no field identity, so
+    # --identifier takes the region itself (X,Y,W,H, recording pixels), marked
+    # once per recording. Fail loud on field-name syntax rather than silently
+    # record an unmarked session.
+    identifier_region = _parse_identifier_region_arg(
+        getattr(args, "identifier", None) or (), backend=backend
+    )
+
     from openadapt_flow.desktop_record import record_desktop_capture
 
     task = args.task or f"openadapt-flow {backend} recording"
@@ -497,6 +538,7 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
         Path(args.out),
         task_description=task,
         params=params,
+        identifier_region=identifier_region,
     )
     print(f"Recording written to {out}")
     if params:
@@ -1808,6 +1850,24 @@ def build_parser() -> argparse.ArgumentParser:
             "windows/macos/linux/rdp (capture has no field identity), use "
             "NAME=VALUE — the typed value equal to VALUE is marked as parameter "
             "NAME. Repeatable."
+        ),
+    )
+    p.add_argument(
+        "--identifier",
+        action="append",
+        default=[],
+        metavar="FIELD|X,Y,W,H",
+        help=(
+            "Mark the RECORD-IDENTIFYING region (patient banner / MRN field) "
+            "so the compiler crops its pixels (anchor.identifier_crop) and "
+            "the pixel-compare identity tier arms on remote-display/pixel "
+            "replays (Citrix/RDP). For --backend web, FIELD is the field "
+            "name/id (repeatable; the first marked field present at each "
+            "click contributes its rect). For --backend "
+            "windows/macos/linux/rdp (a pixel capture has no field "
+            "identity), give the region once as X,Y,W,H in recording "
+            "pixels. Unmarked recordings still get automatic crops on "
+            "identity-armed pixel steps (from the OCR identity band)."
         ),
     )
     p.add_argument(

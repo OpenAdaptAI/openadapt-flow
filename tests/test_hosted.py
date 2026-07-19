@@ -2228,6 +2228,121 @@ def test_client_run_id_refuses_inode_swap_while_waiting(tmp_path, monkeypatch):
         hosted._client_run_id(run_dir)
 
 
+def test_client_run_id_refuses_inode_swap_during_read(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+    real_read = hosted.os.read
+    swapped = False
+
+    def swap_then_read(fd, size):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            id_path.unlink()
+            id_path.write_text(_HALT_UUID + "\n", encoding="utf-8")
+        return real_read(fd, size)
+
+    monkeypatch.setattr(hosted.os, "read", swap_then_read)
+    with pytest.raises(hosted.HostedError, match="changed while"):
+        hosted._client_run_id(run_dir)
+    assert id_path.read_text(encoding="utf-8").strip() == _HALT_UUID
+
+
+@pytest.mark.skipif(
+    hosted.os.name == "nt" or not hasattr(hosted.os, "mkfifo"),
+    reason="FIFO substitution is POSIX-only",
+)
+def test_client_run_id_nonblocking_open_refuses_fifo_swap(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+    real_open = hosted.os.open
+    swapped = False
+
+    def swap_to_fifo(path, flags, mode=0o777):
+        nonlocal swapped
+        if Path(path) == id_path and not (flags & hosted.os.O_CREAT) and not swapped:
+            assert flags & hosted.os.O_NONBLOCK
+            swapped = True
+            id_path.unlink()
+            hosted.os.mkfifo(id_path)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(hosted.os, "open", swap_to_fifo)
+    with pytest.raises(hosted.HostedError, match="regular file"):
+        hosted._client_run_id(run_dir)
+
+
+def test_client_run_id_write_failure_never_unlinks_replacement(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    real_fsync = hosted.os.fsync
+    replaced = False
+
+    def replace_then_fail(fd):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            id_path.unlink()
+            id_path.write_text(_HALT_UUID + "\n", encoding="utf-8")
+            raise OSError("forced persistence failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(hosted.os, "fsync", replace_then_fail)
+    with pytest.raises(hosted.HostedError, match="persist"):
+        hosted._client_run_id(run_dir)
+    assert id_path.read_text(encoding="utf-8").strip() == _HALT_UUID
+
+
+def test_client_run_id_retries_only_canonical_partial_write(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_bytes(_RUN_UUID[:12].encode("ascii"))
+    completed = False
+
+    def complete_same_inode(_delay):
+        nonlocal completed
+        assert not completed
+        completed = True
+        with id_path.open("r+b") as handle:
+            handle.seek(0)
+            handle.truncate()
+            handle.write((_RUN_UUID + "\n").encode("ascii"))
+            handle.flush()
+
+    monkeypatch.setattr(hosted.time, "sleep", complete_same_inode)
+    assert hosted._client_run_id(run_dir) == _RUN_UUID
+    assert completed
+
+
+def test_client_run_id_refuses_malformed_short_value_without_retry(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / ".report_run_id").write_bytes(b"not-a-prefix")
+    monkeypatch.setattr(
+        hosted.time,
+        "sleep",
+        lambda _delay: pytest.fail("malformed value must not be retried"),
+    )
+    with pytest.raises(hosted.HostedError, match="unreadable or invalid"):
+        hosted._client_run_id(run_dir)
+
+
+@pytest.mark.parametrize("ending", [b"", b"\n", b"\r\n"])
+def test_client_run_id_accepts_canonical_platform_line_endings(tmp_path, ending):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / ".report_run_id").write_bytes(_RUN_UUID.encode("ascii") + ending)
+    assert hosted._client_run_id(run_dir) == _RUN_UUID
+
+
 def test_report_run_refuses_oversized_report_before_egress(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "r1"
     report_path = _successful_run(run_dir)

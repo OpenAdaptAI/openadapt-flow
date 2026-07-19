@@ -1606,7 +1606,7 @@ def _client_run_id(run_path: Path) -> str:
         last_error: Optional[Exception] = None
         if not stat.S_ISREG(metadata.st_mode):
             raise HostedError("run report id must be a regular file (symlinks refused)")
-        flags = os.O_RDONLY
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         if nofollow:
             flags |= nofollow
@@ -1630,35 +1630,60 @@ def _client_run_id(run_path: Path) -> str:
             if not os.path.samestat(metadata, opened):
                 raise HostedError("run report id changed while it was being opened")
 
-            while True:
+            def require_same_entry(*, action: str) -> os.stat_result:
                 try:
                     current = id_path.lstat()
                 except FileNotFoundError as exc:
-                    raise HostedError(
-                        "run report id changed while waiting for its writer"
-                    ) from exc
+                    raise HostedError(f"run report id changed while {action}") from exc
                 if not stat.S_ISREG(current.st_mode):
                     raise HostedError(
                         "run report id must be a regular file (symlinks refused)"
                     )
                 if not os.path.samestat(opened, current):
-                    raise HostedError(
-                        "run report id changed while waiting for its writer"
-                    )
+                    raise HostedError(f"run report id changed while {action}")
+                return current
+
+            def is_canonical_prefix(raw: bytes) -> bool:
+                """Whether ``raw`` can be a prefix of our canonical UUID."""
+                uuid_part = raw[:36]
+                hex_bytes = b"0123456789abcdef"
+                dash_positions = {8, 13, 18, 23}
+                if not all(
+                    byte == ord("-") if index in dash_positions else byte in hex_bytes
+                    for index, byte in enumerate(uuid_part)
+                ):
+                    return False
+                # Text-mode writes use LF on POSIX and CRLF on Windows. A
+                # trailing CR is the only valid byte beyond the UUID that can
+                # still be an in-progress serialization.
+                return len(raw) <= 36 or raw == uuid_part + b"\r"
+
+            while True:
+                require_same_entry(action="waiting for its writer")
 
                 os.lseek(fd, 0, os.SEEK_SET)
                 raw_bytes = os.read(fd, 128)
-                if len(raw_bytes) == 128:
+                # Bind the bytes back to the same live directory entry after
+                # the read as well as before it. Otherwise a replacement
+                # during os.read could return UUID A while the path persists B.
+                require_same_entry(action="it was being read")
+                size_after_read = os.fstat(fd).st_size
+                if len(raw_bytes) == 128 or size_after_read >= 128:
                     raise HostedError("run report id is unreadable or invalid")
                 try:
                     raw = raw_bytes.decode("utf-8")
-                    return str(UUID(raw.strip()))
+                    parsed = str(UUID(raw.strip()))
+                    if size_after_read != len(raw_bytes):
+                        raise ValueError("run report id changed during read")
+                    if raw not in {parsed, f"{parsed}\n", f"{parsed}\r\n"}:
+                        raise ValueError("run report id is not canonical")
+                    return parsed
                 except (UnicodeError, ValueError) as exc:
                     last_error = exc
                     # A UUID written by this function is 36 ASCII bytes plus a
                     # newline. Only a shorter prefix can be an in-progress
                     # write; a complete malformed value is never retried.
-                    if len(raw_bytes) >= 36:
+                    if not is_canonical_prefix(raw_bytes):
                         raise HostedError(
                             "run report id is unreadable or invalid"
                         ) from exc
@@ -1701,15 +1726,6 @@ def _client_run_id(run_path: Path) -> str:
         raise HostedError("could not persist the run report id") from exc
     created = os.fstat(fd)
 
-    def remove_created_entry() -> None:
-        """Remove only the exact entry created above, never a replacement."""
-        try:
-            current = id_path.lstat()
-            if os.path.samestat(created, current):
-                id_path.unlink()
-        except OSError:
-            pass
-
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(fresh + "\n")
@@ -1736,10 +1752,11 @@ def _client_run_id(run_path: Path) -> str:
             finally:
                 os.close(directory_fd)
     except HostedError:
-        remove_created_entry()
         raise
     except OSError as exc:
-        remove_created_entry()
+        # There is no portable conditional-unlink primitive. Leave this exact
+        # failed-create entry behind so subsequent reports fail closed instead
+        # of risking deletion of a path replacement between lstat and unlink.
         raise HostedError("could not persist the run report id") from exc
     return fresh
 

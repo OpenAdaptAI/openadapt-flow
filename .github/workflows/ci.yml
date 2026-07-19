@@ -514,7 +514,9 @@ jobs:
       # test only constructs NativeWin32Api and verifies every ctypes prototype
       # and structure size; it never enumerates a window or calls SendInput.
       - name: Windows ABI and mock backend tests (non-injecting)
-        run: pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py tests/test_win32_window_client.py tests/test_remote_display_backend.py
+        run: |
+          pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py tests/test_win32_window_client.py tests/test_remote_display_backend.py
+          pytest -q tests/test_hosted.py -k client_run_id
 
   # --- Clean-wheel install + CLI smoke (REQUIRED on PRs) -------------------
   # Builds the wheel, installs it in a FRESH venv (no source tree), and proves

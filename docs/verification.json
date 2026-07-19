@@ -732,6 +732,44 @@
       "errors": []
     },
     {
+      "id": "win32-window-replay-roadmap",
+      "claim": "Windows hosts can replay window-scoped remote-display workflows (the Citrix/RDP client window on a Windows endpoint) through the same governed pixel contract already proven on macOS hosts.",
+      "tier": "roadmap",
+      "reproducibility": null,
+      "surfaces": [
+        "docs"
+      ],
+      "strongest_evidence": "supported",
+      "caveats": [
+        "NOT qualified: no counted end-to-end batch on a real Windows host or a real client window exists. The contract tests mock every Win32 call; real DPI virtualization, UIPI, foreground-arbitration, and PrintWindow rendering behavior remain unproven until the Parallels/real-Windows validation procedure is executed and counted."
+      ],
+      "evidence": [
+        {
+          "path": "tests/test_win32_window_client.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "MOCK-ONLY conformance: the win32 WindowClient implements the remote-display WindowClient seam (exact process/title/class selection with ambiguity halt, client-area coordinate mapping under per-monitor DPI awareness, PrintWindow-then-BitBlt capture fallback, focus-verification refusal, and the UIPI elevation guard) against a scripted Win32 API \u2014 never against a real Windows host."
+        },
+        {
+          "path": "docs/desktop/CITRIX_PIXEL.md",
+          "kind": "doc",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The remote-display contract the client implements and the evidence ladder for qualifying it (Parallels/RDP client-window analog first, then design-partner Citrix)."
+        }
+      ],
+      "errors": []
+    },
+    {
       "id": "openemr-field-benchmark",
       "claim": "On the real third-party OpenEMR public demo, compiled replay went 20/20 versus 10/10 for a computer-use agent, faster and with zero model calls.",
       "tier": "validating",

@@ -507,10 +507,14 @@ jobs:
         run: pip install -e .[dev]
 
       # The WindowsBackend + RDP backend suites mock the WAA/RDP servers with
-      # stdlib HTTP + fakes (no live VM, no Playwright browser), so they run
-      # anywhere. This proves the 4-method Backend protocol on Windows.
+      # stdlib HTTP + fakes (no live VM, no Playwright browser), and the win32
+      # window-client suite mocks the entire Win32 API, so they run anywhere.
+      # This proves the 4-method Backend protocol — and the remote-display
+      # WindowClient contract — on a real Windows interpreter (still mocked:
+      # no live window, no SendInput; see claims.yaml
+      # win32-window-replay-roadmap for what this does NOT prove).
       - name: Windows mock backend tests
-        run: pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py
+        run: pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py tests/test_win32_window_client.py tests/test_remote_display_backend.py
 
   # --- Clean-wheel install + CLI smoke (REQUIRED on PRs) -------------------
   # Builds the wheel, installs it in a FRESH venv (no source tree), and proves

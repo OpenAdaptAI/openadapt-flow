@@ -44,12 +44,18 @@ not Accessibility-trusted; a caller never mistakes a no-op for a completed actio
 The macOS bindings are isolated behind :class:`MacWindowClient` (a small
 :class:`WindowClient` seam) so the coordinate math, the pixel<->point mapping, and
 the fail-loud contract are unit-testable with a fake client and no live window.
+The Windows-host counterpart of that seam is
+:class:`openadapt_flow.backends.win32_window_client.Win32WindowClient`
+(PrintWindow/BitBlt client-area capture + SendInput injection, per-monitor-v2
+DPI, same fail-loud contract); :class:`RemoteDisplayBackend` picks the host's
+client automatically when none is injected.
 """
 
 from __future__ import annotations
 
 import io
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -307,13 +313,57 @@ class WindowClient(Protocol):
         """Post a wheel gesture (line units; Backend sign convention)."""
         ...
 
+    def resolve_key(self, token: str) -> Optional[tuple[int, bool]]:
+        """Resolve a named-key or single-character token from a chord to
+        ``(client keycode, needs_shift)``, or None when unmapped.
+
+        Keycodes are CLIENT-DEFINED (macOS virtual key codes vs Windows VKs);
+        the backend never interprets them, it only round-trips them into
+        :meth:`key`. An unmapped token makes the backend halt loudly.
+        """
+        ...
+
+
+def resolve_mac_key(token: str) -> Optional[tuple[int, bool]]:
+    """macOS key resolution: named-key table first, then US-layout characters.
+
+    Shared by :class:`MacWindowClient` and the offline test fakes so the
+    backend's chord semantics stay byte-identical to the historical in-backend
+    lookup (named keys resolve unshifted; an upper-case character token adds
+    Shift).
+    """
+    code = _MAC_KEYCODES.get(token.lower())
+    if code is not None:
+        return code, False
+    return _CHAR_KEYCODES.get(token)
+
+
+def _default_window_client() -> "WindowClient":
+    """The host OS's live window client (macOS Quartz or Win32).
+
+    Fail-loud on hosts with no window-scoped replay client rather than
+    constructing a client whose bindings can never work.
+    """
+    if sys.platform == "darwin":
+        return MacWindowClient()
+    if sys.platform == "win32":
+        from openadapt_flow.backends.win32_window_client import Win32WindowClient
+
+        return Win32WindowClient()
+    raise RemoteDisplayError(
+        f"no host WindowClient exists for platform {sys.platform!r}; "
+        "window-scoped remote-display replay is implemented on macOS "
+        "(Quartz) and Windows (Win32) hosts only"
+    )
+
 
 class RemoteDisplayBackend:
     """`Backend` over a remote-display CLIENT WINDOW (pixels in, OS input out).
 
     Args:
-        client: The host-OS window client (real :class:`MacWindowClient` or a
-            fake). Defaults to a live :class:`MacWindowClient`.
+        client: The host-OS window client (a real :class:`MacWindowClient` /
+            ``Win32WindowClient`` or a fake). Defaults to the current host's
+            live client; unsupported hosts fail loud at construction.
         owner_substr: Exact case-insensitive owner-app name (default
             ``"Parallels Desktop"``; use the exact Citrix Workspace owner name
             for a real ICA client).
@@ -347,7 +397,7 @@ class RemoteDisplayBackend:
         max_frame_age_s: float = 10.0,
         readiness_probe: Optional[Callable[[bytes], bool]] = None,
     ) -> None:
-        self._client = client if client is not None else MacWindowClient()
+        self._client = client if client is not None else _default_window_client()
         self._owner_substr = owner_substr
         self._title_substr = title_substr
         self._require_input_trust = require_input_trust
@@ -531,16 +581,13 @@ class RemoteDisplayBackend:
             if len(final) == 1 and not mods:
                 self._client.type_chars(final)
                 return
-            # Named key, or a modified key: resolve a key code (named table first,
-            # then the printable-character table so chords like Ctrl+A work).
-            code = _MAC_KEYCODES.get(final.lower())
-            shift = False
-            if code is None:
-                char = _CHAR_KEYCODES.get(final)
-                if char is not None:
-                    code, shift = char
-            if code is None:
+            # Named key, or a modified key: the CLIENT owns the keycode
+            # namespace (macOS virtual key codes vs Windows VKs), so key
+            # resolution is delegated to it; an unmapped token halts loudly.
+            resolved = self._client.resolve_key(final)
+            if resolved is None:
                 raise RemoteDisplayError(f"no key mapping for {final!r} in {key!r}")
+            code, shift = resolved
             flags = list(mods) + (["shift"] if shift else [])
             try:
                 self._client.key(code, down=True, flags=flags)
@@ -566,10 +613,12 @@ class RemoteDisplayBackend:
         """
         if self._require_input_trust and not self._client.input_trusted():
             raise RemoteDisplayError(
-                "process is not Accessibility-trusted, so OS input would be "
-                "silently dropped; grant Accessibility to the driving app "
-                "(System Settings > Privacy & Security > Accessibility) before "
-                "driving a remote-display window. Refusing to emit an input that "
+                "process is not trusted to inject OS input, so input would be "
+                "silently dropped. macOS: grant Accessibility to the driving "
+                "app (System Settings > Privacy & Security > Accessibility). "
+                "Windows: the target window belongs to an elevated (or "
+                "unknown-elevation) process and UIPI would discard our input "
+                "— run the driver elevated. Refusing to emit an input that "
                 "cannot be delivered (a dropped click must never look like "
                 "success)."
             )
@@ -704,6 +753,10 @@ class MacWindowClient:
             return bool(AXIsProcessTrusted())
         except Exception:  # noqa: BLE001 - absence == untrusted
             return False
+
+    def resolve_key(self, token: str) -> Optional[tuple[int, bool]]:
+        """macOS virtual key code for a named-key/character chord token."""
+        return resolve_mac_key(token)
 
     def capture_trusted(self) -> bool:
         """Whether this process may capture other applications' windows."""

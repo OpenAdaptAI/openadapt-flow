@@ -64,8 +64,8 @@ def build_backend(
             from ``cfg.rdp_*``. Primarily a test seam (a live RDP server is
             otherwise required to construct the backend).
         window_client: An injected remote-display ``WindowClient`` for the
-            ``kind: rdp`` local-window path. When omitted, the live macOS
-            client is used. Primarily a test seam.
+            ``kind: rdp`` local-window path. When omitted, the host's native
+            client is used (macOS Quartz or Win32). Primarily a test seam.
         macos_client: An injected native macOS client for ``kind: macos``.
         linux_client: An injected native Linux/AT-SPI client for ``kind: linux``.
 

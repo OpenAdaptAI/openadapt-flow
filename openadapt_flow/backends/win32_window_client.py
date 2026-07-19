@@ -211,7 +211,7 @@ def scancode_key_fields(vk: int, scan_code: int, *, down: bool) -> tuple[int, in
     scan = scan_code & 0xFF
     if scan == 0:
         raise InputDeliveryError(
-            f"virtual key {int(vk):#x} resolved to invalid scan code " f"{scan_code:#x}"
+            f"virtual key {int(vk):#x} resolved to invalid scan code {scan_code:#x}"
         )
     flags = _KEYEVENTF_SCANCODE
     if prefix in (0xE0, 0xE1) or int(vk) in _EXTENDED_VKS:

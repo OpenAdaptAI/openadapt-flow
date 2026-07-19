@@ -1497,6 +1497,8 @@ def _cmd_report_run(args: argparse.Namespace) -> int:
             workflow_id=args.workflow_id,
             host=args.host,
             token=args.token,
+            deployment_kind=args.deployment_kind,
+            org_id=args.org_id,
             backend=args.backend,
             destination_kind=args.destination_kind,
             trusted_hosts=args.trusted_host,
@@ -2810,10 +2812,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--deployment-kind",
+        choices=["local", "cloud", "byoc"],
+        default="local",
+        help=(
+            "Deprecated compatibility input from Flow 1.18.0; accepted but "
+            "ignored because authenticated server provenance is authoritative"
+        ),
+    )
+    p.add_argument(
         "--backend",
         choices=["web", "windows", "macos", "linux", "rdp"],
         default=None,
         help="Backend/substrate this run executed on (web/windows/macos/linux/rdp)",
+    )
+    p.add_argument(
+        "--org-id",
+        default=None,
+        help=(
+            "Deprecated compatibility input from Flow 1.18.0; accepted but "
+            "ignored because token ownership is authoritative"
+        ),
     )
     p.add_argument(
         "--host",

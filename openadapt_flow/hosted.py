@@ -1517,12 +1517,15 @@ def report_break(
             f"ingest-report returned {resp.status_code} (expected 202): "
             f"{_body_snippet(resp)}"
         )
-    body = resp.json() if resp.content else {}
-    result = dict(body) if isinstance(body, dict) else {"response": body}
-    result["emitted"] = True
+    result = _parse_report_response(
+        resp,
+        expected_status=payload["status"],
+        require_break_fields=True,
+    )
     teach_url = result.get("teach_url")
     if teach_url and str(teach_url).startswith("/"):
         result["teach_url"] = f"{resolved_host}{teach_url}"
+    result["emitted"] = True
     return result
 
 
@@ -1594,21 +1597,51 @@ def _client_run_id(run_path: Path) -> str:
         deadline = time.monotonic() + 1.0
         last_error: Optional[Exception] = None
         while True:
+            fd: Optional[int] = None
             try:
+                flags = os.O_RDONLY
                 metadata = id_path.lstat()
                 if not stat.S_ISREG(metadata.st_mode):
                     raise HostedError(
                         "run report id must be a regular file (symlinks refused)"
                     )
-                return str(UUID(id_path.read_text(encoding="utf-8").strip()))
+                before = metadata
+                nofollow = getattr(os, "O_NOFOLLOW", 0)
+                if nofollow:
+                    flags |= nofollow
+                # Windows has no portable O_NOFOLLOW. On every platform, bind
+                # the opened descriptor back to this exact directory entry
+                # before reading any bytes; O_NOFOLLOW is an added symlink
+                # refusal where the OS exposes it.
+
+                fd = os.open(id_path, flags)
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise HostedError(
+                        "run report id must be a regular file (symlinks refused)"
+                    )
+                if not os.path.samestat(before, opened):
+                    raise HostedError("run report id changed while it was being opened")
+
+                with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                    fd = None  # ownership transferred to the file object
+                    raw = handle.read(128)
+                if len(raw) == 128:
+                    raise ValueError("run report id is oversized")
+                return str(UUID(raw.strip()))
             except FileNotFoundError as exc:
                 last_error = exc
                 if not wait_for_writer:
                     raise
-            except (OSError, ValueError) as exc:
+            except HostedError:
+                raise
+            except (OSError, UnicodeError, ValueError) as exc:
                 last_error = exc
                 if not wait_for_writer:
                     raise HostedError("run report id is unreadable or invalid") from exc
+            finally:
+                if fd is not None:
+                    os.close(fd)
             if time.monotonic() >= deadline:
                 raise HostedError(
                     "run report id is unreadable or invalid"
@@ -1741,6 +1774,55 @@ def _optional_uuid(value: Optional[str], *, field: str) -> Optional[str]:
         raise HostedError(f"{field} must be a canonical UUID") from exc
 
 
+def _parse_report_response(
+    resp: httpx.Response,
+    *,
+    expected_status: str,
+    require_break_fields: bool,
+) -> dict[str, Any]:
+    """Validate a successful local-report response before marking it emitted.
+
+    Both report rails share the same run identity and duplicate semantics.
+    Break responses additionally bind the halt and teach route to that run.
+    """
+    try:
+        body = resp.json()
+    except (UnicodeError, ValueError) as exc:
+        raise HostedError("ingest-report returned malformed JSON") from exc
+    if not isinstance(body, dict):
+        raise HostedError("ingest-report returned an unexpected response shape")
+
+    run_id = _optional_uuid(body.get("run_id"), field="response.run_id")
+    if run_id is None:
+        raise HostedError("response.run_id must be a canonical UUID")
+    if body.get("status") != expected_status:
+        raise HostedError(
+            f"ingest-report returned status {body.get('status')!r}; "
+            f"expected {expected_status!r}"
+        )
+    if "duplicate" in body and not isinstance(body["duplicate"], bool):
+        raise HostedError("ingest-report duplicate must be a boolean")
+
+    if require_break_fields:
+        halt_id = _optional_uuid(body.get("halt_id"), field="response.halt_id")
+        if halt_id is None:
+            raise HostedError("response.halt_id must be a canonical UUID")
+        teach_url = body.get("teach_url")
+        if teach_url != f"/dashboard/runs/{run_id}/teach":
+            raise HostedError(
+                "ingest-report teach_url must be the relative route for response.run_id"
+            )
+
+    prior_halt_run_id = body.get("prior_halt_run_id")
+    if prior_halt_run_id is not None:
+        _optional_uuid(prior_halt_run_id, field="response.prior_halt_run_id")
+    provenance = body.get("provenance")
+    if provenance is not None and provenance != "locally_reported":
+        raise HostedError("ingest-report returned an unexpected provenance")
+
+    return dict(body)
+
+
 def _hex64(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
         raise HostedError(f"{field} must be a lowercase 64-hex SHA-256 digest")
@@ -1859,6 +1941,8 @@ def report_run(
     workflow_id: Optional[str] = None,
     host: Optional[str] = None,
     token: Optional[str] = None,
+    deployment_kind: str = "local",
+    org_id: Optional[str] = None,
     backend: Optional[str] = None,
     allow_local_fallback: bool = True,
     destination_kind: Optional[str] = None,
@@ -1884,6 +1968,12 @@ def report_run(
         workflow_id: Hosted workflow id when known (from ``push``/dashboard).
             The exact pushed bundle content digest is always required as the
             execution binding; the id only avoids an extra server lookup.
+        deployment_kind: Deprecated compatibility input retained from Flow
+            1.18.0. The authenticated server derives provenance; this value is
+            ignored and never enters the payload.
+        org_id: Deprecated compatibility input retained from Flow 1.18.0.
+            Token ownership is canonical server-side; this value is ignored
+            and never enters the payload.
         backend: The backend/substrate kind this run executed on (``web`` /
             ``windows`` / ``macos`` / ``linux`` / ``rdp``), when known.
         allow_local_fallback: On a server-side PHI-boundary rejection (422),
@@ -1973,12 +2063,13 @@ def report_run(
             f"ingest-report returned {resp.status_code} (expected 202): "
             f"{_body_snippet(resp)}"
         )
-    try:
-        body = resp.json() if resp.content else {}
-    except ValueError as exc:
-        raise HostedError("ingest-report returned malformed JSON") from exc
-    if not isinstance(body, dict):
-        raise HostedError("ingest-report returned an unexpected response shape")
-    result = dict(body)
+    # Retained solely for the public 1.18.0 keyword/CLI contract. Authenticated
+    # server identity is authoritative and neither value may egress.
+    del deployment_kind, org_id
+    result = _parse_report_response(
+        resp,
+        expected_status="success",
+        require_break_fields=False,
+    )
     result["emitted"] = True
     return result

@@ -1198,6 +1198,30 @@ def test_push_refuses_symlinked_artifact(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 _WORKFLOW_UUID = "11111111-1111-4111-8111-111111111111"
+_RUN_UUID = "22222222-2222-4222-8222-222222222222"
+_HALT_UUID = "33333333-3333-4333-8333-333333333333"
+
+
+def _run_response(**overrides) -> dict:
+    body = {
+        "run_id": _RUN_UUID,
+        "status": "success",
+        "provenance": "locally_reported",
+    }
+    body.update(overrides)
+    return body
+
+
+def _break_response(status: str = "halt", **overrides) -> dict:
+    body = {
+        "run_id": _RUN_UUID,
+        "halt_id": _HALT_UUID,
+        "status": status,
+        "provenance": "locally_reported",
+        "teach_url": f"/dashboard/runs/{_RUN_UUID}/teach",
+    }
+    body.update(overrides)
+    return body
 
 
 def _halted_run(run_dir: Path) -> Path:
@@ -1233,14 +1257,7 @@ def test_report_break_success(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "r1"
     _halted_run(run_dir)
     recorder: dict = {}
-    body = {
-        "ok": True,
-        "run_id": "run_1",
-        "halt_id": "halt_1",
-        "status": "halt",
-        "deployment_kind": "byoc",
-        "teach_url": "/dashboard/runs/run_1/teach",
-    }
+    body = _break_response(deployment_kind="byoc")
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, body))
     result = hosted.report_break(
         run_dir,
@@ -1251,7 +1268,7 @@ def test_report_break_success(tmp_path, monkeypatch):
         token="tok",
     )
     assert result["emitted"] is True
-    assert result["teach_url"] == "https://h.test/dashboard/runs/run_1/teach"
+    assert result["teach_url"] == (f"https://h.test/dashboard/runs/{_RUN_UUID}/teach")
     posted = recorder["kw"]["json"]
     assert posted["kind"] == "break_summary"
     assert posted["schema"] == hosted.BREAK_SUMMARY_SCHEMA
@@ -1283,7 +1300,7 @@ def test_report_break_omits_optional_resolver_rung_when_unavailable(
         halt=HaltObservation(state_id="st1"),
     ).save(run_dir)
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _break_response()))
     hosted.report_break(
         run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
@@ -1300,7 +1317,7 @@ def test_report_break_scrubs_phi(tmp_path, monkeypatch):
 
     privacy.set_text_scrubber(FakeScrubber())
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _break_response()))
     hosted.report_break(
         run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
@@ -1378,7 +1395,7 @@ def test_report_break_scrubber_unavailable_still_emits_minimal(tmp_path, monkeyp
 
     monkeypatch.setattr(privacy, "scrub_text", boom)
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _break_response()))
     result = hosted.report_break(
         run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
@@ -1395,7 +1412,7 @@ def test_report_break_omits_free_text_when_scrub_unavailable(tmp_path, monkeypat
     # auto mode (default), capability explicitly absent.
     privacy.set_text_scrubber(None)
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _break_response()))
     result = hosted.report_break(
         run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
@@ -1484,17 +1501,19 @@ def test_report_run_success(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "r1"
     _successful_run(run_dir)
     recorder: dict = {}
-    body = {"run_id": "run_9", "status": "success"}
+    body = _run_response()
     monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, body))
     result = hosted.report_run(
         run_dir,
         workflow_id=_WORKFLOW_UUID,
+        deployment_kind="byoc",
+        org_id="legacy-org-id",
         backend="web",
         host="https://h.test",
         token="tok",
     )
     assert result["emitted"] is True
-    assert result["run_id"] == "run_9"
+    assert result["run_id"] == _RUN_UUID
     assert recorder["url"] == "https://h.test/api/runs/ingest-report"
     posted = recorder["kw"]["json"]
     assert posted["kind"] == "run_summary"
@@ -1543,7 +1562,7 @@ def test_report_run_binds_by_digest_without_workflow_id(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "r1"
     _successful_run(run_dir)
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _run_response()))
     hosted.report_run(run_dir, host="https://h.test", token="tok")
     posted = recorder["kw"]["json"]
     assert "workflow_id" not in posted
@@ -1557,7 +1576,7 @@ def test_report_run_payload_carries_no_phi(tmp_path, monkeypatch):
     run_dir = tmp_path / "runs" / "r1"
     _successful_run(run_dir)
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _run_response()))
     hosted.report_run(
         run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
@@ -1616,7 +1635,7 @@ def test_report_run_never_egresses_actual_resolved_effect_contract_hash(
         ],
     )
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _run_response()))
     hosted.report_run(
         run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
@@ -1709,6 +1728,86 @@ def test_report_run_refuses_malformed_success_response(tmp_path, monkeypatch, re
         )
 
 
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({}, "run_id"),
+        (_run_response(run_id="run_9"), "run_id"),
+        (_run_response(status="halt"), "expected 'success'"),
+        (_run_response(duplicate="true"), "duplicate"),
+        (_run_response(prior_halt_run_id="run_1"), "prior_halt_run_id"),
+        (_run_response(provenance="hosted_execution"), "provenance"),
+    ],
+)
+def test_report_run_refuses_adversarial_success_shapes(
+    tmp_path, monkeypatch, body, message
+):
+    run_dir = tmp_path / "runs" / "r1"
+    _successful_run(run_dir)
+    monkeypatch.setattr(httpx, "post", _capture_post({}, 202, body))
+    with pytest.raises(hosted.HostedError, match=message):
+        hosted.report_run(
+            run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+        )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(202, content=b"{not-json"),
+        httpx.Response(202, json=["unexpected", "list"]),
+    ],
+)
+def test_report_break_wraps_malformed_success_response(tmp_path, monkeypatch, response):
+    run_dir = tmp_path / "runs" / "r1"
+    _halted_run(run_dir)
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: response)
+    with pytest.raises(hosted.HostedError, match="malformed JSON|unexpected response"):
+        hosted.report_break(
+            run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+        )
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({}, "run_id"),
+        (_break_response(run_id="run_1"), "run_id"),
+        (_break_response(status="success"), "expected 'halt'"),
+        (_break_response(duplicate=1), "duplicate"),
+        (
+            {
+                key: value
+                for key, value in _break_response().items()
+                if key != "halt_id"
+            },
+            "halt_id",
+        ),
+        (_break_response(halt_id="halt_1"), "halt_id"),
+        (
+            {
+                key: value
+                for key, value in _break_response().items()
+                if key != "teach_url"
+            },
+            "teach_url",
+        ),
+        (_break_response(teach_url="/dashboard/runs/wrong/teach"), "teach_url"),
+        (_break_response(provenance="hosted_execution"), "provenance"),
+    ],
+)
+def test_report_break_refuses_adversarial_success_shapes(
+    tmp_path, monkeypatch, body, message
+):
+    run_dir = tmp_path / "runs" / "r1"
+    _halted_run(run_dir)
+    monkeypatch.setattr(httpx, "post", _capture_post({}, 202, body))
+    with pytest.raises(hosted.HostedError, match=message):
+        hosted.report_break(
+            run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
+        )
+
+
 def test_report_run_idempotency_key_stable_per_run_distinct_across_runs(
     tmp_path, monkeypatch
 ):
@@ -1723,7 +1822,7 @@ def test_report_run_idempotency_key_stable_per_run_distinct_across_runs(
         "post",
         lambda url, **kw: (
             ids.append(kw["json"]["client_run_id"]),
-            httpx.Response(202, json={"ok": True}),
+            httpx.Response(202, json=_run_response()),
         )[1],
     )
     for target in (run_a, run_a, run_b):
@@ -1742,8 +1841,11 @@ def test_break_and_resumed_success_share_attempt_id(tmp_path, monkeypatch):
 
     def capture(url, **kwargs):
         payloads.append(kwargs["json"])
+        if kwargs["json"]["status"] == "success":
+            return httpx.Response(202, json=_run_response())
         return httpx.Response(
-            202, json={"ok": True, "status": kwargs["json"]["status"]}
+            202,
+            json=_break_response(status=kwargs["json"]["status"]),
         )
 
     monkeypatch.setattr(httpx, "post", capture)
@@ -1797,7 +1899,7 @@ def test_report_run_keeps_resolved_effect_hashes_local(tmp_path, monkeypatch):
         ],
     )
     recorder: dict = {}
-    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, {"ok": True}))
+    monkeypatch.setattr(httpx, "post", _capture_post(recorder, 202, _run_response()))
     hosted.report_run(
         run_dir, workflow_id=_WORKFLOW_UUID, host="https://h.test", token="tok"
     )
@@ -1986,6 +2088,53 @@ def test_report_run_refuses_when_id_cannot_be_persisted(tmp_path, monkeypatch):
             host="https://h.test",
             token="tok",
         )
+
+
+def test_client_run_id_reads_from_descriptor_with_nofollow_when_available(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+    real_open = hosted.os.open
+    opened_flags: list[int] = []
+
+    def recording_open(path, flags, mode=0o777):
+        if Path(path) == id_path:
+            opened_flags.append(flags)
+        return real_open(path, flags, mode)
+
+    def refuse_path_read(*args, **kwargs):
+        raise AssertionError("client run id must be read from its bound descriptor")
+
+    monkeypatch.setattr(hosted.os, "open", recording_open)
+    monkeypatch.setattr(Path, "read_text", refuse_path_read)
+    assert hosted._client_run_id(run_dir) == _RUN_UUID
+    assert opened_flags
+    if hasattr(hosted.os, "O_NOFOLLOW"):
+        assert opened_flags[0] & hosted.os.O_NOFOLLOW
+
+
+def test_client_run_id_fallback_refuses_entry_swap_before_read(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+    substitute = tmp_path / "substitute-id"
+    substitute.write_text(_HALT_UUID + "\n", encoding="utf-8")
+    real_open = hosted.os.open
+
+    monkeypatch.delattr(hosted.os, "O_NOFOLLOW", raising=False)
+
+    def swapped_open(path, flags, mode=0o777):
+        if Path(path) == id_path:
+            return real_open(substitute, flags, mode)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(hosted.os, "open", swapped_open)
+    with pytest.raises(hosted.HostedError, match="changed while"):
+        hosted._client_run_id(run_dir)
 
 
 @pytest.mark.skipif(hosted.os.name == "nt", reason="directory fsync is POSIX-only")
@@ -2336,6 +2485,10 @@ def test_cli_report_run_dispatch(monkeypatch, capsys):
             "runs/r1",
             "--workflow-id",
             _WORKFLOW_UUID,
+            "--deployment-kind",
+            "byoc",
+            "--org-id",
+            "legacy-org-id",
             "--backend",
             "windows",
             "--host",
@@ -2352,6 +2505,8 @@ def test_cli_report_run_dispatch(monkeypatch, capsys):
     assert captured == {
         "run_dir": "runs/r1",
         "workflow_id": _WORKFLOW_UUID,
+        "deployment_kind": "byoc",
+        "org_id": "legacy-org-id",
         "backend": "windows",
         "host": "https://h.test",
         "destination_kind": "customer-managed",

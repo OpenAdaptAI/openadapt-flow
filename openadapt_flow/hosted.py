@@ -1593,83 +1593,158 @@ def _client_run_id(run_path: Path) -> str:
 
     id_path = run_path / _RUN_REPORT_ID_FILE
 
-    def read_existing(*, wait_for_writer: bool = False) -> str:
+    def read_existing(metadata: os.stat_result) -> str:
+        """Read one exact existing entry, allowing its creator to finish.
+
+        ``O_EXCL`` publishes the directory entry before the winning writer can
+        populate it.  A losing reporter therefore pins that entry's descriptor
+        and retries only an empty/partial UUID prefix for a bounded interval.
+        Any path replacement, symlink, non-regular entry, or complete malformed
+        value remains an immediate refusal.
+        """
         deadline = time.monotonic() + 1.0
         last_error: Optional[Exception] = None
-        while True:
-            fd: Optional[int] = None
-            try:
-                flags = os.O_RDONLY
-                metadata = id_path.lstat()
-                if not stat.S_ISREG(metadata.st_mode):
-                    raise HostedError(
-                        "run report id must be a regular file (symlinks refused)"
-                    )
-                before = metadata
-                nofollow = getattr(os, "O_NOFOLLOW", 0)
-                if nofollow:
-                    flags |= nofollow
-                # Windows has no portable O_NOFOLLOW. On every platform, bind
-                # the opened descriptor back to this exact directory entry
-                # before reading any bytes; O_NOFOLLOW is an added symlink
-                # refusal where the OS exposes it.
-
-                fd = os.open(id_path, flags)
-                opened = os.fstat(fd)
-                if not stat.S_ISREG(opened.st_mode):
-                    raise HostedError(
-                        "run report id must be a regular file (symlinks refused)"
-                    )
-                if not os.path.samestat(before, opened):
-                    raise HostedError("run report id changed while it was being opened")
-
-                with os.fdopen(fd, "r", encoding="utf-8") as handle:
-                    fd = None  # ownership transferred to the file object
-                    raw = handle.read(128)
-                if len(raw) == 128:
-                    raise ValueError("run report id is oversized")
-                return str(UUID(raw.strip()))
-            except FileNotFoundError as exc:
-                last_error = exc
-                if not wait_for_writer:
-                    raise
-            except HostedError:
-                raise
-            except (OSError, UnicodeError, ValueError) as exc:
-                last_error = exc
-                if not wait_for_writer:
-                    raise HostedError("run report id is unreadable or invalid") from exc
-            finally:
-                if fd is not None:
-                    os.close(fd)
-            if time.monotonic() >= deadline:
+        if not stat.S_ISREG(metadata.st_mode):
+            raise HostedError("run report id must be a regular file (symlinks refused)")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow:
+            flags |= nofollow
+        # Windows has no portable O_NOFOLLOW. On every platform, bind the
+        # opened descriptor back to this exact directory entry before reading
+        # any bytes; O_NOFOLLOW is an added symlink refusal where available.
+        try:
+            fd = os.open(id_path, flags)
+        except FileNotFoundError as exc:
+            raise HostedError(
+                "run report id changed while it was being opened"
+            ) from exc
+        except OSError as exc:
+            raise HostedError("run report id is unreadable or invalid") from exc
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
                 raise HostedError(
-                    "run report id is unreadable or invalid"
-                ) from last_error
-            time.sleep(0.005)
+                    "run report id must be a regular file (symlinks refused)"
+                )
+            if not os.path.samestat(metadata, opened):
+                raise HostedError("run report id changed while it was being opened")
+
+            def require_same_entry(*, action: str) -> os.stat_result:
+                try:
+                    current = id_path.lstat()
+                except FileNotFoundError as exc:
+                    raise HostedError(f"run report id changed while {action}") from exc
+                if not stat.S_ISREG(current.st_mode):
+                    raise HostedError(
+                        "run report id must be a regular file (symlinks refused)"
+                    )
+                if not os.path.samestat(opened, current):
+                    raise HostedError(f"run report id changed while {action}")
+                return current
+
+            def is_canonical_prefix(raw: bytes) -> bool:
+                """Whether ``raw`` can be a prefix of our canonical UUID."""
+                uuid_part = raw[:36]
+                hex_bytes = b"0123456789abcdef"
+                dash_positions = {8, 13, 18, 23}
+                if not all(
+                    byte == ord("-") if index in dash_positions else byte in hex_bytes
+                    for index, byte in enumerate(uuid_part)
+                ):
+                    return False
+                # Text-mode writes use LF on POSIX and CRLF on Windows. A
+                # trailing CR is the only valid byte beyond the UUID that can
+                # still be an in-progress serialization.
+                return len(raw) <= 36 or raw == uuid_part + b"\r"
+
+            while True:
+                require_same_entry(action="waiting for its writer")
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                raw_bytes = os.read(fd, 128)
+                # Bind the bytes back to the same live directory entry after
+                # the read as well as before it. Otherwise a replacement
+                # during os.read could return UUID A while the path persists B.
+                require_same_entry(action="it was being read")
+                size_after_read = os.fstat(fd).st_size
+                if len(raw_bytes) == 128 or size_after_read >= 128:
+                    raise HostedError("run report id is unreadable or invalid")
+                try:
+                    raw = raw_bytes.decode("utf-8")
+                    parsed = str(UUID(raw.strip()))
+                    if size_after_read != len(raw_bytes):
+                        raise ValueError("run report id changed during read")
+                    if raw not in {parsed, f"{parsed}\n", f"{parsed}\r\n"}:
+                        raise ValueError("run report id is not canonical")
+                    return parsed
+                except (UnicodeError, ValueError) as exc:
+                    last_error = exc
+                    # A UUID written by this function is 36 ASCII bytes plus a
+                    # newline. Only a shorter prefix can be an in-progress
+                    # write; a complete malformed value is never retried.
+                    if not is_canonical_prefix(raw_bytes):
+                        raise HostedError(
+                            "run report id is unreadable or invalid"
+                        ) from exc
+                if time.monotonic() >= deadline:
+                    raise HostedError(
+                        "run report id is unreadable or invalid"
+                    ) from last_error
+                time.sleep(0.005)
+        except OSError as exc:
+            raise HostedError("run report id is unreadable or invalid") from exc
+        finally:
+            os.close(fd)
 
     try:
-        return read_existing()
+        existing = id_path.lstat()
     except FileNotFoundError:
         pass
-    except HostedError:
-        raise
+    except OSError as exc:
+        raise HostedError("run report id is unreadable or invalid") from exc
+    else:
+        return read_existing(existing)
 
     fresh = str(uuid.uuid4())
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
         fd = os.open(id_path, flags, 0o600)
     except FileExistsError:
-        return read_existing(wait_for_writer=True)
+        try:
+            existing = id_path.lstat()
+        except FileNotFoundError as exc:
+            raise HostedError(
+                "run report id changed while another writer was creating it"
+            ) from exc
+        except OSError as exc:
+            raise HostedError("run report id is unreadable or invalid") from exc
+        return read_existing(existing)
     except OSError as exc:
         raise HostedError("could not persist the run report id") from exc
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        created = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        raise HostedError("could not persist the run report id") from exc
+
+    unowned_fd: Optional[int] = fd
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+        unowned_fd = None  # ownership transferred to the file object
+        with handle:
             handle.write(fresh + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+            current = id_path.lstat()
+            if not stat.S_ISREG(current.st_mode):
+                raise HostedError(
+                    "run report id must be a regular file (symlinks refused)"
+                )
+            if not os.path.samestat(created, current):
+                raise HostedError("run report id changed while it was being written")
         # POSIX requires the containing directory to be flushed as well before
         # the newly created name is durable across a crash. Windows does not
         # expose a portable directory fsync through Python; FlushFileBuffers on
@@ -1683,12 +1758,16 @@ def _client_run_id(run_path: Path) -> str:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+    except HostedError:
+        raise
     except OSError as exc:
-        try:
-            id_path.unlink()
-        except OSError:
-            pass
+        # There is no portable conditional-unlink primitive. Leave this exact
+        # failed-create entry behind so subsequent reports fail closed instead
+        # of risking deletion of a path replacement between lstat and unlink.
         raise HostedError("could not persist the run report id") from exc
+    finally:
+        if unowned_fd is not None:
+            os.close(unowned_fd)
     return fresh
 
 

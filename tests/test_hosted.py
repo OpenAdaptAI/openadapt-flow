@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import stat
+import threading
 import zipfile
 from pathlib import Path
 from uuid import UUID
@@ -2164,6 +2165,242 @@ def test_client_run_id_is_race_safe(tmp_path):
     assert len(set(ids)) == 1
     if hosted.os.name != "nt":
         assert (run_dir / ".report_run_id").stat().st_mode & 0o777 == 0o600
+
+
+def test_client_run_id_waits_for_exact_exclusive_creator(tmp_path, monkeypatch):
+    """A loser may observe O_EXCL's empty entry before the winner writes it."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    writer_created = threading.Event()
+    allow_writer = threading.Event()
+    reader_saw_empty = threading.Event()
+    real_fdopen = hosted.os.fdopen
+    real_read = hosted.os.read
+    paused = False
+
+    def paused_fdopen(fd, *args, **kwargs):
+        nonlocal paused
+        if not paused and stat.S_ISREG(hosted.os.fstat(fd).st_mode):
+            paused = True
+            writer_created.set()
+            assert allow_writer.wait(timeout=2), "test did not release id writer"
+        return real_fdopen(fd, *args, **kwargs)
+
+    def recording_read(fd, size):
+        raw = real_read(fd, size)
+        if raw == b"" and id_path.exists():
+            reader_saw_empty.set()
+        return raw
+
+    monkeypatch.setattr(hosted.os, "fdopen", paused_fdopen)
+    monkeypatch.setattr(hosted.os, "read", recording_read)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner = pool.submit(hosted._client_run_id, run_dir)
+        assert writer_created.wait(timeout=2), "winner did not create id entry"
+        loser = pool.submit(hosted._client_run_id, run_dir)
+        assert reader_saw_empty.wait(timeout=2), "loser did not observe empty entry"
+        allow_writer.set()
+        assert winner.result(timeout=2) == loser.result(timeout=2)
+
+
+@pytest.mark.skipif(
+    hosted.os.name == "nt",
+    reason="Windows denies replacing an entry while its descriptor is open",
+)
+def test_client_run_id_refuses_inode_swap_while_waiting(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.touch()
+    real_sleep = hosted.time.sleep
+    swapped = False
+
+    def swap_entry(_delay):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            id_path.unlink()
+            id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+        real_sleep(0)
+
+    monkeypatch.setattr(hosted.time, "sleep", swap_entry)
+    with pytest.raises(hosted.HostedError, match="changed while waiting"):
+        hosted._client_run_id(run_dir)
+
+
+@pytest.mark.skipif(
+    hosted.os.name == "nt",
+    reason="Windows denies replacing an entry while its descriptor is open",
+)
+def test_client_run_id_refuses_inode_swap_during_read(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+    real_read = hosted.os.read
+    swapped = False
+
+    def swap_then_read(fd, size):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            id_path.unlink()
+            id_path.write_text(_HALT_UUID + "\n", encoding="utf-8")
+        return real_read(fd, size)
+
+    monkeypatch.setattr(hosted.os, "read", swap_then_read)
+    with pytest.raises(hosted.HostedError, match="changed while"):
+        hosted._client_run_id(run_dir)
+    assert id_path.read_text(encoding="utf-8").strip() == _HALT_UUID
+
+
+@pytest.mark.skipif(
+    hosted.os.name == "nt" or not hasattr(hosted.os, "mkfifo"),
+    reason="FIFO substitution is POSIX-only",
+)
+def test_client_run_id_nonblocking_open_refuses_fifo_swap(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+    real_open = hosted.os.open
+    swapped = False
+
+    def swap_to_fifo(path, flags, mode=0o777):
+        nonlocal swapped
+        if Path(path) == id_path and not (flags & hosted.os.O_CREAT) and not swapped:
+            assert flags & hosted.os.O_NONBLOCK
+            swapped = True
+            id_path.unlink()
+            hosted.os.mkfifo(id_path)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(hosted.os, "open", swap_to_fifo)
+    with pytest.raises(hosted.HostedError, match="regular file"):
+        hosted._client_run_id(run_dir)
+
+
+@pytest.mark.skipif(
+    hosted.os.name == "nt",
+    reason="Windows denies replacing an entry while its descriptor is open",
+)
+def test_client_run_id_write_failure_never_unlinks_replacement(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    real_fsync = hosted.os.fsync
+    replaced = False
+
+    def replace_then_fail(fd):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            id_path.unlink()
+            id_path.write_text(_HALT_UUID + "\n", encoding="utf-8")
+            raise OSError("forced persistence failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(hosted.os, "fsync", replace_then_fail)
+    with pytest.raises(hosted.HostedError, match="persist"):
+        hosted._client_run_id(run_dir)
+    assert id_path.read_text(encoding="utf-8").strip() == _HALT_UUID
+
+
+def test_client_run_id_closes_descriptor_when_fdopen_fails(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    real_close = hosted.os.close
+    created_fd = None
+    closed_fds = []
+
+    def fail_fdopen(fd, *args, **kwargs):
+        nonlocal created_fd
+        created_fd = fd
+        raise OSError("forced fdopen failure")
+
+    def record_close(fd):
+        closed_fds.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(hosted.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(hosted.os, "close", record_close)
+    with pytest.raises(hosted.HostedError, match="persist"):
+        hosted._client_run_id(run_dir)
+    assert created_fd in closed_fds
+    assert (run_dir / ".report_run_id").exists()
+
+
+@pytest.mark.skipif(
+    hosted.os.name != "nt",
+    reason="Windows-specific open-descriptor replacement denial",
+)
+def test_client_run_id_windows_denies_replacement_during_read(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_text(_RUN_UUID + "\n", encoding="utf-8")
+    real_read = hosted.os.read
+    replacement_denied = False
+
+    def attempt_replacement_then_read(fd, size):
+        nonlocal replacement_denied
+        with pytest.raises(OSError):
+            id_path.unlink()
+        replacement_denied = True
+        return real_read(fd, size)
+
+    monkeypatch.setattr(hosted.os, "read", attempt_replacement_then_read)
+    assert hosted._client_run_id(run_dir) == _RUN_UUID
+    assert replacement_denied
+
+
+def test_client_run_id_retries_only_canonical_partial_write(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    id_path = run_dir / ".report_run_id"
+    id_path.write_bytes(_RUN_UUID[:12].encode("ascii"))
+    completed = False
+
+    def complete_same_inode(_delay):
+        nonlocal completed
+        assert not completed
+        completed = True
+        with id_path.open("r+b") as handle:
+            handle.seek(0)
+            handle.truncate()
+            handle.write((_RUN_UUID + "\n").encode("ascii"))
+            handle.flush()
+
+    monkeypatch.setattr(hosted.time, "sleep", complete_same_inode)
+    assert hosted._client_run_id(run_dir) == _RUN_UUID
+    assert completed
+
+
+def test_client_run_id_refuses_malformed_short_value_without_retry(
+    tmp_path, monkeypatch
+):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / ".report_run_id").write_bytes(b"not-a-prefix")
+    monkeypatch.setattr(
+        hosted.time,
+        "sleep",
+        lambda _delay: pytest.fail("malformed value must not be retried"),
+    )
+    with pytest.raises(hosted.HostedError, match="unreadable or invalid"):
+        hosted._client_run_id(run_dir)
+
+
+@pytest.mark.parametrize("ending", [b"", b"\n", b"\r\n"])
+def test_client_run_id_accepts_canonical_platform_line_endings(tmp_path, ending):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    (run_dir / ".report_run_id").write_bytes(_RUN_UUID.encode("ascii") + ending)
+    assert hosted._client_run_id(run_dir) == _RUN_UUID
 
 
 def test_report_run_refuses_oversized_report_before_egress(tmp_path, monkeypatch):

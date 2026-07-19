@@ -179,7 +179,13 @@ def utf16_code_units(ch: str) -> tuple[int, ...]:
     """
     if len(ch) != 1:
         raise ValueError("expected exactly one Unicode character")
-    encoded = ch.encode("utf-16-le", errors="surrogatepass")
+    codepoint = ord(ch)
+    if 0xD800 <= codepoint <= 0xDFFF:
+        raise InputDeliveryError(
+            f"lone UTF-16 surrogate U+{codepoint:04X} is not a Unicode scalar "
+            "value; refusing malformed text input"
+        )
+    encoded = ch.encode("utf-16-le")
     return tuple(
         int.from_bytes(encoded[offset : offset + 2], "little")
         for offset in range(0, len(encoded), 2)
@@ -827,7 +833,6 @@ class NativeWin32Api:
     _dwmapi: Any
     _shcore: Any
     _advapi32: Any
-    _prototype_contract: dict[tuple[str, str], tuple[tuple[Any, ...], Any]]
     _MOUSEINPUT: Any
     _KEYBDINPUT: Any
     _HARDWAREINPUT: Any
@@ -968,10 +973,6 @@ class NativeWin32Api:
             ) from None
         function.argtypes = argtypes
         function.restype = restype
-        self._prototype_contract[(dll_name, function_name)] = (
-            tuple(argtypes),
-            restype,
-        )
         return function
 
     def _bind_all_prototypes(self) -> None:
@@ -981,7 +982,6 @@ class NativeWin32Api:
         PVOID = ctypes.c_void_p
         PDWORD = ctypes.POINTER(w.DWORD)
         PHANDLE = ctypes.POINTER(w.HANDLE)
-        self._prototype_contract = {}
 
         # user32.dll
         self._bind(
@@ -1227,12 +1227,6 @@ class NativeWin32Api:
             w.BOOL,
             optional=True,
         )
-
-    def bound_prototypes(
-        self,
-    ) -> dict[tuple[str, str], tuple[tuple[Any, ...], Any]]:
-        """Return a copy for the non-injecting Windows ABI contract test."""
-        return dict(self._prototype_contract)
 
     # -- DPI ------------------------------------------------------------------
 
@@ -1605,6 +1599,17 @@ class NativeWin32Api:
         self._send([item])
 
     def vk_for_char(self, ch: str) -> Optional[tuple[int, bool]]:
+        if len(ch) != 1:
+            raise InputDeliveryError("expected one character for VkKeyScanW")
+        codepoint = ord(ch)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise InputDeliveryError(
+                f"lone UTF-16 surrogate U+{codepoint:04X} is not valid text"
+            )
+        # Windows WCHAR is one UTF-16 code unit. A supplementary code point
+        # must bypass WCHAR/VkKeyScanW and use the ordered surrogate fallback.
+        if codepoint > 0xFFFF:
+            return None
         res = int(self._user32.VkKeyScanW(self._wintypes.WCHAR(ch)))
         if res == -1:
             return None

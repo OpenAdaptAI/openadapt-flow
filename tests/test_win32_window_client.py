@@ -684,6 +684,8 @@ def test_non_bmp_unicode_fallback_emits_ordered_utf16_surrogate_edges() -> None:
         ("unicode_unit", 0xDE00, True),
         ("unicode_unit", 0xDE00, False),
     ]
+    with pytest.raises(InputDeliveryError, match="lone UTF-16 surrogate"):
+        utf16_code_units("\ud800")
 
 
 def test_scancode_fields_use_real_scancode_mode_and_extended_prefix() -> None:
@@ -774,49 +776,132 @@ def test_native_win32_abi_prototypes_are_bound_without_injecting() -> None:
     import ctypes
 
     api = NativeWin32Api()
-    contract = api.bound_prototypes()
-    required = {
-        ("user32", "EnumWindows"),
-        ("user32", "GetWindowThreadProcessId"),
-        ("user32", "GetClientRect"),
-        ("user32", "ClientToScreen"),
-        ("user32", "GetForegroundWindow"),
-        ("user32", "WindowFromPoint"),
-        ("user32", "GetDC"),
-        ("user32", "PrintWindow"),
-        ("user32", "SendInput"),
-        ("user32", "MapVirtualKeyW"),
-        ("user32", "VkKeyScanW"),
-        ("gdi32", "CreateCompatibleDC"),
-        ("gdi32", "CreateDIBSection"),
-        ("gdi32", "SelectObject"),
-        ("gdi32", "BitBlt"),
-        ("kernel32", "OpenProcess"),
-        ("kernel32", "QueryFullProcessImageNameW"),
-        ("kernel32", "CloseHandle"),
-        ("kernel32", "GetCurrentProcess"),
-    }
-    assert required <= set(contract)
-    dlls = {
-        "user32": api._user32,
-        "gdi32": api._gdi32,
-        "kernel32": api._kernel32,
-        "dwmapi": api._dwmapi,
-        "shcore": api._shcore,
-        "advapi32": api._advapi32,
-    }
-    for (dll_name, function_name), (argtypes, restype) in contract.items():
-        function = getattr(dlls[dll_name], function_name)
-        assert tuple(function.argtypes) == argtypes
-        assert function.restype is restype
+    w = api._wintypes
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    assert pointer_size in (4, 8)
+
+    # Fixed Windows SDK prototypes for every safety-critical pointer return.
+    assert api._user32.GetForegroundWindow.argtypes == []
+    assert api._user32.GetForegroundWindow.restype is w.HWND
+    assert api._user32.GetAncestor.argtypes == [w.HWND, w.UINT]
+    assert api._user32.GetAncestor.restype is w.HWND
+    assert api._user32.WindowFromPoint.argtypes == [w.POINT]
+    assert api._user32.WindowFromPoint.restype is w.HWND
+    assert api._user32.GetDC.argtypes == [w.HWND]
+    assert api._user32.GetDC.restype is w.HDC
+    assert api._gdi32.CreateCompatibleDC.argtypes == [w.HDC]
+    assert api._gdi32.CreateCompatibleDC.restype is w.HDC
+    assert api._gdi32.CreateDIBSection.restype is w.HANDLE
+    assert api._gdi32.SelectObject.argtypes == [w.HDC, w.HANDLE]
+    assert api._gdi32.SelectObject.restype is w.HANDLE
+    assert api._kernel32.OpenProcess.restype is w.HANDLE
+    assert api._kernel32.GetCurrentProcess.argtypes == []
+    assert api._kernel32.GetCurrentProcess.restype is w.HANDLE
+    assert ctypes.sizeof(w.HWND) == pointer_size
+    assert ctypes.sizeof(w.HANDLE) == pointer_size
+    assert ctypes.sizeof(w.HDC) == pointer_size
+
+    # SendInput's count, pointer, size, and return types are fixed by winuser.h.
     assert api._user32.SendInput.argtypes == [
-        api._wintypes.UINT,
+        w.UINT,
         ctypes.POINTER(api._INPUT),
         ctypes.c_int,
     ]
-    assert ctypes.sizeof(api._INPUT) == (
-        40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
-    )
+    assert api._user32.SendInput.restype is w.UINT
+    assert api._user32.GetWindowThreadProcessId.argtypes == [
+        w.HWND,
+        ctypes.POINTER(w.DWORD),
+    ]
+    assert api._user32.GetWindowThreadProcessId.restype is w.DWORD
+
+    # Windows is LLP64: ULONG_PTR/WPARAM follows pointer width while DWORD/LONG
+    # remain 32-bit. These assertions catch definitions that look right on
+    # Linux/macOS but truncate x64 Windows handles or over-size INPUT fields.
+    assert ctypes.sizeof(w.WPARAM) == pointer_size
+    assert ctypes.sizeof(w.DWORD) == 4
+    assert ctypes.sizeof(w.LONG) == 4
+    assert ctypes.sizeof(w.WORD) == 2
+    assert dict(api._MOUSEINPUT._fields_)["dwExtraInfo"] is w.WPARAM
+    assert dict(api._KEYBDINPUT._fields_)["dwExtraInfo"] is w.WPARAM
+
+    expected = {
+        4: {
+            "mouse_size": 24,
+            "mouse_extra": 20,
+            "key_size": 16,
+            "key_extra": 12,
+            "input_size": 28,
+            "input_union": 4,
+        },
+        8: {
+            "mouse_size": 32,
+            "mouse_extra": 24,
+            "key_size": 24,
+            "key_extra": 16,
+            "input_size": 40,
+            "input_union": 8,
+        },
+    }[pointer_size]
+    assert ctypes.sizeof(api._MOUSEINPUT) == expected["mouse_size"]
+    assert api._MOUSEINPUT.dx.offset == 0
+    assert api._MOUSEINPUT.dy.offset == 4
+    assert api._MOUSEINPUT.mouseData.offset == 8
+    assert api._MOUSEINPUT.dwFlags.offset == 12
+    assert api._MOUSEINPUT.time.offset == 16
+    assert api._MOUSEINPUT.dwExtraInfo.offset == expected["mouse_extra"]
+    assert ctypes.sizeof(api._KEYBDINPUT) == expected["key_size"]
+    assert api._KEYBDINPUT.wVk.offset == 0
+    assert api._KEYBDINPUT.wScan.offset == 2
+    assert api._KEYBDINPUT.dwFlags.offset == 4
+    assert api._KEYBDINPUT.time.offset == 8
+    assert api._KEYBDINPUT.dwExtraInfo.offset == expected["key_extra"]
+    assert ctypes.sizeof(api._INPUT) == expected["input_size"]
+    assert api._INPUT.type.offset == 0
+    assert api._INPUT.union.offset == expected["input_union"]
+
+    assert ctypes.sizeof(api._BITMAPINFOHEADER) == 40
+    assert api._BITMAPINFOHEADER.biSize.offset == 0
+    assert api._BITMAPINFOHEADER.biWidth.offset == 4
+    assert api._BITMAPINFOHEADER.biHeight.offset == 8
+    assert api._BITMAPINFOHEADER.biPlanes.offset == 12
+    assert api._BITMAPINFOHEADER.biBitCount.offset == 14
+    assert api._BITMAPINFOHEADER.biCompression.offset == 16
+    assert api._BITMAPINFOHEADER.biSizeImage.offset == 20
+    assert api._BITMAPINFOHEADER.biXPelsPerMeter.offset == 24
+    assert api._BITMAPINFOHEADER.biYPelsPerMeter.offset == 28
+    assert api._BITMAPINFOHEADER.biClrUsed.offset == 32
+    assert api._BITMAPINFOHEADER.biClrImportant.offset == 36
+    assert ctypes.sizeof(api._BITMAPINFO) == 44
+    assert api._BITMAPINFO.bmiHeader.offset == 0
+    assert api._BITMAPINFO.bmiColors.offset == 40
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows WCHAR ABI only")
+def test_native_emoji_bypasses_wchar_and_uses_ordered_utf16_fallback(
+    monkeypatch,
+) -> None:
+    """No injection: native VK decision + fake edge sink prove surrogate order."""
+    native = NativeWin32Api()
+
+    class VkKeyScanMustNotRun:
+        @staticmethod
+        def VkKeyScanW(_character):
+            raise AssertionError("supplementary code point reached VkKeyScanW")
+
+    monkeypatch.setattr(native, "_user32", VkKeyScanMustNotRun())
+    api = FakeWin32Api()
+    monkeypatch.setattr(api, "vk_for_char", native.vk_for_char)
+    client, _ = _client(api)
+    client.find_windows("wfica32", None)
+    client.type_chars("\U0001f600")
+    assert [c for c in api.calls if c[0] == "unicode_unit"] == [
+        ("unicode_unit", 0xD83D, True),
+        ("unicode_unit", 0xD83D, False),
+        ("unicode_unit", 0xDE00, True),
+        ("unicode_unit", 0xDE00, False),
+    ]
+    with pytest.raises(InputDeliveryError, match="lone UTF-16 surrogate"):
+        client.type_chars("\ud800")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows last-error ABI only")

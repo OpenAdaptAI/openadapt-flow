@@ -99,6 +99,42 @@ resolution and calibrate its mapping as part of workflow qualification.
 `--backend rdp` records identically to `--backend windows`; the flag selects
 intent and replay wiring.
 
+### Window-scoped capture (`--window`)
+
+Instead of full-screen capture, scope the recording to **ONE window, recorded in
+that window's own pixel space** — closing the coordinate-space gap above at the
+source. Select the target by owner-app substring (and optionally a title
+substring to disambiguate):
+
+```
+openadapt-flow record --backend rdp --window Parallels --out rec/
+openadapt-flow record --backend rdp --window 'Citrix Workspace' \
+    --window-title 'Ward A' --out rec/
+```
+
+Selectors are case-insensitive substrings matching openadapt-capture's
+`WindowTarget` (`--window` → owner app, `--window-title` → window title); the
+largest matching visible window wins. Every frame is that window's own pixels
+and input coordinates are translated into the same space at capture time, so a
+demonstration recorded here is already in the pixel space the `rdp` backend
+replays in (`CaptureSession.window_capture`, `coordinate_space:
+window_pixels`). The capture adapter stamps the window identity into
+`meta.json` under `window_capture` (target + resolved owner/title, plus the
+resolved `resolved_pid` / `resolved_window_id` OS handle where available) and
+emits `backend_hints` (`rdp_window` / `rdp_window_title`) so
+`replay --backend rdp` can resolve the same client window.
+
+Window-scoped capture is implemented on **macOS and Windows** hosts
+(`CGWindowListCreateImage` / Win32 region grab); on any other host `--window`
+is refused up front rather than silently falling back to full-screen (which
+would record coordinates in the wrong pixel space). `--window` applies only to
+the desktop backends — `--backend web` records the Playwright page and refuses
+it.
+
+**PHI note:** a window title can contain a patient name. The resolved title is
+kept in the **local recording metadata only** (`meta.json`); it is not emitted
+to any report/evidence rail.
+
 ## Parameters
 
 Desktop has no field identity (no DOM `name`/`id`), so a parameter is keyed by

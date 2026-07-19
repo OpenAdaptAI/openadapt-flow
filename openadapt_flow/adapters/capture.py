@@ -474,6 +474,23 @@ def _window_selectors(
     return owner, title, resolved_owner, resolved_title
 
 
+def _window_identity_int(value: Any) -> Optional[int]:
+    """Coerce a resolved-window identity field (pid / window id) to ``int``.
+
+    Capture's snapshot stores these as ints, but the persisted config fallback
+    can round-trip them as int-valued strings. Non-numeric/absent values yield
+    ``None`` (the field is simply omitted from meta.json) rather than raising —
+    a missing OS handle must not fail an otherwise-valid conversion.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
 def _flow_events(
     actions: "list[Action]",
     scale: float,
@@ -801,6 +818,16 @@ def convert_capture(
                 "resolved_owner": resolved_owner,
                 "resolved_title": resolved_title,
             }
+            # Additive resolved-window IDENTITY (provenance for the LOCAL
+            # recording; these stay out of any report rail — a window title/pid
+            # can carry PHI). ``window_id`` is the OS handle (macOS
+            # kCGWindowNumber / Windows HWND) capture resolved the target to.
+            resolved_pid = _window_identity_int(window_capture.get("pid"))
+            resolved_window_id = _window_identity_int(window_capture.get("window_id"))
+            if resolved_pid is not None:
+                meta["window_capture"]["resolved_pid"] = resolved_pid
+            if resolved_window_id is not None:
+                meta["window_capture"]["resolved_window_id"] = resolved_window_id
             hints: dict[str, Any] = {"backend": "rdp"}
             if owner:
                 hints["rdp_window"] = owner

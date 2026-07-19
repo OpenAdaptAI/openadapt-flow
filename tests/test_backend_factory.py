@@ -328,9 +328,12 @@ def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path, kind) -> 
 
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params, identifier_region=None):
+    def fake_record(
+        out_dir, *, task_description, params, identifier_region=None, window=None
+    ):
         captured["out"] = out_dir
         captured["params"] = params
+        captured["window"] = window
         return out_dir
 
     monkeypatch.setattr(
@@ -341,6 +344,7 @@ def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path, kind) -> 
     )
     assert _cmd_record(args) == 0
     assert captured["params"] == {}
+    assert captured["window"] is None  # no --window: full-screen capture
 
 
 # --- CLI replay drives the desktop backend (no browser, stubbed agent) ------

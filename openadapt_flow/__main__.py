@@ -463,6 +463,16 @@ def _cmd_record(args: argparse.Namespace) -> int:
     if backend in ("windows", "macos", "linux", "rdp"):
         return _cmd_record_desktop(args, backend)
 
+    if getattr(args, "window", None) or getattr(args, "window_title", None):
+        # --window scopes a pixel/desktop capture to one on-screen window; the
+        # web recorder drives a Playwright page and has no such notion. Refuse
+        # rather than silently ignore the operator's requested scope.
+        raise SystemExit(
+            "record: --window/--window-title apply only to the desktop "
+            "backends (--backend windows/macos/linux/rdp); --backend web "
+            "records the Playwright page given by --url."
+        )
+
     if not args.url:
         raise SystemExit(
             "record --backend web requires --url (the app to record against)."
@@ -531,6 +541,15 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
         getattr(args, "identifier", None) or (), backend=backend
     )
 
+    # Window-scoping (optional): capture ONE window in its own pixel space.
+    # Selectors are case-insensitive substrings (owner app / window title),
+    # matching openadapt-capture's WindowTarget; None means full-screen capture.
+    window_owner = getattr(args, "window", None)
+    window_title = getattr(args, "window_title", None)
+    window: Optional[dict[str, Optional[str]]] = None
+    if window_owner or window_title:
+        window = {"owner": window_owner, "title": window_title}
+
     from openadapt_flow.desktop_record import record_desktop_capture
 
     task = args.task or f"openadapt-flow {backend} recording"
@@ -539,8 +558,16 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
         task_description=task,
         params=params,
         identifier_region=identifier_region,
+        window=window,
     )
     print(f"Recording written to {out}")
+    if window is not None:
+        print(
+            "Window-scoped recording: "
+            f"owner={window_owner!r} title={window_title!r} "
+            "(frames are that window's own pixels; identity stored in "
+            "meta.json for the pixel/rdp replay surface)."
+        )
     if params:
         print(
             "Recorded parameter(s): "
@@ -1878,6 +1905,31 @@ def build_parser() -> argparse.ArgumentParser:
             "Task description for a desktop "
             "(--backend windows/macos/linux/rdp) capture session "
             "(stored in the recording metadata)."
+        ),
+    )
+    p.add_argument(
+        "--window",
+        default=None,
+        metavar="OWNER",
+        help=(
+            "Scope a desktop capture (--backend windows/macos/linux/rdp) to ONE "
+            "window, recorded in that window's OWN pixel space (owner-app "
+            "substring, e.g. --window Parallels / --window 'Citrix Workspace'). "
+            "Closes the coordinate-space gap with the pixel (rdp) replay "
+            "surface. Combine with --window-title to disambiguate. "
+            "Supported on macOS and Windows hosts; refused elsewhere. "
+            "Ignored (rejected) for --backend web."
+        ),
+    )
+    p.add_argument(
+        "--window-title",
+        default=None,
+        metavar="SUBSTRING",
+        help=(
+            "Title substring to disambiguate the --window target when the owner "
+            "app has multiple windows (case-insensitive; may be used with or "
+            "without --window). The resolved title is stored in the LOCAL "
+            "recording metadata only."
         ),
     )
     p.add_argument(

@@ -7,8 +7,8 @@ mutations additionally require same-origin JSON and a session-bound CSRF
 token. With ``allow_actions=False`` (the default), mutating endpoints refuse
 with a browser-safe placeholder command the operator can copy. ``attend=True``
 makes the secure Needs Attention queue the first view; it does not weaken or
-remove the normal console.  Attended mutations additionally require an exact
-engine-issued pause capability and a deployment-bound executor.
+remove the normal console. Attended mutations additionally require an exact
+engine-issued pause capability and a deployment-bound action service.
 
 Browser DTOs use opaque ids and explicit projections; protected workflow
 labels, parameters, identity evidence, local paths, and raw reports do not
@@ -37,11 +37,11 @@ from openadapt_flow.console import attention as attention_mod
 from openadapt_flow.console import data
 from openadapt_flow.runtime.durable.approval import ResumeRefused
 from openadapt_flow.runtime.durable.attended import (
-    AttendedActionExecutor,
     AttendedActionRefused,
     AttendedActionRequest,
     execute_attended_action,
 )
+from openadapt_flow.runtime.durable.attended_service import AttendedActionService
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _MAX_BODY_BYTES = 16 * 1024
@@ -279,7 +279,7 @@ def create_app(
     attend: bool = False,
     access_token: Optional[str] = None,
     csrf_token: Optional[str] = None,
-    attended_executor: Optional[AttendedActionExecutor] = None,
+    attended_service: Optional[AttendedActionService] = None,
 ) -> FastAPI:
     bundles = _validated_root(bundles_root, label="bundles")
     runs = _validated_root(runs_root, label="runs")
@@ -388,7 +388,7 @@ def create_app(
             "attend": attend,
             "attended_decisions_ready": bool(attend and allow_actions),
             "attended_actions_ready": bool(
-                attend and allow_actions and attended_executor is not None
+                attend and allow_actions and attended_service is not None
             ),
             "csrf_token": csrf,
         }
@@ -402,7 +402,7 @@ def create_app(
             "attend": attend,
             "attended_decisions_ready": bool(attend and allow_actions),
             "attended_actions_ready": bool(
-                attend and allow_actions and attended_executor is not None
+                attend and allow_actions and attended_service is not None
             ),
         }
 
@@ -523,7 +523,7 @@ def create_app(
         _refuse_or_none(
             allow_actions,
             "start `openadapt-flow console --attend --allow-actions` with "
-            "a qualified deployment executor",
+            "a qualified deployment service",
         )
         if action_id != payload.action:
             raise HTTPException(
@@ -532,11 +532,18 @@ def create_app(
             )
         run_dir = _resolve_run(runs, run_id)
         try:
-            decision = execute_attended_action(
-                run_dir,
-                payload,
-                operator=operator,
-                executor=attended_executor,
+            decision = (
+                attended_service.execute(
+                    run_dir,
+                    payload,
+                    operator=operator,
+                )
+                if attended_service is not None
+                else execute_attended_action(
+                    run_dir,
+                    payload,
+                    operator=operator,
+                )
             )
         except (AttendedActionRefused, ResumeRefused) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

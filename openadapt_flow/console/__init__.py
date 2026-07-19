@@ -18,7 +18,7 @@ local paths. The console invents no new engine semantics:
   mutations additionally require same-origin JSON and a session CSRF token.
 - ``console --attend`` opens the redacted Needs Attention queue first. It
   remains read-only by default; explicit action enablement still requires an
-  exact engine-issued pause capability and a deployment-bound executor before
+  exact engine-issued pause capability and a deployment-bound action service before
   an attended decision can cross a delivery boundary.
 
 Serve it with ``openadapt-flow console`` (requires the ``console`` extra:

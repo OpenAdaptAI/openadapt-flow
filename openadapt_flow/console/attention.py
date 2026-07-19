@@ -8,7 +8,7 @@ console's authenticated, symlink-safe artifact endpoint.
 
 This module remains projection-only.  Engine-owned attended mutations live in
 ``runtime.durable.attended`` and appear only when an exact pause capability and
-deployment-bound executor are present.
+deployment-bound action service are present.
 """
 
 from __future__ import annotations

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from openadapt_flow.console.app import create_app
+from openadapt_flow.deployment import DeploymentConfig
 from openadapt_flow.ir import (
     ActionKind,
     Guard,
@@ -43,6 +45,7 @@ from openadapt_flow.runtime.durable.attended import (
     issue_attended_capability,
     validate_attended_program_receipt,
 )
+from openadapt_flow.runtime.durable.attended_service import AttendedActionService
 from openadapt_flow.runtime.durable.checkpoint import (
     CheckpointStore,
     PendingEscalation,
@@ -1606,12 +1609,22 @@ def test_attended_http_action_requires_auth_csrf_and_exact_capability(
         "openadapt_flow.console.app._local_operator_identity", lambda: "staff"
     )
     executor = _ResultExecutor()
+
+    class Service:
+        def execute(self, run_dir, request, *, operator):
+            return execute_attended_action(
+                run_dir,
+                request,
+                operator=operator,
+                executor=executor,
+            )
+
     app = create_app(
         bundle.parent,
         run.parent,
         allow_actions=True,
         attend=True,
-        attended_executor=executor,
+        attended_service=Service(),
     )
     unauthenticated = TestClient(app, base_url="http://127.0.0.1")
     assert unauthenticated.get("/api/attention").status_code == 401
@@ -1650,6 +1663,27 @@ def test_attended_http_action_requires_auth_csrf_and_exact_capability(
         json={**payload, "idempotency_key": "request-key-http2"},
     )
     assert wrong_path.status_code == 400
+
+
+def test_public_attended_service_executes_exact_request_on_owner(tmp_path, monkeypatch):
+    _workflow, _bundle, run, _store, capability = _paused(tmp_path)
+    executor = _ResultExecutor()
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.durable.attended_service._deployment_executor",
+        lambda _deployment, *, key: nullcontext(executor),
+    )
+
+    with AttendedActionService(DeploymentConfig()) as service:
+        decision = service.execute(
+            run,
+            _request(capability, key="request-key-public-service"),
+            operator="staff",
+        )
+        owner_thread = service._owner.owner_thread_id
+
+    assert decision.status == "completed"
+    assert executor.calls == 1
+    assert owner_thread is not None
 
 
 def test_attended_http_can_teach_or_escalate_without_live_executor(

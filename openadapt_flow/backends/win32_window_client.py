@@ -163,6 +163,56 @@ _MODIFIER_VKS: dict[str, int] = {
 _EXTENDED_VKS = frozenset({0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E})
 
 _WHEEL_DELTA = 120
+_KEYEVENTF_EXTENDEDKEY = 0x0001
+_KEYEVENTF_KEYUP = 0x0002
+_KEYEVENTF_UNICODE = 0x0004
+_KEYEVENTF_SCANCODE = 0x0008
+
+
+def utf16_code_units(ch: str) -> tuple[int, ...]:
+    """Return the exact UTF-16 code units Windows ``KEYEVENTF_UNICODE`` needs.
+
+    ``KEYBDINPUT.wScan`` is a 16-bit UTF-16 code unit in Unicode mode. Python
+    represents a non-BMP character as one code point, so ``ord(ch)`` does not
+    fit in ``WORD`` and would either truncate or raise. Encode explicitly and
+    preserve the surrogate pair order.
+    """
+    if len(ch) != 1:
+        raise ValueError("expected exactly one Unicode character")
+    encoded = ch.encode("utf-16-le", errors="surrogatepass")
+    return tuple(
+        int.from_bytes(encoded[offset : offset + 2], "little")
+        for offset in range(0, len(encoded), 2)
+    )
+
+
+def scancode_key_fields(vk: int, scan_code: int, *, down: bool) -> tuple[int, int, int]:
+    """Return ``(wVk, wScan, dwFlags)`` for hardware-like ``KEYBDINPUT``.
+
+    ``MapVirtualKeyW(..., MAPVK_VK_TO_VSC_EX)`` may return ``0xE0`` in the
+    high byte for an extended key. With ``KEYEVENTF_SCANCODE`` set, Windows
+    ignores ``wVk`` and consumes the low-byte hardware scan code plus the
+    explicit extended flag. Supplying both a VK and a scan code *without*
+    ``KEYEVENTF_SCANCODE`` (the former implementation) is VK injection, not
+    scan-code injection.
+    """
+    scan_code = int(scan_code)
+    if scan_code <= 0:
+        raise InputDeliveryError(
+            f"virtual key {int(vk):#x} has no hardware scan-code mapping"
+        )
+    prefix = (scan_code >> 8) & 0xFF
+    scan = scan_code & 0xFF
+    if scan == 0:
+        raise InputDeliveryError(
+            f"virtual key {int(vk):#x} resolved to invalid scan code " f"{scan_code:#x}"
+        )
+    flags = _KEYEVENTF_SCANCODE
+    if prefix in (0xE0, 0xE1) or int(vk) in _EXTENDED_VKS:
+        flags |= _KEYEVENTF_EXTENDEDKEY
+    if not down:
+        flags |= _KEYEVENTF_KEYUP
+    return 0, scan, flags
 
 
 def normalize_to_virtual_desktop(
@@ -294,8 +344,8 @@ class Win32Api(Protocol):
         where required)."""
         ...
 
-    def send_unicode_char(self, ch: str, down: bool) -> None:
-        """KEYEVENTF_UNICODE fallback (a remote-display client may drop it)."""
+    def send_unicode_unit(self, code_unit: int, down: bool) -> None:
+        """Emit one UTF-16 ``KEYEVENTF_UNICODE`` transition."""
         ...
 
     def send_wheel(self, delta: int, horizontal: bool) -> None: ...
@@ -338,22 +388,27 @@ class Win32WindowClient:
         self._api: Win32Api = api if api is not None else NativeWin32Api()
         self._expected_class = expected_class
         self._char_delay_s = char_delay_s
-        self._dpi_level: Optional[str] = None
         # Most recent exact-match resolution: pid -> hwnd (activation target)
         # and the pid set (UIPI elevation guard).
         self._activation_hints: dict[int, int] = {}
         self._last_match_pids: frozenset[int] = frozenset()
+        self._last_query: Optional[tuple[str, Optional[str]]] = None
+        self._resolved_target: Optional[tuple[int, int]] = None
 
     # -- DPI ------------------------------------------------------------------
 
     def _require_dpi(self) -> None:
-        """Establish (once) and require per-monitor DPI awareness."""
-        if self._dpi_level is None:
-            self._dpi_level = self._api.ensure_dpi_awareness()
-        if self._dpi_level not in ("per-monitor-v2", "per-monitor"):
+        """Require the calling thread's effective per-monitor DPI awareness.
+
+        The check intentionally runs on every public capture/input path.
+        Threads can carry their own DPI-awareness context, so caching one
+        successful answer from another call or thread is not sufficient.
+        """
+        dpi_level = self._api.ensure_dpi_awareness()
+        if dpi_level not in ("per-monitor-v2", "per-monitor"):
             raise DpiAwarenessError(
                 "process could not become per-monitor DPI aware (achieved "
-                f"{self._dpi_level!r}); under DPI virtualization window "
+                f"{dpi_level!r}); under DPI virtualization window "
                 "geometry is scaled behind our back and a mapped click can "
                 "land on the wrong control. Refusing capture/input rather "
                 "than risking a silent wrong action."
@@ -372,6 +427,8 @@ class Win32WindowClient:
         backend's on-screen/foreground proofs still gate every input.
         """
         self._require_dpi()
+        self._last_query = (owner, title)
+        self._resolved_target = None
         title_l = title.casefold() if title is not None else None
         class_l = (
             self._expected_class.casefold()
@@ -426,6 +483,9 @@ class Win32WindowClient:
             pid: hwnd for pid, hwnd in hints.items() if pid_counts.get(pid) == 1
         }
         self._last_match_pids = frozenset(w.pid for w in matches)
+        if len(matches) == 1:
+            only = matches[0]
+            self._resolved_target = (only.window_id, only.pid)
         return matches
 
     # -- WindowClient: trust / focus -----------------------------------------
@@ -455,6 +515,68 @@ class Win32WindowClient:
                 "this process. Run the driver elevated to drive an elevated "
                 "target — a dropped input must never look like success."
             )
+
+    def _require_unique_target(self) -> tuple[int, int]:
+        """Re-resolve and preserve one exact ``(HWND, PID)`` input target."""
+        query = self._last_query
+        target = self._resolved_target
+        if query is None or target is None:
+            raise InputDeliveryError(
+                "no unique window target has been resolved; call find_windows "
+                "and require exactly one match before input"
+            )
+        owner, title = query
+        matches = self.find_windows(owner, title)
+        if len(matches) != 1:
+            raise InputDeliveryError(
+                "window target is no longer unique "
+                f"(found {len(matches)} exact matches); refusing input"
+            )
+        current = (matches[0].window_id, matches[0].pid)
+        if current != target:
+            self._resolved_target = None
+            raise InputDeliveryError(
+                "resolved window identity changed before input "
+                f"(leased HWND/PID={target!r}, current={current!r}); "
+                "capture and re-resolve before acting"
+            )
+        if (
+            not self._api.is_window(target[0])
+            or self._api.window_pid(target[0]) != target[1]
+        ):
+            raise InputDeliveryError(
+                f"resolved window HWND/PID {target!r} is no longer valid"
+            )
+        return target
+
+    def _assert_target_foreground(self, target: tuple[int, int]) -> None:
+        """Require the exact leased HWND—not merely another window in its PID."""
+        hwnd, pid = target
+        current = self._api.foreground_window()
+        if (
+            current != hwnd
+            or not self._api.is_window(hwnd)
+            or self._api.window_pid(hwnd) != pid
+        ):
+            raise InputDeliveryError(
+                "exact resolved target window lost foreground or identity "
+                f"(expected HWND/PID={target!r}, foreground={current!r}); "
+                "refusing to deliver the next input edge"
+            )
+
+    def _prepare_input(self) -> tuple[int, int]:
+        """Recheck DPI, uniqueness, UIPI, and exact foreground before a burst."""
+        self._require_dpi()
+        target = self._require_unique_target()
+        self._assert_injectable()
+        self._assert_target_foreground(target)
+        return target
+
+    def _emit_edge(self, target: tuple[int, int], emit: Any) -> None:
+        """Emit one input edge with exact-HWND checks immediately around it."""
+        self._assert_target_foreground(target)
+        emit()
+        self._assert_target_foreground(target)
 
     def frontmost_pid(self) -> Optional[int]:
         hwnd = self._api.foreground_window()
@@ -559,12 +681,14 @@ class Win32WindowClient:
         double-clicks from transition timing/position, and the backend's two
         rapid down/up pairs land inside the double-click interval.
         """
-        self._assert_injectable()
-        self._api.send_mouse_button(x, y, button, down)
+        target = self._prepare_input()
+        self._emit_edge(target, lambda: self._api.send_mouse_button(x, y, button, down))
+        self._assert_target_foreground(target)
 
     def mouse_move(self, x: float, y: float) -> None:
-        self._assert_injectable()
-        self._api.send_mouse_move(x, y)
+        target = self._prepare_input()
+        self._emit_edge(target, lambda: self._api.send_mouse_move(x, y))
+        self._assert_target_foreground(target)
 
     def type_chars(self, text: str) -> None:
         """Type text via layout-resolved VKs (hardware-like scancodes).
@@ -574,23 +698,48 @@ class Win32WindowClient:
         need AltGr) fall back to a synthetic Unicode keystroke, which such a
         client may drop — the same documented caveat as the macOS client.
         """
-        self._assert_injectable()
+        target = self._prepare_input()
         for ch in text:
             mapping = self._api.vk_for_char(ch)
             if mapping is not None:
                 vk, shift = mapping
                 if shift:
-                    self._api.send_key_vk(_MODIFIER_VKS["shift"], True)
+                    self._emit_edge(
+                        target,
+                        lambda: self._api.send_key_vk(_MODIFIER_VKS["shift"], True),
+                    )
                 try:
-                    self._api.send_key_vk(vk, True)
-                    self._api.send_key_vk(vk, False)
+                    self._emit_edge(
+                        target, lambda vk=vk: self._api.send_key_vk(vk, True)
+                    )
+                    self._emit_edge(
+                        target, lambda vk=vk: self._api.send_key_vk(vk, False)
+                    )
                 finally:
                     if shift:
-                        self._api.send_key_vk(_MODIFIER_VKS["shift"], False)
+                        self._emit_edge(
+                            target,
+                            lambda: self._api.send_key_vk(
+                                _MODIFIER_VKS["shift"], False
+                            ),
+                        )
             else:
-                self._api.send_unicode_char(ch, True)
-                self._api.send_unicode_char(ch, False)
+                for code_unit in utf16_code_units(ch):
+                    self._emit_edge(
+                        target,
+                        lambda code_unit=code_unit: self._api.send_unicode_unit(
+                            code_unit, True
+                        ),
+                    )
+                    self._emit_edge(
+                        target,
+                        lambda code_unit=code_unit: self._api.send_unicode_unit(
+                            code_unit, False
+                        ),
+                    )
             time.sleep(self._char_delay_s)
+            self._assert_target_foreground(target)
+        self._assert_target_foreground(target)
 
     def key(self, keycode: int, *, down: bool, flags: list[str]) -> None:
         """Post a VK transition with real modifier key events around it.
@@ -601,18 +750,24 @@ class Win32WindowClient:
         down edge and released after it on the up edge — a failure can never
         leave a modifier latched.
         """
-        self._assert_injectable()
-        mods = [_MODIFIER_VKS[f] for f in flags if f in _MODIFIER_VKS]
+        target = self._prepare_input()
+        unknown = [flag for flag in flags if flag not in _MODIFIER_VKS]
+        if unknown:
+            raise InputDeliveryError(f"unknown Windows modifier flags: {unknown!r}")
+        mods = [_MODIFIER_VKS[f] for f in flags]
         if down:
             for m in mods:
-                self._api.send_key_vk(m, True)
-            self._api.send_key_vk(int(keycode), True)
+                self._emit_edge(target, lambda m=m: self._api.send_key_vk(m, True))
+            self._emit_edge(target, lambda: self._api.send_key_vk(int(keycode), True))
         else:
             try:
-                self._api.send_key_vk(int(keycode), False)
+                self._emit_edge(
+                    target, lambda: self._api.send_key_vk(int(keycode), False)
+                )
             finally:
                 for m in reversed(mods):
-                    self._api.send_key_vk(m, False)
+                    self._emit_edge(target, lambda m=m: self._api.send_key_vk(m, False))
+        self._assert_target_foreground(target)
 
     def scroll(self, dx: int, dy: int) -> None:
         """Wheel gesture in Backend sign convention (positive dy = content up).
@@ -621,13 +776,20 @@ class Win32WindowClient:
         vertical lines are negated — the same inversion the macOS client
         applies for CGEvent.
         """
-        self._assert_injectable()
+        target = self._prepare_input()
         lines_v = -_lines(int(dy))
         lines_h = _lines(int(dx))
         if lines_v:
-            self._api.send_wheel(lines_v * _WHEEL_DELTA, horizontal=False)
+            self._emit_edge(
+                target,
+                lambda: self._api.send_wheel(lines_v * _WHEEL_DELTA, horizontal=False),
+            )
         if lines_h:
-            self._api.send_wheel(lines_h * _WHEEL_DELTA, horizontal=True)
+            self._emit_edge(
+                target,
+                lambda: self._api.send_wheel(lines_h * _WHEEL_DELTA, horizontal=True),
+            )
+        self._assert_target_foreground(target)
 
     def resolve_key(self, token: str) -> Optional[tuple[int, bool]]:
         """(VK, needs_shift) for a named key or character token, else None.
@@ -665,6 +827,14 @@ class NativeWin32Api:
     _dwmapi: Any
     _shcore: Any
     _advapi32: Any
+    _prototype_contract: dict[tuple[str, str], tuple[tuple[Any, ...], Any]]
+    _MOUSEINPUT: Any
+    _KEYBDINPUT: Any
+    _HARDWAREINPUT: Any
+    _INPUT: Any
+    _BITMAPINFOHEADER: Any
+    _BITMAPINFO: Any
+    _WNDENUMPROC: Any
 
     def __init__(self) -> None:
         if sys.platform != "win32":
@@ -677,62 +847,463 @@ class NativeWin32Api:
 
         self._ctypes = ctypes
         self._wintypes = wintypes
-        self._user32 = ctypes.windll.user32
-        self._gdi32 = ctypes.windll.gdi32
-        self._kernel32 = ctypes.windll.kernel32
+        # ``use_last_error`` is required for a trustworthy SendInput failure
+        # receipt. More importantly, WinDLL preserves pointer-sized HANDLE/
+        # HWND return values once the explicit prototypes below are installed;
+        # ctypes' default ``c_int`` restype truncates them on 64-bit Windows.
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         try:
-            self._dwmapi = ctypes.windll.dwmapi
+            self._dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
         except OSError:  # pragma: no cover - dwmapi ships with every DWM OS
             self._dwmapi = None
         try:
-            self._shcore = ctypes.windll.shcore
+            self._shcore = ctypes.WinDLL("shcore", use_last_error=True)
         except OSError:
             self._shcore = None
         try:
-            self._advapi32 = ctypes.windll.advapi32
+            self._advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
         except OSError:  # pragma: no cover - advapi32 always present
             self._advapi32 = None
+        self._define_native_types()
+        self._bind_all_prototypes()
+
+    def _define_native_types(self) -> None:
+        """Define the Windows ABI structures once, before binding SendInput."""
+        import ctypes
+
+        wintypes = self._wintypes
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [
+                ("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", wintypes.WPARAM),  # ULONG_PTR
+            ]
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", wintypes.WPARAM),  # ULONG_PTR
+            ]
+
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [
+                ("uMsg", wintypes.DWORD),
+                ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD),
+            ]
+
+        class INPUTUNION(ctypes.Union):
+            _fields_ = [
+                ("mi", MOUSEINPUT),
+                ("ki", KEYBDINPUT),
+                ("hi", HARDWAREINPUT),
+            ]
+
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ("union",)
+            _fields_ = [("type", wintypes.DWORD), ("union", INPUTUNION)]
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        class BITMAPINFO(ctypes.Structure):
+            # One RGBQUAD is the ABI minimum for BI_RGB; CreateDIBSection does
+            # not inspect a palette for the 32-bit format used here.
+            _fields_ = [
+                ("bmiHeader", BITMAPINFOHEADER),
+                ("bmiColors", wintypes.DWORD * 1),
+            ]
+
+        self._MOUSEINPUT = MOUSEINPUT
+        self._KEYBDINPUT = KEYBDINPUT
+        self._HARDWAREINPUT = HARDWAREINPUT
+        self._INPUT = INPUT
+        self._BITMAPINFOHEADER = BITMAPINFOHEADER
+        self._BITMAPINFO = BITMAPINFO
+        winfunctype: Any = getattr(ctypes, "WINFUNCTYPE")
+        self._WNDENUMPROC = winfunctype(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _bind(
+        self,
+        dll_name: str,
+        dll: Any,
+        function_name: str,
+        argtypes: list[Any],
+        restype: Any,
+        *,
+        optional: bool = False,
+    ) -> Optional[Any]:
+        if dll is None:
+            if optional:
+                return None
+            raise Win32WindowError(f"required Windows DLL {dll_name!r} is unavailable")
+        try:
+            function = getattr(dll, function_name)
+        except AttributeError:
+            if optional:
+                return None
+            raise Win32WindowError(
+                f"required Windows API {dll_name}.{function_name} is unavailable"
+            ) from None
+        function.argtypes = argtypes
+        function.restype = restype
+        self._prototype_contract[(dll_name, function_name)] = (
+            tuple(argtypes),
+            restype,
+        )
+        return function
+
+    def _bind_all_prototypes(self) -> None:
+        """Bind every native function used below to its exact Windows ABI."""
+        ctypes = self._ctypes
+        w = self._wintypes
+        PVOID = ctypes.c_void_p
+        PDWORD = ctypes.POINTER(w.DWORD)
+        PHANDLE = ctypes.POINTER(w.HANDLE)
+        self._prototype_contract = {}
+
+        # user32.dll
+        self._bind(
+            "user32",
+            self._user32,
+            "SetProcessDpiAwarenessContext",
+            [PVOID],
+            w.BOOL,
+            optional=True,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "GetThreadDpiAwarenessContext",
+            [],
+            PVOID,
+            optional=True,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "AreDpiAwarenessContextsEqual",
+            [PVOID, PVOID],
+            w.BOOL,
+            optional=True,
+        )
+        self._bind("user32", self._user32, "SetProcessDPIAware", [], w.BOOL)
+        self._bind(
+            "user32",
+            self._user32,
+            "EnumWindows",
+            [self._WNDENUMPROC, w.LPARAM],
+            w.BOOL,
+        )
+        for name in ("IsWindow", "IsWindowVisible", "IsIconic"):
+            self._bind("user32", self._user32, name, [w.HWND], w.BOOL)
+        self._bind(
+            "user32", self._user32, "GetWindowTextLengthW", [w.HWND], ctypes.c_int
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "GetWindowTextW",
+            [w.HWND, w.LPWSTR, ctypes.c_int],
+            ctypes.c_int,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "GetClassNameW",
+            [w.HWND, w.LPWSTR, ctypes.c_int],
+            ctypes.c_int,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "GetWindowThreadProcessId",
+            [w.HWND, PDWORD],
+            w.DWORD,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "GetClientRect",
+            [w.HWND, ctypes.POINTER(w.RECT)],
+            w.BOOL,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "ClientToScreen",
+            [w.HWND, ctypes.POINTER(w.POINT)],
+            w.BOOL,
+        )
+        self._bind("user32", self._user32, "GetForegroundWindow", [], w.HWND)
+        self._bind(
+            "user32",
+            self._user32,
+            "GetAncestor",
+            [w.HWND, w.UINT],
+            w.HWND,
+        )
+        self._bind("user32", self._user32, "WindowFromPoint", [w.POINT], w.HWND)
+        self._bind(
+            "user32",
+            self._user32,
+            "ShowWindow",
+            [w.HWND, ctypes.c_int],
+            w.BOOL,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "AttachThreadInput",
+            [w.DWORD, w.DWORD, w.BOOL],
+            w.BOOL,
+        )
+        self._bind("user32", self._user32, "BringWindowToTop", [w.HWND], w.BOOL)
+        self._bind("user32", self._user32, "SetForegroundWindow", [w.HWND], w.BOOL)
+        self._bind("user32", self._user32, "GetDC", [w.HWND], w.HDC)
+        self._bind(
+            "user32",
+            self._user32,
+            "PrintWindow",
+            [w.HWND, w.HDC, w.UINT],
+            w.BOOL,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "ReleaseDC",
+            [w.HWND, w.HDC],
+            ctypes.c_int,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "GetSystemMetrics",
+            [ctypes.c_int],
+            ctypes.c_int,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "SendInput",
+            [w.UINT, ctypes.POINTER(self._INPUT), ctypes.c_int],
+            w.UINT,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "MapVirtualKeyW",
+            [w.UINT, w.UINT],
+            w.UINT,
+        )
+        self._bind(
+            "user32",
+            self._user32,
+            "VkKeyScanW",
+            [w.WCHAR],
+            ctypes.c_short,
+        )
+
+        # gdi32.dll
+        self._bind("gdi32", self._gdi32, "CreateCompatibleDC", [w.HDC], w.HDC)
+        self._bind(
+            "gdi32",
+            self._gdi32,
+            "CreateDIBSection",
+            [
+                w.HDC,
+                ctypes.POINTER(self._BITMAPINFO),
+                w.UINT,
+                ctypes.POINTER(PVOID),
+                w.HANDLE,
+                w.DWORD,
+            ],
+            w.HANDLE,
+        )
+        self._bind(
+            "gdi32",
+            self._gdi32,
+            "SelectObject",
+            [w.HDC, w.HANDLE],
+            w.HANDLE,
+        )
+        self._bind(
+            "gdi32",
+            self._gdi32,
+            "BitBlt",
+            [
+                w.HDC,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                w.HDC,
+                ctypes.c_int,
+                ctypes.c_int,
+                w.DWORD,
+            ],
+            w.BOOL,
+        )
+        self._bind("gdi32", self._gdi32, "DeleteObject", [w.HANDLE], w.BOOL)
+        self._bind("gdi32", self._gdi32, "DeleteDC", [w.HDC], w.BOOL)
+
+        # kernel32.dll
+        self._bind(
+            "kernel32",
+            self._kernel32,
+            "OpenProcess",
+            [w.DWORD, w.BOOL, w.DWORD],
+            w.HANDLE,
+        )
+        self._bind(
+            "kernel32",
+            self._kernel32,
+            "QueryFullProcessImageNameW",
+            [w.HANDLE, w.DWORD, w.LPWSTR, PDWORD],
+            w.BOOL,
+        )
+        self._bind("kernel32", self._kernel32, "CloseHandle", [w.HANDLE], w.BOOL)
+        self._bind("kernel32", self._kernel32, "GetCurrentProcess", [], w.HANDLE)
+
+        # Optional system DLLs still receive exact prototypes when present.
+        self._bind(
+            "dwmapi",
+            self._dwmapi,
+            "DwmGetWindowAttribute",
+            [w.HWND, w.DWORD, PVOID, w.DWORD],
+            ctypes.c_long,
+            optional=True,
+        )
+        self._bind(
+            "shcore",
+            self._shcore,
+            "SetProcessDpiAwareness",
+            [ctypes.c_int],
+            ctypes.c_long,
+            optional=True,
+        )
+        self._bind(
+            "shcore",
+            self._shcore,
+            "GetProcessDpiAwareness",
+            [w.HANDLE, ctypes.POINTER(ctypes.c_int)],
+            ctypes.c_long,
+            optional=True,
+        )
+        self._bind(
+            "advapi32",
+            self._advapi32,
+            "OpenProcessToken",
+            [w.HANDLE, w.DWORD, PHANDLE],
+            w.BOOL,
+            optional=True,
+        )
+        self._bind(
+            "advapi32",
+            self._advapi32,
+            "GetTokenInformation",
+            [w.HANDLE, ctypes.c_int, PVOID, w.DWORD, PDWORD],
+            w.BOOL,
+            optional=True,
+        )
+
+    def bound_prototypes(
+        self,
+    ) -> dict[tuple[str, str], tuple[tuple[Any, ...], Any]]:
+        """Return a copy for the non-injecting Windows ABI contract test."""
+        return dict(self._prototype_contract)
 
     # -- DPI ------------------------------------------------------------------
+
+    def _current_dpi_awareness(self) -> Optional[str]:
+        """Query effective awareness; never infer it from ACCESS_DENIED."""
+        ctypes = self._ctypes
+        get_ctx = getattr(self._user32, "GetThreadDpiAwarenessContext", None)
+        eq_ctx = getattr(self._user32, "AreDpiAwarenessContextsEqual", None)
+        if get_ctx is not None and eq_ctx is not None:
+            current = get_ctx()
+            if current:
+                for handle, name in (
+                    (-4, "per-monitor-v2"),
+                    (-3, "per-monitor"),
+                    (-2, "system"),
+                    (-1, "unaware"),
+                    (-5, "unaware"),
+                ):
+                    if eq_ctx(current, ctypes.c_void_p(handle)):
+                        return name
+        get_process = (
+            getattr(self._shcore, "GetProcessDpiAwareness", None)
+            if self._shcore is not None
+            else None
+        )
+        if get_process is not None:
+            awareness = ctypes.c_int(-1)
+            result = get_process(
+                self._kernel32.GetCurrentProcess(), ctypes.byref(awareness)
+            )
+            if int(result) == 0:
+                return {0: "unaware", 1: "system", 2: "per-monitor"}.get(
+                    int(awareness.value)
+                )
+        return None
 
     def ensure_dpi_awareness(self) -> str:
         ctypes = self._ctypes
         # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == HANDLE(-4).
         set_ctx = getattr(self._user32, "SetProcessDpiAwarenessContext", None)
-        get_ctx = getattr(self._user32, "GetThreadDpiAwarenessContext", None)
-        eq_ctx = getattr(self._user32, "AreDpiAwarenessContextsEqual", None)
         if set_ctx is not None:
+            ctypes.set_last_error(0)
             if set_ctx(ctypes.c_void_p(-4)):
-                return "per-monitor-v2"
-            # Already set (possibly by the host process); read what we have.
-            if get_ctx is not None and eq_ctx is not None:
-                current = get_ctx()
-                for handle, name in (
-                    (-4, "per-monitor-v2"),
-                    (-3, "per-monitor"),
-                    (-2, "system"),
-                ):
-                    if eq_ctx(current, ctypes.c_void_p(handle)):
-                        return name
+                return self._current_dpi_awareness() or "per-monitor-v2"
+            # ERROR_ACCESS_DENIED means awareness is already fixed, but it can
+            # be SYSTEM_AWARE or UNAWARE. Query the actual context.
+            current = self._current_dpi_awareness()
+            if ctypes.get_last_error() == 5 or current in (
+                "per-monitor-v2",
+                "per-monitor",
+                "system",
+            ):
+                if current is not None:
+                    return current
         if self._shcore is not None:
-            # PROCESS_PER_MONITOR_DPI_AWARE == 2; S_OK or already-set both
-            # leave us at least per-monitor aware.
             E_ACCESSDENIED = -2147024891  # already set for this process
             res = self._shcore.SetProcessDpiAwareness(2)
-            if res in (0, E_ACCESSDENIED):
-                return "per-monitor"
+            if int(res) == 0:
+                return self._current_dpi_awareness() or "per-monitor"
+            if int(res) == E_ACCESSDENIED:
+                return self._current_dpi_awareness() or "unaware"
         if self._user32.SetProcessDPIAware():
-            return "system"
-        return "unaware"
+            return self._current_dpi_awareness() or "system"
+        return self._current_dpi_awareness() or "unaware"
 
     # -- enumeration / identity ----------------------------------------------
 
     def enum_top_level_windows(self) -> list[int]:
-        ctypes = self._ctypes
-        wintypes = self._wintypes
         hwnds: list[int] = []
 
-        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        @self._WNDENUMPROC
         def _cb(hwnd: int, _lparam: int) -> bool:
             hwnds.append(int(hwnd))
             return True
@@ -847,7 +1418,6 @@ class NativeWin32Api:
 
     def force_foreground(self, hwnd: int) -> None:
         """AttachThreadInput dance; best-effort, caller verifies the result."""
-        ctypes = self._ctypes
         wintypes = self._wintypes
         target_thread = self._user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), None)
         fg = self._user32.GetForegroundWindow()
@@ -865,7 +1435,6 @@ class NativeWin32Api:
         finally:
             if attached:
                 self._user32.AttachThreadInput(fg_thread, target_thread, False)
-        del ctypes  # bound above for symmetry; nothing else to do
 
     # -- capture ---------------------------------------------------------------
 
@@ -882,29 +1451,8 @@ class NativeWin32Api:
         user32, gdi32 = self._user32, self._gdi32
         wintypes = self._wintypes
 
-        class BITMAPINFOHEADER(ctypes.Structure):
-            _fields_ = [
-                ("biSize", ctypes.c_uint32),
-                ("biWidth", ctypes.c_int32),
-                ("biHeight", ctypes.c_int32),
-                ("biPlanes", ctypes.c_uint16),
-                ("biBitCount", ctypes.c_uint16),
-                ("biCompression", ctypes.c_uint32),
-                ("biSizeImage", ctypes.c_uint32),
-                ("biXPelsPerMeter", ctypes.c_int32),
-                ("biYPelsPerMeter", ctypes.c_int32),
-                ("biClrUsed", ctypes.c_uint32),
-                ("biClrImportant", ctypes.c_uint32),
-            ]
-
-        class BITMAPINFO(ctypes.Structure):
-            _fields_ = [
-                ("bmiHeader", BITMAPINFOHEADER),
-                ("bmiColors", ctypes.c_uint32 * 3),
-            ]
-
-        bmi = BITMAPINFO()
-        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi = self._BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes.sizeof(self._BITMAPINFOHEADER)
         bmi.bmiHeader.biWidth = w
         bmi.bmiHeader.biHeight = -h  # top-down
         bmi.bmiHeader.biPlanes = 1
@@ -965,43 +1513,16 @@ class NativeWin32Api:
             int(self._user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)),
         )
 
-    def _input_structs(self):
-        ctypes = self._ctypes
-
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [
-                ("dx", ctypes.c_long),
-                ("dy", ctypes.c_long),
-                ("mouseData", ctypes.c_ulong),
-                ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.c_size_t),
-            ]
-
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [
-                ("wVk", ctypes.c_ushort),
-                ("wScan", ctypes.c_ushort),
-                ("dwFlags", ctypes.c_ulong),
-                ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.c_size_t),
-            ]
-
-        class _INPUTUNION(ctypes.Union):
-            _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", ctypes.c_ulong), ("union", _INPUTUNION)]
-
-        return MOUSEINPUT, KEYBDINPUT, INPUT
-
     def _send(self, inputs: list) -> None:
         ctypes = self._ctypes
         n = len(inputs)
+        if n == 0:
+            return
         array = (inputs[0].__class__ * n)(*inputs)
+        ctypes.set_last_error(0)
         sent = self._user32.SendInput(n, array, ctypes.sizeof(inputs[0]))
         if int(sent) != n:
-            err = self._kernel32.GetLastError()
+            err = ctypes.get_last_error()
             raise InputDeliveryError(
                 f"SendInput injected {int(sent)}/{n} events (GetLastError="
                 f"{err}); input was blocked (locked desktop, UIPI, or "
@@ -1010,7 +1531,7 @@ class NativeWin32Api:
             )
 
     def _mouse_input(self, x: float, y: float, flags: int, data: int = 0):
-        MOUSEINPUT, _KEYBDINPUT, INPUT = self._input_structs()
+        MOUSEINPUT, INPUT = self._MOUSEINPUT, self._INPUT
         INPUT_MOUSE = 0
         MOUSEEVENTF_ABSOLUTE = 0x8000
         MOUSEEVENTF_VIRTUALDESK = 0x4000
@@ -1018,7 +1539,7 @@ class NativeWin32Api:
         nx, ny = normalize_to_virtual_desktop(x, y, self._virtual_screen())
         item = INPUT()
         item.type = INPUT_MOUSE
-        item.union.mi = MOUSEINPUT(
+        item.mi = MOUSEINPUT(
             nx,
             ny,
             data,
@@ -1043,13 +1564,13 @@ class NativeWin32Api:
         self._send([self._mouse_input(x, y, 0)])
 
     def send_wheel(self, delta: int, horizontal: bool) -> None:
-        MOUSEINPUT, _KEYBDINPUT, INPUT = self._input_structs()
+        MOUSEINPUT, INPUT = self._MOUSEINPUT, self._INPUT
         INPUT_MOUSE = 0
         MOUSEEVENTF_WHEEL = 0x0800
         MOUSEEVENTF_HWHEEL = 0x1000
         item = INPUT()
         item.type = INPUT_MOUSE
-        item.union.mi = MOUSEINPUT(
+        item.mi = MOUSEINPUT(
             0,
             0,
             delta & 0xFFFFFFFF,
@@ -1060,31 +1581,27 @@ class NativeWin32Api:
         self._send([item])
 
     def send_key_vk(self, vk: int, down: bool) -> None:
-        _MOUSEINPUT, KEYBDINPUT, INPUT = self._input_structs()
+        KEYBDINPUT, INPUT = self._KEYBDINPUT, self._INPUT
         INPUT_KEYBOARD = 1
-        KEYEVENTF_KEYUP = 0x0002
-        KEYEVENTF_EXTENDEDKEY = 0x0001
-        MAPVK_VK_TO_VSC = 0
-        scan = int(self._user32.MapVirtualKeyW(int(vk), MAPVK_VK_TO_VSC))
-        flags = 0
-        if not down:
-            flags |= KEYEVENTF_KEYUP
-        if int(vk) in _EXTENDED_VKS:
-            flags |= KEYEVENTF_EXTENDEDKEY
+        MAPVK_VK_TO_VSC_EX = 4
+        mapped = int(self._user32.MapVirtualKeyW(int(vk), MAPVK_VK_TO_VSC_EX))
+        w_vk, scan, flags = scancode_key_fields(int(vk), mapped, down=down)
         item = INPUT()
         item.type = INPUT_KEYBOARD
-        item.union.ki = KEYBDINPUT(int(vk), scan, flags, 0, 0)
+        item.ki = KEYBDINPUT(w_vk, scan, flags, 0, 0)
         self._send([item])
 
-    def send_unicode_char(self, ch: str, down: bool) -> None:
-        _MOUSEINPUT, KEYBDINPUT, INPUT = self._input_structs()
+    def send_unicode_unit(self, code_unit: int, down: bool) -> None:
+        KEYBDINPUT, INPUT = self._KEYBDINPUT, self._INPUT
         INPUT_KEYBOARD = 1
-        KEYEVENTF_KEYUP = 0x0002
-        KEYEVENTF_UNICODE = 0x0004
-        flags = KEYEVENTF_UNICODE | (0 if down else KEYEVENTF_KEYUP)
+        if not (0 <= int(code_unit) <= 0xFFFF):
+            raise InputDeliveryError(
+                f"Unicode input unit {int(code_unit)!r} does not fit UTF-16"
+            )
+        flags = _KEYEVENTF_UNICODE | (0 if down else _KEYEVENTF_KEYUP)
         item = INPUT()
         item.type = INPUT_KEYBOARD
-        item.union.ki = KEYBDINPUT(0, ord(ch), flags, 0, 0)
+        item.ki = KEYBDINPUT(0, int(code_unit), flags, 0, 0)
         self._send([item])
 
     def vk_for_char(self, ch: str) -> Optional[tuple[int, bool]]:

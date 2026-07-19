@@ -11,9 +11,10 @@ name: CI
 #       e2e-browser (record -> compile -> replay in a headless browser; no OS
 #         permissions needed, so it runs on PRs, NOT just nightly),
 #       linux-atspi-x11 (real GTK/AT-SPI actuation inside Xvfb + session D-Bus),
-#       wheel (clean-venv wheel install + CLI smoke).
+#       wheel (clean-venv wheel install + CLI smoke),
+#       windows-mock (non-injecting Win32 ABI + fake behavior contract).
 #   - push to main: re-validate main AND run the genuinely-heavy suites that are
-#     too slow/OS-bound for PRs (full Python matrix + macOS + windows-mock).
+#     too slow/OS-bound for PRs (full Python matrix + macOS).
 #   - schedule: a nightly run of the same heavy suites, so long-lived branches
 #     and environment drift are caught even without a merge.
 #   - workflow_dispatch: let maintainers validate those post-merge suites on an
@@ -23,9 +24,9 @@ name: CI
 # runner spend for zero extra signal).
 #
 # Which jobs to mark REQUIRED in branch protection (repo Settings, owner-only):
-#   lint, python-compatibility, mypy-strict-safety, phi-guard,
+#   lint, python-compatibility, mypy-strict-safety, phi-guard, windows-mock,
 #   docs-consistency, interop-types, test, e2e-browser, linux-atspi-x11, wheel.
-#   (test-matrix and windows-mock are post-merge/nightly -- NOT required.)
+#   (test-matrix remains post-merge/nightly.)
 on:
   pull_request:
   push:
@@ -489,10 +490,11 @@ jobs:
             runs/**/*.png
           if-no-files-found: warn
 
-  # --- Windows: pure-Python / mock backend tests (no live VM, no browser) --
-  # Post-merge / nightly only (not a required check, not run on PRs).
+  # --- Windows: native ABI + pure-Python mock backend tests ----------------
+  # Runs on PRs because 64-bit ctypes ABI mistakes cannot be validated on the
+  # Linux required matrix. The ABI test binds/inspects prototypes only; every
+  # behavior test uses fakes. Nothing opens a window or calls SendInput.
   windows-mock:
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -508,12 +510,10 @@ jobs:
 
       # The WindowsBackend + RDP backend suites mock the WAA/RDP servers with
       # stdlib HTTP + fakes (no live VM, no Playwright browser), and the win32
-      # window-client suite mocks the entire Win32 API, so they run anywhere.
-      # This proves the 4-method Backend protocol — and the remote-display
-      # WindowClient contract — on a real Windows interpreter (still mocked:
-      # no live window, no SendInput; see claims.yaml
-      # win32-window-replay-roadmap for what this does NOT prove).
-      - name: Windows mock backend tests
+      # window-client behavior suite mocks the entire Win32 API. Its one native
+      # test only constructs NativeWin32Api and verifies every ctypes prototype
+      # and structure size; it never enumerates a window or calls SendInput.
+      - name: Windows ABI and mock backend tests (non-injecting)
         run: pytest -q tests/test_windows_backend.py tests/test_rdp_backend.py tests/test_win32_window_client.py tests/test_remote_display_backend.py
 
   # --- Clean-wheel install + CLI smoke (REQUIRED on PRs) -------------------

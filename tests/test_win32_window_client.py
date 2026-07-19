@@ -51,6 +51,8 @@ from openadapt_flow.backends.win32_window_client import (
     WindowMinimizedError,
     normalize_to_virtual_desktop,
     owner_matches_process,
+    scancode_key_fields,
+    utf16_code_units,
 )
 
 
@@ -214,8 +216,8 @@ class FakeWin32Api:
     def send_key_vk(self, vk, down):
         self.calls.append(("key_vk", vk, down))
 
-    def send_unicode_char(self, ch, down):
-        self.calls.append(("unicode", ch, down))
+    def send_unicode_unit(self, code_unit, down):
+        self.calls.append(("unicode_unit", code_unit, down))
 
     def send_wheel(self, delta, horizontal):
         self.calls.append(("wheel", delta, horizontal))
@@ -328,11 +330,11 @@ def test_dpi_virtualization_refused(level: str) -> None:
         client.capture(101)
 
 
-def test_dpi_established_once_and_cached() -> None:
+def test_dpi_rechecked_on_every_resolution_path() -> None:
     client, api = _client()
     client.find_windows("wfica32", None)
     client.find_windows("wfica32", None)
-    assert api.calls.count(("dpi",)) == 1
+    assert api.calls.count(("dpi",)) == 2
 
 
 # -- coordinate mapping -------------------------------------------------------
@@ -404,7 +406,9 @@ def test_input_refused_when_other_window_holds_foreground() -> None:
         backend.click(10, 10)
     with pytest.raises(RemoteDisplayError, match="not visible, app-frontmost"):
         backend.type_text("x")
-    assert not any(c[0] in {"mouse_button", "key_vk", "unicode"} for c in api.calls)
+    assert not any(
+        c[0] in {"mouse_button", "key_vk", "unicode_unit"} for c in api.calls
+    )
 
 
 def test_key_window_id_requires_exact_foreground_hwnd() -> None:
@@ -555,9 +559,87 @@ def test_direct_input_to_elevated_target_is_refused_at_the_client() -> None:
         with pytest.raises(InputDeliveryError, match="UIPI"):
             fn()
     assert not any(
-        c[0] in {"mouse_button", "mouse_move", "key_vk", "unicode", "wheel"}
+        c[0] in {"mouse_button", "mouse_move", "key_vk", "unicode_unit", "wheel"}
         for c in api.calls
     )
+
+
+# -- direct-input target/DPI/foreground adversarial gates ---------------------
+
+
+def test_every_direct_input_path_requires_a_unique_prior_resolution() -> None:
+    client, api = _client()
+    calls = (
+        lambda: client.mouse(1, 1, button="left", down=True, click_count=1),
+        lambda: client.mouse_move(1, 1),
+        lambda: client.type_chars("x"),
+        lambda: client.key(0x41, down=True, flags=[]),
+        lambda: client.scroll(0, 120),
+    )
+    for call in calls:
+        with pytest.raises(InputDeliveryError, match="no unique window target"):
+            call()
+    assert not any(
+        c[0] in {"mouse_button", "mouse_move", "key_vk", "unicode_unit", "wheel"}
+        for c in api.calls
+    )
+
+
+def test_direct_input_refuses_ambiguous_resolution() -> None:
+    api = FakeWin32Api(windows=[FakeWindow(1), FakeWindow(2)])
+    client, _ = _client(api)
+    assert len(client.find_windows("wfica32", None)) == 2
+    with pytest.raises(InputDeliveryError, match="no unique window target"):
+        client.type_chars("x")
+    assert not any(c[0] == "key_vk" for c in api.calls)
+
+
+def test_direct_input_rechecks_per_monitor_dpi_after_resolution() -> None:
+    client, api = _client()
+    client.find_windows("wfica32", None)
+    api.dpi = "system"
+    with pytest.raises(DpiAwarenessError, match="per-monitor DPI"):
+        client.type_chars("x")
+    assert not any(c[0] == "key_vk" for c in api.calls)
+
+
+def test_direct_input_requires_exact_foreground_hwnd_not_same_pid() -> None:
+    api = FakeWin32Api(
+        windows=[
+            FakeWindow(1),
+            FakeWindow(2, title="Second Session", pid=4242),
+        ],
+        foreground=1,
+    )
+    client, _ = _client(api)
+    assert [
+        w.window_id for w in client.find_windows("wfica32", "Accuro - Citrix Workspace")
+    ] == [1]
+    api.foreground = 2
+    with pytest.raises(InputDeliveryError, match="exact resolved target window"):
+        client.type_chars("x")
+    assert not any(c[0] == "key_vk" for c in api.calls)
+
+
+def test_focus_theft_after_character_edge_halts_before_next_edge() -> None:
+    api = FakeWin32Api(
+        windows=[
+            FakeWindow(1),
+            FakeWindow(9, title="Other", pid=9, image="other.exe"),
+        ],
+        foreground=1,
+    )
+
+    def steal_after_first_key(vk, down):
+        api.calls.append(("key_vk", vk, down))
+        api.foreground = 9
+
+    api.send_key_vk = steal_after_first_key
+    client, _ = _client(api)
+    client.find_windows("wfica32", None)
+    with pytest.raises(InputDeliveryError, match="lost foreground"):
+        client.type_chars("ab")
+    assert [c for c in api.calls if c[0] == "key_vk"] == [("key_vk", 0x41, True)]
 
 
 # -- input synthesis ----------------------------------------------------------
@@ -565,6 +647,7 @@ def test_direct_input_to_elevated_target_is_refused_at_the_client() -> None:
 
 def test_type_chars_uses_layout_vks_with_shift_wrapping() -> None:
     client, api = _client()
+    client.find_windows("wfica32", None)
     client.type_chars("Ab-")
     keys = [c for c in api.calls if c[0] == "key_vk"]
     assert keys == [
@@ -577,20 +660,51 @@ def test_type_chars_uses_layout_vks_with_shift_wrapping() -> None:
         ("key_vk", 0xBD, True),  # -
         ("key_vk", 0xBD, False),
     ]
-    assert not any(c[0] == "unicode" for c in api.calls)
+    assert not any(c[0] == "unicode_unit" for c in api.calls)
 
 
 def test_type_chars_unicode_fallback_for_unmapped_char() -> None:
     client, api = _client()
+    client.find_windows("wfica32", None)
     client.type_chars("é")
-    assert [c for c in api.calls if c[0] == "unicode"] == [
-        ("unicode", "é", True),
-        ("unicode", "é", False),
+    assert [c for c in api.calls if c[0] == "unicode_unit"] == [
+        ("unicode_unit", 0x00E9, True),
+        ("unicode_unit", 0x00E9, False),
     ]
+
+
+def test_non_bmp_unicode_fallback_emits_ordered_utf16_surrogate_edges() -> None:
+    client, api = _client()
+    client.find_windows("wfica32", None)
+    client.type_chars("\U0001f600")
+    assert utf16_code_units("\U0001f600") == (0xD83D, 0xDE00)
+    assert [c for c in api.calls if c[0] == "unicode_unit"] == [
+        ("unicode_unit", 0xD83D, True),
+        ("unicode_unit", 0xD83D, False),
+        ("unicode_unit", 0xDE00, True),
+        ("unicode_unit", 0xDE00, False),
+    ]
+
+
+def test_scancode_fields_use_real_scancode_mode_and_extended_prefix() -> None:
+    assert scancode_key_fields(0x41, 0x1E, down=True) == (0, 0x1E, 0x0008)
+    assert scancode_key_fields(0x41, 0x1E, down=False) == (
+        0,
+        0x1E,
+        0x0008 | 0x0002,
+    )
+    assert scancode_key_fields(0x25, 0xE04B, down=True) == (
+        0,
+        0x4B,
+        0x0008 | 0x0001,
+    )
+    with pytest.raises(InputDeliveryError, match="no hardware scan-code"):
+        scancode_key_fields(0xFF, 0, down=True)
 
 
 def test_key_chord_wraps_real_modifier_transitions() -> None:
     client, api = _client()
+    client.find_windows("wfica32", None)
     client.key(0x41, down=True, flags=["control"])
     client.key(0x41, down=False, flags=["control"])
     assert [c for c in api.calls if c[0] == "key_vk"] == [
@@ -603,6 +717,7 @@ def test_key_chord_wraps_real_modifier_transitions() -> None:
 
 def test_scroll_sign_convention_matches_backend() -> None:
     client, api = _client()
+    client.find_windows("wfica32", None)
     client.scroll(0, 120)  # positive dy = content up -> negative wheel delta
     client.scroll(80, 0)
     wheels = [c for c in api.calls if c[0] == "wheel"]
@@ -647,7 +762,76 @@ def test_native_api_refuses_non_windows_host() -> None:
 
 def test_module_imports_without_windows_bindings() -> None:
     """The module must be importable (and the client testable) anywhere; only
-    NativeWin32Api construction touches ctypes.windll."""
+    NativeWin32Api construction loads native Windows DLLs."""
     import openadapt_flow.backends.win32_window_client as mod
 
     assert mod.Win32WindowClient is Win32WindowClient
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ABI only")
+def test_native_win32_abi_prototypes_are_bound_without_injecting() -> None:
+    """Construct/bind only: this test never enumerates windows or calls SendInput."""
+    import ctypes
+
+    api = NativeWin32Api()
+    contract = api.bound_prototypes()
+    required = {
+        ("user32", "EnumWindows"),
+        ("user32", "GetWindowThreadProcessId"),
+        ("user32", "GetClientRect"),
+        ("user32", "ClientToScreen"),
+        ("user32", "GetForegroundWindow"),
+        ("user32", "WindowFromPoint"),
+        ("user32", "GetDC"),
+        ("user32", "PrintWindow"),
+        ("user32", "SendInput"),
+        ("user32", "MapVirtualKeyW"),
+        ("user32", "VkKeyScanW"),
+        ("gdi32", "CreateCompatibleDC"),
+        ("gdi32", "CreateDIBSection"),
+        ("gdi32", "SelectObject"),
+        ("gdi32", "BitBlt"),
+        ("kernel32", "OpenProcess"),
+        ("kernel32", "QueryFullProcessImageNameW"),
+        ("kernel32", "CloseHandle"),
+        ("kernel32", "GetCurrentProcess"),
+    }
+    assert required <= set(contract)
+    dlls = {
+        "user32": api._user32,
+        "gdi32": api._gdi32,
+        "kernel32": api._kernel32,
+        "dwmapi": api._dwmapi,
+        "shcore": api._shcore,
+        "advapi32": api._advapi32,
+    }
+    for (dll_name, function_name), (argtypes, restype) in contract.items():
+        function = getattr(dlls[dll_name], function_name)
+        assert tuple(function.argtypes) == argtypes
+        assert function.restype is restype
+    assert api._user32.SendInput.argtypes == [
+        api._wintypes.UINT,
+        ctypes.POINTER(api._INPUT),
+        ctypes.c_int,
+    ]
+    assert ctypes.sizeof(api._INPUT) == (
+        40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows last-error ABI only")
+def test_native_dpi_access_denied_returns_queried_actual_level(monkeypatch) -> None:
+    """ACCESS_DENIED means 'already set', not 'per-monitor'; query and preserve."""
+    import ctypes
+
+    api = NativeWin32Api()
+
+    class AlreadySetUser32:
+        @staticmethod
+        def SetProcessDpiAwarenessContext(_context) -> int:
+            ctypes.set_last_error(5)
+            return 0
+
+    monkeypatch.setattr(api, "_user32", AlreadySetUser32())
+    monkeypatch.setattr(api, "_current_dpi_awareness", lambda: "system")
+    assert api.ensure_dpi_awareness() == "system"

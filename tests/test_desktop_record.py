@@ -269,7 +269,9 @@ def _run_cli(argv: list[str], monkeypatch: Any = None) -> int:
 def test_cli_record_windows_invokes_capture(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params, identifier_region=None, window=None):
+    def fake_record(
+        out_dir, *, task_description, params, identifier_region=None, window=None
+    ):
         captured["out"] = Path(out_dir)
         captured["task"] = task_description
         captured["params"] = params
@@ -302,7 +304,9 @@ def test_cli_record_windows_invokes_capture(tmp_path: Path, monkeypatch) -> None
 def test_cli_record_rdp_invokes_capture(tmp_path: Path, monkeypatch) -> None:
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params, identifier_region=None, window=None):
+    def fake_record(
+        out_dir, *, task_description, params, identifier_region=None, window=None
+    ):
         captured["params"] = params
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         return Path(out_dir)
@@ -320,7 +324,9 @@ def test_cli_record_desktop_identifier_region(tmp_path: Path, monkeypatch) -> No
     record-identifying region through to the capture orchestration."""
     captured: dict = {}
 
-    def fake_record(out_dir, *, task_description, params, identifier_region=None, window=None):
+    def fake_record(
+        out_dir, *, task_description, params, identifier_region=None, window=None
+    ):
         captured["identifier_region"] = identifier_region
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         return Path(out_dir)
@@ -433,9 +439,7 @@ def _fake_desktop_record(captured: dict):
     return fake_record
 
 
-def test_cli_record_window_threads_owner_and_title(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_cli_record_window_threads_owner_and_title(tmp_path: Path, monkeypatch) -> None:
     """`record --window OWNER --window-title T` builds the capture window spec."""
     captured: dict = {}
     monkeypatch.setattr(
@@ -488,9 +492,7 @@ def test_cli_record_no_window_is_full_screen(tmp_path: Path, monkeypatch) -> Non
         "openadapt_flow.desktop_record.record_desktop_capture",
         _fake_desktop_record(captured),
     )
-    rc = _run_cli(
-        ["record", "--backend", "windows", "--out", str(tmp_path / "rec")]
-    )
+    rc = _run_cli(["record", "--backend", "windows", "--out", str(tmp_path / "rec")])
     assert rc == 0
     assert captured["window"] is None
 

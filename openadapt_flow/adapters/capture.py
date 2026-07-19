@@ -823,9 +823,7 @@ def convert_capture(
             # can carry PHI). ``window_id`` is the OS handle (macOS
             # kCGWindowNumber / Windows HWND) capture resolved the target to.
             resolved_pid = _window_identity_int(window_capture.get("pid"))
-            resolved_window_id = _window_identity_int(
-                window_capture.get("window_id")
-            )
+            resolved_window_id = _window_identity_int(window_capture.get("window_id"))
             if resolved_pid is not None:
                 meta["window_capture"]["resolved_pid"] = resolved_pid
             if resolved_window_id is not None:

@@ -343,7 +343,9 @@ def _build_and_run_replayer(
     )
 
 
-def _finish_replay(run_dir: Path, report) -> int:
+def _finish_replay(
+    run_dir: Path, report, args: Optional[argparse.Namespace] = None
+) -> int:
     """Render the run report, print the outcome, and map it to an exit code."""
     from openadapt_flow.report import render_run_report
 
@@ -356,6 +358,7 @@ def _finish_replay(run_dir: Path, report) -> int:
             "screenshots could have left the box (see REPORT.md)."
         )
     _maybe_report_break(run_dir, report)
+    _maybe_report_run(run_dir, report, args)
     return 0 if report.success else 1
 
 
@@ -415,7 +418,7 @@ def _replay_desktop(
         close = getattr(backend, "close", None)
         if callable(close):
             close()  # RDP transports hold a live socket; browsers/agents don't
-    return _finish_replay(run_dir, report)
+    return _finish_replay(run_dir, report, args)
 
 
 def _cmd_record(args: argparse.Namespace) -> int:
@@ -721,7 +724,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if stop is not None:
             stop()
 
-    return _finish_replay(run_dir, report)
+    return _finish_replay(run_dir, report, args)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -1432,6 +1435,46 @@ def _cmd_report_break(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_run(args: argparse.Namespace) -> int:
+    """Emit a PHI-free SUCCESS summary from a completed run's ``report.json``.
+
+    The success counterpart of ``report-break`` (same endpoint, same paired
+    ingest credential, same fail-closed PHI boundary): posts a schema-minimal
+    summary — counts, durations, one-way digests, never values — to
+    ``/api/runs/ingest-report`` so the control plane can show and meter local
+    runs. The recording never leaves the machine.
+    """
+    from openadapt_flow.hosted import HostedError, report_run
+
+    try:
+        result = report_run(
+            args.run_dir,
+            workflow_id=args.workflow_id,
+            host=args.host,
+            token=args.token,
+            deployment_kind=args.deployment_kind,
+            org_id=args.org_id,
+            backend=args.backend,
+            destination_kind=args.destination_kind,
+            trusted_hosts=args.trusted_host,
+        )
+    except HostedError as e:
+        print(f"report-run failed: {e}")
+        return 1
+    if not result.get("emitted"):
+        if result.get("local_only"):
+            print(f"Run summary kept LOCAL-ONLY: {result.get('reason')}")
+        else:
+            print(f"Nothing emitted: {result.get('reason')}")
+        return 0
+    duplicate = " (already reported)" if result.get("duplicate") else ""
+    print(
+        f"Run summary reported (run_id={result.get('run_id')}, "
+        f"status={result.get('status')}){duplicate}."
+    )
+    return 0
+
+
 def _maybe_report_break(run_dir: Path, report) -> None:
     """Opt-in post-run hook: emit a break diagnostic when a run halts.
 
@@ -1458,6 +1501,43 @@ def _maybe_report_break(run_dir: Path, report) -> None:
             print(f"Break reported to hosted control plane (workflow {workflow_id}).")
     except Exception as e:  # noqa: BLE001 — a diagnostic hook must never fail a run
         print(f"(break report skipped: {e})")
+
+
+def _maybe_report_run(run_dir: Path, report, args=None) -> None:
+    """Opt-in post-run hook: emit a PHI-free SUCCESS summary (the L0 rail).
+
+    NEVER auto-uploads: it fires only when the operator explicitly opted in —
+    ``run --report`` on this invocation, or ``OPENADAPT_FLOW_REPORT_RUN=1``
+    in the environment/config — and the run SUCCEEDED. Fully best-effort:
+    any failure is swallowed so the hook never changes the run's outcome or
+    exit code (mirrors ``_maybe_report_break``).
+    """
+    import os
+
+    opted_in = bool(getattr(args, "report", False)) or os.environ.get(
+        "OPENADAPT_FLOW_REPORT_RUN", ""
+    ).lower() in ("1", "true", "yes")
+    if not opted_in or not getattr(report, "success", False):
+        return
+    try:
+        from openadapt_flow.hosted import report_run
+
+        result = report_run(
+            run_dir,
+            workflow_id=os.environ.get("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID"),
+            deployment_kind=os.environ.get("OPENADAPT_FLOW_DEPLOYMENT_KIND", "local"),
+            org_id=os.environ.get("OPENADAPT_FLOW_ORG_ID"),
+            backend=getattr(args, "backend", None),
+        )
+        if result.get("emitted"):
+            print(
+                "Run summary reported to hosted control plane "
+                f"(run_id={result.get('run_id')})."
+            )
+        elif result.get("local_only"):
+            print(f"(run summary kept LOCAL-ONLY: {result.get('reason')})")
+    except Exception as e:  # noqa: BLE001 — a reporting hook must never fail a run
+        print(f"(run summary report skipped: {e})")
 
 
 def _cmd_teach(args: argparse.Namespace) -> int:
@@ -1992,6 +2072,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         action="store_true",
         help="Print the fail-closed coverage report and exit WITHOUT executing",
+    )
+    p.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "OPT-IN: after a SUCCESSFUL run, emit the PHI-free run summary to "
+            "the paired hosted control plane (see `report-run`). Off by "
+            "default — nothing is ever uploaded without this flag (or "
+            "OPENADAPT_FLOW_REPORT_RUN=1)"
+        ),
     )
     p.set_defaults(func=_cmd_run)
 
@@ -2627,6 +2717,66 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_report_break)
+
+    p = sub.add_parser(
+        "report-run",
+        help=(
+            "Emit a PHI-free SUCCESS summary from a completed run's "
+            "report.json to /api/runs/ingest-report (counts, durations, and "
+            "one-way digests only — the recording stays local)"
+        ),
+    )
+    p.add_argument("run_dir", help="The completed run directory (holds report.json)")
+    p.add_argument(
+        "--workflow-id",
+        default=None,
+        help=(
+            "Hosted workflow id (from `push`/dashboard). When omitted the "
+            "summary binds by workflow-name digest + bundle content digest"
+        ),
+    )
+    p.add_argument(
+        "--deployment-kind",
+        choices=["local", "cloud", "byoc"],
+        default="local",
+        help="Deployment lane (default: local — a customer-machine run)",
+    )
+    p.add_argument(
+        "--backend",
+        default=None,
+        help="Backend/substrate this run executed on (web/windows/macos/linux/rdp)",
+    )
+    p.add_argument(
+        "--org-id",
+        default=None,
+        help="Org id, carried in the body until the per-user token store is canonical",
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="Hosted base URL (default: config.toml host, else https://app.openadapt.ai)",
+    )
+    p.add_argument(
+        "--destination-kind",
+        choices=["openadapt-managed", "customer-managed", "local"],
+        default=None,
+        help="Trust class for the run-summary destination",
+    )
+    p.add_argument(
+        "--trusted-host",
+        action="append",
+        default=None,
+        help="Exact allowed customer-managed origin (repeatable)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help=(
+            "Ingest token (default: OPENADAPT_INGEST_TOKEN env, OS keychain, "
+            "then an existing config migration token)"
+        ),
+    )
+    p.set_defaults(func=_cmd_report_run)
 
     p = sub.add_parser(
         "console",

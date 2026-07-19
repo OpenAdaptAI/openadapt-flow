@@ -1510,3 +1510,309 @@ def _post_report(url: str, token: str, payload: dict[str, Any]) -> httpx.Respons
         )
     except httpx.HTTPError as exc:
         raise HostedError(f"POST {url} failed: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# run summary report (SUCCESS rail — the metering/visibility counterpart of
+# report_break; same endpoint, same paired ingest credential, same PHI
+# boundary, opposite outcome)
+# ---------------------------------------------------------------------------
+
+#: Wire-schema tag for the success payload; version it if the shape changes.
+RUN_SUMMARY_SCHEMA = "run-summary/v1"
+
+#: Upper bound on the one-way effect-contract digests carried per run. The
+#: full count is always reported; only the digest LIST is truncated so a
+#: pathological worklist run cannot balloon the payload.
+_MAX_EFFECT_CONTRACT_HASHES = 256
+
+#: CLOSED substrate enum (red-team PHI-1): the payload's ``backend`` field may
+#: only carry one of these fixed tokens, never a free-text hint. In particular
+#: recorded window titles / ``backend_hints`` (meta.json) are PHI-bearing
+#: (PMS titles embed patient names) and are NEVER read by this rail.
+_BACKEND_ENUM = frozenset({"web", "windows", "macos", "linux", "rdp"})
+
+#: Sidecar file persisting this run's client-generated report UUID, so
+#: re-reporting the SAME run is idempotent while DISTINCT runs never collide
+#: (red-team correction: content-hash alone could collapse two identical
+#: successful runs into one).
+_RUN_REPORT_ID_FILE = ".report_run_id"
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _client_run_id(run_path: Path) -> str:
+    """The stable, client-generated UUID for this run directory.
+
+    Generated once per run dir and persisted beside ``report.json``; a random
+    UUID carries no PHI. Together with ``run_content_hash`` it forms the
+    server-side idempotency pair.
+    """
+    import uuid
+
+    id_path = run_path / _RUN_REPORT_ID_FILE
+    try:
+        existing = id_path.read_text(encoding="utf-8").strip()
+        return str(UUID(existing))
+    except (OSError, ValueError):
+        fresh = str(uuid.uuid4())
+        try:
+            id_path.write_text(fresh + "\n", encoding="utf-8")
+        except OSError:
+            pass  # still report; idempotency degrades to content-hash only
+        return fresh
+
+
+def _origin_domain_hash(origin: Optional[str]) -> Optional[str]:
+    """A 16-hex one-way fingerprint of the execution origin's HOSTNAME only.
+
+    The raw origin/URL never enters the payload (path/query could carry
+    record identifiers); the hash lets the control plane group runs by the
+    registered target without learning anything it was not already told at
+    workflow-registration time.
+    """
+    if not origin:
+        return None
+    host = urlparse(origin).hostname
+    if not host:
+        return None
+    return _sha256_hex(host.lower().encode("utf-8"))[:16]
+
+
+def _identity_summary(report: Any) -> dict[str, int]:
+    """Categorical identity-verdict COUNTS only.
+
+    ``IdentityCheck.expected`` / ``observed`` hold live band text (names,
+    DOBs — PHI by construction) and are deliberately never read here.
+    """
+    counts = {"verified": 0, "mismatch": 0, "abstain": 0, "unreadable": 0}
+    for step in report.results:
+        if step.identity is not None and step.identity.status in counts:
+            counts[step.identity.status] += 1
+    counts["applicable"] = int(report.identity_applicable_steps)
+    counts["armed"] = int(report.identity_armed_steps)
+    return counts
+
+
+def _effect_summary(report: Any) -> tuple[dict[str, int], list[str]]:
+    """Effect-verdict counts + the one-way per-effect contract digests.
+
+    ``effect_contract_hashes`` are already SHA-256 digests of the bound
+    ValueExpr contracts (ir.StepResult docs: recorded so an auditor can
+    confirm two runs resolved differently WITHOUT persisting the underlying
+    value). ``effect_results`` (human-readable verdict lines) may embed
+    resolved values and is deliberately never read here — the one-way
+    evidence rule.
+    """
+    verified = 0
+    approved_unverified = 0
+    hashes: list[str] = []
+    for step in report.results:
+        if step.effect_verified is True:
+            verified += 1
+        if step.effect_approved_unverified:
+            approved_unverified += 1
+        hashes.extend(step.effect_contract_hashes)
+    counts = {
+        "verified": verified,
+        "approved_unverified": approved_unverified,
+        "contract_hash_count": len(hashes),
+    }
+    return counts, hashes[:_MAX_EFFECT_CONTRACT_HASHES]
+
+
+def _build_run_summary_payload(
+    report: Any,
+    report_bytes: bytes,
+    *,
+    workflow_id: Optional[str],
+    deployment_kind: str,
+    org_id: Optional[str],
+    backend: Optional[str],
+    client_run_id: str,
+) -> dict[str, Any]:
+    """Assemble the schema-minimal SUCCESS payload.
+
+    PHI posture (mirrors ``_build_break_payload``, one-way evidence rules):
+    every field is either a categorical count, a duration, a fixed enum
+    token, or a one-way SHA-256 digest. Screenshots, params, URLs (beyond
+    the origin-hostname hash), free text (intents / reasons / errors /
+    observed_texts / meta.json backend_hints such as recorded window
+    titles), and identity expected/observed strings are never read.
+    ``(client_run_id, run_content_hash)`` is the idempotency pair:
+    re-uploading the SAME run dedupes server-side, while two distinct runs
+    that happen to produce identical reports never collapse.
+    """
+    steps = len(report.results)
+    steps_ok = sum(1 for s in report.results if s.ok)
+    steps_skipped = sum(1 for s in report.results if s.skipped)
+    identity = _identity_summary(report)
+    effects, effect_hashes = _effect_summary(report)
+    rung_counts = {
+        str(rung): int(count)
+        for rung, count in dict(report.rung_counts).items()
+        if isinstance(count, int) and count >= 0
+    }
+    payload: dict[str, Any] = {
+        "kind": "run_summary",
+        "schema": RUN_SUMMARY_SCHEMA,
+        "org_id": org_id,
+        "deployment_kind": deployment_kind,
+        "status": "success",
+        "flow_version": _flow_version(),
+        # Closed enum only (red-team PHI-1): anything else — including
+        # free-text backend hints — is dropped client-side, never sent.
+        "backend": backend if backend in _BACKEND_ENUM else None,
+        "started_at": report.started_at,
+        "origin_domain_hash": _origin_domain_hash(report.execution_origin),
+        "client_run_id": client_run_id,
+        "run_content_hash": _sha256_hex(report_bytes),
+        "phi_minimal": True,
+        "metrics": {
+            "steps": steps,
+            "steps_ok": steps_ok,
+            "steps_skipped": steps_skipped,
+            "duration_s": round(report.total_ms / 1000.0, 3),
+            "heal_count": int(report.heal_count),
+            "model_calls": int(report.model_calls),
+            "est_model_cost_usd": round(float(report.est_model_cost_usd), 6),
+            "rung_counts": rung_counts,
+            "identity": identity,
+            "effects": effects,
+        },
+        "effect_contract_hashes": effect_hashes,
+    }
+    # Workflow binding: the hosted workflow id when the bundle came from the
+    # control plane; otherwise the (name-digest, bundle-content-digest) pair.
+    # The raw workflow NAME never leaves the machine — names routinely embed
+    # client/site identifiers.
+    if workflow_id:
+        payload["workflow_id"] = workflow_id
+    else:
+        payload["workflow_name_digest"] = _sha256_hex(
+            report.workflow_name.encode("utf-8")
+        )
+        payload["bundle_content_digest"] = report.bundle_content_digest
+    return payload
+
+
+def _flow_version() -> str:
+    from openadapt_flow import __version__
+
+    return __version__
+
+
+def report_run(
+    run_dir: Any,
+    *,
+    workflow_id: Optional[str] = None,
+    host: Optional[str] = None,
+    token: Optional[str] = None,
+    deployment_kind: str = "local",
+    org_id: Optional[str] = None,
+    backend: Optional[str] = None,
+    allow_local_fallback: bool = True,
+    destination_kind: Optional[str] = None,
+    trusted_hosts: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Emit a PHI-free SUCCESS summary of a completed run to
+    ``POST /api/runs/ingest-report`` (the success/metering rail; L0 in the
+    multi-substrate design).
+
+    Reads ``run_dir/report.json`` and, when the run SUCCEEDED, posts the
+    schema-minimal summary so the control plane can show "last run: success"
+    for locally-executed workflows. Halted/failed runs are ``report_break``'s
+    contract — this function refuses them (``emitted=False``) rather than
+    blurring the two rails. The recording, screenshots, params, and all free
+    text NEVER leave the machine; see ``_build_run_summary_payload``.
+
+    Never auto-invoked: callers opt in per-run (``run --report``) or via the
+    ``OPENADAPT_FLOW_REPORT_RUN`` config knob.
+
+    Args:
+        run_dir: The run directory holding ``report.json``.
+        workflow_id: Hosted workflow id when known (from ``push``/dashboard).
+            When omitted the payload binds by workflow-name digest + bundle
+            content digest instead; one of the two bindings must exist.
+        deployment_kind: ``"local"`` (default — a customer-machine run),
+            ``"cloud"``, or ``"byoc"``.
+        backend: The backend/substrate kind this run executed on (``web`` /
+            ``windows`` / ``macos`` / ``linux`` / ``rdp``), when known.
+        allow_local_fallback: On a server-side PHI-boundary rejection (422),
+            return a ``local_only`` result instead of raising.
+
+    Returns:
+        On success: the server response (``run_id`` / ``status`` /
+        ``duplicate``) plus ``{"emitted": True}``. When the run did not
+        succeed: ``{"emitted": False, "reason": …}``. On a PHI-boundary
+        fallback: ``{"emitted": False, "local_only": True, …}``.
+
+    Raises:
+        HostedError: missing report, missing workflow binding, auth failure,
+            or a non-2xx/422 response.
+    """
+    from openadapt_flow.ir import RunReport
+
+    run_path = Path(run_dir)
+    report_path = run_path / "report.json"
+    if not report_path.is_file():
+        raise HostedError(f"No report.json in {run_path} — nothing to report.")
+    report_bytes = report_path.read_bytes()
+    report = RunReport.model_validate_json(report_bytes.decode("utf-8"))
+
+    if not report.success:
+        return {
+            "emitted": False,
+            "reason": ("run did not succeed; the halt/failure rail is `report-break`"),
+        }
+    if not workflow_id and not report.bundle_content_digest:
+        raise HostedError(
+            "No workflow binding: pass --workflow-id, or run a sealed bundle "
+            "(report.json carries no bundle_content_digest)."
+        )
+
+    resolved_host = resolve_host(host)
+    resolve_destination_policy(
+        resolved_host,
+        destination_kind=destination_kind,
+        trusted_hosts=trusted_hosts,
+    )
+    resolved_token = resolve_token(token, host=resolved_host)
+    url = f"{resolved_host}/api/runs/ingest-report"
+
+    payload = _build_run_summary_payload(
+        report,
+        report_bytes,
+        workflow_id=workflow_id,
+        deployment_kind=deployment_kind,
+        org_id=org_id,
+        backend=backend,
+        client_run_id=_client_run_id(run_path),
+    )
+
+    resp = _post_report(url, resolved_token, payload)
+
+    if resp.status_code == 422:
+        if allow_local_fallback:
+            return {
+                "emitted": False,
+                "local_only": True,
+                "reason": "server rejected payload as PHI boundary (422)",
+                "detail": _body_snippet(resp),
+            }
+        raise HostedError(
+            f"ingest-report rejected as PHI boundary (422): {_body_snippet(resp)}"
+        )
+    if resp.status_code == 401:
+        raise HostedError("Ingest token was rejected (401).")
+    if resp.status_code not in (200, 202):
+        raise HostedError(
+            f"ingest-report returned {resp.status_code} (expected 202): "
+            f"{_body_snippet(resp)}"
+        )
+    body = resp.json() if resp.content else {}
+    result = dict(body) if isinstance(body, dict) else {"response": body}
+    result["emitted"] = True
+    return result

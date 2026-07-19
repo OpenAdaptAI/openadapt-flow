@@ -1,7 +1,9 @@
-"""Multi-scale grayscale template matching.
+"""Multi-scale grayscale and structural-edge template matching.
 
 Implements the `find_template` rung of the resolution ladder using
 ``cv2.matchTemplate`` with ``TM_CCOEFF_NORMED`` over a small scale ladder.
+``find_structural_template`` applies the same matcher to Canny edge maps for
+postconditions whose recorded invariant is layout/content rather than palette.
 All returned coordinates are in *screen* (full-frame) pixel space, even when
 a ``search_region`` restricts the search.
 """
@@ -66,44 +68,22 @@ def _clamp_region(region: Region, width: int, height: int) -> Optional[Region]:
 # (repeated UI structure such as identical empty form fields produces exact
 # score ties at several positions).
 TIE_BREAK_EPS = 1e-3
+# A flat/near-flat edge crop has no discriminative structure and makes
+# normalized correlation degenerate.  Refuse that evidence and let the
+# caller's independent hash/semantic checks decide.
+STRUCTURAL_MIN_EDGE_PIXELS = 16
 
 
-def find_template(
-    screen_png: bytes,
-    template_png: bytes,
+def _find_template_arrays(
+    screen: np.ndarray,
+    template: np.ndarray,
     *,
     search_region: Region | None = None,
     scales: tuple[float, ...] = (0.85, 1.0, 1.18),
     threshold: float = 0.82,
     prefer_near: Point | None = None,
 ) -> Match | None:
-    """Locate a template crop on screen via multi-scale template matching.
-
-    Grayscale ``cv2.matchTemplate`` with ``TM_CCOEFF_NORMED`` is run at each
-    scale (the *template* is resized); the best-scoring location across all
-    scales wins if it clears ``threshold``. Scales at which the resized
-    template would not fit inside the search image are skipped.
-
-    Args:
-        screen_png: Full-frame screenshot as PNG bytes.
-        template_png: Template crop as PNG bytes.
-        search_region: Optional ``(x, y, w, h)`` sub-region of the screen to
-            search within (clamped to screen bounds). Returned coordinates
-            are still full-screen coordinates.
-        scales: Multiplicative scale factors applied to the template.
-        threshold: Minimum ``TM_CCOEFF_NORMED`` score to accept a match.
-        prefer_near: Optional expected match origin ``(x, y)`` in screen
-            coordinates. When several locations score within
-            ``TIE_BREAK_EPS`` of the best (repeated UI structure — e.g. two
-            identical empty inputs), the tie is broken in favor of the
-            location nearest this point instead of raster-scan order.
-
-    Returns:
-        The best :class:`Match` in screen coordinates, or ``None`` if no
-        scale produced a score at or above ``threshold``.
-    """
-    screen = _decode_gray(screen_png)
-    template = _decode_gray(template_png)
+    """Run the shared multi-scale matcher over two single-channel arrays."""
     sh, sw = screen.shape[:2]
 
     off_x, off_y = 0, 0
@@ -151,6 +131,82 @@ def find_template(
     region: Region = (rx, ry, mw, mh)
     point: Point = (rx + mw // 2, ry + mh // 2)
     return Match(point=point, region=region, confidence=score)
+
+
+def find_template(
+    screen_png: bytes,
+    template_png: bytes,
+    *,
+    search_region: Region | None = None,
+    scales: tuple[float, ...] = (0.85, 1.0, 1.18),
+    threshold: float = 0.82,
+    prefer_near: Point | None = None,
+) -> Match | None:
+    """Locate a grayscale template crop via multi-scale matching.
+
+    ``cv2.matchTemplate`` with ``TM_CCOEFF_NORMED`` is run at each scale (the
+    *template* is resized); the best-scoring location wins if it clears
+    ``threshold``. Scales at which the resized template would not fit inside
+    the search image are skipped.
+
+    Args:
+        screen_png: Full-frame screenshot as PNG bytes.
+        template_png: Template crop as PNG bytes.
+        search_region: Optional ``(x, y, w, h)`` sub-region of the screen to
+            search within (clamped to screen bounds). Returned coordinates
+            are still full-screen coordinates.
+        scales: Multiplicative scale factors applied to the template.
+        threshold: Minimum ``TM_CCOEFF_NORMED`` score to accept a match.
+        prefer_near: Optional expected match origin ``(x, y)`` in screen
+            coordinates. When several locations score within
+            ``TIE_BREAK_EPS`` of the best (repeated UI structure — e.g. two
+            identical empty inputs), the tie is broken in favor of the
+            location nearest this point instead of raster-scan order.
+
+    Returns:
+        The best :class:`Match` in screen coordinates, or ``None`` if no
+        scale produced a score at or above ``threshold``.
+    """
+    return _find_template_arrays(
+        _decode_gray(screen_png),
+        _decode_gray(template_png),
+        search_region=search_region,
+        scales=scales,
+        threshold=threshold,
+        prefer_near=prefer_near,
+    )
+
+
+def find_structural_template(
+    screen_png: bytes,
+    template_png: bytes,
+    *,
+    search_region: Region | None = None,
+    scales: tuple[float, ...] = (0.85, 1.0, 1.18),
+    threshold: float = 0.8,
+    prefer_near: Point | None = None,
+) -> Match | None:
+    """Locate recorded structure while ignoring foreground/background palette.
+
+    Both images are reduced to Canny edge maps before the same localized,
+    multi-scale normalized-correlation matcher used by :func:`find_template`.
+    A light/dark theme inversion therefore keeps borders and glyph geometry,
+    while a modal, missing panel, or changed layout alters the edge map and
+    remains a failed match. This is intended for ``REGION_STABLE`` outcome
+    checks; target resolution continues to use the stricter grayscale matcher.
+    """
+    screen = cv2.Canny(_decode_gray(screen_png), 50, 150)
+    template = cv2.Canny(_decode_gray(template_png), 50, 150)
+    if int(np.count_nonzero(template)) < STRUCTURAL_MIN_EDGE_PIXELS:
+        return None
+    return _find_template_arrays(
+        screen,
+        template,
+        search_region=search_region,
+        scales=scales,
+        threshold=threshold,
+        prefer_near=prefer_near,
+    )
 
 
 # pixels_changed: threshold below which a per-pixel grayscale difference is

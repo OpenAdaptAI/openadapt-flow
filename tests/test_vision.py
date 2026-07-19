@@ -15,6 +15,7 @@ import pytest
 
 from openadapt_flow.vision import (
     Match,
+    find_structural_template,
     find_template,
     find_text,
     ocr,
@@ -137,6 +138,66 @@ class TestFindTemplate:
         other = to_png(blank())
         m = find_template(other, self.template, threshold=0.0)
         assert m is not None and m.confidence < 0.82
+
+
+class TestFindStructuralTemplate:
+    def test_palette_inversion_preserves_structure(self) -> None:
+        recorded = blank(420, 220)
+        draw_button(recorded, 120, 80, 160, 48, "Save Encounter")
+        x, y, w, h = (105, 65, 190, 78)
+        template = to_png(recorded[y : y + h, x : x + w])
+        themed = 255 - recorded
+
+        # The ordinary grayscale matcher correctly rejects the palette flip;
+        # REGION_STABLE's edge representation recognizes the same structure.
+        assert (
+            find_template(
+                to_png(themed),
+                template,
+                search_region=(80, 40, 260, 140),
+                threshold=0.9,
+            )
+            is None
+        )
+        match = find_structural_template(
+            to_png(themed),
+            template,
+            search_region=(80, 40, 260, 140),
+            threshold=0.8,
+        )
+        assert match is not None
+        assert match.confidence > 0.95
+        assert abs(match.region[0] - x) <= 1
+        assert abs(match.region[1] - y) <= 1
+
+    def test_true_region_change_is_not_rescued(self) -> None:
+        recorded = blank(420, 220)
+        draw_button(recorded, 120, 80, 160, 48, "Save Encounter")
+        x, y, w, h = (105, 65, 190, 78)
+        template = to_png(recorded[y : y + h, x : x + w])
+        changed = blank(420, 220, gray=30)
+        cv2.rectangle(changed, (100, 60), (300, 150), (220, 220, 220), -1)
+
+        assert (
+            find_structural_template(
+                to_png(changed),
+                template,
+                search_region=(80, 40, 260, 140),
+                threshold=0.8,
+            )
+            is None
+        )
+
+    def test_flat_template_is_unverifiable_not_a_match(self) -> None:
+        assert (
+            find_structural_template(
+                to_png(blank(420, 220, gray=30)),
+                to_png(blank(190, 78, gray=220)),
+                search_region=(80, 40, 260, 140),
+                threshold=0.8,
+            )
+            is None
+        )
 
 
 # -- ocr / find_text ----------------------------------------------------------

@@ -1,0 +1,188 @@
+{
+  "caveat": "Measured on synthetic real-glyph/real-shape fixtures with the REAL resolver + REAL vision (cv2 template matcher + RapidOCR), NOT on a live RDP/Citrix/HDX frame. It measures the resolution ladder's silent-mis-resolution (SWER) under a metamorphic perturbation space; it does not raise any substrate's maturity claim. The TEMPLATE tier is font-free and cv2-deterministic (the CI ratchet); the OCR tier depends on the OCR engine/platform and is informational.",
+  "generated_at": "2026-07-20T22:18:20.410952+00:00",
+  "ocr_tier": {
+    "by_family": {
+      "duplicate_buttons": {
+        "correct": 32,
+        "over-halt": 0,
+        "safe-halt": 3,
+        "silent-wrong": 17
+      },
+      "labeled_rows": {
+        "correct": 56,
+        "over-halt": 0,
+        "safe-halt": 4,
+        "silent-wrong": 96
+      },
+      "mrn_rows": {
+        "correct": 69,
+        "over-halt": 17,
+        "safe-halt": 12,
+        "silent-wrong": 6
+      }
+    },
+    "by_perturbation": {
+      "color_depth": {
+        "correct": 12,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 0
+      },
+      "compose": {
+        "correct": 15,
+        "over-halt": 1,
+        "safe-halt": 0,
+        "silent-wrong": 20
+      },
+      "dpi_scale": {
+        "correct": 44,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 16
+      },
+      "gaussian_blur": {
+        "correct": 14,
+        "over-halt": 0,
+        "safe-halt": 6,
+        "silent-wrong": 4
+      },
+      "identity": {
+        "correct": 12,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 0
+      },
+      "jpeg": {
+        "correct": 30,
+        "over-halt": 0,
+        "safe-halt": 1,
+        "silent-wrong": 17
+      },
+      "local_drift": {
+        "correct": 6,
+        "over-halt": 0,
+        "safe-halt": 4,
+        "silent-wrong": 2
+      },
+      "occlude_target": {
+        "correct": 0,
+        "over-halt": 16,
+        "safe-halt": 8,
+        "silent-wrong": 48
+      },
+      "subpixel_jitter": {
+        "correct": 16,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 8
+      },
+      "theme_invert": {
+        "correct": 8,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 4
+      }
+    },
+    "counts": {
+      "correct": 157,
+      "over-halt": 17,
+      "safe-halt": 19,
+      "silent-wrong": 119
+    },
+    "gated_in_ci": false,
+    "note": "RapidOCR-dependent; counts can vary across OCR-engine/font versions, so this tier is reported, not hard-gated per PR.",
+    "silent_wrong": 119,
+    "silent_wrong_rate": 0.3814,
+    "total": 312
+  },
+  "schema_version": "openadapt.vision-hardening-results.v1",
+  "template_tier": {
+    "by_family": {
+      "form_fields": {
+        "correct": 32,
+        "over-halt": 42,
+        "safe-halt": 36,
+        "silent-wrong": 46
+      },
+      "repeated_icons": {
+        "correct": 91,
+        "over-halt": 144,
+        "safe-halt": 108,
+        "silent-wrong": 125
+      }
+    },
+    "by_perturbation": {
+      "color_depth": {
+        "correct": 24,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 0
+      },
+      "compose": {
+        "correct": 0,
+        "over-halt": 33,
+        "safe-halt": 24,
+        "silent-wrong": 15
+      },
+      "dpi_scale": {
+        "correct": 24,
+        "over-halt": 72,
+        "safe-halt": 24,
+        "silent-wrong": 0
+      },
+      "gaussian_blur": {
+        "correct": 0,
+        "over-halt": 24,
+        "safe-halt": 24,
+        "silent-wrong": 0
+      },
+      "identity": {
+        "correct": 24,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 0
+      },
+      "jpeg": {
+        "correct": 39,
+        "over-halt": 9,
+        "safe-halt": 48,
+        "silent-wrong": 0
+      },
+      "local_drift": {
+        "correct": 12,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 12
+      },
+      "occlude_target": {
+        "correct": 0,
+        "over-halt": 0,
+        "safe-halt": 0,
+        "silent-wrong": 144
+      },
+      "subpixel_jitter": {
+        "correct": 0,
+        "over-halt": 48,
+        "safe-halt": 0,
+        "silent-wrong": 0
+      },
+      "theme_invert": {
+        "correct": 0,
+        "over-halt": 0,
+        "safe-halt": 24,
+        "silent-wrong": 0
+      }
+    },
+    "counts": {
+      "correct": 123,
+      "over-halt": 186,
+      "safe-halt": 144,
+      "silent-wrong": 171
+    },
+    "gated_in_ci": true,
+    "silent_wrong": 171,
+    "silent_wrong_rate": 0.274,
+    "total": 624
+  }
+}

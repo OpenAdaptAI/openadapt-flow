@@ -21,7 +21,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check paper constants against benchmark artifacts
         run: python paper/check_artifacts.py
       - name: Install TeX
@@ -32,12 +32,12 @@ jobs:
       - name: Build PDFs (full report + workshop condensation)
         run: make -C paper
       - name: Upload full report PDF
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openadapt-paper
           path: paper/build/main.pdf
       - name: Upload workshop PDF
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: openadapt-paper-workshop
           path: paper/workshop/build/main.pdf

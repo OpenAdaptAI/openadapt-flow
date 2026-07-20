@@ -69,13 +69,14 @@ TEMPLATE_THRESHOLD = 0.985
 # reads near-verbatim, still match at ≈ 1.0.
 OCR_MIN_RATIO = 0.9
 
-# The global template rung for UNLABELED anchors (no ocr_text) must not
-# contradict the anchor's landmarks by more than this many pixels. Repeated
-# icon UIs (an identical glyph per card/row — e.g. an edit pencil per
-# dashboard card) make a full-frame template match ambiguous: when mutable
-# content near the true target changes, a look-alike elsewhere can outscore
-# it. Labeled anchors are exempt — their template carries the label, which
-# is discriminative, and rename/move drift relies on global acceptance.
+# The global template rung must not accept a match that contradicts the
+# anchor's landmarks by more than this many pixels. Repeated-widget UIs (an
+# identical glyph or LABEL per card/row — e.g. an edit pencil per dashboard
+# card, a "Delete" per list item) make a full-frame template match ambiguous:
+# when mutable content near the true target changes, a look-alike elsewhere can
+# outscore it. This applies to labeled and unlabeled anchors alike — a baked-in
+# label is NOT discriminative when the same label repeats — so any global match
+# whose position all located landmarks contradict falls through to ocr/geometry.
 GLOBAL_LANDMARK_TOLERANCE_PX = 40
 
 
@@ -196,10 +197,11 @@ def _landmarks_contradict(
 ) -> bool:
     """True when every locatable landmark places the target far from ``point``.
 
-    Guards the global template rung for unlabeled anchors: landmarks are the
-    only labeled evidence such anchors carry. Landmarks that cannot be
-    located (or carry no exact offsets) abstain; with no located landmark
-    the match is accepted unchallenged.
+    Guards the global template rung (for labeled and unlabeled anchors alike):
+    landmarks corroborate the match's POSITION independently of the template's
+    appearance, which is what a repeated identical widget defeats. Landmarks
+    that cannot be located (or carry no exact offsets) abstain; with no located
+    landmark the match is accepted unchallenged.
 
     Args:
         anchor: The anchor whose landmarks corroborate or contradict.
@@ -335,11 +337,18 @@ def resolve(
             )
             return resolution, tuple(match.region)
 
-        # Rung 2: template over the full frame. For unlabeled anchors the
-        # match must not contradict the anchor's landmarks (repeated-icon
-        # UIs: an identical glyph elsewhere can outscore the true target
-        # when mutable content near the target changed); a contradicted
-        # match falls through to the ocr/geometry rungs.
+        # Rung 2: template over the full frame. The match must not contradict
+        # the anchor's LOCATABLE landmarks, whether or not the anchor is
+        # labeled: repeated-widget UIs (an identical glyph/label per row or
+        # card) make a full-frame match ambiguous, and an identical LABELED
+        # look-alike elsewhere can outscore the true target when mutable content
+        # near it changed. A labeled anchor was previously EXEMT from this check
+        # on the theory that its template's baked-in label is discriminative --
+        # but that assumption fails precisely on repeated labeled widgets, so a
+        # global match whose position is contradicted by located landmarks (all
+        # placing the target > GLOBAL_LANDMARK_TOLERANCE_PX away) now falls
+        # through to the ocr/geometry rungs for ALL anchors. Anchors with no
+        # locatable landmark are unaffected (``_landmarks_contradict`` abstains).
         match = vision.find_template(
             screen_png,
             template_png,
@@ -348,9 +357,7 @@ def resolve(
         )
         if match is not None:
             point = _scaled_click_point(anchor, tuple(match.region))
-            if anchor.ocr_text or not _landmarks_contradict(
-                anchor, point, screen_png, vision
-            ):
+            if not _landmarks_contradict(anchor, point, screen_png, vision):
                 resolution = Resolution(
                     rung="template_global",
                     point=point,

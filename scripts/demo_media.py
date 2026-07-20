@@ -1406,13 +1406,14 @@ def build_run_openemr(work: Path, out: Path, *, headed: bool) -> bool:
     if steps_ok < 4:
         print(f"  run_openemr: SKIPPED (only {steps_ok} steps drove cleanly)")
         return False
-    badge = work / "badge_run.png"
-    if not badge.exists():
-        _badge_png(badge, "replaying · local · $0", triangle=GOOD)
+    # No burned-in status badge: the openadapt-web hero paints the
+    # "running · local · $0" indicator as a floating DOM system overlay on top
+    # of this footage, so the footage itself must stay clean (a baked badge
+    # would double up the indicator). See openadapt-web ReplayHero + PR #246.
     master = work / "run_openemr_master.mp4"
     _build_master(
         raw, master, trim_start=0.6, speed=1.4,
-        overlays=[Overlay(badge, x="28", y="26")],
+        overlays=[],
     )
     sizes = _finalize(master, out / "run_openemr", poster_at=1.0)
     sizes["app"] = "openemr"

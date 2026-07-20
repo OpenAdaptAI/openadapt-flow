@@ -19,7 +19,8 @@ named byline until every author has approved the author list and order.
 ## Build
 
 Requirements: Python 3.10+, `latexmk`, and a TeX distribution with `booktabs`,
-`microtype`, and `hyperref`.
+`microtype`, `hyperref`, `amssymb`, `tikz`, and `pgfplots` (Debian/Ubuntu:
+`texlive-latex-extra texlive-pictures texlive-science`).
 
 ```bash
 python paper/check_artifacts.py

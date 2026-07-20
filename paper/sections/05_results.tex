@@ -1,4 +1,62 @@
 \section{Results}
+\label{sec:results}
+
+\paragraph{Headline: an effect check catches silent wrong actions that the
+screen misses.} The paper's central claim is a safety one, and it is the
+cleanest, most repeated result. We injected seven persistence faults behind a
+real HTTP boundary and ran each ten times (Section~\ref{sec:method}). Judged by
+the \emph{screen}---the same signal an agent or a script trusts---replay
+silently accepted 50 of 90 fault runs and additionally aborted 10 runs that had
+in fact succeeded. When the consequential step declared a typed effect checked
+against the system of record, silent acceptance fell to \emph{zero} and the
+spurious aborts to zero (Figure~\ref{fig:silentbar}). Concretely, screen-only
+verification silently mishandled five of seven injected fault classes: partial
+save, duplicate submission, optimistic UI followed by rejection, stale overwrite,
+and double delivery. There were 10 consistent repeats per class. When the step
+declared the expected effect and a system-of-record verifier was configured,
+those five classes refuted and halted through the live replayer. This
+improvement has two non-optional preconditions: the effect must be authored and
+the verifier deployed.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  ybar,
+  bar width=15pt,
+  width=0.86\linewidth,
+  height=4.6cm,
+  ymin=0, ymax=90,
+  ylabel={runs (of 90)},
+  ylabel style={font=\footnotesize},
+  symbolic x coords={Screen-only, Effect-verified},
+  xtick=data,
+  xticklabel style={font=\small},
+  ytick={0,15,30,45,60,75,90},
+  yticklabel style={font=\footnotesize},
+  enlarge x limits=0.5,
+  legend style={font=\footnotesize, at={(0.5,1.14)}, anchor=south,
+    legend columns=-1, /tikz/every even column/.append style={column sep=8pt}},
+  nodes near coords, nodes near coords style={font=\scriptsize},
+]
+\addplot[fill=oared!75, draw=oared] coordinates {(Screen-only,50) (Effect-verified,0)};
+\addplot[fill=oaamber!70, draw=oaamber] coordinates {(Screen-only,10) (Effect-verified,0)};
+\legend{silent wrong action, false abort}
+\end{axis}
+\end{tikzpicture}
+\caption{Same 90 injected-fault runs, two verification policies. Screen-only
+verification silently accepted 50 wrong outcomes and falsely aborted 10 correct
+ones; a system-of-record effect check reduced both to zero. This is the failure
+mode general computer-use agents and selector RPA do not measure.}
+\label{fig:silentbar}
+\end{figure}
+
+\paragraph{Compiled replay removes per-run reasoning on demonstrated tasks.}
+Table~\ref{tab:comparison} shows that, on these two already-demonstrated tasks,
+compiled replay completed every measured run with lower median latency and no
+model calls. The unequal, small samples do not establish superior reliability.
+The correct inference is narrower: repeated reasoning was unnecessary for the
+healthy executions measured here.
 
 \begin{table}[t]
 \centering
@@ -18,12 +76,18 @@ MockMed & Agent & 20/20 & 20 & 37.5 & \$0.27 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:comparison} shows that, on these two already-demonstrated tasks,
-compiled replay completed every measured run with lower median latency and no
-model calls. The unequal, small samples do not establish superior reliability.
-The correct inference is narrower: repeated reasoning was unnecessary for the
-healthy executions measured here.
+\paragraph{Repair under drift: the compiler heals what breaks the agent's day.}
+The comparison above is the healthy path. To exercise the ``govern every
+repair'' half of the thesis, we forced the MockMed interface to re-render with a
+dark palette, invalidating every recorded template crop. As a single observation
+per arm, compiled replay self-healed in 9.7\,s with 8 target repairs and zero
+model calls, while the same computer-use agent under the same drift took 87.4\,s
+and \$0.63 across 24 model calls. One run is not a reliability claim, but it
+shows the mechanism working end to end: the resolution ladder re-resolved changed
+targets deterministically and logged each as a reviewable patch rather than
+re-reasoning the whole task.
 
+\paragraph{Breadth: weak postconditions can still emit a green report.}
 On the one-run public-web corpus, all 29 recordings compiled; 17 replays reached
 a verified success, 10 halted safely, and 2 reported success while the external
 oracle disagreed. Both silent wrong actions were vacuous successes under an
@@ -32,20 +96,18 @@ that weak postconditions can still yield a green report. Because each app ran
 once and the corpus excludes authenticated enterprise and desktop applications,
 these counts are failure discovery, not a generalization rate estimate.
 
-In the transactional study, screen-only verification silently mishandled five
-of seven injected fault classes: partial save, duplicate submission, optimistic
-UI followed by rejection, stale overwrite, and double delivery. There were 10
-consistent repeats per class. When the step declared the expected effect and a
-system-of-record verifier was configured, those five classes refuted and halted
-through the live replayer. This improvement has two non-optional preconditions:
-the effect must be authored and the verifier deployed.
-
+\paragraph{Identity: zero false accepts, honestly at the cost of availability.}
 The integrated identity ladder recorded zero false accepts in every tested
 configuration. Structured browser identity also had zero over-halts on 14
 correct homonym cases. Pure-pixel configurations halted on all correct
 confusable cases: zero false accepts at 100\% over-halt. This is the intended
 safety/availability disclosure, not evidence that pixel-only identity is ready
 for dense clinical lists.
+
+\paragraph{Substrate reach: the same governed semantics across four backends.}
+The governed contract is not browser-specific. Table~\ref{tab:substrates}
+qualifies three additional substrates on named tasks, each with an independent
+effect oracle and refusal controls.
 
 \begin{table}[t]
 \centering

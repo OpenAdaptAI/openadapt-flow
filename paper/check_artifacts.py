@@ -85,6 +85,17 @@ def main() -> None:
     require_close(mockmed["agent"]["wall_s_p50"], 37.5, "MockMed agent p50")
     require_close(mockmed["agent"]["cost_usd_per_run"], 0.27, "MockMed agent cost")
 
+    # Drift-repair illustration (single observation per arm): the compiled
+    # bundle self-heals a theme re-render that invalidates every template crop,
+    # while the agent re-reasons the whole task under the same drift.
+    drift = source_results["MockMed"]["drift_theme"]
+    require_equal(drift["compiled"]["heal_count"], 8, "drift compiled heals")
+    require_equal(drift["compiled"]["api_calls"], 0, "drift compiled model calls")
+    require_close(drift["compiled"]["wall_s"], 9.7, "drift compiled wall")
+    require_equal(drift["agent"]["api_calls"], 24, "drift agent model calls")
+    require_close(drift["agent"]["wall_s"], 87.4, "drift agent wall")
+    require_close(drift["agent"]["cost_usd"], 0.63, "drift agent cost")
+
     reliability = load("benchmark/reliability/results.json")
     require_equal(len(reliability["results"]), 29, "reliability apps")
     outcomes = reliability["summary"]["outcomes"]
@@ -336,6 +347,19 @@ def main() -> None:
         results_tex,
         f"There were {faults['meta']['repeats']} consistent repeats per class.",
         "transactional repeat count",
+    )
+
+    require_contains(
+        results_tex,
+        (
+            f"self-healed in {drift['compiled']['wall_s']:.1f}\\,s with "
+            f"{drift['compiled']['heal_count']} target repairs and zero model "
+            f"calls, while the same computer-use agent under the same drift "
+            f"took {drift['agent']['wall_s']:.1f}\\,s and "
+            f"\\${drift['agent']['cost_usd']:.2f} across "
+            f"{drift['agent']['api_calls']} model calls"
+        ),
+        "drift-repair illustration",
     )
 
     structured = configs["structured"]

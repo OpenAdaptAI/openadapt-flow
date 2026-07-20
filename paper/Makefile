@@ -12,8 +12,10 @@ all: check
 		-output-directory=$(BUILD_DIR) main.tex
 	$(MAKE) workshop
 
-# Workshop condensation. references.bib is a symlink to ../references.bib, so
-# the build runs from the workshop directory to keep bibtex paths unambiguous.
+# Workshop condensation. workshop/references.bib is a byte-identical regular-file
+# copy of ../references.bib (NOT a symlink -- a symlink member breaks the sdist
+# packaging gate); the build runs from the workshop directory so bibtex resolves
+# the local copy unambiguously. check_artifacts.py asserts the two stay identical.
 workshop:
 	mkdir -p workshop/$(BUILD_DIR)
 	cd workshop && latexmk -pdf -interaction=nonstopmode -halt-on-error \

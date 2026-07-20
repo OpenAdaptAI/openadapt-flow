@@ -607,3 +607,194 @@ def _extract_json_object(text: str) -> Optional[dict]:
     except json.JSONDecodeError:
         return None
     return obj if isinstance(obj, dict) else None
+
+
+def _match_from_xy(x: Any, y: Any) -> Optional[GrounderMatch]:
+    """Build a :class:`GrounderMatch` from a model's ``x`` / ``y`` reply.
+
+    Fail-safe: returns None (abstain) unless BOTH coordinates are finite
+    numbers. A ``{"x": null, "y": null}`` "not visible" reply, a non-numeric
+    value, or a NaN therefore yields no proposal, so the ladder halts rather
+    than clicks a bogus point.
+    """
+    if isinstance(x, bool) or isinstance(y, bool):
+        return None
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    if x != x or y != y:  # NaN
+        return None
+    px, py = int(round(x)), int(round(y))
+    region: Region = (
+        max(0, px - _REGION_HALF_W),
+        max(0, py - _REGION_HALF_H),
+        2 * _REGION_HALF_W,
+        2 * _REGION_HALF_H,
+    )
+    return GrounderMatch(point=(px, py), region=region, confidence=0.5)
+
+
+class OpenAICompatibleGrounder:
+    """Grounder backed by any OpenAI-compatible vision chat-completions API.
+
+    One adapter for the whole "bring your own model" surface: OpenRouter, Azure
+    OpenAI, a Bedrock/OpenAI proxy, and self-hosted vLLM / Ollama / LM Studio all
+    speak the same ``POST {base_url}/chat/completions`` contract with an image
+    supplied as a ``data:`` URL. The operator names the ``base_url`` and ``model``
+    in the deployment config; the API key is read from a named environment
+    variable (never stored in the config or here).
+
+    EGRESS (PHI audit REM-3): base64-encodes the full screen PNG into the request
+    body and POSTs it to ``base_url``. Off the local box, so the replayer refuses
+    to wire it unless the operator opts in (``allow_model_grounding``) and, in PHI
+    mode, unless the endpoint host is on the attested allowlist (see
+    ``openadapt_flow.deployment``). It flags the run either way.
+
+    FAIL-SAFE by construction: any transport error, non-2xx, malformed body,
+    unparseable content, or ``{"x": null}`` reply returns None (abstain). It only
+    ever PROPOSES a point; the deterministic identity band and risk gate still
+    dispose before any click, so an outage or a confused model lowers
+    availability (more halts), never safety.
+    """
+
+    MAY_EGRESS = True
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        api_key: str = "",
+        timeout: float = 10.0,
+        client: Any = None,
+    ) -> None:
+        """Create the grounder.
+
+        Args:
+            base_url: Root of the OpenAI-compatible API (``/chat/completions`` is
+                appended). Required.
+            model: The vision-capable model id to request. Required.
+            api_key: Bearer token sent as ``Authorization: Bearer <key>``. Empty
+                => no auth header (a loopback vLLM/Ollama needs none). The caller
+                resolves this from a named env var; it is never stored here.
+            timeout: Per-call timeout in seconds.
+            client: Optional pre-built ``httpx.Client``-like object exposing
+                ``post(url, json=..., headers=..., timeout=...)`` (for tests /
+                custom transports). None => module-level ``httpx.post``.
+
+        Raises:
+            ValueError: If ``base_url`` or ``model`` is empty/blank.
+        """
+        if not base_url or not str(base_url).strip():
+            raise ValueError("OpenAICompatibleGrounder requires a non-empty base_url")
+        if not model or not str(model).strip():
+            raise ValueError("OpenAICompatibleGrounder requires a non-empty model")
+        self._url = base_url.rstrip("/") + "/chat/completions"
+        self._model = model.strip()
+        self._timeout = timeout
+        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = client
+
+    def locate(
+        self,
+        screen_png: bytes,
+        intent: str,
+        ocr_text: Optional[str] = None,
+    ) -> Optional[GrounderMatch]:
+        """Ask the OpenAI-compatible model for the click point of the target.
+
+        Returns a :class:`GrounderMatch` centered on the model's point, or None
+        (abstain) on ANY failure — unreachable endpoint, timeout, non-2xx,
+        malformed JSON, an unparseable reply, or a ``{"x": null}`` "not visible"
+        answer. Never raises.
+        """
+        try:
+            image_b64 = base64.standard_b64encode(screen_png).decode("utf-8")
+            body = {
+                "model": self._model,
+                "max_tokens": 256,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_b64}"
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": _PROMPT.format(
+                                    intent=intent, ocr_text=ocr_text or "(none)"
+                                ),
+                            },
+                        ],
+                    }
+                ],
+            }
+            data = self._post(body)
+        except Exception:
+            return None  # SAFE: any failure => no proposal => halt
+        if data is None:
+            return None
+        text = _openai_message_text(data)
+        if not text:
+            return None
+        payload = _extract_json_object(text)
+        if payload is None:
+            return None
+        return _match_from_xy(payload.get("x"), payload.get("y"))
+
+    def _post(self, body: dict) -> Optional[dict]:
+        """POST the request; return the parsed JSON dict, or None on failure."""
+        if self._client is not None:
+            resp = self._client.post(
+                self._url, json=body, headers=self._headers, timeout=self._timeout
+            )
+        else:
+            import httpx
+
+            try:
+                resp = httpx.post(
+                    self._url,
+                    json=body,
+                    headers=self._headers,
+                    timeout=self._timeout,
+                )
+            except httpx.HTTPError:
+                return None  # unreachable, timeout, connection reset, ...
+        if getattr(resp, "status_code", None) != 200:
+            return None  # auth error, 4xx/5xx
+        try:
+            parsed = resp.json()
+        except ValueError:
+            return None  # malformed body
+        return parsed if isinstance(parsed, dict) else None
+
+
+def _openai_message_text(data: dict) -> str:
+    """Pull the assistant message text out of a chat-completions response.
+
+    Tolerant of the two shapes providers emit: ``content`` as a plain string,
+    or as a list of content parts (``[{"type": "text", "text": ...}, ...]``).
+    Returns "" when the shape is unexpected, so the caller abstains.
+    """
+    try:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+    except (AttributeError, IndexError, KeyError, TypeError):
+        return ""
+    return ""

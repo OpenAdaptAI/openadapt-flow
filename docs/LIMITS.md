@@ -261,6 +261,42 @@ rendering, and in-progress states are known hard cases. Treat the model as an
 availability aid, not a safety authority, and keep consequential actions behind
 identity, effect, and policy controls that do not depend on the model's answer.
 
+#### Configuring your own grounding model (bring your own)
+
+The grounding model is operator-selectable. The `runtime.grounding_model`
+section of a deployment config chooses which model backs the fallback rung:
+`provider: anthropic` (the built-in Anthropic API path) or
+`provider: openai_compatible` (any `{base_url}/chat/completions` vision
+endpoint — OpenRouter, Azure OpenAI, a Bedrock/OpenAI proxy, or a self-hosted
+vLLM / Ollama / LM Studio). The API key is supplied by reference: `api_key_env`
+names an environment variable; the key is never stored in the config.
+
+Two boundaries are load-bearing:
+
+- **Configuring a model does not enable egress.** `runtime.grounding_model`
+  only names *which* model would be used. Whether any screenshot leaves the box
+  is still governed entirely by `runtime.allow_model_grounding`, which defaults
+  to off. An enabled model with egress off stays dormant and the run is fully
+  local. The hosted managed runner refuses any profile that enables
+  model-grounding egress at all.
+- **PHI mode fails closed on egress.** When PHI mode is active
+  (`OPENADAPT_FLOW_PHI_MODE`, or `OPENADAPT_FLOW_SCRUB=on`) a configured
+  grounding endpoint is refused unless its host is on the admin-attested
+  `runtime.phi_grounding_allowlist`; the run then stays fully local rather than
+  egressing. Known public aggregators (`openrouter.ai`, `api.openai.com`,
+  `api.anthropic.com`, `generativelanguage.googleapis.com`) stay blocked under
+  PHI even when allowlisted, unless the operator sets
+  `runtime.phi_egress_attested: true` to attest that a Business Associate
+  Agreement (or equivalent) covers the destination. Ambiguity — an
+  unresolvable host, an empty allowlist — always resolves to fully local.
+  Non-PHI runs are unaffected: any configured endpoint works under the normal
+  egress opt-in.
+
+None of this changes the safety authority. A configured model, like the built-in
+one, only *proposes* a point; the deterministic identity band and risk gate
+still dispose before any click, and irreversible steps refuse a grounder
+resolution and halt.
+
 ### 5. A halt is not a rollback
 
 A run may halt after earlier steps have already changed the application or

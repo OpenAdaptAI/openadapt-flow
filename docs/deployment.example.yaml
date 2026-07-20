@@ -128,6 +128,34 @@ runtime:
   # renders (see docs/LIMITS.md); MISMATCH/ABSTAIN are unaffected either way.
   pixel_verify_enabled: false
 
+  # Operator-selected ("bring your own") model grounder: the VLM fallback rung
+  # BEHIND the local OCR rung. Configuring it NEVER enables egress by itself —
+  # `allow_model_grounding` above still governs whether anything leaves the box.
+  # The API key is a REFERENCE (`api_key_env` names an env var), never a literal.
+  grounding_model:
+    enabled: false
+    # anthropic          -> the built-in Anthropic API path.
+    # openai_compatible  -> any {base_url}/chat/completions vision endpoint
+    #                       (OpenRouter, Azure OpenAI, a Bedrock/OpenAI proxy,
+    #                       self-hosted vLLM / Ollama / LM Studio).
+    provider: openai_compatible
+    base_url: "http://vllm.internal:8000/v1"   # openai_compatible only
+    model: "qwen2.5-vl-7b-instruct"
+    api_key_env: "OPENADAPT_FLOW_GROUNDING_API_KEY"  # env var NAME, not the key
+
+  # PHI-mode egress allowlist (FAIL-CLOSED). When PHI mode is active
+  # (OPENADAPT_FLOW_PHI_MODE / SCRUB=on), a configured grounding endpoint is
+  # REFUSED unless its host appears here — the run then stays FULLY LOCAL. Empty
+  # => no endpoint may egress under PHI. Non-PHI runs ignore this list (the
+  # normal egress opt-in governs). Known public aggregators (openrouter.ai,
+  # api.openai.com, api.anthropic.com, generativelanguage.googleapis.com) stay
+  # BLOCKED under PHI even if listed here, unless phi_egress_attested is true.
+  phi_grounding_allowlist:
+    - "vllm.internal"
+  # Admin attestation that a BAA / equivalent covers the public aggregators
+  # above. Default false => they are blocked under PHI regardless of allowlist.
+  phi_egress_attested: false
+
 # -- policy: the safety policy that certifies this bundle --------------------
 policy:
   # A policy YAML path, or a shipped built-in name (permissive, clinical-write).

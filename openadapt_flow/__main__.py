@@ -324,12 +324,14 @@ def _configured_replayer(
     use_structural: bool,
     pixel_verify_enabled: bool = False,
     governed_authorization=None,
+    runtime_config=None,
 ):
     """Wire the grounding, verification, and actuation layers into a Replayer.
 
     Backend-agnostic: the on-prem VLM appliance (opt-in, egress-guarded), the
-    OCR grounding rung, and the deployment wiring (effect verifier / API
-    actuator / durable runtime) are identical for browser, Windows, macOS, and
+    operator-selected model grounder (opt-in, PHI-allowlisted), the OCR
+    grounding rung, and the deployment wiring (effect verifier / API actuator /
+    durable runtime) are identical for browser, Windows, macOS, and
     RDP/remote-display sessions. The caller owns the backend lifecycle.
     """
     from openadapt_flow.deployment import build_replayer
@@ -343,6 +345,7 @@ def _configured_replayer(
         use_structural=use_structural,
         pixel_verify_enabled=pixel_verify_enabled,
         governed_authorization=governed_authorization,
+        runtime_config=runtime_config,
     )
 
 
@@ -362,6 +365,7 @@ def _build_and_run_replayer(
     use_structural: bool,
     pixel_verify_enabled: bool = False,
     governed_authorization=None,
+    runtime_config=None,
     execution_origin: Optional[str] = None,
     execution_entry_url: Optional[str] = None,
 ):
@@ -375,6 +379,7 @@ def _build_and_run_replayer(
         use_structural=use_structural,
         pixel_verify_enabled=pixel_verify_enabled,
         governed_authorization=governed_authorization,
+        runtime_config=runtime_config,
     ).run(
         workflow,
         params=params,
@@ -421,6 +426,7 @@ def _replay_desktop(
     durable: bool,
     pixel_verify_enabled: bool = False,
     governed_authorization=None,
+    runtime_config=None,
 ) -> int:
     """Replay against a non-browser native/remote backend built by the factory.
 
@@ -459,6 +465,7 @@ def _replay_desktop(
             use_structural=True,
             pixel_verify_enabled=pixel_verify_enabled,
             governed_authorization=governed_authorization,
+            runtime_config=runtime_config,
         )
     finally:
         close = getattr(backend, "close", None)
@@ -790,6 +797,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             durable=durable,
             pixel_verify_enabled=cfg.runtime.pixel_verify_enabled,
             governed_authorization=getattr(args, "_governed_run_authorization", None),
+            runtime_config=cfg.runtime,
         )
 
     headed = args.headed or cfg.backend.headed
@@ -855,6 +863,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     governed_authorization=getattr(
                         args, "_governed_run_authorization", None
                     ),
+                    runtime_config=cfg.runtime,
                     execution_origin=(
                         f"{urlsplit(page.url).scheme}://{urlsplit(page.url).netloc}"
                     ),

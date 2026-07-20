@@ -264,6 +264,13 @@ class RuntimeSection(BaseModel):
     #: grounder / identity-VLM / state-verifier. Off by default => fully local,
     #: zero outbound calls.
     allow_model_grounding: bool = False
+    #: Arm the pixel-compare identity tier's VERIFY branch (experimental,
+    #: evidence-gated). Off by default => the pixel tier only ever HALTs on a
+    #: localized glyph change or ABSTAINs; it never pixel-VERIFIES (a
+    #: would-be verify falls through to the next tier). See
+    #: :func:`openadapt_flow.runtime.identity.verify_pixel_identity` and
+    #: docs/LIMITS.md.
+    pixel_verify_enabled: bool = False
 
 
 class PolicySection(BaseModel):
@@ -320,6 +327,7 @@ def build_replayer(
     api_actuator: Any,
     durable: bool,
     use_structural: bool,
+    pixel_verify_enabled: bool = False,
     governed_authorization: Any = None,
 ) -> Any:
     """Wire one deployment-qualified backend into the governed Replayer.
@@ -365,6 +373,7 @@ def build_replayer(
         api_actuator=api_actuator,
         durable=durable,
         use_structural=use_structural,
+        pixel_verify_enabled=pixel_verify_enabled,
         governed_authorization=governed_authorization,
     )
 

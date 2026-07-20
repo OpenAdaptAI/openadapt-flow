@@ -300,6 +300,7 @@ class Replayer:
         checkpoint_key: Optional[str] = None,
         poll_interval_s: float = 0.05,
         use_structural: bool = True,
+        pixel_verify_enabled: bool = False,
         allow_model_grounding: bool = False,
         governed_authorization: Optional[GovernedRunAuthorization] = None,
         governed_continuation: bool = False,
@@ -350,6 +351,14 @@ class Replayer:
         # (RDP/Citrix/VDI) on a Playwright surface (see the e2e visual-floor
         # drift/heal suites). Never disables the visual ladder itself.
         self.use_structural = use_structural
+        # Arm the pixel-compare identity tier's VERIFY branch (experimental,
+        # evidence-gated; OFF by default = today's behavior). When False the
+        # pixel tier only HALTs on a localized glyph change or ABSTAINs; it
+        # never pixel-VERIFIES. Resolved from deployment.yaml
+        # ``runtime.pixel_verify_enabled`` via build_replayer; read only by the
+        # identity ladder's pixel_tier (see identity.verify_pixel_identity and
+        # docs/LIMITS.md).
+        self.pixel_verify_enabled = pixel_verify_enabled
         # System-of-record effect verification (OFF by default). The verifier
         # is bound to the deployment's system of record; the optional
         # compensator undoes a detected duplicate irreversible write. Neither
@@ -3356,7 +3365,11 @@ class Replayer:
 
         def pixel_tier() -> Optional[IdentityCheck]:
             recorded_png, live_png = identifier_crops()
-            return identity_mod.verify_pixel_identity(recorded_png, live_png)
+            return identity_mod.verify_pixel_identity(
+                recorded_png,
+                live_png,
+                enable_verify=self.pixel_verify_enabled,
+            )
 
         def vlm_tier() -> Optional[IdentityCheck]:
             recorded_png, live_png = identifier_crops()

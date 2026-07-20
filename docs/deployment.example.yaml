@@ -121,6 +121,13 @@ runtime:
   # verifier (screenshots may leave the box). Leave false unless required.
   allow_model_grounding: false
 
+  # Arm the pixel-compare identity tier's VERIFY branch (experimental,
+  # evidence-gated). Off by default: the tier can still HALT on a wrong
+  # identifier or ABSTAIN, it just never pixel-VERIFIES a match. Only set true
+  # on a substrate where the pixel VERIFY gate has been validated for your
+  # renders (see docs/LIMITS.md); MISMATCH/ABSTAIN are unaffected either way.
+  pixel_verify_enabled: false
+
 # -- policy: the safety policy that certifies this bundle --------------------
 policy:
   # A policy YAML path, or a shipped built-in name (permissive, clinical-write).

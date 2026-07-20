@@ -318,6 +318,7 @@ def _configured_replayer(
     api_actuator,
     durable: bool,
     use_structural: bool,
+    pixel_verify_enabled: bool = False,
     governed_authorization=None,
 ):
     """Wire the grounding, verification, and actuation layers into a Replayer.
@@ -336,6 +337,7 @@ def _configured_replayer(
         api_actuator=api_actuator,
         durable=durable,
         use_structural=use_structural,
+        pixel_verify_enabled=pixel_verify_enabled,
         governed_authorization=governed_authorization,
     )
 
@@ -354,6 +356,7 @@ def _build_and_run_replayer(
     api_actuator,
     durable: bool,
     use_structural: bool,
+    pixel_verify_enabled: bool = False,
     governed_authorization=None,
     execution_origin: Optional[str] = None,
     execution_entry_url: Optional[str] = None,
@@ -366,6 +369,7 @@ def _build_and_run_replayer(
         api_actuator=api_actuator,
         durable=durable,
         use_structural=use_structural,
+        pixel_verify_enabled=pixel_verify_enabled,
         governed_authorization=governed_authorization,
     ).run(
         workflow,
@@ -411,6 +415,7 @@ def _replay_desktop(
     effect_verifier,
     api_actuator,
     durable: bool,
+    pixel_verify_enabled: bool = False,
     governed_authorization=None,
 ) -> int:
     """Replay against a non-browser native/remote backend built by the factory.
@@ -448,6 +453,7 @@ def _replay_desktop(
             # No MockMed drift here, so the deterministic structural rung is
             # preferred exactly as in a non-drift web replay.
             use_structural=True,
+            pixel_verify_enabled=pixel_verify_enabled,
             governed_authorization=governed_authorization,
         )
     finally:
@@ -712,6 +718,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             effect_verifier=effect_verifier,
             api_actuator=api_actuator,
             durable=durable,
+            pixel_verify_enabled=cfg.runtime.pixel_verify_enabled,
             governed_authorization=getattr(args, "_governed_run_authorization", None),
         )
 
@@ -774,6 +781,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     api_actuator=api_actuator,
                     durable=durable,
                     use_structural=not bool(args.drift),
+                    pixel_verify_enabled=cfg.runtime.pixel_verify_enabled,
                     governed_authorization=getattr(
                         args, "_governed_run_authorization", None
                     ),

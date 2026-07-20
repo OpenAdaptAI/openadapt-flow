@@ -2307,6 +2307,12 @@ class Replayer:
         # params (P0-3); resolved BEFORE the pre-state snapshot so verification
         # targets the record this run wrote, not the demonstration's.
         resolved_effects: Optional[list["Effect"]] = None
+        # The verifier used for THIS step. Defaults to the configured one, but a
+        # GUI-only recording whose mined effects are auto-derived DIFFERENT-PATH
+        # on-screen read-backs is verified out of the box by a backend-bound
+        # read-back verifier even with NO effect verifier configured (the
+        # no-connector default); see the effect block below.
+        active_verifier = self.effect_verifier
 
         try:
             # Workflow-program IR, Phase 1: evaluate the step's guard
@@ -2454,7 +2460,15 @@ class Replayer:
             # error -- refuse to perform an unverifiable consequential write
             # rather than pass it silently.
             if error is None and step.effects:
-                if self.effect_verifier is None:
+                if active_verifier is None and self._all_default_readback(step.effects):
+                    # AUTO-DEFAULT (no connector): every declared effect is an
+                    # auto-derived DIFFERENT-PATH on-screen read-back, whose
+                    # measured false-CONFIRM rate is ~0. Wire a read-back
+                    # verifier bound to the live backend for this step. A
+                    # same-surface (weak) read-back or a structured effect is
+                    # NOT eligible and falls through to the HALT/approval path.
+                    active_verifier = self._auto_readback_verifier()
+                if active_verifier is None:
                     authorization = self.governed_authorization
                     approved = (
                         authorization is not None
@@ -2493,7 +2507,7 @@ class Replayer:
                     # pre-state snapshot (P0-3): match/value/idempotency_key must
                     # describe the record THIS run writes, not the demo's.
                     resolved_effects = self._resolve_effects(step.effects, params)
-                    effect_pre_state = self.effect_verifier.capture_pre_state()
+                    effect_pre_state = active_verifier.capture_pre_state()
 
             if self._governed_asset_mutation is not None:
                 error = self._governed_asset_mutation
@@ -2557,7 +2571,11 @@ class Replayer:
             # on any non-CONFIRMED verdict (docs/design/EFFECT_VERIFIER.md).
             if error is None and effect_pre_state is not None:
                 error = self._verify_effects(
-                    step, effect_pre_state, result, effects=resolved_effects
+                    step,
+                    effect_pre_state,
+                    result,
+                    effects=resolved_effects,
+                    verifier=active_verifier,
                 )
                 if error is not None and self.governed_authorization is not None:
                     result.safety_halt = True
@@ -2756,12 +2774,36 @@ class Replayer:
         namespace = {**params, "__run_id__": self._run_id}
         return [effect.resolve(namespace) for effect in effects]
 
+    def _all_default_readback(self, effects: list["Effect"]) -> bool:
+        """Whether EVERY declared effect is an auto-derived DIFFERENT-PATH
+        on-screen read-back that may be verified out of the box with no
+        connector (measured false-CONFIRM ~0). A same-surface read-back or any
+        structured system-of-record effect makes this False — those still
+        require a configured verifier (fail-safe)."""
+        from openadapt_flow.runtime.effects.onscreen import is_default_readback_effect
+
+        return bool(effects) and all(is_default_readback_effect(e) for e in effects)
+
+    def _auto_readback_verifier(self) -> Any:
+        """The backend-bound on-screen read-back verifier for the no-connector
+        default path (built once, reused across steps)."""
+        verifier = getattr(self, "_readback_verifier", None)
+        if verifier is None:
+            from openadapt_flow.runtime.effects.onscreen import (
+                OnScreenReadbackVerifier,
+            )
+
+            verifier = OnScreenReadbackVerifier(backend=self.backend)
+            self._readback_verifier = verifier
+        return verifier
+
     def _verify_effects(
         self,
         step: Step,
         before: EffectState,
         result: StepResult,
         effects: Optional[list["Effect"]] = None,
+        verifier: Any = None,
     ) -> Optional[str]:
         """Verify each declared Effect against the system of record; HALT on
         any non-CONFIRMED verdict.
@@ -2788,7 +2830,12 @@ class Replayer:
         Returns an error string (HALT) or None (all effects confirmed or
         reconciled).
         """
-        assert self.effect_verifier is not None  # guaranteed by the caller
+        # ``verifier`` is the configured one by default, but the caller may pass
+        # the auto-wired backend-bound read-back verifier (the no-connector
+        # default path) for a step whose effects are different-path read-backs.
+        if verifier is None:
+            verifier = self.effect_verifier
+        assert verifier is not None  # guaranteed by the caller
         if effects is None:
             effects = step.effects
         for effect in effects:
@@ -2816,7 +2863,7 @@ class Replayer:
                     "be completed by an operator before this consequential "
                     "write can run — run aborted"
                 )
-            verdict = self.effect_verifier.verify(effect, before)
+            verdict = verifier.verify(effect, before)
             if verdict.confirmed:
                 result.effect_results.append(
                     f"[{verdict.substrate}] {effect.kind.value}: CONFIRMED"
@@ -2834,7 +2881,7 @@ class Replayer:
                 comp = reconcile_or_escalate(
                     effect,
                     verdict,
-                    verifier=self.effect_verifier,
+                    verifier=verifier,
                     before=before,
                     compensator=self.effect_compensator,
                 )

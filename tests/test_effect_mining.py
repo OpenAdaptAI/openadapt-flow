@@ -20,6 +20,27 @@ from pathlib import Path
 
 import requests
 
+from openadapt_flow.compiler import compile_recording, mine_step_effects
+from openadapt_flow.compiler.effect_mining import (
+    PLACEHOLDER_MATCH,
+    SOR_AFTER_KEY,
+    SOR_BEFORE_KEY,
+    derive_different_path_readback,
+)
+from openadapt_flow.ir import (
+    ActionKind,
+    Anchor,
+    Postcondition,
+    PostconditionKind,
+    Step,
+)
+from openadapt_flow.runtime.effects import (
+    EffectKind,
+    RestRecordVerifier,
+    Verdict,
+)
+from openadapt_flow.runtime.replayer import Replayer
+
 # Reuse the scripted fakes + fault-server helpers from the replayer-effects
 # tests (pytest prepend import mode puts tests/ on sys.path).
 from tests.test_replayer_effects import (
@@ -29,20 +50,6 @@ from tests.test_replayer_effects import (
     _save_workflow,
     _vision_that_confirms_saved,
 )
-
-from openadapt_flow.compiler import compile_recording, mine_step_effects
-from openadapt_flow.compiler.effect_mining import (
-    PLACEHOLDER_MATCH,
-    SOR_AFTER_KEY,
-    SOR_BEFORE_KEY,
-)
-from openadapt_flow.ir import ActionKind, Step
-from openadapt_flow.runtime.effects import (
-    EffectKind,
-    RestRecordVerifier,
-    Verdict,
-)
-from openadapt_flow.runtime.replayer import Replayer
 
 NOTE = "confidential follow up note"
 
@@ -348,3 +355,159 @@ def test_compile_mining_on_but_nothing_derivable_leaves_effects_empty(tmp_path):
         rec, tmp_path / "bundle", name="mine-demo", mine_effects=True
     )
     assert all(step.effects == [] for step in wf.steps)
+
+
+# -- unit: on-screen read-back auto-derivation (the no-API default oracle) ---
+
+
+def _view_step(
+    step_id: str,
+    *,
+    region=(100, 200, 300, 40),
+    show_value: str = NOTE,
+    action=ActionKind.KEY,
+    click_point=None,
+    risk: str = "irreversible",
+) -> Step:
+    """A step whose postconditions show ``show_value`` rendered in a stable
+    region (the demonstrator viewing the saved value)."""
+    anchor = None
+    if click_point is not None:
+        anchor = Anchor(
+            template="t.png", region=(0, 0, 10, 10), click_point=click_point
+        )
+    return Step(
+        id=step_id,
+        intent="view saved encounter",
+        action=action,
+        key="Enter" if action is ActionKind.KEY else None,
+        anchor=anchor,
+        risk=risk,
+        expect=[
+            Postcondition(kind=PostconditionKind.REGION_STABLE, region=region),
+            Postcondition(
+                kind=PostconditionKind.TEXT_PRESENT, text=f"Saved: {show_value}"
+            ),
+        ],
+    )
+
+
+def test_onscreen_readback_derived_when_demo_views_saved_value():
+    step = _view_step("step_000")
+    mined = mine_step_effects({"kind": "key"}, step, exclude_texts=(NOTE,))
+    assert mined.disposition == "readback"
+    assert len(mined.effects) == 1
+    eff = mined.effects[0]
+    assert eff.kind is EffectKind.FIELD_EQUALS
+    assert eff.value == NOTE
+    assert eff.readback is not None
+    assert eff.readback.region == (100, 200, 300, 40)
+    # Same-surface (weak) until a different-path re-open is derived.
+    assert eff.readback.different_path is False
+    assert eff.needs_operator_confirmation is False
+
+
+def test_onscreen_readback_requires_a_bounded_region_else_placeholder():
+    # Payload viewed (text_present) but NO stable region to bound the re-read:
+    # we do NOT emit an unbounded whole-frame read-back -> honest placeholder.
+    step = Step(
+        id="step_000",
+        intent="save",
+        action=ActionKind.KEY,
+        key="Enter",
+        risk="irreversible",
+        expect=[
+            Postcondition(kind=PostconditionKind.TEXT_PRESENT, text=f"Saved {NOTE}")
+        ],
+    )
+    mined = mine_step_effects({"kind": "key"}, step, exclude_texts=(NOTE,))
+    assert mined.placeholder is True
+    assert mined.effects[0].needs_operator_confirmation is True
+
+
+def test_different_path_upgrade_from_reopen_sequence():
+    # A consequential write (same-surface read-back), then the demonstrator
+    # navigates AWAY and re-opens the record (>= 2 nav actions) ending in a
+    # re-view of the saved value -> upgrade to different-path.
+    write = _view_step("step_000")  # gets a same-surface read-back effect
+    write_mined = mine_step_effects({"kind": "key"}, write, exclude_texts=(NOTE,))
+    write.effects = write_mined.effects
+
+    close = _plain_click("step_001", (10, 10))  # close the form
+    search = Step(
+        id="step_002",
+        intent="type patient id",
+        action=ActionKind.TYPE,
+        text="p1",  # a LITERAL (non-parameterized) search term
+    )
+    reopen = _view_step(
+        "step_003",
+        region=(50, 60, 200, 30),
+        action=ActionKind.CLICK,
+        click_point=(70, 65),
+    )
+    steps = [write, close, search, reopen]
+
+    upgraded = derive_different_path_readback(steps)
+    assert upgraded == 1
+    rb = write.effects[0].readback
+    assert rb is not None
+    assert rb.different_path is True
+    assert rb.region == (50, 60, 200, 30)
+    # The re-navigation replays the recorded away-and-back actions.
+    assert [n.action for n in rb.renavigation] == ["click", "type", "click"]
+
+
+def test_different_path_not_upgraded_when_renav_is_parameterized():
+    # A parameterized search step cannot be replayed deterministically as a
+    # re-navigation -> stays SAME-SURFACE (safe: an over-eager upgrade could
+    # only false-HALT, but we decline it).
+    write = _view_step("step_000")
+    write.effects = mine_step_effects(
+        {"kind": "key"}, write, exclude_texts=(NOTE,)
+    ).effects
+    close = _plain_click("step_001", (10, 10))
+    param_search = Step(
+        id="step_002",
+        intent="type patient id",
+        action=ActionKind.TYPE,
+        param="patient_id",  # per-run value, not a literal -> not replayable
+    )
+    reopen = _view_step("step_003", action=ActionKind.CLICK, click_point=(70, 65))
+    upgraded = derive_different_path_readback([write, close, param_search, reopen])
+    assert upgraded == 0
+    assert write.effects[0].readback.different_path is False
+
+
+def _plain_click(step_id: str, point) -> Step:
+    return Step(
+        id=step_id,
+        intent="navigate",
+        action=ActionKind.CLICK,
+        anchor=Anchor(template="t.png", region=(0, 0, 10, 10), click_point=point),
+        risk="reversible",
+    )
+
+
+def test_readback_effect_rendered_in_workflow_py_for_review():
+    from openadapt_flow.compiler.codegen import _effect_comment
+
+    step = _view_step("step_000")
+    step.effects = mine_step_effects(
+        {"kind": "key"}, step, exclude_texts=(NOTE,)
+    ).effects
+    rendered = "\n".join(_effect_comment(step.effects))
+    assert "onscreen-readback=same-surface" in rendered
+    assert "SAME-SURFACE read-back (weak; non-default)" in rendered
+
+    derive_different_path_readback(
+        [
+            step,
+            _plain_click("step_001", (10, 10)),
+            _plain_click("step_002", (20, 20)),
+            _view_step("step_003", action=ActionKind.CLICK, click_point=(70, 65)),
+        ]
+    )
+    rendered2 = "\n".join(_effect_comment(step.effects))
+    assert "onscreen-readback=different-path" in rendered2
+    assert "renav=" in rendered2

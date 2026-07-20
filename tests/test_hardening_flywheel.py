@@ -136,3 +136,26 @@ def test_results_snapshot_declares_template_tier_gated() -> None:
     doc = json.loads(C.results_path().read_text())
     assert doc["template_tier"]["gated_in_ci"] is True
     assert doc["template_tier"]["silent_wrong"] == C.ratchet_max()
+
+
+def test_corpus_dir_defaults_to_public_and_is_env_overridable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """Public default keeps CI green; the private corpus is opt-in via env.
+
+    The public synthetic baseline is the default so public tests + the
+    credibility story run without the private OpenAdaptAI/openadapt-corpus repo.
+    Setting OPENADAPT_HARDENING_CORPUS_DIR points internal ratchet runs at a
+    private corpus, but that path is never a build- or import-time dependency.
+    """
+    monkeypatch.delenv(C.CORPUS_DIR_ENV, raising=False)
+    assert C.corpus_dir() == C.public_corpus_dir()
+    assert C.corpus_path().is_file()  # committed public baseline is present
+
+    override = str(tmp_path)  # type: ignore[arg-type]
+    monkeypatch.setenv(C.CORPUS_DIR_ENV, override)
+    from pathlib import Path
+
+    assert C.corpus_dir() == Path(override)
+    assert C.corpus_path() == Path(override) / "corpus.json"
+    assert C.results_path() == Path(override) / "results.json"

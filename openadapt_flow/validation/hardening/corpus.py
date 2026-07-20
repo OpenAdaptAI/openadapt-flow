@@ -22,6 +22,7 @@ release over release.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -34,18 +35,52 @@ from openadapt_flow.validation.hardening.harness import (
 
 SCHEMA_VERSION = "openadapt.vision-hardening-corpus.v1"
 
+# Opt-in override that points the corpus/results loader at a DIFFERENT directory
+# (e.g. an internal, deployment-derived corpus checked out from the private
+# ``OpenAdaptAI/openadapt-corpus`` repo) for internal ratchet runs.
+#
+# Data-boundary contract (see ``benchmark/vision_hardening/README.md`` and the
+# private repo's DATA_BOUNDARY.md):
+#   - When UNSET (the default, and the state in public CI), the loader reads the
+#     committed PUBLIC SYNTHETIC baseline under ``benchmark/vision_hardening/``.
+#     That baseline is what the public tests + credibility story run against.
+#   - When SET, the loader reads the private corpus from that directory. The
+#     private corpus is NEVER a build-time or import-time dependency of the
+#     public package: this is a pure runtime, env-gated lookup with a public
+#     default, so ``openadapt-flow`` builds and imports with the private repo
+#     absent.
+CORPUS_DIR_ENV = "OPENADAPT_HARDENING_CORPUS_DIR"
+
 
 def _repo_root() -> Path:
     # openadapt_flow/validation/hardening/corpus.py -> repo root
     return Path(__file__).resolve().parents[3]
 
 
+def public_corpus_dir() -> Path:
+    """The committed PUBLIC synthetic baseline directory (never private)."""
+    return _repo_root() / "benchmark" / "vision_hardening"
+
+
+def corpus_dir() -> Path:
+    """The active corpus directory: the env override if set, else the public one.
+
+    Setting :data:`CORPUS_DIR_ENV` selects an internal, deployment-derived
+    corpus for internal ratchet runs. It is optional by construction — the
+    public default keeps public tests green without the private repo present.
+    """
+    override = os.environ.get(CORPUS_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+    return public_corpus_dir()
+
+
 def corpus_path() -> Path:
-    return _repo_root() / "benchmark" / "vision_hardening" / "corpus.json"
+    return corpus_dir() / "corpus.json"
 
 
 def results_path() -> Path:
-    return _repo_root() / "benchmark" / "vision_hardening" / "results.json"
+    return corpus_dir() / "results.json"
 
 
 def _case_key(entry: dict[str, Any]) -> str:

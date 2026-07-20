@@ -776,6 +776,13 @@ def test_record_compile_replay_over_rdp_backend(tmp_path) -> None:
         run_dir=run_dir,
     )
     assert report.success, [r.model_dump() for r in report.results]
+    # Reference-bar invariant: a HEALTHY replay resolves from retained
+    # evidence with ZERO model calls (docs/LIMITS.md "Healthy replay with
+    # zero model calls"). The pixel-only RDP substrate must meet the same bar
+    # the browser reference path and the Linux qualification already assert;
+    # a nonzero count would mean the deterministic ladder silently fell
+    # through to the optional grounder on a clean run.
+    assert report.model_calls == 0, report.model_calls
     assert transport.state == 3
 
 

@@ -97,8 +97,15 @@ For an armed step:
 - a definitive mismatch halts before the action;
 - OCR can be unable to distinguish identifiers such as `O` from `0` or `l`
   from `1` on a pixel-only display;
-- the pixel comparison tier can reject some differences but is not enabled to
-  authorize a match.
+- the pixel comparison tier rejects a wrong record on a pixel-only display by
+  comparing the recorded vs live identifier crop (the pixels keep the `O`/`0`
+  and `l`/`1` distinction OCR collapses). It has three outcomes — mismatch
+  (localized glyph change → halt), abstain (render drift or uncertainty → fall
+  through), and, when enabled, verify (match). The positive **verify** path is
+  jitter-robust (the crops are sub-pixel aligned before comparison, so
+  cross-render jitter of the same value no longer looks like a glyph change) and
+  proven zero-false-accept on a synthetic cross-render battery, but its default
+  is **off** (`runtime.identity.PIXEL_VERIFY_ENABLED`, see below).
 
 Permissive `replay` may proceed on an unreadable reversible target and reports
 that condition. Governed `run` requires an affirmative live verdict for every
@@ -126,6 +133,23 @@ safe halts because OCR ambiguity cannot always be resolved. The adversarial
 identity evidence and measured over-halt tradeoff are documented in
 [`IDENTITY_ROC.md`](validation/IDENTITY_ROC.md) and the generated claim registry
 in [`VERIFICATION.md`](VERIFICATION.md).
+
+**Pixel-verify enable bar.** The pixel tier's positive **verify** path is built
+and validated but ships **disabled by default** (`PIXEL_VERIFY_ENABLED = False`).
+On the self-contained jitter battery (`benchmark/pixel_identity_aligned`:
+rendered MRNs plus the committed real-browser crops, re-rendered under sub-pixel
+jitter, JPEG q≤10, 105–150% DPI, and theme inversion) the sub-pixel-aligned
+whole-crop distance separates same-record matching renders (worst window ≈0.052)
+from every different record — glyph-collapse siblings and wrong MRNs alike
+(≈0.070) — with the verify gate (0.040) inside that gap, giving **zero
+false-accept across the different-record trials with margin**. That evidence is
+**synthetic**; a pixel false-accept is a silent wrong record, the worst possible
+outcome, and no real RDP/Citrix/HDX identifier corpus has been captured yet
+(that substrate is Research). The exact bar to flip the default on: reproduce
+`false_accept == 0` with a comparable gap on a **real captured remote-display
+identifier corpus**. Until then, verify is reachable only when a caller opts in
+per risk class (`verify_pixel_identity(..., enable_verify=True)`); mismatch and
+abstain remain always-on and can only ever add a halt.
 
 ### 2. A postcondition verifies only what it observes
 

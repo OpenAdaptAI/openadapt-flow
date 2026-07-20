@@ -14,6 +14,7 @@ and asserts the contract:
 This is the no-DOM-canvas STAND-IN (Citrix Workspace-WEB class), NOT ICA/HDX.
 See ``benchmark/citrix_workspace/README.md``.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -32,15 +33,18 @@ pytestmark = pytest.mark.skipif(
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO / "benchmark" / "canvas_ladder" / "fixture"
-HARNESS = REPO / "benchmark" / "citrix_workspace" / "run_citrix_workspace_qualification.py"
+HARNESS = (
+    REPO / "benchmark" / "citrix_workspace" / "run_citrix_workspace_qualification.py"
+)
 IMAGE = "oaflow-canvas-fixture:test"
 CONTAINER = "oaflow-citrix-standin-test"
 PORT = 6080
 
 
 def _docker(*args: str, check: bool = True, timeout: int = 900):
-    return subprocess.run(["docker", *args], check=check, timeout=timeout,
-                          capture_output=True, text=True)
+    return subprocess.run(
+        ["docker", *args], check=check, timeout=timeout, capture_output=True, text=True
+    )
 
 
 @pytest.fixture(scope="module")
@@ -49,8 +53,9 @@ def canvas_fixture():
         pytest.skip("docker not available")
     _docker("build", "-t", IMAGE, str(FIXTURE_DIR))
     _docker("rm", "-f", CONTAINER, check=False)
-    _docker("run", "-d", "--name", CONTAINER, "--shm-size=1g",
-            "-p", f"{PORT}:6080", IMAGE)
+    _docker(
+        "run", "-d", "--name", CONTAINER, "--shm-size=1g", "-p", f"{PORT}:6080", IMAGE
+    )
     time.sleep(18)
     try:
         yield CONTAINER
@@ -65,7 +70,8 @@ def test_citrix_backend_contract_over_canvas_standin(canvas_fixture, tmp_path):
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
 
     evidence = mod.run_qualification(
-        canvas_fixture, out_dir=tmp_path, base_url="http://localhost", port=PORT)
+        canvas_fixture, out_dir=tmp_path, base_url="http://localhost", port=PORT
+    )
 
     healthy, severe = evidence["trials"]
     assert healthy["success"], healthy

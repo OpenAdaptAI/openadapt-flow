@@ -138,7 +138,9 @@ def build_backend(
 
     if kind == "rdp":
         return _build_rdp_backend(
-            cfg, rdp_transport=rdp_transport, window_client=window_client,
+            cfg,
+            rdp_transport=rdp_transport,
+            window_client=window_client,
             citrix=(cfg.kind or "").strip().lower() == "citrix",
         )
 

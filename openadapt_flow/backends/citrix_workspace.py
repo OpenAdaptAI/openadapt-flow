@@ -79,8 +79,11 @@ def default_citrix_owner(platform: Optional[str] = None) -> str:
     Workspace build differs (confirm with the window inventory in the README).
     """
     plat = platform or sys.platform
-    key = "win32" if plat.startswith("win") else (
-        "darwin" if plat == "darwin" else "linux")
+    key = (
+        "win32"
+        if plat.startswith("win")
+        else ("darwin" if plat == "darwin" else "linux")
+    )
     return CITRIX_WINDOW_OWNERS[key][0]
 
 
@@ -133,7 +136,9 @@ class CitrixWorkspaceBackend(RemoteDisplayBackend):
         self._citrix_owner = owner
 
 
-def _ocr_marker_probe(marker: str, *, min_ratio: float = 0.8) -> Callable[[bytes], bool]:
+def _ocr_marker_probe(
+    marker: str, *, min_ratio: float = 0.8
+) -> Callable[[bytes], bool]:
     """Build a coarse OCR readiness predicate (import stays lazy)."""
     text = marker.strip()
 

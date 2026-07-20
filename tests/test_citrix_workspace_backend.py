@@ -10,6 +10,7 @@ safe-halts over a real no-DOM surface is the fixture qualification in
 ``benchmark/citrix_workspace`` (driven through the ``WindowClient`` seam over the
 Part-1 canvas). See that directory's README.
 """
+
 from __future__ import annotations
 
 from openadapt_flow.backend import (
@@ -54,8 +55,10 @@ def test_backend_defaults_to_citrix_owner():
 
 def test_owner_and_title_overrides():
     be = CitrixWorkspaceBackend(
-        _NoopWindowClient(), owner_substr="Citrix Viewer (2)",
-        window_title="Accuro - ICA")
+        _NoopWindowClient(),
+        owner_substr="Citrix Viewer (2)",
+        window_title="Accuro - ICA",
+    )
     assert be._owner_substr == "Citrix Viewer (2)"
     assert be._title_substr == "Accuro - ICA"
 
@@ -79,8 +82,7 @@ def test_factory_builds_citrix_backend_with_default_owner():
     from openadapt_flow.backends.factory import build_backend
     from openadapt_flow.deployment import BackendConfig
 
-    be = build_backend(BackendConfig(kind="citrix"),
-                       window_client=_NoopWindowClient())
+    be = build_backend(BackendConfig(kind="citrix"), window_client=_NoopWindowClient())
     assert isinstance(be, CitrixWorkspaceBackend)
     assert be._owner_substr == default_citrix_owner()
 
@@ -90,9 +92,11 @@ def test_factory_citrix_owner_and_title_override():
     from openadapt_flow.deployment import BackendConfig
 
     be = build_backend(
-        BackendConfig(kind="citrix", rdp_window="wfica32",
-                      rdp_window_title="Accuro - ICA"),
-        window_client=_NoopWindowClient())
+        BackendConfig(
+            kind="citrix", rdp_window="wfica32", rdp_window_title="Accuro - ICA"
+        ),
+        window_client=_NoopWindowClient(),
+    )
     assert isinstance(be, CitrixWorkspaceBackend)
     assert be._owner_substr == "wfica32"
     assert be._title_substr == "Accuro - ICA"

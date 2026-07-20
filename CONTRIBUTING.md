@@ -69,6 +69,31 @@ surface from permissively licensed package artifacts.
 The release-consistency gate inspects the actual wheel and sdist. A source-tree
 notice alone is not sufficient.
 
+## Contributor License Agreement (CLA) and DCO
+
+So that OpenAdapt (MLDSAI Inc.) can steward the project and retain future
+relicensing flexibility, every contribution must be covered by both:
+
+1. **DCO sign-off (required now):** sign off every commit with `git commit -s`,
+   which adds a `Signed-off-by` line certifying the Developer Certificate of
+   Origin (https://developercertificate.org).
+2. **Contributor License Agreement:** by opening a pull request you agree to the
+   [OpenAdapt CLA](CLA.md). `openadapt-flow/CLA.md` is the canonical CLA text for
+   all OpenAdapt OSS repositories. When the CLA Assistant check is enabled,
+   first-time contributors sign once by commenting on their PR.
+
+This is *outbound* licensing of your contribution to the project; it is separate
+from the *inbound* third-party rules above.
+
+## Source-availability boundary (open-core)
+
+`openadapt-flow` is the open engine. Do not add private crown-jewel artifacts —
+the *grown* hardening failure corpus, *tuned* metamorphic-adversary params,
+deployment-derived *thresholds*, per-system-of-record oracle/connector *recipes*,
+or *real-EMR* datasets — to this public repository. The harness/mechanism is
+public; that data lives in the private corpus repo. The release-consistency gate
+also fails a build that would carry those private paths.
+
 ## Safety-sensitive areas
 
 The identity gate, the resolution ladder, and the postcondition/halt logic are

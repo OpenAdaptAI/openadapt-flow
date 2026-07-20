@@ -64,6 +64,9 @@ jobs:
       - name: Publish to the stable paper-latest release
         env:
           GH_TOKEN: ${{ github.token }}
+          # gh release commands need the repo context; the publish job downloads
+          # the artifact but never checks out, so pass GH_REPO explicitly.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # Canonical asset name -> stable download URL. Renaming main.pdf keeps

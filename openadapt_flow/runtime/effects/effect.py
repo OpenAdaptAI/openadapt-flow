@@ -148,6 +148,67 @@ class EffectKind(str, Enum):
     FIELD_EQUALS = "field_equals"
 
 
+#: A screen region ``(x, y, w, h)`` in the recorded/live frame's pixel space.
+#: Mirrors :data:`openadapt_flow.ir.Region`; defined locally to keep this
+#: module import-light (``ir`` imports :class:`Effect`, not the reverse).
+Region = tuple[int, int, int, int]
+
+
+class ReadbackNav(BaseModel):
+    """One deterministic navigation action to RE-OPEN the written record by a
+    path DIFFERENT from the write flow, before an on-screen read-back.
+
+    Auto-derived from the demonstration (the steps the person took to view the
+    saved record again — e.g. clear the form, search the patient, open the
+    encounter). Deliberately tiny and model-free: a re-navigation is replayed
+    by coordinate/keyboard exactly as recorded; anything a backend cannot
+    perform makes the read-back INDETERMINATE (HALT), never a guessed CONFIRM.
+    """
+
+    #: ``click`` (at :attr:`point`) | ``type`` (:attr:`text`) | ``key``
+    #: (:attr:`key`). An unknown action is refused by the navigator (HALT).
+    action: str
+    #: Click target in frame pixel space (``click`` only).
+    point: Optional[tuple[int, int]] = None
+    #: Literal text to type (``type`` only).
+    text: Optional[str] = None
+    #: Key name to press, e.g. ``"Enter"`` (``key`` only).
+    key: Optional[str] = None
+
+
+class ReadbackSpec(BaseModel):
+    """The on-screen read-back oracle mined from the demonstration.
+
+    Carries WHERE to re-read the saved value (:attr:`region`) and, for the
+    stronger DIFFERENT-PATH variant, the re-navigation that re-opens the record
+    (:attr:`renavigation`) so the read is forced through a real fetch rather
+    than the form the write left on screen. Consumed by
+    :class:`~openadapt_flow.runtime.effects.onscreen.OnScreenReadbackVerifier`;
+    every non-onscreen substrate ignores it.
+
+    SAFETY — the ``different_path`` flag is the gate. A ``different_path=True``
+    read-back re-opens the record by an independent path (defeating the
+    "the form still shows what I typed but nothing persisted" phantom-save
+    class) and is safe enough to be the DEFAULT out-of-the-box oracle. A
+    ``different_path=False`` (SAME-SURFACE) read-back re-reads the very region
+    the write drove; it CANNOT see a phantom/optimistic save (the measured
+    false-CONFIRM rate is > 0), so it is wired but NON-default — a
+    halt-inducing consistency signal an operator opts into with eyes open, not
+    a pass. See ``docs/LIMITS.md`` and ``benchmark/effect_readback/``.
+    """
+
+    #: Region to OCR for the saved value. None => the verifier's constructed
+    #: region (a hand-configured deployment).
+    region: Optional[Region] = None
+    #: True when :attr:`renavigation` re-opens the record by an independent
+    #: path (the strong, default-eligible oracle); False for a same-surface
+    #: re-read (weak, non-default).
+    different_path: bool = False
+    #: The re-navigation to perform BEFORE reading (different-path only). Empty
+    #: for a same-surface read-back.
+    renavigation: list[ReadbackNav] = Field(default_factory=list)
+
+
 class Effect(BaseModel):
     """A typed system-of-record effect (RFC ``Effect``, concrete runtime form).
 
@@ -244,6 +305,15 @@ class Effect(BaseModel):
     #: verify a fabricated binding — see ``runtime.replayer._verify_effects``)
     #: until an operator completes the binding and clears this flag.
     needs_operator_confirmation: bool = False
+    #: On-screen read-back oracle (the no-API default for GUI-only recordings).
+    #: Set by the compiler's effect miner (``compiler.effect_mining``) when the
+    #: demonstration shows the person VIEWING the saved value: it names the
+    #: region to re-OCR and, for the DIFFERENT-PATH variant, the re-navigation
+    #: that re-opens the record. Consumed ONLY by the ``onscreen`` substrate
+    #: (:class:`~openadapt_flow.runtime.effects.onscreen.OnScreenReadbackVerifier`);
+    #: every system-of-record substrate ignores it. None => not an on-screen
+    #: read-back effect (the structured/placeholder paths are unchanged).
+    readback: Optional[ReadbackSpec] = None
 
     # -- back-compat coercion: accept the v1 plain-string JSON form ----------
     @staticmethod

@@ -43,9 +43,17 @@ def _effect_comment(effects: list[Effect]) -> list[str]:
             parts.append(f"count={eff.expected_count}")
         if eff.idempotency_key is not None:
             parts.append(f"idempotency_key={eff.idempotency_key!r}")
+        if eff.readback is not None:
+            rb = eff.readback
+            kind = "different-path" if rb.different_path else "same-surface"
+            parts.append(f"onscreen-readback={kind} region={rb.region!r}")
+            if rb.renavigation:
+                parts.append(f"renav={len(rb.renavigation)} action(s)")
         parts.append(f"[{eff.risk}]")
         if eff.needs_operator_confirmation:
             parts.append("!! NEEDS OPERATOR CONFIRMATION (placeholder)")
+        elif eff.readback is not None and not eff.readback.different_path:
+            parts.append("!! SAME-SURFACE read-back (weak; non-default)")
         lines.append("    # " + " ".join(parts))
     return lines
 

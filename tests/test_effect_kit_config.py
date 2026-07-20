@@ -284,3 +284,28 @@ class TestBackCompat:
 
     def test_defaults_are_none_kind(self):
         assert build_effect_verifier(DeploymentConfig().effects) is None
+
+
+class TestOnScreenKitConfig:
+    def test_onscreen_builds_unbound_readback_verifier(self):
+        from openadapt_flow.runtime.effects.onscreen import OnScreenReadbackVerifier
+
+        cfg = EffectsConfig(kind="onscreen", readback_min_ratio=0.95)
+        v = build_effect_verifier(cfg)
+        assert isinstance(v, OnScreenReadbackVerifier)
+        # Backend is bound later (build_replayer); it exposes bind_backend.
+        assert hasattr(v, "bind_backend")
+
+    def test_onscreen_explicit_region_honored(self, tmp_path: Path):
+        from openadapt_flow.runtime.effects.onscreen import OnScreenReadbackVerifier
+
+        (tmp_path / "d.yaml").write_text(
+            "effects:\n  kind: onscreen\n  readback_region: [10, 20, 100, 40]\n"
+        )
+        cfg = load_deployment(tmp_path / "d.yaml")
+        v = build_effect_verifier(cfg.effects)
+        assert isinstance(v, OnScreenReadbackVerifier)
+
+    def test_onscreen_listed_in_unknown_kind_message(self):
+        with pytest.raises(ValueError, match="onscreen"):
+            build_effect_verifier(EffectsConfig(kind="bogus"))

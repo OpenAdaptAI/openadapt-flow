@@ -1392,7 +1392,10 @@ def compile_recording(
     # auto-derived typed effects to `Step.effects`; never fabricates a binding
     # (see compiler.effect_mining). Off by default → bundle byte-identical.
     if mine_effects:
-        from openadapt_flow.compiler.effect_mining import mine_step_effects
+        from openadapt_flow.compiler.effect_mining import (
+            derive_different_path_readback,
+            mine_step_effects,
+        )
 
         for step, _sb, _sa, event in pending:
             mined = mine_step_effects(event, step, exclude_texts=exclude_texts)
@@ -1400,6 +1403,17 @@ def compile_recording(
                 step.effects = mined.effects
             log = logger.info if mined.disposition != "none" else logger.debug
             log("effect-mining %s: %s", step.id, mined.reason)
+
+        # Cross-step pass: upgrade a same-surface on-screen read-back to the
+        # stronger DIFFERENT-PATH oracle when the demonstration re-opened the
+        # record by an independent path (the default-eligible signal).
+        upgraded = derive_different_path_readback(steps)
+        if upgraded:
+            logger.info(
+                "effect-mining: upgraded %d on-screen read-back(s) to "
+                "different-path (re-open) oracle",
+                upgraded,
+            )
 
     workflow = Workflow(
         name=name,

@@ -52,13 +52,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from openadapt_flow.ir import Step
+from openadapt_flow.ir import ActionKind, PostconditionKind, Region, Step
 from openadapt_flow.runtime.effects.effect import (
     Effect,
     EffectKind,
+    ReadbackNav,
+    ReadbackSpec,
     ValueExpr,
     stable_id,
 )
+
+# A different-path re-navigation must be genuinely independent of the write
+# flow: at least this many deterministic navigation actions (e.g. close/clear
+# the form + re-open the record, or search + open the result) before the saved
+# value is re-viewed. One action is not a "different path"; it is a re-read.
+MIN_RENAV_ACTIONS = 2
 
 
 def _ve(value: str) -> ValueExpr:
@@ -110,6 +118,9 @@ class StepEffectMining:
     ``disposition`` is one of:
 
     - ``"derived"``     — real effect(s) mined from an OBSERVED SoR / DOM delta;
+    - ``"readback"``    — no SoR observed, but the demonstration viewed the
+      saved value → an auto-derived on-screen read-back oracle (the no-API
+      default for GUI-only recordings), instead of an unconditional HALT;
     - ``"placeholder"`` — consequential step, binding not derivable → a flagged
       placeholder effect the run must not silently trust;
     - ``"none"``        — no verifiable effect derivable (honest gap).
@@ -123,6 +134,10 @@ class StepEffectMining:
     @property
     def derived(self) -> bool:
         return self.disposition == "derived"
+
+    @property
+    def readback(self) -> bool:
+        return self.disposition == "readback"
 
     @property
     def placeholder(self) -> bool:
@@ -338,6 +353,98 @@ def _mine_from_dom_delta(
     )
 
 
+def _norm_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _mine_onscreen_readback(
+    step: Step,
+    exclude_texts: tuple[str, ...],
+) -> Optional[StepEffectMining]:
+    """Auto-derive a SAME-SURFACE on-screen read-back effect from the demo.
+
+    The out-of-the-box, no-API oracle: when the demonstration shows the person
+    VIEWING the saved value after a consequential GUI write (a stable region
+    that rendered the typed value), that view IS the oracle. We mine it into an
+    ``onscreen`` ``field_equals`` effect whose :class:`ReadbackSpec` names the
+    region to re-OCR and the value expected there — so the run re-reads the
+    saved value instead of an unconditional HALT.
+
+    Derived ONLY when BOTH are present in what the recording already captured:
+
+    - a BOUNDED region that stabilized after the action (a ``REGION_STABLE``
+      postcondition — where the saved value/status rendered), so the re-read is
+      not an unbounded whole-frame guess; and
+    - the demonstrated saved VALUE (a mined ``TEXT_PRESENT`` whose text carries
+      a typed payload value, or — failing an explicit text match — the single
+      demonstrated payload value paired with that stable region).
+
+    Returned as ``different_path=False`` (SAME-SURFACE): it is the weak,
+    NON-default signal. The compiler's cross-step pass
+    (:func:`derive_different_path_readback`) UPGRADES it to the strong,
+    default-eligible different-path oracle when the recording also contains a
+    re-open of the record. When neither a bounded region nor a value is present
+    we return ``None`` (the caller falls back to the honest placeholder HALT —
+    there is nothing on screen to read back).
+    """
+    payloads = tuple(v for v in exclude_texts if v)
+    if not payloads:
+        return None
+
+    stable_region: Optional[Region] = None
+    for pc in step.expect:
+        if pc.kind is PostconditionKind.REGION_STABLE and pc.region is not None:
+            stable_region = pc.region
+            break
+    if stable_region is None:
+        return None
+
+    # The saved value: a payload value that a TEXT_PRESENT postcondition shows
+    # is on screen, else (no explicit text_present) the single demonstrated
+    # payload value bounded by the stable region.
+    saved_value: Optional[str] = None
+    present_texts = [
+        _norm_text(pc.text)
+        for pc in step.expect
+        if pc.kind is PostconditionKind.TEXT_PRESENT and pc.text
+    ]
+    for payload in payloads:
+        norm = _norm_text(payload)
+        if norm and any(norm in t for t in present_texts):
+            saved_value = payload
+            break
+    if saved_value is None and len(payloads) == 1:
+        saved_value = payloads[0]
+    if saved_value is None:
+        return None
+
+    effect = Effect(
+        kind=EffectKind.FIELD_EQUALS,
+        value=_ve(saved_value),
+        risk=step.risk,
+        readback=ReadbackSpec(region=stable_region, different_path=False),
+        probe=(
+            "SAME-SURFACE on-screen read-back: re-OCR the saved-value region "
+            f"{stable_region} and require the demonstrated value "
+            f"{saved_value!r}. Auto-derived from the demonstration's view of "
+            "the saved record. A presence/consistency signal only — it re-reads "
+            "the write's own surface and CANNOT catch a phantom/optimistic "
+            "save; non-default until upgraded to a different-path re-open."
+        ),
+    )
+    return StepEffectMining(
+        step_id=step.id,
+        effects=[effect],
+        disposition="readback",
+        reason=(
+            "auto-derived a SAME-SURFACE on-screen read-back (no system-of-"
+            f"record observed): region {stable_region}, expected value "
+            f"{saved_value!r} (the demonstration viewed the saved value). "
+            "Non-default (weak) until a different-path re-open is derived."
+        ),
+    )
+
+
 def _placeholder(step: Step) -> StepEffectMining:
     """A flagged placeholder for a consequential step whose SoR binding is not
     derivable from the demonstration (§7 "irreducibly app-specific").
@@ -372,6 +479,122 @@ def _placeholder(step: Step) -> StepEffectMining:
     )
 
 
+def _onscreen_readback_effect(step: Step) -> Optional[Effect]:
+    """The step's mined SAME-SURFACE on-screen read-back effect, or None."""
+    for eff in step.effects:
+        rb = eff.readback
+        if rb is not None and not rb.different_path and not rb.renavigation:
+            return eff
+    return None
+
+
+def _as_readback_nav(step: Step) -> Optional[ReadbackNav]:
+    """Turn a compiled step into a deterministic re-navigation action, or None.
+
+    Only actions that replay WITHOUT per-run parameters or ambiguity qualify: a
+    click at a recorded point, a literal (non-parameterized, non-secret) type,
+    or a key press. A parameterized/secret type or an anchor-less click returns
+    None — the caller then declines to build a different-path re-navigation
+    (staying with the weaker same-surface read-back) rather than emit a
+    re-navigation that would drive the wrong target at run time.
+    """
+    if step.action in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK):
+        if step.anchor is None:
+            return None
+        px, py = step.anchor.click_point
+        return ReadbackNav(action="click", point=(int(px), int(py)))
+    if step.action is ActionKind.TYPE:
+        if step.secret or step.param is not None or not step.text:
+            return None
+        return ReadbackNav(action="type", text=step.text)
+    if step.action is ActionKind.KEY:
+        if not step.key:
+            return None
+        return ReadbackNav(action="key", key=step.key)
+    return None
+
+
+def _value_view_region(step: Step, norm_value: str) -> Optional[Region]:
+    """A bounded region on ``step`` that RE-SHOWS ``norm_value``, or None.
+
+    The re-view signal: the step's postconditions both assert the value is on
+    screen (a ``TEXT_PRESENT`` carrying it) AND name a stabilized region (a
+    ``REGION_STABLE``) to bound the re-read. Both are required so the
+    different-path read is not an unbounded whole-frame guess.
+    """
+    shows_value = any(
+        pc.kind is PostconditionKind.TEXT_PRESENT
+        and pc.text is not None
+        and norm_value in _norm_text(pc.text)
+        for pc in step.expect
+    )
+    if not shows_value:
+        return None
+    for pc in step.expect:
+        if pc.kind is PostconditionKind.REGION_STABLE and pc.region is not None:
+            return pc.region
+    return None
+
+
+def derive_different_path_readback(steps: list[Step]) -> int:
+    """Cross-step pass: UPGRADE a same-surface read-back to DIFFERENT-PATH.
+
+    A same-surface read-back (mined by :func:`_mine_onscreen_readback`) is the
+    weak, non-default signal. When the demonstration ALSO re-opened the written
+    record by an independent path — navigating away from the write flow and
+    back to re-view the saved value — that re-navigation is the strong,
+    default-eligible oracle. This pass finds that pattern in the ALREADY-mined
+    linear step list and rewrites the effect's :class:`ReadbackSpec` in place:
+    ``different_path=True`` with the intervening navigation as
+    :attr:`ReadbackSpec.renavigation` and the re-view's bounded region.
+
+    Conservative and fail-safe: it upgrades ONLY when every intervening step is
+    a deterministic, non-parameterized navigation action
+    (:func:`_as_readback_nav`), there are at least :data:`MIN_RENAV_ACTIONS` of
+    them (a genuine away-and-back, not a re-read), and the re-view re-shows the
+    value in a bounded region (:func:`_value_view_region`). Anything else is
+    left as the weaker same-surface read-back — an over-eager upgrade would only
+    ever cause a false HALT, never a false CONFIRM, but staying conservative
+    keeps the derived oracle honest. Returns the number of effects upgraded.
+
+    Makes ZERO model / network calls (pure structure over the compiled steps).
+    """
+    upgraded = 0
+    for i, step in enumerate(steps):
+        effect = _onscreen_readback_effect(step)
+        if effect is None or effect.value is None:
+            continue
+        value = effect.value.resolve({})
+        if not value:
+            continue
+        norm_value = _norm_text(value)
+        nav: list[ReadbackNav] = []
+        for later in steps[i + 1 :]:
+            navstep = _as_readback_nav(later)
+            if navstep is None:
+                break  # non-deterministic step — cannot build a safe re-nav
+            nav.append(navstep)
+            region = _value_view_region(later, norm_value)
+            if region is not None and len(nav) >= MIN_RENAV_ACTIONS:
+                effect.readback = ReadbackSpec(
+                    region=region,
+                    different_path=True,
+                    renavigation=list(nav),
+                )
+                effect.probe = (
+                    "DIFFERENT-PATH on-screen read-back: re-open the record by "
+                    f"an independent path ({len(nav)} recorded re-navigation "
+                    f"action(s)) then re-OCR region {region} for the "
+                    f"demonstrated value {value!r}. Re-opening forces a real "
+                    "fetch, defeating the phantom/optimistic-save class; "
+                    "default-eligible. Still same-APPLICATION — see "
+                    "docs/LIMITS.md."
+                )
+                upgraded += 1
+                break
+    return upgraded
+
+
 def mine_step_effects(
     event: dict,
     step: Step,
@@ -388,9 +611,15 @@ def mine_step_effects(
     2. Otherwise a structured DOM field map (``dom_fields_*``) whose field took
        the typed value → a form-level ``field_equals``, flagged
        ``needs_operator_confirmation`` (not a record write).
-    3. Otherwise, if the step is consequential (``risk == "irreversible"``) →
-       a flagged PLACEHOLDER ``record_written`` (binding app-specific).
-    4. Otherwise → NO effect and a "no verifiable effect derivable" reason.
+    3. Otherwise, if the demonstration VIEWED the saved value (a stable region
+       rendered the typed payload) → an auto-derived on-screen READ-BACK effect
+       (:func:`_mine_onscreen_readback`) — the no-API default oracle, instead
+       of an unconditional HALT. This is what replaces today's dead-end
+       placeholder for a GUI-only consequential write whose value is on screen.
+    4. Otherwise, if the step is consequential (``risk == "irreversible"``) →
+       a flagged PLACEHOLDER ``record_written`` (binding app-specific; there is
+       nothing on screen to read back).
+    5. Otherwise → NO effect and a "no verifiable effect derivable" reason.
 
     Args:
         event: The recorded event dict (may carry ``sor_before`` /
@@ -437,6 +666,14 @@ def mine_step_effects(
         mined = _mine_from_dom_delta(step, dom_before, dom_after, exclude_texts)
         if mined is not None:
             return mined
+
+    # No independent system-of-record and no structured DOM map (the pilot-
+    # shaped GUI-only case: Citrix / legacy EMR). If the demonstration VIEWED
+    # the saved value, derive an on-screen read-back oracle instead of an
+    # unconditional HALT — the out-of-the-box, no-connector default.
+    readback = _mine_onscreen_readback(step, exclude_texts)
+    if readback is not None:
+        return readback
 
     if step.risk == "irreversible":
         return _placeholder(step)

@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 # declarative config vocabulary, so a deployment YAML binds run parameters
 # with the exact ``{param: ...}`` / ``{literal: ...}`` form bundles use.
 from openadapt_flow.runtime.effects.auth import AuthRef
-from openadapt_flow.runtime.effects.effect import ValueExpr
+from openadapt_flow.runtime.effects.effect import Region, ValueExpr
 
 
 class BackendConfig(BaseModel):
@@ -156,8 +156,20 @@ class EffectsConfig(BaseModel):
       bound to the record each run actually writes.
     """
 
-    #: ``none`` | ``rest`` | ``fhir`` | ``sql`` | ``file`` | ``document-hash``.
+    #: ``none`` | ``onscreen`` | ``rest`` | ``fhir`` | ``sql`` | ``file`` |
+    #: ``document-hash``. ``onscreen`` is the no-API screen read-back oracle
+    #: (the auto-derived default for GUI-only recordings); it reads the saved
+    #: value off the live backend, so it needs no external system of record.
     kind: str = "none"
+
+    # -- onscreen (no-API screen read-back; auto-derived per-effect region) ---
+    #: Explicit read-back region ``(x, y, w, h)`` for a hand-configured
+    #: deployment. Normally left None — the compiler auto-derives a per-effect
+    #: region into each effect's ``ReadbackSpec`` (this is only the fallback
+    #: for an effect that carries no region of its own).
+    readback_region: Optional[Region] = None
+    #: Fuzzy-match floor for accepting an OCR read-back as the expected value.
+    readback_min_ratio: float = 0.9
 
     # -- rest (JSON REST system of record, e.g. MockMed /api/db) -------------
     base_url: Optional[str] = None
@@ -343,6 +355,13 @@ def build_replayer(
     from openadapt_flow.runtime.grounder import build_grounder
     from openadapt_flow.runtime.remote_vlm import appliance_from_env
 
+    # The on-screen read-back verifier reads the SAME live backend the replay
+    # drives; it is constructed backend-less (the backend does not exist at
+    # config time) and bound here. Never a system-of-record egress — the
+    # backend is the local screen it already drives.
+    if effect_verifier is not None and hasattr(effect_verifier, "bind_backend"):
+        effect_verifier.bind_backend(backend)
+
     appliance = appliance_from_env()
     if appliance is not None and not allow_egress:
         print(
@@ -439,6 +458,19 @@ def build_effect_verifier(
     kind = (cfg.kind or "none").strip().lower()
     if kind in ("none", ""):
         return None
+
+    if kind == "onscreen":
+        # No-API screen read-back oracle. The live backend is bound later (it
+        # does not exist at config-build time) by ``build_replayer`` via
+        # ``bind_backend``; each mined effect carries its own read-back region
+        # and (for the different-path variant) re-navigation.
+        from openadapt_flow.runtime.effects.onscreen import OnScreenReadbackVerifier
+
+        return OnScreenReadbackVerifier(
+            backend=None,
+            region=cfg.readback_region,
+            min_ratio=cfg.readback_min_ratio,
+        )
 
     if kind == "rest":
         if not cfg.base_url:
@@ -559,7 +591,7 @@ def build_effect_verifier(
 
     raise ValueError(
         f"unknown effects.kind {cfg.kind!r} "
-        "(expected: none | rest | fhir | sql | file | document-hash)"
+        "(expected: none | onscreen | rest | fhir | sql | file | document-hash)"
     )
 
 

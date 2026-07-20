@@ -184,21 +184,24 @@ later-rolled-back write. Visual verification and a screen-reading model cannot
 detect a backend fault when the interface itself displays success.
 
 OpenAdapt can verify a declared effect against a configured REST, FHIR, or
-document-store verifier. When no verifier is configured, the governed `run`
-gate admits a GUI write only after explicit `--approve-unverified-writes` and
-only when the step has a non-vacuous screen postcondition. The resulting
-authorization is bound to the exact sealed bundle, effective runtime inputs,
-step, and effect-contract hashes. Replay records
+document-store verifier. When no such structured verifier is configured, a
+GUI-only recording gets an auto-derived on-screen **read-back** oracle (below);
+absent even that, the governed `run` gate admits a GUI write only after explicit
+`--approve-unverified-writes` and only when the step has a non-vacuous screen
+postcondition. The resulting authorization is bound to the exact sealed bundle,
+effective runtime inputs, step, and effect-contract hashes. Replay records
 `effect_approved_unverified=true`, never `effect_verified=true`; approval is
 not independent confirmation. Direct API writes still require a verifier and
 refuse this fallback.
 
 The remaining boundary is material:
 
-- the compiler does not generally infer system-of-record effects from a
-  demonstration;
-- the operator must author and bind the effect to the correct record and run
-  parameters;
+- the compiler does not infer a structured system-of-record binding (which
+  API / DB / record / idempotency key) from a demonstration that never observed
+  one; it auto-derives only the on-screen read-back below, or a flagged
+  placeholder that halts;
+- the operator must author and bind a structured effect to the correct record
+  and run parameters;
 - the verifier's permissions, query, freshness window, and independence must
   be validated in the real deployment;
 - operator approval is risk acceptance, not independent confirmation; and
@@ -210,6 +213,39 @@ effect path refused. See
 [`FAULT_MODEL.md`](../benchmark/fault_model/FAULT_MODEL.md) and
 [`EFFECT_VERIFIER.md`](design/EFFECT_VERIFIER.md). This is evidence for the
 mechanism, not proof that a customer-specific effect binding is correct.
+
+#### On-screen read-back (the no-API default oracle) is a consistency signal, not transactional proof
+
+For a GUI-only recording (Citrix / legacy EMR with no reachable read API), the
+compiler auto-derives an on-screen read-back oracle from what the demonstration
+already captured — the region where the saved value rendered and, when the
+recording re-opened the record, the re-navigation to it. Two strengths, one
+gate, measured in
+[`benchmark/effect_readback/`](../benchmark/effect_readback/RESULTS.md):
+
+- **Different-path read-back is the default.** Before re-reading, it re-opens
+  the record by a path independent of the write flow, forcing a real fetch;
+  this defeats the "the form still shows what I typed but nothing persisted"
+  phantom/optimistic class. Its measured false-CONFIRM rate is 0, so it is
+  auto-wired with no connector and HALTs on any non-CONFIRMED verdict.
+- **Same-surface read-back is NOT a default.** Re-reading the write's own
+  surface cannot see a phantom/optimistic/partial save (the note is still
+  painted there); its measured false-CONFIRM rate is > 0. It is wired only when
+  an operator explicitly sets `effects.kind: onscreen`, and is a halt-inducing
+  consistency signal, never an automatic pass.
+
+Even a different-path read-back is **same-application**, not an independent
+system of record. A read-back CONFIRMED means "the expected value is on screen
+when the record is re-opened" — a consistency signal, NOT full transactional
+proof. It cannot catch a partial save the app re-renders optimistically, a
+duplicate / double-submit, a lost update by a concurrent writer, or a value
+served from a stale cache/BFF (the `duplicate` and `stale` blind spots in the
+study CONFIRM because the value is present while a separate structural fault is
+not). Where a read API exists, the **structured system-of-record oracle**
+(`record_written` count, `forbid_collateral_loss`, idempotency key) remains the
+transactional guarantee. The ultimate safety net is never the read-back: it is
+the **identity gate** (right record) plus **halt-on-ambiguity** (never guess a
+target), with read-back as additive assurance on top.
 
 ### 4. Model assistance can convert a halt into a false pass
 

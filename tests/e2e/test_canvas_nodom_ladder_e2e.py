@@ -14,6 +14,7 @@ NOT ICA/HDX -- see ``benchmark/canvas_ladder/README.md``):
   * severe (illegible) drift HALTS with no write and no model call -- no blind
     coordinate replay.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -39,8 +40,9 @@ PORT = 6080
 
 
 def _docker(*args: str, check: bool = True, timeout: int = 900):
-    return subprocess.run(["docker", *args], check=check, timeout=timeout,
-                          capture_output=True, text=True)
+    return subprocess.run(
+        ["docker", *args], check=check, timeout=timeout, capture_output=True, text=True
+    )
 
 
 @pytest.fixture(scope="module")
@@ -49,8 +51,9 @@ def canvas_fixture():
         pytest.skip("docker not available")
     _docker("build", "-t", IMAGE, str(FIXTURE_DIR))
     _docker("rm", "-f", CONTAINER, check=False)
-    _docker("run", "-d", "--name", CONTAINER, "--shm-size=1g",
-            "-p", f"{PORT}:6080", IMAGE)
+    _docker(
+        "run", "-d", "--name", CONTAINER, "--shm-size=1g", "-p", f"{PORT}:6080", IMAGE
+    )
     time.sleep(18)  # TigerVNC + kiosk + noVNC come up
     try:
         yield CONTAINER
@@ -65,7 +68,8 @@ def test_no_dom_canvas_vision_ladder_contract(canvas_fixture, tmp_path):
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
 
     evidence = mod.run_qualification(
-        canvas_fixture, out_dir=tmp_path, base_url="http://localhost", port=PORT)
+        canvas_fixture, out_dir=tmp_path, base_url="http://localhost", port=PORT
+    )
 
     healthy, moderate, severe = evidence["trials"]
     assert healthy["success"], healthy

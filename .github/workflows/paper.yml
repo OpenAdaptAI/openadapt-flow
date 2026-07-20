@@ -46,8 +46,8 @@ jobs:
   # Runs only after a successful build on push to main. Overwrites the asset on
   # the fixed `paper-latest` tag so there is one canonical, never-drifting URL:
   #   https://github.com/OpenAdaptAI/openadapt-flow/releases/download/paper-latest/openadapt-paper.pdf
-  # This is the source of truth for openadapt.ai's build-time fetch. See the
-  # openadapt-web prebuild step (scripts/fetch-paper-pdf.js) for the consumer.
+  # This is the source of truth for openadapt.ai's build-time fetch. The
+  # consumer is openadapt-web's prebuild fetch step in its own repository.
   publish:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

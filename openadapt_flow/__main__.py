@@ -23,6 +23,10 @@ imported lazily inside each handler so ``--help`` always works):
   verified revision), writing an updated bundle. Refuses bad fixes.
 - ``approve`` — mark a durably-paused run's pending escalation approved.
 - ``bench`` — replay a bundle N times against MockMed and aggregate.
+- ``visualize`` — SEE what a demonstration compiled into: emit a program-graph
+  view of a bundle (steps, targets, resolution ladder, identity/effect gates,
+  verification, halt points) as self-contained HTML, Mermaid, or the shared JSON
+  graph spec that the cloud and desktop surfaces render.
 - ``lint`` — report a bundle's coverage gaps (advice; exit code by severity).
 - ``certify`` — enforce a safety policy on a bundle (refuse it if it fails).
 - ``console`` — serve the localhost-only operator console (a read-first web
@@ -1136,6 +1140,41 @@ def _cmd_lint(args: argparse.Namespace) -> int:
     threshold = "warn" if args.strict else "error"
     fail = SEVERITY_ORDER[report.max_severity] >= SEVERITY_ORDER[threshold]
     return 1 if (report.findings and fail) else 0
+
+
+def _cmd_visualize(args: argparse.Namespace) -> int:
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.visualize import (
+        build_program_graph,
+        render_html,
+        render_mermaid,
+    )
+
+    workflow = Workflow.load(Path(args.bundle))
+    spec = build_program_graph(workflow)
+    fmt = args.format
+    if fmt == "json":
+        output = spec.model_dump_json(indent=2)
+    elif fmt == "mermaid":
+        output = render_mermaid(spec)
+    else:  # html
+        output = render_html(spec)
+
+    if args.out:
+        out_path = Path(args.out)
+        if out_path.parent != Path(""):
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(output, encoding="utf-8")
+        b = spec.bundle
+        print(
+            f"Wrote {fmt} visualization of {b.name} "
+            f"({b.action_count} steps, {b.identity_armed_count} identity gates, "
+            f"{b.irreversible_count} irreversible, {b.halt_point_count} halt "
+            f"point(s)) to {out_path}"
+        )
+    else:
+        print(output)
+    return 0
 
 
 def _cmd_certify(args: argparse.Namespace) -> int:
@@ -2342,6 +2381,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit nonzero on warnings too (default: only on errors)",
     )
     p.set_defaults(func=_cmd_lint)
+
+    p = sub.add_parser(
+        "visualize",
+        help=(
+            "See what a demonstration compiled INTO: emit a program-graph "
+            "view of a bundle (steps, targets, resolution ladder, identity/"
+            "effect gates, verification, and halt points) as self-contained "
+            "HTML, Mermaid, or the shared JSON graph spec"
+        ),
+    )
+    p.add_argument("bundle", help="Workflow bundle directory")
+    p.add_argument(
+        "--format",
+        choices=("html", "mermaid", "json"),
+        default="html",
+        help=(
+            "html: self-contained, offline-openable page (default); "
+            "mermaid: flowchart source for Markdown/docs; "
+            "json: the shared program-graph spec every surface renders"
+        ),
+    )
+    p.add_argument(
+        "-o",
+        "--out",
+        default=None,
+        help="Write to this file instead of stdout (parent dirs are created)",
+    )
+    p.set_defaults(func=_cmd_visualize)
 
     p = sub.add_parser(
         "certify",

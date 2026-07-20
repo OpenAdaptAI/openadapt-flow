@@ -135,11 +135,15 @@ def backend(client: FakeMacClient | None = None, **kwargs) -> MacOSBackend:
     )
 
 
-def test_native_backend_is_typed_but_does_not_claim_unqualified_ax() -> None:
+def test_native_backend_exposes_ax_structured_identity_capability() -> None:
     target = backend()
     assert isinstance(target, Backend)
-    assert not isinstance(target, IdentityBackend)
-    assert not isinstance(target, StructuralActionBackend)
+    # The AX tree gives macOS a structured layer, so — like the browser DOM,
+    # Windows UIA, and Linux AT-SPI backends — it advertises structured-text
+    # identity and the deterministic structural action rung. Detailed behavior
+    # (record/locate/refuse) is covered in test_macos_structural.py.
+    assert isinstance(target, IdentityBackend)
+    assert isinstance(target, StructuralActionBackend)
 
 
 def test_target_window_capture_and_exact_focused_text_delivery() -> None:

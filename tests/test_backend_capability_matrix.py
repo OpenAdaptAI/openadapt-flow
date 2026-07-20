@@ -29,9 +29,11 @@ It also guards two specific honesty facts the audit surfaced:
   (``deployment.build_effect_verifier``), never fabricated by a backend claiming
   to read the app's authoritative store.
 * The pixel-only substrates (RDP network + local remote-display/Citrix analog)
-  and the native macOS backend advertise NO structured/identity capability, so
-  identity honestly falls through to the OCR ladder (macOS/pixel) rather than a
-  structured check that substrate cannot back.
+  advertise NO structured/identity capability, so identity honestly falls
+  through to the OCR ladder rather than a structured check that substrate cannot
+  back. The four backends that DO own a structured layer -- the browser DOM,
+  Windows UIA, Linux AT-SPI, and native macOS AX -- each expose both the
+  structured-text identity read and the deterministic structural action rung.
 
 Membership is derived from each protocol's own ``__protocol_attrs__`` rather than
 hard-coded, so extending a protocol's surface is reflected automatically and a
@@ -73,8 +75,10 @@ OPTIONAL_PROTOCOLS = {
 #            it has no cheap url/title/page-count equivalent (Experimental).
 #   linux  : AT-SPI exposes structured identity text + a structural rung
 #            (scoped, ambiguity-refusing); no browser-style page observations.
-#   macos  : native window actuation only -- AX structural/identity resolution
-#            is explicitly NOT claimed yet (Research); visual/OCR ladder only.
+#   macos  : native AX exposes structured identity text + a structural rung
+#            (scoped, ambiguity-refusing); no browser-style page observations.
+#            It does NOT claim native AXPress actuation, so a resolved element
+#            is acted on through the fully gated physical click.
 #   rdp    : pixel-only network RDP -- no structured layer at all.
 #   rdp-win: pixel-only local remote-display window (the Citrix analog) -- ditto.
 EXPECTED: dict[str, dict[str, bool]] = {
@@ -98,8 +102,8 @@ EXPECTED: dict[str, dict[str, bool]] = {
     },
     "macos": {
         "structural": False,
-        "identity": False,
-        "structural_action": False,
+        "identity": True,
+        "structural_action": True,
         "system_of_record": False,
     },
     "rdp": {
@@ -193,12 +197,12 @@ def test_no_backend_fabricates_a_system_of_record_oracle() -> None:
         )
 
 
-def test_pixel_and_native_macos_advertise_no_structured_capability() -> None:
-    """The substrates with no structured layer (pixel-only RDP / remote-display
-    and native macOS, which does not yet claim AX resolution) must expose no
-    structural or identity protocol, so identity honestly falls through to the
-    OCR ladder instead of a structured check the substrate cannot back."""
-    for kind in ("macos", "rdp", "rdp-window"):
+def test_pixel_substrates_advertise_no_structured_capability() -> None:
+    """The substrates with no structured layer (pixel-only RDP / remote-display,
+    the Citrix analog) must expose no structural or identity protocol, so
+    identity honestly falls through to the OCR ladder instead of a structured
+    check the substrate cannot back."""
+    for kind in ("rdp", "rdp-window"):
         cls = BACKEND_CLASSES[kind]
         assert not _implements(cls, StructuralBackend)
         assert not _implements(cls, IdentityBackend)
@@ -207,10 +211,10 @@ def test_pixel_and_native_macos_advertise_no_structured_capability() -> None:
 
 def test_native_and_browser_structural_backends_expose_identity() -> None:
     """Wherever a backend DOES own a structured layer (browser DOM, Windows UIA,
-    Linux AT-SPI) it must expose both the identity read and the deterministic
-    structural action rung -- structure that can locate an element must also be
-    able to prove the element's identity."""
-    for kind in ("web", "windows", "linux"):
+    Linux AT-SPI, native macOS AX) it must expose both the identity read and the
+    deterministic structural action rung -- structure that can locate an element
+    must also be able to prove the element's identity."""
+    for kind in ("web", "windows", "linux", "macos"):
         cls = BACKEND_CLASSES[kind]
         assert _implements(cls, IdentityBackend)
         assert _implements(cls, StructuralActionBackend)

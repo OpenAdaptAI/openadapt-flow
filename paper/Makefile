@@ -1,11 +1,22 @@
 SHELL := /bin/sh
 BUILD_DIR := build
 
-.PHONY: all check clean
+.PHONY: all check workshop clean
 
+# `all` gate-checks every headline constant against the benchmark artifacts,
+# then builds BOTH the full technical report (main.tex) and the workshop
+# condensation (workshop/main.tex). check_artifacts.py binds both PDFs.
 all: check
 	mkdir -p $(BUILD_DIR)
 	latexmk -pdf -interaction=nonstopmode -halt-on-error \
+		-output-directory=$(BUILD_DIR) main.tex
+	$(MAKE) workshop
+
+# Workshop condensation. references.bib is a symlink to ../references.bib, so
+# the build runs from the workshop directory to keep bibtex paths unambiguous.
+workshop:
+	mkdir -p workshop/$(BUILD_DIR)
+	cd workshop && latexmk -pdf -interaction=nonstopmode -halt-on-error \
 		-output-directory=$(BUILD_DIR) main.tex
 
 check:
@@ -13,4 +24,5 @@ check:
 
 clean:
 	latexmk -C -output-directory=$(BUILD_DIR) main.tex 2>/dev/null || true
-	rm -rf $(BUILD_DIR)
+	cd workshop && latexmk -C -output-directory=$(BUILD_DIR) main.tex 2>/dev/null || true
+	rm -rf $(BUILD_DIR) workshop/$(BUILD_DIR)

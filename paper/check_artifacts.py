@@ -85,6 +85,17 @@ def main() -> None:
     require_close(mockmed["agent"]["wall_s_p50"], 37.5, "MockMed agent p50")
     require_close(mockmed["agent"]["cost_usd_per_run"], 0.27, "MockMed agent cost")
 
+    # Drift-repair illustration (single observation per arm): the compiled
+    # bundle self-heals a theme re-render that invalidates every template crop,
+    # while the agent re-reasons the whole task under the same drift.
+    drift = source_results["MockMed"]["drift_theme"]
+    require_equal(drift["compiled"]["heal_count"], 8, "drift compiled heals")
+    require_equal(drift["compiled"]["api_calls"], 0, "drift compiled model calls")
+    require_close(drift["compiled"]["wall_s"], 9.7, "drift compiled wall")
+    require_equal(drift["agent"]["api_calls"], 24, "drift agent model calls")
+    require_close(drift["agent"]["wall_s"], 87.4, "drift agent wall")
+    require_close(drift["agent"]["cost_usd"], 0.63, "drift agent cost")
+
     reliability = load("benchmark/reliability/results.json")
     require_equal(len(reliability["results"]), 29, "reliability apps")
     outcomes = reliability["summary"]["outcomes"]
@@ -338,6 +349,19 @@ def main() -> None:
         "transactional repeat count",
     )
 
+    require_contains(
+        results_tex,
+        (
+            f"self-healed in {drift['compiled']['wall_s']:.1f}\\,s with "
+            f"{drift['compiled']['heal_count']} target repairs and zero model "
+            f"calls, while the same computer-use agent under the same drift "
+            f"took {drift['agent']['wall_s']:.1f}\\,s and "
+            f"\\${drift['agent']['cost_usd']:.2f} across "
+            f"{drift['agent']['api_calls']} model calls"
+        ),
+        "drift-repair illustration",
+    )
+
     structured = configs["structured"]
     pixel = configs["pixel_stable"]
     require_contains(
@@ -379,6 +403,49 @@ def main() -> None:
     rdp_values = [f"{trial['latency_s']:.3f}" for trial in rdp["trials"]]
     rdp_latencies = f"{', '.join(rdp_values[:-1])}, and {rdp_values[-1]}"
     require_contains(results_tex, rdp_latencies, "RDP trial latencies")
+
+    # Workshop condensation: the ~8-page reframe under paper/workshop/ must reuse
+    # the exact same benchmark-derived constants as the full report, so bind its
+    # headline sentences to the same artifacts. Both PDFs are gate-checked here.
+    workshop_tex = load_text("paper/workshop/main.tex")
+    n_runs = silent["metrics"]["n_runs"]
+    require_contains(
+        workshop_tex,
+        (
+            f"silently accepted {metrics['screen']['silent_wrong_count']} of "
+            f"{n_runs} fault runs"
+        ),
+        "workshop screen silent-accept count",
+    )
+    require_contains(
+        workshop_tex,
+        f"drove that to {metrics['effect']['silent_wrong_count']} of {n_runs}",
+        "workshop effect silent-accept count",
+    )
+    require_contains(
+        workshop_tex,
+        (
+            "screen-only verification silently mishandled "
+            f"{number_words[silently_mishandled]} of "
+            f"{number_words[len(injected_faults)]} injected fault classes"
+        ),
+        "workshop transactional silent-mishandling count",
+    )
+    require_contains(
+        workshop_tex,
+        f"There were {faults['meta']['repeats']} consistent repeats per class.",
+        "workshop transactional repeat count",
+    )
+    require_contains(
+        workshop_tex,
+        f"zero over-halts on {structured['n_correct']} correct homonym cases",
+        "workshop structured identity availability",
+    )
+    require_contains(
+        workshop_tex,
+        f"zero false accepts at {pixel['over_halt_rate'] * 100:.0f}\\% over-halt",
+        "workshop pixel identity safety and availability",
+    )
 
     print("paper artifact constants: OK")
 

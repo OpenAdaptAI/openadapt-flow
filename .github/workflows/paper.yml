@@ -25,11 +25,19 @@ jobs:
       - name: Check paper constants against benchmark artifacts
         run: python paper/check_artifacts.py
       - name: Install TeX
-        run: sudo apt-get update && sudo apt-get install -y latexmk texlive-latex-extra
-      - name: Build PDF
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          latexmk texlive-latex-extra texlive-pictures texlive-science
+          texlive-latex-recommended texlive-fonts-recommended
+      - name: Build PDFs (full report + workshop condensation)
         run: make -C paper
-      - name: Upload PDF
+      - name: Upload full report PDF
         uses: actions/upload-artifact@v4
         with:
           name: openadapt-paper
           path: paper/build/main.pdf
+      - name: Upload workshop PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: openadapt-paper-workshop
+          path: paper/workshop/build/main.pdf

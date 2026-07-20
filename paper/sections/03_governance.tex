@@ -16,7 +16,55 @@ verifier against REST, FHIR, or document state. The verifier snapshots the
 system of record before and after an action and returns confirmed, refuted, or
 indeterminate. A declared effect without a configured verifier halts. Effects
 are currently authored per deployment; the compiler does not infer them from a
-single demonstration.
+single demonstration. This is the classic \emph{oracle problem}
+\cite{barr2015oracle} made concrete: the screen is a weak oracle and the
+application's own state is the strong oracle (Figure~\ref{fig:oracle}). Many of
+the faults it catches---duplicate submission, double delivery, stale
+overwrite---are exactly-once and idempotency hazards long studied in
+transactional systems \cite{gray1981transaction}.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  screen/.style={draw=oaink, rounded corners=2pt, minimum width=30mm,
+    minimum height=13mm, align=center, fill=white},
+  db/.style={draw=oaink, cylinder, shape border rotate=90, aspect=0.28,
+    minimum width=22mm, minimum height=15mm, align=center, fill=oagray!40,
+    inner sep=1pt},
+  verdict/.style={align=left, font=\footnotesize},
+  ]
+  % The action.
+  \node[align=center, font=\footnotesize\itshape] (act) {consequential\\action};
+  \node[screen, right=10mm of act] (scr)
+    {\textcolor{oagreen}{$\checkmark$}\,``Saved''\\\scriptsize green banner};
+  \node[db, right=20mm of scr] (db) {system of\\record};
+
+  \draw[-{Stealth[length=2mm]}, thick, oaink] (act) -- (scr);
+  \draw[-{Stealth[length=2mm]}, thick, oaink] (act.east) to[out=-30,in=180] (db.west);
+
+  % Weak vs strong oracle labels.
+  \node[above=1mm of scr, font=\scriptsize\itshape, text=oared] {weak oracle (screen)};
+  \node[above=1mm of db, font=\scriptsize\itshape, text=oagreen!55!black] {strong oracle (state)};
+
+  % The disagreement.
+  \node[verdict, below=7mm of scr, text width=78mm, xshift=18mm] (gap)
+    {\textcolor{oared}{Same green banner} can follow: partial save $\cdot$
+     duplicate $\cdot$ stale overwrite $\cdot$ silent reject.
+     \\[1mm]
+     \textcolor{oagreen!55!black}{Effect verifier} snapshots state before/after
+     $\Rightarrow$ \textbf{confirmed} / \textbf{refuted} / \textbf{indeterminate};
+     a refuted effect \emph{halts}.};
+  \draw[-{Stealth[length=1.6mm]}, oared, dashed] (scr.south) -- (gap.north -| scr.south);
+  \draw[-{Stealth[length=1.6mm]}, oagreen!55!black, dashed] (db.south) to[out=-90,in=0] (gap.east);
+\end{tikzpicture}
+\caption{Effect verification separates the weak screen oracle from the strong
+system-of-record oracle. A rendered success is evidence about pixels, not about
+a persisted write; only an independent before/after snapshot of the application's
+state can refute a silent wrong action. In the fault study this reduced silent
+acceptance from 50 of 90 runs to 0 of 90.}
+\label{fig:oracle}
+\end{figure}
 
 \subsection{Policy and refusal}
 The linter exposes unarmed clicks, vacuous postconditions, and risk-classifier

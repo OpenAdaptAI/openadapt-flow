@@ -54,6 +54,47 @@ pinned.
 - `corpus.json` — the **frozen catalog** of template-tier silent-wrong cases
   (the growing failure corpus) + `ratchet_max_silent_wrong` (the CI ceiling).
 
+## Public / private data boundary (read before adding data)
+
+This directory is **public and synthetic on purpose**. The corpus here is not
+grown from any real deployment: every case is produced by the deterministic
+`sweep()` over PIL-rendered fixtures × a fixed perturbation grid (see the
+`test_committed_corpus_is_faithful_to_head` freeze test, which asserts
+`corpus.json` equals exactly what the harness regenerates). It stays public
+because it *is* the harness's public credibility artifact and the public CI
+ratchet — moving it would break the tests and delete the "the flywheel works"
+demonstration.
+
+What is **public and stays here**: the flywheel harness code
+(`openadapt_flow/validation/hardening/`), the SWER metric definition, and this
+synthetic baseline corpus/results.
+
+What is **private and must NOT land here** (it lives only in the private
+`OpenAdaptAI/openadapt-corpus` repo): the **grown** failure corpus from real
+deployments, **tuned** metamorphic-adversary parameters/weights,
+deployment-derived **thresholds**, effect-verification oracle **recipes**, and
+**real-EMR** datasets. Those are deployment-derived and are refused from any
+published wheel/sdist by the release-boundary guard in
+`scripts/check_release_consistency.py` (path-token + provenance-banner scan,
+analogous to the AGPL/openIMIS gate).
+
+### Pointing the harness at a private corpus (internal ratchet runs)
+
+The corpus/results loader is configurable. By default it reads this committed
+public baseline. Set the environment variable to run an internal ratchet
+against a private corpus checked out from `OpenAdaptAI/openadapt-corpus`:
+
+```bash
+export OPENADAPT_HARDENING_CORPUS_DIR=/path/to/openadapt-corpus/grown_corpus
+python -m openadapt_flow.validation.hardening      # reads the private corpus
+```
+
+The private corpus is **never** a build-time or import-time dependency of the
+public package: this is a pure runtime, env-gated lookup with a public default,
+so `openadapt-flow` builds, imports, and passes public CI with the private repo
+absent. Leave the variable unset (the public-CI state) to run against the
+public synthetic baseline.
+
 ## Current measured baseline (this PR, on `main`)
 
 Real numbers, template tier (font-free, deterministic):

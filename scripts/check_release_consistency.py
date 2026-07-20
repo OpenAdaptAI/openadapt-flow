@@ -24,6 +24,39 @@ AGPL_CONTENT_SIGNATURES = (
     b"SPDX-License-Identifier: " + b"AG" + b"PL-",
     b"GNU " + b"AFFERO GENERAL PUBLIC LICENSE",
 )
+# Private, deployment-derived hardening artifacts -- the GROWN failure corpus
+# from real deployments, the TUNED metamorphic-adversary parameters/weights,
+# deployment-derived THRESHOLDS, effect-verification oracle RECIPES, and
+# real-EMR datasets -- live ONLY in the private OpenAdaptAI/openadapt-corpus repo
+# and must never ride inside an MIT wheel or sdist. The public synthetic
+# baseline under benchmark/vision_hardening/ is explicitly NOT private and is
+# allowed. This mirrors the AGPL boundary above: both a path-token check and a
+# content-signature check, so a rename cannot smuggle a private artifact in.
+PRIVATE_DISTRIBUTION_PATH_TOKENS = (
+    "openadapt-corpus",
+    "grown_corpus",
+    "tuned_adversary",
+    "deployment_corpus",
+    "deployment_thresholds",
+    "effect_oracle_recipe",
+    "real_emr",
+)
+# Assembled from parts so this guard (which ships in the sdist) does not itself
+# trip the content scan; every private-corpus artifact carries the full banner.
+PRIVATE_CORPUS_CONTENT_SIGNATURES = (b"OPENADAPT-CORPUS" + b"-PRIVATE-DO-NOT-PACKAGE",)
+
+
+def _private_distribution_hits(members: set[str], signature_hits: set[str]) -> set[str]:
+    """Members that are private deployment-derived hardening artifacts."""
+    hits = {
+        member
+        for member in members
+        if any(token in member.lower() for token in PRIVATE_DISTRIBUTION_PATH_TOKENS)
+    }
+    hits.update(signature_hits)
+    return hits
+
+
 LOCK_PACKAGE_PATTERN = re.compile(
     r'(?P<prefix>\[\[package\]\]\nname = "openadapt-flow"\nversion = ")'
     r'[^\"]+(?P<suffix>"\nsource = \{ editable = "\." \})',
@@ -184,6 +217,7 @@ def validate_sdist_license_boundary(
     archived_license: bytes | None = None
     archived_metadata: bytes | None = None
     signature_hits: set[str] = set()
+    private_signature_hits: set[str] = set()
     with tarfile.open(sdist, mode="r:gz") as archive:
         for member in archive:
             parts = _archive_parts(member.name, source="source distribution")
@@ -224,6 +258,18 @@ def validate_sdist_license_boundary(
                 archived_metadata = payload
             if any(signature in payload for signature in AGPL_CONTENT_SIGNATURES):
                 signature_hits.add(relative)
+            if any(
+                signature in payload for signature in PRIVATE_CORPUS_CONTENT_SIGNATURES
+            ):
+                private_signature_hits.add(relative)
+    private = _private_distribution_hits(members, private_signature_hits)
+    if private:
+        raise ValueError(
+            "source distribution contains private, deployment-derived hardening "
+            "material (grown corpus / tuned adversary / thresholds / oracle "
+            "recipes / real-EMR datasets) that belongs only in the private "
+            f"OpenAdaptAI/openadapt-corpus repo: {sorted(private)}"
+        )
     missing = REQUIRED_SDIST_PATHS - members
     if missing:
         raise ValueError(
@@ -277,6 +323,7 @@ def validate_wheel_license_boundary(
         archived_license: bytes | None = None
         archived_metadata: bytes | None = None
         signature_hits: set[str] = set()
+        private_signature_hits: set[str] = set()
         for name, info in member_info.items():
             if info.is_dir():
                 continue
@@ -287,6 +334,10 @@ def validate_wheel_license_boundary(
                 archived_metadata = payload
             if any(signature in payload for signature in AGPL_CONTENT_SIGNATURES):
                 signature_hits.add(name)
+            if any(
+                signature in payload for signature in PRIVATE_CORPUS_CONTENT_SIGNATURES
+            ):
+                private_signature_hits.add(name)
     if not license_members:
         raise ValueError("wheel is missing the MIT LICENSE")
     if len(license_members) != 1:
@@ -303,6 +354,14 @@ def validate_wheel_license_boundary(
         source="wheel METADATA",
         expected_version=expected_version,
     )
+    private = _private_distribution_hits(members, private_signature_hits)
+    if private:
+        raise ValueError(
+            "wheel contains private, deployment-derived hardening material "
+            "(grown corpus / tuned adversary / thresholds / oracle recipes / "
+            "real-EMR datasets) that belongs only in the private "
+            f"OpenAdaptAI/openadapt-corpus repo: {sorted(private)}"
+        )
     forbidden = {
         member
         for member in members

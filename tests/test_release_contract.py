@@ -17,6 +17,7 @@ from scripts.check_release_consistency import (
     AGPL_CONTENT_SIGNATURES,
     FORBIDDEN_SDIST_PATHS,
     FORBIDDEN_SDIST_PREFIXES,
+    PRIVATE_CORPUS_CONTENT_SIGNATURES,
     REQUIRED_SDIST_PATHS,
     release_versions,
     sync_lock_version,
@@ -297,6 +298,81 @@ def test_sdist_requires_mit_license_and_excludes_openimis_surface(
             ),
         )
         with pytest.raises(ValueError, match="repository-only openIMIS"):
+            validate_sdist_license_boundary(mixed)
+
+
+def test_wheel_refuses_private_corpus_material(tmp_path: Path) -> None:
+    """The wheel must reject private, deployment-derived hardening artifacts.
+
+    The public synthetic baseline (benchmark/vision_hardening/) is allowed; only
+    the private grown-corpus / tuned-adversary / real-EMR class -- detected by
+    path token OR provenance banner even after a rename -- is refused.
+    """
+    license_path = "openadapt_flow-1.0.dist-info/licenses/LICENSE"
+    metadata_path = "openadapt_flow-1.0.dist-info/METADATA"
+
+    # A public synthetic corpus path is NOT private -> still passes.
+    ok = tmp_path / "public-corpus-ok.whl"
+    _write_wheel(
+        ok,
+        {
+            license_path,
+            metadata_path,
+            "openadapt_flow/validation/hardening/corpus.py",
+        },
+    )
+    validate_wheel_license_boundary(ok)
+
+    for index, forbidden in enumerate(
+        (
+            "openadapt_flow/validation/hardening/grown_corpus/deploy.json",
+            "openadapt_flow/tuned_adversary/weights.json",
+            "openadapt_flow/data/real_emr/patients.json",
+            "openadapt_flow/renamed-neutral.json",  # caught by banner, not path
+        )
+    ):
+        mixed = tmp_path / f"private-{index}.whl"
+        _write_wheel(
+            mixed,
+            {license_path, metadata_path, forbidden},
+            payloads=(
+                {forbidden: PRIVATE_CORPUS_CONTENT_SIGNATURES[0]}
+                if forbidden.endswith("renamed-neutral.json")
+                else None
+            ),
+        )
+        with pytest.raises(ValueError, match="private, deployment-derived"):
+            validate_wheel_license_boundary(mixed)
+
+
+def test_sdist_refuses_private_corpus_material(tmp_path: Path) -> None:
+    """The sdist must reject private, deployment-derived hardening artifacts."""
+    clean_members = {*REQUIRED_SDIST_PATHS, "PKG-INFO"}
+
+    # The committed public synthetic corpus is allowed in the sdist.
+    ok = tmp_path / "public-corpus-ok.tar.gz"
+    _write_sdist(ok, {*clean_members, "benchmark/vision_hardening/corpus.json"})
+    validate_sdist_license_boundary(ok)
+
+    for index, forbidden in enumerate(
+        (
+            "benchmark/vision_hardening/grown_corpus/deploy.json",
+            "vendor/openadapt-corpus/thresholds.json",
+            "benchmark/effect_oracle_recipe/openemr.yml",
+            "benchmark/renamed-neutral.json",  # caught by banner, not path
+        )
+    ):
+        mixed = tmp_path / f"private-{index}.tar.gz"
+        _write_sdist(
+            mixed,
+            {*clean_members, forbidden},
+            payloads=(
+                {forbidden: PRIVATE_CORPUS_CONTENT_SIGNATURES[0]}
+                if forbidden.endswith("renamed-neutral.json")
+                else None
+            ),
+        )
+        with pytest.raises(ValueError, match="private, deployment-derived"):
             validate_sdist_license_boundary(mixed)
 
 

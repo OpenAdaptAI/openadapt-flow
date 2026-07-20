@@ -171,7 +171,15 @@ def _find_template_arrays(
         # nearest the expected location, and REFUSE (None) an ambiguous frame
         # where >= 2 look-alikes clear threshold and none sits where expected.
         peaks = _peaks_above(result, threshold, mw, mh)
-        px, py = prefer_near[0] - off_x, prefer_near[1] - off_y
+        # ``prefer_near`` is the recorded target ORIGIN (top-left) in screen
+        # coords (the ladder passes ``anchor.region[0:2]``). Compare peak
+        # centers against the EXPECTED center so the locality radius is measured
+        # consistently -- adding ``mw//2, mh//2`` to only the peak side would
+        # bias every true peak by ~half a template, pushing wider widgets past
+        # the radius and spuriously tripping the uniqueness halt on unchanged
+        # surfaces.
+        px = prefer_near[0] - off_x + mw // 2
+        py = prefer_near[1] - off_y + mh // 2
         radius = max(LOCALITY_MIN_PX, min(mw, mh))
 
         def _center_dist(peak: tuple[float, int, int]) -> float:

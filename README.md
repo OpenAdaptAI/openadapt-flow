@@ -42,6 +42,7 @@ openadapt-flow certify bundle --policy clinical-write    # expected: strict refu
 openadapt-flow replay bundle                             # replay: local, $0
 openadapt-flow replay bundle --drift theme \
   --save-healed-to healed                                # deterministic repair
+openadapt-flow visualize bundle -o graph.html            # see what compiled
 ```
 
 On the first command that needs a browser, openadapt-flow downloads the
@@ -194,6 +195,24 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
   `Transition` / `LoopSpec` / `Guard` / `Predicate` / `ParamSpec`). The flat
   trajectory is the degenerate case, so the migration is backward-compatible.
   Design: [`docs/design/WORKFLOW_PROGRAM_IR.md`](docs/design/WORKFLOW_PROGRAM_IR.md).
+- **A data-driven loop from one demonstration.** `for-each` wraps a single
+  linear bundle's body in one governed LOOP that runs once per record of a
+  worklist (CSV or JSON), binding each record's columns to the workflow's
+  parameters. Every iteration keeps the same gates: bounded by a hard
+  `--max-iterations` cap, identity-checked and effect-verified per record,
+  halting on an ambiguous or refuted write instead of skipping it. The
+  column-to-parameter mapping is explicit and validated, so an unmapped
+  column, a bound parameter with no value, or a ragged worklist fails at
+  authoring time rather than emitting a bad bundle. This turns a replay of
+  one recorded path into governed execution over a queue:
+  `openadapt-flow for-each bundle --records worklist.csv --out queue-bundle`.
+- **See what a demonstration compiled into.** `visualize` renders a
+  program-graph view of a bundle before it runs: the ordered steps, the
+  resolution ladder each step will try, where an identity gate is armed,
+  which writes carry an effect check, and every point the run can halt. Emit
+  a self-contained offline HTML page, Mermaid for docs, or the shared JSON
+  graph spec that the Cloud and desktop surfaces render
+  (`openadapt-flow visualize bundle -o graph.html`).
 - **Multi-trace induction that refuses when it isn't sure.** `induce_program`
   aligns several demonstrations of the same task to recover the shared
   parameters, loops, and branches — deterministic and model-free at its core.

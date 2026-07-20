@@ -861,10 +861,12 @@ def _emit_identifier_crop(
     4. otherwise identity is unarmed and there is nothing to crop.
 
     The crop lands in :data:`IDENTIFIER_CROP_DIR` (under ``templates/``) so it
-    is sealed/hashed with the other image crops. Arming the pixel tier is
-    MISMATCH-or-ABSTAIN only (``identity.PIXEL_VERIFY_ENABLED`` is False), so
-    a crop can only add a safe HALT on a wrong identifier — never a pixel
-    false-accept.
+    is sealed/hashed with the other image crops. With the default config
+    (``identity.PIXEL_VERIFY_ENABLED`` is False) arming the pixel tier is
+    MISMATCH-or-ABSTAIN only, so a crop can only add a safe HALT on a wrong
+    identifier — never a pixel false-accept. The jitter-robust positive VERIFY
+    path exists but is opt-in per risk class (benchmark/pixel_identity_aligned,
+    docs/LIMITS.md).
     """
     region: Optional[Region] = None
     marked_invalid = False

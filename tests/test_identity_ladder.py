@@ -60,14 +60,17 @@ def _with_bar(cols: int, x0: int = 100, val: int = 0) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def test_pixel_verify_is_hard_gated_identical_crop_abstains() -> None:
-    # Blocker 2: the VERIFY path is HARD-GATED (PIXEL_VERIFY_ENABLED False)
-    # because cross-render jitter defeats a same/different threshold. Even a
-    # byte-identical crop ABSTAINS (None) rather than verify -- the tier can
-    # only MISMATCH or ABSTAIN, never grant a pass, so it cannot false-accept.
+def test_pixel_verify_is_config_gated_off_by_default_identical_crop_abstains() -> None:
+    # VERIFY is CONFIG-GATED with a safe default off (PIXEL_VERIFY_ENABLED
+    # False), pending a real remote-display battery. Under the default even a
+    # byte-identical crop ABSTAINS (None) rather than verify -- so the default
+    # install cannot false-accept. The jitter-robust ENABLED path and its
+    # zero-false-accept battery are covered in test_pixel_identity_aligned.py.
     assert I.PIXEL_VERIFY_ENABLED is False
     png = _png(_with_bar(6))
     assert I.verify_pixel_identity(png, png) is None
+    # ...but opting in per risk class verifies a byte-identical crop.
+    assert I.verify_pixel_identity(png, png, enable_verify=True).status == "verified"
 
 
 def test_pixel_mismatch_on_localized_glyph_change_same_render() -> None:

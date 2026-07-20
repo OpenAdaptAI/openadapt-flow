@@ -404,6 +404,49 @@ def main() -> None:
     rdp_latencies = f"{', '.join(rdp_values[:-1])}, and {rdp_values[-1]}"
     require_contains(results_tex, rdp_latencies, "RDP trial latencies")
 
+    # Workshop condensation: the ~8-page reframe under paper/workshop/ must reuse
+    # the exact same benchmark-derived constants as the full report, so bind its
+    # headline sentences to the same artifacts. Both PDFs are gate-checked here.
+    workshop_tex = load_text("paper/workshop/main.tex")
+    n_runs = silent["metrics"]["n_runs"]
+    require_contains(
+        workshop_tex,
+        (
+            f"silently accepted {metrics['screen']['silent_wrong_count']} of "
+            f"{n_runs} fault runs"
+        ),
+        "workshop screen silent-accept count",
+    )
+    require_contains(
+        workshop_tex,
+        f"drove that to {metrics['effect']['silent_wrong_count']} of {n_runs}",
+        "workshop effect silent-accept count",
+    )
+    require_contains(
+        workshop_tex,
+        (
+            "screen-only verification silently mishandled "
+            f"{number_words[silently_mishandled]} of "
+            f"{number_words[len(injected_faults)]} injected fault classes"
+        ),
+        "workshop transactional silent-mishandling count",
+    )
+    require_contains(
+        workshop_tex,
+        f"There were {faults['meta']['repeats']} consistent repeats per class.",
+        "workshop transactional repeat count",
+    )
+    require_contains(
+        workshop_tex,
+        f"zero over-halts on {structured['n_correct']} correct homonym cases",
+        "workshop structured identity availability",
+    )
+    require_contains(
+        workshop_tex,
+        f"zero false accepts at {pixel['over_halt_rate'] * 100:.0f}\\% over-halt",
+        "workshop pixel identity safety and availability",
+    )
+
     print("paper artifact constants: OK")
 
 

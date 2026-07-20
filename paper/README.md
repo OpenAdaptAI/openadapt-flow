@@ -27,8 +27,16 @@ python paper/check_artifacts.py
 make -C paper
 ```
 
-The PDF is written to `paper/build/main.pdf`. `make -C paper clean` removes
-generated files.
+`make -C paper` builds two PDFs from the same gate-checked constants:
+
+- `paper/build/main.pdf` — the full technical report (canonical artifact).
+- `paper/workshop/build/main.pdf` — an ~8-page workshop condensation
+  (`paper/workshop/main.tex`) reframed around the silent-wrong-effect finding.
+  It shares `references.bib` (via a symlink) and the same benchmark constants;
+  `check_artifacts.py` binds both. Retarget its document class when a specific
+  workshop venue is chosen.
+
+`make -C paper clean` removes generated files.
 
 ## Evidence contract
 

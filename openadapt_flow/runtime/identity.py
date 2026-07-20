@@ -1597,21 +1597,24 @@ def run_identity_ladder(
 # PURE-PIXEL substrates (Citrix/RDP/VDI, broken a11y) that expose no
 # DOM/a11y string. Both were validated as standalone probes before promotion:
 #
-#   tier 2  PIXEL COMPARE   (benchmark/pixel_identity, PR #29) -- the rendered
+#   tier 2  PIXEL COMPARE   (benchmark/pixel_identity[_aligned]) -- the rendered
 #           pixels retain the O/0 and l/1 distinction OCR collapses, so a
-#           localized max abs-diff of the recorded vs live identifier crop
-#           separates the glyph-collapse wrong-patient pairs at AUC 1.0 on a
-#           STABLE render (same_max 0.0 vs diff_min ~0.097; threshold ~0.049).
-#           It BREAKS under render drift (dark theme / zoom / font), where a
-#           SAME-value crop's distance climbs above the threshold too. So it is
-#           promoted FAIL-SAFE: it VERIFIES only when the render matches (a
-#           near-zero localized distance -- structurally impossible for a
-#           different identifier, whose min stable distance is ~0.097),
-#           MISMATCHES only when the difference is LOCALIZED on an otherwise
-#           matching render (a single differing glyph), and ABSTAINS (returns
-#           None -> next tier) the moment a WHOLE-crop change signals drift.
-#           It can never false-accept: VERIFY requires a distance no different
-#           identifier ever produces. Free, no model.
+#           sub-pixel-ALIGNED localized distance of the recorded vs live
+#           identifier crop separates the glyph-collapse wrong-patient pairs. A
+#           global translation register (dominated by the matching glyphs)
+#           removes the cross-render JITTER that used to defeat a same/different
+#           threshold, leaving a genuine one-glyph change as a surviving
+#           localized spike. It is HALT-BIASED: MISMATCHES only when the
+#           difference is a UNIQUELY localized spike on an otherwise matching
+#           render (a single differing glyph), ABSTAINS the moment a WHOLE-crop
+#           change signals drift (dark theme / heavy scale) OR the render sits
+#           in the uncertain band, and VERIFIES only when the whole crop matches
+#           after alignment (worst aligned window inside the clean gap between
+#           same-record ~0.052 and any different-record ~0.070). VERIFY is
+#           CONFIG-GATED (``PIXEL_VERIFY_ENABLED``, default OFF pending a real
+#           remote-display battery); MISMATCH/ABSTAIN are always live. It can
+#           never false-accept: MATCH requires a whole-crop distance no
+#           different identifier produces on the battery. Free, no model.
 #
 #   tier 3  VLM VETO         (benchmark/vlm_identity, PR #28) -- a LOCAL open
 #           VLM (Qwen3-VL-4B via MLX, ~0.8s/call, ZERO API calls) asked
@@ -1630,112 +1633,100 @@ def run_identity_ladder(
 # (#27) and then HALT -- the disclosed residual. No tier can ever turn a
 # wrong patient into a verified one; the worst any drift can force is a HALT.
 
-# Localized max abs-diff parameters, pinned to the validated probe
-# (benchmark/pixel_identity/pixel_identity.json, method "local_maxdiff").
-PIXEL_CANON = (48, 240)  # (H, W) canonical grayscale canvas
-PIXEL_LOCALMAX_WIN = 24  # sliding-window width (columns)
-PIXEL_SAME_THRESHOLD = 0.0487  # same_max 0.0 vs diff_min ~0.097 -> AUC 1.0
-# Mismatch-vs-abstain split (measured across stable/dark/zoom/font renders):
-# a STABLE different-identifier crop is a LOCALIZED change (global L1 <= ~0.025,
-# active-column spread <= ~0.18); render DRIFT is a WHOLE-crop change (global
-# L1 >= ~0.037, spread >= ~0.30). Caps sit in the gap; either one exceeded =>
-# drift suspected => abstain (fail-safe: prefer fall-through over a halt).
-PIXEL_MISMATCH_GLOBAL_CAP = 0.030
-PIXEL_MISMATCH_SPREAD_CAP = 0.24
-PIXEL_SPREAD_EPS = 0.06  # per-column mean-diff over which a column is "active"
+# Legacy canonical size, kept because tests build crops at this size so the
+# aspect-preserving canonicalizer is an identity resize on them.
+PIXEL_CANON = (48, 240)  # (H, W)
 
-# --- Blocker 2 (crop-scale sensitivity) -----------------------------------
-# PIXEL_SAME_THRESHOLD above is an ABSOLUTE whole-crop mean-abs-diff on a crop
-# force-resized to a FIXED WIDTH (240). That is crop-scale-SENSITIVE: a
-# realistic wide identifier CELL (an MRN with cell padding) resizes so each
-# glyph occupies few canonical columns, and a one-glyph-different MRN's diff
-# DILUTES below PIXEL_SAME_THRESHOLD -> it VERIFIES a DIFFERENT patient.
-# Empirically: a 420px-wide cell, AC50061 vs AC58061, gives localized-max
-# 0.016 < 0.0487 -> false-accept (while a same-value 1px cross-render JITTER
-# gives 0.087 -> false-abort: the metric is inverted at realistic scale).
+# --- Jitter-robust pixel identity metric ----------------------------------
+# The scale-invariant localized spike (max window mean-abs-diff MINUS the
+# per-window median floor) MISMATCHES a one-glyph-different MRN at any crop
+# scale (a localized spike survives), and ABSTAINS under whole-crop drift (a
+# high floor). But an UN-aligned spike could not safely VERIFY: sub-pixel
+# cross-render JITTER of the SAME value shifts every anti-aliased glyph edge,
+# spiking one window LARGER (~0.1) than a genuine one-glyph change (~0.038). No
+# fixed threshold on the un-aligned spike separates "same value, jittered" from
+# "one glyph different", so VERIFY was hard-gated (docs/LIMITS.md).
 #
-# The forward-looking metric (pixel_localized_spike) is scale-INVARIANT: it
-# canonicalizes to a fixed HEIGHT preserving aspect (so a glyph is a
-# consistent width at any crop scale) and takes the localized max as a SPIKE
-# above the per-window median (drift) floor -- a one-glyph MRN change scores a
-# consistent ~0.038 spike at 120px/420px/840px cell widths, while uniform
-# theme drift scores ~0 (max == median). That makes a DIFFERENT MRN MISMATCH
-# at any crop scale (test_blocker2_*).
+# The fix is a GLOBAL sub-pixel REGISTRATION (:func:`_align_translation`) before
+# comparison. Both crops are canonicalized to a fixed HEIGHT (aspect preserved,
+# so a glyph keeps a consistent width at any crop scale), then the live crop is
+# translation-aligned onto the recorded crop by ECC (sub-pixel, whole-crop, so
+# the many matching glyphs dominate the estimate). After alignment:
+#   - SAME value + jitter  -> the translational jitter is corrected -> the WORST
+#     aligned window mean-abs-diff collapses toward 0 (a matching render).
+#   - ONE glyph different   -> the matching glyphs pin the global shift, so the
+#     single differing glyph SURVIVES as a localized spike a rigid translation
+#     cannot remove (it would have to warp locally).
+# The alignment is capped at PIXEL_ALIGN_MAX_SHIFT_FRAC * height so it corrects
+# jitter but can never slide one identifier onto another.
 #
-# BUT sub-pixel cross-render JITTER of the SAME value scores a spike (~0.1)
-# LARGER than a one-glyph change (~0.038): pixel compare across two real
-# renders cannot separate "same value, jittered" from "one glyph different" at
-# single-glyph granularity. So the VERIFY path cannot be made safe by any
-# threshold, and it is HARD-GATED (PIXEL_VERIFY_ENABLED=False): the tier may
-# only MISMATCH (a localized spike -> safe HALT) or ABSTAIN (fall through),
-# never VERIFY, until a jitter-robust distance is validated end to end. The
-# compiler now DOES emit identifier crops (compiler.compile, identity-armed
-# steps without structured identity, or explicitly marked ones), so the tier
-# is production-reachable -- but only on its safe half: arming it can add a
-# safe HALT on a different identifier, never a pixel false-accept.
-# Disclosed in docs/LIMITS.md.
+# On the adversarial battery (benchmark/pixel_identity_aligned: cv2-rendered
+# MRNs + the committed real-render crops, under sub-pixel jitter, JPEG q<=10,
+# 105-150% DPI, and theme inversion), the WORST aligned window (spike + floor)
+# CLEANLY SEPARATES: same-record matching renders top out at ~0.052 while EVERY
+# different-record (glyph-collapse siblings AND wrong MRNs) stays >= ~0.070 --
+# a real gap, not a knife edge. VERIFY sits inside that gap.
+PIXEL_SI_HEIGHT = 48  # canonical HEIGHT (aspect preserved) for every crop
+PIXEL_WIN_FRAC = 0.55  # sliding window width as a fraction of height (~1 glyph)
+PIXEL_ALIGN_MAX_SHIFT_FRAC = 0.35  # reject an alignment shift beyond this*height
+PIXEL_DRIFT_FLOOR = 0.10  # per-window median >= this => whole-crop drift => abstain
+PIXEL_MISMATCH_SPIKE = 0.030  # localized spike above the floor => a glyph change
+PIXEL_MISMATCH_UNIQUENESS = 1.25  # top spike must exceed the 2nd (non-overlapping)
+#                                   window spike by this ratio (a real glyph
+#                                   change is uniquely localized; broadband JPEG
+#                                   noise is not) -- keeps compression from
+#                                   forcing a false MISMATCH
+PIXEL_VERIFY_MAX_WINDOW = 0.040  # VERIFY: worst aligned window mean-abs-diff <= this
+#                                  (0.040 sits between same_max ~0.052 and
+#                                  diff_min ~0.070 with margin; abstains above)
+
+# VERIFY default. The verifier can now MATCH safely on the SYNTHETIC cross-render
+# jitter battery with zero false-accept and a real margin, but the DEFAULT stays
+# OFF: there is no captured REAL RDP/Citrix/HDX identifier battery yet (that
+# substrate is Research/Exploratory, STATUS.md), and a pixel false-accept is a
+# SILENT WRONG RECORD -- the worst possible outcome. So VERIFY is config-gated
+# with a safe default: MISMATCH and ABSTAIN are always live (they only ever add
+# a HALT, never a pass); the positive MATCH path is reached only when a caller
+# opts in (``verify_pixel_identity(..., enable_verify=True)``) or this default is
+# flipped. The exact bar to flip the default is in docs/LIMITS.md: reproduce the
+# benchmark/pixel_identity_aligned zero-false-accept battery on a REAL captured
+# remote-display corpus. Enabling MATCH can never introduce a false-accept the
+# battery does not already exercise; it only lets the tier certify a correct
+# record instead of deferring to (a possibly over-halting) OCR.
 PIXEL_VERIFY_ENABLED = False
-PIXEL_SI_HEIGHT = 48  # canonical HEIGHT (aspect preserved)
-PIXEL_SI_WIN_FRAC = 0.55  # sliding window width as a fraction of height (~1 glyph)
-PIXEL_SI_MISMATCH_SPIKE = (
-    0.02  # localized spike above the drift floor => a glyph change
-)
-PIXEL_SI_DRIFT_FLOOR = (
-    0.10  # per-window median at/above this => whole-crop drift => abstain
-)
 
 
-def _pixel_canon(png: bytes) -> Optional[Any]:
-    """Decode PNG bytes to the canonical grayscale crop (size-normalized).
+class PixelIdentityDistance(NamedTuple):
+    """Aligned localized distance between two identifier crops.
 
-    Returns None when the bytes cannot be decoded. cv2/numpy are imported
-    lazily to keep this module import-light for unit tests.
+    Attributes:
+        max_window: worst (largest) sliding-window mean-abs-diff after global
+            sub-pixel alignment, in ``[0, 1]`` -- the whole-crop match statistic
+            the VERIFY gate reads (low iff EVERY glyph matches).
+        floor: the per-window MEDIAN mean-abs-diff -- the whole-crop drift
+            detector (high under a theme/heavy-scale wash where no local
+            decision is trustworthy).
+        spike: ``max_window - floor`` -- a single glyph-scale change spikes one
+            window above the floor; the MISMATCH statistic.
+        uniqueness: ``spike`` over the next-tallest NON-overlapping window's
+            spike -- a genuine one-glyph change is uniquely localized (>1),
+            broadband compression noise is not (~1).
+        aligned: whether ECC sub-pixel registration converged within the
+            plausible-jitter shift cap (VERIFY requires it; MISMATCH does not,
+            since a localized spike is only more visible without alignment).
     """
-    import cv2
-    import numpy as np
 
-    img = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        return None
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-    return cv2.resize(
-        gray, (PIXEL_CANON[1], PIXEL_CANON[0]), interpolation=cv2.INTER_AREA
-    )
-
-
-def pixel_distances(recorded_gray: Any, live_gray: Any) -> tuple[float, float, float]:
-    """(localized max, global mean, active-column spread) of |recorded-live|.
-
-    All on the canonical grayscale crops, normalized to [0, 1]:
-
-    - **localized max** -- the max over sliding ``PIXEL_LOCALMAX_WIN``-wide
-      windows of the window's mean abs-diff (segmentation-free localization of
-      a single differing glyph; the validated ``local_maxdiff`` metric).
-    - **global mean** -- the whole-crop mean abs-diff (a drift detector: a
-      single glyph barely moves it, a theme/zoom/font change dominates it).
-    - **spread** -- fraction of columns whose mean abs-diff exceeds
-      ``PIXEL_SPREAD_EPS`` (localized change -> small; drift -> near 1.0).
-    """
-    import numpy as np
-
-    a = recorded_gray.astype(np.float32)
-    b = live_gray.astype(np.float32)
-    d = np.abs(a - b) / 255.0
-    w = d.shape[1]
-    win = PIXEL_LOCALMAX_WIN
-    local = 0.0
-    for x0 in range(0, max(1, w - win + 1), max(1, win // 3)):
-        local = max(local, float(d[:, x0 : x0 + win].mean()))
-    glob = float(d.mean())
-    col = d.mean(axis=0)
-    spread = float((col > PIXEL_SPREAD_EPS).mean())
-    return local, glob, spread
+    max_window: float
+    floor: float
+    spike: float
+    uniqueness: float
+    aligned: bool
 
 
 def _pixel_canon_aspect(png: bytes) -> Optional[Any]:
     """Decode PNG to grayscale canonicalized to a FIXED HEIGHT, aspect
-    PRESERVED (so a glyph keeps a consistent width at any crop scale -- the
-    scale-invariant fix for Blocker 2). Returns None on undecodable bytes."""
+    PRESERVED (so a glyph keeps a consistent width at any crop scale). Returns
+    None on undecodable bytes."""
     import cv2
     import numpy as np
 
@@ -1748,25 +1739,57 @@ def _pixel_canon_aspect(png: bytes) -> Optional[Any]:
     return cv2.resize(gray, (nw, PIXEL_SI_HEIGHT), interpolation=cv2.INTER_AREA)
 
 
-def pixel_localized_spike(
+def _align_translation(recorded_gray: Any, live_gray: Any) -> tuple[Any, bool]:
+    """Sub-pixel translation-register ``live_gray`` onto ``recorded_gray``.
+
+    Estimates a WHOLE-crop translation by ECC (so the many matching glyphs
+    dominate; a single differing glyph cannot swing it) and warps the live crop
+    by it. Returns ``(aligned_live, ok)``; ``ok`` is False -- and the live crop
+    is returned UNCHANGED -- when ECC fails to converge (e.g. a low-texture
+    crop) or the estimated shift exceeds ``PIXEL_ALIGN_MAX_SHIFT_FRAC * height``
+    (an implausible jitter that would risk sliding one identifier onto another).
+    A False here disqualifies VERIFY (never a MATCH on an un-registered pair)
+    while leaving MISMATCH free to read the un-aligned crops.
+    """
+    import cv2
+    import numpy as np
+
+    a = recorded_gray.astype(np.float32)
+    b = live_gray.astype(np.float32)
+    warp = np.eye(2, 3, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 50, 1e-4)
+    try:
+        _, warp = cv2.findTransformECC(
+            a, b, warp, cv2.MOTION_TRANSLATION, criteria, None, 5
+        )
+    except cv2.error:
+        return live_gray, False
+    dx, dy = float(warp[0, 2]), float(warp[1, 2])
+    if not (np.isfinite(dx) and np.isfinite(dy)):
+        return live_gray, False
+    cap = PIXEL_ALIGN_MAX_SHIFT_FRAC * PIXEL_SI_HEIGHT
+    if abs(dx) > cap or abs(dy) > cap:
+        return live_gray, False
+    aligned = cv2.warpAffine(
+        b,
+        warp,
+        (a.shape[1], a.shape[0]),
+        flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    return aligned, True
+
+
+def pixel_identity_distance(
     recorded_png: bytes, live_png: bytes
-) -> Optional[tuple[float, float]]:
-    """Scale-INVARIANT localized distance (Blocker 2 fix): ``(spike, floor)``.
+) -> Optional[PixelIdentityDistance]:
+    """Jitter-robust localized distance between two identifier crops.
 
-    Both crops are canonicalized to a fixed HEIGHT with aspect preserved
-    (:func:`_pixel_canon_aspect`), truncated to the shared width, and the
-    sliding-window (~one-glyph-wide) mean abs-diffs are computed. Returns:
-
-    - ``spike`` -- the MAX window mean-diff MINUS the per-window MEDIAN: a
-      localized glyph-scale change spikes ONE window above the median floor
-      (consistent ~0.038 for a one-glyph MRN change at ANY crop width);
-      uniform theme drift moves every window equally, so max == median and the
-      spike is ~0.
-    - ``floor`` -- the per-window median: high (~1.0) under a whole-crop wash
-      (dark theme), so a large spike riding a high floor is drift, not a glyph
-      change.
-
-    Returns None when either crop is undecodable.
+    Both crops are canonicalized to a fixed height (aspect preserved), the live
+    crop is sub-pixel translation-aligned onto the recorded crop
+    (:func:`_align_translation`), and per-window (~one-glyph-wide) mean-abs-diffs
+    are computed on the shared width. Returns a :class:`PixelIdentityDistance`
+    or None when either crop is undecodable.
     """
     import numpy as np
 
@@ -1774,78 +1797,112 @@ def pixel_localized_spike(
     la = _pixel_canon_aspect(live_png)
     if ra is None or la is None:
         return None
-    a = ra.astype(np.float32)
-    b = la.astype(np.float32)
-    w = min(a.shape[1], b.shape[1])
-    d = np.abs(a[:, :w] - b[:, :w]) / 255.0
-    win = max(4, int(PIXEL_SI_WIN_FRAC * PIXEL_SI_HEIGHT))
-    means = [
-        float(d[:, x0 : x0 + win].mean())
-        for x0 in range(0, max(1, w - win + 1), max(1, win // 4))
+    w = int(min(ra.shape[1], la.shape[1]))
+    a = ra[:, :w]
+    b = la[:, :w]
+    aligned_b, ok = _align_translation(a, b)
+    d = np.abs(a.astype(np.float32) - aligned_b.astype(np.float32)) / 255.0
+    win = max(4, int(PIXEL_WIN_FRAC * PIXEL_SI_HEIGHT))
+    step = max(1, win // 4)
+    windows = [
+        (x0, float(d[:, x0 : x0 + win].mean()))
+        for x0 in range(0, max(1, d.shape[1] - win + 1), step)
     ]
-    if not means:
-        return 0.0, 0.0
-    arr = np.array(means)
-    floor = float(np.median(arr))
-    return float(arr.max() - floor), floor
+    if not windows:
+        return PixelIdentityDistance(0.0, 0.0, 0.0, 0.0, bool(ok))
+    means = np.array([m for _, m in windows], dtype=np.float64)
+    floor = float(np.median(means))
+    max_window = float(means.max())
+    spike = max_window - floor
+    # Uniqueness: the tallest window's spike vs the next tallest window that does
+    # NOT overlap it (a real glyph change is one tall window; JPEG noise is many).
+    order = sorted(range(len(windows)), key=lambda i: windows[i][1], reverse=True)
+    top_x = windows[order[0]][0]
+    second = floor
+    for i in order[1:]:
+        if abs(windows[i][0] - top_x) >= win:
+            second = windows[i][1]
+            break
+    second_spike = max(0.0, second - floor)
+    uniqueness = spike / (second_spike + 1e-6)
+    return PixelIdentityDistance(max_window, floor, spike, uniqueness, bool(ok))
 
 
 def verify_pixel_identity(
-    recorded_png: Optional[bytes], live_png: Optional[bytes]
+    recorded_png: Optional[bytes],
+    live_png: Optional[bytes],
+    *,
+    enable_verify: Optional[bool] = None,
 ) -> Optional[IdentityCheck]:
-    """Pixel-compare identity tier (tier 2 of the ladder), scale-invariant and
-    VERIFY-GATED (Blocker 2).
+    """Pixel-compare identity tier (tier 2 of the ladder), jitter-robust.
 
-    Uses the scale-INVARIANT localized-spike distance
-    (:func:`pixel_localized_spike`) so a one-glyph-different MRN is detected at
-    ANY crop scale (the absolute-threshold metric diluted below its cap on
-    realistic wide cells and FALSE-ACCEPTED -- Blocker 2). Three-way:
+    Compares the recorded vs live identifier crops with a sub-pixel-aligned,
+    scale-invariant localized distance (:func:`pixel_identity_distance`).
+    Three-way, HALT-biased (a false MATCH is the worst outcome, so the tier
+    abstains whenever it is not confident):
 
-    - **mismatch** -- a localized glyph-scale SPIKE
-      (>= :data:`PIXEL_SI_MISMATCH_SPIKE`) that is NOT riding a whole-crop
-      drift floor (floor < :data:`PIXEL_SI_DRIFT_FLOOR`): a different
-      identifier -> HALT. Scale-invariant, so this fires on a realistic cell.
-    - **abstain** (``None``) -- no localized spike (same value, OR the crops
-      are identical), OR a whole-crop drift wash: fall through to the next
-      tier. A would-be VERIFY lands here because the VERIFY path is HARD-GATED
-      (``PIXEL_VERIFY_ENABLED`` False): cross-render sub-pixel JITTER of the
-      SAME value spikes LARGER than a one-glyph change, so no threshold makes
-      VERIFY safe until fixed-size crop capture + a jitter-robust distance land
-      (docs/LIMITS.md). The tier therefore NEVER false-accepts.
-    - **verify** -- only when ``PIXEL_VERIFY_ENABLED`` is turned on (it is not).
+    - **mismatch** -- a UNIQUELY localized glyph-scale spike
+      (>= :data:`PIXEL_MISMATCH_SPIKE`, uniqueness
+      >= :data:`PIXEL_MISMATCH_UNIQUENESS`) that is NOT riding a whole-crop
+      drift floor (floor < :data:`PIXEL_DRIFT_FLOOR`): a different identifier
+      -> HALT. Scale-invariant; fires on a realistic wide cell.
+    - **verify** -- the whole crop matches after alignment (worst aligned
+      window <= :data:`PIXEL_VERIFY_MAX_WINDOW`, not drifted, alignment
+      converged) AND verify is enabled. On the battery this window CLEANLY
+      separates same-record matching renders (max ~0.052) from every
+      different-record (min ~0.070), so a MATCH cannot be a false-accept.
+    - **abstain** (``None``) -- whole-crop drift (theme/heavy scale), or a
+      render whose worst window sits in the uncertain band between the MATCH
+      gate and a clean glyph spike, or verify disabled: fall through to the
+      next tier (VLM / OCR) or HALT. Also when a crop is missing/undecodable.
 
-    Returns None when either crop is missing or undecodable.
+    ``enable_verify`` gates ONLY the positive MATCH path: None (default) reads
+    the module default :data:`PIXEL_VERIFY_ENABLED` (currently False, pending a
+    real remote-display battery -- docs/LIMITS.md); True/False overrides it for
+    a caller that has its own evidence/risk policy. MISMATCH and ABSTAIN are
+    unaffected -- they can only ever add a HALT, never grant a pass.
+
+    The ``observed`` text carries only DISTANCES, never crop pixels or decoded
+    identifier text, so an identity verdict never logs PHI.
     """
+    if enable_verify is None:
+        enable_verify = PIXEL_VERIFY_ENABLED
     if not recorded_png or not live_png:
         return None
-    dist = pixel_localized_spike(recorded_png, live_png)
+    dist = pixel_identity_distance(recorded_png, live_png)
     if dist is None:
         return None
-    spike, floor = dist
-    if spike >= PIXEL_SI_MISMATCH_SPIKE and floor < PIXEL_SI_DRIFT_FLOOR:
+    if dist.floor < PIXEL_DRIFT_FLOOR and (
+        dist.spike >= PIXEL_MISMATCH_SPIKE
+        and dist.uniqueness >= PIXEL_MISMATCH_UNIQUENESS
+    ):
         return IdentityCheck(
             status="mismatch",
             mode="pixel",
             coverage=0.0,
             expected="recorded identifier crop",
             observed=(
-                f"identifier pixels differ locally (spike {spike:.3f}, "
-                f"floor {floor:.3f}) — a different identifier"
+                f"identifier pixels differ locally (spike {dist.spike:.3f}, "
+                f"floor {dist.floor:.3f}) — a different identifier"
             ),
         )
     if (
-        PIXEL_VERIFY_ENABLED
-        and spike < PIXEL_SI_MISMATCH_SPIKE
-        and floor < PIXEL_SI_DRIFT_FLOOR
+        enable_verify
+        and dist.aligned
+        and dist.floor < PIXEL_DRIFT_FLOOR
+        and dist.max_window <= PIXEL_VERIFY_MAX_WINDOW
     ):
         return IdentityCheck(
             status="verified",
             mode="pixel",
             coverage=1.0,
             expected="recorded identifier crop",
-            observed=f"live identifier crop matches (spike {spike:.3f})",
+            observed=(
+                f"live identifier crop matches after alignment "
+                f"(worst window {dist.max_window:.3f})"
+            ),
         )
-    return None  # same-but-gated, or whole-crop drift -> abstain to next tier
+    return None  # drift, uncertain band, or verify-gated -> abstain to next tier
 
 
 @runtime_checkable

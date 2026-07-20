@@ -265,6 +265,7 @@ def _deployment_executor(
                 api_actuator=api_actuator,
                 durable=True,
                 use_structural=True,
+                pixel_verify_enabled=deployment.runtime.pixel_verify_enabled,
                 governed_authorization=manifest.governed_authorization,
             )
 

@@ -1,0 +1,68 @@
+{
+  "accepted": false,
+  "base_commit": "",
+  "candidate_commit": "b1a3726f1b5f3fc2507c214a3ffd1659f3725ceb",
+  "caveat": "Real RDP-transported pixels + input, but NOT Citrix ICA/HDX, NOT the aardwolf transport, and the drift is simulated-on-a-real-session (not WAN capture).",
+  "contract": {
+    "drift_no_silent_write": true,
+    "drift_safely_halted": true,
+    "healthy_effect_confirmed": false,
+    "healthy_structural_rung_used": 0,
+    "healthy_visual_rungs_used": {},
+    "healthy_zero_model_calls": true
+  },
+  "environment": {
+    "backend": "openadapt_flow FreeRDPBackend (pixel-only, use_structural off)",
+    "note": "aardwolf (the product's Windows-RDP transport) cannot connect to Linux RDP servers; see fixture README. The aardwolf-over-Windows transport is qualified separately in benchmark/rdp (PR #142).",
+    "rdp_client": "xfreerdp3 (FreeRDP3 client, fullscreen)",
+    "rdp_server": "freerdp-shadow-cli3 (FreeRDP3 server)",
+    "surface": "Tk kiosk app served over RDP; observed on client display",
+    "transport": "DockerX11RdpTransport (screenshot+xdotool over the RDP client)",
+    "viewport": [
+      1280,
+      800
+    ]
+  },
+  "failure_taxonomy": [
+    "connect_or_frame_failure",
+    "healthy_contract_violation",
+    "effect_not_confirmed",
+    "drift_not_safely_halted"
+  ],
+  "generated_at": "2026-07-20T18:21:23.402708+00:00",
+  "model_calls": 0,
+  "oracle": "docker exec cat of the kiosk-persisted note file",
+  "run_count": 2,
+  "schema_version": "openadapt.rdp-ladder-qualification.v1",
+  "substrate": "real-rdp-freerdp3-roundtrip-linux-kiosk",
+  "successes": 1,
+  "task": "record->compile->replay a patient-note write through the vision-only resolver ladder over a real RDP round-trip, with no structural backend; confirm the write via an independent document oracle; and halt under injected DPI/theme/JPEG drift",
+  "total_s": 133.937,
+  "trials": [
+    {
+      "effect_confirmed": false,
+      "effect_expected": "MRN A1001\tfollowup in two weeks",
+      "effect_observed": null,
+      "failure_class": "healthy_contract_violation",
+      "kind": "healthy_record_compile_replay",
+      "model_calls": 0,
+      "passed": false,
+      "rung_counts": {},
+      "structural_rung_used": 0,
+      "success": false,
+      "trial": 1,
+      "visual_rungs_used": {}
+    },
+    {
+      "drift": "downscale_0.4x_blur + theme_invert + jpeg_q8 (simulated on real session)",
+      "effect_after_drift": null,
+      "failure_class": null,
+      "halted": true,
+      "kind": "halt_under_injected_drift",
+      "model_calls": 0,
+      "passed": true,
+      "silent_write": false,
+      "trial": 2
+    }
+  ]
+}

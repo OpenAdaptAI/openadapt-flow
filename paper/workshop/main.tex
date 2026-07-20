@@ -3,7 +3,7 @@
 % Work", paper/main.tex). This ~8-page version is deliberately reframed around
 % the single sharpest finding -- that task-success metrics overstate GUI-agent
 % reliability because they score the screen, not the business effect -- and
-% defers system depth to the full report. It shares paper/references.bib and
+% defers system depth to the full report. It copies paper/references.bib and
 % reuses the exact machine-checked benchmark constants (see paper/check_artifacts.py).
 % Venue-agnostic single-column article for now; retarget the class to a chosen
 % NeurIPS 2026 workshop style when selected.
@@ -402,8 +402,10 @@ oracle alongside task success. The mechanism that makes such checks the
 exceptional event---a demonstration compiler with deterministic replay and
 governed repair---is described in full in the \fullreport{}.
 
-% references.bib is a symlink to ../references.bib so the workshop shares the
-% full report's single bibliography (see paper/workshop/references.bib).
+% paper/workshop/references.bib is a byte-identical copy of ../references.bib
+% (kept a regular file, NOT a symlink, so it packages cleanly in the sdist); the
+% workshop shares the full report's single bibliography. check_artifacts.py
+% asserts the two files stay identical so they cannot silently drift.
 \bibliographystyle{plain}
 \bibliography{references}
 

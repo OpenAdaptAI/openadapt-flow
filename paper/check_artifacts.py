@@ -404,6 +404,16 @@ def main() -> None:
     rdp_latencies = f"{', '.join(rdp_values[:-1])}, and {rdp_values[-1]}"
     require_contains(results_tex, rdp_latencies, "RDP trial latencies")
 
+    # The workshop shares the full report's bibliography via a byte-identical
+    # COPY (paper/workshop/references.bib), kept a regular file rather than a
+    # symlink so the sdist packages cleanly. Assert the copy has not drifted from
+    # the source of truth so the two bibliographies can never diverge silently.
+    require_equal(
+        load_text("paper/workshop/references.bib"),
+        load_text("paper/references.bib"),
+        "workshop references.bib copy matches paper/references.bib",
+    )
+
     # Workshop condensation: the ~8-page reframe under paper/workshop/ must reuse
     # the exact same benchmark-derived constants as the full report, so bind its
     # headline sentences to the same artifacts. Both PDFs are gate-checked here.

@@ -23,6 +23,12 @@ from openadapt_flow.compiler.induction import (
     structural_trace_coverage,
     validate_held_out,
 )
+from openadapt_flow.compiler.loop_authoring import (
+    LoopAuthoringError,
+    author_data_driven_loop,
+    body_param_names,
+    resolve_column_map,
+)
 
 __all__ = [
     "compile_recording",
@@ -38,6 +44,12 @@ __all__ = [
     # ``reproduction_score`` is a deprecated alias kept for back-compat.
     "structural_trace_coverage",
     "reproduction_score",
+    # Data-driven LOOP authoring (RFC §2.3): wrap a single-demonstration linear
+    # body in a LOOP over a declared worklist, reusing the built interpreter.
+    "author_data_driven_loop",
+    "resolve_column_map",
+    "body_param_names",
+    "LoopAuthoringError",
     "InductionResult",
     "HeldOutValidation",
     "Proposer",

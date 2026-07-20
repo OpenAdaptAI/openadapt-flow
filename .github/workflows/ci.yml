@@ -163,7 +163,8 @@ jobs:
             openadapt_flow/compiler/codegen.py \
             openadapt_flow/compiler/annotate.py \
             openadapt_flow/compiler/effect_mining.py \
-            openadapt_flow/compiler/induction.py
+            openadapt_flow/compiler/induction.py \
+            openadapt_flow/compiler/loop_authoring.py
 
   # --- Docs / claims consistency (required on PRs) -------------------------
   # Fails the PR if the docs drift from the code: a stale version, a broken file

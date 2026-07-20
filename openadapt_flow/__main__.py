@@ -10,6 +10,10 @@ imported lazily inside each handler so ``--help`` always works):
 - ``induce`` — induce a parameterized PROGRAM bundle from MULTIPLE recordings
   (multi-trace induction); refuses (nonzero exit) when intent is
   underdetermined rather than guessing a branch.
+- ``for-each`` — author a DATA-DRIVEN LOOP bundle: wrap a single-demonstration
+  bundle's linear body in a LOOP that runs once per record of a worklist
+  (CSV/JSON), binding each record's columns to the workflow's parameters.
+  Emits a program:true bundle; fails loudly on a column/parameter mismatch.
 - ``replay`` — replay a bundle; serves the bundled MockMed demo app when no
   ``--url`` is given (with optional ``--drift`` to demonstrate healing).
   ``--worklist`` drives a program's loop over a CLI-supplied relation; effect
@@ -656,6 +660,72 @@ def _cmd_induce(args: argparse.Namespace) -> int:
         f"(workflow: {workflow.name!r}, "
         f"{len(result.param_specs)} param(s), "
         f"{len(result.column_decisions)} column decision(s))."
+    )
+    return 0
+
+
+def _cmd_for_each(args: argparse.Namespace) -> int:
+    import shutil
+
+    from openadapt_flow.compiler.loop_authoring import (
+        LoopAuthoringError,
+        author_data_driven_loop,
+    )
+    from openadapt_flow.ir import Workflow
+
+    src = Path(args.bundle)
+    if (
+        not (src / "workflow.json").is_file()
+        and not (src / "workflow.json.enc").is_file()
+    ):
+        raise SystemExit(f"{src} is not a workflow bundle (no workflow.json)")
+    body = Workflow.load(src)
+
+    records = _load_worklist_file(Path(args.records))
+
+    # Parse --map col=param entries into an explicit column -> param mapping.
+    column_map: dict[str, str] = {}
+    for raw in args.map or []:
+        if "=" not in raw:
+            raise SystemExit(f"--map expects COLUMN=PARAM, got {raw!r}")
+        col, param = raw.split("=", 1)
+        col, param = col.strip(), param.strip()
+        if not col or not param:
+            raise SystemExit(f"--map expects COLUMN=PARAM, got {raw!r}")
+        if col in column_map:
+            raise SystemExit(f"--map column {col!r} given more than once")
+        column_map[col] = param
+
+    try:
+        looped = author_data_driven_loop(
+            body,
+            records,
+            column_map=column_map or None,
+            relation=args.relation,
+            max_iterations=args.max_iterations,
+            loop_var=args.loop_var or "",
+            name=args.name,
+        )
+    except LoopAuthoringError as exc:
+        # Fail loudly on any param/column mismatch -- never emit a bundle.
+        raise SystemExit(str(exc))
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    # Copy the demonstrated body's templates so the looped bundle is a complete,
+    # self-verifying artifact (the loop body reuses the body's anchors/crops).
+    src_templates = src / "templates"
+    if src_templates.is_dir():
+        shutil.copytree(src_templates, out / "templates", dirs_exist_ok=True)
+    looped.save(out)
+
+    relation = args.relation
+    rel = looped.data_sources[relation]
+    print(
+        f"Authored data-driven LOOP bundle at {out} (workflow: "
+        f"{looped.name!r}): {len(rel.rows)} record(s) over relation "
+        f"{relation!r}, body = {len(body.steps)} demonstrated step(s), "
+        f"program: true."
     )
     return 0
 
@@ -2005,6 +2075,65 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_induce)
+
+    p = sub.add_parser(
+        "for-each",
+        help=(
+            "Author a DATA-DRIVEN LOOP bundle: wrap an existing single-"
+            "demonstration bundle's linear body in a LOOP that runs once per "
+            "record of a worklist (CSV/JSON), binding each record's columns to "
+            "the workflow's parameters. Emits a program:true bundle the runtime "
+            "executes bounded, $0, identity-gated and effect-verified per record"
+        ),
+    )
+    p.add_argument(
+        "bundle",
+        help="Existing single-demonstration bundle directory (the linear body)",
+    )
+    p.add_argument(
+        "--records",
+        required=True,
+        help=(
+            "Worklist file (.csv header names columns, or .json list of row "
+            "objects); one record = one loop iteration"
+        ),
+    )
+    p.add_argument("--out", required=True, help="Output program-bundle directory")
+    p.add_argument(
+        "--map",
+        action="append",
+        metavar="COLUMN=PARAM",
+        help=(
+            "Map a worklist COLUMN to a workflow PARAM (repeatable). Omit to map "
+            "each column to the parameter of the same name. Every column must "
+            "map to a known non-secret parameter or authoring FAILS LOUDLY."
+        ),
+    )
+    p.add_argument(
+        "--relation",
+        default="worklist",
+        help="Name of the emitted loop relation (default: 'worklist')",
+    )
+    p.add_argument(
+        "--max-iterations",
+        type=int,
+        default=1000,
+        help=(
+            "Hard fail-safe bound on iterations (default 1000); a worklist "
+            "longer than this is refused at authoring time and HALTs at run time"
+        ),
+    )
+    p.add_argument(
+        "--loop-var",
+        default=None,
+        help="Optional human label for the loop variable (reports only)",
+    )
+    p.add_argument(
+        "--name",
+        default=None,
+        help="Name for the looped workflow (default: '<body>-for-each')",
+    )
+    p.set_defaults(func=_cmd_for_each)
 
     p = sub.add_parser(
         "replay",

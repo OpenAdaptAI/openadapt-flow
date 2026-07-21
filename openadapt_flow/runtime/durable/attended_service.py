@@ -267,6 +267,7 @@ def _deployment_executor(
                 use_structural=True,
                 pixel_verify_enabled=deployment.runtime.pixel_verify_enabled,
                 governed_authorization=manifest.governed_authorization,
+                runtime_config=deployment.runtime,
             )
 
         return BoundAttendedExecutor(replayer_for_manifest, key=key)

@@ -22,7 +22,7 @@ fully-local, zero-egress) deployment.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Literal, Mapping, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -266,6 +266,50 @@ class ActuationConfig(BaseModel):
     timeout_s: float = 5.0
 
 
+class GroundingModelConfig(BaseModel):
+    """Operator-selected ("bring your own") model-grounding endpoint.
+
+    The last rung of the resolution ladder is a Grounder that PROPOSES a click
+    point when the deterministic rungs abstain. This section lets a deployment
+    point that fallback rung at a model of its choice instead of the built-in
+    Anthropic default: a self-hosted vLLM/Ollama, an OpenRouter/Azure/Bedrock
+    proxy, or the Anthropic API directly.
+
+    Two hard invariants:
+
+    * **Configuring a model NEVER enables egress by itself.** This section only
+      names WHICH model would be used; whether ANYTHING leaves the box is still
+      governed entirely by ``allow_model_grounding`` (default False => fully
+      local). An enabled model with egress off stays dormant.
+    * **The API key is a reference, never a literal.** ``api_key_env`` names the
+      environment variable holding the key; the key itself is never stored in
+      the config or in the repository.
+
+    Fail-safe: the constructed grounder only ever proposes a point; the identity
+    band and risk gate still dispose before any click, and any endpoint error
+    yields no proposal (the ladder halts).
+    """
+
+    #: Off by default. When False, no configured model grounder is built and the
+    #: on-prem appliance (if any) remains the only VLM fallback. Setting True
+    #: still does nothing unless ``allow_model_grounding`` is also True.
+    enabled: bool = False
+    #: ``anthropic`` (the built-in Anthropic API path) | ``openai_compatible``
+    #: (any ``{base_url}/chat/completions`` vision endpoint: OpenRouter, Azure
+    #: OpenAI, a Bedrock/OpenAI proxy, self-hosted vLLM / Ollama / LM Studio).
+    provider: Literal["anthropic", "openai_compatible"] = "anthropic"
+    #: Root URL of an ``openai_compatible`` endpoint (``/chat/completions`` is
+    #: appended). Required for ``openai_compatible``; ignored for ``anthropic``.
+    base_url: str = ""
+    #: The vision-capable model id to request. For ``anthropic`` an empty value
+    #: uses the shipped default; for ``openai_compatible`` it is required.
+    model: str = ""
+    #: NAME of the environment variable holding the API key (never the key
+    #: itself). Empty => no auth header sent (a loopback vLLM/Ollama needs none);
+    #: for ``anthropic`` an empty value falls back to the SDK's ``ANTHROPIC_API_KEY``.
+    api_key_env: str = ""
+
+
 class RuntimeSection(BaseModel):
     """Runtime posture: durability and model-egress opt-in."""
 
@@ -283,6 +327,21 @@ class RuntimeSection(BaseModel):
     #: :func:`openadapt_flow.runtime.identity.verify_pixel_identity` and
     #: docs/LIMITS.md.
     pixel_verify_enabled: bool = False
+    #: Operator-selected ("bring your own") model-grounding endpoint (the VLM
+    #: fallback rung). Off by default; configuring it never enables egress on its
+    #: own (``allow_model_grounding`` still governs whether anything leaves).
+    grounding_model: GroundingModelConfig = Field(default_factory=GroundingModelConfig)
+    #: PHI-mode egress allowlist (fail-closed). Admin-attested hostnames (or
+    #: URLs) for model-grounding endpoints. When PHI mode is active, a configured
+    #: grounding endpoint whose host is NOT listed here is REFUSED — the run
+    #: stays fully local. Empty (default) => no endpoint may egress under PHI.
+    #: Non-PHI runs ignore this list (the normal egress opt-in governs).
+    phi_grounding_allowlist: list[str] = Field(default_factory=list)
+    #: PHI-mode attestation that a Business Associate Agreement (or equivalent)
+    #: covers the known public aggregators (OpenRouter, OpenAI, Anthropic,
+    #: Google). Default False => those aggregators are BLOCKED under PHI even if
+    #: allowlisted. Non-aggregator allowlisted endpoints do not need it.
+    phi_egress_attested: bool = False
 
 
 class PolicySection(BaseModel):
@@ -331,6 +390,170 @@ def load_deployment(source: str | Path) -> DeploymentConfig:
         raise ValueError(f"invalid deployment config {path}: {e}") from e
 
 
+# --------------------------------------------------------------------------
+# Bring-your-own model grounding — construction + fail-closed PHI enforcement.
+# --------------------------------------------------------------------------
+
+_DEFAULT_ANTHROPIC_HOST = "api.anthropic.com"
+
+# Public multi-tenant aggregators. BLOCKED under PHI mode even if allowlisted,
+# unless the operator sets ``phi_egress_attested`` (an admin attestation that a
+# BAA / equivalent agreement covers the destination). Fail-closed default: no
+# PHI screenshot reaches a shared public endpoint without an explicit
+# attestation, whatever the allowlist says.
+_PHI_AGGREGATOR_DENYLIST = frozenset(
+    {
+        "openrouter.ai",
+        "api.openai.com",
+        "api.anthropic.com",
+        "generativelanguage.googleapis.com",
+    }
+)
+
+
+def _host_of(url_or_host: str) -> str:
+    """Extract a lowercase hostname from a URL or a bare host[:port] string.
+
+    Fail-closed helper: returns "" when nothing host-like can be parsed, so the
+    caller treats an unparseable endpoint as not-on-the-allowlist (refused).
+    """
+    from urllib.parse import urlsplit
+
+    raw = (url_or_host or "").strip()
+    if not raw:
+        return ""
+    candidate = raw if "//" in raw else f"//{raw}"
+    host = urlsplit(candidate).hostname or ""
+    return host.lower()
+
+
+def phi_grounding_endpoint_allowed(
+    host: str, *, allowlist: list[str], attested: bool
+) -> tuple[bool, str]:
+    """Decide whether a grounding endpoint may egress under PHI mode.
+
+    Fail-closed. Returns ``(allowed, reason)`` where ``reason`` is a
+    human-readable refusal message when ``allowed`` is False.
+
+    Rules (every wired PHI endpoint must clear ALL of them):
+
+    1. The host must be resolvable and present on the attested ``allowlist``.
+       Ambiguity (an empty/unparseable host) or absence => refuse.
+    2. A host on the public-aggregator denylist additionally requires
+       ``attested`` (a BAA attestation). Without it => refuse, even if the host
+       was allowlisted.
+    """
+    h = (host or "").strip().lower()
+    if not h:
+        return (False, "grounding endpoint host could not be determined")
+    allow = {_host_of(entry) for entry in allowlist}
+    allow.discard("")
+    if h not in allow:
+        return (False, f"grounding endpoint {h} is not on the attested allowlist")
+    if h in _PHI_AGGREGATOR_DENYLIST and not attested:
+        return (
+            False,
+            f"grounding endpoint {h} is a public aggregator blocked in PHI mode "
+            "without an explicit phi_egress_attested BAA attestation",
+        )
+    return (True, "")
+
+
+def _phi_mode_active(explicit: Optional[bool] = None) -> bool:
+    """Resolve PHI mode without importing the heavy hosted module.
+
+    Mirrors ``hosted._phi_mode``: explicit arg -> ``OPENADAPT_FLOW_PHI_MODE``
+    env -> ``OPENADAPT_FLOW_SCRUB=on``. Any failure resolves to False (PHI
+    enforcement then does not apply and the normal egress opt-in governs).
+    """
+    if explicit is not None:
+        return explicit
+    import os
+
+    env = os.environ.get("OPENADAPT_FLOW_PHI_MODE")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        from openadapt_flow import privacy
+
+        return privacy.scrub_mode() == "on"
+    except Exception:
+        return False
+
+
+def _grounding_model_host(cfg: GroundingModelConfig) -> str:
+    """The egress host a configured grounding model would reach.
+
+    ``anthropic`` always reaches the Anthropic API host; ``openai_compatible``
+    reaches the host of its ``base_url``.
+    """
+    if cfg.provider == "anthropic":
+        return _DEFAULT_ANTHROPIC_HOST
+    return _host_of(cfg.base_url)
+
+
+def build_model_grounder(cfg: GroundingModelConfig) -> Optional[Any]:
+    """Construct the configured "bring your own" model grounder, or None.
+
+    Returns None (and prints a clear reason) when the section is disabled, its
+    provider dependency is missing, or its configuration is incomplete —
+    degrading to fully local rather than raising. The caller is responsible for
+    the egress opt-in and PHI allowlist checks BEFORE wiring the result.
+    """
+    if not cfg.enabled:
+        return None
+    provider = (cfg.provider or "anthropic").strip().lower()
+
+    import os
+
+    api_key = os.environ.get(cfg.api_key_env, "") if cfg.api_key_env else ""
+
+    if provider == "anthropic":
+        from openadapt_flow.runtime.grounder import _DEFAULT_MODEL, AnthropicGrounder
+
+        model = (cfg.model or "").strip() or _DEFAULT_MODEL
+        try:
+            client = None
+            if api_key:
+                import anthropic
+
+                client = anthropic.Anthropic(api_key=api_key)
+            return AnthropicGrounder(model=model, client=client)
+        except ImportError:
+            print(
+                "grounding_model.provider 'anthropic' requires the 'anthropic' "
+                "package (pip install 'openadapt-flow[grounder]'); replaying "
+                "FULLY LOCAL."
+            )
+            return None
+
+    if provider == "openai_compatible":
+        if not cfg.base_url.strip():
+            print(
+                "grounding_model.provider 'openai_compatible' requires a "
+                "base_url; replaying FULLY LOCAL."
+            )
+            return None
+        from openadapt_flow.runtime.grounder import OpenAICompatibleGrounder
+
+        try:
+            return OpenAICompatibleGrounder(
+                base_url=cfg.base_url, model=cfg.model, api_key=api_key
+            )
+        except (ValueError, ImportError) as exc:
+            print(
+                f"grounding_model 'openai_compatible' not wired ({exc}); "
+                "replaying FULLY LOCAL."
+            )
+            return None
+
+    print(
+        f"unknown grounding_model.provider {cfg.provider!r} "
+        "(expected: anthropic | openai_compatible); replaying FULLY LOCAL."
+    )
+    return None
+
+
 def build_replayer(
     backend: Any,
     *,
@@ -341,6 +564,8 @@ def build_replayer(
     use_structural: bool,
     pixel_verify_enabled: bool = False,
     governed_authorization: Any = None,
+    runtime_config: Optional["RuntimeSection"] = None,
+    phi_mode: Optional[bool] = None,
 ) -> Any:
     """Wire one deployment-qualified backend into the governed Replayer.
 
@@ -348,12 +573,36 @@ def build_replayer(
     public deployment module lets CLI, console, and embedding services share
     one egress/grounding/effect/actuation posture without importing CLI-private
     helpers.
+
+    ``runtime_config`` (the deployment's ``runtime`` section) carries the
+    optional operator-selected model grounder (``grounding_model``) and the
+    fail-closed PHI allowlist (``phi_grounding_allowlist`` /
+    ``phi_egress_attested``). When absent, the behavior is exactly the historic
+    one: the on-prem appliance is the only VLM fallback and no model grounder is
+    configured.
     """
     import os
 
     from openadapt_flow.runtime import Replayer
     from openadapt_flow.runtime.grounder import build_grounder
     from openadapt_flow.runtime.remote_vlm import appliance_from_env
+
+    grounding_cfg = (
+        runtime_config.grounding_model
+        if runtime_config is not None
+        else GroundingModelConfig()
+    )
+    allowlist = (
+        list(runtime_config.phi_grounding_allowlist)
+        if runtime_config is not None
+        else []
+    )
+    attested = (
+        bool(runtime_config.phi_egress_attested)
+        if runtime_config is not None
+        else False
+    )
+    phi_on = _phi_mode_active(phi_mode)
 
     # The on-screen read-back verifier reads the SAME live backend the replay
     # drives; it is constructed backend-less (the backend does not exist at
@@ -371,6 +620,17 @@ def build_replayer(
             "Replaying FULLY LOCAL (zero outbound calls)."
         )
         appliance = None
+    # PHI fail-closed: a configured on-prem appliance whose host is not attested
+    # is dropped entirely (identity veto tier + grounder + state verifier), so no
+    # PHI screenshot reaches it.
+    if appliance is not None and phi_on:
+        host = _host_of(os.environ.get("OPENADAPT_FLOW_VLM_URL", ""))
+        ok, reason = phi_grounding_endpoint_allowed(
+            host, allowlist=allowlist, attested=attested
+        )
+        if not ok:
+            print(f"PHI mode: {reason}; replaying FULLY LOCAL.")
+            appliance = None
     if appliance is not None:
         print(
             "Using on-prem VLM appliance at "
@@ -379,7 +639,44 @@ def build_replayer(
             "fail-safe to halt). WARNING: screenshots WILL leave "
             "the box for this run (model grounding is enabled)."
         )
-    grounder = build_grounder(fallback=appliance.grounder if appliance else None)
+
+    # Operator-selected ("bring your own") model grounder. Only ever built when
+    # egress is opted in; PHI mode further requires the endpoint be on the
+    # attested allowlist (and, for public aggregators, an explicit attestation).
+    model_grounder: Optional[Any] = None
+    if grounding_cfg.enabled:
+        if not allow_egress:
+            print(
+                "grounding_model is configured but model grounding is not "
+                "enabled (runtime.allow_model_grounding=false); replaying FULLY "
+                "LOCAL (zero outbound calls)."
+            )
+        else:
+            wire = True
+            if phi_on:
+                host = _grounding_model_host(grounding_cfg)
+                ok, reason = phi_grounding_endpoint_allowed(
+                    host, allowlist=allowlist, attested=attested
+                )
+                if not ok:
+                    print(f"PHI mode: {reason}; replaying FULLY LOCAL.")
+                    wire = False
+            if wire:
+                model_grounder = build_model_grounder(grounding_cfg)
+                if model_grounder is not None:
+                    print(
+                        "Model grounder wired: "
+                        f"{type(model_grounder).__name__} "
+                        f"(provider={grounding_cfg.provider}). WARNING: "
+                        "screenshots WILL leave the box for this run."
+                    )
+
+    # The configured model grounder takes precedence as the VLM fallback; the
+    # on-prem appliance grounder is used only when no model grounder is wired.
+    fallback = model_grounder
+    if fallback is None and appliance is not None:
+        fallback = appliance.grounder
+    grounder = build_grounder(fallback=fallback)
     if grounder is not None:
         print(f"Grounding rung active: {type(grounder).__name__}")
     return Replayer(

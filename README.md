@@ -5,23 +5,33 @@
 [![Python](https://img.shields.io/pypi/pyversions/openadapt-flow)](https://pypi.org/project/openadapt-flow/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+**openadapt-flow is the OpenAdapt engine: a governed demonstration compiler.**
+Record a task once, compile it to a deterministic program, and replay that
+program deterministically with zero model calls on the healthy path. Instead of
+silently doing the wrong thing when an interface drifts, it re-resolves from the
+evidence the demonstration retained, or it **halts** for a human or an AI, gated
+by an identity check and independent effect verification. It runs entirely on
+your machine; nothing egresses unless you opt in.
+
 **Lifecycle: Beta.** See the
 [capability and qualification matrix](docs/PRODUCT_STATUS.md) for workflow- and
-environment-specific evidence.
+environment-specific evidence. This is the flagship engine of the
+[OpenAdapt](https://github.com/OpenAdaptAI/openadapt) project; the full docs live
+at [docs.openadapt.ai](https://docs.openadapt.ai).
 
-OpenAdapt is built for repeated workflows behind browser, legacy desktop, and
-remote-display interfaces. It compiles demonstrated GUI workflows into
-deterministic, locally executable programs. Each target application and
+OpenAdapt is built for repeated workflows across every interface an operator
+touches: browser pages, native Windows / macOS / Linux desktops, and
+remote-display sessions (RDP, Citrix / VDI). Each target application and
 environment is qualified separately. Healthy runs make no model calls. When
 interfaces drift, OpenAdapt re-resolves from retained evidence or proposes a
-governed repair and halts when verification fails.
+governed repair, and halts when verification fails.
 
-![One demonstration, two UIs, same compiled workflow — the right side self-heals under a theme it has never seen](docs/showcase/demo.gif)
+![One demonstration, two UIs, same compiled workflow. The right side self-heals under a theme it has never seen](docs/showcase/demo.gif)
 
 *Real screenshots from the two runs in [`docs/showcase/`](docs/showcase).
-Left: the UI the demo was recorded on. Right: a theme it had never seen — each
-step re-resolves through OCR or geometry, and each fix is written back to the
-script as a reviewable diff. Zero model calls on either side.*
+Left: the UI the demo was recorded on. Right: a theme it had never seen, where
+each step re-resolves through OCR or geometry, and each fix is written back to
+the script as a reviewable diff. Zero model calls on either side.*
 
 **Verified execution.** It halts instead of guessing, and qualification reports
 measure silent incorrect success, over-halt, effect confirmation, latency, and
@@ -45,9 +55,14 @@ openadapt-flow replay bundle --drift theme \
 openadapt-flow visualize bundle -o graph.html            # see what compiled
 ```
 
+The command is `openadapt-flow`. If you installed the
+[OpenAdapt](https://github.com/OpenAdaptAI/openadapt) launcher, the two-word form
+`openadapt flow <args>` is equivalent and forwards every flag, including
+`--backend`, to this engine.
+
 On the first command that needs a browser, openadapt-flow downloads the
-Chromium build Playwright needs (a one-time ~150MB fetch) — no separate
-`playwright install chromium` step. Prefer the fast, isolated installs
+Chromium build Playwright needs (a one-time ~150MB fetch), so there is no
+separate `playwright install chromium` step. Prefer the fast, isolated installs
 `uvx openadapt-flow …` or `uv tool install openadapt-flow`. In air-gapped
 or CI environments that pre-provision the browser, set
 `OPENADAPT_FLOW_NO_AUTO_INSTALL=1` to disable the auto-download.
@@ -65,40 +80,64 @@ on Linux, macOS, and Windows. See the
 [capability and qualification matrix](docs/PRODUCT_STATUS.md) for the accepted
 scope of each substrate.
 
-### Record your own app
+## Record your own app, on any substrate
 
-`record --url` opens a headed browser on YOUR app and watches what you do —
-real clicks, typing, key presses and scrolls — writing the same recording
-format `compile` consumes. Perform the workflow, then press Ctrl-C (or close
-the window) to finish:
+`record` opens the operator's real interface and watches what you do: real
+clicks, typing, key presses, and scrolls, writing the same recording format
+`compile` consumes. Perform the workflow, then press Ctrl-C (or close the
+window) to finish. The `--backend` selector picks the substrate, and the same
+selector is available on `replay` and `run`. It defaults to `web`, which
+reproduces the historical browser behavior exactly.
 
 ```bash
-openadapt-flow record --url https://your.app --out rec   # do the task, Ctrl-C
+# Browser (Playwright / Chromium): the app is a URL.
+openadapt-flow record --backend web --url https://your.app --out rec
 openadapt-flow compile rec --out bundle --name my-task
-openadapt-flow replay bundle --url https://your.app       # replay it
+openadapt-flow replay bundle --backend web --url https://your.app
+
+# Native Windows (UI Automation via the in-guest WAA agent).
+openadapt-flow record --backend windows --agent-url http://localhost:5001 \
+  --task "add a patient note" --out rec
+
+# Native macOS (accessibility, one app window).
+openadapt-flow record --backend macos --macos-app TextEdit --out rec
+
+# Native Linux (AT-SPI, one exact app window).
+openadapt-flow record --backend linux --linux-app gedit \
+  --linux-window-title "Untitled Document 1" --out rec
+
+# Remote display / Citrix / VDI (pixel-only vision ladder over RDP).
+openadapt-flow record --backend rdp --rdp-host 10.0.0.5 --out rec
 ```
 
-Pass `--url` to `replay` to run against your own app; recorded parameter values
-are the defaults and `--param` overrides them.
+`--backend web` is browser-first (the app is a `--url`). For
+`windows`, `macos`, `linux`, and `rdp` the capture has no field identity, so the
+target is the app window or host: `--agent-url` for Windows, `--macos-app`,
+`--linux-app` plus `--linux-window-title`, and `--rdp-host` (or a configured
+`rdp_window` for a local Citrix / Parallels window). Pass the same `--backend`
+plus target flags to `replay`, or drive a real deployment with
+`openadapt-flow run bundle --config deploy.yaml`, which reads the backend,
+effects, actuation, durable, and policy sections from one config. Recorded
+parameter values are the defaults, and `--param` overrides them at replay.
 
-**Secrets never get recorded.** A `input[type=password]` field (or any field
+**Secrets never get recorded.** An `input[type=password]` field (or any field
 named with `--secret <name>`) is a secret parameter: its value is never written
 to the recording, the events log, the compiled bundle, or the saved frames (its
 region is redacted). At replay it is injected from the environment and a missing
 one fails fast:
 
 ```bash
-openadapt-flow record --url https://your.app --out rec --secret password
+openadapt-flow record --backend web --url https://your.app --out rec --secret password
 export OPENADAPT_FLOW_SECRET_PASSWORD='…'                 # supplied at replay
-openadapt-flow replay bundle --url https://your.app
+openadapt-flow replay bundle --backend web --url https://your.app
 ```
 
 **Compiled is not the same as certified safe.** `lint` reports a bundle's
 coverage gaps (clicks that act with no identity check, steps that assert
 nothing, write steps left mis-classified) with a severity each; `certify`
-enforces a policy and exits nonzero — refusing the bundle before it deploys —
-when it fails. Risk is auto-classified at compile time (write-shaped clicks —
-save/submit/create/delete/... — become `irreversible`, which arms the
+enforces a policy and exits nonzero, refusing the bundle before it deploys,
+when it fails. Risk is auto-classified at compile time (write-shaped clicks
+such as save / submit / create / delete become `irreversible`, which arms the
 low-confidence refusal), and two example policies ship: a permissive default
 and a strict `clinical-write.yaml`. See [docs/LIMITS.md](docs/LIMITS.md) for
 what the heuristic does and does not catch.
@@ -106,9 +145,25 @@ what the heuristic does and does not catch.
 ## How it works
 
 Computer-use agents re-reason through your task with a large model on every
-run. That's the right shape for a task nobody has automated before, and the
+run. That is the right shape for a task nobody has automated before, and the
 wrong one for the 500th referral this month. openadapt-flow compiles the
 demonstration instead.
+
+```mermaid
+flowchart LR
+  R["record<br/>--backend web / windows / macos / linux / rdp"] --> C["compile<br/>demo to a bundle"]
+  C --> G["lint / certify<br/>policy gates"]
+  G --> P["replay / run<br/>0 model calls on the healthy path"]
+  P -->|bounded drift| H["heal<br/>reviewable diff back into the bundle"]
+  H --> P
+  P -->|identity or effect fails| X{{"HALT<br/>for a human or an AI"}}
+```
+
+*Text summary (PyPI does not render Mermaid): record on any substrate, compile
+the demonstration to a bundle, gate it with lint / certify, then replay or run
+with zero model calls on the healthy path. Bounded drift heals back into the
+bundle as a reviewable diff; an identity or effect failure halts for a human or
+an AI.*
 
 Each compiled step carries a template crop, an OCR label, geometry landmarks,
 a structural locator, and postconditions derived from what the demo actually
@@ -122,47 +177,48 @@ makes no model calls and incurs no per-run model cost.
 
 When bounded UI drift preserves enough evidence, a lower rung can find the same
 target and the fix lands in the bundle as a diff you can review. An optional
-model may propose a repair only when explicitly enabled; a human can teach a
-guarded correction after a halt. These are different modes, not a blanket
-promise of adaptation. When the screen stops matching
+model may propose a repair only when explicitly enabled, and a human can teach
+a guarded correction after a halt (`openadapt-flow teach`). These are different
+modes, not a blanket promise of adaptation. When the screen stops matching
 expectations entirely, the run halts with a report instead of guessing, and
-steps tagged irreversible won't act on a low-confidence match at all.
+steps tagged irreversible will not act on a low-confidence match at all.
 
 The runtime is **vision-first**: it can operate a pure pixel surface
 (PNG in, clicks and keys out), but it is not limited to pixels. Where a backend
-owns a structured layer — a browser DOM, a native UI Automation / accessibility
-tree — the ladder's top rung re-finds the recorded target as an *element* and
+owns a structured layer, a browser DOM or a native UI Automation / accessibility
+tree, the ladder's top rung re-finds the recorded target as an *element* and
 acts on it deterministically; the visual rungs are the fallback floor for
-pixel-only substrates (RDP, Citrix, canvas). On a desktop drift benchmark the structural
-rung resolved 21/21 targets where visual replay alone managed 6/21
+pixel-only substrates (RDP, Citrix, canvas). On a desktop drift benchmark the
+structural rung resolved 21/21 targets where visual replay alone managed 6/21
 ([`benchmark/structural_action/`](benchmark/structural_action/STRUCTURAL_ACTION.md)).
-Structure never bypasses the identity gate — it makes identity stronger, an
+Structure never bypasses the identity gate; it makes identity stronger, an
 exact element rather than a pixel guess. But the identity gate only covers
 *armed* steps, and today's bundles arm a subset of clicks (the live OpenEMR
-bundle armed 4-7 of 12) — an **unarmed click has no identity check at all**. The
-per-step coverage is auditable in `workflow.json` and reported in every run;
+bundle armed 4-7 of 12), so an **unarmed click has no identity check at all**.
+The per-step coverage is auditable in `workflow.json` and reported in every run;
 see [what it doesn't do yet](docs/LIMITS.md).
 
-It all sits behind a small `Backend` protocol shared by browser, native desktop,
-and remote-display drivers. The browser lifecycle runs on every CI build and
-has published third-party application evidence. Windows UIA passed 3/3 fixed
-WinForms trials with independently confirmed SQLite effects, plus 3/3 refusal
-for both stale and ambiguous targets. Native macOS passed 3/3 fixed TextEdit
-trials with exact file-byte effects and refused a two-window ambiguity without
-changing either file. Real-network Aardwolf RDP into Windows 11 passed 3/3
-fixed remote-input trials with independent guest-tools file verification.
-These are accepted scoped qualifications; a customer application is qualified
+## Substrates (all first-class)
+
+Every substrate runs on the same small `Backend` protocol and the same governed
+runtime; none is a second-class add-on. Maturity is reported honestly per the
+[capability and qualification matrix](docs/PRODUCT_STATUS.md):
+
+| Substrate | Selector | Status | Evidence |
+|---|---|---|---|
+| Web / browser | `--backend web` | Validated | Full lifecycle on every CI build, plus third-party OpenEMR evidence |
+| Native macOS (AX) | `--backend macos` | Validated | 3/3 fixed TextEdit trials with exact file-byte effects; refused a two-window ambiguity without changing either file |
+| Native Windows (UIA) | `--backend windows` | Early | 3/3 fixed WinForms trials with independently confirmed SQLite effects; 3/3 refusal for both stale and ambiguous targets |
+| Native Linux (AT-SPI) | `--backend linux` | Early | Required CI drives a real GTK3 workflow through an isolated X11 / session-D-Bus environment: three verified effects, plus three ambiguous-target and three stale-target refusals |
+| RDP (remote display) | `--backend rdp` | Early | Real-network Aardwolf RDP into Windows 11 passed 3/3 fixed remote-input trials with independent guest-tools file verification |
+| Citrix / VDI (pixel ladder) | `--backend rdp` + `rdp_window` | Exploratory | Pixel-only vision ladder; no validated ICA / HDX environment qualified yet. Enters design-partner qualification in the customer's exact published application |
+
+These are accepted scoped qualifications. A customer application is qualified
 against its own controls, session/display policy, identity evidence, and effect
-oracle. Native Linux now uses the same governed runtime through an exact-window
-AT-SPI backend. Required CI drives a real GTK3 workflow through an isolated
-X11/session-D-Bus environment for three independently verified effects, plus
-three ambiguous-target and three stale-target refusals; customer applications
-retain their own qualification boundary. Citrix ICA/HDX uses the remote-display
-adapter contract and enters
-design-partner qualification in the customer's exact published application
-([`docs/backends/RDP.md`](docs/backends/RDP.md),
+oracle. Details:
+[`docs/backends/RDP.md`](docs/backends/RDP.md),
 [`docs/desktop/LINUX_NATIVE.md`](docs/desktop/LINUX_NATIVE.md),
-[`docs/desktop/CITRIX_PIXEL.md`](docs/desktop/CITRIX_PIXEL.md)).
+[`docs/desktop/CITRIX_PIXEL.md`](docs/desktop/CITRIX_PIXEL.md).
 
 ## Proof
 
@@ -177,7 +233,7 @@ Every CI run records a demonstration, compiles it, and checks:
 | Surprise modal | fails loudly, naming the violated postcondition |
 | Non-recorded parameter | substituted and verified by OCR of the final screen |
 
-Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) ·
+Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) and
 [theme-drift run report](docs/showcase/theme-drift-run/REPORT.md).
 
 Compiled workflows can also be emitted as Agent Skills or MCP servers
@@ -215,7 +271,7 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
   (`openadapt-flow visualize bundle -o graph.html`).
 - **Multi-trace induction that refuses when it isn't sure.** `induce_program`
   aligns several demonstrations of the same task to recover the shared
-  parameters, loops, and branches — deterministic and model-free at its core.
+  parameters, loops, and branches, deterministic and model-free at its core.
   When a branch condition or a value stays underdetermined it *quarantines* the
   program (`certified` is `False`) instead of guessing, and `disambiguate`
   surfaces the ambiguity as concrete multiple-choice questions rather than
@@ -223,44 +279,90 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
 - **Effect verification against the system of record.** The screen can lie: an
   optimistic UI, a duplicate submit, a partial save all read as success. A step
   may declare typed `effects`, and when a run is given an `EffectVerifier` the
-  replayer checks the *real* record — REST (`RestRecordVerifier`), FHIR
-  (`FhirEffectVerifier`), or a document hash (`DocumentHashVerifier`) — before
-  and after the action, halting on a refuted or unverifiable write, still with
-  zero model calls. A fault-model study found the screen-only oracle silently
-  mishandles 5 of 7 transactional fault classes; all five halt through the real
-  replayer once effects are declared ([`benchmark/fault_model/`](benchmark/fault_model/FAULT_MODEL.md),
+  replayer checks the *real* record out of band, before and after the action,
+  halting on a refuted or unverifiable write, still with zero model calls. The
+  oracle is pluggable: SQL, REST (`RestRecordVerifier`), FHIR
+  (`FhirEffectVerifier`), or a document hash (`DocumentHashVerifier`). A
+  fault-model study found the screen-only oracle silently mishandles 5 of 7
+  transactional fault classes; all five halt through the real replayer once
+  effects are declared ([`benchmark/fault_model/`](benchmark/fault_model/FAULT_MODEL.md),
   [`docs/design/EFFECT_VERIFIER.md`](docs/design/EFFECT_VERIFIER.md)). Two honest
   preconditions bound this: the compiler does **not** yet infer effects from a
-  demonstration — they are authored per deployment against the app's system of
-  record — and a run with **no** verifier configured falls back to the screen
+  demonstration (they are authored per deployment against the app's system of
+  record), and a run with **no** verifier configured falls back to the screen
   oracle. The net exists only when both are supplied; without them the write is
   exactly as silent as before.
 - **An API actuator tier.** Where the target app exposes a real API, driving its
   GUI to make the write is the wrong tool. A step carrying an `ApiBinding`, with
   an `ApiActuator` configured, performs the write by calling the API
-  deterministically and confirms it with the same `EffectVerifier` — the `api`
-  leaf of the capability ladder (API → DOM/UIA → geometry → OCR → template → VLM
-  → human). It is an optimization whose safe fallback is always the GUI.
+  deterministically and confirms it with the same `EffectVerifier`, the `api`
+  leaf of the capability ladder (API, then DOM/UIA, geometry, OCR, template,
+  VLM, human). It is an optimization whose safe fallback is always the GUI.
 - **Policy: lint and certify.** `lint` reports a bundle's coverage gaps (unarmed
   clicks, vacuous postconditions, under-classified risk) with a severity each;
   `certify` enforces a policy and exits nonzero, refusing a bundle before it
   deploys. Runnable is not the same as certified safe. Certification is
-  **optional and opt-in** — an uncertified bundle still runs — and a policy only
+  **optional and opt-in** (an uncertified bundle still runs), and a policy only
   defines what a bundle must satisfy, so the honest claim is that *a certified
   workflow can be configured to halt* on the conditions its policy names, not
   that any workflow always halts.
 - **Governed healing.** Every fix under drift lands in the bundle as a reviewable
   diff, and a step classified irreversible will not act on a low-confidence
-  match — structure and the identity gate govern the heal, they are not bypassed
+  match. Structure and the identity gate govern the heal; they are not bypassed
   by it.
 - **Durable checkpoint / resume.** A run checkpoints verified progress
   (`openadapt_flow/runtime/durable/`) so a halt becomes a durable pause the
-  operator can approve and resume from the last verified state — not a restart,
-  and explicitly not "hand the rest to a free-form agent."
+  operator can approve and resume from the last verified state (`resume` /
+  `approve`), not a restart, and explicitly not "hand the rest to a free-form
+  agent."
 - **PHI-free identity.** The wrong-patient identity check can run against a
   salted-hash, shape-preserving `IdentityTemplate` instead of a plaintext
   name / DOB / MRN band, so a compiled bundle need carry no readable PHI while
   still enforcing identity (`openadapt_flow/runtime/identity_template.py`).
+
+### What `visualize` shows
+
+This is the actual Mermaid that `visualize` emits for the bundled MockMed
+triage sample, produced by
+`openadapt-flow visualize docs/showcase/bundle --format mermaid` (nothing
+below is hand-drawn):
+
+```mermaid
+flowchart TD
+  n0("click at (214, 195)")
+  n1("type 'nurse.demo'")
+  n2("click at (214, 264)")
+  n3("type 'mockmed-demo-pass'")
+  n4("click 'Sign In'")
+  n5("click 'Open'")
+  n6("click 'New Encounter'")
+  n7("click 'Triage'")
+  n8("click at (344, 290)")
+  n9("type <note>")
+  n10("click 'Save Encounter'")
+  n11{{"Success"}}
+  n0 --> n1
+  n1 --> n2
+  n2 --> n3
+  n3 --> n4
+  n4 --> n5
+  n5 --> n6
+  n6 --> n7
+  n7 --> n8
+  n8 --> n9
+  n9 --> n10
+  n10 --> n11
+  classDef irreversible stroke:#b4530a,stroke-width:2px;
+  classDef halt stroke:#b21f2d,stroke-width:2px;
+```
+
+*Text summary (PyPI does not render Mermaid): the compiled MockMed triage
+bundle is eleven ordered steps, signing in, opening the patient, starting a new
+encounter, opening triage, typing the `<note>` parameter, and clicking Save
+Encounter, ending in a `Success` postcondition node (`n11`). The
+`irreversible` and `halt` style classes are the ones `visualize` reserves for
+write-shaped steps and halt points. The `--format html` output renders the same
+graph with per-step resolution-ladder and gate detail.*
 
 ## Benchmark
 
@@ -268,21 +370,21 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
 
 The lead result is on a real third-party app: the official OpenEMR public
 demo (fake patients only, resets daily). We ran an 18-step add-patient-note
-workflow both ways — log in, find a patient, scroll a dense dashboard, add
-a note — with a distinct note value each run and the same OCR success
+workflow both ways (log in, find a patient, scroll a dense dashboard, add
+a note) with a distinct note value each run and the same OCR success
 check on both arms: 20 compiled replays against 10 runs of a
 claude-sonnet-5 computer-use agent. Compiled went 20/20 at 39.2s (p50)
 with zero model calls; the agent went 10/10 at 70.4s (p50), about $0.55
 per run at list price ($5.52 total for the 10 runs, with prompt caching
-and hard cost caps enforced in the harness). It's a shared public demo
-that other users mutate and that resets daily — not CI-reproducible, and
-the sample is small. Correctness alone (no agent arm, 5/5 fresh browsers,
+and hard cost caps enforced in the harness). It is a shared public demo
+that other users mutate and that resets daily, so it is not CI-reproducible,
+and the sample is small. Correctness alone (no agent arm, 5/5 fresh browsers,
 zero model calls, closed-loop scrolling) is in
 [docs/showcase-openemr/FINDINGS.md](docs/showcase-openemr/FINDINGS.md).
 Full numbers, methodology, and caveats:
 [benchmark/openemr/BENCHMARK.md](benchmark/openemr/BENCHMARK.md).
 
-For a controlled, CI-reproducible comparison — the methodology anchor — we
+For a controlled, CI-reproducible comparison (the methodology anchor) we
 ran the bundled MockMed task both ways on 2026-07-08 with the same OCR
 success check: 100 compiled replays against 20 runs of the same agent.
 Both arms went 100 for 100 and 20 for 20, so on an app this simple the
@@ -295,8 +397,8 @@ numbers, methodology, and caveats:
 [benchmark/BENCHMARK.md](benchmark/BENCHMARK.md).
 
 The stack also ships a pinned, containerized lending reference environment,
-[`benchmark/frappe_lending/`](benchmark/frappe_lending/README.md) — pinned
-containers + lockfile, with independent REST, SQL, and exact table-delta
+[`benchmark/frappe_lending/`](benchmark/frappe_lending/README.md), with pinned
+containers, a lockfile, and independent REST, SQL, and exact table-delta
 verification of every write. In the model-free engineering matrix (compiled
 and direct-API arms, baseline plus cosmetic drift), it delivered **12/12
 correct rows with zero silent wrong writes, zero over-halts, and $0 model
@@ -306,12 +408,12 @@ of the matrix.
 ## Capability and qualification
 
 The reference browser path runs record, compile, policy-check, deterministic
-replay, refusal, and report generation in CI. Windows UIA, native macOS, and
-RDP each have retained 3/3 accepted task evidence with independent effects or
-oracles. Citrix and each new third-party application are qualified with a design
-partner in the exact deployment environment. The workflow-program IR adds
-parameters, branches, loops, effect verification, and governed recovery on the
-same runtime. `DESIGN.md` has the module contracts;
+replay, refusal, and report generation in CI. Windows UIA, native macOS, native
+Linux, and RDP each have retained 3/3 accepted task evidence with independent
+effects or oracles. Citrix and each new third-party application are qualified
+with a design partner in the exact deployment environment. The workflow-program
+IR adds parameters, branches, loops, effect verification, and governed recovery
+on the same runtime. `DESIGN.md` has the module contracts;
 [`docs/design/WORKFLOW_PROGRAM_IR.md`](docs/design/WORKFLOW_PROGRAM_IR.md)
 describes the program IR, and [`docs/L1_INTEGRATION.md`](docs/L1_INTEGRATION.md)
 covers feeding layered clinical-data platforms.
@@ -328,11 +430,24 @@ claim is tiered and mapped to the specific tests and benchmark artifacts that
 back it in [`claims.yaml`](claims.yaml). CI runs `scripts/validate_claims.py`,
 which **fails the build whenever a
 claim's tier outranks its strongest evidence** and regenerates
-[`docs/VERIFICATION.md`](docs/VERIFICATION.md) — the claim-by-claim
-verification report — from the registry, so the adjectives in this README
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md), the claim-by-claim
+verification report, from the registry, so the adjectives in this README
 cannot quietly rot.
 
-## Privacy (PHI)
+## Local-first, with an optional hosted path
+
+openadapt-flow runs entirely on your machine. Record, compile, lint, certify,
+replay, and run are all local, and the healthy replay path makes zero outbound
+calls. Model grounding is off by default and only wired in behind an explicit
+`--allow-model-grounding` opt-in.
+
+OpenAdapt Cloud is the optional managed control plane at `app.openadapt.ai`.
+The public managed subscription covers browser workflows today; desktop and
+Citrix / VDI runs are self-hosted or on-prem. The hosted commands below connect
+the locally executed compiler and runtime to that control plane for
+authentication, governed artifact ingest, and PHI-minimal break reporting.
+
+### Privacy (PHI)
 
 For regulated deployments, PHI scrubbing on the persist/log paths is provided by
 the optional `privacy` extra (Presidio-backed
@@ -346,8 +461,8 @@ export OPENADAPT_FLOW_SCRUB=on          # scrub REPORT.md + logs, fail closed
 The shareable `REPORT.md` and console logs are scrubbed; the compiled bundle and
 `report.json` keep literal identifiers on purpose (identity check + audit trail)
 and are protected by a documented boundary. Identity crops sent to the on-prem
-VLM appliance are deliberately not scrubbed — the control there is
-on-prem-only + no-retention. Full map: [docs/PRIVACY.md](docs/PRIVACY.md).
+VLM appliance are deliberately not scrubbed; the control there is on-prem-only
+plus no-retention. Full map: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 At rest, opt-in AES-256-GCM encryption (`OPENADAPT_BUNDLE_KEY`) seals
 `workflow.json`, template crops, and durable checkpoints. KMS integration and
@@ -355,7 +470,7 @@ key rotation remain operator responsibilities, and full-disk encryption is
 still required. Treat every source bundle as PHI. Details:
 [docs/phi_at_rest.md](docs/phi_at_rest.md).
 
-## Hosted (cloud connectivity)
+### Hosted (cloud connectivity)
 
 Hosted commands connect the locally executed compiler/runtime to the launched
 control plane at `app.openadapt.ai`: authentication, governed artifact ingest,
@@ -400,14 +515,14 @@ openadapt-flow push ./triage.bundle.sanitized --kind bundle \
 #   --resolves-run-id 00000000-0000-0000-0000-000000000000
 
 openadapt-flow report-break runs/replay-… \          # PHI-free break diagnostic
-    --workflow-id <id> --deployment-kind byoc         #   → POST /api/runs/ingest-report
+    --workflow-id <id> --deployment-kind byoc         #   -> POST /api/runs/ingest-report
 ```
 
-- **Token resolution** (all outbound calls): `--token` → `OPENADAPT_INGEST_TOKEN`
-  env → OS keychain → existing `~/.openadapt/config.toml` token (migration
-  read). Install the `hosted` extra for keychain storage. New plaintext
-  mode-`0600` storage is refused unless `login --allow-plaintext-token` makes the
-  insecure fallback explicit.
+- **Token resolution** (all outbound calls): `--token`, then
+  `OPENADAPT_INGEST_TOKEN` env, then OS keychain, then an existing
+  `~/.openadapt/config.toml` token (migration read). Install the `hosted` extra
+  for keychain storage. New plaintext mode-`0600` storage is refused unless
+  `login --allow-plaintext-token` makes the insecure fallback explicit.
 - **Sanitization never mutates the original.** It inventories every file,
   applies type-specific text/image handlers to a copy, requires a stable second
   scrub pass, and writes per-file source/derivative hashes and coverage to
@@ -455,7 +570,11 @@ openadapt-flow report-break runs/replay-… \          # PHI-free break diagnost
   halting `replay`/`run` emits the break automatically (best-effort; never
   changes the run's exit code). Off by default.
 
-The sanitizer uses the optional `privacy` extra. Hosted transport uses `httpx`.
+To pair this machine with a launched Cloud tenant from a desktop deep link, use
+`openadapt-flow connect`. The operator console (`openadapt-flow console`, needs
+the `console` extra) serves a localhost-only, read-only web UI over compiled
+bundles, run reports, halt evidence, and skill-library lineage. The sanitizer
+uses the optional `privacy` extra; hosted transport uses `httpx`.
 
 ## Development
 
@@ -466,7 +585,7 @@ playwright install chromium  # optional: else auto-downloads on first launch
 pytest -q
 ```
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). A
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). A
 ready-made first contribution: pick a module off the mypy type-debt burn-down
 list (`[[tool.mypy.overrides]]` in `pyproject.toml`), tighten its annotations,
 and remove it from the list.

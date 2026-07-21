@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from openadapt_flow.ir import (
     BundleManifest,
     BundleProvenance,
+    Predicate,
     ProgramGraph,
     State,
     StateKind,
@@ -99,6 +100,10 @@ def _referenced_asset_paths(workflow: "Workflow") -> set[str]:
         anchor = interstitial.dismiss_anchor
         if anchor is not None and anchor.template:
             refs.add(anchor.template)
+        for predicate_anchor in _predicate_templates(
+            interstitial.detect, interstitial.clearance
+        ):
+            refs.add(predicate_anchor)
     return refs
 
 
@@ -110,6 +115,12 @@ def _predicate_anchor_templates(step: "Step") -> Iterator[str]:
         preds.append(step.wait_until)
     if step.guard is not None:
         preds.append(step.guard.predicate)
+    yield from _predicate_templates(*preds)
+
+
+def _predicate_templates(*predicates: Optional[Predicate]) -> Iterator[str]:
+    """Template paths recursively referenced by predicate anchors."""
+    preds = [predicate for predicate in predicates if predicate is not None]
     while preds:
         p = preds.pop()
         if p.anchor is not None and p.anchor.template:

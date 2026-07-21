@@ -40,7 +40,7 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from openadapt_flow.backend import Backend, StructuralResolutionRefused
 from openadapt_flow.bundle_validation import compute_parameter_schema_digest
@@ -50,6 +50,7 @@ from openadapt_flow.ir import (
     HaltObservation,
     IdentityCheck,
     Interstitial,
+    InterstitialActionResult,
     LoopSpec,
     Point,
     PostconditionKind,
@@ -292,11 +293,11 @@ class Replayer:
             closed when the injected vision cannot report settledness.
         settle_readiness_timeout_s: Single bounded settle window for the
             readiness gate (seconds) before it HALTs.
-        interstitials: Operator-supplied KNOWN interstitials (survey modal,
-            "What's New" notice, cookie banner) detected model-free at each
-            step's entry and auto-dismissed or halted-on gracefully. Merged with
-            the bundle's own ``Workflow.interstitials``. None (default) => no
-            interstitial handling.
+        interstitials: Operator-supplied KNOWN reversible, non-consequential
+            interstitials detected model-free at each step's entry. Each
+            dismissal is audited and must pass its declared visual clearance;
+            otherwise replay halts. Merged with the bundle's own
+            ``Workflow.interstitials``. None (default) => no handling.
     """
 
     def __init__(
@@ -452,11 +453,11 @@ class Replayer:
         # it in an outer retry loop, avoiding unaccounted blind retries.
         self.settle_readiness_timeout_s = settle_readiness_timeout_s
         # Operator-supplied KNOWN interstitials, merged with the bundle's own
-        # (Workflow.interstitials) at each step's entry. None/empty (default) =>
-        # no interstitial handling, behavior unchanged.
+        # at each step's entry. The IR validator only admits automatic actions
+        # declared reversible + non-consequential with visual clearance, and
+        # the governed runtime-input digest binds the full declaration.
+        # None/empty (default) => no interstitial handling, behavior unchanged.
         self._interstitials: list[Interstitial] = list(interstitials or [])
-        # Bounded dismissal attempts before a persistent interstitial HALTs.
-        self._max_interstitial_dismissals = 3
 
     # -- public API ----------------------------------------------------------
 
@@ -2369,7 +2370,12 @@ class Replayer:
             # acting. Both are model-free. A SCROLL step's wait_until is
             # consumed by its own closed loop (see _act_scroll), not here.
             proceed, gate_error, before_png = self._apply_step_gates(
-                step, before_png, bundle_dir, params, workflow
+                step,
+                before_png,
+                bundle_dir,
+                params,
+                result,
+                workflow,
             )
             if before_png is not last_frame:
                 result.before_png = self._save_step_png(
@@ -3305,15 +3311,16 @@ class Replayer:
         before_png: bytes,
         bundle_dir: Path,
         params: dict[str, str],
+        audit_events: list[InterstitialActionResult],
         workflow: Optional[Workflow],
     ) -> tuple[bytes, Optional[str]]:
         """Detect + handle KNOWN interstitials on the entry frame (model-free).
 
-        A detected interstitial with a dismissal (``dismiss_key`` /
-        ``dismiss_anchor``) is dismissed and the frame re-settled, up to a
-        bounded number of attempts; a detected interstitial with NO dismissal,
-        or one that persists after the attempts, HALTs the run GRACEFULLY naming
-        it (a clear report, never a blind "target not found"). Returns
+        A detected interstitial with an explicitly reversible,
+        non-consequential dismissal (``dismiss_key`` / ``dismiss_anchor``) gets
+        one audited action followed by its declared visual clearance check. A
+        delivery/clearance failure, persistent detection, or a detected
+        interstitial with NO dismissal HALTs the run GRACEFULLY naming it. Returns
         ``(frame, None)`` when the screen is clear, else ``(frame, halt_reason)``.
 
         Unknown / undeclared overlays are NOT guessed at here: one that covers
@@ -3328,7 +3335,24 @@ class Replayer:
         if not interstitials:
             return before_png, None
 
-        attempts = [0] * len(interstitials)
+        # Revalidate serialized values at the point of use. Pydantic validates
+        # construction/load, but models are intentionally mutable; an in-memory
+        # edit or model_construct must not bypass affirmative detection, visual
+        # clearance, Escape-only, or reversible/non-consequential policy.
+        validated: list[Interstitial] = []
+        for candidate in interstitials:
+            try:
+                validated.append(
+                    Interstitial.model_validate(candidate.model_dump(mode="python"))
+                )
+            except Exception as exc:
+                return before_png, (
+                    f"Interstitial '{candidate.name}' has an invalid automatic "
+                    f"dismissal declaration ({type(exc).__name__}) - refusing "
+                    "to emit an action; run aborted."
+                )
+        interstitials = validated
+
         while True:
             active_index = next(
                 (
@@ -3355,15 +3379,26 @@ class Replayer:
                     "automatic dismissal - refusing to act beneath it; run "
                     "aborted (handle it, then re-run)."
                 )
-            if attempts[active_index] >= self._max_interstitial_dismissals:
-                # Detected again after the bounded number of dismissals.
+            if (
+                it.risk != "reversible"
+                or it.consequential is not False
+                or it.clearance is None
+                or (it.dismiss_key is not None and it.dismiss_key != "Escape")
+            ):
+                # Defensive runtime check in addition to Pydantic validation:
+                # model_construct/in-memory mutation must never turn this into
+                # an ungoverned consequential or unverifiable action.
                 return before_png, (
-                    f"Interstitial '{it.name}' persisted after "
-                    f"{self._max_interstitial_dismissals} dismissal attempt(s) - "
-                    "refusing to act beneath it; run aborted."
+                    f"Interstitial '{it.name}' does not declare an automatic "
+                    "dismissal that is reversible, non-consequential, and "
+                    "visually verifiable - refusing to emit an action; run "
+                    "aborted."
                 )
+
+            resolution: Optional[Resolution] = None
+            action: Literal["key", "click"]
             if it.dismiss_key is not None:
-                self.backend.press(it.dismiss_key)
+                action = "key"
             else:
                 assert it.dismiss_anchor is not None
                 template_png = self._asset_bytes(
@@ -3390,11 +3425,83 @@ class Replayer:
                         "aborted."
                     )
                 resolution, _region = res
-                self.backend.click(int(resolution.point[0]), int(resolution.point[1]))
-            attempts[active_index] += 1
+                action = "click"
+
+            # Append BEFORE delivery: a backend exception can never create an
+            # unreported key/click attempt. The event carries the exact admitted
+            # policy and expected visual outcome.
+            event = InterstitialActionResult(
+                interstitial=it.name,
+                action=action,
+                key=it.dismiss_key,
+                expected_clearance=it.clearance,
+                resolution=resolution,
+                before_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+            )
+            audit_events.append(event)
+            try:
+                if it.dismiss_key is not None:
+                    self.backend.press(it.dismiss_key)
+                else:
+                    assert resolution is not None
+                    self.backend.click(
+                        int(resolution.point[0]), int(resolution.point[1])
+                    )
+                event.delivered = True
+            except Exception as exc:
+                event.error = (
+                    "dismissal delivery failed "
+                    f"({type(exc).__name__}); outcome is unknown"
+                )
+                return before_png, (
+                    f"Interstitial '{it.name}' dismissal delivery failed "
+                    f"({type(exc).__name__}) - refusing to act beneath it; run "
+                    "aborted."
+                )
+
             before_png, settle_error = self._resettle_after_interstitial(before_png)
+            event.after_frame_sha256 = hashlib.sha256(before_png).hexdigest()
             if settle_error is not None:
+                event.error = settle_error
                 return before_png, settle_error
+
+            clearance_holds = self._predicate_holds(
+                it.clearance,
+                before_png,
+                bundle_dir,
+                params,
+                workflow=workflow,
+            )
+            if self._governed_asset_mutation is not None:
+                event.clearance_ok = False
+                event.error = self._governed_asset_mutation
+                return before_png, self._governed_asset_mutation
+            still_detected = False
+            if clearance_holds:
+                still_detected = self._predicate_holds(
+                    it.detect,
+                    before_png,
+                    bundle_dir,
+                    params,
+                    workflow=workflow,
+                )
+                if self._governed_asset_mutation is not None:
+                    event.clearance_ok = False
+                    event.error = self._governed_asset_mutation
+                    return before_png, self._governed_asset_mutation
+            event.clearance_ok = clearance_holds and not still_detected
+            event.ok = event.delivered and event.clearance_ok
+            if not event.ok:
+                event.error = (
+                    "declared visual clearance did not hold"
+                    if not clearance_holds
+                    else "interstitial remained detected after dismissal"
+                )
+                return before_png, (
+                    f"Interstitial '{it.name}' did not satisfy its declared "
+                    "visual clearance after one dismissal - refusing a blind "
+                    "retry or action beneath it; run aborted."
+                )
 
     # -- Workflow-program IR gates: guard + wait_until --------------------------
 
@@ -3404,6 +3511,7 @@ class Replayer:
         before_png: bytes,
         bundle_dir: Path,
         params: dict[str, str],
+        result: StepResult,
         workflow: Optional[Workflow] = None,
     ) -> tuple[bool, Optional[str], bytes]:
         """Evaluate readiness, interstitials, guard, then wait_until before acting.
@@ -3412,8 +3520,9 @@ class Replayer:
 
         1. **readiness** (``require_settled``) - refuse to act on a frame that
            never settled (still-loading / mid-transition); HALT gracefully.
-        2. **interstitials** - a KNOWN overlay (survey modal, cookie banner) on
-           the entry frame is auto-dismissed (then re-settled) or HALTed on.
+        2. **interstitials** - a KNOWN reversible, non-consequential overlay on
+           the entry frame gets one audited dismissal plus declared clearance
+           verification, or HALTs before the workflow action.
         3. **guard** (precondition) on the entry frame - unmet HALTs (default)
            or SKIPs (``on_unmet="skip"``).
         4. **wait_until** (readiness predicate) - polled, bounded, HALT on
@@ -3439,9 +3548,13 @@ class Replayer:
 
         # (2) Interstitials: dismiss a KNOWN overlay, or HALT gracefully.
         before_png, interstitial_error = self._handle_interstitials(
-            before_png, bundle_dir, params, workflow
+            before_png, bundle_dir, params, result.interstitial_actions, workflow
         )
         if interstitial_error is not None:
+            # An interstitial refusal is a state-safety halt, not an ordinary
+            # workflow exception a program on_exception edge may turn into a
+            # successful outcome after an uncertain/blocked pre-action state.
+            result.safety_halt = True
             return False, interstitial_error, before_png
 
         # Guard (precondition) on the entry frame.

@@ -8,9 +8,9 @@ model-free defenses, all added around the unchanged hardened action leaf:
   "wait_settled proceeds on stale frames" bug);
 * the replayer's opt-in ``require_settled`` readiness gate HALTs gracefully on a
   screen that never settles (a slow load), rather than acting on it;
-* a KNOWN interstitial (survey modal, "What's New" notice, cookie banner) at a
-  step's entry is auto-dismissed (then re-settled) or HALTed on gracefully with
-  a clear report, never a blind wrong action.
+* a KNOWN reversible, non-consequential interstitial at a step's entry is
+  dismissed through an audited action, then re-settled and checked against an
+  explicit visual clearance postcondition; anything else HALTs before the step.
 
 Backend and vision are faked (reused from test_replayer) -- no Playwright, no
 OCR stack, ZERO model calls.
@@ -24,10 +24,16 @@ import pytest
 from PIL import Image
 
 from openadapt_flow.ir import (
+    ActionKind,
     Anchor,
     Interstitial,
     Predicate,
     PredicateKind,
+    ProgramGraph,
+    RunReport,
+    State,
+    StateKind,
+    Transition,
     Workflow,
 )
 from openadapt_flow.runtime.replayer import Replayer
@@ -230,6 +236,10 @@ def _present_then_absent(match: Match) -> list:
     return [match, None]
 
 
+def _cleared(text: str) -> Predicate:
+    return Predicate(kind=PredicateKind.TEXT_ABSENT, text=text)
+
+
 def test_known_interstitial_dismissed_by_key_then_step_runs(bundle, run_dir):
     vision = FakeVision()
     vision.text_results = {
@@ -245,6 +255,9 @@ def test_known_interstitial_dismissed_by_key_then_step_runs(bundle, run_dir):
                 name="satisfaction survey",
                 detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="rate us"),
                 dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("rate us"),
             )
         ],
     )
@@ -255,6 +268,19 @@ def test_known_interstitial_dismissed_by_key_then_step_runs(bundle, run_dir):
     # The overlay was dismissed BEFORE the target click.
     assert backend.actions[0] == ("press", "Escape")
     assert ("click", 110, 105, False) in backend.actions
+    dismissal = report.results[0].interstitial_actions[0]
+    assert dismissal.action == "key"
+    assert dismissal.key == "Escape"
+    assert dismissal.risk == "reversible"
+    assert dismissal.consequential is False
+    assert dismissal.attempted is True
+    assert dismissal.delivered is True
+    assert dismissal.clearance_ok is True
+    assert dismissal.ok is True
+    saved = RunReport.model_validate_json((run_dir / "report.json").read_text())
+    saved_dismissal = saved.results[0].interstitial_actions[0]
+    assert saved_dismissal == dismissal
+    assert saved_dismissal.expected_clearance.kind == PredicateKind.TEXT_ABSENT
 
 
 def test_known_interstitial_dismissed_by_anchor_click(bundle, run_dir):
@@ -279,8 +305,11 @@ def test_known_interstitial_dismissed_by_anchor_click(bundle, run_dir):
                     template="templates/btn.png",
                     region=(190, 10, 30, 20),
                     click_point=(200, 20),
-                    ocr_text="Continue",
+                    ocr_text="Close",
                 ),
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("What's New"),
             )
         ],
     )
@@ -290,6 +319,12 @@ def test_known_interstitial_dismissed_by_anchor_click(bundle, run_dir):
     assert report.success is True
     assert backend.actions[0] == ("click", 200, 20, False)  # dismiss first
     assert ("click", 110, 105, False) in backend.actions  # then the target
+    dismissal = report.results[0].interstitial_actions[0]
+    assert dismissal.action == "click"
+    assert dismissal.resolution is not None
+    assert dismissal.delivered is True
+    assert dismissal.clearance_ok is True
+    assert dismissal.ok is True
 
 
 def test_interstitial_resettle_failure_halts_before_underlying_step(bundle, run_dir):
@@ -308,6 +343,9 @@ def test_interstitial_resettle_failure_halts_before_underlying_step(bundle, run_
                 name="satisfaction survey",
                 detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="rate us"),
                 dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("rate us"),
             )
         ],
     )
@@ -324,6 +362,11 @@ def test_interstitial_resettle_failure_halts_before_underlying_step(bundle, run_
     assert "starting state not ready" in report.results[0].error
     assert backend.actions == [("press", "Escape")]
     assert vision.result_calls == 2
+    dismissal = report.results[0].interstitial_actions[0]
+    assert dismissal.delivered is True
+    assert dismissal.clearance_ok is None
+    assert dismissal.ok is False
+    assert dismissal.error is not None
 
 
 def test_blocking_interstitial_with_no_dismissal_halts_gracefully(bundle, run_dir):
@@ -352,9 +395,61 @@ def test_blocking_interstitial_with_no_dismissal_halts_gracefully(bundle, run_di
     assert backend.actions == []  # never clicked beneath the overlay
 
 
-def test_interstitial_that_persists_halts_after_bounded_attempts(bundle, run_dir):
-    """An interstitial that keeps re-appearing despite dismissal HALTs (safe
-    direction) rather than looping forever or acting beneath it."""
+def test_program_exception_handler_cannot_bypass_interstitial_halt(bundle, run_dir):
+    step = click_step()
+    program = ProgramGraph(
+        entry="open",
+        states={
+            "open": State(
+                id="open",
+                kind=StateKind.ACTION,
+                step=step,
+                transitions=[Transition(target="done")],
+                on_exception="recover",
+            ),
+            "recover": State(
+                id="recover",
+                kind=StateKind.ACTION,
+                step=step.model_copy(
+                    update={
+                        "id": "recover",
+                        "action": ActionKind.KEY,
+                        "key": "R",
+                        "anchor": None,
+                    }
+                ),
+                transitions=[Transition(target="done")],
+            ),
+            "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+        },
+    )
+    workflow = Workflow(
+        name="program",
+        program=program,
+        interstitials=[
+            Interstitial(
+                name="maintenance notice",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="maintenance"),
+            )
+        ],
+    )
+    vision = FakeVision()
+    vision.text_results = {"maintenance": Match((10, 10), (0, 0, 5, 5))}
+    backend = FakeBackend()
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.005).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].safety_halt is True
+    assert report.results[0].exception_handled is False
+
+
+def test_interstitial_failed_clearance_halts_without_blind_retry(bundle, run_dir):
+    """A dismissal whose declared clearance fails emits exactly one audited
+    action, then HALTs rather than retrying or acting beneath the overlay."""
     vision = FakeVision()
     # Always present (never absent): dismissal never clears it.
     vision.text_results = {"stuck": Match((10, 10), (0, 0, 5, 5))}
@@ -367,6 +462,9 @@ def test_interstitial_that_persists_halts_after_bounded_attempts(bundle, run_dir
                 name="stuck modal",
                 detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="stuck"),
                 dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("stuck"),
             )
         ],
     )
@@ -374,9 +472,13 @@ def test_interstitial_that_persists_halts_after_bounded_attempts(bundle, run_dir
         wf, bundle_dir=bundle, run_dir=run_dir
     )
     assert report.success is False
-    assert "persisted" in report.results[0].error
-    assert backend.actions.count(("press", "Escape")) == 3  # bounded attempts
+    assert "declared visual clearance" in report.results[0].error
+    assert backend.actions.count(("press", "Escape")) == 1  # no blind retries
     assert not any(a[0] == "click" for a in backend.actions)
+    dismissal = report.results[0].interstitial_actions[0]
+    assert dismissal.delivered is True
+    assert dismissal.clearance_ok is False
+    assert dismissal.ok is False
 
 
 def test_operator_supplied_interstitial_applies_without_recompiling(bundle, run_dir):
@@ -384,7 +486,7 @@ def test_operator_supplied_interstitial_applies_without_recompiling(bundle, run_
     bundle's own (here the bundle declares none)."""
     vision = FakeVision()
     vision.text_results = {
-        "cookies": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
+        "release tip": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
     }
     vision.template_results = [Match((110, 105), (100, 100, 50, 20))]
     backend = FakeBackend()
@@ -395,14 +497,18 @@ def test_operator_supplied_interstitial_applies_without_recompiling(bundle, run_
         poll_interval_s=0.005,
         interstitials=[
             Interstitial(
-                name="cookie banner",
-                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="cookies"),
-                dismiss_key="Enter",
+                name="release tip",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release tip"),
+                dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("release tip"),
             )
         ],
     ).run(wf, bundle_dir=bundle, run_dir=run_dir)
     assert report.success is True
-    assert backend.actions[0] == ("press", "Enter")
+    assert backend.actions[0] == ("press", "Escape")
+    assert report.results[0].interstitial_actions[0].ok is True
 
 
 def test_no_interstitials_declared_is_byte_for_byte_unchanged(bundle, run_dir):
@@ -423,6 +529,9 @@ def test_interstitial_rejects_ambiguous_dismissal():
             name="ambiguous",
             detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="notice"),
             dismiss_key="Escape",
+            risk="reversible",
+            consequential=False,
+            clearance=_cleared("notice"),
             dismiss_anchor=Anchor(
                 template="templates/btn.png",
                 region=(0, 0, 10, 10),
@@ -437,7 +546,127 @@ def test_interstitial_rejects_nonvisual_or_negative_detection():
             name="blind",
             detect=Predicate(kind=PredicateKind.TEXT_ABSENT, text="notice"),
             dismiss_key="Escape",
+            risk="reversible",
+            consequential=False,
+            clearance=_cleared("notice"),
         )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"consequential": False}, "risk='reversible'"),
+        (
+            {"risk": "irreversible", "consequential": False},
+            "risk='reversible'",
+        ),
+        ({"risk": "reversible", "consequential": True}, "consequential=False"),
+        (
+            {
+                "risk": "reversible",
+                "consequential": False,
+                "clearance": None,
+            },
+            "clearance",
+        ),
+        (
+            {
+                "dismiss_key": "Enter",
+                "risk": "reversible",
+                "consequential": False,
+                "clearance": _cleared("notice"),
+            },
+            "only permits Escape",
+        ),
+        (
+            {
+                "risk": "reversible",
+                "consequential": False,
+                "clearance": Predicate(
+                    kind=PredicateKind.PARAM_EQUALS, param="state", value="closed"
+                ),
+            },
+            "visual postcondition",
+        ),
+    ],
+)
+def test_automatic_dismissal_requires_governed_nonconsequential_contract(
+    overrides,
+    error,
+):
+    kwargs = {
+        "name": "notice",
+        "detect": Predicate(kind=PredicateKind.TEXT_PRESENT, text="notice"),
+        "dismiss_key": "Escape",
+        "clearance": _cleared("notice"),
+        **overrides,
+    }
+    with pytest.raises(ValueError, match=error):
+        Interstitial(**kwargs)
+
+
+def test_dismissal_delivery_failure_is_still_audited(bundle, run_dir):
+    class FailingDismissBackend(FakeBackend):
+        def press(self, key):
+            self.actions.append(("press", key))
+            raise RuntimeError("delivery unavailable")
+
+    vision = FakeVision()
+    vision.text_results = {"release note": Match((10, 10), (0, 0, 5, 5))}
+    backend = FailingDismissBackend()
+    workflow = Workflow(
+        name="wf",
+        steps=[click_step()],
+        interstitials=[
+            Interstitial(
+                name="release note",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+                dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("release note"),
+            )
+        ],
+    )
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.005).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == [("press", "Escape")]
+    event = report.results[0].interstitial_actions[0]
+    assert event.attempted is True
+    assert event.delivered is False
+    assert event.clearance_ok is None
+    assert event.ok is False
+    assert "delivery failed" in (event.error or "")
+    assert "delivery failed" in (report.results[0].error or "")
+
+
+def test_in_memory_dismissal_policy_mutation_refuses_before_action(bundle, run_dir):
+    interstitial = Interstitial(
+        name="release note",
+        detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+        dismiss_key="Escape",
+        risk="reversible",
+        consequential=False,
+        clearance=_cleared("release note"),
+    )
+    vision = FakeVision()
+    vision.text_results = {"release note": Match((10, 10), (0, 0, 5, 5))}
+    backend = FakeBackend()
+    workflow = Workflow(name="wf", steps=[click_step()], interstitials=[interstitial])
+    workflow.interstitials[0].risk = "irreversible"
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.005).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].interstitial_actions == []
+    assert "refusing to emit an action" in (report.results[0].error or "")
 
 
 # -- IR round-trip ------------------------------------------------------------
@@ -452,6 +681,9 @@ def test_interstitials_round_trip_through_bundle(bundle):
                 name="survey",
                 detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="rate us"),
                 dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("rate us"),
             )
         ],
     )
@@ -461,4 +693,7 @@ def test_interstitials_round_trip_through_bundle(bundle):
     assert len(loaded.interstitials) == 1
     assert loaded.interstitials[0].name == "survey"
     assert loaded.interstitials[0].dismiss_key == "Escape"
+    assert loaded.interstitials[0].risk == "reversible"
+    assert loaded.interstitials[0].consequential is False
+    assert loaded.interstitials[0].clearance is not None
     assert loaded.interstitials[0].detect.kind == PredicateKind.TEXT_PRESENT

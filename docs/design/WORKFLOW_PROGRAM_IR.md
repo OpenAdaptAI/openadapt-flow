@@ -1,792 +1,724 @@
-# RFC — Workflow-Program IR: control flow, induction, capability-adaptive compilation
+# Workflow-program IR: control flow, effects, induction, capability-adaptive compilation
 
-**Status:** Draft (design only — no code changes in this PR)
-**Scope:** the biggest architectural change on the openadapt-flow roadmap:
-evolving the compiled artifact from a *linear action list* into a
-*parameterized workflow program* (a state machine with typed parameters,
-guards, loops, branches, effects, and exception handlers).
-**Audience:** integrator + maintainers deciding whether/when to build this,
-and in what order.
-**Non-goals of this PR:** shipping code, changing the frozen v0 IR
-(`DESIGN.md:13-15`), or calling any model API.
+**Status:** Implemented (bundle schema v2). This document specifies the IR that
+ships in `openadapt_flow/ir.py` and the runtime that interprets it, and it
+records the roadmap for the parts that still need a real customer workflow to
+finish.
 
----
+**Scope:** the compiled artifact and its execution model. A bundle is no longer
+only a linear action list. It is a parameterized workflow program: a state
+machine with typed parameters, guards, loops, branches, subflows, system-of-record
+effects, and exception handlers. Today's linear workflow is the degenerate case
+of that program, so old bundles keep running unchanged.
 
-## 0. TL;DR
+**Audience:** maintainers and integrators who need the precise shape and
+semantics of a bundle, and researchers deciding whether the IR is worth writing
+up.
 
-Today a compiled bundle is a **trajectory**: `Workflow` is a flat
-`list[Step]` (`openadapt_flow/ir.py:206-217`), each `Step` a single
-CLICK/DOUBLE_CLICK/TYPE/KEY/WAIT/SCROLL (`ir.py:31-37`, `ir.py:167-203`)
-carrying redundant *evidence* about one recorded moment (the `Anchor`,
-`ir.py:64-131`) and assertions about the *pixels that followed* (the
-`Postcondition`, `ir.py:150-164`). `compile_recording` turns **exactly one**
-recording into **exactly one** straight line of steps
-(`compiler/compile.py:716-1082`). `docs/LIMITS.md:686-703` states the
-consequence plainly under *"What a demonstration cannot express"*: **no
-conditionals, no loops, one window** — *"A workflow is a linear list of
-steps."*
-
-That is the correct v0. It is also the ceiling. Two external reviews and
-30 years of programming-by-demonstration (PBD) research converge on the same
-next step: **treat a demonstration as evidence, not specification, and
-compile it toward a *program* with control flow** — the artifact PBD has
-always been trying to recover.
-
-This RFC proposes, as a phased and reversible migration:
-
-1. A **Workflow-Program IR** — a parameterized state machine (states,
-   guarded transitions, actions, pre/postcondition *effects*, typed
-   parameters, loops over worklists, branches, subflows, `wait_until`
-   predicates, exception handlers, human-approval nodes, and per-step risk +
-   compensation). **Today's linear `Workflow` is the degenerate case** (one
-   entry state, unconditional fall-through, no loops) — so the migration is
-   backward-compatible.
-2. An **induction loop**: bootstrap one interpretation from one demo →
-   enumerate candidate generalizations → resolve ambiguity by *asking the
-   operator concrete multiple-choice questions* → fold in additional traces
-   → infer the shared control-flow graph → validate on held-out traces +
-   synthetic perturbations → **quarantine (refuse to emit) when intent stays
-   underdetermined**.
-3. **Capability-adaptive compilation**: one semantic transition compiles to
-   backend-specific implementations (API / DOM-UIA / vision-RDP), each
-   satisfying the *same contract* — separating *what* a step means from
-   *how* the current app permits it.
-4. A **tiered runtime**: deterministic fast path → bounded model recovery of
-   **one local transition** → durable pause/approve/resume from the last
-   verified checkpoint. Explicitly **not** "hand the rest of the workflow to
-   a free-form agent after a halt."
-
-The through-line: openadapt-flow already spent enormous effort making a
-*single trace* safe (the identity ladder, volatility mining, postconditions;
-see `docs/LIMITS.md`). That work is necessary but insufficient, because the
-trace itself under-specifies intent. The next unit of value is recovering the
-**intended program**.
+**History:** this began as a design RFC (PR #61) that proposed the IR before any
+code existed. Most of it is now built (PRs #61, #81, #188, and the effect and
+induction work that followed). This revision rewrites the document to describe
+what exists, marks the small remainder as roadmap, and adds a formal semantics
+section and a schema summary.
 
 ---
 
-## 1. Motivation, grounded: one demonstration is EVIDENCE, not SPECIFICATION
+## 1. Summary
 
-A recording is a sequence of observed input events plus before/after frames
-(`DESIGN.md:37-50`). The compiler already knows a demonstration
-*under-determines* what the operator meant — most of its 1000+ lines exist to
-guess which observed facts are invariant and which are incidental:
+A recording captures observed input events plus before-and-after frames. One
+recording underdetermines what the operator meant. Programming-by-demonstration
+(PBD) research spent decades on the same problem and reached one answer: treat a
+demonstration as evidence, not as a specification, and compile it toward a
+program with control flow. That program is the artifact PBD was always trying to
+recover.
 
-- **Which literal values are parameters vs. incidental.** The recorder tags
-  a typed value as a parameter only if the demo author declared it
-  (`meta.json` `params`, `DESIGN.md:43-47`); the compiler then works hard to
-  *strip* those values from every assertion so they don't ossify into the
-  bundle (`compiler/compile.py:786-791`, the `exclude_texts` machinery, and
-  the `lint_param_leakage` build-failure gate, `compile.py:617-661`). But
-  the *inverse* problem — *"was this un-tagged value actually a parameter the
-  author forgot to mark?"* — is not addressed at all. The demo shows `note =
-  "Follow-up in 2 weeks"`; nothing in one trace says whether the *patient*,
-  the *encounter type*, or the *priority filter* were meant to be fixed or
-  free. `docs/LIMITS.md:495-516` documents the downstream pain: a
-  parameterized *patient* degrades to position-clicking because the anchor
-  was recorded on one entity.
+The IR encodes that program directly:
 
-- **What is incidental.** Volatility mining (`compiler/compile.py:98-121`,
-  `openadapt_flow/volatility.py`) is an entire subsystem devoted to deciding
-  which *observed screen text* is incidental (clocks, counters, near-dates)
-  vs. invariant (a DOB) — because one frame cannot tell you. It is a
-  heuristic proxy for a question only multiple traces or the operator can
-  answer.
+1. A **workflow program**: states, guarded transitions, an action leaf per
+   action state, typed parameters, loops over worklists, branches, subflows,
+   `wait_until` predicates, exception handlers, and per-action risk. A linear
+   `Workflow` is the degenerate program (one entry state, unconditional
+   fall-through, no loops), so the model is backward compatible.
+2. **Typed effects** verified against a system of record, not the screen. A
+   vision postcondition asks whether the pixels look like a save happened. An
+   effect asks whether the intended record is actually present, exactly once,
+   with the right field values.
+3. **Capability-adaptive actuation**: one semantic action carries an optional API
+   binding and a structural locator, so it can run as a deterministic API call,
+   a structural DOM or accessibility action, or the visual resolution ladder,
+   each satisfying the same contract.
+4. **An induction pipeline** that turns one or more demonstrations into a
+   validated program or an honest refusal, with all model use confined to
+   compile time.
 
-- **Absent-result handling.** A single successful trace never shows the
-  *failure* branch. `docs/LIMITS.md:36-43` ("steps with no visual and no
-  structural effect assert nothing") and the transactional-fault study
-  (`LIMITS.md:64-76`: 5 of 7 write-fault classes silently mishandled) are
-  both symptoms of the same gap — the demo shows what *did* happen, not what
-  *should* happen when the result is absent or wrong.
+The runtime that walks this IR makes zero model calls on the healthy path and
+costs nothing per run. Control flow is added around the hardened action leaf; it
+does not replace it.
 
-- **Loops over worklists.** `docs/LIMITS.md:689-691`: *"If the search
-  returns two results… data-dependent pagination has no recorded step to
-  reach it."* A demo of clearing **one** referral task from a queue of
-  fifteen does not, by itself, say "repeat for every open task." The
-  worklist iteration is invisible in a straight-line trace.
+---
 
-- **Essential vs. incidental ordering.** The trace imposes a *total* order;
-  the intent is usually a *partial* order (fill three independent fields in
-  any order, but Save last). Nothing in the IR distinguishes them.
+## 2. Why one demonstration underdetermines intent
 
-- **Branches and expected-vs-exceptional popups.** MockMed's `modal` drift
-  (`DESIGN.md:229-230`) is treated purely as *semantic drift → halt*
-  (`DESIGN.md:200-202`). But a survey modal that *sometimes* appears after
-  Save is not drift — it is a **conditional branch** the operator handles
-  ("dismiss it and continue"). One trace cannot distinguish "this popup is an
-  error" from "this popup is a normal-but-optional step."
+The compiler already knows a single trace is ambiguous. Most of its work exists
+to guess which observed facts are invariant and which are incidental.
+
+- **Which literals are parameters.** The recorder tags a typed value as a
+  parameter only when the demo author marks it. The compiler then strips those
+  values from every assertion so they do not ossify into the bundle (the
+  `exclude_texts` machinery and the `lint_param_leakage` build gate). The inverse
+  question, "was this untagged value actually a parameter the author forgot to
+  mark," is not answerable from one trace. The demo shows `note = "Follow-up in
+  2 weeks"`; nothing in one run says whether the patient, the encounter type, or
+  a priority filter was meant to be fixed or free.
+- **What is incidental.** Volatility mining (`openadapt_flow/volatility.py`)
+  exists to decide which observed screen text is incidental (clocks, counters,
+  near-dates) versus invariant (a date of birth), because one frame cannot tell
+  you. It is a heuristic proxy for a question that only multiple traces or the
+  operator can answer.
+- **Absent results.** A successful trace never shows the failure branch. The
+  transactional-fault study found 5 of 7 write-fault classes silently mishandled
+  (`docs/LIMITS.md`). The demo shows what did happen, not what should happen when
+  the result is absent or wrong.
+- **Loops over worklists.** A demo that clears one referral from a queue of
+  fifteen does not, by itself, say "repeat for every open task." The iteration is
+  invisible in a straight line.
+- **Essential versus incidental order.** A trace imposes a total order. The
+  intent is usually a partial order: fill three independent fields in any order,
+  but save last.
+- **Expected versus exceptional popups.** A survey modal that sometimes appears
+  after Save is not drift. It is a conditional branch the operator handles. One
+  trace cannot tell an error popup apart from a normal optional step.
 
 ### The lineage: recover the program, not the trajectory
 
-This is not a novel observation; it is the founding premise of
-programming-by-demonstration, and the field's arc is precisely
-*trajectory → program*:
+This is the founding premise of programming-by-demonstration, and the field's
+arc is trajectory to program.
 
-- **Straight-line record-and-replay (Ringer et al.).** Robust low-level
-  replay of a single recorded trace — exactly openadapt-flow's current
-  altitude (resolve the recorded target on a drifted page, replay the
-  recorded action). Crucially, in the web-automation lineage Ringer-style
-  straight-line replay was **the input to a generalizer, not the end
-  product.**
+- **Straight-line record-and-replay (Ringer et al.).** Reliable low-level replay
+  of one recorded trace, which is where openadapt-flow's action leaf sits. In the
+  web-automation lineage, straight-line replay was the input to a generalizer,
+  not the end product.
+- **Rousillon / Helena (Chasins et al.).** Generalized straight-line replay into
+  loops over relational data: demonstrate scraping one row, induce "for every
+  row, for every page."
+- **WebRobot (PLDI 2022).** Synthesizes loopy programs from a demonstrated action
+  sequence by proposing a loop body consistent with the prefix and validating it
+  against continued demonstration.
+- **PROLEX.** Recovered the operator's intended program from a single
+  demonstration in 81% of solved cases, which is evidence that one-demo-to-program
+  is tractable when paired with disambiguation.
+- **Skill-DisCo.** Compiles parameterized finite-state-machine subgraphs from
+  multiple traces, with typed parameters, pre and postconditions, and side
+  effects. That is close to the target IR of section 5, learned from a small set
+  of traces.
+- **Agent Workflow Memory / Agent Skill Induction.** Induce reusable branching
+  skills from experience and reuse them as higher-level actions, which is the
+  case for emitting skills and MCP tools as parameterized programs rather than
+  fixed replays.
 
-- **Rousillon / Helena (Chasins et al.).** Took straight-line replay and
-  **generalized it into loops over relational data** — the operator
-  demonstrates scraping one row; the system induces "for every row, for
-  every page." The demonstration is evidence; the *relation* (the worklist)
-  is inferred.
-
-- **WebRobot (PLDI 2022).** Synthesizes **loopy programs** from a demonstrated
-  action sequence via speculative program synthesis — it *proposes* a loop
-  body consistent with the prefix and validates it against continued
-  demonstration. Directly relevant: the target artifact contains loops the
-  demo only *sampled*.
-
-- **PROLEX.** Recovered the operator's **intended program from a single
-  demonstration in 81% of solved cases** — strong evidence that
-  one-demo→program is tractable *when paired with disambiguation*, which is
-  exactly the induction loop in §3.
-
-- **Skill-DisCo.** Compiles **parameterized finite-state-machine subgraphs
-  from multiple traces**, with **typed parameters, pre/postconditions, and
-  side-effects** — essentially the target IR of §2, learned from a small set
-  of traces rather than one.
-
-- **Agent Workflow Memory (AWM) / Agent Skill Induction (ASI).** Induce
-  **reusable, branching skills** from experience and reuse them as
-  higher-level actions — the "subflows / reusable components" of §2, and the
-  justification for emitting skills/MCP tools (`emit/skill.py`,
-  `emit/mcp_tool.py`) as *parameterized programs* rather than fixed replays.
-
-**The target artifact is a program, not a trajectory.** openadapt-flow has
-built an unusually strong *straight-line replayer with a safety net*. The
-research consensus is that the straight line is step one; the value is in the
-generalizer that turns it into a program.
+The action leaf is an unusually strong straight-line replayer with a safety net.
+The research consensus is that the straight line is step one and the value is in
+the generalizer that turns it into a program.
 
 ---
 
-## 2. The target IR / DSL: a parameterized workflow program
+## 3. The action leaf (unchanged, hardened)
 
-### 2.1 Design constraints (inherited, non-negotiable)
+The program IR sits above the existing action machinery. A `Step` is still the
+unit of action, and its fields are unchanged.
 
-1. **Backward compatible.** A v1 linear `Workflow` must load and run
-   unchanged. The frozen-contract policy (`DESIGN.md:13-15`, additive-only,
-   integrator-owned) is respected by making the program IR a **superset**:
-   `schema_version` bumps, and a v1 workflow is mechanically liftable to the
-   degenerate program (§2.5).
-2. **Vision-only actuation stays a leaf.** The `Backend` protocol
-   (`backend.py:98-122`) — screenshot in, clicks/keys out — is *the actuator*
-   and does not change. The program IR sits **above** the current
-   `Step`/`Anchor`/resolution-ladder machinery; the visual ladder becomes the
-   implementation of one leaf actuator (§4, §6).
-3. **Every consequential node keeps its safety metadata.** `risk`
-   (`ir.py:178`), `identity_armed` (`ir.py:187-195`), and the identity ladder
-   (`docs/LIMITS.md:113-235`) are properties of an *action node* in the new
-   IR exactly as they are of a `Step` today. Nothing in the dangerous list
-   (`LIMITS.md:12-76`) is regressed; control flow is *added around* the
-   existing hardened leaf.
+- `ActionKind`: `click`, `double_click`, `type`, `key`, `wait`, `scroll`.
+- `Anchor`: redundant evidence for locating a target, consumed by the resolution
+  ladder in descending order of fidelity: a structural locator (DOM selector or
+  role plus name, or a Windows UIA `AutomationId`), then a local template match,
+  a global template match, an OCR text anchor, landmark geometry, and an optional
+  grounding model as the last rung.
+- Identity evidence rides on the anchor: `context_text` (an OCR band), a
+  `structured_identity` string, a PHI-free `IdentityTemplate` (salted-hash and
+  shape, no plaintext name, date of birth, or MRN in the artifact), and an
+  optional `identifier_crop` for the pixel-compare identity tier on pixel-only
+  substrates.
+- Safety metadata on the step: `risk` (`reversible` or `irreversible`),
+  `identity_armed`, `identity_unarmed_reason`, and `identifier_crop_missing_reason`
+  record and audit the identity gate coverage before a run.
 
-### 2.2 Schema (proposed; illustrative Pydantic-style shapes)
+Nothing in the state machine changes the action leaf. It adds control flow around
+it. A structurally-resolved target still flows through the same click path, so
+the pre-click identity gate and the irreversible-risk gate still fire.
 
-The program is a directed graph of **states**; edges are **guarded
-transitions**; a state's body is an **action** (or a subflow call). Effects
-declare pre/postconditions as *typed contracts*, not pixel assertions.
+---
+
+## 4. Typed parameters, predicates, guards, effects
+
+These are the Phase 1 pieces. Each is additive: a bundle that declares none of
+them loads and replays exactly as a v0 bundle.
+
+### 4.1 Typed parameters
+
+`Workflow.param_specs` is a map of name to `ParamSpec`, alongside the frozen
+`Workflow.params` dict. A `ParamSpec` carries a `type` (`ParamKind`), the recorded
+demo value in `example` (which doubles as the replay default), `required`, and
+`choices` for an enum.
+
+`ParamKind` is `string`, `date`, `enum`, `number`, or `entity_ref`. An
+`entity_ref` names an entity to be re-resolved by the identity ladder at run time,
+not a literal to substitute. It is the typed form of the "which patient" fix: the
+parameter selects a record by identity rather than by a recorded pixel position.
+Phase 1 stores the type for validation and emit; run-time re-resolution of an
+`entity_ref` inside a loop is described in section 5.3.
+
+### 4.2 Predicates
+
+A `Predicate` is a deterministic condition over the current frame and run
+parameters. It is evaluated with zero model calls, and an unknown kind fails safe
+(does not hold). `PredicateKind`:
+
+| Kind | Meaning |
+|------|---------|
+| `anchor_resolves` | the embedded `anchor` resolves on the current frame via the model-free ladder (the closed-loop scroll stop condition, now first-class) |
+| `text_present` | `text` is present on the current frame (tolerant OCR presence check) |
+| `text_absent` | `text` is not present on the current frame |
+| `param_equals` | the run's value for `param` equals `value` (string compare) |
+| `and` / `or` / `not` | boolean composition over `operands` |
+
+A predicate is used two ways: as a `Step.wait_until` readiness predicate that the
+replayer polls (bounded by `timeout_s`, halting on timeout, never proceeding
+anyway), and as the condition inside a guard.
+
+### 4.3 Guards
+
+A `Guard` is a precondition on a step. Its `predicate` is evaluated on the step's
+entry frame. When it does not hold, `on_unmet` decides: `halt` (the default, the
+safe direction for an unmet precondition) stops the run naming the step, and
+`skip` makes the step a no-op success. `skip` is the expected-but-optional case:
+dismiss a survey modal only when it appeared. Full multi-way branching is the
+state machine in section 5.
+
+### 4.4 Effects (system of record)
+
+`Step.effects` is a list of typed `Effect` contracts verified against the real
+system of record after the action runs, not against the screen. This closes the
+transactional gap the vision postconditions are blind to. Verification is done by
+the run's configured `EffectVerifier`; a non-confirmed verdict halts the run. The
+design and substrates are specified in `docs/design/EFFECT_VERIFIER.md`.
+
+`EffectKind` today is `record_written` and `field_equals`:
+
+- `record_written`: a record matching the `match` selector must exist exactly
+  `expected_count` times (default once). This catches missing, phantom,
+  duplicate, and double-click writes. Options tighten it: `count_new_only` counts
+  only records new relative to a pre-action snapshot, `idempotency_key` collapses
+  a retried submission to one record, and `forbid_collateral_loss` refutes when a
+  concurrent actor's row silently vanished (a lost update).
+- `field_equals`: the matched record must carry `field == value`, a read-back
+  that catches a partial save that persists the row but drops a field.
+
+Each selector value and each `value` is a `ValueExpr`: a static `literal` or a
+run `param` reference. A parameterized workflow therefore verifies the record it
+actually wrote this run, not the record baked in at demonstration time. A v1
+bundle's bare string is coerced to `ValueExpr(literal=...)` and behaves
+identically.
+
+Two mining outputs make effects usable without an API. A `ReadbackSpec` records
+an on-screen read-back oracle mined from the demonstration; its `different_path`
+variant re-opens the record by an independent navigation before reading, which
+defeats the "the form still shows what I typed but nothing persisted" phantom
+save and is safe enough to be the default oracle. When the compiler cannot derive
+a real binding it emits a placeholder effect with `needs_operator_confirmation`
+set, and the runtime treats a placeholder as fail-safe (halt) until an operator
+completes the binding rather than trusting a fabricated endpoint.
+
+### 4.5 API binding
+
+`Step.api_binding` is an optional `ApiBinding`: a declarative description of the
+API call that performs the step's write without the GUI. When a step carries a
+binding and the run configures an `ApiActuator`, the runtime performs the write by
+calling the API deterministically (zero cost, zero model calls), confirms it with
+the same `EffectVerifier` that gates a GUI write, and skips the GUI resolve and
+act for that step. The binding is REST/JSON first but shaped so a FHIR, MCP, or
+tool call fits the same model (`kind` selects the substrate). It is additive: a
+bundle with no binding, or a binding with no actuator configured, actuates through
+the GUI ladder exactly as before. The API tier is an optimization whose safe
+fallback is the GUI, never a gate that can block a runnable step.
+
+---
+
+## 5. The state machine
+
+These are the Phase 2 pieces: the control flow a linear list cannot express. They
+are built additively on the Phase 1 parts. A state's action is a Phase 1 `Step`, a
+transition's guard is a Phase 1 `Predicate`, and a branch reuses the same
+model-free predicate evaluation. `Workflow.program` is optional: when it is `None`
+the runtime executes the linear `steps` loop, and a linear bundle lifts
+mechanically to the degenerate single-path graph.
+
+### 5.1 States
+
+`StateKind` and its payload:
+
+| Kind | Payload | Behavior |
+|------|---------|----------|
+| `action` | `step: Step` | perform the hardened action leaf, then take a transition |
+| `branch` | (none) | perform no action; pick an outgoing edge by guard |
+| `loop` | `loop: LoopSpec` | iterate a worklist, running a body subflow per row |
+| `subflow_call` | `subflow: str` | invoke a reusable named subflow, then continue |
+| `terminal` | `outcome`, `reason` | end this (sub)graph |
+
+A `State` also carries `transitions` (outgoing edges) and `on_exception` (a local
+handler; a failed action routes there instead of aborting the whole run). A
+terminal's `outcome` is `success` (complete normally; a subflow returns to its
+caller), `halt`, or `escalate` (both stop the entire run with `success=False`).
+
+### 5.2 Transitions
+
+A `Transition` is a guarded edge to a `target` state, with an optional
+human-readable `label`. Its `guard` is a `Predicate`, or `None` for an
+unconditional edge (the `TRUE` edge, and the only edge a degenerate linear program
+has). A state's transitions are evaluated in order and the first whose guard holds
+wins. Multiple non-`None` guards make a multi-way branch.
+
+### 5.3 Relations and loops
+
+A `Relation` is a worklist a `loop` iterates: a `name`, a variable-length list of
+`rows` (each a map of param name to value), and a `description`. Rows may be
+inlined in `Workflow.data_sources` (the authored or compiled case) or supplied at
+run time (`Replayer.run(worklists=...)`) for a genuinely data-dependent queue.
+
+A `LoopSpec` binds a `relation` and a `body` subflow that runs once per row, the
+row's fields merged into the run params for that iteration. A zero-row worklist
+runs the body zero times. Iteration is bounded by `max_iterations` (default 1000):
+a worklist longer than the bound halts fail-safe, never running unbounded. When
+the loop variable is an `entity_ref` param, it re-resolves through the identity
+ladder each pass, so iteration N acts on the right row rather than a recorded
+pixel position.
+
+### 5.4 Program graph and the degenerate lift
+
+A `ProgramGraph` is a directed graph of states with a single `entry`, used both as
+the top-level program (`Workflow.program`) and as a reusable subflow
+(`Workflow.subflows[name]` or a loop body).
+
+`lift_to_program(workflow)` mechanically lifts a linear `Workflow` to the
+degenerate straight-line graph: each `Step[i]` becomes an `action` state with a
+single unconditional transition to `Step[i+1]`, ending in a `success` terminal.
+The graph interpreter over this lift replays byte-for-byte identically to the
+linear replayer. That equivalence is what makes the whole migration reversible:
+every v0 bundle is a valid program with an empty control-flow layer.
+
+---
+
+## 6. Operational semantics
+
+This section states precisely how the runtime walks a program, so the IR has a
+defined meaning independent of the current implementation details. It reflects the
+interpreter in `openadapt_flow/runtime/replayer.py`.
+
+### 6.1 The interpreter walk
+
+Execution starts at `program.entry` and walks state by state. For the current
+state:
+
+- **terminal.** Stop this graph. `success` completes: at the top graph the run
+  ends successfully, and inside a subflow it returns control to the caller. `halt`
+  and `escalate` stop the entire run with success set false and record the
+  terminal `reason`.
+- **action.** Run the state's `Step` through the shared per-step pipeline
+  (resolve target, pre-click identity gate, act, verify postconditions and
+  effects). If the step succeeds, record a durable checkpoint (section 8), then
+  select the next transition. If it fails and the state has an `on_exception`
+  handler and the failure is not a safety halt, route to the handler and mark the
+  result `exception_handled`. Otherwise raise a halt. A safety refusal (identity,
+  effect, or postcondition) is never caught by `on_exception`; the `safety_halt`
+  flag forces the run to stop.
+- **branch.** Perform no action. Select a transition purely by guard. No matching
+  edge routes to `on_exception` if present, otherwise halts.
+- **loop.** Resolve the worklist (a run-time `worklists` entry overrides the
+  inline `data_sources` relation; an undefined relation is a config halt, and a
+  defined but empty relation legitimately runs the body zero times). If the row
+  count exceeds `max_iterations`, halt. Otherwise walk the body subflow once per
+  row with the row merged into the params in scope, then select the loop state's
+  transition.
+- **subflow_call.** Walk the named subflow to completion (an undefined subflow
+  halts), then select the calling state's transition.
+
+Falling off the top graph with no explicit terminal is treated as a clean
+`success`.
+
+### 6.2 Transition selection
+
+Given a state's `transitions`:
+
+1. No transitions: return nothing (fall off the current graph, or return from a
+   subflow).
+2. All guards are `None`: take the first target with no screenshot. This is what
+   lets the degenerate all-unconditional chain replay with no extra frame settles,
+   the byte-identical linear lift.
+3. Otherwise settle the frame once, evaluate guards in order, and take the first
+   target whose guard holds.
+4. Guards exist but none hold on the current screen: halt fail-safe (never guess
+   an edge).
+
+### 6.3 Predicate evaluation
+
+A predicate is evaluated over the current frame and run params with zero model
+calls. `anchor_resolves` runs the model-free resolution ladder and holds when the
+anchor resolves. `text_present` and `text_absent` are tolerant OCR presence
+checks. `param_equals` is a string compare against the run's param value. `and`,
+`or`, and `not` compose `operands`. An unknown kind does not hold, which makes an
+unrecognized guard fail toward halt rather than toward an unintended edge.
+
+### 6.4 Effect verdicts
+
+An `EffectVerifier` returns one of three verdicts, mirroring the identity gate:
+
+- `CONFIRMED`: the effect is present and correct. Proceed.
+- `REFUTED`: the system of record affirmatively contradicts the effect (missing,
+  duplicated, wrong value, or collateral loss). Halt; never accept as success.
+- `INDETERMINATE`: the system of record is unreachable or unreadable, so the
+  effect cannot be certified. Halt; never assume success.
+
+Both non-confirmed verdicts set `should_halt`. There is no "probably fine": an
+unverifiable consequential write halts, exactly as an unreadable identity band
+does. A declared effect with no verifier configured is a deployment error that
+halts, never a silent unverifiable write.
+
+### 6.5 Invariants
+
+- **Determinism and zero model calls on the healthy path.** Guards, branches,
+  loops, and subflow dispatch are deterministic. The healthy run makes zero model
+  calls and costs nothing per run. Any model use is compile-time only, plus the
+  bounded and counted Tier-2 recovery in section 8.
+- **Bounded execution.** Loops are bounded per loop by `max_iterations`, subflow
+  recursion is bounded by an interpreter depth limit, and each `wait_until` is
+  bounded by its `timeout_s`. No construct runs unbounded.
+- **Fail-safe direction.** Every underdetermined or unverifiable point halts. An
+  unmet guard defaults to halt, a dead-end branch halts, an unknown predicate does
+  not hold, and a placeholder effect halts until an operator completes it.
+- **Safety refusals are not exceptions.** An identity, effect, or postcondition
+  refusal sets `safety_halt`, and an `on_exception` handler cannot turn it into a
+  successful terminal.
+
+---
+
+## 7. Schema summary
+
+The models in `openadapt_flow/ir.py` are the normative schema, and
+`Workflow.model_json_schema()` emits the machine-readable JSON Schema from them.
+The sketch below is the shape, not a second source of truth.
 
 ```text
-WorkflowProgram
-  schema_version: int                 # e.g. 2; v1 loads as degenerate (§2.5)
+Workflow
+  schema_version: int = 2
   name: str
-  params: list[ParamSpec]             # TYPED params (supersedes dict[str,str])
-  data_sources: list[Relation]        # worklists to loop over (§2.3)
-  entry: StateId
-  states: dict[StateId, State]
-  subflows: dict[SubflowId, WorkflowProgram]   # reusable components
-  # bundle I/O unchanged: workflow.json + templates/*.png (DESIGN.md:30-35)
+  params: dict[str, str]                 # frozen v0 name -> example
+  param_specs: dict[str, ParamSpec]      # typed, additive
+  secret_params: list[str]
+  steps: list[Step]                      # linear body; the degenerate program
+  program: ProgramGraph | null           # the state machine (null => linear)
+  subflows: dict[str, ProgramGraph]      # reusable subgraphs / loop bodies
+  data_sources: dict[str, Relation]      # inline worklists
+  manifest: BundleManifest | null        # v2 integrity + provenance
+  contains_phi / phi_scrubbed / encrypted: bool
 
 ParamSpec
   name: str
   type: "string" | "date" | "enum" | "number" | "entity_ref"
-  example: str                        # the recorded demo value (today's dict value)
-  required: bool = True
-  # 'entity_ref' is the fix for the "which patient" gap (LIMITS.md:495-516):
-  #   the param names an ENTITY to be re-resolved by identity at run time,
-  #   not a literal to substitute.
+  example: str | null                    # recorded demo value = replay default
+  required: bool = true
+  choices: list[str]                     # enum only
+
+Predicate
+  kind: "anchor_resolves" | "text_present" | "text_absent"
+      | "param_equals" | "and" | "or" | "not"
+  anchor / text / param / value / intent: optional per kind
+  operands: list[Predicate]              # and / or / not
+  timeout_s: float = 5.0                 # wait_until bound
+
+Guard { predicate: Predicate, on_unmet: "halt" | "skip" }
+
+Step
+  id, intent, action(ActionKind)
+  anchor: Anchor | null
+  text / param / key / scroll_dx / scroll_dy: optional per action
+  secret: bool
+  expect: list[Postcondition]            # vision assertions
+  effects: list[Effect]                  # system-of-record assertions
+  api_binding: ApiBinding | null
+  wait_until: Predicate | null
+  guard: Guard | null
+  risk: "reversible" | "irreversible"
+  identity_armed / identity_unarmed_reason / identifier_crop_missing_reason
+
+Effect
+  kind: "record_written" | "field_equals"
+  match: dict[str, ValueExpr]            # record selector
+  field / value: for field_equals
+  expected_count: int = 1                # record_written
+  idempotency_key / key_field / count_new_only / forbid_collateral_loss
+  readback: ReadbackSpec | null          # on-screen oracle
+  needs_operator_confirmation: bool
+  risk, probe, timeout_s
+
+ValueExpr { literal: str | null, param: str | null }   # exactly one meaningful
+
+ProgramGraph { entry: StateId, states: dict[StateId, State] }
 
 State
-  id: StateId
-  kind: "action" | "branch" | "loop" | "subflow_call" | "approval" | "terminal"
-  action: Optional[ActionNode]        # kind=action  (wraps today's Step)
-  guardset: list[Transition]          # outgoing edges, evaluated in order
-  invariants: list[Effect]            # must hold on ENTRY (pre) — else exception
-  effects: list[Effect]               # must hold on EXIT  (post) — the contract
-  on_exception: Optional[StateId]     # local error handler (§2.4)
-  risk: "reversible" | "irreversible" # promoted from Step.risk (ir.py:178)
-  compensation: Optional[ActionNode]  # how to UNDO this state (§2.4)
+  id, kind: "action" | "branch" | "loop" | "subflow_call" | "terminal"
+  step: Step | null                      # kind = action
+  loop: LoopSpec | null                  # kind = loop
+  subflow: str | null                    # kind = subflow_call
+  transitions: list[Transition]          # empty on terminal
+  on_exception: StateId | null
+  outcome: "success" | "halt" | "escalate" | null   # kind = terminal
+  reason: str
 
-Transition
-  guard: Predicate                    # see 2.3; `TRUE` = unconditional
-  target: StateId
-  label: str                          # human-readable, for the workflow.py rendering
-
-ActionNode
-  # This IS today's Step, largely unchanged (ir.py:167-203):
-  intent: str
-  action: ActionKind                  # click/type/key/wait/scroll (ir.py:31-37)
-  anchor: Optional[Anchor]            # ir.py:64-131, UNCHANGED
-  text / param / key / scroll_*: ...  # UNCHANGED
-  identity_armed / identity_unarmed_reason: ...   # UNCHANGED (ir.py:187-203)
-  # NEW: the actuator binding (§4)
-  contract: Optional[TransitionContract]   # capability-adaptive impls
-
-Effect (a TYPED postcondition — supersedes ir.Postcondition)
-  kind: "text_present" | "region_stable" | "url_changed" | ...   # today's kinds
-       | "record_written"        # NEW: system-of-record effect (LIMITS.md:64-76)
-       | "entity_selected"       # NEW: identity-checked selection
-       | "field_equals"          # NEW: read-back of a specific field
-  # today's Postcondition fields (text/region/phash/timeout) remain for the
-  # vision-checkable kinds; the NEW kinds carry a backend-specific probe.
-
-Predicate  (a GUARD — the thing a linear IR cannot express)
-  kind: "screen_matches"     # a vision/structured check over the current frame
-      | "param_equals"       # branch on a parameter value
-      | "worklist_nonempty"  # loop condition (§2.3)
-      | "effect_holds"       # reuse an Effect as a guard
-      | "predicate_and/or/not"
+Transition { guard: Predicate | null, target: StateId, label: str }
+Relation   { name: str, rows: list[dict[str, str]], description: str }
+LoopSpec   { relation: str, body: SubflowId, var: str, max_iterations: int = 1000 }
 ```
 
-Key moves relative to today:
+---
 
-- **`Postcondition` → `Effect`.** Today postconditions are *vision assertions
-  about the frame* (`ir.py:134-164`). The transactional-fault study proved
-  that insufficient (`LIMITS.md:64-76`, 5/7 write faults silent). `Effect`
-  adds *system-of-record* kinds (`record_written`, `field_equals`) whose
-  probe is backend-specific (an API/DB read, §4). Vision effects remain for
-  substrates that expose nothing else — degenerate but honest.
-- **Guards are first-class.** A `branch` state has multiple outgoing
-  `Transition`s with non-`TRUE` guards. This is the direct fix for
-  `LIMITS.md:687-691` ("no conditionals, no loops"). The `modal` case
-  (`DESIGN.md:229-230`) becomes a guarded edge ("if survey-modal present →
-  dismiss subflow → rejoin"), not a forced halt.
-- **`params: dict[str,str]` → `list[ParamSpec]`.** Typing parameters
-  (`entity_ref` especially) is what lets "which patient" re-resolve by
-  identity instead of position (`LIMITS.md:499-508`).
-- **Explicit `compensation` + `on_exception`.** Encodes undo/rollback per
-  consequential state — the missing piece behind the "irreversible steps"
-  policy (`LIMITS.md:53-61`, risk is opt-in and never compensated today).
+## 8. Tiered runtime
 
-### 2.3 Loops over relations (worklists)
+The runtime is three tiers, because with control flow the cost of handing the rest
+of a workflow to a free-form agent after a halt is unbounded and unsafe.
 
-A `loop` state binds a **`Relation`** (a data source: rows of a table, search
-results, a list of input records) and a **loop body** (a subflow). The body
-runs once per element; the element's fields are in scope as typed params.
-This is the Rousillon/Helena/WebRobot construct. Guard `worklist_nonempty`
-controls continuation; `entity_ref` params bind to the current element and
-re-resolve by identity each iteration (reusing the identity ladder,
-`LIMITS.md:113-235`, so iteration N clicks the *right* row, not the recorded
-row's position).
+- **Tier 1, deterministic fast path.** Execute a state's action via its highest
+  viable implementation (section 9), check the effect deterministically. This is
+  the linear replayer for the degenerate case: no model, no cost. Most states
+  resolve here.
+- **Tier 2, bounded recovery of one transition.** When a single transition fails
+  to resolve or verify, a model may propose a patch for that one transition only.
+  It operates on the current state and current frame, not the remaining program;
+  it proposes a heal patch (a reviewable diff, the same format as `HealEvent`)
+  rather than free-running; the patch still passes the deterministic effect and
+  identity gate before any consequential action; and it is bounded to one
+  transition with a call budget, every call counted in `RunReport.model_calls`.
+- **Tier 3, durable checkpoint, pause, resume.** When Tier 2 cannot safely
+  recover, or a state is an approval or an irreversible state with an unmet
+  precondition, the run durably checkpoints at the last verified state and pauses.
+  It does not proceed and does not delegate. A human approves or edits, and the
+  run resumes from the checkpoint rather than from the top. A verified action
+  state is a natural checkpoint. On resume, an action whose declared effects were
+  all already confirmed before the pause is not re-executed, so a confirmed
+  consequential write is never performed twice.
 
-### 2.4 Exceptions, approvals, compensation
+The non-goal is explicit: do not hand the whole remaining workflow to a free-form
+agent after a halt. That is the "agent silently writes wrong state" failure the
+project is instrumented against. Recovery is local and gated; escalation is
+durable and human-checkpointed. The blast radius of any model call is one
+transition, and the blast radius of any halt is zero, because it is checkpointed
+and resumable.
 
-- **`on_exception`** gives each state a local handler target. A failed
-  invariant/effect routes there instead of aborting the whole run — the graph
-  analog of try/except. The default handler is the tiered runtime's
-  escalation (§5), so *unhandled* exceptions still halt safely (no regression
-  vs. today's halt-on-postcondition-failure, `DESIGN.md:200-202`).
-- **`approval` states** are explicit human-in-the-loop nodes: the run
-  durably pauses, surfaces the pending consequential action + its evidence,
-  and resumes on approve (§5). Today the only human gate is the compile-time
-  `risk_overrides` refusal (`compile.py:1046-1059`); this makes approval a
-  *runtime* node.
-- **`compensation`** is the undo action for an irreversible state, enabling
-  saga-style rollback when a later state fails. Designing real compensations
-  needs a real customer workflow (§7) — the *schema slot* is buildable now;
-  the *contents* are not generic.
+The structured halt record (`HaltObservation` on `RunReport.halt`) captures where
+the run stopped, the unexpected on-screen text it had no branch for
+(PHI-scrubbed), and the intents that completed before the halt. It has the same
+shape as a learning trace, so the halt-to-learn loop can lift it into the trace
+corpus with no reshaping.
 
-### 2.5 Worked example: `add-patient-note` in the target schema
+---
 
-The canonical demo today (`demo_driver.record_triage_demo`, `DESIGN.md:241-247`):
-login → tasks → Open first referral → New Encounter → click "Triage" → click
-Note field → type note (param) → click Save Encounter. Compiled, it is ~8–10
-linear `Step`s.
+## 9. Capability-adaptive compilation
 
-The same skill as a **workflow program** — note the parts a linear trace
-*cannot* carry (guards, the entity_ref, the optional-modal branch, the
-record-written effect, the approval on the irreversible Save):
+The identity ladder already uses "the same semantic check, different fidelity per
+substrate": a structured-text tier on DOM, UIA, and AX, and pixel or OCR tiers on
+pure-pixel substrates. Capability-adaptive compilation generalizes that from
+identity to the whole action.
+
+A semantic action carries a contract (what the step means and how to know it
+worked) and can run through backend-specific implementations, ordered by fidelity,
+first viable wins:
+
+1. `api`: call the app's API or DB write via `Step.api_binding`; the effect is
+   probed against the system of record. This closes the transactional gap.
+2. `dom_uia`: DOM (Playwright), Windows UIA, or macOS AX structural selection via
+   the anchor's `StructuralLocator`, with a structured identity check and a
+   structured effect check.
+3. `vision_rdp`: the resolution ladder plus the OCR and pixel identity ladder plus
+   vision postconditions. The pure-pixel and Citrix or RDP fallback.
+
+The contract is the what (save this encounter for this patient; a record must
+exist afterward). The implementation is the how (API call versus UIA invoke versus
+vision click and OCR). The same program compiles to an API-backed implementation
+where the app exposes one, a UIA implementation on a native client, and the
+current vision implementation on a Citrix session, each satisfying the same
+`record_written` effect at very different reliability and cost. The anchor plus
+resolution ladder is now one implementation of the `vision_rdp` leaf, not the
+universal mechanism.
+
+---
+
+## 10. The induction pipeline
+
+The single-trace compiler is the bootstrap of a pipeline that turns one or more
+demonstrations into a validated program or an honest refusal. The stages, and
+their status:
 
 ```text
-WorkflowProgram(name="add-patient-note", schema_version=2)
-  params:
-    - ParamSpec(name="patient", type="entity_ref", example="Belford, Phil")
-    - ParamSpec(name="encounter_type", type="enum",
-                example="Triage", choices=["Triage","Consult"])
-    - ParamSpec(name="note", type="string", example="Follow-up in 2 weeks")
-  data_sources:
-    - Relation(name="open_referrals", source=screen_table("#tasks"))   # for the loop variant
-  entry: s_login
-
-  states:
-    s_login: State(kind=action, action=<login: type user/pass, click Sign In>,
-                   effects=[Effect(text_present="Referral Tasks")],
-                   guardset=[Transition(TRUE, s_open_patient)],
-                   risk=reversible)
-
-    # ENTITY selection — the "which patient" gap (LIMITS.md:495-516), now typed:
-    s_open_patient: State(kind=action,
-        action=<click the row whose identity matches params.patient>,
-        effects=[Effect(kind="entity_selected", entity=params.patient)],  # identity-checked
-        guardset=[Transition(TRUE, s_new_encounter)],
-        on_exception=s_patient_not_found,     # branch the demo never showed
-        risk=reversible)
-
-    s_new_encounter: State(kind=action, action=<click "New Encounter">,
-        effects=[Effect(text_present="Save Encounter")],
-        guardset=[Transition(TRUE, s_pick_type)], risk=reversible)
-
-    s_pick_type: State(kind=branch,               # param-driven branch
-        guardset=[
-          Transition(guard=param_equals("encounter_type","Triage"),  target=s_click_triage),
-          Transition(guard=param_equals("encounter_type","Consult"), target=s_click_consult)])
-    s_click_triage:  State(kind=action, action=<click "Triage">,  guardset=[Transition(TRUE,s_note)])
-    s_click_consult: State(kind=action, action=<click "Consult">, guardset=[Transition(TRUE,s_note)])
-
-    s_note: State(kind=action, action=<click Note field; type params.note>,
-        effects=[Effect(kind="field_equals", field="note", value=params.note)],  # read-back
-        guardset=[Transition(TRUE, s_approve_save)], risk=reversible)
-
-    # The IRREVERSIBLE write — approval + record-written effect + compensation:
-    s_approve_save: State(kind=approval,
-        prompt="About to save an encounter for {patient}. Approve?",
-        guardset=[Transition(TRUE, s_save)])
-    s_save: State(kind=action, action=<click "Save Encounter">,
-        risk=irreversible,
-        effects=[Effect(kind="record_written",              # system-of-record, not pixels
-                        probe="encounter exists for patient")],
-        compensation=<void/delete the just-created encounter>,
-        guardset=[
-          Transition(guard=screen_matches("Survey"), target=s_dismiss_survey),  # the modal, now a BRANCH
-          Transition(guard=effect_holds("record_written"), target=s_done)],
-        on_exception=s_save_failed)          # phantom/partial-save handler (LIMITS.md:64-76)
-
-    s_dismiss_survey: State(kind=action, action=<dismiss survey modal>,
-        guardset=[Transition(TRUE, s_done)])          # expected-but-optional popup
-
-    s_patient_not_found: State(kind=terminal, outcome="halt", reason="patient not found")
-    s_save_failed:       State(kind=terminal, outcome="escalate")   # → tiered runtime §5
-    s_done:              State(kind=terminal, outcome="success")
+  demo_1                        additional traces / variants (optional)
+    |                                        |
+    v                                        v
+ [1] bootstrap -> [2] candidates -> [3] disambiguation -> [4] induction -> [5] validate -> emit
+     one interp.     generalizations   ask the operator     shared graph      or QUARANTINE
 ```
 
-**Loop variant** ("clear every open referral"): wrap
-`s_open_patient…s_done` as a `subflow`, and add a top `loop` state bound to
-`data_sources.open_referrals` with guard `worklist_nonempty`. The body runs
-per row; `patient` binds to the current row and re-resolves by identity each
-iteration. *This is exactly the generalization a single trace cannot express
-(`LIMITS.md:689-691`) and the induction loop (§3) recovers.*
+1. **Bootstrap (built).** Compile one demo into the degenerate straight-line
+   program. This is today's compiler output, lifted. Zero behavior change.
+2. **Candidate interpretations (built for the structural parts).** Enumerate
+   generalizations consistent with the seed: which literals are parameters, which
+   repeated sub-sequences are loop bodies over a relation, which post-action
+   popups are branches versus drift, which orderings are essential. Enumeration is
+   structural and needs no model call.
+3. **Interactive disambiguation (built, `compiler/disambiguation.py`).** Where
+   candidates disagree, do not guess. Ask the operator a concrete multiple-choice
+   question grounded in a real screenshot or step. Each question maps to a schema
+   decision: an `on_exception` or guard policy, a loop over a worklist, a guarded
+   branch versus an exception, or a `ParamSpec` versus a baked literal. The answers
+   are stored with the bundle as an audit trail.
+4. **Multi-trace induction (built, `compiler/induction.py`).** When additional
+   traces or variants are provided, infer the shared control-flow graph across
+   traces. Divergences localize the branches and parameters: a second trace that
+   picks a different row proves the row is a parameter, and a trace that hits the
+   survey modal proves that edge exists. Alignment infers params (values that vary
+   across traces), loops (a repeated body whose count differs), branches (a
+   divergent step under a detectable condition), and optional steps, all
+   deterministic with zero model calls.
+5. **Validate or quarantine (built).** Validate the induced program on held-out
+   traces and synthetic perturbations. Emit a program bundle when it is determined
+   and validates. Quarantine (emit nothing, `certified=False`) when intent stays
+   underdetermined, and route it to the disambiguation flow. This is the
+   program-level analog of the identity ladder's refuse-rather-than-guess stance.
+   A wrong branch on an irreversible node is exactly the failure class the whole
+   repo is organized to avoid.
 
-### 2.6 The degenerate case: today's linear workflow is a straight-line program
+### Compile-time model use, once, not per run
 
-A v1 `Workflow` (`ir.py:206-217`) lifts mechanically:
-
-- each `Step[i]` → an `action` State `s_i` with a single
-  `Transition(TRUE, s_{i+1})` (a straight chain);
-- each `Step.expect` postcondition → an `Effect` of the same kind on that
-  state (identity mapping for the existing kinds);
-- `Step.risk` → `State.risk`; `identity_armed`/`unarmed_reason` ride along on
-  the `ActionNode` unchanged;
-- no `branch`/`loop`/`approval`/`on_exception` states; `params` lifts
-  `dict[str,str]` → `list[ParamSpec(type="string")]` (or `entity_ref` where a
-  param drove selection).
-
-So **a straight-line program is the degenerate workflow program** — every v0
-bundle is a valid v1-of-the-new-IR with an empty control-flow layer. The
-runtime for the linear case is byte-for-byte today's `Replayer`. This is what
-makes the migration (§6) reversible: Phase 1 ships the IR that *is* today's
-IR plus optional slots.
-
----
-
-## 3. The induction loop: from one demo to a validated program
-
-The compiler today is a **single-shot, single-trace** function:
-`compile_recording(recording_dir, out_bundle_dir, …)`
-(`compiler/compile.py:716`). The induction loop generalizes it into a
-**pipeline** that turns one-or-more demonstrations into a *validated program
-or an honest refusal*.
-
-```
-  demo₁                         additional traces / variants (optional)
-    │                                        │
-    ▼                                        ▼
- [1] bootstrap ──▶ [2] candidate ──▶ [3] interactive ──▶ [4] multi-trace ──▶ [5] validate ──▶ emit
-     one interp.      generalizations   disambiguation      induction           or QUARANTINE
-```
-
-**[1] Bootstrap (today's compiler).** Compile one demo into the degenerate
-straight-line program (§2.6). This is the current
-`compile_recording` output, lifted. Zero behavior change; it is the seed.
-
-**[2] Candidate interpretations.** Enumerate generalizations consistent with
-the seed: *which literals are parameters* (WebRobot-style speculation over
-the typed values, extending today's `exclude_texts` reasoning,
-`compile.py:786-791`), *which repeated sub-sequences are loop bodies over a
-relation* (Rousillon/Helena), *which post-action popups are branches vs.
-drift* (the `modal` question, `DESIGN.md:229-230`), *which orderings are
-essential*. Each candidate is a distinct `WorkflowProgram`. **No model call
-is required to enumerate**; this is structural. (A one-time compile-time model
-call *may* rank/label candidates — see the compile-time-model-use note
-below.)
-
-**[3] Interactive disambiguation (Socrates-style).** Where candidates
-disagree, **do not guess — ask the operator a concrete, multiple-choice
-question about the actual demonstrated situation.** This is the PBD
-disambiguation-dialog tradition (SMARTedit/Lau-style version spaces surfaced
-as questions), and it is what took PROLEX to 81% single-demo recovery. Every
-question is grounded in a real screenshot/step, never abstract. Examples,
-each mapping to a schema decision:
-
-- *"Two patients match 'Belford' — the run picked the newest. When this
-  happens at run time: **(a) Halt** / **(b) take Newest** / **(c) compare DOB
-  and pick exact** / **(d) ask the operator**?"* → sets the `on_exception` /
-  guard policy on `s_open_patient`.
-- *"You cleared 1 of 15 open referrals. Is this: **(a) just this one** /
-  **(b) every open referral** / **(c) every one matching a filter**?"* →
-  decides whether to wrap the body in a `loop` over `open_referrals`.
-- *"After Save, a Survey popup appeared. Is it: **(a) a normal step to
-  dismiss** / **(b) an error that should stop the run**?"* → guarded branch
-  vs. `on_exception`.
-- *"Was the encounter type ('Triage') **fixed** or a **parameter**?"* →
-  `ParamSpec` vs. baked literal.
-
-The answers are **stored with the bundle** (an audit trail, like today's
-`identity_unarmed_reason`, `ir.py:196-203`) so a reviewer sees *why* the
-program branches as it does.
-
-**[4] Multi-trace induction.** When additional traces/variants are provided
-(the operator runs the demo again on a different patient, or on the two-match
-case), infer the **shared control-flow graph** across traces (Skill-DisCo:
-parameterized FSM subgraphs from multiple traces). Divergences between traces
-*localize the branches and the parameters* automatically — the second trace
-that picks a different patient row proves `patient` is a parameter; the trace
-that hits the survey modal proves that edge exists. Multi-trace **reduces the
-questions [3] must ask**.
-
-**[5] Validate, or quarantine.** Before emitting, validate the induced
-program on **held-out traces** (does it reproduce a trace it wasn't built
-from?) and **synthetic perturbations** (reuse the existing drift harness:
-`theme/move/rename/modal`, `DESIGN.md:229-240`, plus the benchmark corpora).
-Two outcomes:
-
-- **Emit** a `WorkflowProgram` bundle when the induced program is determined
-  and validates.
-- **Quarantine / refuse** when intent stays underdetermined (candidates
-  remain that disagree on a consequential edge and the operator hasn't
-  resolved them, or held-out traces diverge). This is the program-level analog
-  of the identity ladder's *"refuse rather than guess"* stance
-  (`LIMITS.md:129-131, 224-235`): **an underdetermined program is not
-  emitted; it is flagged for more demonstration or more disambiguation.** A
-  wrong branch on an irreversible node is exactly the failure class the whole
-  repo is organized to avoid.
-
-### Compile-time model use (one-time, not per-run)
-
-The runtime is model-free by design and by benchmark ($0/run, 0 model calls;
-`__main__.py:238-246`, `DESIGN.md:133-134`, `LIMITS.md:741-748`). The
-induction loop preserves that: any LLM use is **at compile time, once**, to
-*label steps* with human-readable intent (today's rule-based intent,
-`compile.py:898-903`, is explicitly marked "VLM annotation is a later
-enhancement — design for it, don't call any API", `DESIGN.md:133-134`),
-*propose risk classes* (today `risk` is opt-in and never inferred,
-`compile.py:746-749`, `LIMITS.md:53-61`), and *propose parameter/loop/branch
-candidates* for the operator to confirm in [3]. **Runtime robustness at zero
-per-run cost** — the model shapes the program once; replay stays
-deterministic. This must not regress the runtime's audited $0/0-call
-property.
+The runtime is model-free by design and by benchmark. The induction pipeline
+preserves that. Any model use is at compile time, once, to label steps with
+human-readable intent, propose risk classes, and propose parameter, loop, and
+branch candidates for the operator to confirm. An optional `Proposer` only
+proposes; its output is flagged and never trusted. The model shapes the program
+once; replay stays deterministic. This must not regress the runtime's zero-cost,
+zero-call property.
 
 ---
 
-## 4. Capability-adaptive compilation: one contract, many implementations
+## 11. What is built versus what needs a customer
 
-The current `Backend` protocol is purely **vision + input**
-(`backend.py:98-122`), with two *optional, additive* structured capabilities
-already carved out: `StructuralBackend` (URL/title/page-count,
-`backend.py:14-45`) and `IdentityBackend.structured_text_at`
-(`backend.py:47-96`). The identity ladder *already* uses "the same semantic
-check, different fidelity per substrate" — structured-text tier on
-DOM/UIA/AX, pixel/OCR tiers on pure-pixel substrates
-(`LIMITS.md:113-235`). Capability-adaptive compilation **generalizes that
-pattern from identity to the whole action.**
+### Built
 
-Proposal: a semantic transition carries a **`TransitionContract`** — *what the
-step means and how to know it worked* — plus a set of **backend-specific
-implementations**, each of which must satisfy the same contract:
+- Typed params, predicates, guards, and `wait_until` (Phase 1).
+- The full state machine: branch, loop, subflow, exception paths, and the
+  degenerate lift (Phase 2).
+- `entity_ref` params re-resolving through the identity ladder inside a loop.
+- Effects with `record_written` and `field_equals`, `ValueExpr` param binding,
+  the duplicate and collateral-loss guards, the on-screen read-back oracle, and
+  the placeholder-halts-until-confirmed rule.
+- `api_binding` and the API actuator tier, with the GUI as the safe fallback.
+- The disambiguation, multi-trace induction, held-out validation, and quarantine
+  stages.
+- The tiered runtime: bounded local recovery and durable checkpoint, pause, and
+  resume, with idempotent resume of confirmed writes.
+- Bundle schema v2: integrity manifest, provenance, certification stamp, and
+  optional encryption at rest for both `workflow.json` and the image crops.
 
-```text
-TransitionContract
-  intent: str                          # "save the encounter"
-  precondition: Predicate              # what must hold to attempt
-  effect: Effect                       # what must hold to have succeeded (§2.2)
-  identity: Optional[EntityRef]        # which entity this acts on (identity-gated)
-  risk: reversible | irreversible
+### Needs a real customer workflow to finish well
 
-Implementations (ordered by fidelity, first viable wins):
-  1. api        — call the app's API / DB write; effect probed against the
-                  system of record (closes LIMITS.md:64-76 transactional gap)
-  2. dom_uia    — DOM (Playwright) / Windows UIA / macOS AX: structured
-                  selection + structured-text identity (backend.py:47-96),
-                  structured effect check
-  3. vision_rdp — the CURRENT machinery: resolution ladder (DESIGN.md:152-164)
-                  + OCR/pixel identity ladder + vision postconditions. The
-                  pure-pixel / Citrix-RDP fallback.
-```
-
-Separation of concerns: the **contract is the WHAT** (save this encounter for
-this patient; a record must exist afterward); the **implementation is the
-HOW** (API call vs. UIA invoke vs. vision-click-and-OCR). The same
-`add-patient-note` program compiles to an API-backed implementation where the
-EMR exposes one, a UIA implementation on a native desktop client, and the
-current vision-RDP implementation on a Citrix session — **each satisfying the
-same `record_written` effect**, at wildly different reliability/cost. This
-ties directly to the structural-action-rung work landing in parallel
-(`docs/backends/`, the `dom_arm`/grounding-rung benchmarks) and to the
-existing dual-fidelity identity ladder — it is the same idea, promoted from
-*locate/verify identity* to *perform/verify the whole transition*.
-
-Concretely this means today's `Anchor` + resolution ladder becomes **one
-implementation of the `vision_rdp` leaf**, not the universal mechanism — the
-"visual ladder as one actuator" the migration keeps as-is (§6).
-
----
-
-## 5. Tiered runtime: deterministic → bounded recovery → durable escalation
-
-The runtime today is two-tier: (1) a deterministic resolution ladder
-(`DESIGN.md:152-164`) with an optional model grounder as the *last* rung, and
-(2) halt on failure (`DESIGN.md:200-202`). The program IR needs an explicit
-**three-tier** contract, because with control flow the cost of "hand the rest
-to an agent after a halt" is unbounded and unsafe.
-
-**Tier 1 — Deterministic fast path.** Execute the state's action via its
-highest-viable implementation (§4), check the effect deterministically. This
-is today's replayer for the linear case; unchanged, $0, no model. The vast
-majority of states resolve here (the audited 20/20-compiled control runs,
-`LIMITS.md:746-748`).
-
-**Tier 2 — Bounded model recovery of ONE local transition.** When a single
-transition fails to resolve/verify, a model may propose a **patch for that one
-transition only**, under constraints:
-- it operates on the **current state and the current frame**, not the
-  remaining program;
-- it may re-resolve *this* target or propose an alternative *for this
-  transition*, and it **proposes a patch** (a heal-style diff, like today's
-  `HealEvent`, `ir.py:292-298`) — it does not free-run;
-- the patch still passes through the **deterministic effect + identity gate**
-  before any consequential action (a bad proposal faces the identity band,
-  exactly as the grounder does today, `LIMITS.md:107-111`);
-- it is **bounded** (one transition, a call budget) and every call is
-  recorded/counted (`RunReport.model_calls`, `ir.py:339-340`).
-
-**Tier 3 — Durable pause / approve / resume from the last verified
-checkpoint.** When Tier 2 cannot safely recover, or the state is an
-`approval` node or an irreversible state with an unmet precondition, the run
-**durably checkpoints at the last verified state and pauses** — it does not
-proceed and does not delegate. A human (or a separate escalation path)
-approves/edits, and the run **resumes from the checkpoint**, not from the
-top. Checkpoints are natural in the state-machine IR: the last state whose
-`effect` verified is the resume point.
-
-**Explicit non-goal:** *do not hand the whole remaining workflow to a
-free-form agent after a halt.* That is precisely the "agent silently writes
-wrong state" failure the project is instrumented against (the competitor-drift
-/ silent-wrong-action-rate line of work). Recovery is **local and gated**;
-escalation is **durable and human-checkpointed**. The tiering makes the
-blast radius of any model call exactly one transition, and the blast radius
-of any halt exactly zero (checkpointed, resumable).
-
----
-
-## 6. Migration plan (phased, reversible)
-
-The guiding rule: **each phase is a superset of the last, ships value on its
-own, and can be reverted without stranding bundles.** Nothing here is a
-big-bang rewrite; the linear IR and its replayer remain the load-bearing leaf
-throughout.
-
-### Phase 0 — This RFC (no code)
-Agree the target shape. Reversible by definition.
-
-### Phase 1 — Additive schema: typed params + guards + `wait_until` (SHIP FIRST)
-- Bump `schema_version` to 2; add **optional** fields to the existing models
-  (`ParamSpec` alongside `params: dict[str,str]`; an optional `guardset` and
-  `wait_until` predicate on `Step`; an optional `on_exception`). Additive-only
-  respects the frozen-contract policy (`DESIGN.md:13-15`).
-- Runtime: a v1 bundle (no guards) runs **exactly as today**. A bundle with a
-  single `wait_until`/guard gets minimal interpreter support. This subsumes
-  today's SCROLL closed-loop "wait until the next anchor resolves"
-  (`DESIGN.md:172-196`) as the first concrete `wait_until` predicate — proving
-  the construct on machinery that already exists.
-- **Why first:** highest value / lowest risk. Typed params (esp.
-  `entity_ref`) start closing the "which patient" gap (`LIMITS.md:495-516`);
-  guards let the `modal` case become a branch instead of a halt
-  (`DESIGN.md:229-230`); `wait_until` generalizes the scroll loop. No
-  induction, no multi-trace, no model needed.
-
-### Phase 2 — The program interpreter + degenerate lift
-- Introduce `WorkflowProgram` (§2) as the loader target; **mechanically lift**
-  every v1 `Workflow` to the degenerate straight-line program (§2.6) at load
-  time. The linear `Replayer` becomes the `action`-state executor.
-- Ship `branch`, `loop`, `subflow`, `approval`, `on_exception` **interpreter**
-  support, even before the *compiler* can induce them — hand-authored or
-  disambiguation-authored programs run.
-- Emit adapts: `emit/skill.py` / `emit/mcp_tool.py` already emit a
-  parameterized tool with typed params (`emit/mcp_tool.py:126-153`); they now
-  emit the program's `ParamSpec` types instead of `dict[str,str]`.
-
-### Phase 3 — Capability-adaptive compilation (§4)
-- Formalize `TransitionContract` + implementation selection. The current
-  vision machinery becomes the `vision_rdp` leaf; `dom_uia` uses the existing
-  `structured_text_at` (`backend.py:47-96`) and the parallel structural-action
-  rung; `api` is per-app. Effects gain `record_written`/`field_equals`
-  (system-of-record checks, closing `LIMITS.md:64-76`).
-
-### Phase 4 — The induction loop (§3): multi-trace + interactive disambiguation
-- Build [2]-[5] of §3: candidate enumeration, the Socrates-style question UI,
-  multi-trace graph induction, held-out validation, and quarantine. This is
-  the largest lift and the one most dependent on a real workflow (§7).
-- Compile-time model use (one-time labeling/risk/param proposal) lands here,
-  guarded to preserve the runtime's $0/0-call property.
-- **Status:** §3 step [3] (interactive disambiguation) shipped in
-  `compiler/disambiguation.py`; §3 steps [4]+[5] (multi-trace induction +
-  held-out validation / quarantine) shipped in `compiler/induction.py`
-  (`induce_program` / `validate_held_out` / `reproduction_score`). Structural
-  alignment infers params (values that VARY across traces), loops (a repeated
-  body whose count DIFFERS), branches (a divergent step under a detectable
-  condition — guard proposed/flagged), and optional steps — all deterministic,
-  ZERO model calls; the optional compile-time `Proposer` only PROPOSES (flagged,
-  never trusted). Contradictory / underdetermined traces are QUARANTINED (no
-  program emitted, `certified=False`) and routed to the disambiguation flow.
-
-### Stays as-is (do not rebuild)
-- The **visual resolution ladder** (`DESIGN.md:152-164`, `resolver.py`) — one
-  actuator implementation.
-- The **identity ladder** (`LIMITS.md:113-235`, `runtime/identity.py`) — the
-  per-action identity gate, now attached to `ActionNode`.
-- **Heal** (`ir.py:292-298`, `runtime/heal.py`) — becomes the Tier-2 patch
-  format.
-- **Volatility mining / postcondition mining** (`compiler/compile.py`) —
-  becomes the `Effect`-inference for the `vision_rdp` implementation.
-- **Bundle format** (`workflow.json` + `templates/`, `DESIGN.md:30-35`) and
-  the readable `workflow.py` rendering (`compiler/codegen.py`) — extended to
-  render control flow, not replaced.
-
-### Reversibility
-Because every phase is additive and the degenerate lift is mechanical, at any
-phase boundary the system can be pinned to "linear-only" behavior by ignoring
-the new optional fields. No bundle authored in an earlier phase is stranded.
-
----
-
-## 7. Honest scope / risk: what needs a customer vs. what is buildable now
-
-### Buildable now (no customer needed)
-- **Phase 1 additive schema** (typed params, guards, `wait_until`,
-  `on_exception`) and the **degenerate lift** (§2.5-2.6). These are
-  refactors of known code with known semantics; MockMed + the existing drift
-  harness (`DESIGN.md:229-240`) exercise them.
-- **The program interpreter** (Phase 2): `branch`/`loop`/`subflow`/`approval`
-  execution is standard and testable against MockMed (e.g. the survey-modal
-  branch, a synthetic multi-referral worklist).
-- **`entity_ref` params** re-resolving by the existing identity ladder — the
-  hard safety work (`LIMITS.md:113-235`) already exists; this wires it to a
-  parameter.
-- **Candidate *enumeration* and *validation* infra** (§3 steps [2],[5]) — the
-  structural parts, plus quarantine, are buildable against synthetic
-  multi-trace fixtures.
-- **The tiered-runtime contract** (§5) — bounded local recovery + durable
-  checkpoint/resume is implementable on the linear runtime today (heal is
-  already a patch; checkpoints are just the last verified step).
-
-### Needs a real customer workflow to design well
-- **Effect specs for the system of record** (`record_written`,
-  `field_equals`). What "the encounter was actually written" *means* — which
-  API, which DB row, which idempotency key (`LIMITS.md:74-76`) — is
-  irreducibly app-specific. The *schema slot* is buildable now; the *probe
-  contents* are not generic. MockMed can only fake a persistence boundary
-  (the fault-model study already does, `benchmark/fault_model/`); the real
-  contract needs the real EMR.
-- **The actual branch/loop logic of real workflows.** Which popups are
-  normal-optional vs. error, which selections are loops over a real worklist,
-  what the exception/compensation paths *should* do — these are the operator's
-  intent, and inducing them well (and asking the *right* disambiguation
-  questions, §3 step [3]) needs real demonstrations of a real process. Designing
-  the question set against MockMed risks overfitting a toy.
-- **Compensations** (undo/rollback for irreversible states). What it means to
-  "undo a save" is entirely domain-specific and often *impossible* (some
-  writes are irreversible in fact, not just in policy) — this is where the
-  `risk=irreversible` + `approval` gate (§2.4, §5) matters most, and where a
-  wrong design does real harm.
-- **`api`-tier implementations** (§4). Whether an EMR even exposes a usable
-  API, and what its contract is, is per-customer.
+- **Effect probes for a real system of record.** What "the encounter was actually
+  written" means (which API, which DB row, which idempotency key) is
+  app-specific. The schema slot exists; the probe contents are not generic.
+  MockMed can only fake a persistence boundary.
+- **The actual branch and loop logic of real workflows.** Which popups are normal
+  versus error, which selections are loops over a real worklist, and what the
+  exception and compensation paths should do are the operator's intent, and
+  inducing them (and asking the right disambiguation questions) needs real
+  demonstrations of a real process.
+- **Compensations for irreversible states.** What it means to undo a save is
+  domain-specific and often impossible. This is where the `irreversible` plus
+  approval gate matters most and where a wrong design does real harm.
+- **`api`-tier implementations.** Whether an app exposes a usable API, and what
+  its contract is, is per customer.
 
 ### Principal risks
-- **Induction proposing a wrong branch on an irreversible node.** Mitigated
-  by: quarantine-on-underdetermined (§3 step [5]), the `approval` gate on
-  irreversible states (§2.4), and Tier-3 durable escalation (§5). The whole
-  design inherits the repo's *"refuse rather than guess"* posture
-  (`LIMITS.md:129-131`).
+
+- **Induction proposing a wrong branch on an irreversible node.** Mitigated by
+  quarantine-on-underdetermined, the approval gate on irreversible states, and
+  Tier-3 durable escalation.
 - **Scope creep re-introducing per-run model cost.** Mitigated by the
-  compile-time-only model-use rule and the bounded, counted, gated Tier-2
-  (§5). The $0/0-call runtime property (`LIMITS.md:741-748`) is a hard
-  invariant, not a nice-to-have.
-- **Over-engineering ahead of a real workflow.** Mitigated by phasing:
-  Phases 1-2 are buildable and valuable without a customer; Phases 3-4's
-  customer-dependent parts are explicitly deferred until there is one.
+  compile-time-only rule and the bounded, counted, gated Tier-2. The zero-cost,
+  zero-call runtime is a hard invariant.
+- **Over-engineering ahead of a real workflow.** Mitigated by the phasing: the
+  customer-dependent probe contents and compensations are deferred until there is
+  a real process to design against.
 
 ---
 
-## 8. Decision requested
+## 12. Compatibility and versioning
 
-1. **Approve the target IR shape** (§2): a parameterized state machine with
-   guards/loops/branches/effects/approvals, of which today's linear
-   `Workflow` is the degenerate case.
-2. **Approve Phase 1 as the first shippable increment** (§6): additive typed
-   params + guards + `wait_until`, additive-only against the frozen contract,
-   subsuming the existing SCROLL closed loop as the first `wait_until`.
-3. **Confirm the guardrails**: runtime stays $0/0-call (model use is
-   compile-time-only + bounded/gated Tier-2); induction *quarantines* rather
-   than guesses; the visual ladder and identity ladder are kept as leaf
-   actuators, not rebuilt.
-4. **Acknowledge the customer dependency** (§7): effect specs, real
-   branch/loop logic, and compensations are deferred to Phases 3-4 and need a
-   real workflow to design well.
+The bundle schema is v2 and every v2 field is additive over v1. A v1 bundle
+migrates on read (`bundle_validation.migrate_bundle_dict`) and replays
+byte-for-byte. A bundle that declares no `param_specs`, no `program`, no effects,
+and no api bindings is a v0 linear bundle and runs through the linear path
+unchanged.
+
+The migration was reversible at every step because each phase was a superset of
+the last and the degenerate lift is mechanical, so no bundle authored under an
+earlier phase is stranded. The load path validates structure (missing entry,
+dangling transition or handler target, kind and payload mismatch, missing subflow,
+duplicate id, unreachable terminal, unsafe unconditional cycle) and, for a bundle
+carrying a sealed digest, integrity.
+
+### Recommended further formalization
+
+The IR is precise enough to specify and to test. Concrete, low-risk next steps:
+
+- **Publish the JSON Schema.** `Workflow.model_json_schema()` already produces it
+  from the Pydantic models. Writing it to a versioned file under `docs/design/`
+  or `schema/` on each release gives integrators a machine-readable contract and a
+  diffable record of schema changes.
+- **Conformance tests for the semantics in section 6.** The rules for transition
+  selection, fail-safe halting, loop bounds, and effect verdicts are worth a small
+  table-driven test suite so the interpreter and this document cannot drift.
+- **A short state diagram per real workflow** once a customer program exists, to
+  document the actual branch and loop structure rather than the MockMed sketch.
+
+These are additive to the document and the tests. They do not change the IR.
 
 ---
 
-### Appendix A — code map (what this RFC touches, by file)
+## Appendix A. Code map
 
-| Concern | Today | Under this RFC |
-|---|---|---|
-| Artifact | `ir.Workflow` = `list[Step]` (`ir.py:206-217`) | `WorkflowProgram` graph; linear = degenerate (§2.5) |
-| Action leaf | `Step` + `Anchor` (`ir.py:64-203`) | `ActionNode` (unchanged) inside a `State` |
-| Assertions | `Postcondition` (`ir.py:150-164`) | `Effect` (adds system-of-record kinds, §2.2) |
-| Params | `dict[str,str]` (`ir.py:214-215`) | `list[ParamSpec]` (typed; `entity_ref`) |
-| Compile | single-trace `compile_recording` (`compile.py:716`) | induction loop (§3); single-trace = bootstrap |
-| Resolve | resolution ladder (`DESIGN.md:152-164`) | `vision_rdp` implementation of a contract (§4) |
-| Identity | identity ladder (`LIMITS.md:113-235`) | per-`ActionNode` identity gate (unchanged) |
-| Recover | heal (`ir.py:292-298`) | Tier-2 bounded patch (§5) |
-| Halt | halt-on-postcondition (`DESIGN.md:200-202`) | Tier-3 durable checkpoint/resume (§5) |
-| Emit | skill/MCP w/ `dict` params (`emit/*`) | skill/MCP w/ typed `ParamSpec` (§6 Phase 2) |
+| Concern | Model | Runtime |
+|---------|-------|---------|
+| Artifact | `Workflow` (linear `steps` and optional `program`) | linear replayer or graph interpreter |
+| Action leaf | `Step` plus `Anchor` | resolution ladder, identity gate |
+| Vision assertions | `Postcondition` | vision postcondition check |
+| Record assertions | `Effect` (`record_written`, `field_equals`) | `EffectVerifier` (rest, fhir, sql, file, onscreen) |
+| API tier | `ApiBinding` | `ApiActuator` |
+| Params | `ParamSpec` (typed; `entity_ref`) | per-run overlay; identity re-resolution |
+| Predicates and guards | `Predicate`, `Guard` | model-free predicate evaluation |
+| State machine | `ProgramGraph`, `State`, `Transition`, `Relation`, `LoopSpec` | graph interpreter, transition selection |
+| Degenerate lift | `lift_to_program` | byte-identical linear replay |
+| Recover | `HealEvent` | Tier-2 bounded patch |
+| Halt and resume | `HaltObservation`, durable checkpoint | Tier-3 checkpoint, pause, resume |
+| Integrity | `BundleManifest`, `BundleProvenance` | load-time validate and verify |
 
-### Appendix B — lineage references
+## Appendix B. Lineage references
 
-- Ringer et al. — robust straight-line web record-and-replay (the input, not
-  the output, of a generalizer).
-- Rousillon / Helena (Chasins et al.) — generalizing straight-line replay into
+- Ringer et al.: reliable straight-line web record-and-replay (the input, not the
+  output, of a generalizer).
+- Rousillon / Helena (Chasins et al.): generalizing straight-line replay into
   relational loops.
-- WebRobot (PLDI 2022) — synthesizing loopy programs from action demonstrations.
-- PROLEX — recovering the intended program from a single demonstration (81% of
+- WebRobot (PLDI 2022): synthesizing loopy programs from action demonstrations.
+- PROLEX: recovering the intended program from a single demonstration (81% of
   solved cases).
-- Skill-DisCo — parameterized FSM subgraphs with typed params /
-  pre-postconditions / side-effects from multiple traces.
-- Agent Workflow Memory (AWM) / Agent Skill Induction (ASI) — inducing reusable
-  branching skills from experience.
-- PBD disambiguation-dialog tradition (SMARTedit / version-space PBD; "Watch
-  What I Do", "Your Wish is My Command") — resolving demonstration ambiguity by
-  asking concrete questions.
+- Skill-DisCo: parameterized FSM subgraphs with typed params, pre and
+  postconditions, and side effects from multiple traces.
+- Agent Workflow Memory / Agent Skill Induction: inducing reusable branching
+  skills from experience.
+- PBD disambiguation-dialog tradition (SMARTedit, version-space PBD, "Watch What I
+  Do", "Your Wish is My Command"): resolving demonstration ambiguity by asking
+  concrete questions.
+</content>

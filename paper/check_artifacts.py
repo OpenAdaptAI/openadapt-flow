@@ -214,21 +214,29 @@ def main() -> None:
     e2e_full = e2e["effect_full"]["silent_wrong_count"]
 
     # Second domain (non-healthcare): the MockLoan lending replication of the
-    # silent-wrong-effect result, judged by an out-of-band ledger verifier.
+    # silent-wrong-effect result, judged by an out-of-band ledger verifier. This
+    # mirrors the healthcare three-arm ladder (screen / single out-of-band oracle
+    # / complete read path) so the two domains are comparable: the single-surface
+    # arm leaves the same collateral residual, and only the complete read path
+    # reaches zero.
     lending = load("benchmark/lending_fault_model/swer_results.json")
-    lend_screen = lending["screen_only"]["swer"]["numerator"]
     lend_den = lending["screen_only"]["swer"]["denominator"]
-    lend_effect = lending["effect_verify"]["swer"]["numerator"]
-    lend_overhalt = lending["effect_verify"]["over_halt"]["numerator"]
-    require_equal(lend_screen, 21, "lending screen-only silent wrong")
-    require_equal(lend_den, 33, "lending episodes")
-    require_equal(lend_effect, 0, "lending effect-verified silent wrong")
-    require_equal(lend_overhalt, 6, "lending effect-verified over-halts")
+    lend_screen = lending["screen_only"]["swer"]["numerator"]
+    lend_single = lending["effect_verify_single"]["swer"]["numerator"]
+    lend_full = lending["effect_verify_full"]["swer"]["numerator"]
+    lend_overhalt = lending["effect_verify_full"]["over_halt"]["numerator"]
+    require_equal(lend_den, 36, "lending episodes per arm")
+    require_equal(lend_screen, 24, "lending screen silent wrong")
+    require_equal(
+        lend_single, 3, "lending single-surface-oracle silent wrong (collateral residual)"
+    )
+    require_equal(lend_full, 0, "lending complete-read-path silent wrong")
     require_equal(
         lending["screen_only"]["over_halt"]["numerator"],
         0,
         "lending screen-only over-halts",
     )
+    require_equal(lend_overhalt, 6, "lending complete-read-path over-halts")
 
     # EffectBench: the metric + fault taxonomy packaged as a standalone, versioned,
     # independently runnable benchmark. Bind the released spec version the paper
@@ -392,7 +400,9 @@ def main() -> None:
         "results e2e residual honesty",
     )
 
-    # Second-domain lending generalization prose bound to swer_results.json.
+    # Second-domain lending generalization prose bound to swer_results.json. The
+    # lending study now reports the same three-arm ladder as the healthcare one,
+    # so the prose binds all three rungs.
     require_contains(
         results_tex,
         f"silently accepted {lend_screen} of {lend_den} wrong ledger effects",
@@ -400,8 +410,13 @@ def main() -> None:
     )
     require_contains(
         results_tex,
-        f"drove silent wrong effects to {lend_effect} of {lend_den}",
-        "results lending effect-verified",
+        f"single out-of-band oracle over one surface left {lend_single} of {lend_den}",
+        "results lending single-surface residual",
+    )
+    require_contains(
+        results_tex,
+        f"complete read path drove it to {lend_full} of {lend_den}",
+        "results lending complete-read-path",
     )
     require_contains(
         results_tex,
@@ -415,8 +430,13 @@ def main() -> None:
     )
     require_contains(
         main_tex,
-        f"{lend_effect} of {lend_den} under effect verification",
-        "abstract lending effect-verified",
+        f"{lend_single} of {lend_den} under a single out-of-band oracle",
+        "abstract lending single-surface residual",
+    )
+    require_contains(
+        main_tex,
+        f"{lend_full} of {lend_den} under a complete read path",
+        "abstract lending complete-read-path",
     )
 
     # Released standalone benchmark reference.

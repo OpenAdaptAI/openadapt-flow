@@ -10,6 +10,7 @@ a ``search_region`` restricts the search.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import cv2
@@ -64,10 +65,56 @@ def _clamp_region(region: Region, width: int, height: int) -> Optional[Region]:
     return (x0, y0, x1 - x0, y1 - y0)
 
 
-# Score margin within which multiple match locations are considered a tie
-# (repeated UI structure such as identical empty form fields produces exact
-# score ties at several positions).
-TIE_BREAK_EPS = 1e-3
+# --- Locality / uniqueness gate (target-resolution only) -------------------
+# When a caller passes ``prefer_near`` it is asserting an EXPECTED location for
+# the target (the resolution ladder passes the recorded anchor origin). On a
+# pixel-only substrate (RDP/Citrix) the frame frequently contains several
+# near-identical widgets (an edit pencil per row, a gear per toolbar item, an
+# empty form field per column). ``TM_CCOEFF_NORMED`` scores every instance ~1.0,
+# so the raw arg-max returns an ARBITRARY instance -- and when the TRUE target is
+# degraded (compression, a cursor/tooltip occluding it, sub-pixel jitter) a
+# CLEANER look-alike out-scores it and is clicked SILENTLY (the wrong-row / wrong-
+# icon class -- the most dangerous failure because nothing downstream on an
+# unarmed step catches it). The gate makes two changes, both keyed on
+# ``prefer_near`` so postcondition matching (which passes none) is untouched:
+#   1. LOCALITY -- prefer the peak nearest the expected location over a cleaner
+#      look-alike elsewhere, so a degraded/occluded true target still wins.
+#   2. UNIQUENESS -- when >= 2 peaks clear ``threshold`` and NONE sits where
+#      expected, the target is not uniquely present; return None so the ladder
+#      falls through / halts rather than guess. A single peak far from expected
+#      is a legitimately MOVED unique target and is kept.
+# Radius (px) around the expected point that counts as "at the expected spot".
+# Floored so small icons still admit a few px of cross-render drift; otherwise
+# it scales with the smaller template dimension (~ the target's own size).
+LOCALITY_MIN_PX = 48
+# Bound on the number of peaks enumerated per frame (cost guard).
+MAX_PEAKS = 16
+
+
+def _peaks_above(
+    result: np.ndarray, threshold: float, tw: int, th: int
+) -> list[tuple[float, int, int]]:
+    """Greedy non-max-suppressed peaks ``(score, x, y)`` at/above ``threshold``.
+
+    ``x``/``y`` are the match top-left in the result map's (haystack) coords.
+    A template-sized-ish window is suppressed around each accepted peak so
+    repeated UI structure yields ONE peak per instance; capped at
+    :data:`MAX_PEAKS` to bound cost on pathological frames.
+    """
+    work = result.copy()
+    sx = max(1, tw // 2)
+    sy = max(1, th // 2)
+    peaks: list[tuple[float, int, int]] = []
+    while len(peaks) < MAX_PEAKS:
+        _, max_val, _, max_loc = cv2.minMaxLoc(work)
+        if max_val < threshold:
+            break
+        x, y = int(max_loc[0]), int(max_loc[1])
+        peaks.append((float(max_val), x, y))
+        work[max(0, y - sy) : y + sy + 1, max(0, x - sx) : x + sx + 1] = -1.0
+    return peaks
+
+
 # A flat/near-flat edge crop has no discriminative structure and makes
 # normalized correlation degenerate.  Refuse that evidence and let the
 # caller's independent hash/semantic checks decide.
@@ -119,13 +166,35 @@ def _find_template_arrays(
 
     score, mx, my, mw, mh, result = best
     if prefer_near is not None:
-        ys, xs = np.where(result >= score - TIE_BREAK_EPS)
-        if len(xs) > 1:
-            px, py = prefer_near[0] - off_x, prefer_near[1] - off_y
-            d2 = (xs.astype(np.int64) - px) ** 2 + (ys.astype(np.int64) - py) ** 2
-            i = int(np.argmin(d2))
-            mx, my = int(xs[i]), int(ys[i])
-            score = float(result[my, mx])
+        # Locality + uniqueness gate (see the constants block above). Enumerate
+        # the spatially distinct peaks that clear ``threshold``, prefer the one
+        # nearest the expected location, and REFUSE (None) an ambiguous frame
+        # where >= 2 look-alikes clear threshold and none sits where expected.
+        peaks = _peaks_above(result, threshold, mw, mh)
+        # ``prefer_near`` is the recorded target ORIGIN (top-left) in screen
+        # coords (the ladder passes ``anchor.region[0:2]``). Compare peak
+        # centers against the EXPECTED center so the locality radius is measured
+        # consistently -- adding ``mw//2, mh//2`` to only the peak side would
+        # bias every true peak by ~half a template, pushing wider widgets past
+        # the radius and spuriously tripping the uniqueness halt on unchanged
+        # surfaces.
+        px = prefer_near[0] - off_x + mw // 2
+        py = prefer_near[1] - off_y + mh // 2
+        radius = max(LOCALITY_MIN_PX, min(mw, mh))
+
+        def _center_dist(peak: tuple[float, int, int]) -> float:
+            return math.hypot(peak[1] + mw // 2 - px, peak[2] + mh // 2 - py)
+
+        near = [p for p in peaks if _center_dist(p) <= radius]
+        if near:
+            # A degraded/occluded TRUE target at the expected spot beats a
+            # cleaner look-alike elsewhere.
+            score, mx, my = min(near, key=_center_dist)
+        elif len(peaks) >= 2:
+            # Multiple look-alikes, none where expected: not uniquely present.
+            return None
+        # else: a single peak far from expected -> legitimately moved unique
+        # target; keep the arg-max match unchanged.
 
     rx, ry = off_x + mx, off_y + my
     region: Region = (rx, ry, mw, mh)
@@ -158,14 +227,20 @@ def find_template(
         scales: Multiplicative scale factors applied to the template.
         threshold: Minimum ``TM_CCOEFF_NORMED`` score to accept a match.
         prefer_near: Optional expected match origin ``(x, y)`` in screen
-            coordinates. When several locations score within
-            ``TIE_BREAK_EPS`` of the best (repeated UI structure — e.g. two
-            identical empty inputs), the tie is broken in favor of the
-            location nearest this point instead of raster-scan order.
+            coordinates. Enables the LOCALITY + UNIQUENESS gate (see the
+            ``LOCALITY_MIN_PX`` constants block): among the peaks that clear
+            ``threshold``, the one nearest this point wins — so a degraded or
+            occluded TRUE target at the expected spot is chosen over a cleaner
+            look-alike elsewhere — and an AMBIGUOUS frame (>= 2 peaks clear
+            threshold, none near the expected spot) returns ``None`` so the
+            caller can fall through / halt instead of clicking an arbitrary
+            look-alike. A single peak far from the expected point is treated as
+            a legitimately moved unique target and is kept.
 
     Returns:
-        The best :class:`Match` in screen coordinates, or ``None`` if no
-        scale produced a score at or above ``threshold``.
+        The best :class:`Match` in screen coordinates, or ``None`` if no scale
+        produced a score at or above ``threshold`` — or, when ``prefer_near``
+        is set, if the target is not uniquely present where expected.
     """
     return _find_template_arrays(
         _decode_gray(screen_png),

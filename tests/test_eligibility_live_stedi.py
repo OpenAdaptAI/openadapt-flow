@@ -68,6 +68,7 @@ def test_stedi_dental_mock_roundtrip_three_trials(tmp_path, trial):
     artifact_key = base64.urlsafe_b64encode(os.urandom(32)).decode()
     policy = PracticeArtifactPolicy(
         boundary_id=f"live-test-trial-{trial}",
+        application_mode=ApplicationMode.TEST,
         encryption=ArtifactEncryption.APPLICATION_AES256_GCM,
         encryption_key_env="LIVE_TEST_ARTIFACT_KEY",
         retention_days=1,

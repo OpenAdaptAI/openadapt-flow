@@ -50,7 +50,9 @@ _ENCRYPTED_SUFFIX = ".enc"
 _AES_PREFIX = b"OAE1"
 
 _CSV_COLUMNS = [
-    "checked_at",
+    "committed_at",
+    "application_mode",
+    "http_status",
     "payer",
     "payer_id",
     "member_id",
@@ -84,6 +86,7 @@ class PracticeArtifactPolicy(BaseModel):
     """Explicit PHI storage, encryption, retention, and egress boundary."""
 
     boundary_id: str
+    application_mode: ApplicationMode
     encryption: ArtifactEncryption
     retention_days: int = Field(ge=1, le=3650)
     egress: Literal["none"] = "none"
@@ -132,6 +135,8 @@ class EligibilityArtifact(BaseModel):
     normalized_file: str
     raw_271_sha256: str
     normalized_sha256: str
+    application_mode: ApplicationMode
+    committed_at: str
     created: bool
     effects: list[Effect] = Field(default_factory=list)
 
@@ -157,6 +162,18 @@ def _ensure_secure_dir(path: Path) -> None:
         path.mkdir(parents=True, mode=0o700)
     if stat.S_IMODE(path.lstat().st_mode) != 0o700:
         raise PermissionError("artifact root is not owner-only")
+
+
+def _require_secure_existing_dir(path: Path, *, label: str) -> None:
+    """Refuse a committed directory whose type or owner-only mode drifted."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError(f"{label} directory is missing") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"{label} is not a regular directory")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise PermissionError(f"{label} directory must remain owner-only")
 
 
 def _write_exclusive(path: Path, payload: bytes) -> None:
@@ -185,6 +202,8 @@ def _read_regular(path: Path) -> bytes:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
             raise ValueError("artifact is not a regular file")
+        if stat.S_IMODE(opened.st_mode) & 0o077:
+            raise PermissionError("artifact files must remain owner-only")
         chunks: list[bytes] = []
         while chunk := os.read(fd, 1 << 20):
             chunks.append(chunk)
@@ -206,8 +225,9 @@ def _fsync_dir(path: Path) -> None:
 def _policy_payload(policy: PracticeArtifactPolicy) -> bytes:
     return _canonical(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "boundary_id": policy.boundary_id,
+            "application_mode": policy.application_mode.value,
             "encryption": policy.encryption.value,
             "retention_days": policy.retention_days,
             "egress": policy.egress,
@@ -284,13 +304,20 @@ def _transaction_id(policy: PracticeArtifactPolicy, operation_id: str) -> str:
 
 
 def _normalized_payload(
-    result: EligibilityResult, *, request: EligibilityRequest
+    result: EligibilityResult,
+    *,
+    request: EligibilityRequest,
+    committed_at: str,
 ) -> dict[str, object]:
     selection = request.benefit_selection
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "operation_id": result.operation_id,
-        "checked_at": result.checked_at,
+        "committed_at": committed_at,
+        "application_mode": result.application_mode.value
+        if result.application_mode is not None
+        else "",
+        "http_status": result.http_status,
         "payer": result.payer_name or "",
         "payer_id": result.payer_id,
         "member_id": request.member_id or "",
@@ -398,6 +425,8 @@ def _artifact_from_manifest(
         normalized_file=str(tx_dir / normalized_name),
         raw_271_sha256=str(manifest["raw_plain_sha256"]),
         normalized_sha256=str(manifest["normalized_plain_sha256"]),
+        application_mode=ApplicationMode(str(manifest["application_mode"])),
+        committed_at=str(manifest["committed_at"]),
         created=created,
         effects=effects,
     )
@@ -407,7 +436,7 @@ def _load_manifest(
     tx_dir: Path, policy: Optional[PracticeArtifactPolicy] = None
 ) -> dict[str, object]:
     raw = json.loads(_read_regular(tx_dir / "manifest.json"))
-    if not isinstance(raw, dict) or raw.get("schema_version") != 2:
+    if not isinstance(raw, dict) or raw.get("schema_version") != 3:
         raise ValueError("eligibility transaction manifest is malformed")
     tx_id = tx_dir.name.removeprefix("tx_")
     suffix = (
@@ -425,6 +454,19 @@ def _load_manifest(
         raise ValueError("eligibility transaction directory name is malformed")
     if policy is not None and raw.get("boundary_id") != policy.boundary_id:
         raise ValueError("eligibility transaction escaped its PHI boundary")
+    if (
+        policy is not None
+        and raw.get("application_mode") != policy.application_mode.value
+    ):
+        raise ValueError("eligibility transaction application mode is malformed")
+    if not isinstance(raw.get("http_status"), int) or not (
+        200 <= int(raw["http_status"]) < 300
+    ):
+        raise ValueError("eligibility transaction HTTP status is malformed")
+    try:
+        datetime.strptime(str(raw.get("committed_at", "")), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError("eligibility transaction commit time is malformed") from exc
     for field, value in expected.items():
         if raw.get(field) != value:
             raise ValueError(f"eligibility transaction {field} is malformed")
@@ -449,8 +491,7 @@ def _rebuild_index(
     rows: list[dict[str, object]] = []
     transactions = root / TRANSACTIONS_DIR
     for tx_dir in sorted(transactions.iterdir()):
-        if not tx_dir.is_dir() or tx_dir.is_symlink():
-            raise ValueError("transaction store contains a non-directory entry")
+        _require_secure_existing_dir(tx_dir, label="transaction")
         manifest = _load_manifest(tx_dir, policy)
         raw_name = str(manifest["raw_file"])
         raw_stored = _read_regular(tx_dir / raw_name)
@@ -492,6 +533,12 @@ def write_eligibility_artifacts(
     env: Optional[Mapping[str, str]] = None,
 ) -> EligibilityArtifact:
     """Atomically promote a PHI-bearing raw+normalized transaction."""
+    if result.raw_271_bytes is None or result.raw_271_sha256 is None:
+        raise ValueError(
+            "a raw response is required for a consumable eligibility artifact"
+        )
+    if result.application_mode is None or result.http_status is None:
+        raise ValueError("eligibility result lacks its response boundary metadata")
     if not result.is_answer:
         raise ValueError(
             "only an exact unambiguous eligibility answer may be promoted as consumable"
@@ -504,19 +551,17 @@ def write_eligibility_artifacts(
         or result.request_sha256 != request_sha256
     ):
         raise ValueError("eligibility result is not bound to the supplied request")
-    if result.raw_271_bytes is None or result.raw_271_sha256 is None:
-        raise ValueError(
-            "a raw response is required for a consumable eligibility artifact"
-        )
     if _sha(result.raw_271_bytes) != result.raw_271_sha256:
         raise ValueError("raw eligibility bytes do not match the wire digest")
-    if result.application_mode is None or result.http_status is None:
-        raise ValueError("eligibility result lacks its response boundary metadata")
+    if result.application_mode is not policy.application_mode:
+        raise ValueError(
+            "eligibility result application mode does not match the artifact policy"
+        )
     reparsed = parse_271(
         request,
         result.raw_271_bytes,
         http_status=result.http_status,
-        expected_mode=ApplicationMode(result.application_mode),
+        expected_mode=policy.application_mode,
     )
     if not reparsed.is_answer:
         raise ValueError("raw eligibility response is not a consumable answer")
@@ -532,7 +577,6 @@ def write_eligibility_artifacts(
     _ensure_secure_dir(transactions)
     tx_id = _transaction_id(policy, result.operation_id)
     tx_dir = transactions / f"tx_{tx_id}"
-    normalized_plain = _canonical(_normalized_payload(result, request=request))
     raw_plain = result.raw_271_bytes
     suffix = _ENCRYPTED_SUFFIX if key is not None else ""
     raw_name = f"raw_271_{tx_id}.json{suffix}"
@@ -540,11 +584,15 @@ def write_eligibility_artifacts(
 
     with _artifact_lock(root):
         if tx_dir.exists() or tx_dir.is_symlink():
-            if tx_dir.is_symlink() or not tx_dir.is_dir():
-                raise ValueError(
-                    "idempotency target is not a regular transaction directory"
-                )
+            _require_secure_existing_dir(tx_dir, label="idempotency target")
             manifest = _load_manifest(tx_dir, policy)
+            normalized_plain = _canonical(
+                _normalized_payload(
+                    reparsed,
+                    request=request,
+                    committed_at=str(manifest["committed_at"]),
+                )
+            )
             if (
                 manifest.get("operation_id") != result.operation_id
                 or manifest.get("request_sha256") != request_sha256
@@ -560,6 +608,12 @@ def write_eligibility_artifacts(
         stage = transactions / f".staging-{uuid4().hex}"
         stage.mkdir(mode=0o700)
         try:
+            committed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            normalized_plain = _canonical(
+                _normalized_payload(
+                    reparsed, request=request, committed_at=committed_at
+                )
+            )
             raw_aad = f"{policy.boundary_id}:{tx_dir.name}:{raw_name}".encode()
             normalized_aad = (
                 f"{policy.boundary_id}:{tx_dir.name}:{normalized_name}".encode()
@@ -573,11 +627,14 @@ def write_eligibility_artifacts(
             ).strftime("%Y-%m-%dT%H:%M:%SZ")
             index_name = RESULTS_CSV + (_ENCRYPTED_SUFFIX if key is not None else "")
             committed_manifest: dict[str, object] = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "operation_id": result.operation_id,
                 "request_sha256": request_sha256,
                 "response_subject_sha256": result.response_subject_sha256,
                 "boundary_id": policy.boundary_id,
+                "application_mode": policy.application_mode.value,
+                "http_status": reparsed.http_status,
+                "committed_at": committed_at,
                 "retention_expires_at": expiry,
                 "egress": "none",
                 "raw_file": raw_name,

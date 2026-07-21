@@ -226,6 +226,19 @@ def test_raw_phi_response_is_excluded_from_repr_and_serialization():
     assert "SECRET-MEMBER-123" not in result.model_dump_json()
 
 
+def test_answer_requires_exact_raw_bytes_digest_and_application_mode():
+    result = parse_271(
+        dental_request(),
+        json.dumps(ACTIVE_271).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
+    assert result.is_answer
+    assert not result.model_copy(update={"raw_271_bytes": None}).is_answer
+    assert not result.model_copy(update={"raw_271_sha256": "0" * 64}).is_answer
+    assert not result.model_copy(update={"application_mode": None}).is_answer
+    assert not result.model_copy(update={"application_mode": "test"}).is_answer
+
+
 @pytest.mark.parametrize(
     ("field", "wrong"),
     [

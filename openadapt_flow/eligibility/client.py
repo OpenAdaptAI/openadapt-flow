@@ -314,9 +314,13 @@ class EligibilityResult(BaseModel):
             self.status in (EligibilityStatus.ACTIVE, EligibilityStatus.INACTIVE)
             and not self.ambiguities
             and self.error_category is None
+            and isinstance(self.application_mode, ApplicationMode)
             and self.response_subject_sha256 is not None
             and self.http_status is not None
             and 200 <= self.http_status < 300
+            and self.raw_271_bytes is not None
+            and self.raw_271_sha256 is not None
+            and hashlib.sha256(self.raw_271_bytes).hexdigest() == self.raw_271_sha256
         )
 
     @property

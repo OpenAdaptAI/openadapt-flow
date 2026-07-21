@@ -13,6 +13,7 @@ import pytest
 from openadapt_flow.eligibility.artifact import (
     BOUNDARY_FILE,
     RESULTS_CSV,
+    TRANSACTIONS_DIR,
     ArtifactEncryption,
     PracticeArtifactPolicy,
     all_confirmed,
@@ -72,9 +73,12 @@ def active_result(operation_id="artifact-check-1"):
     )
 
 
-def volume_policy(boundary="practice-1") -> PracticeArtifactPolicy:
+def volume_policy(
+    boundary="practice-1", mode=ApplicationMode.TEST
+) -> PracticeArtifactPolicy:
     return PracticeArtifactPolicy(
         boundary_id=boundary,
+        application_mode=mode,
         encryption=ArtifactEncryption.PLATFORM_VOLUME,
         volume_encryption_attested=True,
         retention_days=30,
@@ -84,6 +88,7 @@ def volume_policy(boundary="practice-1") -> PracticeArtifactPolicy:
 def encrypted_policy() -> PracticeArtifactPolicy:
     return PracticeArtifactPolicy(
         boundary_id="practice-encrypted",
+        application_mode=ApplicationMode.TEST,
         encryption=ArtifactEncryption.APPLICATION_AES256_GCM,
         encryption_key_env="ELIGIBILITY_ARTIFACT_KEY",
         retention_days=30,
@@ -114,7 +119,12 @@ def test_raw_and_normalized_records_promote_together_and_verify(tmp_path):
         manifest["response_subject_sha256"] == active_result().response_subject_sha256
     )
     assert manifest["egress"] == "none"
+    assert manifest["application_mode"] == "test"
+    assert manifest["http_status"] == 200
+    assert manifest["committed_at"] == artifact.committed_at
     assert manifest["retention_expires_at"].endswith("Z")
+    boundary = json.loads((tmp_path / BOUNDARY_FILE).read_text())
+    assert boundary["application_mode"] == "test"
 
 
 def test_csv_is_derived_and_formula_neutralized(tmp_path):
@@ -141,6 +151,9 @@ def test_csv_is_derived_and_formula_neutralized(tmp_path):
     assert rows[0]["payer"].startswith("'+")
     assert rows[0]["deductible_total"] == "50"
     assert rows[0]["status"] == EligibilityStatus.ACTIVE.value
+    assert rows[0]["application_mode"] == "test"
+    assert rows[0]["http_status"] == "200"
+    assert rows[0]["committed_at"]
 
 
 def test_same_operation_and_content_is_idempotent(tmp_path):
@@ -359,6 +372,89 @@ def test_tampered_manifest_cannot_escape_transaction_directory(tmp_path):
     manifest["normalized_file"] = "../../../outside.json"
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="normalized_file"):
+        write_eligibility_artifacts(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )
+
+
+def test_test_answer_cannot_enter_a_production_artifact_boundary(tmp_path):
+    with pytest.raises(ValueError, match="application mode"):
+        write_eligibility_artifacts(
+            active_result(),
+            tmp_path,
+            request=request(),
+            policy=volume_policy(mode=ApplicationMode.PRODUCTION),
+        )
+    assert not (tmp_path / TRANSACTIONS_DIR).exists()
+
+
+def test_artifact_boundary_cannot_mix_application_modes(tmp_path):
+    write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=volume_policy()
+    )
+    production_response = json.loads(json.dumps(ACTIVE))
+    production_response["meta"]["applicationMode"] = "production"
+    production_request = request("production-check")
+    production_result = parse_271(
+        production_request,
+        json.dumps(production_response).encode(),
+        expected_mode=ApplicationMode.PRODUCTION,
+    )
+    assert production_result.is_answer
+    with pytest.raises(ValueError, match="different PHI policy"):
+        write_eligibility_artifacts(
+            production_result,
+            tmp_path,
+            request=production_request,
+            policy=volume_policy(mode=ApplicationMode.PRODUCTION),
+        )
+
+
+def test_caller_timestamp_is_not_persisted_as_audit_truth(tmp_path):
+    result = active_result().model_copy(update={"checked_at": "1900-01-01T00:00:00Z"})
+    artifact = write_eligibility_artifacts(
+        result, tmp_path, request=request(), policy=volume_policy()
+    )
+    normalized = json.loads(Path(artifact.normalized_file).read_text())
+    assert "checked_at" not in normalized
+    assert normalized["committed_at"] == artifact.committed_at
+    assert normalized["committed_at"] != result.checked_at
+    assert normalized["application_mode"] == "test"
+    assert normalized["http_status"] == 200
+
+
+@pytest.mark.parametrize("target", ["transaction", "raw", "normalized", "manifest"])
+def test_committed_paths_must_remain_owner_only(tmp_path, target):
+    artifact = write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=volume_policy()
+    )
+    tx = Path(artifact.transaction_dir)
+    paths = {
+        "transaction": tx,
+        "raw": Path(artifact.raw_271_file),
+        "normalized": Path(artifact.normalized_file),
+        "manifest": tx / "manifest.json",
+    }
+    paths[target].chmod(0o755 if target == "transaction" else 0o644)
+    with pytest.raises(PermissionError, match="owner-only"):
+        write_eligibility_artifacts(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )
+
+
+def test_committed_file_symlink_substitution_is_refused(tmp_path):
+    artifact = write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=volume_policy()
+    )
+    raw = Path(artifact.raw_271_file)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
+    outside.write_bytes(raw.read_bytes())
+    raw.unlink()
+    try:
+        raw.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises((OSError, ValueError)):
         write_eligibility_artifacts(
             active_result(), tmp_path, request=request(), policy=volume_policy()
         )

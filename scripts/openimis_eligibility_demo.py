@@ -81,7 +81,7 @@ DEPLOYMENT_YAML = (
 
 SERVICE_QUERY = "General"
 SERVICE_OPTION = "General Consultation"
-SETTLE = {
+SETTLE: dict[str, Any] = {
     "settle_timeout_s": 10.0,
     "settle_stable_frames": 3,
     "settle_interval_s": 0.3,
@@ -150,10 +150,25 @@ class OpenIMISEligibilityBackend(PlaywrightBackend):
         if (!targetKind) return null;
         const context = {target_kind: targetKind, target_id: targetId};
         if (targetKind !== 'eligibility_lookup') {
-            const dialog = document.querySelector('[role="dialog"]');
-            const match = dialog && (dialog.innerText || '').match(/\b999\d{6}\b/);
-            if (!match) return null;
-            context.insurance_no = match[0];
+            const visibleDialogs = Array.from(
+                document.querySelectorAll('[role="dialog"]')
+            ).filter((dialog) => {
+                const style = window.getComputedStyle(dialog);
+                const rect = dialog.getBoundingClientRect();
+                return style.display !== 'none' && style.visibility !== 'hidden'
+                    && rect.width > 0 && rect.height > 0;
+            });
+            const insuranceNumbers = new Set();
+            for (const dialog of visibleDialogs) {
+                for (const match of (dialog.innerText || '').matchAll(/\b999\d{6}\b/g)) {
+                    insuranceNumbers.add(match[0]);
+                }
+            }
+            // Never take the first dialog/identifier: an ambiguous or missing
+            // visible record makes this identity tier unavailable, so replay
+            // falls through to another verifier or halts before acting.
+            if (insuranceNumbers.size !== 1) return null;
+            context.insurance_no = Array.from(insuranceNumbers)[0];
         }
         return JSON.stringify(context);
     }"""
@@ -186,11 +201,11 @@ def eligibility_effects() -> list[Any]:
     ``deployment.eligibility.yaml`` wires them to the read-only SQL verifier
     over openIMIS's own PostgreSQL policy/product/service tables.
     """
-    from openadapt_flow.runtime.effects import Effect, ValueExpr
+    from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
 
     return [
         Effect(
-            kind="field_equals",
+            kind=EffectKind.FIELD_EQUALS,
             match={
                 "chf_id": ValueExpr(param="insurance_no"),
                 "service_code": ValueExpr(param="service_code"),
@@ -303,6 +318,47 @@ def _build_verifier(params: dict[str, str], *, oracle_port: int) -> Any:
     if verifier is None:
         raise FixtureError(f"{DEPLOYMENT_YAML} wired no effect verifier")
     return verifier
+
+
+def _report_contract_error(report: Any, *, expect_halt: bool) -> str | None:
+    """Return why a replay did not prove the one declared SQL outcome.
+
+    ``--expect-halt`` is evidence tooling, so an unrelated resolver, login, or
+    postcondition failure must never be counted as the intended
+    system-of-record refusal.  The positive lane is equally strict: a generic
+    successful report without the exact confirmed contract is not this demo's
+    success condition.
+    """
+    results = list(report.results)
+    contracted = [result for result in results if result.effect_contract_hashes]
+    if len(contracted) != 1:
+        return f"expected exactly one effect-armed step, observed {len(contracted)}"
+    effect_step = contracted[0]
+    if not results or effect_step is not results[-1]:
+        return "the effect-armed eligibility step was not the final executed step"
+
+    if expect_halt:
+        if report.success:
+            return "expected SQL refusal, but the run reported success"
+        if any(not result.ok for result in results[:-1]):
+            return "the run failed before the eligibility outcome was checked"
+        if effect_step.ok or effect_step.effect_verified is not False:
+            return "the final step did not halt on a refuted effect contract"
+        if not any(
+            "[sql] field_equals: REFUTED" in line for line in effect_step.effect_results
+        ):
+            return "the final step lacks the expected SQL field_equals refusal"
+        return None
+
+    if not report.success or any(not result.ok for result in results):
+        return "the run did not complete every compiled step successfully"
+    if effect_step.effect_verified is not True:
+        return "the final eligibility outcome was not independently confirmed"
+    if not any(
+        "[sql] field_equals: CONFIRMED" in line for line in effect_step.effect_results
+    ):
+        return "the final step lacks the expected SQL field_equals confirmation"
+    return None
 
 
 def cmd_up(args: argparse.Namespace) -> int:
@@ -431,21 +487,18 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 f"step {result.step_id}: effect_verified={result.effect_verified} "
                 f"contracts={result.effect_contract_hashes}"
             )
+    contract_error = _report_contract_error(report, expect_halt=args.expect_halt)
+    if contract_error is not None:
+        print(f"error: {contract_error}", file=sys.stderr)
+        return 1
     if args.expect_halt:
-        if report.success:
-            print(
-                "error: expected the coverage contract to HALT this replay, "
-                "but it succeeded",
-                file=sys.stderr,
-            )
-            return 1
         print(
             "HALT demonstrated: the system-of-record contract refused to "
             "certify coverage (see the run report's effect-verification "
             "section)"
         )
         return 0
-    return 0 if report.success else 1
+    return 0
 
 
 def main() -> int:

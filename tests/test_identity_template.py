@@ -256,7 +256,9 @@ def test_structured_tier_substitutes_run_bound_parameter_before_exact_hash() -> 
     )
     assert tmpl is not None
     assert tmpl.structured_params == ["insurance_no"]
-    assert "999000001" not in tmpl.model_dump_json()
+    serialized = tmpl.model_dump_json()
+    assert '"structured_params":["insurance_no"]' in serialized
+    assert "999000001" not in serialized
 
     live = recorded.replace("999000001", "999000003")
     assert (

@@ -508,7 +508,13 @@ COMMIT;
                 f"ALTER ROLE \"{ORACLE_ROLE}\" WITH LOGIN PASSWORD '{password}';"
             )
         self._psql(
+            f'ALTER ROLE "{ORACLE_ROLE}" WITH LOGIN NOSUPERUSER NOCREATEDB '
+            f"NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;\n"
             f'ALTER ROLE "{ORACLE_ROLE}" SET default_transaction_read_only = on;\n'
+            f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public "
+            f'FROM "{ORACLE_ROLE}";\n'
+            f'REVOKE CREATE ON SCHEMA public FROM "{ORACLE_ROLE}";\n'
+            f'REVOKE TEMPORARY ON DATABASE "IMIS" FROM "{ORACLE_ROLE}";\n'
             f'GRANT CONNECT ON DATABASE "IMIS" TO "{ORACLE_ROLE}";\n'
             f'GRANT USAGE ON SCHEMA public TO "{ORACLE_ROLE}";\n'
             f'GRANT SELECT ON "tblInsuree", "tblPolicy", "tblInsureePolicy", '

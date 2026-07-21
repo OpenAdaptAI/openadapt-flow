@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Iterator, Literal, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_serializer, model_validator
 
 if TYPE_CHECKING:
     # Type-only import for the Step.effects forward reference. The RUNTIME
@@ -204,10 +204,6 @@ class IdentityTemplate(BaseModel):
     )
     structured_params: list[str] = Field(
         default_factory=list,
-        # Keep pre-feature sealed bundles byte-semantically compatible: an
-        # absent/empty parameter list carries no meaning and must not move the
-        # canonical bundle digest. Non-empty lists remain serialized and sealed.
-        exclude_if=lambda value: not value,
         description=(
             "Workflow parameters embedded in the structured identity. Their "
             "demonstrated values are replaced by fixed sentinels before "
@@ -216,6 +212,21 @@ class IdentityTemplate(BaseModel):
     )
     param_token_indices: dict[str, list[int]] = Field(default_factory=dict)
     rests_on_confusable_identifier: bool = False
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Omit empty additive metadata from legacy sealed bundle bytes.
+
+        ``Field(exclude_if=...)`` would express this directly, but that option
+        is newer than the package's declared Pydantic >=2.5 compatibility
+        floor.  A wrap serializer is supported throughout Pydantic v2 and
+        keeps pre-feature identity templates byte-semantically unchanged while
+        still sealing non-empty run-bound structured parameter metadata.
+        """
+        data: dict[str, Any] = handler(self)
+        if not self.structured_params:
+            data.pop("structured_params", None)
+        return data
 
 
 class Anchor(BaseModel):

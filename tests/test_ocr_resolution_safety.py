@@ -16,7 +16,12 @@ from PIL import Image
 from openadapt_flow.ir import Anchor, Landmark, Region
 from openadapt_flow.runtime.resolver import resolve
 from openadapt_flow.vision.match import Match
-from openadapt_flow.vision.ocr import AmbiguousOcrMatchError, OcrLine, find_text
+from openadapt_flow.vision.ocr import (
+    AmbiguousOcrMatchError,
+    ContradictoryOcrEvidenceError,
+    OcrLine,
+    find_text,
+)
 
 VIEWPORT = (640, 480)
 ocr_module = importlib.import_module("openadapt_flow.vision.ocr")
@@ -166,9 +171,9 @@ def test_local_ocr_ambiguity_halts_without_weaker_fallback() -> None:
     vision = _Vision({("Delete", local_region): _AMBIGUOUS})
     grounder = _Grounder()
 
-    result = resolve(_anchor(), _png(), vision, grounder, viewport=VIEWPORT)
+    with pytest.raises(AmbiguousOcrMatchError):
+        resolve(_anchor(), _png(), vision, grounder, viewport=VIEWPORT)
 
-    assert result is None
     assert vision.text_calls == [("Delete", local_region)]
     assert grounder.calls == 0
 
@@ -184,9 +189,9 @@ def test_global_ocr_ambiguity_halts_without_weaker_fallback() -> None:
     )
     grounder = _Grounder()
 
-    result = resolve(_anchor(), _png(), vision, grounder, viewport=VIEWPORT)
+    with pytest.raises(AmbiguousOcrMatchError):
+        resolve(_anchor(), _png(), vision, grounder, viewport=VIEWPORT)
 
-    assert result is None
     assert vision.text_calls == [("Delete", local_region), ("Delete", None)]
     assert grounder.calls == 0
 
@@ -210,11 +215,159 @@ def test_ambiguous_landmark_halts_instead_of_blind_geometry() -> None:
     vision = _Vision({("Name:", None): _AMBIGUOUS})
     grounder = _Grounder()
 
-    result = resolve(anchor, _png(), vision, grounder, viewport=VIEWPORT)
+    with pytest.raises(AmbiguousOcrMatchError):
+        resolve(anchor, _png(), vision, grounder, viewport=VIEWPORT)
 
-    assert result is None
     assert vision.text_calls == [("Name:", None)]
     assert grounder.calls == 0
+
+
+@pytest.mark.parametrize("ambiguous_first", [False, True])
+def test_ambiguous_landmark_abstains_when_unique_landmark_is_sufficient(
+    ambiguous_first: bool,
+) -> None:
+    """One repeated landmark cannot poison independent unique geometry."""
+    ambiguous = Landmark(
+        relation="left_of",
+        ocr_text="Name:",
+        distance_px=80,
+        dx_px=80,
+        dy_px=0,
+    )
+    unique = Landmark(
+        relation="left_of",
+        ocr_text="Case A17",
+        distance_px=80,
+        dx_px=80,
+        dy_px=0,
+    )
+    landmarks = [ambiguous, unique] if ambiguous_first else [unique, ambiguous]
+    anchor = Anchor(
+        template="templates/icon.png",
+        region=(80, 90, 90, 32),
+        click_point=(125, 106),
+        landmarks=landmarks,
+    )
+    vision = _Vision(
+        {
+            ("Name:", None): _AMBIGUOUS,
+            ("Case A17", None): _match((100, 106), (70, 96, 60, 20)),
+        }
+    )
+    grounder = _Grounder()
+
+    result = resolve(anchor, _png(), vision, grounder, viewport=VIEWPORT)
+
+    assert result is not None
+    assert result[0].rung == "geometry"
+    assert result[0].point == (180, 106)
+    assert grounder.calls == 0
+
+
+def test_conflicting_unique_landmarks_refuse_without_grounder() -> None:
+    """Unique but inconsistent landmarks cannot be averaged into a click."""
+    anchor = Anchor(
+        template="templates/icon.png",
+        region=(80, 90, 90, 32),
+        click_point=(125, 106),
+        landmarks=[
+            Landmark(
+                relation="left_of",
+                ocr_text="Case A17",
+                distance_px=80,
+                dx_px=80,
+                dy_px=0,
+            ),
+            Landmark(
+                relation="above",
+                ocr_text="Account 42",
+                distance_px=60,
+                dx_px=0,
+                dy_px=60,
+            ),
+        ],
+    )
+    vision = _Vision(
+        {
+            ("Case A17", None): _match((100, 106), (70, 96, 60, 20)),
+            ("Account 42", None): _match((400, 300), (360, 290, 80, 20)),
+        }
+    )
+    grounder = _Grounder()
+
+    with pytest.raises(ContradictoryOcrEvidenceError):
+        resolve(anchor, _png(), vision, grounder, viewport=VIEWPORT)
+
+    assert grounder.calls == 0
+
+
+def test_conflicting_unique_landmarks_cannot_corroborate_ocr_target() -> None:
+    """One agreeing landmark cannot hide contradictory retained context."""
+    local_region = (40, 50, 170, 112)
+    anchor = _anchor(
+        landmarks=[
+            Landmark(
+                relation="left_of",
+                ocr_text="Case A17",
+                distance_px=25,
+                dx_px=25,
+                dy_px=0,
+            ),
+            Landmark(
+                relation="above",
+                ocr_text="Account 42",
+                distance_px=60,
+                dx_px=0,
+                dy_px=60,
+            ),
+        ]
+    )
+    vision = _Vision(
+        {
+            ("Delete", local_region): _match((125, 106), (95, 96, 60, 20)),
+            ("Case A17", None): _match((100, 106), (70, 96, 60, 20)),
+            ("Account 42", None): _match((400, 300), (360, 290, 80, 20)),
+        }
+    )
+
+    with pytest.raises(ContradictoryOcrEvidenceError):
+        resolve(anchor, _png(), vision, viewport=VIEWPORT)
+
+
+@pytest.mark.parametrize("ambiguous_first", [False, True])
+def test_ambiguous_landmark_abstains_from_unique_target_corroboration(
+    ambiguous_first: bool,
+) -> None:
+    """Repeated context does not veto a target corroborated by unique context."""
+    local_region = (40, 50, 170, 112)
+    ambiguous = Landmark(
+        relation="left_of",
+        ocr_text="Name:",
+        distance_px=80,
+        dx_px=80,
+        dy_px=0,
+    )
+    unique = Landmark(
+        relation="left_of",
+        ocr_text="Case A17",
+        distance_px=25,
+        dx_px=25,
+        dy_px=0,
+    )
+    landmarks = [ambiguous, unique] if ambiguous_first else [unique, ambiguous]
+    vision = _Vision(
+        {
+            ("Delete", local_region): _match((125, 106), (95, 96, 60, 20)),
+            ("Name:", None): _AMBIGUOUS,
+            ("Case A17", None): _match((100, 106), (70, 96, 60, 20)),
+        }
+    )
+
+    result = resolve(_anchor(landmarks=landmarks), _png(), vision, viewport=VIEWPORT)
+
+    assert result is not None
+    assert result[0].rung == "ocr"
+    assert result[0].point == (125, 106)
 
 
 def test_labeled_far_decoy_contradicted_by_landmark_halts() -> None:
@@ -235,11 +388,11 @@ def test_labeled_far_decoy_contradicted_by_landmark_halts() -> None:
         }
     )
 
-    result = resolve(_anchor(landmarks=[landmark]), _png(), vision, viewport=VIEWPORT)
+    with pytest.raises(ContradictoryOcrEvidenceError):
+        resolve(_anchor(landmarks=[landmark]), _png(), vision, viewport=VIEWPORT)
 
     # The contradicted OCR result is a refusal. In particular, the ladder does
     # not turn the same landmark into an unverified geometry action.
-    assert result is None
     assert vision.text_calls == [
         ("Delete", local_region),
         ("Delete", None),
@@ -264,7 +417,7 @@ def test_local_ocr_candidate_contradicted_by_landmark_halts() -> None:
         }
     )
 
-    result = resolve(_anchor(landmarks=[landmark]), _png(), vision, viewport=VIEWPORT)
+    with pytest.raises(ContradictoryOcrEvidenceError):
+        resolve(_anchor(landmarks=[landmark]), _png(), vision, viewport=VIEWPORT)
 
-    assert result is None
     assert vision.text_calls == [("Delete", local_region), ("Name:", None)]

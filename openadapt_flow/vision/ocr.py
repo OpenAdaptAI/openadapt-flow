@@ -23,7 +23,11 @@ _engine: Any = None
 _engine_lock = threading.Lock()
 
 
-class AmbiguousOcrMatchError(RuntimeError):
+class OcrResolutionRefused(RuntimeError):
+    """Base class for fail-closed OCR target-resolution refusals."""
+
+
+class AmbiguousOcrMatchError(OcrResolutionRefused):
     """Raised when target resolution sees more than one qualifying OCR line.
 
     Generic OCR consumers retain the historical best-match behavior. The
@@ -31,6 +35,10 @@ class AmbiguousOcrMatchError(RuntimeError):
     ambiguity (halt) from absence (continue to the next independent evidence
     rung).
     """
+
+
+class ContradictoryOcrEvidenceError(OcrResolutionRefused):
+    """Raised when independently located OCR evidence disagrees on target."""
 
 
 def _get_engine() -> Any:

@@ -118,6 +118,9 @@ def find_template(screen_png: bytes, template_png: bytes, *,
 # ocr.py  (rapidocr_onnxruntime; instantiate the engine once, module-level lazy)
 class OcrLine(BaseModel):
     text: str; region: Region; confidence: float
+class OcrResolutionRefused(RuntimeError): ...
+class AmbiguousOcrMatchError(OcrResolutionRefused): ...
+class ContradictoryOcrEvidenceError(OcrResolutionRefused): ...
 def ocr(screen_png: bytes, *, region: Region | None = None) -> list[OcrLine]
 def find_text(screen_png: bytes, text: str, *,
               region: Region | None = None, min_ratio: float = 0.8,
@@ -125,6 +128,8 @@ def find_text(screen_png: bytes, text: str, *,
     # normalized fuzzy match (difflib ratio on lowercased/stripped text);
     # resolution enables the typed ambiguity signal so duplicates halt instead
     # of falling through, while presence/readiness callers retain best-match.
+    # The resolver also refuses contradictory unique landmark estimates rather
+    # than averaging them or delegating to a weaker model-backed rung.
 
 # hashing.py
 def phash_png(png: bytes, region: Region | None = None) -> str

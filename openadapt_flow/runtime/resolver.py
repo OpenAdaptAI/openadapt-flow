@@ -41,7 +41,10 @@ from typing import Any, Optional
 
 from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.ir import Anchor, Point, Region, Resolution, Rung
-from openadapt_flow.vision.ocr import AmbiguousOcrMatchError
+from openadapt_flow.vision.ocr import (
+    AmbiguousOcrMatchError,
+    ContradictoryOcrEvidenceError,
+)
 
 RUNG_ORDER: tuple[Rung, ...] = (
     "structural",
@@ -220,12 +223,20 @@ def _landmarks_contradict(
     for landmark in anchor.landmarks:
         if landmark.dx_px is None or landmark.dy_px is None:
             continue
-        match = vision.find_text(
-            screen_png,
-            landmark.ocr_text,
-            min_ratio=OCR_MIN_RATIO,
-            raise_on_ambiguity=True,
-        )
+        try:
+            match = vision.find_text(
+                screen_png,
+                landmark.ocr_text,
+                min_ratio=OCR_MIN_RATIO,
+                raise_on_ambiguity=True,
+            )
+        except AmbiguousOcrMatchError:
+            # A repeated/generic landmark cannot corroborate or contradict a
+            # candidate.  It abstains while any independent unique landmark
+            # remains available.  Treating one ambiguous landmark as a veto
+            # makes the outcome depend on irrelevant repeated labels and
+            # over-halts otherwise uniquely established targets.
+            continue
         if match is None:
             continue
         estimates.append(
@@ -236,9 +247,22 @@ def _landmarks_contradict(
         )
     if not estimates:
         return False
+    if _estimates_conflict(estimates):
+        raise ContradictoryOcrEvidenceError(
+            "unique OCR landmark estimates disagree beyond tolerance"
+        )
     return all(
         math.hypot(ex - point[0], ey - point[1]) > GLOBAL_LANDMARK_TOLERANCE_PX
         for ex, ey in estimates
+    )
+
+
+def _estimates_conflict(estimates: list[Point]) -> bool:
+    """Whether retained unique landmarks disagree beyond the target tolerance."""
+    return any(
+        math.hypot(ax - bx, ay - by) > GLOBAL_LANDMARK_TOLERANCE_PX
+        for index, (ax, ay) in enumerate(estimates)
+        for bx, by in estimates[index + 1 :]
     )
 
 
@@ -281,6 +305,11 @@ def resolve(
         is the screen region the evidence matched (used for healing), or None
         when every rung fails. ``resolution.elapsed_ms`` is the total time
         spent across all rungs attempted.
+
+    Raises:
+        OcrResolutionRefused: When OCR target/context evidence is ambiguous or
+            contradictory. This is deliberately distinct from absence so the
+            runtime halts without retrying or downgrading to weaker evidence.
     """
     t0 = time.monotonic()
     if viewport is None:
@@ -364,10 +393,7 @@ def resolve(
         )
         if match is not None:
             point = _scaled_click_point(anchor, tuple(match.region))
-            try:
-                contradicted = _landmarks_contradict(anchor, point, screen_png, vision)
-            except AmbiguousOcrMatchError:
-                return None
+            contradicted = _landmarks_contradict(anchor, point, screen_png, vision)
             if not contradicted:
                 resolution = Resolution(
                     rung="template_global",
@@ -400,16 +426,18 @@ def resolve(
                     raise_on_ambiguity=True,
                 )
             except AmbiguousOcrMatchError:
-                return None
+                # Ambiguity is not absence.  Preserve the typed refusal so the
+                # runtime does not retry it as a miss or downgrade to geometry,
+                # model grounding, healing, or coordinate actuation.
+                raise
             if match is None:
                 continue
             point = (int(match.point[0]), int(match.point[1]))
-            try:
-                contradicted = _landmarks_contradict(anchor, point, screen_png, vision)
-            except AmbiguousOcrMatchError:
-                return None
+            contradicted = _landmarks_contradict(anchor, point, screen_png, vision)
             if contradicted:
-                return None
+                raise ContradictoryOcrEvidenceError(
+                    "OCR target and unique landmark evidence disagree"
+                )
             resolution = Resolution(
                 rung="ocr",
                 point=point,
@@ -421,6 +449,7 @@ def resolve(
     # Rung 4: geometry from landmarks.
     estimates: list[Point] = []
     confidences: list[float] = []
+    ambiguous_landmark = False
     for landmark in anchor.landmarks:
         try:
             lm_match = vision.find_text(
@@ -430,7 +459,11 @@ def resolve(
                 raise_on_ambiguity=True,
             )
         except AmbiguousOcrMatchError:
-            return None
+            # An ambiguous landmark contributes no coordinate.  Other unique
+            # landmarks remain independently usable under the existing
+            # geometry contract, regardless of declaration order.
+            ambiguous_landmark = True
+            continue
         if lm_match is None:
             continue
         estimates.append(
@@ -444,6 +477,14 @@ def resolve(
         )
         confidences.append(float(lm_match.confidence))
     if estimates:
+        if _estimates_conflict(estimates):
+            # Averaging inconsistent unique anchors can synthesize a point that
+            # matches no observed control. Preserve the disagreement as a typed
+            # terminal refusal; a model grounder must not override retained
+            # contradictory evidence.
+            raise ContradictoryOcrEvidenceError(
+                "unique OCR landmark estimates disagree beyond tolerance"
+            )
         px = int(round(sum(p[0] for p in estimates) / len(estimates)))
         py = int(round(sum(p[1] for p in estimates) / len(estimates)))
         region = _clamp_region_of_size(
@@ -457,6 +498,14 @@ def resolve(
             elapsed_ms=elapsed_ms(),
         )
         return resolution, region
+
+    if ambiguous_landmark:
+        # Every locatable landmark was ambiguous.  This is a terminal typed
+        # refusal, not a miss: a grounder or healer must not guess beneath the
+        # unresolved repeated-row evidence.
+        raise AmbiguousOcrMatchError(
+            "OCR landmark evidence did not uniquely establish a target"
+        )
 
     # Rung 5: optional grounder.
     if grounder is not None:

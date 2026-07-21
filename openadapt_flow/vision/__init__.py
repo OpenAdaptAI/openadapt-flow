@@ -19,7 +19,9 @@ from openadapt_flow.vision.match import (
 )
 from openadapt_flow.vision.ocr import (
     AmbiguousOcrMatchError,
+    ContradictoryOcrEvidenceError,
     OcrLine,
+    OcrResolutionRefused,
     find_text,
     ocr,
     text_present,
@@ -33,8 +35,10 @@ from openadapt_flow.vision.settle import (
 
 __all__ = [
     "AmbiguousOcrMatchError",
+    "ContradictoryOcrEvidenceError",
     "Match",
     "OcrLine",
+    "OcrResolutionRefused",
     "SettleResult",
     "find_structural_template",
     "find_template",

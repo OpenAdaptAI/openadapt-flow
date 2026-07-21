@@ -1,4 +1,11 @@
-"""Fail when paper headline constants drift from benchmark artifacts."""
+"""Fail when paper headline constants drift from benchmark artifacts.
+
+Scope: this is a transcription-fidelity guard, not a validity check. It verifies
+only that the numbers written in the paper match the released benchmark JSON. It
+cannot tell a sound measurement from an unsound one (a circular benchmark and a
+rigorous one are bound identically), so a green run certifies faithful citation,
+never the correctness of the underlying result.
+"""
 
 from __future__ import annotations
 

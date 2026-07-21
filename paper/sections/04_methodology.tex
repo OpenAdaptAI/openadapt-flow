@@ -27,8 +27,25 @@ Success means the external task oracle is satisfied. A safe halt stops without
 the intended effect. Over-halt is a safe halt when the intended correct action
 was in fact available. Silent incorrect success means the runtime reports
 success while the external oracle disagrees. False abort means the intended
-effect occurred but the runtime reports failure. We report run counts rather
-than confidence intervals for small bounded studies.
+effect occurred but the runtime reports failure.
+
+\paragraph{Deterministic counts, not sampled rates.}
+The fault-injection and end-to-end studies are deterministic by construction:
+localhost, no model calls, and a fixed fault injected at the persistence
+boundary, so a given (arm $\times$ fault) yields the same outcome on every
+repeat and the repeats carry approximately zero sampling variance. We therefore
+report run counts as a \emph{coverage matrix} over a small, hand-authored fault
+taxonomy, not as an estimate of any population incidence rate, and we do not
+attach confidence intervals, which would be vacuous on variance-zero data. Two
+consequences are load-bearing for how these numbers should be read. First, the
+entire screen-versus-effect gap rests on the differentiating fault classes and
+the entire out-of-band-versus-complete-read-path gap rests on exactly one class,
+so the results are driven by a handful of authored classes rather than a
+distribution. Second, the taxonomy is an adversarial transactional-fault lineage
+\cite{gray1981transaction} chosen to differentiate oracles; it is not weighted
+to any measured EMR or lending incident distribution, so a figure such as the
+screen arm's 60\% is fault coverage under this taxonomy, never an expected
+production frequency.
 
 \paragraph{OpenEMR comparison.}
 The task logs into the shared public OpenEMR demonstration site, searches a

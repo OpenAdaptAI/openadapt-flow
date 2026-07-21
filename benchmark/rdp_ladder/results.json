@@ -1,7 +1,7 @@
 {
   "accepted": false,
   "base_commit": "",
-  "candidate_commit": "b1a3726f1b5f3fc2507c214a3ffd1659f3725ceb",
+  "candidate_commit": "5c4529bc5e80f6edba6b509ad3895f0b806e9219",
   "caveat": "Real RDP-transported pixels + input, but NOT Citrix ICA/HDX, NOT the aardwolf transport, and the drift is simulated-on-a-real-session (not WAN capture).",
   "contract": {
     "drift_no_silent_write": true,
@@ -29,7 +29,7 @@
     "effect_not_confirmed",
     "drift_not_safely_halted"
   ],
-  "generated_at": "2026-07-20T18:21:23.402708+00:00",
+  "generated_at": "2026-07-20T18:30:16.434958+00:00",
   "model_calls": 0,
   "oracle": "docker exec cat of the kiosk-persisted note file",
   "run_count": 2,
@@ -37,7 +37,7 @@
   "substrate": "real-rdp-freerdp3-roundtrip-linux-kiosk",
   "successes": 1,
   "task": "record->compile->replay a patient-note write through the vision-only resolver ladder over a real RDP round-trip, with no structural backend; confirm the write via an independent document oracle; and halt under injected DPI/theme/JPEG drift",
-  "total_s": 133.937,
+  "total_s": 155.074,
   "trials": [
     {
       "effect_confirmed": false,

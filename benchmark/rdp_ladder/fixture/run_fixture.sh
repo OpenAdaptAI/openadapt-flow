@@ -3,10 +3,14 @@
 #   :0  = kiosk app (the "remote desktop")            -> served by shadow server
 #   3389 = FreeRDP shadow server mirroring :0 over RDP
 #   :1  = FreeRDP client rendering the RDP session fullscreen (what we observe)
-set -e
+set -euo pipefail
 export HOME=/root
-export RDP_FIXTURE_SAVE_PATH="${RDP_FIXTURE_SAVE_PATH:-/opt/rdp_fixture/saved_note.txt}"
+export RDP_FIXTURE_ORACLE_ROOT="${RDP_FIXTURE_ORACLE_ROOT:-/opt/rdp_fixture/oracle}"
+export RDP_FIXTURE_SAVE_PATH="${RDP_FIXTURE_SAVE_PATH:-${RDP_FIXTURE_ORACLE_ROOT}/saved_note.txt}"
+export RDP_FIXTURE_RESET_ACK_PATH="${RDP_FIXTURE_RESET_ACK_PATH:-${RDP_FIXTURE_ORACLE_ROOT}/reset_ack.txt}"
 export RDP_FIXTURE_THEME="${RDP_FIXTURE_THEME:-light}"
+
+mkdir -p "${RDP_FIXTURE_ORACLE_ROOT}"
 
 log() { echo "[run_fixture] $*"; }
 
@@ -42,6 +46,6 @@ DISPLAY=:1 xfreerdp3 /v:127.0.0.1:3389 /u:ubuntu /p:ubuntu /size:1280x800 /f \
     -gfx -rfx -nsc /cert:ignore +auto-reconnect /log-level:ERROR \
     >/tmp/client.log 2>&1 &
 sleep 4
-log "fixture up: observe/inject on DISPLAY=:1; kiosk saves to $RDP_FIXTURE_SAVE_PATH"
+log "fixture up: observe/inject on DISPLAY=:1; oracle root is $RDP_FIXTURE_ORACLE_ROOT"
 # Keep the container alive.
 tail -f /dev/null

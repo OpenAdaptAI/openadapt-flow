@@ -31,7 +31,9 @@ COPY kiosk_app.py /opt/rdp_fixture/kiosk_app.py
 COPY run_fixture.sh /opt/rdp_fixture/run_fixture.sh
 RUN chmod +x /opt/rdp_fixture/run_fixture.sh && mkdir -p /opt/rdp_fixture
 
-# ImageMagick's default policy forbids some coder ops; the fixture only needs
-# X window capture to PNG, which is allowed. No policy change required.
+# The image is built and run only as an ephemeral qualification fixture. The
+# apt-installed FreeRDP/Openbox/xdotool/ImageMagick binaries are not copied into
+# the Python wheel or sdist and this image is not published by the workflow.
+# ImageMagick's default policy permits the X-window-to-PNG capture used here.
 EXPOSE 3389
 CMD ["/opt/rdp_fixture/run_fixture.sh"]

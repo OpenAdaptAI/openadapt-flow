@@ -155,6 +155,7 @@ def test_pixel_only_recording_emits_identifier_crop(tmp_path: Path) -> None:
     # ... so the identifier crop was emitted, with no degrade reason.
     assert anchor.identifier_crop is not None
     assert anchor.identifier_region is not None
+    assert step.identity_armed is True
     assert step.identifier_crop_missing_reason is None
     # Sealed-handling contract: the crop lives UNDER templates/ so encrypted
     # saves, the integrity manifest, and the run gate's cleartext check all
@@ -209,6 +210,7 @@ def test_event_marked_region_wins_and_forces_crop_despite_structured(
     anchor = step.anchor
     assert anchor is not None
     assert anchor.identifier_crop is not None
+    assert step.identity_armed is True
     assert step.identifier_crop_missing_reason is None
     assert anchor.identifier_region == tuple(marked)
     assert (bundle / anchor.identifier_crop).is_file()

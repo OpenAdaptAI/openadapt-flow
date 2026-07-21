@@ -42,8 +42,10 @@ make -C paper
 
 ## Evidence contract
 
-`check_artifacts.py` binds the raw benchmark results to the comparison artifact
-and the headline numbers in the LaTeX draft. It does not re-run the
-applications. The reproducibility section and `ARTIFACT_CHECKLIST.md`
+`check_artifacts.py` binds each headline number to a released raw result or a
+bounded aggregate summary. It does not re-run the applications or imply that
+all underlying evaluation rows are public. Grown corpora, deployment-derived
+tuning, target-specific recipes, and raw private evaluation rows stay outside
+the public release. The reproducibility section and `ARTIFACT_CHECKLIST.md`
 distinguish source-backed, CI-reproducible, field, fixture, and one-run
 descriptive evidence.

@@ -36,3 +36,7 @@ The machine-readable aggregate is in [`summary.json`](summary.json). Product
 claims must retain the task, environment, run count, oracle, failure taxonomy,
 and caveats above; the aggregate must not be presented as an SLA or as evidence
 for an arbitrary workflow.
+
+The repository-wide [source and evaluation boundary](../../docs/SOURCE_BOUNDARY.md)
+explains why the generic harness and this bounded aggregate remain public while
+successor target recipes and raw per-target evaluation rows remain private.

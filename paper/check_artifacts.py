@@ -312,6 +312,42 @@ def main() -> None:
     intro_tex = load_text("paper/sections/01_introduction.tex")
     methodology_tex = load_text("paper/sections/04_methodology.tex")
     results_tex = load_text("paper/sections/05_results.tex")
+    reproducibility_tex = load_text("paper/sections/07_reproducibility.tex")
+    paper_readme = load_text("paper/README.md")
+
+    # The public/private evaluation boundary is part of the evidence contract.
+    # Prevent future paper edits from claiming that every raw row or target
+    # recipe is released merely because each headline constant is checked.
+    require_contains(
+        main_tex,
+        "either a reviewed raw artifact or a bounded aggregate summary",
+        "abstract public evidence boundary",
+    )
+    require_contains(
+        reproducibility_tex,
+        "Grown identity and reliability corpora, deployment-derived tuning, "
+        "target-specific recipes, and raw private rows are deliberately excluded",
+        "reproducibility private evidence boundary",
+    )
+    require_contains(
+        paper_readme,
+        "released raw result or a bounded aggregate summary",
+        "paper README public evidence boundary",
+    )
+    forbidden_release_claims = (
+        "Every headline number in this paper is bound by a released machine-check "
+        "to its raw artifact",
+        "Raw run rows, aggregate JSON, task definitions",
+        "binds the raw benchmark results to the comparison artifact",
+    )
+    combined_evidence_prose = "\n".join(
+        (main_tex, intro_tex, reproducibility_tex, paper_readme)
+    )
+    for claim in forbidden_release_claims:
+        if claim in combined_evidence_prose:
+            raise AssertionError(
+                f"paper overstates public raw-artifact availability: {claim!r}"
+            )
 
     # End-to-end silent-wrong-effect headline (54 -> 9 -> 0). Bind the abstract,
     # introduction, and results prose to the effect_e2e artifact so the headline

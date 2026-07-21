@@ -33,3 +33,7 @@ history includes adversarial reviews that found new false-accept classes after
 earlier zero measurements. Claims must therefore stay scoped to the named
 corpora and rendered task. Deployment certification still requires evidence
 for the actual workflow, application, identity surface, and effect oracle.
+
+See [Source and evaluation boundary](../SOURCE_BOUNDARY.md) for the distinction
+between public mechanisms and bounded summaries, already-public historical
+reference material, and private successor corpora and tuning.

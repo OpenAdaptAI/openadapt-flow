@@ -105,7 +105,7 @@ position with a controlled fault study and an adversarial identity study, and
 sketches a mechanism that acts on it. The full system, additional substrates
 (native Windows UI Automation, macOS, and real-network RDP), and a broader
 evaluation are in the \fullreport{}; every number below is bound by a
-machine-check to a released benchmark artifact.
+machine-check to a released raw artifact or bounded aggregate summary.
 
 \section{The screen is a weak oracle}
 \label{sec:oracle}
@@ -378,8 +378,11 @@ Citrix ICA/HDX. The full report adds a repeated-workflow latency and cost
 comparison against a computer-use agent, a public-web breadth corpus, a
 drift-repair study, and scoped qualifications of native Windows UIA, macOS, and
 real-network RDP substrates, each with an independent effect oracle. The authors
-develop the evaluated system; raw artifacts and scripts reduce but do not
-eliminate experimenter bias, and independent replication remains necessary.
+develop the evaluated system; released raw artifacts, bounded aggregate
+summaries, and scripts reduce but do not eliminate experimenter bias. Grown
+corpora, deployment-derived tuning, target-specific recipes, and raw private
+evaluation rows are excluded from the public release, and independent
+replication remains necessary.
 
 \section{Recommendations for evaluating GUI agents}
 \label{sec:recs}

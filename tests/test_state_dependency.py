@@ -669,6 +669,82 @@ def test_in_memory_dismissal_policy_mutation_refuses_before_action(bundle, run_d
     assert "refusing to emit an action" in (report.results[0].error or "")
 
 
+def test_click_dismissal_requires_sealed_template_before_any_action(bundle, run_dir):
+    empty_anchor = Anchor(
+        template="",
+        region=(0, 0, 10, 10),
+        click_point=(5, 5),
+        ocr_text="Close",
+    )
+    with pytest.raises(ValueError, match="non-empty sealed anchor template"):
+        Interstitial(
+            name="release note",
+            detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+            dismiss_anchor=empty_anchor,
+            risk="reversible",
+            consequential=False,
+            clearance=_cleared("release note"),
+        )
+
+    interstitial = Interstitial(
+        name="release note",
+        detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+        dismiss_anchor=empty_anchor.model_copy(
+            update={"template": "templates/btn.png"}
+        ),
+        risk="reversible",
+        consequential=False,
+        clearance=_cleared("release note"),
+    )
+    workflow = Workflow(name="wf", steps=[click_step()], interstitials=[interstitial])
+    assert workflow.interstitials[0].dismiss_anchor is not None
+    workflow.interstitials[0].dismiss_anchor.template = ""
+    vision = FakeVision()
+    vision.text_results = {"release note": Match((10, 10), (0, 0, 5, 5))}
+    backend = FakeBackend()
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.005).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].interstitial_actions == []
+    assert report.results[0].safety_halt is True
+
+
+def test_click_dismissal_template_is_in_sealed_file_hashes(tmp_path):
+    bundle = tmp_path / "sealed"
+    (bundle / "assets").mkdir(parents=True)
+    (bundle / "assets" / "target.png").write_bytes(make_png((50, 20)))
+    (bundle / "assets" / "close.png").write_bytes(make_png((30, 20)))
+    workflow = Workflow(
+        name="wf",
+        steps=[click_step(template="assets/target.png")],
+        interstitials=[
+            Interstitial(
+                name="release note",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+                dismiss_anchor=Anchor(
+                    template="assets/close.png",
+                    region=(0, 0, 30, 20),
+                    click_point=(15, 10),
+                    ocr_text="Close",
+                ),
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("release note"),
+            )
+        ],
+    )
+
+    workflow.save(bundle)
+    loaded = Workflow.load(bundle)
+
+    assert loaded.manifest is not None
+    assert "assets/close.png" in loaded.manifest.file_hashes
+
+
 # -- IR round-trip ------------------------------------------------------------
 
 

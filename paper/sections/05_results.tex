@@ -13,10 +13,13 @@ spurious aborts to zero (Figure~\ref{fig:silentbar}). Concretely, screen-only
 verification silently mishandled five of seven injected fault classes: partial
 save, duplicate submission, optimistic UI followed by rejection, stale overwrite,
 and double delivery. There were 10 consistent repeats per class. When the step
-declared the expected effect and a system-of-record verifier was configured,
-those five classes refuted and halted through the live replayer. This
-improvement has two non-optional preconditions: the effect must be authored and
-the verifier deployed.
+declared the expected effect, a system-of-record verifier reading the
+persistence boundary refuted all five classes, and a refuted effect halts. This
+effect-verified arm is a mechanism measurement rather than an end-to-end replay:
+the verifier is exercised directly against the same persistence boundary the
+ground-truth judge reads, not through the full browser-and-replayer path used
+for the screen-only arm. This improvement has two non-optional preconditions:
+the effect must be authored and the verifier deployed.
 
 \begin{figure}[t]
 \centering

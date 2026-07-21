@@ -14,7 +14,13 @@ The agent condition used \texttt{claude-sonnet-5} with the
 \texttt{computer\_20251124} tool and
 \texttt{computer-use-2025-11-24} beta header. Agent costs are calculated from
 recorded token usage and the list-price schedule stored in each raw result; the
-compiled condition recorded no model calls.
+compiled condition recorded no model calls. The agent is a single-attempt
+observe-act loop given the task goal and the same settled screenshots the
+replayer uses, without a system prompt, planning or reflection scaffolding, or
+whole-task retry, and bounded by per-run action and cost caps. It is a fair
+same-backend reference rather than a maximally scaffolded agent, so the latency
+and cost gaps should be read as lower bounds on what scaffolding could close,
+not as a reliability comparison.
 
 \paragraph{Outcome taxonomy.}
 Success means the external task oracle is satisfied. A safe halt stops without

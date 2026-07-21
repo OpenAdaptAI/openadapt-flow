@@ -60,9 +60,7 @@ class EnvHandle(Protocol):
 
     goal: str
 
-    def attempt_intended_action(
-        self, params: Mapping[str, str]
-    ) -> ScreenObservation:
+    def attempt_intended_action(self, params: Mapping[str, str]) -> ScreenObservation:
         """Perform the task's intended action once and return the screen banner."""
         ...
 

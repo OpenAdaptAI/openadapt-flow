@@ -105,7 +105,12 @@ class MockMedProvider:
         )
 
 
-def run_setup(sut: SystemUnderTest, setup: EpisodeSetup) -> Optional[EpisodeRecord]:
+def run_setup(
+    sut: SystemUnderTest,
+    setup: EpisodeSetup,
+    *,
+    provider_name: Optional[str] = None,
+) -> Optional[EpisodeRecord]:
     """Run and score ONE provider-provisioned episode. ``None`` if it is dropped.
 
     Provider-agnostic: it drives ``sut`` through ``setup.env`` (goal + params
@@ -118,6 +123,12 @@ def run_setup(sut: SystemUnderTest, setup: EpisodeSetup) -> Optional[EpisodeReco
     expected_effect = setup.expected_effect or task.expected_effect
     seed = setup.seed if setup.seed is not None else setup.trial
     episode_id = setup.episode_id or f"{sut.name}::{task.task_id}::t{setup.trial}"
+    env_fingerprint = dict(setup.env_fingerprint)
+    if provider_name is not None:
+        # Provider identity is harness provenance, not provider-supplied data.
+        # Overwrite any conflicting fingerprint value so a result cannot claim
+        # to have come from a provider other than the one the runner invoked.
+        env_fingerprint["provider"] = provider_name
 
     def run_action():
         return sut.run_task(task, env, params=params)
@@ -136,7 +147,7 @@ def run_setup(sut: SystemUnderTest, setup: EpisodeSetup) -> Optional[EpisodeReco
             correct_action_available=setup.correct_action_available,
             params=params,
             seed=seed,
-            env_fingerprint=setup.env_fingerprint,
+            env_fingerprint=env_fingerprint,
         )
     except ValueError:
         # UNREADABLE oracle -> not scoreable. Drop rather than guess.
@@ -153,7 +164,12 @@ def run_episode(
     :class:`~effectbench.provider.BenchmarkProvider` and use
     :func:`evaluate_provider` instead.
     """
-    return run_setup(sut, MockMedProvider().provision(task, trial))
+    provider = MockMedProvider()
+    return run_setup(
+        sut,
+        provider.provision(task, trial),
+        provider_name=provider.name,
+    )
 
 
 def evaluate_provider(
@@ -174,7 +190,7 @@ def evaluate_provider(
     for task in provider.tasks():
         for trial in range(trials):
             setup = provider.provision(task, trial)
-            record = run_setup(sut, setup)
+            record = run_setup(sut, setup, provider_name=provider.name)
             if record is not None:
                 records.append(record)
     return records

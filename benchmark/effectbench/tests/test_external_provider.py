@@ -188,7 +188,9 @@ class TicketDeskProvider:
 
 
 def test_external_provider_conforms_to_protocol() -> None:
-    assert isinstance(TicketDeskProvider(supply_product_verifier=True), BenchmarkProvider)
+    assert isinstance(
+        TicketDeskProvider(supply_product_verifier=True), BenchmarkProvider
+    )
 
 
 def test_screen_only_is_caught_silent_on_the_external_phantom() -> None:
@@ -205,6 +207,15 @@ def test_screen_only_is_caught_silent_on_the_external_phantom() -> None:
     assert phantom and all(
         e.outcome is OutcomeLabel.SILENT_WRONG_EFFECT for e in phantom
     )
+
+
+def test_provider_name_is_bound_into_episode_provenance() -> None:
+    provider = TicketDeskProvider(supply_product_verifier=True)
+    episodes = evaluate_provider(ScreenOnlySUT(), provider, trials=1)
+    assert episodes
+    assert {episode.env_fingerprint["provider"] for episode in episodes} == {
+        "ticketdesk"
+    }
 
 
 def test_effect_verified_reaches_swer_zero_on_the_external_provider() -> None:

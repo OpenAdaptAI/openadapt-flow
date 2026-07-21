@@ -133,8 +133,11 @@ class MockMedSoR:
 
         if fault == "partial":
             self._append(
-                patient_id=patient_id, enc_type=enc_type, note="",
-                source="replay", key=key,
+                patient_id=patient_id,
+                enc_type=enc_type,
+                note="",
+                source="replay",
+                key=key,
             )
             return ScreenObservation(banner, "partial: note field dropped")
 
@@ -143,8 +146,11 @@ class MockMedSoR:
             # silently destroyed.
             self._records = []
             self._append(
-                patient_id=patient_id, enc_type=enc_type, note=note,
-                source="replay", key=key,
+                patient_id=patient_id,
+                enc_type=enc_type,
+                note=note,
+                source="replay",
+                key=key,
             )
             return ScreenObservation(banner, "stale: concurrent row clobbered")
 
@@ -154,15 +160,21 @@ class MockMedSoR:
             if key is not None:
                 self._seen_keys.add(key)
             self._append(
-                patient_id=patient_id, enc_type=enc_type, note=note,
-                source="replay", key=key,
+                patient_id=patient_id,
+                enc_type=enc_type,
+                note=note,
+                source="replay",
+                key=key,
             )
             return ScreenObservation(banner, "idempotent: first write persisted")
 
         # ok / duplicate / double / timeout: persist the row normally.
         self._append(
-            patient_id=patient_id, enc_type=enc_type, note=note,
-            source="replay", key=key,
+            patient_id=patient_id,
+            enc_type=enc_type,
+            note=note,
+            source="replay",
+            key=key,
         )
         if fault == "timeout":
             # Committed, but the client aborts before the ack -> the UI shows an

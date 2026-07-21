@@ -1,4 +1,4 @@
-"""Tests for the per-payer capability map and the waterfall resolver."""
+"""Exact payer/account/service routing tests for the eligibility waterfall."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import httpx
 import pytest
 
 from openadapt_flow.eligibility.client import (
+    ApplicationMode,
     EligibilityRequest,
     EligibilityStatus,
+    StediAccountBoundary,
     StediEligibilityClient,
 )
 from openadapt_flow.eligibility.waterfall import (
@@ -20,193 +22,247 @@ from openadapt_flow.eligibility.waterfall import (
     run_waterfall,
 )
 
-ENV = {"STEDI_API_KEY": "test-key-123"}
-
-ACTIVE_271 = {
-    "payer": {"name": "Cigna"},
-    "benefitsInformation": [{"code": "1", "name": "Active Coverage"}],
-}
-PAYER_DOWN_271 = {
-    "errors": [{"code": "42", "description": "Unable to Respond at Current Time"}]
-}
+DIGEST = "a" * 64
+ENV = {"STEDI_API_KEY": "test-key"}
+ACCOUNT = StediAccountBoundary(
+    practice_account_id="practice-1", application_mode=ApplicationMode.TEST
+)
 
 
-def fake_client(body: dict, status: int = 200) -> StediEligibilityClient:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, json=body)
-
-    return StediEligibilityClient(transport=httpx.MockTransport(handler), env=ENV)
-
-
-def request_for(payer_id: str) -> EligibilityRequest:
+def request_for(payer_id: str = "62308", services=None) -> EligibilityRequest:
     return EligibilityRequest(
+        operation_id="route-check-1",
         payer_id=payer_id,
         provider_npi="1999999984",
         provider_organization="One",
         member_id="123",
+        service_type_codes=services or ["35"],
     )
 
 
-# -- the committed registry ---------------------------------------------------
+def api_capability(**overrides) -> PayerCapability:
+    data = dict(
+        key="cigna",
+        display_name="Cigna Dental",
+        route=EligibilityRoute.API,
+        request_payer_id="62308",
+        stedi_id="SX071",
+        application_mode=ApplicationMode.TEST,
+        practice_account_id="practice-1",
+        supported_service_type_codes=["35"],
+        payer_record_sha256=DIGEST,
+        verified_on="2026-07-21",
+    )
+    data.update(overrides)
+    return PayerCapability(**data)
 
 
-def test_committed_registry_loads_and_ships_with_package():
+def registry(cap=None) -> PayerRegistry:
+    item = cap or api_capability()
+    return PayerRegistry(payers={item.key: item})
+
+
+def fake_client(body: dict, *, status=200, account=ACCOUNT, max_attempts=1):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=body)
+
+    return StediEligibilityClient(
+        account=account,
+        transport=httpx.MockTransport(handler),
+        env=ENV,
+        max_attempts=max_attempts,
+        sleep=lambda _: None,
+    )
+
+
+ACTIVE = {
+    "meta": {"applicationMode": "test"},
+    "tradingPartnerServiceId": "62308",
+    "benefitsInformation": [{"code": "1", "serviceTypeCodes": ["35"]}],
+}
+
+
+def test_shipped_registry_is_a_complete_synthetic_test_binding():
     assert DEFAULT_REGISTRY_PATH.exists()
-    registry = load_payer_routes()
-    assert registry.default_route is EligibilityRoute.PORTAL
-    assert set(registry.payers) >= {
-        "delta_dental",
-        "metlife",
-        "cigna_dental",
-        "guardian",
-        "united_concordia",
-        "dentaquest",
-        "availity",
-    }
+    loaded = load_payer_routes()
+    assert loaded.default_route is EligibilityRoute.QUEUE
+    cap = loaded.payers["cigna_dental_mock"]
+    assert cap.application_mode is ApplicationMode.TEST
+    assert cap.request_payer_id == "62308"
+    assert cap.stedi_id == "SX071"
+    assert cap.supported_service_type_codes == ["35"]
+    assert len(cap.payer_record_sha256 or "") == 64
 
 
-def test_six_confirmed_dental_payers_route_api_first():
-    registry = load_payer_routes()
-    for key in (
-        "delta_dental",
-        "metlife",
-        "cigna_dental",
-        "guardian",
-        "united_concordia",
-        "dentaquest",
-    ):
-        assert registry.payers[key].route is EligibilityRoute.API, key
+def test_incomplete_api_binding_fails_registry_validation():
+    with pytest.raises(ValueError, match="exact reviewed binding"):
+        PayerCapability(key="unsafe", route=EligibilityRoute.API)
 
 
-def test_availity_is_excluded_and_portal_banned():
-    registry = load_payer_routes()
-    availity = registry.payers["availity"]
-    assert availity.route is EligibilityRoute.EXCLUDED
-    assert availity.portal_banned
-    assert "sanctioned" in availity.notes.lower()  # the API conversion path
-    decision = resolve_route("Availity Essentials", registry)
-    assert decision.route is EligibilityRoute.EXCLUDED
+def test_unknown_payer_queues_instead_of_guessing_a_portal():
+    decision = resolve_route("Unknown Dental", registry())
+    assert decision.route is EligibilityRoute.QUEUE
+    assert "no exact reviewed route" in decision.reason
 
 
-def test_alias_and_case_insensitive_lookup():
-    registry = load_payer_routes()
-    for name in ("Cigna", "CIGNA DENTAL", "cigna dental health"):
-        decision = resolve_route(name, registry)
-        assert decision.use_api, name
-        assert decision.capability is not None
-        assert decision.capability.stedi_payer_id == "62308"
+def test_alias_collision_fails_loud():
+    with pytest.raises(ValueError, match="maps to both"):
+        PayerRegistry(
+            payers={
+                "one": api_capability(key="one", aliases=["shared"]),
+                "two": api_capability(
+                    key="two",
+                    display_name="Other",
+                    aliases=["shared"],
+                    request_payer_id="99999",
+                ),
+            }
+        )
 
 
-def test_unknown_payer_defaults_to_portal():
-    decision = resolve_route("Mom & Pop Dental Trust", load_payer_routes())
-    assert decision.route is EligibilityRoute.PORTAL
-    assert not decision.use_api
-    assert "not in the capability map" in decision.reason
-
-
-def test_malformed_registry_fails_loud(tmp_path):
-    bad = tmp_path / "routes.yaml"
-    bad.write_text("just a string")
-    with pytest.raises(ValueError, match="malformed"):
-        load_payer_routes(bad)
-
-
-# -- run_waterfall: the fulfillment seam -------------------------------------
-
-
-def test_api_answer_finishes_on_api_route():
+def test_exact_binding_answer_completes_api_route():
     outcome = run_waterfall(
-        request_for("62308"),
+        request_for(),
         payer="Cigna Dental",
-        client=fake_client(ACTIVE_271),
-        registry=load_payer_routes(),
+        client=fake_client(ACTIVE),
+        registry=registry(),
     )
     assert outcome.final_route is EligibilityRoute.API
     assert outcome.answered_by_api
-    assert outcome.result is not None
-    assert outcome.result.status is EligibilityStatus.ACTIVE
 
 
-def test_api_unavailable_falls_through_to_portal():
+def test_request_payer_id_mismatch_never_calls_api():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=ACTIVE)
+
+    client = StediEligibilityClient(
+        account=ACCOUNT, transport=httpx.MockTransport(handler), env=ENV
+    )
     outcome = run_waterfall(
-        request_for("62308"),
+        request_for("6238"), payer="Cigna Dental", client=client, registry=registry()
+    )
+    assert calls == 0
+    assert outcome.final_route is EligibilityRoute.QUEUE
+    assert "payer ID" in outcome.trail[-1]
+
+
+def test_unreviewed_service_type_never_calls_api():
+    outcome = run_waterfall(
+        request_for(services=["30"]),
         payer="Cigna Dental",
-        client=fake_client(PAYER_DOWN_271),
-        registry=load_payer_routes(),
+        client=fake_client(ACTIVE),
+        registry=registry(),
+    )
+    assert outcome.final_route is EligibilityRoute.QUEUE
+    assert "service type" in outcome.trail[-1]
+
+
+def test_account_or_mode_mismatch_never_calls_api():
+    other = StediAccountBoundary(
+        practice_account_id="practice-2", application_mode=ApplicationMode.TEST
+    )
+    outcome = run_waterfall(
+        request_for(),
+        payer="Cigna Dental",
+        client=fake_client(ACTIVE, account=other),
+        registry=registry(),
+    )
+    assert outcome.final_route is EligibilityRoute.QUEUE
+    assert "account/mode" in outcome.trail[-1]
+
+
+def test_transient_failure_falls_to_reviewed_portal_after_retries():
+    body = {"code": "TOO_MANY_REQUESTS"}
+    outcome = run_waterfall(
+        request_for(),
+        payer="Cigna Dental",
+        client=fake_client(body, status=429, max_attempts=2),
+        registry=registry(),
     )
     assert outcome.final_route is EligibilityRoute.PORTAL
-    assert not outcome.answered_by_api
     assert outcome.result is not None
     assert outcome.result.status is EligibilityStatus.PAYER_UNAVAILABLE
-    assert any("falling through to portal" in step for step in outcome.trail)
+    assert outcome.result.attempt_count == 2
 
 
-def test_portal_route_never_needs_an_api_key():
-    # No client, no STEDI_API_KEY: a portal-routed payer must not construct
-    # the API client at all.
+def test_member_identity_error_queues_without_portal_fallback():
+    body = {
+        "meta": {"applicationMode": "test"},
+        "tradingPartnerServiceId": "62308",
+        "errors": [{"code": "75"}],
+    }
     outcome = run_waterfall(
-        request_for("LOCAL1"),
-        payer="Mom & Pop Dental Trust",
-        registry=load_payer_routes(),
-    )
-    assert outcome.final_route is EligibilityRoute.PORTAL
-    assert outcome.result is None
-
-
-def test_excluded_payer_never_reaches_api_or_portal():
-    outcome = run_waterfall(
-        request_for("AVAILITY"),
-        payer="Availity",
-        registry=load_payer_routes(),
-    )
-    assert outcome.final_route is EligibilityRoute.EXCLUDED
-    assert outcome.result is None
-
-
-def test_portal_banned_api_payer_lands_excluded_not_portal():
-    # An api-sanctioned / portal-banned payer whose API leg is down must land
-    # in the queue, never on its banned portal.
-    registry = PayerRegistry(
-        payers={
-            "strict": PayerCapability(
-                key="strict",
-                route=EligibilityRoute.API,
-                portal_banned=True,
-                aliases=["strict dental"],
-            )
-        }
-    )
-    outcome = run_waterfall(
-        request_for("STRICT1"),
-        payer="Strict Dental",
-        client=fake_client(PAYER_DOWN_271),
-        registry=registry,
-    )
-    assert outcome.final_route is EligibilityRoute.EXCLUDED
-    assert any("contractually banned" in step for step in outcome.trail)
-
-
-def test_indeterminate_parse_is_not_an_answer():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"<html>oops</html>")
-
-    client = StediEligibilityClient(transport=httpx.MockTransport(handler), env=ENV)
-    outcome = run_waterfall(
-        request_for("62308"),
+        request_for(),
         payer="Cigna Dental",
-        client=client,
-        registry=load_payer_routes(),
+        client=fake_client(body),
+        registry=registry(),
     )
-    assert not outcome.answered_by_api
-    assert outcome.final_route is EligibilityRoute.PORTAL
+    assert outcome.final_route is EligibilityRoute.QUEUE
     assert outcome.result is not None
-    assert outcome.result.status is EligibilityStatus.INDETERMINATE
+    assert outcome.result.status is EligibilityStatus.NOT_FOUND
+
+
+def test_portal_banned_transient_failure_queues():
+    cap = api_capability(portal_banned=True)
+    outcome = run_waterfall(
+        request_for(),
+        payer="Cigna Dental",
+        client=fake_client({"error": "down"}, status=503),
+        registry=registry(cap),
+    )
+    assert outcome.final_route is EligibilityRoute.QUEUE
+    assert "barred" in outcome.trail[-1]
+
+
+def test_explicit_portal_route_needs_no_api_key():
+    cap = PayerCapability(
+        key="portal", display_name="Portal Dental", route=EligibilityRoute.PORTAL
+    )
+    outcome = run_waterfall(
+        request_for("PORTAL"), payer="Portal Dental", registry=registry(cap)
+    )
+    assert outcome.final_route is EligibilityRoute.PORTAL
+    assert outcome.result is None
+
+
+def test_portal_banned_configuration_cannot_select_portal():
+    with pytest.raises(ValueError, match="portal-banned"):
+        PayerCapability(
+            key="contradictory",
+            display_name="Contradictory Portal",
+            route=EligibilityRoute.PORTAL,
+            portal_banned=True,
+        )
+
+
+def test_excluded_route_stays_excluded():
+    cap = PayerCapability(
+        key="blocked",
+        display_name="Blocked Portal",
+        route=EligibilityRoute.EXCLUDED,
+        portal_banned=True,
+    )
+    outcome = run_waterfall(
+        request_for("BLOCKED"), payer="Blocked Portal", registry=registry(cap)
+    )
+    assert outcome.final_route is EligibilityRoute.EXCLUDED
+
+
+def test_malformed_registry_fails_loud(tmp_path):
+    path = tmp_path / "routes.yaml"
+    path.write_text("just a string")
+    with pytest.raises(ValueError, match="payer mapping"):
+        load_payer_routes(path)
 
 
 def test_lazy_package_exports():
-    import openadapt_flow.eligibility as elig
+    import openadapt_flow.eligibility as eligibility
 
-    assert elig.EligibilityRoute is EligibilityRoute
-    assert callable(elig.run_waterfall)
+    assert eligibility.EligibilityRoute is EligibilityRoute
+    assert callable(eligibility.run_waterfall)
     with pytest.raises(AttributeError):
-        elig.nope
+        eligibility.nope

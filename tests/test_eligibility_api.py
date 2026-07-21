@@ -1,14 +1,4 @@
-"""Contract tests for the Stedi 270/271 eligibility client.
-
-The fakes are FAITHFUL to Stedi's documented request/response shapes
-(endpoint, ``Authorization: Key`` header, ``tradingPartnerServiceId`` /
-``subscriber`` / ``encounter.serviceTypeCodes`` request, ``planStatus`` /
-``benefitsInformation`` / AAA ``errors`` response -- fetched 2026-07-18, see
-``docs/ELIGIBILITY_API_WATERFALL.md``). This suite is CONTRACT-proven: it
-proves the client's parsing/fail-closed/auth behavior against those
-documented shapes, not against Stedi's live service (that is the env-gated
-smoke test in ``tests/test_eligibility_live_stedi.py``).
-"""
+"""Contract and fail-closed tests for the Stedi eligibility client."""
 
 from __future__ import annotations
 
@@ -18,18 +8,28 @@ import httpx
 import pytest
 
 from openadapt_flow.eligibility.client import (
+    STEDI_ELIGIBILITY_URL,
+    ApplicationMode,
+    BenefitSelection,
     EligibilityRequest,
     EligibilityStatus,
+    ErrorCategory,
+    RetryDisposition,
+    StediAccountBoundary,
     StediEligibilityClient,
     parse_271,
 )
 
 ENV = {"STEDI_API_KEY": "test-key-123"}
+ACCOUNT = StediAccountBoundary(
+    practice_account_id="openadapt-sandbox",
+    application_mode=ApplicationMode.TEST,
+)
 
 
 def dental_request(**overrides) -> EligibilityRequest:
-    """A dental inquiry shaped like Stedi's documented dental mocks."""
     base = dict(
+        operation_id="check-001",
         payer_id="62308",
         member_id="U3141592653",
         first_name="Jaguar",
@@ -38,215 +38,405 @@ def dental_request(**overrides) -> EligibilityRequest:
         provider_npi="1999999984",
         provider_organization="One",
         service_type_codes=["35"],
+        date_of_service="20260721",
+        benefit_selection=BenefitSelection(network_code="Y", coverage_level_code="IND"),
     )
     base.update(overrides)
     return EligibilityRequest(**base)
 
 
-#: A faithful active-coverage dental 271 (documented benefitsInformation
-#: codes: 1 active, C deductible, B copay, A co-insurance, G OOP max).
 ACTIVE_271 = {
-    "controlNumber": "000000001",
+    "meta": {"applicationMode": "test"},
     "tradingPartnerServiceId": "62308",
-    "payer": {
-        "entityIdentifier": "Payer",
-        "name": "Cigna",
-        "payorIdentification": "62308",
-    },
-    "planInformation": {"groupNumber": "1234567", "groupDescription": "DENTAL PPO"},
-    "planDateInformation": {"planBegin": "20260101", "eligibilityBegin": "20260101"},
-    "planStatus": [
-        {
-            "statusCode": "1",
-            "status": "Active Coverage",
-            "planDetails": "Cigna Dental PPO",
-            "serviceTypeCodes": ["35"],
-        }
-    ],
+    "payer": {"name": "Cigna"},
+    "planInformation": {"groupDescription": "DENTAL PPO"},
+    "planDateInformation": {"planBegin": "20260101", "planEnd": "20261231"},
     "benefitsInformation": [
-        {"code": "1", "name": "Active Coverage", "serviceTypeCodes": ["35"]},
+        {"code": "1", "serviceTypeCodes": ["35"]},
         {
-            "code": "C",
-            "name": "Deductible",
-            "benefitAmount": "50",
+            "code": "B",
+            "benefitAmount": "20",
+            "serviceTypeCodes": ["35"],
             "coverageLevelCode": "IND",
             "inPlanNetworkIndicatorCode": "Y",
+        },
+        {
+            "code": "B",
+            "benefitAmount": "80",
             "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "N",
         },
-        {"code": "B", "name": "Co-Payment", "benefitAmount": "20"},
-        {"code": "A", "name": "Co-Insurance", "benefitPercent": "0.2"},
-        {"code": "G", "name": "Out of Pocket (Stop Loss)", "benefitAmount": "1500"},
-    ],
-    "x12": "ISA*00*...~ST*271*0001*005010X279A1~...~IEA*1*000000001~",
-}
-
-INACTIVE_271 = {
-    "tradingPartnerServiceId": "87726",
-    "payer": {"name": "UnitedHealthcare"},
-    "benefitsInformation": [
-        {"code": "6", "name": "Inactive", "serviceTypeCodes": ["30"]}
-    ],
-}
-
-AAA_PAYER_DOWN_271 = {
-    "tradingPartnerServiceId": "62308",
-    "errors": [
         {
-            "code": "42",
-            "description": "Unable to Respond at Current Time",
-            "followupAction": "Resubmission Allowed",
-        }
-    ],
-}
-
-AAA_NOT_FOUND_271 = {
-    "tradingPartnerServiceId": "62308",
-    "errors": [
-        {
-            "code": "75",
-            "description": "Subscriber/Insured Not Found",
-            "followupAction": "Please Correct and Resubmit",
-        }
-    ],
-}
-
-
-def make_client(handler) -> StediEligibilityClient:
-    return StediEligibilityClient(transport=httpx.MockTransport(handler), env=ENV)
-
-
-# -- request shape + auth ----------------------------------------------------
-
-
-def test_request_body_matches_documented_stedi_shape():
-    body = dental_request().to_stedi_body()
-    assert body == {
-        "tradingPartnerServiceId": "62308",
-        "provider": {"npi": "1999999984", "organizationName": "One"},
-        "subscriber": {
-            "firstName": "Jaguar",
-            "lastName": "Dent",
-            "dateOfBirth": "19960505",
-            "memberId": "U3141592653",
+            "code": "A",
+            "benefitPercent": "0.2",
+            "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "Y",
         },
-        "encounter": {"serviceTypeCodes": ["35"]},
+        {
+            "code": "C",
+            "benefitAmount": "1000",
+            "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "Y",
+            "timeQualifierCode": "23",
+        },
+        {
+            "code": "C",
+            "benefitAmount": "500",
+            "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "Y",
+            "timeQualifierCode": "29",
+        },
+        {
+            "code": "G",
+            "benefitAmount": "2500",
+            "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "Y",
+            "timeQualifierCode": "23",
+        },
+        {
+            "code": "G",
+            "benefitAmount": "1200",
+            "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "Y",
+            "timeQualifierCode": "29",
+        },
+    ],
+}
+
+
+def make_client(handler, **kwargs) -> StediEligibilityClient:
+    return StediEligibilityClient(
+        account=ACCOUNT,
+        transport=httpx.MockTransport(handler),
+        env=ENV,
+        sleep=lambda _: None,
+        **kwargs,
+    )
+
+
+def test_request_shape_and_phi_safe_repr():
+    request = dental_request()
+    assert request.to_stedi_body()["encounter"] == {
+        "serviceTypeCodes": ["35"],
+        "dateOfService": "20260721",
+    }
+    assert request.to_stedi_body()["tradingPartnerServiceId"] == "62308"
+    assert "U3141592653" not in repr(request)
+    assert request.safe_summary() == {
+        "operation_id": "check-001",
+        "payer_id": "62308",
+        "service_type_codes": ["35"],
+        "date_of_service_present": True,
     }
 
 
-def test_client_sends_key_auth_header_and_json_body():
+def test_client_uses_current_bare_authorization_header():
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["auth"] = request.headers.get("Authorization")
-        seen["body"] = json.loads(request.content)
+        seen["authorization"] = request.headers["Authorization"]
         return httpx.Response(200, json=ACTIVE_271)
 
-    result = make_client(handler).check(dental_request())
-    assert seen["auth"] == "Key test-key-123"  # documented Stedi format
-    assert seen["body"]["tradingPartnerServiceId"] == "62308"
-    assert result.status is EligibilityStatus.ACTIVE
+    assert make_client(handler).check(dental_request()).is_answer
+    assert seen["authorization"] == "test-key-123"
 
 
-def test_missing_api_key_fails_loud_at_construction():
-    with pytest.raises(ValueError, match="STEDI_API_KEY"):
-        StediEligibilityClient(env={})
+def test_legacy_key_prefix_is_removed_not_emitted():
+    seen = {}
 
-
-def test_secret_never_appears_in_result_or_reason():
     def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers["Authorization"]
         return httpx.Response(200, json=ACTIVE_271)
 
-    result = make_client(handler).check(dental_request())
-    dumped = result.model_dump_json() + result.reason + repr(result)
-    assert "test-key-123" not in dumped
-
-
-# -- 271 normalization (fake-proven against documented shapes) ---------------
-
-
-def test_active_dental_271_normalizes_benefits():
-    result = parse_271(
-        "62308", json.dumps(ACTIVE_271).encode(), service_type_codes=["35"]
+    client = StediEligibilityClient(
+        account=ACCOUNT,
+        transport=httpx.MockTransport(handler),
+        env={"STEDI_API_KEY": "Key old-key"},
     )
-    assert result.status is EligibilityStatus.ACTIVE
+    client.check(dental_request())
+    assert seen["authorization"] == "old-key"
+
+
+def test_missing_key_and_non_allowlisted_endpoint_fail_loud():
+    with pytest.raises(ValueError, match="practice-held credential"):
+        StediEligibilityClient(account=ACCOUNT, env={})
+    with pytest.raises(ValueError, match="allowlisted"):
+        StediEligibilityClient(
+            account=ACCOUNT, env=ENV, base_url="https://example.test/eligibility"
+        )
+    with pytest.raises(ValueError, match="allowlisted"):
+        StediEligibilityClient(
+            account=ACCOUNT,
+            env=ENV,
+            base_url=f"{STEDI_ELIGIBILITY_URL}?alternate=true",
+        )
+
+
+def test_production_account_requires_practice_baa():
+    with pytest.raises(ValueError, match="BAA"):
+        StediAccountBoundary(
+            practice_account_id="practice-1",
+            application_mode=ApplicationMode.PRODUCTION,
+        )
+
+
+def test_qualifier_aware_values_do_not_choose_out_of_network_or_remaining_as_total():
+    payload = json.dumps(ACTIVE_271).encode()
+    result = parse_271(dental_request(), payload, expected_mode=ApplicationMode.TEST)
     assert result.is_answer
-    assert result.payer_name == "Cigna"
-    assert result.plan_name == "DENTAL PPO"
-    assert result.plan_begin == "20260101"
-    assert result.deductible == "50"
+    assert result.status is EligibilityStatus.ACTIVE
     assert result.copay == "20"
     assert result.coinsurance_percent == "0.2"
-    assert result.out_of_pocket_maximum == "1500"
-    assert result.raw_271 == ACTIVE_271  # raw 271 retained for audit
-    assert result.raw_271_sha256 and len(result.raw_271_sha256) == 64
+    assert result.deductible_total == "1000"
+    assert result.deductible_remaining == "500"
+    assert result.out_of_pocket_total == "2500"
+    assert result.out_of_pocket_remaining == "1200"
+    assert len(result.benefits) == 7
+    assert result.raw_271_bytes == payload
 
 
-def test_inactive_271():
-    result = parse_271("87726", json.dumps(INACTIVE_271).encode())
-    assert result.status is EligibilityStatus.INACTIVE
-    assert result.is_answer  # inactive IS a benefits answer
+def test_raw_phi_response_is_excluded_from_repr_and_serialization():
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["subscriber"] = {"memberId": "SECRET-MEMBER-123"}
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert result.raw_271 is not None
+    assert "SECRET-MEMBER-123" not in repr(result)
+    assert "SECRET-MEMBER-123" not in result.model_dump_json()
 
 
-def test_aaa_42_maps_to_payer_unavailable():
-    result = parse_271("62308", json.dumps(AAA_PAYER_DOWN_271).encode())
-    assert result.status is EligibilityStatus.PAYER_UNAVAILABLE
+def test_response_application_mode_is_required_even_without_expected_mode():
+    body = json.loads(json.dumps(ACTIVE_271))
+    body.pop("meta")
+    result = parse_271(dental_request(), json.dumps(body).encode())
     assert not result.is_answer
-    assert result.aaa_codes == ["42"]
+    assert result.error_category is ErrorCategory.AUTH_CONFIGURATION
 
 
-def test_aaa_75_maps_to_not_found():
-    result = parse_271("62308", json.dumps(AAA_NOT_FOUND_271).encode())
-    assert result.status is EligibilityStatus.NOT_FOUND
+@pytest.mark.parametrize(
+    ("status", "category", "retryable"),
+    [
+        (401, ErrorCategory.AUTH_CONFIGURATION, False),
+        (429, ErrorCategory.THROTTLED, True),
+        (503, ErrorCategory.SERVER_TRANSIENT, True),
+    ],
+)
+def test_http_status_classification_does_not_depend_on_json_body(
+    status, category, retryable
+):
+    result = parse_271(dental_request(), b"upstream text", http_status=status)
+    assert result.error_category is category
+    assert result.retryable is retryable
+
+
+def test_conflicting_qualified_benefits_are_not_an_answer():
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["benefitsInformation"].append(
+        {
+            "code": "B",
+            "benefitAmount": "25",
+            "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "Y",
+        }
+    )
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert result.status is EligibilityStatus.ACTIVE
+    assert result.copay is None
     assert not result.is_answer
-    assert "Subscriber/Insured Not Found" in result.errors
+    assert result.error_category is ErrorCategory.RESPONSE_AMBIGUOUS
+    assert result.ambiguities == ["benefit B: conflicting qualified values"]
 
 
-def test_aaa_43_maps_to_rejected():
-    body = {
-        "errors": [
-            {"code": "43", "description": "Invalid/Missing Provider Identification"}
-        ]
-    }
-    result = parse_271("62308", json.dumps(body).encode())
-    assert result.status is EligibilityStatus.REJECTED
-
-
-def test_payer_not_supported_http_400_is_unavailable_not_an_answer():
-    # Stedi-level rejection (e.g. unsupported payer) with no AAA structure.
-    body = {"message": "trading partner is not supported"}
-    result = parse_271("99999", json.dumps(body).encode(), http_status=400)
-    assert result.status is EligibilityStatus.PAYER_UNAVAILABLE
-    assert not result.is_answer
-
-
-def test_malformed_html_body_fails_closed():
-    result = parse_271("62308", b"<html>502 Bad Gateway</html>")
+def test_wrong_service_and_conflicting_coverage_fail_closed():
+    wrong = json.loads(json.dumps(ACTIVE_271))
+    wrong["benefitsInformation"][0]["serviceTypeCodes"] = ["30"]
+    result = parse_271(
+        dental_request(), json.dumps(wrong).encode(), expected_mode=ApplicationMode.TEST
+    )
     assert result.status is EligibilityStatus.INDETERMINATE
     assert not result.is_answer
-    assert result.raw_271 is None
-    assert result.raw_271_sha256  # bytes still digested for the audit trail
 
-
-def test_empty_2xx_json_fails_closed_never_guesses_active():
-    result = parse_271("62308", b"{}")
+    conflict = json.loads(json.dumps(ACTIVE_271))
+    conflict["benefitsInformation"].append({"code": "6", "serviceTypeCodes": ["35"]})
+    result = parse_271(
+        dental_request(),
+        json.dumps(conflict).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
     assert result.status is EligibilityStatus.INDETERMINATE
-    assert not result.is_answer
+    assert "conflicting active/inactive" in result.ambiguities[0]
 
 
-def test_transport_failure_maps_to_payer_unavailable():
+def test_service_date_outside_plan_and_benefit_window_fails_closed():
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["planDateInformation"]["planEnd"] = "20260630"
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert result.status is EligibilityStatus.INDETERMINATE
+    assert "service date" in result.ambiguities[0]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_errors_do_not_retry_or_fallback(status):
+    calls = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, json={"error": "unauthorized"})
 
     result = make_client(handler).check(dental_request())
-    assert result.status is EligibilityStatus.PAYER_UNAVAILABLE
-    assert "ConnectError" in result.reason
-    assert result.raw_271_bytes is None
+    assert calls == 1
+    assert result.error_category is ErrorCategory.AUTH_CONFIGURATION
+    assert result.retry_disposition is RetryDisposition.NO_RETRY_QUEUE
 
 
-def test_raw_bytes_digest_matches_wire_payload():
-    import hashlib
+def test_invalid_response_is_queued_without_retry_or_portal_fallback():
+    calls = 0
 
-    payload = json.dumps(ACTIVE_271).encode()
-    result = parse_271("62308", payload)
-    assert result.raw_271_bytes == payload
-    assert result.raw_271_sha256 == hashlib.sha256(payload).hexdigest()
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=b"not-json")
+
+    result = make_client(handler).check(dental_request())
+    assert calls == 1
+    assert result.error_category is ErrorCategory.RESPONSE_INVALID
+    assert result.status is EligibilityStatus.INDETERMINATE
+    assert result.retry_disposition is RetryDisposition.NO_RETRY_QUEUE
+
+
+def test_http_400_aaa79_is_invalid_payer_and_not_retried():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"errors": [{"code": "79"}]})
+
+    result = make_client(handler).check(dental_request())
+    assert calls == 1
+    assert result.error_category is ErrorCategory.INVALID_PAYER
+    assert not result.retryable
+
+
+def test_aaa_member_identity_is_queued_not_automatically_retried():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        body = {
+            "meta": {"applicationMode": "test"},
+            "tradingPartnerServiceId": "62308",
+            "errors": [{"code": "75", "description": "contains no logged data"}],
+        }
+        return httpx.Response(200, json=body)
+
+    result = make_client(handler).check(dental_request())
+    assert calls == 1
+    assert result.status is EligibilityStatus.NOT_FOUND
+    assert result.error_category is ErrorCategory.MEMBER_IDENTITY
+    assert "description" not in result.reason
+
+
+@pytest.mark.parametrize(
+    "first_status,first_body",
+    [
+        (429, {"code": "TOO_MANY_REQUESTS"}),
+        (503, {"error": "service_unavailable"}),
+        (
+            200,
+            {
+                "meta": {"applicationMode": "test"},
+                "tradingPartnerServiceId": "62308",
+                "errors": [{"code": "42"}],
+            },
+        ),
+    ],
+)
+def test_only_explicit_transients_retry(first_status, first_body):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(first_status, json=first_body)
+        return httpx.Response(200, json=ACTIVE_271)
+
+    result = make_client(handler).check(dental_request())
+    assert calls == 2
+    assert result.is_answer
+    assert result.attempt_count == 2
+
+
+def test_transport_failure_is_bounded_and_secret_free():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("member U3141592653 key test-key-123", request=request)
+
+    result = make_client(handler, max_attempts=2).check(dental_request())
+    assert calls == 2
+    assert result.error_category is ErrorCategory.TRANSPORT_TRANSIENT
+    assert "U3141592653" not in result.reason
+    assert "test-key-123" not in result.reason + result.model_dump_json()
+
+
+def test_response_size_is_bounded():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 2049)
+
+    result = make_client(handler, max_response_bytes=1024, max_attempts=1).check(
+        dental_request()
+    )
+    assert result.error_category is ErrorCategory.RESPONSE_INVALID
+    assert not result.is_answer
+
+
+def test_partial_result_with_unclassified_error_is_not_accepted():
+    body = {**ACTIVE_271, "error": "partial_failure"}
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.RESPONSE_INVALID
+
+
+def test_response_payer_and_mode_must_match_request_boundary():
+    wrong_payer = {**ACTIVE_271, "tradingPartnerServiceId": "99999"}
+    result = parse_271(
+        dental_request(),
+        json.dumps(wrong_payer).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
+    assert result.error_category is ErrorCategory.INVALID_PAYER
+
+    wrong_mode = {**ACTIVE_271, "meta": {"applicationMode": "production"}}
+    result = parse_271(
+        dental_request(),
+        json.dumps(wrong_mode).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
+    assert result.error_category is ErrorCategory.AUTH_CONFIGURATION
+
+
+def test_non_json_and_empty_json_never_guess_active():
+    for payload in (b"<html>bad</html>", b"{}"):
+        result = parse_271(dental_request(), payload)
+        assert not result.is_answer
+        assert result.status is EligibilityStatus.INDETERMINATE

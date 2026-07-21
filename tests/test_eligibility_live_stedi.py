@@ -1,43 +1,53 @@
-"""Live smoke test against Stedi's TEST-mode eligibility endpoint.
+"""Three-trial live Stedi TEST-mode qualification.
 
-Env-gated: runs only when ``STEDI_API_KEY`` is set. Use a Stedi TEST-mode
-key (self-serve account -> API keys -> Mode: Test); test mode accepts ONLY
-Stedi's published mock requests and mock checks are free, so this test
-costs $0 and touches no real member data. The request below is Stedi's own
-documented DENTAL mock (Cigna, service type code 35, subscriber
-Jaguar Dent).
-
-When this passes against the real endpoint, the client graduates from
-contract-proven (faithful-fake) to live-proven for the mocked path.
+The request is Stedi's published Cigna dental mock (STC 35), so it uses no
+real member data and Stedi documents mock checks as free.  Without a test key,
+all three trials skip with one reproducible setup instruction; they must never
+be reported as executed evidence.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 
 import pytest
 
-from openadapt_flow.eligibility.artifact import all_confirmed, write_and_verify
+from openadapt_flow.eligibility.artifact import (
+    ArtifactEncryption,
+    PracticeArtifactPolicy,
+    all_confirmed,
+    write_and_verify,
+)
 from openadapt_flow.eligibility.client import (
+    ApplicationMode,
+    BenefitSelection,
     EligibilityRequest,
     EligibilityStatus,
+    StediAccountBoundary,
     StediEligibilityClient,
 )
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("STEDI_API_KEY"),
     reason=(
-        "STEDI_API_KEY not set -- live Stedi smoke skipped. Create a free "
-        "Stedi account, generate a TEST-mode API key (mock eligibility "
-        "checks are free), and export STEDI_API_KEY to run this."
+        "STEDI_API_KEY is absent: create a Stedi sandbox TEST key, then run "
+        "`pytest -q tests/test_eligibility_live_stedi.py -rs`; no live "
+        "eligibility evidence was collected"
     ),
 )
 
 
-def test_stedi_dental_mock_roundtrip(tmp_path):
-    client = StediEligibilityClient()  # STEDI_API_KEY from the environment
+@pytest.mark.parametrize("trial", [1, 2, 3])
+def test_stedi_dental_mock_roundtrip_three_trials(tmp_path, trial):
+    account = StediAccountBoundary(
+        practice_account_id="openadapt-sandbox",
+        application_mode=ApplicationMode.TEST,
+    )
+    client = StediEligibilityClient(account=account)
     request = EligibilityRequest(
-        payer_id="62308",  # Cigna -- Stedi's documented dental mock
+        operation_id=f"stedi-cigna-dental-live-trial-{trial}",
+        payer_id="62308",
         member_id="U3141592653",
         first_name="Jaguar",
         last_name="Dent",
@@ -45,17 +55,28 @@ def test_stedi_dental_mock_roundtrip(tmp_path):
         provider_npi="1999999984",
         provider_organization="One",
         service_type_codes=["35"],
+        benefit_selection=BenefitSelection(network_code="Y", coverage_level_code="IND"),
     )
     result = client.check(request)
-    # The mock catalog returns a real 271; the exact benefits payload is
-    # Stedi's to change, so assert the invariants, not the prose.
     assert result.is_answer, result.reason
     assert result.status in (EligibilityStatus.ACTIVE, EligibilityStatus.INACTIVE)
-    assert result.raw_271 is not None
-    assert result.raw_271_sha256 is not None
+    assert result.application_mode is ApplicationMode.TEST
+    assert result.raw_271_sha256
 
+    artifact_key = base64.urlsafe_b64encode(os.urandom(32)).decode()
+    policy = PracticeArtifactPolicy(
+        boundary_id=f"live-test-trial-{trial}",
+        encryption=ArtifactEncryption.APPLICATION_AES256_GCM,
+        encryption_key_env="LIVE_TEST_ARTIFACT_KEY",
+        retention_days=1,
+    )
     artifact, verdicts = write_and_verify(
-        result, tmp_path, member_id="U3141592653", payer="Cigna Dental"
+        result,
+        tmp_path,
+        policy=policy,
+        member_id="U3141592653",
+        payer="Cigna Dental test catalog",
+        env={"LIVE_TEST_ARTIFACT_KEY": artifact_key},
     )
     assert all_confirmed(verdicts), [v.reason for v in verdicts]
-    assert artifact.raw_271_file is not None
+    assert artifact.raw_271_file.endswith(".enc")

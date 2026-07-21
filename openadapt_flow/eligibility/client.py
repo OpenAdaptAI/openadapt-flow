@@ -1,143 +1,224 @@
-"""Stedi real-time 270/271 eligibility client (the waterfall's API tier).
+"""Fail-closed Stedi 270/271 eligibility client.
 
-Documented contract this client is built against (Stedi Healthcare API,
-fetched 2026-07-18 -- ``docs/ELIGIBILITY_API_WATERFALL.md`` records the
-research honestly):
+The public module is mechanism, not a production payer recipe.  A deployment
+supplies a practice-owned account boundary and an exact, reviewed payer binding
+through :mod:`openadapt_flow.eligibility.waterfall`.
 
-- Endpoint: ``POST https://healthcare.us.stedi.com/2024-04-01/change/medicalnetwork/eligibility/v3``
-- Auth: ``Authorization: Key <api_key>`` (a TEST-mode key unlocks Stedi's
-  free mock catalog, including a dedicated dental section -- service type
-  code ``35`` -- with mock payers Ameritas / Anthem / Cigna / MetLife / UHC
-  Dental; no signed contract required for test mode).
-- Request: ``tradingPartnerServiceId`` (payer ID), ``provider`` (NPI +
-  org or person name), ``subscriber`` (name / DOB ``YYYYMMDD`` / member ID),
-  ``encounter.serviceTypeCodes`` (``["35"]`` = Dental Care; defaults to
-  ``30`` when omitted).
-- Response: ``planStatus`` / ``benefitsInformation[]`` (code ``1`` active,
-  ``6`` inactive, ``A`` co-insurance ``benefitPercent``, ``B`` co-payment
-  ``benefitAmount``, ``C`` deductible, ``G`` out-of-pocket max),
-  ``planInformation``, ``errors[]`` carrying X12 AAA reject codes
-  (``42``/``79``/``80`` payer unavailable, ``72``/``73``/``75``/``76``
-  subscriber not found / bad identifying info), and the raw 271 X12.
+Primary contract references (reviewed 2026-07-21):
 
-Posture:
+* https://www.stedi.com/docs/healthcare/api-reference/post-healthcare-eligibility
+* https://www.stedi.com/docs/healthcare/send-eligibility-checks
+* https://www.stedi.com/docs/healthcare/eligibility-troubleshooting
+* https://www.stedi.com/docs/healthcare/eligibility-patient-responsibility-benefits
+* https://www.stedi.com/docs/healthcare/integrated-account-overview
 
-- **Fail-closed parsing.** A response that neither affirms active coverage
-  nor affirms inactive/error is :attr:`EligibilityStatus.INDETERMINATE` --
-  the check is never *guessed* into a benefits row. This mirrors the effect
-  verifier's refuse-rather-than-guess verdicts.
-- **Secret-isolated auth.** The API key is referenced by environment
-  variable name (``STEDI_API_KEY`` by default, or any
-  :class:`~openadapt_flow.runtime.effects.auth.AuthRef`), resolved at
-  construction, failing LOUD when absent -- the kit-wide convention
-  (``docs/EFFECT_KIT.md``). The key never appears in configs, results,
-  reason strings, or artifacts.
-- **Reads are idempotent.** A 270 inquiry writes nothing, so -- unlike the
-  write-path :class:`~openadapt_flow.runtime.actuators.api.ApiActuator`,
-  whose sent-but-unacknowledged requests must HALT to avoid double writes --
-  a failed or unavailable API check may safely fall through to the portal
-  tier. The waterfall (:mod:`.waterfall`) encodes that distinction.
-- **PHI stays local.** The request carries member ID / DOB to the
-  clearinghouse under the *practice's own* Stedi account and BAA, from the
-  practice's machine. Nothing here logs request params; reason strings carry
-  payer IDs and status codes only.
-
-Import-light: ``httpx`` (already a core dependency) is imported lazily so
-importing this module costs nothing on the replay hot path.
+No request body or response body is logged.  Reasons contain only payer IDs,
+HTTP/AAA codes, and fixed classifications.  Raw 271 bytes are returned solely
+for the explicit PHI-bearing local artifact boundary.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+import re
+import threading
+import time
+from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Literal, Mapping, Optional
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openadapt_flow.runtime.effects.auth import AuthRef
 
-#: Stedi's real-time 270/271 JSON endpoint (test and production mode are
-#: selected by the API key, not the URL).
 STEDI_ELIGIBILITY_URL = (
     "https://healthcare.us.stedi.com/2024-04-01/change/medicalnetwork/eligibility/v3"
 )
-
-#: X12 service type code for Dental Care -- the dental offer's default EQ.
 SERVICE_TYPE_DENTAL = "35"
-
-#: Default env var holding the practice's Stedi API key (test or production).
 STEDI_API_KEY_ENV = "STEDI_API_KEY"
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
-#: AAA reject codes meaning the PAYER could not answer right now (retry /
-#: portal fallback is appropriate; the member may be perfectly eligible).
-_AAA_PAYER_UNAVAILABLE = {"42", "79", "80"}
-#: AAA reject codes meaning the payer answered but could not FIND the member
-#: as identified (wrong/missing member ID, name, DOB -- a data problem).
-_AAA_NOT_FOUND = {"72", "73", "75", "76"}
-
-#: benefitsInformation codes affirming coverage state.
+_AAA_TRANSIENT = {"42", "80"}
+_AAA_MEMBER = {"65", "67", "72", "73", "75", "76"}
+_AAA_PROVIDER = {
+    "41",
+    "43",
+    "44",
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50",
+    "51",
+    "52",
+    "53",
+    "97",
+}
+_AAA_INVALID_PAYER = {"T4"}
 _CODE_ACTIVE = "1"
-_CODES_INACTIVE = {"6", "7", "8"}  # inactive / pending / terminated
+_CODES_INACTIVE = {"6", "7", "8"}
+_DATE_RE = re.compile(r"^\d{8}$")
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+class ApplicationMode(str, Enum):
+    TEST = "test"
+    PRODUCTION = "production"
 
 
 class EligibilityStatus(str, Enum):
-    """Normalized outcome of one 270/271 eligibility check."""
-
-    #: Payer affirmed active coverage for the requested service type.
     ACTIVE = "active"
-    #: Payer affirmed the coverage is inactive / terminated.
     INACTIVE = "inactive"
-    #: Payer answered but could not find the member as identified
-    #: (AAA 72/73/75/76) -- fix the identifying fields or fall to the portal.
     NOT_FOUND = "not_found"
-    #: The payer (or its clearinghouse leg) could not respond right now
-    #: (AAA 42/79/80, transport failure, payer not supported) -- the member's
-    #: real status is unknown; retry or fall through to the portal tier.
     PAYER_UNAVAILABLE = "payer_unavailable"
-    #: The payer rejected the REQUEST itself (e.g. AAA 43 invalid provider
-    #: identification) -- an enrollment / request-shape problem to fix, not
-    #: a member status.
     REJECTED = "rejected"
-    #: The response could not be interpreted (malformed JSON, no affirmative
-    #: coverage or error signal). FAIL CLOSED: never recorded as a benefits
-    #: answer, never guessed into "active".
     INDETERMINATE = "indeterminate"
 
 
-class EligibilityRequest(BaseModel):
-    """One 270 inquiry: who is asking (provider) about whom (subscriber).
+class ErrorCategory(str, Enum):
+    AUTH_CONFIGURATION = "auth_configuration"
+    INVALID_PAYER = "invalid_payer"
+    INVALID_REQUEST = "invalid_request"
+    MEMBER_IDENTITY = "member_identity"
+    PROVIDER_CONFIGURATION = "provider_configuration"
+    THROTTLED = "throttled"
+    PAYER_TRANSIENT = "payer_transient"
+    TRANSPORT_TRANSIENT = "transport_transient"
+    SERVER_TRANSIENT = "server_transient"
+    RESPONSE_INVALID = "response_invalid"
+    RESPONSE_AMBIGUOUS = "response_ambiguous"
 
-    Field formats follow the documented Stedi request shape; ``date_of_birth``
-    is X12 ``D8`` (``YYYYMMDD``).
+
+class RetryDisposition(str, Enum):
+    NO_RETRY_QUEUE = "no_retry_queue"
+    RETRY_THEN_PORTAL = "retry_then_portal"
+    RETRY_THEN_QUEUE = "retry_then_queue"
+
+
+class StediAccountBoundary(BaseModel):
+    """Practice-held Stedi credential and tenancy boundary.
+
+    Production keys are accepted only when the practice owns the account and
+    its BAA has been confirmed.  The identifier must be operational, not PHI.
     """
 
-    #: The payer's ID with the clearinghouse (Stedi ``tradingPartnerServiceId``;
-    #: resolve the exact value in Stedi's payer directory at enrollment).
+    practice_account_id: str
+    application_mode: ApplicationMode
+    credential_env: str = STEDI_API_KEY_ENV
+    practice_holds_account: bool = True
+    baa_confirmed: bool = False
+
+    @field_validator("practice_account_id", "credential_env")
+    @classmethod
+    def _safe_identifier(cls, value: str) -> str:
+        if not _SAFE_ID_RE.fullmatch(value):
+            raise ValueError("must be a non-PHI operational identifier")
+        return value
+
+    @model_validator(mode="after")
+    def _production_boundary(self) -> "StediAccountBoundary":
+        if not self.practice_holds_account:
+            raise ValueError("Stedi credentials must belong to the practice account")
+        if (
+            self.application_mode is ApplicationMode.PRODUCTION
+            and not self.baa_confirmed
+        ):
+            raise ValueError(
+                "production Stedi use requires the practice BAA confirmation"
+            )
+        return self
+
+
+class BenefitSelection(BaseModel):
+    """Qualifiers for the practice-facing normalized benefit values.
+
+    The complete qualified benefit list is always retained.  Convenience
+    values are populated only when this selector yields one unambiguous value.
+    """
+
+    network_code: Optional[Literal["Y", "N", "W"]] = None
+    coverage_level_code: Optional[str] = None
+    time_qualifier_code: Optional[str] = None
+    procedure_code: Optional[str] = None
+
+
+class EligibilityRequest(BaseModel):
+    """One idempotently tracked 270 read.
+
+    ``operation_id`` is local correlation/idempotency data and is never sent to
+    Stedi.  PHI fields are suppressed from repr, and callers must not log the
+    result of ``model_dump``.
+    """
+
+    operation_id: str = Field(default_factory=lambda: str(uuid4()))
     payer_id: str
-    member_id: Optional[str] = None
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    #: ``YYYYMMDD``.
-    date_of_birth: Optional[str] = None
-    #: The practice's (rendering/billing) NPI -- the requestor.
+    member_id: Optional[str] = Field(default=None, repr=False)
+    first_name: Optional[str] = Field(default=None, repr=False)
+    last_name: Optional[str] = Field(default=None, repr=False)
+    date_of_birth: Optional[str] = Field(default=None, repr=False)
     provider_npi: str
-    #: Organization name; exactly one of this or the person name pair below.
     provider_organization: Optional[str] = None
     provider_first_name: Optional[str] = None
     provider_last_name: Optional[str] = None
-    #: X12 EQ service type codes; ``["35"]`` = Dental Care.
     service_type_codes: list[str] = Field(default_factory=lambda: [SERVICE_TYPE_DENTAL])
+    date_of_service: Optional[str] = None
+    benefit_selection: BenefitSelection = Field(default_factory=BenefitSelection)
+
+    @field_validator("operation_id")
+    @classmethod
+    def _operation_id(cls, value: str) -> str:
+        if not _SAFE_ID_RE.fullmatch(value):
+            raise ValueError("operation_id must be an opaque non-PHI identifier")
+        return value
+
+    @field_validator("payer_id")
+    @classmethod
+    def _payer_id(cls, value: str) -> str:
+        if not value or value != value.strip() or len(value) > 80:
+            raise ValueError("payer_id must be an exact 1-80 character identifier")
+        return value
+
+    @field_validator("service_type_codes")
+    @classmethod
+    def _service_codes(cls, values: list[str]) -> list[str]:
+        if not values or len(values) > 99 or len(set(values)) != len(values):
+            raise ValueError("service_type_codes must contain 1-99 unique codes")
+        if any(not v or len(v) > 3 or v != v.strip() for v in values):
+            raise ValueError("service type codes must be exact non-empty strings")
+        return values
+
+    @field_validator("date_of_birth", "date_of_service")
+    @classmethod
+    def _date8(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            if not _DATE_RE.fullmatch(value):
+                raise ValueError("date must use YYYYMMDD")
+            datetime.strptime(value, "%Y%m%d")
+        return value
+
+    @model_validator(mode="after")
+    def _identity_and_provider(self) -> "EligibilityRequest":
+        if not any((self.member_id, self.date_of_birth, self.last_name)):
+            raise ValueError("subscriber requires member ID, birth date, or last name")
+        org = bool(self.provider_organization)
+        person = bool(self.provider_first_name and self.provider_last_name)
+        if org == person:
+            raise ValueError(
+                "provider requires exactly organization or first/last name"
+            )
+        if not re.fullmatch(r"\d{10}", self.provider_npi):
+            raise ValueError("provider_npi must contain exactly 10 digits")
+        return self
 
     def to_stedi_body(self) -> dict[str, Any]:
-        """The documented Stedi JSON request body for this inquiry."""
         provider: dict[str, Any] = {"npi": self.provider_npi}
         if self.provider_organization:
             provider["organizationName"] = self.provider_organization
-        if self.provider_first_name:
+        else:
             provider["firstName"] = self.provider_first_name
-        if self.provider_last_name:
             provider["lastName"] = self.provider_last_name
         subscriber: dict[str, Any] = {}
         for key, value in (
@@ -148,310 +229,636 @@ class EligibilityRequest(BaseModel):
         ):
             if value:
                 subscriber[key] = value
+        encounter: dict[str, Any] = {"serviceTypeCodes": list(self.service_type_codes)}
+        if self.date_of_service:
+            encounter["dateOfService"] = self.date_of_service
         return {
             "tradingPartnerServiceId": self.payer_id,
             "provider": provider,
             "subscriber": subscriber,
-            "encounter": {"serviceTypeCodes": list(self.service_type_codes)},
+            "encounter": encounter,
+        }
+
+    def safe_summary(self) -> dict[str, Any]:
+        """Non-PHI operational summary suitable for diagnostics."""
+        return {
+            "operation_id": self.operation_id,
+            "payer_id": self.payer_id,
+            "service_type_codes": list(self.service_type_codes),
+            "date_of_service_present": self.date_of_service is not None,
         }
 
 
+class QualifiedBenefit(BaseModel):
+    code: str
+    value: str
+    value_kind: Literal["amount", "percent"]
+    service_type_codes: list[str]
+    network_code: Optional[str] = None
+    coverage_level_code: Optional[str] = None
+    time_qualifier_code: Optional[str] = None
+    procedure_code: Optional[str] = None
+    benefit_dates: dict[str, str] = Field(default_factory=dict)
+
+
 class EligibilityResult(BaseModel):
-    """Normalized 271 outcome, with the raw response retained for audit.
-
-    The normalized fields are the reliable head of the 271 (active/inactive,
-    plan name, copay / co-insurance / deductible / out-of-pocket max where the
-    payer returned them); everything else stays available in :attr:`raw_271`.
-    :attr:`raw_271_sha256` is the digest of the EXACT response bytes -- the
-    same digest the document-hash effect verifier checks after
-    :func:`~openadapt_flow.eligibility.artifact.write_eligibility_artifacts`
-    writes those bytes into the results artifact set, giving one auditable
-    chain from wire to system-of-record document.
-    """
-
     model_config = ConfigDict(protected_namespaces=())
 
     status: EligibilityStatus
     payer_id: str
+    operation_id: str
+    application_mode: Optional[ApplicationMode] = None
     payer_name: Optional[str] = None
     plan_name: Optional[str] = None
     plan_begin: Optional[str] = None
     plan_end: Optional[str] = None
-    #: Dollar amounts / percents are kept as the payer's exact strings --
-    #: benefits data is transcribed, never arithmetically reinterpreted.
+    coverage_by_service: dict[str, EligibilityStatus] = Field(default_factory=dict)
+    benefits: list[QualifiedBenefit] = Field(default_factory=list)
     copay: Optional[str] = None
     coinsurance_percent: Optional[str] = None
-    deductible: Optional[str] = None
-    out_of_pocket_maximum: Optional[str] = None
+    deductible_total: Optional[str] = None
+    deductible_remaining: Optional[str] = None
+    out_of_pocket_total: Optional[str] = None
+    out_of_pocket_remaining: Optional[str] = None
     service_type_codes: list[str] = Field(default_factory=list)
-    #: X12 AAA reject codes present in the response (empty when none).
     aaa_codes: list[str] = Field(default_factory=list)
-    #: Human-readable error descriptions from the payer/clearinghouse.
-    errors: list[str] = Field(default_factory=list)
-    #: Why the status was assigned (payer IDs / codes only -- no PHI).
+    ambiguities: list[str] = Field(default_factory=list)
+    error_category: Optional[ErrorCategory] = None
+    retry_disposition: RetryDisposition = RetryDisposition.NO_RETRY_QUEUE
     reason: str = ""
-    #: The parsed 271 response body (None when the body was not JSON).
-    raw_271: Optional[dict[str, Any]] = None
-    #: SHA-256 hex digest of the exact response bytes.
+    raw_271: Optional[dict[str, Any]] = Field(default=None, exclude=True, repr=False)
     raw_271_sha256: Optional[str] = None
-    #: The exact response bytes (written verbatim into the artifact set so
-    #: the digest chain holds; excluded from ``model_dump`` serialization).
     raw_271_bytes: Optional[bytes] = Field(default=None, exclude=True, repr=False)
     checked_at: str = ""
     source: str = "stedi"
+    attempt_count: int = 1
 
     @property
     def is_answer(self) -> bool:
-        """Whether the payer AFFIRMED a coverage state (active or inactive).
+        return (
+            self.status in (EligibilityStatus.ACTIVE, EligibilityStatus.INACTIVE)
+            and not self.ambiguities
+            and self.error_category is None
+        )
 
-        Every other status means the check produced no benefits answer and
-        the waterfall may fall through to the portal tier.
-        """
-        return self.status in (EligibilityStatus.ACTIVE, EligibilityStatus.INACTIVE)
+    @property
+    def retryable(self) -> bool:
+        return self.retry_disposition in (
+            RetryDisposition.RETRY_THEN_PORTAL,
+            RetryDisposition.RETRY_THEN_QUEUE,
+        )
+
+    @property
+    def portal_fallback_allowed(self) -> bool:
+        return self.retry_disposition is RetryDisposition.RETRY_THEN_PORTAL
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _first(items: list[Any]) -> Optional[dict[str, Any]]:
-    for item in items:
-        if isinstance(item, dict):
-            return item
-    return None
-
-
-def _collect_aaa_codes(body: Mapping[str, Any]) -> tuple[list[str], list[str]]:
-    """All AAA reject codes + human descriptions in a 271 ``errors`` array."""
-    codes: list[str] = []
-    descriptions: list[str] = []
-    errors = body.get("errors")
-    if isinstance(errors, list):
-        for err in errors:
-            if not isinstance(err, dict):
-                continue
-            code = err.get("code")
-            if code is not None:
-                codes.append(str(code))
-            description = err.get("description")
-            if description:
-                descriptions.append(str(description))
-    return codes, descriptions
-
-
-def _classify_aaa(codes: list[str]) -> Optional[EligibilityStatus]:
-    if not codes:
-        return None
-    if any(c in _AAA_NOT_FOUND for c in codes):
-        return EligibilityStatus.NOT_FOUND
-    if any(c in _AAA_PAYER_UNAVAILABLE for c in codes):
-        return EligibilityStatus.PAYER_UNAVAILABLE
-    return EligibilityStatus.REJECTED
-
-
 def _benefit_entries(body: Mapping[str, Any]) -> list[dict[str, Any]]:
     entries = body.get("benefitsInformation")
-    if not isinstance(entries, list):
-        return []
-    return [e for e in entries if isinstance(e, dict)]
-
-
-def _coverage_state(body: Mapping[str, Any]) -> Optional[EligibilityStatus]:
-    """Affirmative active/inactive signal, or None when neither is present."""
-    codes: list[str] = []
-    for entry in _benefit_entries(body):
-        code = entry.get("code")
-        if code is not None:
-            codes.append(str(code))
-    plan_status = body.get("planStatus")
-    if isinstance(plan_status, list):
-        for entry in plan_status:
-            if isinstance(entry, dict) and entry.get("statusCode") is not None:
-                codes.append(str(entry["statusCode"]))
-    if _CODE_ACTIVE in codes:
-        return EligibilityStatus.ACTIVE
-    if any(c in _CODES_INACTIVE for c in codes):
-        return EligibilityStatus.INACTIVE
-    return None
-
-
-def _extract_amounts(body: Mapping[str, Any]) -> dict[str, Optional[str]]:
-    """First-listed copay / co-insurance / deductible / OOP-max strings.
-
-    The 271 can carry many qualified variants (in/out of network, individual/
-    family, remaining vs total); the FIRST entry per code is normalized here
-    for the results row and the full set stays in the retained raw 271.
-    """
-    out: dict[str, Optional[str]] = {
-        "copay": None,
-        "coinsurance_percent": None,
-        "deductible": None,
-        "out_of_pocket_maximum": None,
-    }
-    key_by_code = {
-        "B": ("copay", "benefitAmount"),
-        "A": ("coinsurance_percent", "benefitPercent"),
-        "C": ("deductible", "benefitAmount"),
-        "G": ("out_of_pocket_maximum", "benefitAmount"),
-    }
-    for entry in _benefit_entries(body):
-        mapping = key_by_code.get(str(entry.get("code")))
-        if mapping is None:
-            continue
-        field, source_key = mapping
-        value = entry.get(source_key)
-        if out[field] is None and value is not None:
-            out[field] = str(value)
-    return out
-
-
-def parse_271(
-    payer_id: str,
-    body_bytes: bytes,
-    *,
-    http_status: int = 200,
-    service_type_codes: Optional[list[str]] = None,
-) -> EligibilityResult:
-    """Normalize one 271 response, failing CLOSED on anything unparseable.
-
-    Pure and transport-free so the fake-proven tests exercise exactly the
-    logic the live client runs. ``body_bytes`` is the exact wire payload;
-    its SHA-256 becomes the result's audit digest.
-    """
-    digest = hashlib.sha256(body_bytes).hexdigest()
-    base: dict[str, Any] = {
-        "payer_id": payer_id,
-        "service_type_codes": list(service_type_codes or []),
-        "raw_271_sha256": digest,
-        "raw_271_bytes": body_bytes,
-        "checked_at": _utcnow(),
-    }
-    try:
-        body = json.loads(body_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return EligibilityResult(
-            status=EligibilityStatus.INDETERMINATE,
-            reason=(
-                f"payer {payer_id}: HTTP {http_status} response body is not "
-                "JSON -- fail closed (no benefits answer recorded)"
-            ),
-            **base,
-        )
-    if not isinstance(body, dict):
-        return EligibilityResult(
-            status=EligibilityStatus.INDETERMINATE,
-            reason=(
-                f"payer {payer_id}: HTTP {http_status} JSON body is not an "
-                "object -- fail closed"
-            ),
-            **base,
-        )
-
-    base["raw_271"] = body
-    aaa_codes, error_texts = _collect_aaa_codes(body)
-    base["aaa_codes"] = aaa_codes
-    base["errors"] = error_texts
-    payer = body.get("payer")
-    if isinstance(payer, dict) and payer.get("name"):
-        base["payer_name"] = str(payer["name"])
-    plan_info = body.get("planInformation")
-    if isinstance(plan_info, dict):
-        name = plan_info.get("planDescription") or plan_info.get("groupDescription")
-        if name:
-            base["plan_name"] = str(name)
-    plan_dates = body.get("planDateInformation")
-    if isinstance(plan_dates, dict):
-        begin = plan_dates.get("planBegin") or plan_dates.get("eligibilityBegin")
-        end = plan_dates.get("planEnd") or plan_dates.get("eligibilityEnd")
-        if begin:
-            base["plan_begin"] = str(begin)
-        if end:
-            base["plan_end"] = str(end)
-    if base.get("plan_name") is None:
-        plan_status = body.get("planStatus")
-        if isinstance(plan_status, list):
-            entry = _first(plan_status)
-            if entry and entry.get("planDetails"):
-                base["plan_name"] = str(entry["planDetails"])
-
-    aaa_status = _classify_aaa(aaa_codes)
-    if aaa_status is not None:
-        return EligibilityResult(
-            status=aaa_status,
-            reason=(
-                f"payer {payer_id}: AAA reject code(s) "
-                f"{','.join(aaa_codes)} -> {aaa_status.value}"
-            ),
-            **base,
-        )
-
-    coverage = _coverage_state(body)
-    if coverage is not None:
-        base.update(_extract_amounts(body))
-        return EligibilityResult(
-            status=coverage,
-            reason=(
-                f"payer {payer_id}: benefitsInformation affirms "
-                f"{coverage.value} coverage"
-            ),
-            **base,
-        )
-
-    if http_status // 100 != 2:
-        return EligibilityResult(
-            status=EligibilityStatus.PAYER_UNAVAILABLE,
-            reason=(
-                f"payer {payer_id}: HTTP {http_status} with no parseable AAA "
-                "or coverage signal -- treating as payer/clearinghouse "
-                "unavailable (safe to retry or fall through; a 270 is a read)"
-            ),
-            **base,
-        )
-    return EligibilityResult(
-        status=EligibilityStatus.INDETERMINATE,
-        reason=(
-            f"payer {payer_id}: 2xx response carries neither an affirmative "
-            "coverage state nor an AAA error -- fail closed (never guess "
-            "a benefits answer)"
-        ),
-        **base,
+    return (
+        [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
     )
 
 
-class StediEligibilityClient:
-    """Real-time 270/271 checks through Stedi's documented JSON endpoint.
+def _collect_aaa_codes(body: Mapping[str, Any]) -> list[str]:
+    codes: list[str] = []
+    errors = body.get("errors")
+    if isinstance(errors, list):
+        for error in errors:
+            if isinstance(error, dict) and error.get("code") is not None:
+                code = str(error["code"])
+                if code not in codes:
+                    codes.append(code)
+    return codes
 
-    Args:
-        auth: Optional :class:`AuthRef` naming where the credential lives.
-            Default: the ``STEDI_API_KEY`` environment variable, sent as
-            Stedi's documented ``Authorization: Key <api_key>`` header.
-            Construction FAILS LOUD when the referenced variable is absent --
-            the client is never wired silently unauthenticated.
-        base_url: Override for tests / a faithful local fake.
-        timeout_s: Per-request timeout. Stedi's leg to slow payers can take
-            tens of seconds; 30 s is a practical default.
-        transport: Optional ``httpx`` transport (tests inject
-            ``httpx.MockTransport``); ``None`` uses the real network.
-        env: Optional environment mapping override (tests).
-    """
+
+def _date_value(value: str) -> Optional[date]:
+    try:
+        return datetime.strptime(value, "%Y%m%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _date_range(value: str) -> tuple[Optional[date], Optional[date]]:
+    if "-" in value:
+        begin, end = value.split("-", 1)
+        return _date_value(begin), _date_value(end)
+    one = _date_value(value)
+    return one, one
+
+
+def _covers_service_date(
+    dates: Mapping[str, Any], service_date: date
+) -> Optional[bool]:
+    starts: list[date] = []
+    ends: list[date] = []
+    for key, raw in dates.items():
+        if not isinstance(raw, str):
+            continue
+        if key in {"benefit", "plan", "eligibility", "policy"}:
+            begin, end = _date_range(raw)
+            if begin:
+                starts.append(begin)
+            if end:
+                ends.append(end)
+        elif key.lower().endswith(("begin", "effective")):
+            parsed = _date_value(raw)
+            if parsed:
+                starts.append(parsed)
+        elif key.lower().endswith(("end", "expiration")):
+            parsed = _date_value(raw)
+            if parsed:
+                ends.append(parsed)
+    if not starts and not ends:
+        return None
+    return (not starts or service_date >= max(starts)) and (
+        not ends or service_date <= min(ends)
+    )
+
+
+def _coverage_by_service(
+    body: Mapping[str, Any], request: EligibilityRequest
+) -> tuple[dict[str, EligibilityStatus], list[str]]:
+    entries = _benefit_entries(body)
+    plan_status = body.get("planStatus")
+    if isinstance(plan_status, list):
+        entries = entries + [e for e in plan_status if isinstance(e, dict)]
+    service_date = (
+        _date_value(request.date_of_service) if request.date_of_service else None
+    )
+    output: dict[str, EligibilityStatus] = {}
+    problems: list[str] = []
+    for service in request.service_type_codes:
+        matching = [
+            e
+            for e in entries
+            if isinstance(e.get("serviceTypeCodes"), list)
+            and service in [str(v) for v in e["serviceTypeCodes"]]
+        ]
+        codes = {str(e.get("code", e.get("statusCode", ""))) for e in matching}
+        active = _CODE_ACTIVE in codes
+        inactive = bool(codes & _CODES_INACTIVE)
+        if active and inactive:
+            problems.append(f"service {service}: conflicting active/inactive coverage")
+            continue
+        if not active and not inactive:
+            problems.append(f"service {service}: no exact coverage signal")
+            continue
+        status = EligibilityStatus.ACTIVE if active else EligibilityStatus.INACTIVE
+        if status is EligibilityStatus.ACTIVE and service_date:
+            benefit_dated: list[bool] = []
+            for entry in matching:
+                if str(entry.get("code", entry.get("statusCode", ""))) != _CODE_ACTIVE:
+                    continue
+                info = entry.get("benefitsDateInformation")
+                if isinstance(info, dict):
+                    covered = _covers_service_date(info, service_date)
+                    if covered is not None:
+                        benefit_dated.append(covered)
+            covered = None
+            if benefit_dated:
+                covered = all(benefit_dated)
+            else:
+                plan_dates = body.get("planDateInformation")
+                if isinstance(plan_dates, dict):
+                    covered = _covers_service_date(plan_dates, service_date)
+            if covered is False:
+                problems.append(
+                    f"service {service}: service date outside returned benefit dates"
+                )
+                continue
+        output[service] = status
+    return output, problems
+
+
+def _qualified_benefits(body: Mapping[str, Any]) -> list[QualifiedBenefit]:
+    output: list[QualifiedBenefit] = []
+    for entry in _benefit_entries(body):
+        code = str(entry.get("code", ""))
+        value_key = "benefitPercent" if code == "A" else "benefitAmount"
+        if code not in {"A", "B", "C", "G"} or entry.get(value_key) is None:
+            continue
+        procedure = entry.get("compositeMedicalProcedureIdentifier")
+        procedure_code = (
+            procedure.get("procedureCode") if isinstance(procedure, dict) else None
+        )
+        date_info = entry.get("benefitsDateInformation")
+        output.append(
+            QualifiedBenefit(
+                code=code,
+                value=str(entry[value_key]),
+                value_kind="percent" if value_key == "benefitPercent" else "amount",
+                service_type_codes=[str(v) for v in entry.get("serviceTypeCodes", [])],
+                network_code=(
+                    str(entry["inPlanNetworkIndicatorCode"])
+                    if entry.get("inPlanNetworkIndicatorCode") is not None
+                    else None
+                ),
+                coverage_level_code=(
+                    str(entry["coverageLevelCode"])
+                    if entry.get("coverageLevelCode") is not None
+                    else None
+                ),
+                time_qualifier_code=(
+                    str(entry["timeQualifierCode"])
+                    if entry.get("timeQualifierCode") is not None
+                    else None
+                ),
+                procedure_code=str(procedure_code) if procedure_code else None,
+                benefit_dates={
+                    str(k): str(v)
+                    for k, v in date_info.items()
+                    if isinstance(v, (str, int, float))
+                }
+                if isinstance(date_info, dict)
+                else {},
+            )
+        )
+    return output
+
+
+def _select_value(
+    benefits: list[QualifiedBenefit],
+    request: EligibilityRequest,
+    *,
+    code: str,
+    time_code: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    selection = request.benefit_selection
+    service_date = (
+        _date_value(request.date_of_service) if request.date_of_service else None
+    )
+    candidates = [
+        b
+        for b in benefits
+        if b.code == code
+        and any(
+            service in b.service_type_codes for service in request.service_type_codes
+        )
+        and (time_code is None or b.time_qualifier_code == time_code)
+        and (
+            selection.time_qualifier_code is None
+            or time_code is not None
+            or b.time_qualifier_code == selection.time_qualifier_code
+        )
+        and (
+            selection.coverage_level_code is None
+            or b.coverage_level_code == selection.coverage_level_code
+        )
+        and (
+            selection.procedure_code is None
+            or b.procedure_code == selection.procedure_code
+        )
+        and (
+            selection.network_code is None
+            or b.network_code in {selection.network_code, "W"}
+        )
+        and (
+            service_date is None
+            or not b.benefit_dates
+            or _covers_service_date(b.benefit_dates, service_date) is True
+        )
+    ]
+    if selection.network_code is not None:
+        exact = [b for b in candidates if b.network_code == selection.network_code]
+        if exact:
+            candidates = exact
+    values = sorted({b.value for b in candidates})
+    if len(values) > 1:
+        suffix = f"/{time_code}" if time_code else ""
+        return None, f"benefit {code}{suffix}: conflicting qualified values"
+    return (values[0] if values else None), None
+
+
+def _base_result(request: EligibilityRequest, body_bytes: bytes) -> dict[str, Any]:
+    return {
+        "payer_id": request.payer_id,
+        "operation_id": request.operation_id,
+        "service_type_codes": list(request.service_type_codes),
+        "raw_271_sha256": hashlib.sha256(body_bytes).hexdigest(),
+        "raw_271_bytes": body_bytes,
+        "checked_at": _utcnow(),
+    }
+
+
+def _error_result(
+    request: EligibilityRequest,
+    body_bytes: bytes,
+    *,
+    status: EligibilityStatus,
+    category: ErrorCategory,
+    disposition: RetryDisposition,
+    reason: str,
+    body: Optional[dict[str, Any]] = None,
+    aaa_codes: Optional[list[str]] = None,
+) -> EligibilityResult:
+    return EligibilityResult(
+        status=status,
+        error_category=category,
+        retry_disposition=disposition,
+        reason=reason,
+        raw_271=body,
+        aaa_codes=aaa_codes or [],
+        **_base_result(request, body_bytes),
+    )
+
+
+def parse_271(
+    request: EligibilityRequest,
+    body_bytes: bytes,
+    *,
+    http_status: int = 200,
+    expected_mode: Optional[ApplicationMode] = None,
+) -> EligibilityResult:
+    """Normalize one response without ever choosing a first matching benefit."""
+    # Transport status is authoritative even when an intermediary returns an
+    # HTML/text error body.  In particular, a non-JSON 429 remains a bounded
+    # throttle retry rather than being mislabeled as an invalid response.
+    if http_status in {401, 403}:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.REJECTED,
+            category=ErrorCategory.AUTH_CONFIGURATION,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: HTTP {http_status} authentication/configuration rejection",
+        )
+    if http_status == 429:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.PAYER_UNAVAILABLE,
+            category=ErrorCategory.THROTTLED,
+            disposition=RetryDisposition.RETRY_THEN_PORTAL,
+            reason=f"payer {request.payer_id}: HTTP 429 request throttled before processing",
+        )
+    if http_status >= 500:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.PAYER_UNAVAILABLE,
+            category=ErrorCategory.SERVER_TRANSIENT,
+            disposition=RetryDisposition.RETRY_THEN_PORTAL,
+            reason=f"payer {request.payer_id}: HTTP {http_status} clearinghouse/server failure",
+        )
+    try:
+        decoded = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.RESPONSE_INVALID,
+            disposition=(
+                RetryDisposition.RETRY_THEN_PORTAL
+                if http_status >= 500
+                else RetryDisposition.NO_RETRY_QUEUE
+            ),
+            reason=f"payer {request.payer_id}: HTTP {http_status} non-JSON response",
+        )
+    if not isinstance(decoded, dict):
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.RESPONSE_INVALID,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: response JSON is not an object",
+        )
+    body = decoded
+
+    aaa_codes = _collect_aaa_codes(body)
+    if http_status == 400 and "79" in aaa_codes:
+        category = ErrorCategory.INVALID_PAYER
+    elif http_status >= 400:
+        category = ErrorCategory.INVALID_REQUEST
+    else:
+        category = None
+    if category is not None:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.REJECTED,
+            category=category,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: HTTP {http_status} {category.value}",
+            body=body,
+            aaa_codes=aaa_codes,
+        )
+
+    response_payer = body.get("tradingPartnerServiceId")
+    if response_payer is None or str(response_payer) != request.payer_id:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.INVALID_PAYER,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: response payer ID does not match request binding",
+            body=body,
+            aaa_codes=aaa_codes,
+        )
+
+    meta = body.get("meta")
+    raw_mode = meta.get("applicationMode") if isinstance(meta, dict) else None
+    application_mode: Optional[ApplicationMode] = None
+    if raw_mode in {m.value for m in ApplicationMode}:
+        application_mode = ApplicationMode(raw_mode)
+    if application_mode is None or (
+        expected_mode is not None and application_mode is not expected_mode
+    ):
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.AUTH_CONFIGURATION,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: response application mode does not match account boundary",
+            body=body,
+            aaa_codes=aaa_codes,
+        )
+
+    if aaa_codes:
+        code_set = set(aaa_codes)
+        if code_set <= _AAA_TRANSIENT or code_set == {"42", "79"}:
+            category = ErrorCategory.PAYER_TRANSIENT
+            status = EligibilityStatus.PAYER_UNAVAILABLE
+            disposition = RetryDisposition.RETRY_THEN_PORTAL
+        elif code_set & _AAA_MEMBER:
+            category = ErrorCategory.MEMBER_IDENTITY
+            status = EligibilityStatus.NOT_FOUND
+            disposition = RetryDisposition.NO_RETRY_QUEUE
+        elif code_set & _AAA_PROVIDER:
+            category = ErrorCategory.PROVIDER_CONFIGURATION
+            status = EligibilityStatus.REJECTED
+            disposition = RetryDisposition.NO_RETRY_QUEUE
+        elif code_set & _AAA_INVALID_PAYER or code_set == {"79"}:
+            category = ErrorCategory.INVALID_PAYER
+            status = EligibilityStatus.REJECTED
+            disposition = RetryDisposition.NO_RETRY_QUEUE
+        else:
+            category = ErrorCategory.INVALID_REQUEST
+            status = EligibilityStatus.REJECTED
+            disposition = RetryDisposition.NO_RETRY_QUEUE
+        result = _error_result(
+            request,
+            body_bytes,
+            status=status,
+            category=category,
+            disposition=disposition,
+            reason=f"payer {request.payer_id}: AAA {','.join(aaa_codes)} classified {category.value}",
+            body=body,
+            aaa_codes=aaa_codes,
+        )
+        result.application_mode = application_mode
+        return result
+
+    if body.get("error") is not None or body.get("errors"):
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.RESPONSE_INVALID,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: response includes an unclassified error",
+            body=body,
+        )
+
+    coverage, problems = _coverage_by_service(body, request)
+    statuses = set(coverage.values())
+    if (
+        problems
+        or len(coverage) != len(request.service_type_codes)
+        or len(statuses) != 1
+    ):
+        result = _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.RESPONSE_AMBIGUOUS,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: requested-service coverage is incomplete or conflicting",
+            body=body,
+            aaa_codes=aaa_codes,
+        )
+        result.application_mode = application_mode
+        result.coverage_by_service = coverage
+        result.ambiguities = problems or [
+            "requested services have mixed coverage states"
+        ]
+        return result
+
+    status = next(iter(statuses))
+    benefits = _qualified_benefits(body)
+    selections: dict[str, Optional[str]] = {}
+    ambiguities: list[str] = []
+    for field, code, time_code in (
+        ("copay", "B", None),
+        ("coinsurance_percent", "A", None),
+        ("deductible_total", "C", "23"),
+        ("deductible_remaining", "C", "29"),
+        ("out_of_pocket_total", "G", "23"),
+        ("out_of_pocket_remaining", "G", "29"),
+    ):
+        value, problem = _select_value(
+            benefits, request, code=code, time_code=time_code
+        )
+        selections[field] = value
+        if problem:
+            ambiguities.append(problem)
+
+    payer = body.get("payer")
+    plan = body.get("planInformation")
+    dates = body.get("planDateInformation")
+    result = EligibilityResult(
+        status=status,
+        payer_id=request.payer_id,
+        operation_id=request.operation_id,
+        application_mode=application_mode,
+        payer_name=str(payer.get("name"))
+        if isinstance(payer, dict) and payer.get("name")
+        else None,
+        plan_name=(
+            str(plan.get("planDescription") or plan.get("groupDescription"))
+            if isinstance(plan, dict)
+            and (plan.get("planDescription") or plan.get("groupDescription"))
+            else None
+        ),
+        plan_begin=(
+            str(dates.get("planBegin") or dates.get("eligibilityBegin"))
+            if isinstance(dates, dict)
+            and (dates.get("planBegin") or dates.get("eligibilityBegin"))
+            else None
+        ),
+        plan_end=(
+            str(dates.get("planEnd") or dates.get("eligibilityEnd"))
+            if isinstance(dates, dict)
+            and (dates.get("planEnd") or dates.get("eligibilityEnd"))
+            else None
+        ),
+        coverage_by_service=coverage,
+        benefits=benefits,
+        ambiguities=ambiguities,
+        reason=f"payer {request.payer_id}: exact requested-service coverage parsed {status.value}",
+        raw_271=body,
+        raw_271_sha256=hashlib.sha256(body_bytes).hexdigest(),
+        raw_271_bytes=body_bytes,
+        checked_at=_utcnow(),
+        service_type_codes=list(request.service_type_codes),
+        copay=selections["copay"],
+        coinsurance_percent=selections["coinsurance_percent"],
+        deductible_total=selections["deductible_total"],
+        deductible_remaining=selections["deductible_remaining"],
+        out_of_pocket_total=selections["out_of_pocket_total"],
+        out_of_pocket_remaining=selections["out_of_pocket_remaining"],
+    )
+    if ambiguities:
+        result.error_category = ErrorCategory.RESPONSE_AMBIGUOUS
+        result.reason = f"payer {request.payer_id}: coverage parsed but qualified benefit values conflict"
+    return result
+
+
+class StediEligibilityClient:
+    """Bounded synchronous Stedi client with explicit account ownership."""
 
     def __init__(
         self,
         *,
+        account: StediAccountBoundary,
         auth: Optional[AuthRef] = None,
         base_url: str = STEDI_ELIGIBILITY_URL,
         timeout_s: float = 30.0,
+        max_attempts: int = 3,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
+        max_concurrency: int = 4,
         transport: Any = None,
         env: Optional[Mapping[str, str]] = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        if base_url != STEDI_ELIGIBILITY_URL:
+            raise ValueError(
+                "eligibility endpoint is not the allowlisted Stedi endpoint"
+            )
+        if timeout_s <= 0 or max_attempts < 1 or max_attempts > 5:
+            raise ValueError("timeout/max_attempts outside bounded policy")
+        if max_response_bytes < 1024 or max_concurrency < 1 or max_concurrency > 32:
+            raise ValueError("response/concurrency limit outside bounded policy")
+        self.account = account
         self.base_url = base_url
         self.timeout_s = timeout_s
+        self.max_attempts = max_attempts
+        self.max_response_bytes = max_response_bytes
         self._transport = transport
+        self._sleep = sleep
+        self._semaphore = threading.BoundedSemaphore(max_concurrency)
         self._headers = self._resolve_headers(auth, env)
 
-    @staticmethod
     def _resolve_headers(
-        auth: Optional[AuthRef], env: Optional[Mapping[str, str]]
+        self, auth: Optional[AuthRef], env: Optional[Mapping[str, str]]
     ) -> dict[str, str]:
         if auth is not None:
             headers = auth.resolve_headers(env)
@@ -459,51 +866,138 @@ class StediEligibilityClient:
             import os
 
             source = os.environ if env is None else env
-            key = source.get(STEDI_API_KEY_ENV, "")
+            key = source.get(self.account.credential_env, "")
             if not key:
                 raise ValueError(
-                    f"eligibility client references environment variable "
-                    f"{STEDI_API_KEY_ENV!r}, which is not set (or empty) -- "
-                    "refusing to construct an unauthenticated client (create "
-                    "a Stedi TEST-mode key for the free mock catalog)"
+                    f"practice-held credential environment variable {self.account.credential_env!r} is empty"
                 )
-            value = key if key.startswith("Key ") else f"Key {key}"
-            headers = {"Authorization": value}
+            # Current Stedi docs prefer the bare key.  The old ``Key `` prefix
+            # is accepted only for backwards compatibility and is not emitted.
+            if key.startswith("Key "):
+                key = key[4:]
+            headers = {"Authorization": key}
+        authorization = headers.get("Authorization", "")
+        if authorization.startswith("Key "):
+            authorization = authorization[4:]
+        if not authorization or "\r" in authorization or "\n" in authorization:
+            raise ValueError("practice-held Authorization credential is invalid")
+        headers["Authorization"] = authorization
         headers.setdefault("Content-Type", "application/json")
         return headers
 
-    def check(self, request: EligibilityRequest) -> EligibilityResult:
-        """Send one 270 inquiry; normalize the 271 (or its failure) fail-closed.
+    def _transport_failure(
+        self, request: EligibilityRequest, category: ErrorCategory, reason: str
+    ) -> EligibilityResult:
+        retryable = category in {
+            ErrorCategory.TRANSPORT_TRANSIENT,
+            ErrorCategory.THROTTLED,
+            ErrorCategory.SERVER_TRANSIENT,
+            ErrorCategory.PAYER_TRANSIENT,
+        }
+        return EligibilityResult(
+            status=(
+                EligibilityStatus.PAYER_UNAVAILABLE
+                if retryable
+                else EligibilityStatus.INDETERMINATE
+            ),
+            payer_id=request.payer_id,
+            operation_id=request.operation_id,
+            application_mode=self.account.application_mode,
+            service_type_codes=list(request.service_type_codes),
+            error_category=category,
+            retry_disposition=(
+                RetryDisposition.RETRY_THEN_PORTAL
+                if retryable
+                else RetryDisposition.NO_RETRY_QUEUE
+            ),
+            reason=reason,
+            checked_at=_utcnow(),
+        )
 
-        Never raises for transport or payer failures -- a 270 is an
-        idempotent read, so every failure maps to a status the waterfall can
-        act on (``payer_unavailable`` -> retry / portal tier).
-        """
-        import httpx  # lazy: keep the module import light
+    def _check_once(self, request: EligibilityRequest) -> EligibilityResult:
+        import httpx
 
+        acquired = self._semaphore.acquire(timeout=self.timeout_s)
+        if not acquired:
+            return self._transport_failure(
+                request,
+                ErrorCategory.THROTTLED,
+                f"payer {request.payer_id}: local eligibility concurrency bound reached",
+            )
         try:
             with httpx.Client(
                 transport=self._transport, timeout=self.timeout_s
             ) as session:
-                response = session.post(
-                    self.base_url, headers=self._headers, json=request.to_stedi_body()
-                )
-        except httpx.HTTPError as exc:
-            return EligibilityResult(
-                status=EligibilityStatus.PAYER_UNAVAILABLE,
-                payer_id=request.payer_id,
-                service_type_codes=list(request.service_type_codes),
-                reason=(
-                    f"payer {request.payer_id}: transport failure "
-                    f"({type(exc).__name__}) -- eligibility API unavailable; "
-                    "safe to retry or fall through (a 270 is a read, nothing "
-                    "was written)"
-                ),
-                checked_at=_utcnow(),
-            )
-        return parse_271(
-            request.payer_id,
-            response.content,
-            http_status=response.status_code,
-            service_type_codes=list(request.service_type_codes),
-        )
+                try:
+                    with session.stream(
+                        "POST",
+                        self.base_url,
+                        headers=self._headers,
+                        json=request.to_stedi_body(),
+                    ) as response:
+                        content_length = response.headers.get("content-length")
+                        try:
+                            declared_length = (
+                                int(content_length) if content_length else None
+                            )
+                        except ValueError:
+                            return self._transport_failure(
+                                request,
+                                ErrorCategory.RESPONSE_INVALID,
+                                f"payer {request.payer_id}: invalid response content-length",
+                            )
+                        if (
+                            declared_length is not None
+                            and declared_length > self.max_response_bytes
+                        ):
+                            return self._transport_failure(
+                                request,
+                                ErrorCategory.RESPONSE_INVALID,
+                                f"payer {request.payer_id}: response exceeds configured byte limit",
+                            )
+                        payload = bytearray()
+                        for chunk in response.iter_bytes():
+                            payload.extend(chunk)
+                            if len(payload) > self.max_response_bytes:
+                                return self._transport_failure(
+                                    request,
+                                    ErrorCategory.RESPONSE_INVALID,
+                                    f"payer {request.payer_id}: response exceeds configured byte limit",
+                                )
+                        return parse_271(
+                            request,
+                            bytes(payload),
+                            http_status=response.status_code,
+                            expected_mode=self.account.application_mode,
+                        )
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    return self._transport_failure(
+                        request,
+                        ErrorCategory.TRANSPORT_TRANSIENT,
+                        f"payer {request.payer_id}: transient transport {type(exc).__name__}",
+                    )
+                except httpx.HTTPError as exc:
+                    return self._transport_failure(
+                        request,
+                        ErrorCategory.RESPONSE_INVALID,
+                        f"payer {request.payer_id}: HTTP client failure {type(exc).__name__}",
+                    )
+        finally:
+            self._semaphore.release()
+
+    def check(self, request: EligibilityRequest) -> EligibilityResult:
+        """Run a bounded retry loop for this idempotent 270 read.
+
+        Stedi's eligibility endpoint does not advertise an idempotency-key
+        header.  Retrying is nevertheless side-effect safe because 270 is a
+        read; ``operation_id`` binds all attempts to one local logical check.
+        """
+        result: Optional[EligibilityResult] = None
+        for attempt in range(1, self.max_attempts + 1):
+            result = self._check_once(request)
+            result.attempt_count = attempt
+            if not result.retryable or attempt == self.max_attempts:
+                return result
+            self._sleep(min(0.25 * (2 ** (attempt - 1)), 2.0))
+        assert result is not None
+        return result

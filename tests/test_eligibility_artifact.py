@@ -1,128 +1,267 @@
-"""Artifact write + document-hash verification roundtrip for API results.
-
-The API result is written into the same practice-local results artifact set
-the portal replay uses (results CSV + raw-271 document) and certified by the
-kit's document-hash verifier -- effect verification is source-agnostic.
-"""
+"""Atomic, idempotent, PHI-bound eligibility artifact tests."""
 
 from __future__ import annotations
 
+import base64
 import csv
 import json
+import os
+from pathlib import Path
 
 import pytest
 
 from openadapt_flow.eligibility.artifact import (
+    BOUNDARY_FILE,
     RESULTS_CSV,
+    ArtifactEncryption,
+    PracticeArtifactPolicy,
     all_confirmed,
     write_and_verify,
     write_eligibility_artifacts,
 )
 from openadapt_flow.eligibility.client import (
-    EligibilityResult,
+    ApplicationMode,
+    BenefitSelection,
+    EligibilityRequest,
     EligibilityStatus,
     parse_271,
 )
 from openadapt_flow.runtime.effects.document_hash import DocumentHashVerifier
 from openadapt_flow.runtime.effects.effect import Verdict
 
-ACTIVE_271 = {
+ACTIVE = {
+    "meta": {"applicationMode": "test"},
+    "tradingPartnerServiceId": "62308",
     "payer": {"name": "Cigna"},
     "planInformation": {"groupDescription": "DENTAL PPO"},
     "benefitsInformation": [
-        {"code": "1", "name": "Active Coverage", "serviceTypeCodes": ["35"]},
-        {"code": "C", "name": "Deductible", "benefitAmount": "50"},
-        {"code": "B", "name": "Co-Payment", "benefitAmount": "20"},
+        {"code": "1", "serviceTypeCodes": ["35"]},
+        {
+            "code": "C",
+            "benefitAmount": "50",
+            "serviceTypeCodes": ["35"],
+            "coverageLevelCode": "IND",
+            "inPlanNetworkIndicatorCode": "Y",
+            "timeQualifierCode": "23",
+        },
     ],
-    "x12": "ISA*...~ST*271*0001~...",
 }
 
 
-def active_result() -> EligibilityResult:
+def request(operation_id="artifact-check-1") -> EligibilityRequest:
+    return EligibilityRequest(
+        operation_id=operation_id,
+        payer_id="62308",
+        provider_npi="1999999984",
+        provider_organization="One",
+        member_id="U3141592653",
+        service_type_codes=["35"],
+        benefit_selection=BenefitSelection(network_code="Y", coverage_level_code="IND"),
+    )
+
+
+def active_result(operation_id="artifact-check-1"):
     return parse_271(
-        "62308", json.dumps(ACTIVE_271).encode(), service_type_codes=["35"]
+        request(operation_id),
+        json.dumps(ACTIVE).encode(),
+        expected_mode=ApplicationMode.TEST,
     )
 
 
-def test_write_and_verify_roundtrip_confirms(tmp_path):
+def volume_policy(boundary="practice-1") -> PracticeArtifactPolicy:
+    return PracticeArtifactPolicy(
+        boundary_id=boundary,
+        encryption=ArtifactEncryption.PLATFORM_VOLUME,
+        volume_encryption_attested=True,
+        retention_days=30,
+    )
+
+
+def encrypted_policy() -> PracticeArtifactPolicy:
+    return PracticeArtifactPolicy(
+        boundary_id="practice-encrypted",
+        encryption=ArtifactEncryption.APPLICATION_AES256_GCM,
+        encryption_key_env="ELIGIBILITY_ARTIFACT_KEY",
+        retention_days=30,
+    )
+
+
+def test_raw_and_normalized_records_promote_together_and_verify(tmp_path):
     artifact, verdicts = write_and_verify(
-        active_result(), tmp_path, member_id="U3141592653", payer="Cigna Dental"
+        active_result(),
+        tmp_path,
+        policy=volume_policy(),
+        member_id="U3141592653",
+        payer="Cigna Dental",
     )
-    assert len(verdicts) == 2  # record_written + sha256 field_equals
+    assert artifact.created
+    assert len(verdicts) == 4
     assert all_confirmed(verdicts), [v.reason for v in verdicts]
-    assert artifact.raw_271_file is not None
-    assert artifact.raw_271_sha256 is not None
-    # The raw-271 document is byte-exact: its digest IS the wire digest.
-    raw = tmp_path / artifact.raw_271_file
-    import hashlib
+    tx = Path(artifact.transaction_dir)
+    assert tx.is_dir()
+    assert {p.name for p in tx.iterdir()} == {
+        Path(artifact.raw_271_file).name,
+        Path(artifact.normalized_file).name,
+        "manifest.json",
+    }
+    manifest = json.loads((tx / "manifest.json").read_text())
+    assert manifest["raw_plain_sha256"] == artifact.raw_271_sha256
+    assert manifest["normalized_plain_sha256"] == artifact.normalized_sha256
+    assert manifest["egress"] == "none"
+    assert manifest["retention_expires_at"].endswith("Z")
 
-    assert hashlib.sha256(raw.read_bytes()).hexdigest() == artifact.raw_271_sha256
 
-
-def test_results_csv_row_carries_normalized_fields_and_digest(tmp_path):
-    artifact, _ = write_and_verify(
-        active_result(), tmp_path, member_id="U3141592653", payer="Cigna Dental"
+def test_csv_is_derived_and_formula_neutralized(tmp_path):
+    artifact, verdicts = write_and_verify(
+        active_result(),
+        tmp_path,
+        policy=volume_policy(),
+        member_id='=HYPERLINK("bad")',
+        payer="+malicious",
     )
-    with (tmp_path / RESULTS_CSV).open() as fh:
-        rows = list(csv.DictReader(fh))
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["status"] == EligibilityStatus.ACTIVE.value
-    assert row["payer"] == "Cigna Dental"
-    assert row["member_id"] == "U3141592653"
-    assert row["plan_name"] == "DENTAL PPO"
-    assert row["deductible"] == "50"
-    assert row["copay"] == "20"
-    assert row["raw_271_file"] == artifact.raw_271_file
-    assert row["raw_271_sha256"] == artifact.raw_271_sha256  # audit chain
-
-
-def test_tampered_raw_271_is_refuted(tmp_path):
-    artifact, verdicts = write_and_verify(active_result(), tmp_path)
     assert all_confirmed(verdicts)
-    raw = tmp_path / artifact.raw_271_file
-    raw.write_bytes(raw.read_bytes() + b" tampered")
-    verifier = DocumentHashVerifier(tmp_path, glob="271_*.json")
-    before = verifier.capture_pre_state()
-    # Re-check the field_equals (sha256) contract against the tampered store.
-    field_effect = artifact.effects[1]
-    verdict = verifier.verify(field_effect, before)
+    with Path(artifact.results_csv).open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["member_id"].startswith("'=")
+    assert rows[0]["payer"].startswith("'+")
+    assert rows[0]["deductible_total"] == "50"
+    assert rows[0]["status"] == EligibilityStatus.ACTIVE.value
+
+
+def test_same_operation_and_content_is_idempotent(tmp_path):
+    first, first_verdicts = write_and_verify(
+        active_result(), tmp_path, policy=volume_policy(), member_id="member"
+    )
+    second, second_verdicts = write_and_verify(
+        active_result(), tmp_path, policy=volume_policy(), member_id="member"
+    )
+    assert first.created and not second.created
+    assert first.transaction_dir == second.transaction_dir
+    assert all_confirmed(first_verdicts) and all_confirmed(second_verdicts)
+    with (tmp_path / RESULTS_CSV).open(newline="") as handle:
+        assert len(list(csv.DictReader(handle))) == 1
+
+
+def test_operation_id_reuse_with_changed_content_refuses(tmp_path):
+    write_eligibility_artifacts(
+        active_result(), tmp_path, policy=volume_policy(), member_id="member"
+    )
+    changed = {**ACTIVE, "controlNumber": "changed"}
+    changed_result = parse_271(
+        request(), json.dumps(changed).encode(), expected_mode=ApplicationMode.TEST
+    )
+    with pytest.raises(FileExistsError, match="different content"):
+        write_eligibility_artifacts(
+            changed_result, tmp_path, policy=volume_policy(), member_id="member"
+        )
+
+
+def test_tampered_storage_is_refuted(tmp_path):
+    artifact, verdicts = write_and_verify(
+        active_result(), tmp_path, policy=volume_policy()
+    )
+    assert all_confirmed(verdicts)
+    raw = Path(artifact.raw_271_file)
+    raw.write_bytes(raw.read_bytes() + b"tampered")
+    verifier = DocumentHashVerifier(tmp_path, glob="transactions/tx_*/*")
+    state = verifier.capture_pre_state()
+    digest_effect = artifact.effects[1]
+    verdict = verifier.verify(digest_effect, state)
     assert verdict.verdict is Verdict.REFUTED
 
 
-def test_duplicate_write_refuses_loudly(tmp_path):
-    result = active_result()
-    write_eligibility_artifacts(result, tmp_path)
-    with pytest.raises(FileExistsError, match="refusing to overwrite"):
-        write_eligibility_artifacts(result, tmp_path)
-
-
-def test_no_answer_result_writes_row_but_no_document(tmp_path):
-    down = parse_271(
-        "62308",
-        json.dumps({"errors": [{"code": "42", "description": "down"}]}).encode(),
+def test_application_encryption_leaks_no_member_or_raw_payload(tmp_path):
+    key = base64.urlsafe_b64encode(b"k" * 32).decode()
+    artifact, verdicts = write_and_verify(
+        active_result(),
+        tmp_path,
+        policy=encrypted_policy(),
+        member_id="U3141592653",
+        env={"ELIGIBILITY_ARTIFACT_KEY": key},
     )
-    # AAA responses DO retain bytes; simulate a transport failure (no bytes).
-    down = down.model_copy(update={"raw_271_bytes": None, "raw_271_sha256": None})
-    artifact, verdicts = write_and_verify(down, tmp_path)
-    assert artifact.raw_271_file is None
-    assert artifact.effects == []
-    assert verdicts == []
-    assert not all_confirmed(verdicts)  # nothing verified -> never "done"
-    with (tmp_path / RESULTS_CSV).open() as fh:
-        rows = list(csv.DictReader(fh))
-    assert rows[0]["status"] == EligibilityStatus.PAYER_UNAVAILABLE.value
-    assert rows[0]["raw_271_file"] == ""
+    assert all_confirmed(verdicts)
+    assert artifact.results_csv.endswith(".enc")
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            payload = path.read_bytes()
+            assert b"U3141592653" not in payload
+            assert b"benefitsInformation" not in payload
 
 
-def test_two_checks_append_two_rows_and_two_documents(tmp_path):
-    first = active_result()
-    second = parse_271(
-        "62308", json.dumps({**ACTIVE_271, "controlNumber": "2"}).encode()
+def test_application_encryption_requires_real_32_byte_key(tmp_path):
+    with pytest.raises(ValueError, match="decode to 32 bytes"):
+        write_eligibility_artifacts(
+            active_result(),
+            tmp_path,
+            policy=encrypted_policy(),
+            env={
+                "ELIGIBILITY_ARTIFACT_KEY": base64.urlsafe_b64encode(b"short").decode()
+            },
+        )
+
+
+def test_boundary_policy_mismatch_fails_loud(tmp_path):
+    write_eligibility_artifacts(active_result(), tmp_path, policy=volume_policy())
+    with pytest.raises(ValueError, match="different PHI policy"):
+        write_eligibility_artifacts(
+            active_result("other-operation"),
+            tmp_path,
+            policy=volume_policy("practice-2"),
+        )
+    assert (tmp_path / BOUNDARY_FILE).exists()
+
+
+def test_symlinked_root_and_index_are_refused(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(ValueError, match="not a link"):
+        write_eligibility_artifacts(active_result(), linked, policy=volume_policy())
+
+    root = tmp_path / "root"
+    write_eligibility_artifacts(active_result(), root, policy=volume_policy())
+    (root / RESULTS_CSV).unlink()
+    (root / RESULTS_CSV).symlink_to(outside / "stolen.csv")
+    with pytest.raises(ValueError, match="symlinked"):
+        write_eligibility_artifacts(
+            active_result("next-operation"), root, policy=volume_policy()
+        )
+
+
+def test_concurrent_writer_lock_fails_fast(tmp_path):
+    tmp_path.chmod(0o700)
+    (tmp_path / ".eligibility-write.lock").mkdir()
+    with pytest.raises(BlockingIOError, match="holds the lock"):
+        write_eligibility_artifacts(active_result(), tmp_path, policy=volume_policy())
+
+
+def test_atomic_promotion_failure_leaves_no_consumable_transaction(
+    tmp_path, monkeypatch
+):
+    real_rename = os.rename
+
+    def fail_stage(source, destination):
+        if ".staging-" in str(source):
+            raise OSError("injected rename failure")
+        return real_rename(source, destination)
+
+    monkeypatch.setattr(os, "rename", fail_stage)
+    with pytest.raises(OSError, match="injected"):
+        write_eligibility_artifacts(active_result(), tmp_path, policy=volume_policy())
+    transactions = tmp_path / "transactions"
+    assert transactions.exists()
+    assert list(transactions.iterdir()) == []
+    assert not (tmp_path / RESULTS_CSV).exists()
+
+
+def test_transport_outcome_without_raw_response_is_not_promoted(tmp_path):
+    result = active_result().model_copy(
+        update={"raw_271_bytes": None, "raw_271_sha256": None}
     )
-    a1, v1 = write_and_verify(first, tmp_path)
-    a2, v2 = write_and_verify(second, tmp_path)
-    assert all_confirmed(v1) and all_confirmed(v2)
-    assert a1.raw_271_file != a2.raw_271_file
-    with (tmp_path / RESULTS_CSV).open() as fh:
-        assert len(list(csv.DictReader(fh))) == 2
+    with pytest.raises(ValueError, match="raw response"):
+        write_eligibility_artifacts(result, tmp_path, policy=volume_policy())

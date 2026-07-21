@@ -1,34 +1,10 @@
-"""API-first eligibility (EDI 270/271) -- the API tier of the eligibility
-waterfall.
+"""Governed API-first 270/271 eligibility mechanism.
 
-Where a payer exposes a sanctioned real-time 270/271 route through a
-clearinghouse API (Stedi is the reference on-ramp), an eligibility check
-should hit that route instead of driving a payer portal's GUI: no page to
-drift, no CAPTCHA, no session/MFA cascade, ~$0.08-0.30 per check. Portal
-replay remains the fallback for API-less payers and API-missing *fields*
-(the ADA-documented weak tail), and stays categorically excluded where a
-portal contractually bans automation (Availity) until the sanctioned API
-enrollment exists.
-
-Three modules, all import-light (httpx and yaml load lazily):
-
-- :mod:`.client` -- the Stedi 270/271 client and the normalized
-  :class:`~openadapt_flow.eligibility.client.EligibilityResult` (raw 271
-  retained + SHA-256 digest for audit). Secret-isolated auth (env-var
-  references, never literals), fail-closed parsing (a malformed response is
-  INDETERMINATE, never a guessed "active").
-- :mod:`.waterfall` -- the per-payer capability map (committed YAML registry:
-  payer -> ``api`` | ``portal`` | ``excluded``) and the route resolver the
-  fulfillment loop uses to pick the route automatically.
-- :mod:`.artifact` -- writes each result into the practice-local results
-  artifact set (results CSV + raw-271 document) and verifies the write with
-  the effect-verifier kit's document-hash substrate, so the API result is
-  governed by the same halt-instead-of-guess wedge as a portal or human
-  write. Effect verification is source-agnostic; that is the point.
-
-NOT on the replay hot path: nothing here is imported by the recorder,
-compiler, or replayer. It is an adjacent fulfillment component that shares
-the runtime's effect-verification and secret-isolation conventions.
+The client, exact route-binding schema, qualifier-aware parser, and atomic
+practice-local artifact boundary are public.  Practice payer maps and account
+credentials are deployment data.  Transient API failures can use a reviewed
+portal fallback; identity, configuration, ambiguity, and forbidden-portal
+outcomes enter the attended queue instead of being guessed.
 """
 
 from __future__ import annotations
@@ -37,14 +13,22 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.eligibility.artifact import (
+        ArtifactEncryption,
         EligibilityArtifact,
+        PracticeArtifactPolicy,
         write_and_verify,
         write_eligibility_artifacts,
     )
     from openadapt_flow.eligibility.client import (
+        ApplicationMode,
+        BenefitSelection,
         EligibilityRequest,
         EligibilityResult,
         EligibilityStatus,
+        ErrorCategory,
+        QualifiedBenefit,
+        RetryDisposition,
+        StediAccountBoundary,
         StediEligibilityClient,
     )
     from openadapt_flow.eligibility.waterfall import (
@@ -57,13 +41,21 @@ if TYPE_CHECKING:  # pragma: no cover
     )
 
 __all__ = [
+    "ApplicationMode",
+    "ArtifactEncryption",
+    "BenefitSelection",
     "EligibilityArtifact",
     "EligibilityRequest",
     "EligibilityResult",
     "EligibilityRoute",
     "EligibilityStatus",
+    "ErrorCategory",
     "PayerCapability",
+    "PracticeArtifactPolicy",
+    "QualifiedBenefit",
+    "RetryDisposition",
     "RouteDecision",
+    "StediAccountBoundary",
     "StediEligibilityClient",
     "load_payer_routes",
     "resolve_route",
@@ -73,9 +65,15 @@ __all__ = [
 ]
 
 _CLIENT = (
+    "ApplicationMode",
+    "BenefitSelection",
     "EligibilityRequest",
     "EligibilityResult",
     "EligibilityStatus",
+    "ErrorCategory",
+    "QualifiedBenefit",
+    "RetryDisposition",
+    "StediAccountBoundary",
     "StediEligibilityClient",
 )
 _WATERFALL = (
@@ -86,7 +84,13 @@ _WATERFALL = (
     "resolve_route",
     "run_waterfall",
 )
-_ARTIFACT = ("EligibilityArtifact", "write_and_verify", "write_eligibility_artifacts")
+_ARTIFACT = (
+    "ArtifactEncryption",
+    "EligibilityArtifact",
+    "PracticeArtifactPolicy",
+    "write_and_verify",
+    "write_eligibility_artifacts",
+)
 
 
 def __getattr__(name: str) -> object:

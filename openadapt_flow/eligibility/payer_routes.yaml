@@ -1,99 +1,23 @@
-# Per-payer eligibility capability map -- the waterfall's routing registry.
-#
-# route: api      -> real-time 270/271 through the clearinghouse API first;
-#                    portal replay remains the fallback for API-missing FIELDS
-#                    (the ADA-documented weak tail: waiting periods,
-#                    shared-frequency rules, full history).
-#         portal  -> no confirmed API route; compiled portal replay with
-#                    effect verification is the primary tier.
-#         excluded-> automation of this surface is contractually barred;
-#                    neither API nor portal replay may run until the
-#                    sanctioned enrollment (see notes) converts it.
-#
-# stedi_payer_id: the tradingPartnerServiceId to use with Stedi. Values are
-#   null unless verified against a Stedi-published document; ALWAYS resolve
-#   the exact ID in Stedi's payer directory during practice enrollment
-#   (aliases are accepted, several plans -- e.g. Delta Dental -- are
-#   per-state entities with per-state IDs).
-#
-# verified: true only when the ID/coverage was checked against a cited Stedi
-#   source at the date in `verified_on`.
-
-version: 1
-default_route: portal
+# Synthetic TEST-mode example only. Production route maps are practice-scoped
+# deployment data. Each API route binds the exact request payer ID, stable Stedi
+# payer ID, reviewed payer-record digest, supported service types, account, and
+# application mode. Unknown or incomplete routes enter the attended queue.
+version: 2
+default_route: queue
 payers:
-  delta_dental:
-    display_name: Delta Dental (per-state plans)
+  cigna_dental_mock:
+    display_name: Cigna Dental (Stedi test catalog)
     route: api
-    stedi_payer_id: null
-    aliases: [delta dental, delta dental plans association]
+    aliases: [cigna dental test]
+    request_payer_id: "62308"
+    stedi_id: "SX071"
+    application_mode: test
+    practice_account_id: "openadapt-sandbox"
+    supported_service_type_codes: ["35"]
+    # SHA-256 of this canonical reviewed TEST record (without a trailing newline):
+    # {"coverageTypes":["dental"],"eligibilityCheck":"SUPPORTED","primaryPayerId":"62308","stediId":"SX071"}
+    # A live enrollment records the production payer record's own digest.
+    payer_record_sha256: "5752c057685f4b54fb60656d2231f9a85f94ce3a3df5d89b44eb44362694c16f"
     portal_banned: false
-    verified: false
-    notes: >-
-      Stedi lists Delta Dental plans among its 200+ dental payers
-      (coverage confirmed mid-2026); Delta Dental is a federation of
-      per-state entities, so resolve the member's state plan to its own
-      tradingPartnerServiceId at enrollment.
-  metlife:
-    display_name: MetLife Dental
-    route: api
-    stedi_payer_id: null
-    aliases: [metlife, metlife dental, metlife dental family]
-    portal_banned: false
-    verified: false
-    notes: >-
-      Stedi eligibility coverage confirmed mid-2026. Stedi's TEST-mode dental
-      mock for MetLife uses tradingPartnerServiceId "10134" (mock catalog,
-      fetched 2026-07-18); resolve the production ID in the payer directory.
-  cigna_dental:
-    display_name: Cigna Dental
-    route: api
-    stedi_payer_id: "62308"
-    aliases: [cigna, cigna dental, cigna dental health]
-    portal_banned: false
-    verified: true
-    verified_on: "2026-07-18"
-    notes: >-
-      62308 appears in Stedi's own documented mock catalog (dental section,
-      service type 35) and is Cigna's standard clearinghouse payer ID.
-      Confirm at enrollment regardless.
-  guardian:
-    display_name: Guardian Life (dental)
-    route: api
-    stedi_payer_id: null
-    aliases: [guardian, guardian life, guardian dental]
-    portal_banned: false
-    verified: false
-    notes: Stedi eligibility coverage confirmed mid-2026; resolve ID at enrollment.
-  united_concordia:
-    display_name: United Concordia Dental
-    route: api
-    stedi_payer_id: null
-    aliases: [united concordia, united concordia dental, ucci]
-    portal_banned: false
-    verified: false
-    notes: Stedi eligibility coverage confirmed mid-2026; resolve ID at enrollment.
-  dentaquest:
-    display_name: DentaQuest
-    route: api
-    stedi_payer_id: null
-    aliases: [dentaquest, denta quest]
-    portal_banned: false
-    verified: false
-    notes: Stedi eligibility coverage confirmed mid-2026; resolve ID at enrollment.
-  availity:
-    display_name: Availity (multi-payer portal)
-    route: excluded
-    stedi_payer_id: null
-    aliases: [availity, availity essentials, availity portal]
-    portal_banned: true
-    verified: true
-    verified_on: "2026-07-14"
-    notes: >-
-      Availity's Essentials terms contractually ban scraping/portal
-      automation ("direct legal action"), so portal replay is EXCLUDED.
-      Availity SELLS a sanctioned API route via a trading-partner agreement
-      (Availity Essentials API) -- once a practice completes that
-      enrollment, flip this entry to route: api with the assigned IDs.
-      Payers reachable only through Availity are api-sanctioned /
-      portal-banned: the waterfall must never fall through to their portal.
+    verified_on: "2026-07-21"
+    notes: Stedi's published dental TEST request; no real member data.

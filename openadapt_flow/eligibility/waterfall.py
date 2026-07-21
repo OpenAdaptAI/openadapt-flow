@@ -1,30 +1,9 @@
-"""The eligibility waterfall seam: per-payer API-vs-portal route resolution.
+"""Exact, practice-scoped eligibility route resolution.
 
-A committed YAML registry (``payer_routes.yaml``, reviewed like any other
-governed config) maps each payer to exactly one primary route:
-
-- ``api`` -- real-time 270/271 through the clearinghouse API first;
-- ``portal`` -- compiled portal replay with effect verification (the wedge);
-- ``excluded`` -- automation of that surface is contractually barred
-  (Availity's portal) until a sanctioned enrollment converts it.
-
-:func:`resolve_route` is the seam the fulfillment loop calls per patient:
-given the payer name it returns a typed :class:`RouteDecision`, so the
-route choice is data, not code. :func:`run_waterfall` composes the decision
-with a client call and encodes the fallback rules:
-
-- A 270 inquiry is an idempotent READ, so an ``api`` attempt that yields no
-  benefits answer (payer unavailable, member not found, indeterminate parse,
-  request rejected) may safely fall through to the portal tier -- the
-  opposite of the write-path
-  :class:`~openadapt_flow.runtime.actuators.api.ApiActuator`, which must
-  HALT on sent-but-unacknowledged writes.
-- EXCEPT when the payer's portal is contractually banned
-  (``portal_banned: true``): then the fallback is ``excluded`` and the
-  check lands in the practice's queue instead of a portal run.
-
-Import-light: PyYAML (a core dependency) loads lazily, and nothing here is
-imported on the replay hot path.
+The shipped YAML is a synthetic TEST-mode example.  Production payer maps are
+deployment data/recipes: the public engine supplies the schema and fail-closed
+resolver, while each practice supplies reviewed bindings from Stedi's Payer
+Network and its own portal policy.
 """
 
 from __future__ import annotations
@@ -34,69 +13,110 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openadapt_flow.eligibility.client import (
+    ApplicationMode,
     EligibilityRequest,
     EligibilityResult,
     StediEligibilityClient,
 )
 
-#: The committed registry shipped with the package.
 DEFAULT_REGISTRY_PATH = Path(__file__).parent / "payer_routes.yaml"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EligibilityRoute(str, Enum):
-    """Primary route for a payer's eligibility checks."""
-
     API = "api"
     PORTAL = "portal"
+    QUEUE = "queue"
     EXCLUDED = "excluded"
 
 
 class PayerCapability(BaseModel):
-    """One payer's entry in the capability map."""
+    """Reviewed route binding for one exact payer in one practice account."""
 
     key: str
     display_name: str = ""
     route: EligibilityRoute
-    #: Stedi ``tradingPartnerServiceId`` when known; ``None`` means "resolve
-    #: in Stedi's payer directory at enrollment".
-    stedi_payer_id: Optional[str] = None
     aliases: list[str] = Field(default_factory=list)
-    #: Portal automation contractually banned (e.g. Availity) -- the
-    #: waterfall must NEVER fall through to this payer's portal.
+    request_payer_id: Optional[str] = None
+    stedi_id: Optional[str] = None
+    application_mode: Optional[ApplicationMode] = None
+    practice_account_id: Optional[str] = None
+    supported_service_type_codes: list[str] = Field(default_factory=list)
+    payer_record_sha256: Optional[str] = None
     portal_banned: bool = False
-    #: Whether the entry was checked against a cited source (see YAML notes).
-    verified: bool = False
     verified_on: Optional[str] = None
     notes: str = ""
 
+    @model_validator(mode="after")
+    def _api_binding_complete(self) -> "PayerCapability":
+        if self.route is EligibilityRoute.PORTAL and self.portal_banned:
+            raise ValueError("a portal-banned payer cannot use the portal route")
+        if self.route is EligibilityRoute.API:
+            missing = [
+                name
+                for name, value in (
+                    ("request_payer_id", self.request_payer_id),
+                    ("stedi_id", self.stedi_id),
+                    ("application_mode", self.application_mode),
+                    ("practice_account_id", self.practice_account_id),
+                    ("supported_service_type_codes", self.supported_service_type_codes),
+                    ("payer_record_sha256", self.payer_record_sha256),
+                    ("verified_on", self.verified_on),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    f"API route lacks exact reviewed binding fields: {missing}"
+                )
+            if not re.fullmatch(r"[A-Z0-9]{5}", self.stedi_id or ""):
+                raise ValueError("stedi_id must be the stable five-character Stedi ID")
+            if not _SHA256_RE.fullmatch(self.payer_record_sha256 or ""):
+                raise ValueError(
+                    "payer_record_sha256 must bind the reviewed directory record"
+                )
+        return self
+
 
 class PayerRegistry(BaseModel):
-    """The loaded capability map."""
-
-    version: int = 1
-    #: Route for payers not present in the map. Portal replay is the honest
-    #: default: an unknown payer has no confirmed API route.
-    default_route: EligibilityRoute = EligibilityRoute.PORTAL
+    version: int = 2
+    default_route: EligibilityRoute = EligibilityRoute.QUEUE
     payers: dict[str, PayerCapability] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _unique_names(self) -> "PayerRegistry":
+        seen: dict[str, str] = {}
+        for key, cap in self.payers.items():
+            for name in (key, cap.key, cap.display_name, *cap.aliases):
+                normalized = _normalize(name)
+                if not normalized:
+                    continue
+                previous = seen.get(normalized)
+                if previous is not None and previous != key:
+                    raise ValueError(
+                        f"payer registry name/alias {name!r} maps to both {previous!r} and {key!r}"
+                    )
+                seen[normalized] = key
+        return self
+
     def find(self, payer: str) -> Optional[PayerCapability]:
-        """Look up a payer by key, display name, or alias (normalized)."""
         wanted = _normalize(payer)
         if not wanted:
             return None
         for cap in self.payers.values():
-            names = [cap.key, cap.display_name, *cap.aliases]
-            if any(_normalize(name) == wanted for name in names if name):
+            if any(
+                _normalize(name) == wanted
+                for name in (cap.key, cap.display_name, *cap.aliases)
+                if name
+            ):
                 return cap
         return None
 
 
 class RouteDecision(BaseModel):
-    """The resolver's typed answer for one payer."""
-
     route: EligibilityRoute
     payer: str
     capability: Optional[PayerCapability] = None
@@ -107,90 +127,7 @@ class RouteDecision(BaseModel):
         return self.route is EligibilityRoute.API
 
 
-def _normalize(name: str) -> str:
-    """Case/punctuation-insensitive payer-name key."""
-    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
-
-
-def load_payer_routes(
-    path: Union[str, Path, None] = None,
-) -> PayerRegistry:
-    """Load the capability map (the committed registry by default).
-
-    Fails loud on a missing or malformed file -- a fulfillment loop must
-    never run against a silently-empty routing table.
-    """
-    import yaml  # lazy: core dependency, but keep module import cheap
-
-    registry_path = Path(path) if path is not None else DEFAULT_REGISTRY_PATH
-    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or "payers" not in raw:
-        raise ValueError(
-            f"payer route registry {registry_path} is malformed: expected a "
-            "mapping with a 'payers' section"
-        )
-    payers = {}
-    for key, entry in (raw.get("payers") or {}).items():
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"payer route registry {registry_path}: entry {key!r} is not a mapping"
-            )
-        payers[key] = PayerCapability(key=key, **entry)
-    return PayerRegistry(
-        version=int(raw.get("version", 1)),
-        default_route=EligibilityRoute(raw.get("default_route", "portal")),
-        payers=payers,
-    )
-
-
-def resolve_route(
-    payer: str, registry: Optional[PayerRegistry] = None
-) -> RouteDecision:
-    """Decide the primary route for ``payer`` from the capability map.
-
-    Unknown payers get the registry's ``default_route`` (portal -- the
-    honest default for a payer with no confirmed API route).
-    """
-    reg = registry if registry is not None else load_payer_routes()
-    cap = reg.find(payer)
-    if cap is None:
-        return RouteDecision(
-            route=reg.default_route,
-            payer=payer,
-            reason=(
-                f"payer {payer!r} not in the capability map -- "
-                f"{reg.default_route.value} route by default (no confirmed "
-                "API route)"
-            ),
-        )
-    if cap.route is EligibilityRoute.EXCLUDED:
-        return RouteDecision(
-            route=EligibilityRoute.EXCLUDED,
-            payer=payer,
-            capability=cap,
-            reason=(
-                f"payer {payer!r} ({cap.key}) is excluded from automation: "
-                f"{cap.notes or 'contractual exclusion'}"
-            ),
-        )
-    return RouteDecision(
-        route=cap.route,
-        payer=payer,
-        capability=cap,
-        reason=f"payer {payer!r} ({cap.key}) routes {cap.route.value}-first",
-    )
-
-
 class WaterfallOutcome(BaseModel):
-    """What one waterfall pass did and where the check must go next.
-
-    ``final_route`` is where the check now stands: ``api`` (the API answered
-    -- an ``EligibilityResult`` with a real coverage state is attached),
-    ``portal`` (run the compiled portal replay for this payer), or
-    ``excluded`` (no automated tier may run; the check lands in the
-    practice's queue). ``trail`` is the audit line of route decisions.
-    """
-
     final_route: EligibilityRoute
     decision: RouteDecision
     result: Optional[EligibilityResult] = None
@@ -201,6 +138,64 @@ class WaterfallOutcome(BaseModel):
         return self.result is not None and self.result.is_answer
 
 
+def _normalize(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+
+
+def load_payer_routes(path: Union[str, Path, None] = None) -> PayerRegistry:
+    """Load and fully validate a route registry; malformed input fails loud."""
+    import yaml
+
+    registry_path = Path(path) if path is not None else DEFAULT_REGISTRY_PATH
+    raw = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not isinstance(raw.get("payers"), dict):
+        raise ValueError("payer route registry must contain a payer mapping")
+    payers: dict[str, PayerCapability] = {}
+    for key, entry in raw["payers"].items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"payer route entry {key!r} is not a mapping")
+        payers[str(key)] = PayerCapability(key=str(key), **entry)
+    return PayerRegistry(
+        version=int(raw.get("version", 2)),
+        default_route=EligibilityRoute(raw.get("default_route", "queue")),
+        payers=payers,
+    )
+
+
+def resolve_route(
+    payer: str, registry: Optional[PayerRegistry] = None
+) -> RouteDecision:
+    reg = registry if registry is not None else load_payer_routes()
+    cap = reg.find(payer)
+    if cap is None:
+        return RouteDecision(
+            route=EligibilityRoute.QUEUE,
+            payer=payer,
+            reason=f"payer {payer!r} has no exact reviewed route binding; queue for resolution",
+        )
+    return RouteDecision(
+        route=cap.route,
+        payer=payer,
+        capability=cap,
+        reason=f"payer {payer!r} resolved to reviewed {cap.route.value} route {cap.key!r}",
+    )
+
+
+def _queue(
+    decision: RouteDecision,
+    trail: list[str],
+    reason: str,
+    result: Optional[EligibilityResult] = None,
+) -> WaterfallOutcome:
+    trail.append(reason)
+    return WaterfallOutcome(
+        final_route=EligibilityRoute.QUEUE,
+        decision=decision,
+        result=result,
+        trail=trail,
+    )
+
+
 def run_waterfall(
     request: EligibilityRequest,
     *,
@@ -208,30 +203,52 @@ def run_waterfall(
     client: Optional[StediEligibilityClient] = None,
     registry: Optional[PayerRegistry] = None,
 ) -> WaterfallOutcome:
-    """Route one eligibility check: API tier first where sanctioned.
-
-    Args:
-        request: The 270 inquiry (its ``payer_id`` is used for the API call).
-        payer: Payer name for capability lookup; defaults to
-            ``request.payer_id``.
-        client: The API-tier client. Required only when the resolved route is
-            ``api``; construction of the default client fails loud without
-            ``STEDI_API_KEY``, so a portal-routed payer never demands a key.
-        registry: Capability map override (tests / per-deployment).
-    """
+    """Run one exact route decision and bounded idempotent API attempt."""
     decision = resolve_route(payer or request.payer_id, registry)
     trail = [decision.reason]
+    cap = decision.capability
+    if decision.route is EligibilityRoute.QUEUE:
+        return WaterfallOutcome(
+            final_route=decision.route, decision=decision, trail=trail
+        )
     if decision.route is EligibilityRoute.EXCLUDED:
         return WaterfallOutcome(
-            final_route=EligibilityRoute.EXCLUDED, decision=decision, trail=trail
+            final_route=decision.route, decision=decision, trail=trail
         )
     if decision.route is EligibilityRoute.PORTAL:
         return WaterfallOutcome(
-            final_route=EligibilityRoute.PORTAL, decision=decision, trail=trail
+            final_route=decision.route, decision=decision, trail=trail
+        )
+    assert cap is not None
+
+    if request.payer_id != cap.request_payer_id:
+        return _queue(
+            decision,
+            trail,
+            "request payer ID does not exactly match the reviewed route binding",
+        )
+    unsupported = set(request.service_type_codes) - set(
+        cap.supported_service_type_codes
+    )
+    if unsupported:
+        return _queue(
+            decision,
+            trail,
+            "requested service type is not in the reviewed payer binding",
+        )
+    if client is None:
+        return _queue(decision, trail, "API route has no practice-held client boundary")
+    if (
+        client.account.practice_account_id != cap.practice_account_id
+        or client.account.application_mode is not cap.application_mode
+    ):
+        return _queue(
+            decision,
+            trail,
+            "client account/mode does not match the reviewed payer binding",
         )
 
-    api_client = client if client is not None else StediEligibilityClient()
-    result = api_client.check(request)
+    result = client.check(request)
     trail.append(result.reason)
     if result.is_answer:
         return WaterfallOutcome(
@@ -240,27 +257,26 @@ def run_waterfall(
             result=result,
             trail=trail,
         )
-    # No benefits answer from the API tier. A 270 is an idempotent read, so
-    # falling through is safe -- unless this payer's portal is banned.
-    if decision.capability is not None and decision.capability.portal_banned:
+    if result.portal_fallback_allowed and not cap.portal_banned:
         trail.append(
-            "portal fallback is contractually banned for this payer -- "
-            "check lands in the practice queue (excluded)"
+            "bounded transient API attempts exhausted; use the reviewed portal fallback"
         )
         return WaterfallOutcome(
-            final_route=EligibilityRoute.EXCLUDED,
+            final_route=EligibilityRoute.PORTAL,
             decision=decision,
             result=result,
             trail=trail,
         )
-    trail.append(
-        f"API tier gave no benefits answer ({result.status.value}) -- "
-        "falling through to portal replay (a 270 is a read; nothing was "
-        "written)"
-    )
-    return WaterfallOutcome(
-        final_route=EligibilityRoute.PORTAL,
-        decision=decision,
-        result=result,
-        trail=trail,
+    if cap.portal_banned:
+        return _queue(
+            decision,
+            trail,
+            "portal fallback is barred; route the evidence-bearing halt to practice staff",
+            result,
+        )
+    return _queue(
+        decision,
+        trail,
+        "non-transient or ambiguous API outcome requires practice review",
+        result,
     )

@@ -868,6 +868,8 @@ def validate_public_source_policy(root: Path = ROOT) -> None:
             "per-system driver recipes that belong only in the private "
             f"OpenAdaptAI/openadapt-corpus repo: {sorted(hits)}"
         )
+
+
 def _expected_license_bytes(license_file: Path | None = None) -> bytes:
     path = license_file or (ROOT / "LICENSE")
     try:

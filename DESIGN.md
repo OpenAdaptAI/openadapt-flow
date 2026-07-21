@@ -120,8 +120,11 @@ class OcrLine(BaseModel):
     text: str; region: Region; confidence: float
 def ocr(screen_png: bytes, *, region: Region | None = None) -> list[OcrLine]
 def find_text(screen_png: bytes, text: str, *,
-              region: Region | None = None, min_ratio: float = 0.8) -> Match | None
-    # normalized fuzzy match (difflib ratio on lowercased/stripped text)
+              region: Region | None = None, min_ratio: float = 0.8,
+              raise_on_ambiguity: bool = False) -> Match | None
+    # normalized fuzzy match (difflib ratio on lowercased/stripped text);
+    # resolution enables the typed ambiguity signal so duplicates halt instead
+    # of falling through, while presence/readiness callers retain best-match.
 
 # hashing.py
 def phash_png(png: bytes, region: Region | None = None) -> str
@@ -202,13 +205,14 @@ implemented rungs are:
    irreversible risk gate still fire on it — structure makes identity STRONGER
    (an exact element), it never bypasses it. Rungs 1–5 remain the visual
    FALLBACK floor and are unchanged:
-1. `template` — find_template within anchor.region padded by search_pad
-2. `template_global` — find_template full frame; for UNLABELED anchors
-   (no ocr_text) the match is rejected when every locatable landmark places
-   the target more than 40px away (repeated-icon UIs: an identical glyph on
-   another card can outscore the true target when mutable content near the
-   target changed) — the ladder then continues to ocr/geometry
-3. `ocr` — find_text(anchor.ocr_text) full frame
+1. `template` — find_template within anchor.region padded by search_pad, with
+   recorded-position locality and repeated-widget uniqueness checks
+2. `template_global` — find_template full frame; for labeled and unlabeled
+   anchors alike, a match is rejected when locatable landmarks contradict its
+   position, and repeated look-alikes with no expected-position candidate halt
+3. `ocr` — require one qualifying `find_text(anchor.ocr_text)` candidate in the
+   padded local region; only a true miss searches globally. Multiple candidates
+   or contradictory landmarks halt instead of falling through to weaker rungs
 4. `geometry` — landmarks: locate landmark text, offset by the exact
    `dx_px`/`dy_px` offsets when recorded, else by relation/distance
 5. `grounder` — optional injected `Grounder.locate(png, intent) -> Match|None`

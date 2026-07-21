@@ -101,7 +101,16 @@ class FakeVision:
             return self.structural_template_results.pop(0)
         return None
 
-    def find_text(self, screen_png, text, *, region=None, min_ratio=0.8):
+    def find_text(
+        self,
+        screen_png,
+        text,
+        *,
+        region=None,
+        min_ratio=0.8,
+        raise_on_ambiguity=False,
+    ):
+        del raise_on_ambiguity
         self.text_calls.append(text)
         result = self.text_results.get(text)
         if isinstance(result, list):

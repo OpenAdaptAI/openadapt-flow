@@ -18,6 +18,7 @@ from openadapt_flow.vision.match import (
     pixels_changed,
 )
 from openadapt_flow.vision.ocr import (
+    AmbiguousOcrMatchError,
     OcrLine,
     find_text,
     ocr,
@@ -31,6 +32,7 @@ from openadapt_flow.vision.settle import (
 )
 
 __all__ = [
+    "AmbiguousOcrMatchError",
     "Match",
     "OcrLine",
     "SettleResult",

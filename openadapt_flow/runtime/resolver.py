@@ -15,7 +15,8 @@ implemented here are:
 1. ``template``         — template match inside ``anchor.region`` padded by
    ``anchor.search_pad`` (clamped to the viewport).
 2. ``template_global``  — template match over the full frame.
-3. ``ocr``              — fuzzy text match on ``anchor.ocr_text``.
+3. ``ocr``              — unique fuzzy text match on ``anchor.ocr_text`` in
+   the anchor's padded local region, then globally only after a local miss.
 4. ``geometry``         — locate landmark text and offset by
    relation/distance to estimate the target point.
 5. ``grounder``         — optional injected model-backed grounding.
@@ -40,6 +41,7 @@ from typing import Any, Optional
 
 from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.ir import Anchor, Point, Region, Resolution, Rung
+from openadapt_flow.vision.ocr import AmbiguousOcrMatchError
 
 RUNG_ORDER: tuple[Rung, ...] = (
     "structural",
@@ -218,7 +220,12 @@ def _landmarks_contradict(
     for landmark in anchor.landmarks:
         if landmark.dx_px is None or landmark.dy_px is None:
             continue
-        match = vision.find_text(screen_png, landmark.ocr_text, min_ratio=OCR_MIN_RATIO)
+        match = vision.find_text(
+            screen_png,
+            landmark.ocr_text,
+            min_ratio=OCR_MIN_RATIO,
+            raise_on_ambiguity=True,
+        )
         if match is None:
             continue
         estimates.append(
@@ -357,7 +364,11 @@ def resolve(
         )
         if match is not None:
             point = _scaled_click_point(anchor, tuple(match.region))
-            if not _landmarks_contradict(anchor, point, screen_png, vision):
+            try:
+                contradicted = _landmarks_contradict(anchor, point, screen_png, vision)
+            except AmbiguousOcrMatchError:
+                return None
+            if not contradicted:
                 resolution = Resolution(
                     rung="template_global",
                     point=point,
@@ -366,13 +377,42 @@ def resolve(
                 )
                 return resolution, tuple(match.region)
 
-    # Rung 3: OCR text match.
+    # Rung 3: OCR text match. Search the same anchor-bounded padded region as
+    # the local template rung first. Only after a local miss may the resolver
+    # search the full frame. ``vision.find_text`` refuses multiple qualifying
+    # lines within either scope, so repeated labels never degrade to a
+    # first/best-match click.
+    #
+    # Landmarks are independent positional evidence. If they contradict an
+    # OCR candidate, halt immediately: falling through to geometry would turn
+    # the same contradictory landmarks into a blind offset and could silently
+    # act on a control that was never established to be present.
     if anchor.ocr_text:
-        match = vision.find_text(screen_png, anchor.ocr_text, min_ratio=OCR_MIN_RATIO)
-        if match is not None:
+        search_region = pad_region(anchor.region, anchor.search_pad, viewport)
+        ocr_regions: tuple[Region | None, ...] = (search_region, None)
+        for ocr_region in ocr_regions:
+            try:
+                match = vision.find_text(
+                    screen_png,
+                    anchor.ocr_text,
+                    region=ocr_region,
+                    min_ratio=OCR_MIN_RATIO,
+                    raise_on_ambiguity=True,
+                )
+            except AmbiguousOcrMatchError:
+                return None
+            if match is None:
+                continue
+            point = (int(match.point[0]), int(match.point[1]))
+            try:
+                contradicted = _landmarks_contradict(anchor, point, screen_png, vision)
+            except AmbiguousOcrMatchError:
+                return None
+            if contradicted:
+                return None
             resolution = Resolution(
                 rung="ocr",
-                point=(int(match.point[0]), int(match.point[1])),
+                point=point,
                 confidence=float(match.confidence),
                 elapsed_ms=elapsed_ms(),
             )
@@ -382,9 +422,15 @@ def resolve(
     estimates: list[Point] = []
     confidences: list[float] = []
     for landmark in anchor.landmarks:
-        lm_match = vision.find_text(
-            screen_png, landmark.ocr_text, min_ratio=OCR_MIN_RATIO
-        )
+        try:
+            lm_match = vision.find_text(
+                screen_png,
+                landmark.ocr_text,
+                min_ratio=OCR_MIN_RATIO,
+                raise_on_ambiguity=True,
+            )
+        except AmbiguousOcrMatchError:
+            return None
         if lm_match is None:
             continue
         estimates.append(

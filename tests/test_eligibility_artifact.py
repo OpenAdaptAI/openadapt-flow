@@ -33,6 +33,7 @@ ACTIVE = {
     "meta": {"applicationMode": "test"},
     "tradingPartnerServiceId": "62308",
     "subscriber": {"memberId": "U3141592653"},
+    "provider": {"npi": "1999999984"},
     "payer": {"name": "Cigna"},
     "planInformation": {"groupDescription": "DENTAL PPO"},
     "planDateInformation": {"planBegin": "20260101", "planEnd": "20261231"},

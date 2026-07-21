@@ -61,8 +61,9 @@ status are also never interpreted as successful eligibility responses.
 The current request schema is deliberately subscriber-only and requires the
 member ID. The returned 271 must contain the same subscriber member ID; every
 name or birth date supplied in the request must also be present and match after
-conservative Unicode, case, and whitespace normalization. A missing subscriber,
-a mismatched identity, or a response containing dependent subjects enters the
+conservative Unicode, case, and whitespace normalization. The returned provider
+NPI must also exactly match the request. A missing subscriber or provider, a
+mismatched identity, or a response containing dependent subjects enters the
 attended queue. A dependent response cannot satisfy this subscriber request
 contract; it requires an explicitly typed dependent request rather than a guess
 about which returned person is the patient.

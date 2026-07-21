@@ -394,6 +394,18 @@ def _verify_response_subject(
     return "subscriber", None
 
 
+def _verify_response_provider(
+    body: Mapping[str, Any], request: EligibilityRequest
+) -> Optional[str]:
+    provider = body.get("provider")
+    if not isinstance(provider, dict):
+        return "response provider identity is missing or malformed"
+    response_npi = provider.get("npi")
+    if response_npi is None or str(response_npi) != request.provider_npi:
+        return "response provider NPI does not match request"
+    return None
+
+
 def _benefit_entries(body: Mapping[str, Any]) -> list[dict[str, Any]]:
     entries = body.get("benefitsInformation")
     return (
@@ -877,6 +889,19 @@ def parse_271(
             http_status=http_status,
         )
     assert subject_role == "subscriber"
+    provider_problem = _verify_response_provider(body, request)
+    if provider_problem is not None:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.PROVIDER_CONFIGURATION,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: {provider_problem}",
+            body=body,
+            aaa_codes=aaa_codes,
+            http_status=http_status,
+        )
     response_subject_sha256 = hashlib.sha256(
         b"openadapt.eligibility.subject.v1\0"
         + eligibility_request_sha256(request).encode("ascii")

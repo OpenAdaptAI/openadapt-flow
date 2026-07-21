@@ -54,6 +54,7 @@ ACTIVE_271 = {
         "lastName": "Dent",
         "dateOfBirth": "19960505",
     },
+    "provider": {"npi": "1999999984"},
     "payer": {"name": "Cigna"},
     "planInformation": {"groupDescription": "DENTAL PPO"},
     "planDateInformation": {"planBegin": "20260101", "planEnd": "20261231"},
@@ -283,6 +284,20 @@ def test_missing_or_dependent_response_subject_never_answers():
     )
     assert not result.is_answer
     assert "dependent" in result.reason
+
+
+@pytest.mark.parametrize("provider", [None, {"npi": "1000000000"}])
+def test_missing_or_wrong_response_provider_never_answers(provider):
+    body = json.loads(json.dumps(ACTIVE_271))
+    if provider is None:
+        body.pop("provider")
+    else:
+        body["provider"] = provider
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.PROVIDER_CONFIGURATION
 
 
 def test_response_application_mode_is_required_even_without_expected_mode():

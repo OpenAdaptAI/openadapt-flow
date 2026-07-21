@@ -81,6 +81,7 @@ ACTIVE = {
     "meta": {"applicationMode": "test"},
     "tradingPartnerServiceId": "62308",
     "subscriber": {"memberId": "123"},
+    "provider": {"npi": "1999999984"},
     "planDateInformation": {"planBegin": "20260101", "planEnd": "20261231"},
     "benefitsInformation": [{"code": "1", "serviceTypeCodes": ["35"]}],
 }

@@ -43,7 +43,7 @@
 
 \title{A Green Screen Is Not a Saved Record:\\
 Effect-Level Verification for Repeated GUI Work}
-\author{Richard Abrich\\OpenAdapt (MLDSAI Inc.)\\\texttt{richard@openadapt.ai}}
+\author{Richard Abrich\\OpenAdapt.AI (MLDSAI Inc.)\\\texttt{richard@openadapt.ai}}
 \date{Workshop draft of July 2026}
 
 \begin{document}
@@ -56,11 +56,15 @@ this metric systematically overstates reliability for consequential work,
 because a rendered success is not a persisted effect. The same green ``Saved''
 banner can follow a partial write, a duplicate submission, a stale overwrite, or
 a silently rejected transaction. We call the resulting error a \emph{silent
-incorrect success} and show it is common and measurable. Injecting seven
-persistence faults behind a real HTTP boundary and running each ten times,
-screen-only verification silently accepted 50 of 90 fault runs; declaring a
-typed effect and checking it against the application's own system of record drove
-that to 0 of 90. A companion adversarial study shows the dual failure at the
+incorrect success} and show it is common and measurable. Driving ten persistence
+scenarios end to end through a live replayer against an on-disk system of record
+and judging every run by an independent ground truth, screen-only verification
+silently accepted a wrong persisted effect on 54 of 90 runs; an out-of-band
+effect check cut that to 9 of 90, and a complete system-of-record read path to 0
+of 90. The residual nine are a single collateral-write class outside the
+out-of-band oracle's read coverage, so effect verification is only as strong as
+what it reads. The same gap replicates on a second, non-healthcare lending
+domain. A companion adversarial study shows the dual failure at the
 identity layer: where confusable glyphs (O/0, l/1) make look-alike records
 observationally identical, the safe response is to refuse, and our identity
 ladder recorded zero false accepts across every configuration. The mechanism is a
@@ -255,14 +259,21 @@ external oracle disagrees) and false abort (the effect occurred but the runtime
 reports failure).
 
 \paragraph{Finding.} Under screen-only verification, silent wrong effects are the
-common case, not a corner case: replay silently accepted 50 of 90 fault runs and
-falsely aborted 10 correct ones. Adding a system-of-record effect check reduced
-both to zero (Figure~\ref{fig:silentbar}). Broken out by class, screen-only
+common case, not a corner case, and we measure it end to end through the live
+replayer against an on-disk system of record, judged by an independent ground
+truth. Screen-only verification silently accepted a wrong persisted effect on 54
+of 90 runs. An out-of-band effect check that reads the record back cut that to 9
+of 90, and a complete system-of-record read path to 0 of 90
+(Figure~\ref{fig:silentbar}). The residual 9 of 90 are one collateral-write class
+outside the out-of-band oracle's read coverage, the honest limit of an
+out-of-band oracle: it catches exactly what its read path can read. False aborts
+are a constant 9 in all three arms, a safe halt on a commit whose outcome is
+unknown to the client. Broken out by class in a companion study, screen-only
 verification silently mishandled five of seven injected fault classes: partial
 save, duplicate submission, optimistic UI followed by rejection, stale overwrite,
 and double delivery. There were 10 consistent repeats per class. When the step
 declared the expected effect and a system-of-record verifier was configured,
-those five classes refuted and halted through the live replayer.
+those five classes refuted and halted.
 
 \begin{figure}[t]
 \centering
@@ -275,26 +286,28 @@ those five classes refuted and halted through the live replayer.
   ymin=0, ymax=90,
   ylabel={runs (of 90)},
   ylabel style={font=\footnotesize},
-  symbolic x coords={Screen-only, Effect-verified},
+  symbolic x coords={Screen-only, {Effect (out-of-band)}, {Effect (complete read)}},
   xtick=data,
-  xticklabel style={font=\small},
+  xticklabel style={font=\footnotesize},
   ytick={0,15,30,45,60,75,90},
   yticklabel style={font=\footnotesize},
-  enlarge x limits=0.5,
+  enlarge x limits=0.28,
   legend style={font=\footnotesize, at={(0.5,1.14)}, anchor=south,
     legend columns=-1, /tikz/every even column/.append style={column sep=8pt}},
   nodes near coords, nodes near coords style={font=\scriptsize},
 ]
-\addplot[fill=oared!75, draw=oared] coordinates {(Screen-only,50) (Effect-verified,0)};
-\addplot[fill=oaamber!70, draw=oaamber] coordinates {(Screen-only,10) (Effect-verified,0)};
-\legend{silent wrong action, false abort}
+\addplot[fill=oared!75, draw=oared] coordinates {(Screen-only,54) ({Effect (out-of-band)},9) ({Effect (complete read)},0)};
+\addplot[fill=oaamber!70, draw=oaamber] coordinates {(Screen-only,9) ({Effect (out-of-band)},9) ({Effect (complete read)},9)};
+\legend{silent wrong effect, false abort}
 \end{axis}
 \end{tikzpicture}
-\caption{Same 90 injected-fault runs, two verification policies. Screen-only
-verification---the signal task-success oracles read---silently accepted 50 wrong
-outcomes and falsely aborted 10 correct ones; a system-of-record effect check
-reduced both to zero. Two preconditions are non-optional: the effect must be
-authored and the verifier deployed.}
+\caption{Same 90 injected-fault runs, three verification policies, measured end to
+end through the live replayer and judged by an independent ground truth.
+Screen-only verification, the signal task-success oracles read, silently
+accepted 54 wrong persisted effects; an out-of-band effect oracle cut that to 9
+(one uncovered collateral-write class); a complete system-of-record read path
+drove it to 0. False aborts are a constant 9, a safe halt on an unknown-outcome
+commit.}
 \label{fig:silentbar}
 \end{figure}
 
@@ -325,9 +338,9 @@ Session loss            & safe halt                          & refuted (halt) \\
 retry policy. It is a change of oracle. The precondition is real work: the
 expected effect must be authored per deployment and the verifier configured, and
 the compiler does not yet infer effects from a single demonstration. But the
-result isolates the metric problem cleanly. On these classes, a task-success
-oracle would have scored the screen-only runs as successes fifty times while the
-database disagreed.
+result isolates the metric problem cleanly. A task-success oracle would have
+scored the screen-only runs as successes on 54 of the 90 runs while the record
+disagreed.
 
 \section{Supporting result: refuse rather than guess on ambiguous identity}
 \label{sec:identity}
@@ -391,8 +404,8 @@ designers.
 \end{enumerate}
 These practices are inexpensive relative to building the agent, and they change
 which systems look reliable. Under a task-success oracle the screen-only runs in
-Section~\ref{sec:faults} score as fifty additional successes; under an
-effect oracle they score as fifty caught faults.
+Section~\ref{sec:faults} score as 54 additional successes; under a complete
+system-of-record effect oracle they score as 54 caught faults.
 
 \section{Conclusion}
 \label{sec:conclusion}

@@ -3,9 +3,11 @@
 The evidence does not establish long-term reliability, maintenance effort,
 total cost of ownership, multi-tenant scale, or safety in clinical production.
 OpenEMR uses a shared public demonstration site and a small sample. MockMed is a
-fixture. The breadth corpus has one trial per application and selection bias
-toward public no-auth browser apps. No published study covers weeks of natural
-drift or a representative distribution of customer workflows.
+fixture, and the second-domain lending study is likewise a bounded mechanism
+study (eleven tasks, three trials each) on a purpose-built MockLoan ledger, not a
+production lending system. The breadth corpus has one trial per application and
+selection bias toward public no-auth browser apps. No published study covers
+weeks of natural drift or a representative distribution of customer workflows.
 
 Identity is only checked on armed steps. Risk classification uses keywords and
 can miss an icon-only or indirect write. Visual postconditions do not verify a
@@ -38,7 +40,11 @@ through guest tools, an out-of-band channel that a locked-down Citrix session ma
 not expose. Where no such read path exists, the transactional strong oracle is
 unavailable; a same-application re-read cannot catch a partial, duplicate, stale,
 or lost-update write, and on such substrates safety rests on the identity gate
-and halt-on-ambiguity rather than on effect verification.
+and halt-on-ambiguity rather than on effect verification. Even where a read path
+exists, an out-of-band effect oracle is only as strong as its read coverage: in
+the end-to-end study a collateral write to a billing surface the oracle did not
+read slipped through (9 of 90) until the read path was extended to every mutable
+surface, so effect verification guarantees only what it reads.
 
 Cost values use recorded provider usage and then-current price metadata. They do
 not include recording, compilation, operator review, exception handling,

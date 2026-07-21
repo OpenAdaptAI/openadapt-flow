@@ -4,9 +4,13 @@ Two entry points:
 
 - :func:`render_run_report` — reads ``<run_dir>/report.json`` (an
   :class:`openadapt_flow.ir.RunReport`) and writes ``<run_dir>/REPORT.md``
-  with the outcome headline, per-step table, embedded screenshots
-  (relative paths so the report renders on GitHub), rung histogram, and
-  totals.
+  with the outcome headline, per-step table, a per-step evidence section
+  (a before/after frame for EVERY step alongside the resolution rung,
+  identity-gate outcome, effect-check verdict, and heal/halt status, on
+  relative paths so the report renders on GitHub), rung histogram, and
+  totals. The generator links only retained image artifacts inside the run
+  directory and never synthesizes pixels: a frame the run did not retain on
+  disk is shown as absent.
 - :func:`render_bench_report` — reads a ``bench.json`` produced by
   :func:`openadapt_flow.bench.run_bench` and writes a Markdown summary.
 """
@@ -16,6 +20,7 @@ from __future__ import annotations
 import json
 import warnings
 from pathlib import Path
+from urllib.parse import quote
 
 from openadapt_flow.ir import RunReport, StepResult
 from openadapt_flow.privacy import scrub_mode as _scrub_mode
@@ -84,21 +89,126 @@ def _md_phi(text: str) -> str:
     return _md_escape(_scrub_phi(text) or "")
 
 
-def _img(rel_path: str | None, alt: str) -> str:
-    """Markdown image for a run-dir-relative path, or an em dash if missing."""
+def _retained_image_target(run: Path, rel_path: str) -> str | None:
+    """Return a safe Markdown target for a retained run image.
+
+    Reports are shareable artifacts, so an untrusted path from ``report.json``
+    must never make them link outside the run directory.  Require a relative,
+    regular file, reject parent traversal and symlink components, and URL-quote
+    the target for Markdown.
+    """
+    relative = Path(rel_path)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        return None
+
+    try:
+        root = run.resolve(strict=True)
+        candidate = root
+        for part in relative.parts:
+            candidate /= part
+            if candidate.is_symlink():
+                return None
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+    if not resolved.is_file():
+        return None
+    return quote(relative.as_posix(), safe="/._-~")
+
+
+def _img(run: Path, rel_path: str | None, alt: str) -> str:
+    """Markdown image for a run-dir-relative path.
+
+    Emits the image only when the frame is actually present on disk under
+    ``run``; an honest artifact never links a frame the run did not retain
+    (some run bundles keep only a final frame). A ``None`` path renders as an
+    em dash; a path whose file is missing renders as an italic "not retained"
+    note instead of a broken image link.
+    """
     if not rel_path:
         return "&mdash;"
-    return f"![{_md_escape(alt)}]({rel_path})"
+    target = _retained_image_target(run, rel_path)
+    if target is None:
+        return "_frame not retained_"
+    escaped_alt = _md_escape(alt).replace("[", "\\[").replace("]", "\\]")
+    return f"![{escaped_alt}]({target})"
 
 
-def _before_after_table(result: StepResult) -> list[str]:
+def _before_after_table(run: Path, result: StepResult) -> list[str]:
     """Before/after screenshots side by side as a two-column table."""
     return [
         "| Before | After |",
         "| --- | --- |",
-        f"| {_img(result.before_png, f'{result.step_id} before')} "
-        f"| {_img(result.after_png, f'{result.step_id} after')} |",
+        f"| {_img(run, result.before_png, f'{result.step_id} before')} "
+        f"| {_img(run, result.after_png, f'{result.step_id} after')} |",
     ]
+
+
+def _verified_parts(result: StepResult) -> list[str]:
+    """Governance markers for a step: identity-gate, typed-input, and effect
+    verdicts, in that order. Shared by the per-step table's ``Verified`` column
+    and the per-step evidence section so both read identically.
+
+    An ``id ⚠`` marker (abstain / unreadable identity) means the step proceeded
+    on positional evidence alone and is flagged, never silent.
+    """
+    parts: list[str] = []
+    if result.identity is not None:
+        parts.append(
+            {
+                "verified": "id ✓",
+                "mismatch": "id ✗",
+                "abstain": "id ⚠",
+                "unreadable": "id ⚠",
+            }[result.identity.status]
+        )
+    if result.input_verified is not None:
+        marker = "input ✓" if result.input_verified else "input ✗"
+        if result.input_retried:
+            marker += " (retried)"
+        parts.append(marker)
+    if result.effect_verified is True:
+        parts.append("effect ✓")
+    elif result.effect_verified is False:
+        parts.append("effect ✗")
+    elif result.effect_approved_unverified:
+        parts.append("effect ⚠ approved")
+    return parts
+
+
+def _step_evidence_line(result: StepResult) -> str:
+    """One compact, scannable governance line for a step's evidence block:
+    resolution rung + confidence + resolved point, the identity/input/effect
+    gate verdicts, heal status, and the pass/halt/skip outcome.
+    """
+    res = result.resolution
+    if res is not None:
+        rung_part = (
+            f"**Rung** `{res.rung}` "
+            f"(conf {res.confidence:.2f}, resolved ({res.point[0]}, {res.point[1]}))"
+        )
+    else:
+        rung_part = "**Rung** &mdash; (keyboard / wait step, no anchor)"
+    gates = _verified_parts(result)
+    gate_part = (
+        f"**Gates** {', '.join(gates)}" if gates else "**Gates** none on this step"
+    )
+    heal_part = (
+        f"**Heal** healed via `{result.heal.rung_used}`"
+        if result.heal
+        else "**Heal** none"
+    )
+    if result.skipped:
+        outcome_part = "**Outcome** ⏭️ skipped (guard unmet)"
+    elif result.ok:
+        outcome_part = "**Outcome** ✅ ok"
+    elif result.safety_halt:
+        outcome_part = "**Outcome** ❌ HALTED (governed refusal)"
+    else:
+        outcome_part = "**Outcome** ❌ halted"
+    return " · ".join([rung_part, gate_part, heal_part, outcome_part])
 
 
 def render_run_report(run_dir: Path | str) -> Path:
@@ -251,30 +361,10 @@ def render_run_report(run_dir: Path | str) -> Path:
         conf = f"{result.resolution.confidence:.2f}" if result.resolution else "&mdash;"
         healed = "\U0001fa79" if result.heal else ""
         status = "✅" if result.ok else "❌"
-        # Identity (clicks) / typed-input (TYPE) verification outcome —
+        # Identity (clicks) / typed-input (TYPE) / effect verification outcome:
         # "unreadable" identity means the step proceeded on positional
         # evidence alone and is flagged, never silent.
-        verified_parts = []
-        if result.identity is not None:
-            marker = {
-                "verified": "id ✓",
-                "mismatch": "id ✗",
-                "abstain": "id ⚠",
-                "unreadable": "id ⚠",
-            }[result.identity.status]
-            verified_parts.append(marker)
-        if result.input_verified is not None:
-            marker = "input ✓" if result.input_verified else "input ✗"
-            if result.input_retried:
-                marker += " (retried)"
-            verified_parts.append(marker)
-        if result.effect_verified is True:
-            verified_parts.append("effect ✓")
-        elif result.effect_verified is False:
-            verified_parts.append("effect ✗")
-        elif result.effect_approved_unverified:
-            verified_parts.append("effect ⚠ approved")
-        verified = ", ".join(verified_parts) or "&mdash;"
+        verified = ", ".join(_verified_parts(result)) or "&mdash;"
         lines.append(
             f"| {i} | `{_md_escape(result.step_id)}` "
             f"| {_md_phi(result.intent)} | {rung} | {conf} "
@@ -282,39 +372,52 @@ def render_run_report(run_dir: Path | str) -> Path:
         )
     lines.append("")
 
-    # -- Screenshots: final step, every heal, any failed step --------------
+    # -- Per-step evidence: a before/after frame for EVERY step -------------
+    # One block per step (not just heals/failures/the final step), so the whole
+    # governed run is legible: the before/after frames alongside the resolution
+    # rung, identity-gate and effect-check verdicts, and heal/halt status.
+    # Link only retained run artifacts; a step whose frame the run did not
+    # retain shows the frame as absent (see _img), never a fabricated one.
     final_id = report.results[-1].step_id if report.results else None
-    shown: list[tuple[str, StepResult]] = []
-    for result in report.results:
-        reasons = []
-        if not result.ok:
-            reasons.append("failed")
-        if result.heal:
-            reasons.append("healed")
-        if result.step_id == final_id:
-            reasons.append("final step")
-        if reasons:
-            shown.append((", ".join(reasons), result))
-
-    if shown:
-        lines.append("## Screenshots")
+    if report.results:
+        lines.append("## Per-step evidence")
         lines.append("")
-        for reason, result in shown:
+        lines.append(
+            "Every step below shows the frame **before** and **after** the "
+            "action next to the resolution rung, the identity-gate and "
+            "effect-check verdicts, and whether the step healed or halted. "
+            "The generator links only retained run artifacts and never "
+            "synthesizes pixels. If image redaction was enabled when a frame "
+            "was persisted, that redaction is already burned into its pixels; "
+            "a frame the run did not retain is marked _not retained_."
+        )
+        lines.append("")
+        for i, result in enumerate(report.results, start=1):
+            tags = []
+            if result.step_id == final_id:
+                tags.append("final step")
+            if result.heal:
+                tags.append("healed")
+            if not result.ok and not result.skipped:
+                tags.append("halted")
+            tag_suffix = f" ({', '.join(tags)})" if tags else ""
             lines.append(
-                f"### `{_md_escape(result.step_id)}` — "
-                f"{_md_phi(result.intent)} ({reason})"
+                f"### {i}. `{_md_escape(result.step_id)}` — "
+                f"{_md_phi(result.intent)}{tag_suffix}"
             )
             lines.append("")
             if result.error:
                 lines.append(f"> ❌ **Error:** {_md_phi(result.error)}")
                 lines.append("")
-            lines.extend(_before_after_table(result))
+            lines.append(_step_evidence_line(result))
+            lines.append("")
+            lines.extend(_before_after_table(run, result))
             lines.append("")
             if result.heal:
                 heal = result.heal
                 applied = "applied" if heal.applied else "not applied"
                 lines.append(
-                    f"**Heal** (`{heal.kind}` via `{heal.rung_used}`, {applied}):"
+                    f"**Heal detail** (`{heal.kind}` via `{heal.rung_used}`, {applied}):"
                 )
                 lines.append("")
                 lines.append(
@@ -325,7 +428,9 @@ def render_run_report(run_dir: Path | str) -> Path:
                     lines.append("")
                     lines.append("| Healed frame |")
                     lines.append("| --- |")
-                    lines.append(f"| {_img(heal.screenshot, f'{heal.step_id} heal')} |")
+                    lines.append(
+                        f"| {_img(run, heal.screenshot, f'{heal.step_id} heal')} |"
+                    )
                 lines.append("")
 
     # -- Rung histogram -----------------------------------------------------

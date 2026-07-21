@@ -176,13 +176,20 @@ def test_run_report_success(tmp_path: Path) -> None:
     assert "`step_save`" in md and "ocr" in md
     # Pipe in intent must be escaped, not break the table.
     assert "verify banner \\| with pipe" in md
-    # Relative-path images: final step + heal step before/after.
+    # Per-step evidence: a before/after frame for EVERY step, not just the
+    # final / healed / failed ones.
+    assert "## Per-step evidence" in md
     assert "![step_verify before](steps/step_verify_before.png)" in md
     assert "![step_verify after](steps/step_verify_after.png)" in md
     assert "![step_save before](steps/step_save_before.png)" in md
     assert "![step_save heal](heals/step_save/heal_frame.png)" in md
-    # Non-final, non-healed, passing step is NOT in the screenshot section.
-    assert "![step_login before]" not in md
+    # The clean, non-final, non-healed step is now shown too (every step is).
+    assert "![step_login before](steps/step_login_before.png)" in md
+    assert "![step_login after](steps/step_login_after.png)" in md
+    # Each step block carries its governance line (rung + gates + heal + outcome).
+    assert "**Rung** `template` (conf 0.97, resolved (90, 52))" in md
+    assert "**Heal** healed via `ocr`" in md
+    assert "**Outcome** ✅ ok" in md
     # Rung histogram.
     assert "## Rung histogram" in md
     assert "| `template` | 2 | ██ |" in md
@@ -205,6 +212,60 @@ def test_run_report_failure(tmp_path: Path) -> None:
     assert "postcondition TEXT_PRESENT timed out" in md
     assert "![step_verify before](steps/step_verify_before.png)" in md
     assert "![step_verify after](steps/step_verify_after.png)" in md
+
+
+def test_run_report_marks_unretained_frames(tmp_path: Path) -> None:
+    """A step whose frame the run did not keep on disk is marked absent, never
+    linked as a broken image (some bundles retain only a final frame)."""
+    run_dir = _make_run_dir(tmp_path, success=True)
+    # Drop step_login's before frame; its report.json path stays, but the file
+    # is gone — the report must not emit a broken image link for it.
+    (run_dir / "steps" / "step_login_before.png").unlink()
+
+    md = render_run_report(run_dir).read_text(encoding="utf-8")
+
+    assert "![step_login before](steps/step_login_before.png)" not in md
+    assert "_frame not retained_" in md
+    # The retained after-frame for the same step is still shown.
+    assert "![step_login after](steps/step_login_after.png)" in md
+
+
+def test_run_report_rejects_image_paths_outside_run(tmp_path: Path) -> None:
+    """A report path cannot disclose a file outside the retained run bundle."""
+    run_dir = _make_run_dir(tmp_path, success=True)
+    outside = tmp_path / "outside.png"
+    _png(outside)
+    report = RunReport.model_validate_json((run_dir / "report.json").read_text())
+    report.results[0].before_png = "../outside.png"
+    report.results[0].after_png = str(outside.resolve())
+    report.save(run_dir)
+
+    md = render_run_report(run_dir).read_text(encoding="utf-8")
+
+    assert "../outside.png" not in md
+    assert str(outside.resolve()) not in md
+    assert md.count("_frame not retained_") >= 2
+
+
+def test_run_report_rejects_symlinked_image(tmp_path: Path) -> None:
+    """A retained-frame link cannot escape through a symlink component."""
+    run_dir = _make_run_dir(tmp_path, success=True)
+    outside = tmp_path / "outside.png"
+    _png(outside)
+    linked = run_dir / "steps" / "linked.png"
+    try:
+        linked.symlink_to(outside)
+    except OSError as exc:  # pragma: no cover - platform policy, not behavior
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    report = RunReport.model_validate_json((run_dir / "report.json").read_text())
+    report.results[0].before_png = "steps/linked.png"
+    report.save(run_dir)
+
+    md = render_run_report(run_dir).read_text(encoding="utf-8")
+
+    assert "steps/linked.png" not in md
+    assert "_frame not retained_" in md
 
 
 def test_run_report_discloses_approved_unverified_effect(tmp_path: Path) -> None:

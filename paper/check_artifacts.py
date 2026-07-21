@@ -462,7 +462,7 @@ def main() -> None:
     )
     require_contains(
         methodology_tex,
-        "benchmark-local row and table-delta classification",
+        "benchmark-local canonical typed row and table-content classification",
         "lending methodology independent classifier",
     )
     require_contains(

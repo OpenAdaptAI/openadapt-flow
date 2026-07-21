@@ -268,7 +268,7 @@
     },
     {
       "path": "benchmark/lending_fault_model/swer_results.json",
-      "sha256": "bb148c346dacb9c7a56bdc710ef0c8307307a2d96a3fd6c804ea66333095f54f"
+      "sha256": "1dd7720a9a44bd5a453ea16fa8ac2f7050beceedf3a1f220312296cb3675bf09"
     },
     {
       "path": "benchmark/macos_native/ax_identity_20260720.adjudication.json",

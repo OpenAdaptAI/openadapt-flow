@@ -150,6 +150,200 @@ class TestLedgerDB:
         assert truth.persisted_count > 0
         assert truth.table_deltas["outbound_payments"] == 1
 
+    def test_ground_truth_catches_same_count_business_table_update(self) -> None:
+        db = LedgerDB()
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute(
+                "CREATE TABLE account_state "
+                "(id INTEGER PRIMARY KEY, balance TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO account_state VALUES (1, '100')")
+        before = G.capture(db.database_path)
+        db.add(
+            S.TARGET_LOAN,
+            S.TARGET_PRODUCT,
+            S.TARGET_AMOUNT,
+            "trial memo",
+        )
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute("UPDATE account_state SET balance = '0' WHERE id = 1")
+        after = G.capture(db.database_path)
+        truth = G.judge(
+            before,
+            after,
+            intended_loan=S.TARGET_LOAN,
+            intended_product=S.TARGET_PRODUCT,
+            intended_amount=S.TARGET_AMOUNT,
+            intended_memo="trial memo",
+        )
+
+        assert truth.correct is False
+        assert truth.fault_class == "collateral_write"
+        assert truth.table_deltas["account_state"] == 0
+        assert "account_state" in truth.table_changes
+
+    def test_ground_truth_catches_same_count_delete_insert(self) -> None:
+        db = LedgerDB()
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute(
+                "CREATE TABLE payout_queue "
+                "(id INTEGER PRIMARY KEY, destination TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO payout_queue VALUES (1, 'approved')")
+        before = G.capture(db.database_path)
+        db.add(
+            S.TARGET_LOAN,
+            S.TARGET_PRODUCT,
+            S.TARGET_AMOUNT,
+            "trial memo",
+        )
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute("DELETE FROM payout_queue WHERE id = 1")
+            conn.execute("INSERT INTO payout_queue VALUES (2, 'redirected')")
+        after = G.capture(db.database_path)
+        truth = G.judge(
+            before,
+            after,
+            intended_loan=S.TARGET_LOAN,
+            intended_product=S.TARGET_PRODUCT,
+            intended_amount=S.TARGET_AMOUNT,
+            intended_memo="trial memo",
+        )
+
+        assert truth.correct is False
+        assert truth.fault_class == "collateral_write"
+        assert truth.table_deltas["payout_queue"] == 0
+        assert "payout_queue" in truth.table_changes
+
+    def test_ground_truth_catches_same_count_schema_change(self) -> None:
+        db = LedgerDB()
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute("CREATE TABLE approvals (id INTEGER PRIMARY KEY)")
+            conn.execute("INSERT INTO approvals VALUES (1)")
+        before = G.capture(db.database_path)
+        db.add(
+            S.TARGET_LOAN,
+            S.TARGET_PRODUCT,
+            S.TARGET_AMOUNT,
+            "trial memo",
+        )
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute("ALTER TABLE approvals ADD COLUMN status TEXT")
+        after = G.capture(db.database_path)
+        truth = G.judge(
+            before,
+            after,
+            intended_loan=S.TARGET_LOAN,
+            intended_product=S.TARGET_PRODUCT,
+            intended_amount=S.TARGET_AMOUNT,
+            intended_memo="trial memo",
+        )
+
+        assert truth.correct is False
+        assert truth.fault_class == "collateral_write"
+        assert truth.table_deltas["approvals"] == 0
+        assert "approvals" in truth.table_changes
+
+    def test_ground_truth_catches_records_schema_change(self) -> None:
+        db = LedgerDB()
+        before = G.capture(db.database_path)
+        db.add(
+            S.TARGET_LOAN,
+            S.TARGET_PRODUCT,
+            S.TARGET_AMOUNT,
+            "trial memo",
+        )
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute("ALTER TABLE records ADD COLUMN approval_state TEXT")
+        after = G.capture(db.database_path)
+        truth = G.judge(
+            before,
+            after,
+            intended_loan=S.TARGET_LOAN,
+            intended_product=S.TARGET_PRODUCT,
+            intended_amount=S.TARGET_AMOUNT,
+            intended_memo="trial memo",
+        )
+
+        assert truth.correct is False
+        assert truth.fault_class == "collateral_mutation"
+        assert truth.table_deltas["records"] == 1
+        assert "records" in truth.table_changes
+
+    def test_ground_truth_catches_unselected_preexisting_record_mutation(
+        self,
+    ) -> None:
+        db = LedgerDB()
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute(
+                "ALTER TABLE records ADD COLUMN audit_state TEXT DEFAULT 'clean'"
+            )
+        existing = db.add("L0999", "Legacy", "10", "pre-existing")
+        before = G.capture(db.database_path)
+        db.add(
+            S.TARGET_LOAN,
+            S.TARGET_PRODUCT,
+            S.TARGET_AMOUNT,
+            "trial memo",
+        )
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute(
+                "UPDATE records SET audit_state = 'corrupt' WHERE id = ?",
+                (existing["id"],),
+            )
+        after = G.capture(db.database_path)
+        truth = G.judge(
+            before,
+            after,
+            intended_loan=S.TARGET_LOAN,
+            intended_product=S.TARGET_PRODUCT,
+            intended_amount=S.TARGET_AMOUNT,
+            intended_memo="trial memo",
+        )
+
+        assert truth.correct is False
+        assert truth.fault_class == "collateral_loss"
+        assert truth.table_deltas["records"] == 1
+        assert "records" in truth.table_changes
+
+    def test_ground_truth_catches_unkeyed_shadowed_rowid_table_update(self) -> None:
+        db = LedgerDB()
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute(
+                "CREATE TABLE unkeyed_state "
+                "(rowid TEXT, _rowid_ TEXT, oid TEXT, value TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO unkeyed_state VALUES "
+                "('shadow-1', 'shadow-2', 'shadow-3', 'approved')"
+            )
+        before = G.capture(db.database_path)
+        assert before.tables["unkeyed_state"].identity_kind == (
+            "canonical_row_multiset"
+        )
+        db.add(
+            S.TARGET_LOAN,
+            S.TARGET_PRODUCT,
+            S.TARGET_AMOUNT,
+            "trial memo",
+        )
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute("UPDATE unkeyed_state SET value = 'redirected'")
+        after = G.capture(db.database_path)
+        truth = G.judge(
+            before,
+            after,
+            intended_loan=S.TARGET_LOAN,
+            intended_product=S.TARGET_PRODUCT,
+            intended_amount=S.TARGET_AMOUNT,
+            intended_memo="trial memo",
+        )
+
+        assert truth.correct is False
+        assert truth.fault_class == "collateral_write"
+        assert truth.table_deltas["unkeyed_state"] == 0
+        assert "unkeyed_state" in truth.table_changes
+
     def test_idempotency_key_dedups(self) -> None:
         db = LedgerDB()
         db.reset()

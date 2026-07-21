@@ -203,7 +203,7 @@ LENDING_PUBLIC_EVIDENCE_META = {
     "domain": "lending (MockLoan) - loan disbursement authorization",
     "oracle": (
         "benchmark-local read-only SQLite ground truth with independent "
-        "row and open-world table-delta classification"
+        "row and open-world canonical table-content classification"
     ),
     "judge_read_path": (
         "direct read-only SQLite capture over sqlite_master-discovered business tables"

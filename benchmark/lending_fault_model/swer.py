@@ -528,7 +528,7 @@ def measure(trials: int = 3) -> dict:
             "domain": "lending (MockLoan) - loan disbursement authorization",
             "oracle": (
                 "benchmark-local read-only SQLite ground truth with independent "
-                "row and open-world table-delta classification"
+                "row and open-world canonical table-content classification"
             ),
             "judge_read_path": (
                 "direct read-only SQLite capture over sqlite_master-discovered "
@@ -555,7 +555,7 @@ the two domains are directly comparable: screen-only, a SINGLE-surface oracle
 (disbursements ledger only, `GET /api/disbursements`), and the COMPLETE read path
 over every mutable surface (disbursements + fees, `GET /api/db`). A separate
 benchmark-local ground truth judges all three arms through a read-only SQLite
-connection and its own row/table-delta classifier, never either HTTP response,
+connection and its own canonical typed row/table-content classifier, never either HTTP response,
 the runtime effect classifier, the screen, or an arm's self-report. Every trial
 binds a trial-unique memo + idempotency key. Zero model calls.
 
@@ -666,7 +666,8 @@ def to_markdown(result: dict) -> str:
         "arm's OWN verifier reads) differs. The ground-truth oracle handed to "
         "`score_episode` is benchmark-local: it opens the persisted SQLite "
         "ledger read-only before and after the action, discovers every business "
-        "table from `sqlite_master`, and classifies row/table deltas without "
+        "table from `sqlite_master`, and classifies canonical typed schema/row "
+        "content changes without "
         "the runtime effect-kit classifier. The SUT "
         "arms use the rendered banner, `GET /api/disbursements`, or `GET "
         "/api/db`; none consumes the judge's SQL connection. The full arm and "

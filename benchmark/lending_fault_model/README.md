@@ -62,7 +62,8 @@ judged by an independent ledger read, with zero model calls.
 The judge never trusts the screen, the agent's self-report, or either REST
 readback. It opens the isolated persisted SQLite ledger through a separate
 read-only connection before and after the write, discovers business tables from
-`sqlite_master`, and runs its own row/table-delta classifier. The product arms
+`sqlite_master`, and runs its own canonical typed row/table-content classifier.
+The product arms
 continue to read `GET /api/disbursements` or `GET /api/db` and use the runtime
 effect classifier, so neither a malformed REST response nor a product-classifier
 regression can redefine ground truth. Every trial binds a **trial-unique** memo

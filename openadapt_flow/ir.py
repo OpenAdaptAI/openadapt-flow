@@ -629,6 +629,11 @@ class Interstitial(BaseModel):
             raise ValueError(
                 "interstitial must declare at most one dismissal mechanism"
             )
+        if self.dismiss_anchor is not None and not self.dismiss_anchor.template.strip():
+            raise ValueError(
+                "automatic interstitial click dismissal requires a non-empty "
+                "sealed anchor template"
+            )
         has_dismissal = self.dismiss_key is not None or self.dismiss_anchor is not None
         if self.dismiss_key is not None and self.dismiss_key.strip() != "Escape":
             raise ValueError(

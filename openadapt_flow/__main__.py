@@ -37,6 +37,10 @@ imported lazily inside each handler so ``--help`` always works):
   UI over bundles / runs / skill libraries; requires the ``console`` extra).
 - ``emit-skill`` — emit an Agent Skills folder for a bundle.
 - ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
+- ``connector`` — the BYOC (bring-your-own-cloud) outbound-pull daemon:
+  ``enroll`` this machine with OpenAdapt Cloud, then ``run`` governed jobs
+  LOCALLY inside the customer perimeter (PHI stays on this side). See
+  ``docs/BYOC_CONNECTOR.md`` and :mod:`openadapt_flow.connector`.
 
 A single ``deployment.yaml`` (``--config``; see
 ``docs/deployment.example.yaml`` and :mod:`openadapt_flow.deployment`)
@@ -3210,6 +3214,67 @@ def build_parser() -> argparse.ArgumentParser:
     _add_deployment_flags(p)
     p.set_defaults(func=_cmd_console)
 
+    # --- connector: the BYOC (bring-your-own-cloud) outbound-pull daemon -------
+    p = sub.add_parser(
+        "connector",
+        help=(
+            "BYOC connector: enroll this machine with OpenAdapt Cloud and run "
+            "governed jobs LOCALLY (customer owns the data boundary; PHI stays "
+            "on this side)"
+        ),
+    )
+    csub = p.add_subparsers(dest="connector_cmd", required=True)
+
+    pe = csub.add_parser(
+        "enroll",
+        help="Enroll this machine as a Connector and persist the token (0600)",
+    )
+    pe.add_argument(
+        "--control-plane-url", help="Control plane base URL (or CONTROL_PLANE_URL)"
+    )
+    pe.add_argument(
+        "--enrollment-secret", help="Org enrollment secret (or BYOC_ENROLLMENT_SECRET)"
+    )
+    pe.add_argument("--org-id", help="Org id to enroll under (or BYOC_ORG_ID)")
+    pe.add_argument("--name", help="Connector name (or BYOC_CONNECTOR_NAME)")
+    pe.add_argument(
+        "--profile", help="Path to the deployment.yaml governed runs use as --config"
+    )
+    pe.add_argument(
+        "--policy", help="Pinned admitted policy name (else the deployment config's)"
+    )
+    pe.add_argument("--storage-backend", help="Customer storage backend (local)")
+    pe.add_argument(
+        "--storage-root",
+        help="Customer storage root dir (a full-disk-encrypted volume)",
+    )
+    pe.set_defaults(func=_cmd_connector)
+
+    pr = csub.add_parser(
+        "run",
+        help="Poll the control plane and run governed jobs until interrupted",
+    )
+    pr.add_argument(
+        "--control-plane-url", help="Control plane base URL (or CONTROL_PLANE_URL)"
+    )
+    pr.add_argument("--token", help="Per-connector token (or BYOC_CONNECTOR_TOKEN)")
+    pr.add_argument("--org-id", help="Org id (or BYOC_ORG_ID)")
+    pr.add_argument(
+        "--profile", help="Path to the deployment.yaml governed runs use as --config"
+    )
+    pr.add_argument(
+        "--policy", help="Pinned admitted policy name (else the deployment config's)"
+    )
+    pr.add_argument("--storage-backend", help="Customer storage backend (local)")
+    pr.add_argument("--storage-root", help="Customer storage root dir")
+    pr.add_argument(
+        "--poll-wait", type=int, help="Long-poll wait seconds (or BYOC_POLL_WAIT_S)"
+    )
+    pr.add_argument(
+        "--once", action="store_true", help="Poll once then exit (cron-style)"
+    )
+    pr.set_defaults(func=_cmd_connector)
+
     return parser
 
 
@@ -3308,6 +3373,95 @@ def _cmd_console(args: argparse.Namespace) -> int:
             port=args.port,
         )
     return 0
+
+
+def _connector_flags(args: argparse.Namespace) -> dict[str, object]:
+    """Collect the connector CLI flags into the settings-resolution dict."""
+    keys = (
+        "control_plane_url",
+        "token",
+        "org_id",
+        "name",
+        "profile",
+        "policy",
+        "storage_backend",
+        "storage_root",
+        "poll_wait",
+    )
+    return {
+        k: getattr(args, k, None) for k in keys if getattr(args, k, None) is not None
+    }
+
+
+def _cmd_connector(args: argparse.Namespace) -> int:
+    """The BYOC connector: enroll this machine, or run governed jobs locally.
+
+    Both sub-verbs are thin wrappers over :mod:`openadapt_flow.connector`. The
+    engine ships the connector so a dispatched run is the SAME fail-closed
+    ``openadapt-flow run`` admission gate + governed Replayer the local CLI uses,
+    executed inside the customer perimeter against the customer's own storage.
+    """
+    import os
+
+    from openadapt_flow.connector import (
+        ConnectorClient,
+        ConnectorClientError,
+        load_settings,
+        run_loop,
+        save_enrollment,
+    )
+    from openadapt_flow.connector.config import ConnectorConfigError
+    from openadapt_flow.connector.executor import _subprocess_runner
+
+    verb = getattr(args, "connector_cmd", None)
+    try:
+        settings = load_settings(_connector_flags(args))
+    except ConnectorConfigError as exc:
+        print(f"connector: {exc}")
+        return 2
+
+    if verb == "enroll":
+        enrollment_secret = getattr(args, "enrollment_secret", None) or os.environ.get(
+            "BYOC_ENROLLMENT_SECRET"
+        )
+        client = ConnectorClient(settings.control_plane_url)
+        try:
+            data = client.enroll(
+                enrollment_secret=enrollment_secret,
+                org_id=settings.org_id,
+                name=settings.name,
+            )
+        except ConnectorClientError as exc:
+            print(f"connector enroll failed: {exc}")
+            return 1
+        finally:
+            client.close()
+        settings.token = data.get("token") or settings.token
+        settings.org_id = data.get("org_id") or settings.org_id
+        path = save_enrollment(settings)
+        print(
+            f"enrolled connector {data.get('connector_id', '?')} for org "
+            f"{settings.org_id}; token persisted to {path} (0600)."
+        )
+        return 0
+
+    # verb == "run"
+    if not settings.token:
+        print(
+            "connector run: not enrolled. Run `openadapt-flow connector enroll` "
+            "first, or pass --token / BYOC_CONNECTOR_TOKEN."
+        )
+        return 2
+    client = ConnectorClient(settings.control_plane_url, token=settings.token)
+    try:
+        return run_loop(
+            client,
+            settings,
+            runner=_subprocess_runner,
+            once=bool(getattr(args, "once", False)),
+        )
+    finally:
+        client.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

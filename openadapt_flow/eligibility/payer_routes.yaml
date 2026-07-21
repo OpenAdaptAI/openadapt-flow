@@ -19,5 +19,6 @@ payers:
     # A live enrollment records the production payer record's own digest.
     payer_record_sha256: "64ebef34642c651416428e365645a3fa5938cdc4a633cdab0af999fcbbe8f095"
     portal_banned: false
+    portal_fallback_reviewed: false
     verified_on: "2026-07-21"
     notes: Stedi's published dental TEST request; no real member data.

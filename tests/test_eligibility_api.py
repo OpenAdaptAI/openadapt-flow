@@ -48,6 +48,12 @@ def dental_request(**overrides) -> EligibilityRequest:
 ACTIVE_271 = {
     "meta": {"applicationMode": "test"},
     "tradingPartnerServiceId": "62308",
+    "subscriber": {
+        "memberId": "U3141592653",
+        "firstName": "Jaguar",
+        "lastName": "Dent",
+        "dateOfBirth": "19960505",
+    },
     "payer": {"name": "Cigna"},
     "planInformation": {"groupDescription": "DENTAL PPO"},
     "planDateInformation": {"planBegin": "20260101", "planEnd": "20261231"},
@@ -212,9 +218,71 @@ def test_raw_phi_response_is_excluded_from_repr_and_serialization():
     result = parse_271(
         dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
     )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.MEMBER_IDENTITY
     assert result.raw_271 is not None
     assert "SECRET-MEMBER-123" not in repr(result)
     assert "SECRET-MEMBER-123" not in result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("memberId", "WRONG-MEMBER"),
+        ("firstName", "Wrong"),
+        ("lastName", "Wrong"),
+        ("dateOfBirth", "19800101"),
+    ],
+)
+def test_active_response_for_wrong_subject_never_answers(field, wrong):
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["subscriber"][field] = wrong
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.MEMBER_IDENTITY
+    assert "SECRET" not in result.reason
+
+
+def test_subject_matching_is_conservative_but_case_and_whitespace_tolerant():
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["subscriber"].update(
+        {
+            "memberId": "  u3141592653  ",
+            "firstName": "  JAGUAR ",
+            "lastName": "DENT",
+        }
+    )
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert result.is_answer
+    assert result.response_subject_sha256
+
+
+def test_missing_or_dependent_response_subject_never_answers():
+    missing = json.loads(json.dumps(ACTIVE_271))
+    missing.pop("subscriber")
+    result = parse_271(
+        dental_request(),
+        json.dumps(missing).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.MEMBER_IDENTITY
+
+    dependent = json.loads(json.dumps(ACTIVE_271))
+    dependent["dependents"] = [
+        {"firstName": "Jaguar", "lastName": "Dent", "dateOfBirth": "19960505"}
+    ]
+    result = parse_271(
+        dental_request(),
+        json.dumps(dependent).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
+    assert not result.is_answer
+    assert "dependent" in result.reason
 
 
 def test_response_application_mode_is_required_even_without_expected_mode():
@@ -290,6 +358,57 @@ def test_service_date_outside_plan_and_benefit_window_fails_closed():
     )
     assert result.status is EligibilityStatus.INDETERMINATE
     assert "service date" in result.ambiguities[0]
+
+
+@pytest.mark.parametrize(
+    "plan_dates",
+    [
+        {"planBegin": "20260722", "planEnd": "20261231"},
+        {"planBegin": "20260101", "planEnd": "20260720"},
+        {},
+    ],
+)
+def test_active_answer_requires_explicit_interval_containing_service_date(plan_dates):
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["planDateInformation"] = plan_dates
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.RESPONSE_AMBIGUOUS
+    assert (
+        "coverage interval" in result.ambiguities[0]
+        or "service date" in result.ambiguities[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "plan_dates",
+    [
+        {"planBegin": "20260101"},
+        {"planEnd": "20261231"},
+    ],
+)
+def test_active_answer_accepts_explicit_open_interval_containing_service_date(
+    plan_dates,
+):
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["planDateInformation"] = plan_dates
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert result.is_answer
+
+
+def test_redirect_with_valid_looking_json_is_never_an_answer():
+    result = parse_271(
+        dental_request(),
+        json.dumps(ACTIVE_271).encode(),
+        http_status=302,
+        expected_mode=ApplicationMode.TEST,
+    )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.RESPONSE_INVALID
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -445,3 +564,15 @@ def test_non_json_and_empty_json_never_guess_active():
         result = parse_271(dental_request(), payload)
         assert not result.is_answer
         assert result.status is EligibilityStatus.INDETERMINATE
+
+
+def test_malformed_qualified_benefit_fails_closed_without_raising():
+    body = json.loads(json.dumps(ACTIVE_271))
+    body["benefitsInformation"].append(
+        {"code": "B", "benefitAmount": "20", "serviceTypeCodes": None}
+    )
+    result = parse_271(
+        dental_request(), json.dumps(body).encode(), expected_mode=ApplicationMode.TEST
+    )
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.RESPONSE_INVALID

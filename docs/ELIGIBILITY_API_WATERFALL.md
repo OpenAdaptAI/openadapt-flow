@@ -30,7 +30,7 @@ records:
 - a digest of the reviewed payer-directory record;
 - supported service-type codes;
 - the practice account and application mode;
-- the verification date and portal policy.
+- the verification date and an explicit reviewed-portal-fallback decision.
 
 This keeps the route mechanism open while keeping productionized payer recipes
 inside the deployment boundary.
@@ -53,8 +53,19 @@ practice-facing convenience values only when one value matches the request's:
   (`29`) deductible/out-of-pocket amounts.
 
 Conflicting active/inactive signals, a response for another service, a payer or
-application-mode mismatch, an out-of-range service date, or two different
-values with the same qualifiers is not an answer.
+application-mode mismatch, an active response without an explicit coverage
+interval containing the requested service date, or two different values with
+the same qualifiers is not an answer. Redirects and every other non-2xx HTTP
+status are also never interpreted as successful eligibility responses.
+
+The current request schema is deliberately subscriber-only and requires the
+member ID. The returned 271 must contain the same subscriber member ID; every
+name or birth date supplied in the request must also be present and match after
+conservative Unicode, case, and whitespace normalization. A missing subscriber,
+a mismatched identity, or a response containing dependent subjects enters the
+attended queue. A dependent response cannot satisfy this subscriber request
+contract; it requires an explicitly typed dependent request rather than a guess
+about which returned person is the patient.
 
 ## Error and fallback rules
 
@@ -65,8 +76,9 @@ Only explicitly transient outcomes retry automatically:
 - payer connectivity AAA `42`, `80`, or Stedi's documented `42` + `79`
   combination.
 
-Retries are bounded. After they are exhausted, the result may use a reviewed
-portal fallback unless that portal is barred. Authentication, invalid payer or
+Retries are bounded. After they are exhausted, the result may use a portal
+fallback only when that fallback was explicitly reviewed and the portal is not
+barred. Authentication, invalid payer or
 request, provider configuration, member identity, and ambiguous response
 outcomes go to practice staff without automatic retry or portal substitution.
 
@@ -91,8 +103,13 @@ requires:
 
 Only an exact, unambiguous answer can enter the consumable result store. The
 artifact writer requires the original `EligibilityRequest`, verifies its
-canonical SHA-256 against the result, and derives member/date/benefit-selector
-fields from that request rather than accepting caller-supplied identity labels.
+canonical SHA-256 and the response-subject evidence digest, then reparses the
+exact raw response and requires canonical semantic equality with the supplied
+normalized result. It derives member/date/benefit-selector fields from the
+request rather than accepting caller-supplied identity labels. The subject
+evidence digest binds the request digest, raw-response digest, and verified
+subscriber role; it does not hash a standalone low-entropy identity tuple or add
+extra plaintext identity fields to the manifest.
 The raw response and normalized practice record are staged, hashed, fsynced,
 and promoted together as one transaction directory. The CSV is a derived index,
 not the source of truth. Repeating the same `operation_id` and content is

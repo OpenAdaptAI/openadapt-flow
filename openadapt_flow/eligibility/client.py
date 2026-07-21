@@ -24,6 +24,7 @@ import json
 import re
 import threading
 import time
+import unicodedata
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Literal, Mapping, Optional
@@ -155,14 +156,14 @@ class EligibilityRequest(BaseModel):
 
     operation_id: str = Field(default_factory=lambda: str(uuid4()))
     payer_id: str
-    member_id: Optional[str] = Field(default=None, repr=False)
+    member_id: str = Field(repr=False)
     first_name: Optional[str] = Field(default=None, repr=False)
     last_name: Optional[str] = Field(default=None, repr=False)
     date_of_birth: Optional[str] = Field(default=None, repr=False)
     provider_npi: str
-    provider_organization: Optional[str] = None
-    provider_first_name: Optional[str] = None
-    provider_last_name: Optional[str] = None
+    provider_organization: Optional[str] = Field(default=None, repr=False)
+    provider_first_name: Optional[str] = Field(default=None, repr=False)
+    provider_last_name: Optional[str] = Field(default=None, repr=False)
     service_type_codes: list[str] = Field(default_factory=lambda: [SERVICE_TYPE_DENTAL])
     date_of_service: str
     benefit_selection: BenefitSelection = Field(default_factory=BenefitSelection)
@@ -177,8 +178,15 @@ class EligibilityRequest(BaseModel):
     @field_validator("payer_id")
     @classmethod
     def _payer_id(cls, value: str) -> str:
-        if not value or value != value.strip() or len(value) > 80:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}", value):
             raise ValueError("payer_id must be an exact 1-80 character identifier")
+        return value
+
+    @field_validator("member_id")
+    @classmethod
+    def _member_id(cls, value: str) -> str:
+        if not value or value != value.strip() or len(value) > 128:
+            raise ValueError("member_id is required for verified eligibility")
         return value
 
     @field_validator("service_type_codes")
@@ -201,8 +209,6 @@ class EligibilityRequest(BaseModel):
 
     @model_validator(mode="after")
     def _identity_and_provider(self) -> "EligibilityRequest":
-        if not any((self.member_id, self.date_of_birth, self.last_name)):
-            raise ValueError("subscriber requires member ID, birth date, or last name")
         org = bool(self.provider_organization)
         person = bool(self.provider_first_name and self.provider_last_name)
         if org == person:
@@ -288,10 +294,19 @@ class EligibilityResult(BaseModel):
     raw_271: Optional[dict[str, Any]] = Field(default=None, exclude=True, repr=False)
     raw_271_sha256: Optional[str] = None
     raw_271_bytes: Optional[bytes] = Field(default=None, exclude=True, repr=False)
+    response_subject_sha256: Optional[str] = None
+    http_status: Optional[int] = None
     checked_at: str = ""
     source: str = "stedi"
     attempt_count: int = 1
     request_sha256: str
+
+    @field_validator("request_sha256", "raw_271_sha256", "response_subject_sha256")
+    @classmethod
+    def _digest(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("eligibility digests must be lowercase SHA-256")
+        return value
 
     @property
     def is_answer(self) -> bool:
@@ -299,6 +314,9 @@ class EligibilityResult(BaseModel):
             self.status in (EligibilityStatus.ACTIVE, EligibilityStatus.INACTIVE)
             and not self.ambiguities
             and self.error_category is None
+            and self.response_subject_sha256 is not None
+            and self.http_status is not None
+            and 200 <= self.http_status < 300
         )
 
     @property
@@ -323,6 +341,57 @@ def eligibility_request_sha256(request: EligibilityRequest) -> str:
         request.to_stedi_body(), sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _normalized_identity_text(value: object) -> str:
+    """Conservatively normalize identity text without dropping punctuation."""
+    return " ".join(unicodedata.normalize("NFKC", str(value)).split()).casefold()
+
+
+def _verify_response_subject(
+    body: Mapping[str, Any], request: EligibilityRequest
+) -> tuple[Optional[str], Optional[str]]:
+    """Bind a subscriber-only request to the exact subject returned by the payer.
+
+    The current request schema deliberately has no dependent field.  A response
+    containing dependent results is therefore not silently interpreted as the
+    subscriber's answer.  The member ID is mandatory; every additional identity
+    field supplied in the request must also be echoed and match after conservative
+    Unicode/case/whitespace normalization.
+    """
+    dependents = body.get("dependents")
+    if dependents not in (None, []):
+        return None, "response contains dependent subjects for a subscriber request"
+    if dependents is not None and not isinstance(dependents, list):
+        return None, "response dependent subject collection is malformed"
+
+    subscriber = body.get("subscriber")
+    if not isinstance(subscriber, dict):
+        return None, "response subscriber identity is missing or malformed"
+
+    request_member = _normalized_identity_text(request.member_id)
+    response_member_raw = subscriber.get("memberId")
+    if response_member_raw is None:
+        return None, "response subscriber member ID is missing"
+    response_member = _normalized_identity_text(response_member_raw)
+    if not response_member or response_member != request_member:
+        return None, "response subscriber member ID does not match request"
+
+    for request_field, response_field, label in (
+        (request.first_name, "firstName", "first name"),
+        (request.last_name, "lastName", "last name"),
+        (request.date_of_birth, "dateOfBirth", "date of birth"),
+    ):
+        if request_field is None:
+            continue
+        response_value = subscriber.get(response_field)
+        if response_value is None:
+            return None, f"response subscriber {label} is missing"
+        expected = _normalized_identity_text(request_field)
+        observed = _normalized_identity_text(response_value)
+        if not observed or observed != expected:
+            return None, f"response subscriber {label} does not match request"
+    return "subscriber", None
 
 
 def _benefit_entries(body: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -359,33 +428,55 @@ def _date_range(value: str) -> tuple[Optional[date], Optional[date]]:
     return one, one
 
 
-def _covers_service_date(
+def _coverage_interval(
     dates: Mapping[str, Any], service_date: date
-) -> Optional[bool]:
+) -> tuple[Optional[bool], Optional[str]]:
     starts: list[date] = []
     ends: list[date] = []
+    recognized = False
     for key, raw in dates.items():
-        if not isinstance(raw, str):
+        is_range = key in {"benefit", "plan", "eligibility", "policy"}
+        is_begin = key.lower().endswith(("begin", "effective"))
+        is_end = key.lower().endswith(("end", "expiration"))
+        if not (is_range or is_begin or is_end):
             continue
-        if key in {"benefit", "plan", "eligibility", "policy"}:
+        recognized = True
+        if not isinstance(raw, str):
+            return None, "returned coverage interval is malformed"
+        if is_range:
             begin, end = _date_range(raw)
+            if begin is None or end is None or begin > end:
+                return None, "returned coverage interval is malformed"
             if begin:
                 starts.append(begin)
             if end:
                 ends.append(end)
-        elif key.lower().endswith(("begin", "effective")):
+        elif is_begin:
             parsed = _date_value(raw)
-            if parsed:
-                starts.append(parsed)
-        elif key.lower().endswith(("end", "expiration")):
+            if parsed is None:
+                return None, "returned coverage interval is malformed"
+            starts.append(parsed)
+        elif is_end:
             parsed = _date_value(raw)
-            if parsed:
-                ends.append(parsed)
-    if not starts and not ends:
-        return None
-    return (not starts or service_date >= max(starts)) and (
-        not ends or service_date <= min(ends)
+            if parsed is None:
+                return None, "returned coverage interval is malformed"
+            ends.append(parsed)
+    if not recognized or (not starts and not ends):
+        return None, None
+    if starts and ends and max(starts) > min(ends):
+        return None, "returned coverage interval is contradictory"
+    return (
+        (not starts or service_date >= max(starts))
+        and (not ends or service_date <= min(ends)),
+        None,
     )
+
+
+def _covers_service_date(
+    dates: Mapping[str, Any], service_date: date
+) -> Optional[bool]:
+    covered, _problem = _coverage_interval(dates, service_date)
+    return covered
 
 
 def _coverage_by_service(
@@ -418,23 +509,34 @@ def _coverage_by_service(
             continue
         status = EligibilityStatus.ACTIVE if active else EligibilityStatus.INACTIVE
         if status is EligibilityStatus.ACTIVE and service_date:
-            benefit_dated: list[bool] = []
+            interval_results: list[bool] = []
             for entry in matching:
                 if str(entry.get("code", entry.get("statusCode", ""))) != _CODE_ACTIVE:
                     continue
                 info = entry.get("benefitsDateInformation")
                 if isinstance(info, dict):
-                    covered = _covers_service_date(info, service_date)
+                    covered, interval_problem = _coverage_interval(info, service_date)
+                    if interval_problem:
+                        problems.append(f"service {service}: {interval_problem}")
+                        continue
                     if covered is not None:
-                        benefit_dated.append(covered)
-            covered = None
-            if benefit_dated:
-                covered = all(benefit_dated)
-            else:
+                        interval_results.append(covered)
+            if not interval_results:
                 plan_dates = body.get("planDateInformation")
                 if isinstance(plan_dates, dict):
-                    covered = _covers_service_date(plan_dates, service_date)
-            if covered is False:
+                    covered, interval_problem = _coverage_interval(
+                        plan_dates, service_date
+                    )
+                    if interval_problem:
+                        problems.append(f"service {service}: {interval_problem}")
+                    elif covered is not None:
+                        interval_results.append(covered)
+            if not interval_results:
+                problems.append(
+                    f"service {service}: no returned active coverage interval"
+                )
+                continue
+            if not all(interval_results):
                 problems.append(
                     f"service {service}: service date outside returned benefit dates"
                 )
@@ -542,13 +644,16 @@ def _select_value(
     return (values[0] if values else None), None
 
 
-def _base_result(request: EligibilityRequest, body_bytes: bytes) -> dict[str, Any]:
+def _base_result(
+    request: EligibilityRequest, body_bytes: bytes, http_status: int
+) -> dict[str, Any]:
     return {
         "payer_id": request.payer_id,
         "operation_id": request.operation_id,
         "service_type_codes": list(request.service_type_codes),
         "raw_271_sha256": hashlib.sha256(body_bytes).hexdigest(),
         "raw_271_bytes": body_bytes,
+        "http_status": http_status,
         "checked_at": _utcnow(),
         "request_sha256": eligibility_request_sha256(request),
     }
@@ -564,6 +669,7 @@ def _error_result(
     reason: str,
     body: Optional[dict[str, Any]] = None,
     aaa_codes: Optional[list[str]] = None,
+    http_status: int,
 ) -> EligibilityResult:
     return EligibilityResult(
         status=status,
@@ -572,7 +678,7 @@ def _error_result(
         reason=reason,
         raw_271=body,
         aaa_codes=aaa_codes or [],
-        **_base_result(request, body_bytes),
+        **_base_result(request, body_bytes, http_status),
     )
 
 
@@ -595,6 +701,7 @@ def parse_271(
             category=ErrorCategory.AUTH_CONFIGURATION,
             disposition=RetryDisposition.NO_RETRY_QUEUE,
             reason=f"payer {request.payer_id}: HTTP {http_status} authentication/configuration rejection",
+            http_status=http_status,
         )
     if http_status == 429:
         return _error_result(
@@ -604,6 +711,7 @@ def parse_271(
             category=ErrorCategory.THROTTLED,
             disposition=RetryDisposition.RETRY_THEN_PORTAL,
             reason=f"payer {request.payer_id}: HTTP 429 request throttled before processing",
+            http_status=http_status,
         )
     if http_status >= 500:
         return _error_result(
@@ -613,6 +721,17 @@ def parse_271(
             category=ErrorCategory.SERVER_TRANSIENT,
             disposition=RetryDisposition.RETRY_THEN_PORTAL,
             reason=f"payer {request.payer_id}: HTTP {http_status} clearinghouse/server failure",
+            http_status=http_status,
+        )
+    if http_status < 200 or 300 <= http_status < 400:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.RESPONSE_INVALID,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: HTTP {http_status} is not a successful response",
+            http_status=http_status,
         )
     try:
         decoded = json.loads(body_bytes.decode("utf-8"))
@@ -628,6 +747,7 @@ def parse_271(
                 else RetryDisposition.NO_RETRY_QUEUE
             ),
             reason=f"payer {request.payer_id}: HTTP {http_status} non-JSON response",
+            http_status=http_status,
         )
     if not isinstance(decoded, dict):
         return _error_result(
@@ -637,6 +757,7 @@ def parse_271(
             category=ErrorCategory.RESPONSE_INVALID,
             disposition=RetryDisposition.NO_RETRY_QUEUE,
             reason=f"payer {request.payer_id}: response JSON is not an object",
+            http_status=http_status,
         )
     body = decoded
 
@@ -657,6 +778,7 @@ def parse_271(
             reason=f"payer {request.payer_id}: HTTP {http_status} {category.value}",
             body=body,
             aaa_codes=aaa_codes,
+            http_status=http_status,
         )
 
     response_payer = body.get("tradingPartnerServiceId")
@@ -670,6 +792,7 @@ def parse_271(
             reason=f"payer {request.payer_id}: response payer ID does not match request binding",
             body=body,
             aaa_codes=aaa_codes,
+            http_status=http_status,
         )
 
     meta = body.get("meta")
@@ -689,6 +812,7 @@ def parse_271(
             reason=f"payer {request.payer_id}: response application mode does not match account boundary",
             body=body,
             aaa_codes=aaa_codes,
+            http_status=http_status,
         )
 
     if aaa_codes:
@@ -722,6 +846,7 @@ def parse_271(
             reason=f"payer {request.payer_id}: AAA {','.join(aaa_codes)} classified {category.value}",
             body=body,
             aaa_codes=aaa_codes,
+            http_status=http_status,
         )
         result.application_mode = application_mode
         return result
@@ -735,7 +860,30 @@ def parse_271(
             disposition=RetryDisposition.NO_RETRY_QUEUE,
             reason=f"payer {request.payer_id}: response includes an unclassified error",
             body=body,
+            http_status=http_status,
         )
+
+    subject_role, subject_problem = _verify_response_subject(body, request)
+    if subject_problem is not None:
+        return _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.MEMBER_IDENTITY,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: {subject_problem}",
+            body=body,
+            aaa_codes=aaa_codes,
+            http_status=http_status,
+        )
+    assert subject_role == "subscriber"
+    response_subject_sha256 = hashlib.sha256(
+        b"openadapt.eligibility.subject.v1\0"
+        + eligibility_request_sha256(request).encode("ascii")
+        + b"\0"
+        + hashlib.sha256(body_bytes).hexdigest().encode("ascii")
+        + b"\0subscriber"
+    ).hexdigest()
 
     coverage, problems = _coverage_by_service(body, request)
     statuses = set(coverage.values())
@@ -753,6 +901,7 @@ def parse_271(
             reason=f"payer {request.payer_id}: requested-service coverage is incomplete or conflicting",
             body=body,
             aaa_codes=aaa_codes,
+            http_status=http_status,
         )
         result.application_mode = application_mode
         result.coverage_by_service = coverage
@@ -762,7 +911,22 @@ def parse_271(
         return result
 
     status = next(iter(statuses))
-    benefits = _qualified_benefits(body)
+    try:
+        benefits = _qualified_benefits(body)
+    except (TypeError, ValueError):
+        result = _error_result(
+            request,
+            body_bytes,
+            status=EligibilityStatus.INDETERMINATE,
+            category=ErrorCategory.RESPONSE_INVALID,
+            disposition=RetryDisposition.NO_RETRY_QUEUE,
+            reason=f"payer {request.payer_id}: qualified benefit structure is malformed",
+            body=body,
+            aaa_codes=aaa_codes,
+            http_status=http_status,
+        )
+        result.application_mode = application_mode
+        return result
     selections: dict[str, Optional[str]] = {}
     ambiguities: list[str] = []
     for field, code, time_code in (
@@ -816,6 +980,8 @@ def parse_271(
         raw_271=body,
         raw_271_sha256=hashlib.sha256(body_bytes).hexdigest(),
         raw_271_bytes=body_bytes,
+        response_subject_sha256=response_subject_sha256,
+        http_status=http_status,
         checked_at=_utcnow(),
         request_sha256=eligibility_request_sha256(request),
         service_type_codes=list(request.service_type_codes),

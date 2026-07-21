@@ -48,6 +48,7 @@ class PayerCapability(BaseModel):
     supported_service_type_codes: list[str] = Field(default_factory=list)
     payer_record_sha256: Optional[str] = None
     portal_banned: bool = False
+    portal_fallback_reviewed: bool = False
     verified_on: Optional[str] = None
     notes: str = ""
 
@@ -62,6 +63,8 @@ class PayerCapability(BaseModel):
     def _api_binding_complete(self) -> "PayerCapability":
         if self.route is EligibilityRoute.PORTAL and self.portal_banned:
             raise ValueError("a portal-banned payer cannot use the portal route")
+        if self.portal_banned and self.portal_fallback_reviewed:
+            raise ValueError("a portal-banned payer cannot approve portal fallback")
         if self.route is EligibilityRoute.API:
             missing = [
                 name
@@ -282,7 +285,11 @@ def run_waterfall(
             result=result,
             trail=trail,
         )
-    if result.portal_fallback_allowed and not cap.portal_banned:
+    if (
+        result.portal_fallback_allowed
+        and cap.portal_fallback_reviewed
+        and not cap.portal_banned
+    ):
         trail.append(
             "bounded transient API attempts exhausted; use the reviewed portal fallback"
         )
@@ -297,6 +304,13 @@ def run_waterfall(
             decision,
             trail,
             "portal fallback is barred; route the evidence-bearing halt to practice staff",
+            result,
+        )
+    if result.portal_fallback_allowed and not cap.portal_fallback_reviewed:
+        return _queue(
+            decision,
+            trail,
+            "transient API attempts exhausted, but no portal fallback is explicitly reviewed",
             result,
         )
     return _queue(

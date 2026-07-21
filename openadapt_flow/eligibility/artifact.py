@@ -28,9 +28,11 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from openadapt_flow.eligibility.client import (
+    ApplicationMode,
     EligibilityRequest,
     EligibilityResult,
     eligibility_request_sha256,
+    parse_271,
 )
 from openadapt_flow.runtime.effects.document_hash import DocumentHashVerifier
 from openadapt_flow.runtime.effects.effect import (
@@ -147,9 +149,12 @@ def _ensure_secure_dir(path: Path) -> None:
         info = path.lstat()
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise ValueError("artifact root must be a regular directory, not a link")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            raise PermissionError(
+                "existing artifact directories must already be owner-only"
+            )
     else:
         path.mkdir(parents=True, mode=0o700)
-    path.chmod(0o700)
     if stat.S_IMODE(path.lstat().st_mode) != 0o700:
         raise PermissionError("artifact root is not owner-only")
 
@@ -312,7 +317,18 @@ def _normalized_payload(
         "source": result.source,
         "raw_271_sha256": result.raw_271_sha256,
         "request_sha256": result.request_sha256,
+        "response_subject_sha256": result.response_subject_sha256,
     }
+
+
+def _semantic_result_payload(result: EligibilityResult) -> bytes:
+    """Canonical result meaning, excluding only observation-time metadata."""
+    return _canonical(
+        result.model_dump(
+            mode="json",
+            exclude={"checked_at", "attempt_count", "raw_271", "raw_271_bytes"},
+        )
+    )
 
 
 def _safe_csv(value: object) -> str:
@@ -418,6 +434,7 @@ def _load_manifest(
         "normalized_plain_sha256",
         "normalized_storage_sha256",
         "request_sha256",
+        "response_subject_sha256",
     ):
         if not re.fullmatch(r"[0-9a-f]{64}", str(raw.get(field, ""))):
             raise ValueError(f"eligibility transaction {field} is malformed")
@@ -493,6 +510,20 @@ def write_eligibility_artifacts(
         )
     if _sha(result.raw_271_bytes) != result.raw_271_sha256:
         raise ValueError("raw eligibility bytes do not match the wire digest")
+    if result.application_mode is None or result.http_status is None:
+        raise ValueError("eligibility result lacks its response boundary metadata")
+    reparsed = parse_271(
+        request,
+        result.raw_271_bytes,
+        http_status=result.http_status,
+        expected_mode=ApplicationMode(result.application_mode),
+    )
+    if not reparsed.is_answer:
+        raise ValueError("raw eligibility response is not a consumable answer")
+    if _semantic_result_payload(reparsed) != _semantic_result_payload(result):
+        raise ValueError(
+            "normalized eligibility result does not match the exact raw response"
+        )
     root = Path(artifact_dir)
     _ensure_secure_dir(root)
     _bind_policy(root, policy)
@@ -545,6 +576,7 @@ def write_eligibility_artifacts(
                 "schema_version": 2,
                 "operation_id": result.operation_id,
                 "request_sha256": request_sha256,
+                "response_subject_sha256": result.response_subject_sha256,
                 "boundary_id": policy.boundary_id,
                 "retention_expires_at": expiry,
                 "egress": "none",

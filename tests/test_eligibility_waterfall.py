@@ -52,6 +52,7 @@ def api_capability(**overrides) -> PayerCapability:
         practice_account_id="practice-1",
         supported_service_type_codes=["35"],
         payer_record_sha256=DIGEST,
+        portal_fallback_reviewed=True,
         verified_on="2026-07-21",
     )
     data.update(overrides)
@@ -79,6 +80,8 @@ def fake_client(body: dict, *, status=200, account=ACCOUNT, max_attempts=1):
 ACTIVE = {
     "meta": {"applicationMode": "test"},
     "tradingPartnerServiceId": "62308",
+    "subscriber": {"memberId": "123"},
+    "planDateInformation": {"planBegin": "20260101", "planEnd": "20261231"},
     "benefitsInformation": [{"code": "1", "serviceTypeCodes": ["35"]}],
 }
 
@@ -221,7 +224,7 @@ def test_member_identity_error_queues_without_portal_fallback():
 
 
 def test_portal_banned_transient_failure_queues():
-    cap = api_capability(portal_banned=True)
+    cap = api_capability(portal_banned=True, portal_fallback_reviewed=False)
     outcome = run_waterfall(
         request_for(),
         payer="Cigna Dental",
@@ -230,6 +233,18 @@ def test_portal_banned_transient_failure_queues():
     )
     assert outcome.final_route is EligibilityRoute.QUEUE
     assert "barred" in outcome.trail[-1]
+
+
+def test_transient_failure_without_reviewed_portal_fallback_queues():
+    cap = api_capability(portal_fallback_reviewed=False)
+    outcome = run_waterfall(
+        request_for(),
+        payer="Cigna Dental",
+        client=fake_client({"error": "down"}, status=503),
+        registry=registry(cap),
+    )
+    assert outcome.final_route is EligibilityRoute.QUEUE
+    assert "no portal fallback is explicitly reviewed" in outcome.trail[-1]
 
 
 def test_explicit_portal_route_needs_no_api_key():

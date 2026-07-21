@@ -32,8 +32,10 @@ from openadapt_flow.runtime.effects.effect import Verdict
 ACTIVE = {
     "meta": {"applicationMode": "test"},
     "tradingPartnerServiceId": "62308",
+    "subscriber": {"memberId": "U3141592653"},
     "payer": {"name": "Cigna"},
     "planInformation": {"groupDescription": "DENTAL PPO"},
+    "planDateInformation": {"planBegin": "20260101", "planEnd": "20261231"},
     "benefitsInformation": [
         {"code": "1", "serviceTypeCodes": ["35"]},
         {
@@ -107,6 +109,9 @@ def test_raw_and_normalized_records_promote_together_and_verify(tmp_path):
     manifest = json.loads((tx / "manifest.json").read_text())
     assert manifest["raw_plain_sha256"] == artifact.raw_271_sha256
     assert manifest["normalized_plain_sha256"] == artifact.normalized_sha256
+    assert (
+        manifest["response_subject_sha256"] == active_result().response_subject_sha256
+    )
     assert manifest["egress"] == "none"
     assert manifest["retention_expires_at"].endswith("Z")
 
@@ -114,6 +119,7 @@ def test_raw_and_normalized_records_promote_together_and_verify(tmp_path):
 def test_csv_is_derived_and_formula_neutralized(tmp_path):
     bound_request = request().model_copy(update={"member_id": '=HYPERLINK("bad")'})
     response = json.loads(json.dumps(ACTIVE))
+    response["subscriber"]["memberId"] = bound_request.member_id
     response["payer"]["name"] = "+malicious"
     result = parse_271(
         bound_request,
@@ -251,6 +257,17 @@ def test_symlinked_root_and_index_are_refused(tmp_path):
         )
 
 
+def test_existing_broad_directory_is_refused_without_chmod(tmp_path):
+    root = tmp_path / "broad"
+    root.mkdir(mode=0o755)
+    root.chmod(0o755)
+    with pytest.raises(PermissionError, match="already be owner-only"):
+        write_eligibility_artifacts(
+            active_result(), root, request=request(), policy=volume_policy()
+        )
+    assert root.stat().st_mode & 0o777 == 0o755
+
+
 def test_concurrent_writer_lock_fails_fast(tmp_path):
     tmp_path.chmod(0o700)
     (tmp_path / ".eligibility-write.lock").mkdir()
@@ -286,6 +303,22 @@ def test_transport_outcome_without_raw_response_is_not_promoted(tmp_path):
         update={"raw_271_bytes": None, "raw_271_sha256": None}
     )
     with pytest.raises(ValueError, match="raw response"):
+        write_eligibility_artifacts(
+            result, tmp_path, request=request(), policy=volume_policy()
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("copay", "999999"),
+        ("payer_name", "Fabricated Payer"),
+        ("response_subject_sha256", "0" * 64),
+    ],
+)
+def test_mutated_normalized_result_cannot_be_promoted(tmp_path, field, value):
+    result = active_result().model_copy(update={field: value})
+    with pytest.raises(ValueError, match="does not match the exact raw response"):
         write_eligibility_artifacts(
             result, tmp_path, request=request(), policy=volume_policy()
         )

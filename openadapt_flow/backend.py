@@ -227,6 +227,26 @@ class NativeStructuralActionBackend(Protocol):
 
 
 @runtime_checkable
+class TextValueBackend(Protocol):
+    """Optional exact readback for the editable control under a point.
+
+    A screenshot/OCR verifier cannot reliably distinguish a long unrendered
+    value from password dots or platform-specific glyph noise. Backends with a
+    structural accessibility surface can return the control's current value so
+    the runtime can confirm text delivery without weakening to pixel change.
+    The value is compared in memory only and must never be logged.
+    """
+
+    def text_value_at(self, x: int, y: int) -> Optional[str]:
+        """Return the exact editable value, or None when unavailable."""
+        ...
+
+    def focused_text_value(self) -> Optional[str]:
+        """Return the exact focused editable value, or None."""
+        ...
+
+
+@runtime_checkable
 class Backend(Protocol):
     @property
     def viewport(self) -> tuple[int, int]:

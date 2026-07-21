@@ -11,7 +11,7 @@ summaries. It never fabricates structure that the compiler did not produce.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from openadapt_flow.visualize.spec import (
     BundleMeta,
@@ -32,6 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.ir import (
         Anchor,
         Predicate,
+        ProgramGraph,
         State,
         Step,
         Workflow,
@@ -343,26 +344,109 @@ def _build_linear(workflow: "Workflow") -> tuple[list[GraphNode], list[GraphEdge
 def _build_program(workflow: "Workflow") -> tuple[list[GraphNode], list[GraphEdge]]:
     """Project a Phase-2 ``Workflow.program`` graph to spec nodes/edges,
     preserving branches, loops, subflow calls, exception handlers, and
-    terminals so richer compiled structure renders without a spec break."""
-    from openadapt_flow.ir import StateKind
+    terminals so richer compiled structure renders without a spec break.
 
-    program = workflow.program
-    assert program is not None
+    A ``loop`` state's per-row body subflow is EXPANDED inline: the loop node
+    links to the body's entry with a ``loop_body`` edge, the body's own action
+    states render (each with its full resolution ladder / identity gate / effect
+    check / halt points, exactly as a top-level action does), and the body's
+    ``success`` terminal is redrawn as a ``next record`` loop-back edge to the
+    loop node -- the real cyclic structure the interpreter walks, not a dangling
+    reference to an unrendered subflow id. Body ``halt`` / ``escalate`` terminals
+    stay as their own halt nodes so per-record stop points remain visible.
+    """
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
-    # Deterministic order: entry first, then the rest by id.
-    ordered_ids = [program.entry] + sorted(
-        sid for sid in program.states if sid != program.entry
+    program = workflow.program
+    assert program is not None
+    _counter = [0]
+
+    def _next_index() -> int:
+        i = _counter[0]
+        _counter[0] += 1
+        return i
+
+    _emit_graph(
+        graph=program,
+        workflow=workflow,
+        prefix="",
+        return_target=None,
+        nodes=nodes,
+        edges=edges,
+        next_index=_next_index,
+        ancestors=frozenset(),
     )
-    index_by_id = {sid: i for i, sid in enumerate(ordered_ids)}
-    for sid in ordered_ids:
-        state: "State" = program.states[sid]
-        idx = index_by_id[sid]
+    return nodes, edges
+
+
+def _emit_graph(
+    *,
+    graph: "ProgramGraph",
+    workflow: "Workflow",
+    prefix: str,
+    return_target: Optional[str],
+    nodes: list[GraphNode],
+    edges: list[GraphEdge],
+    next_index: "Callable[[], int]",
+    ancestors: frozenset[str],
+) -> None:
+    """Emit the nodes/edges of one ``ProgramGraph`` (the top-level program or an
+    expanded loop-body subflow), namespacing every state id with ``prefix``.
+
+    When ``return_target`` is set (this graph is a subflow body), each of the
+    graph's ``success`` terminals is elided and any edge into it is redrawn to
+    ``return_target`` (the caller / loop node) with a ``next record`` label --
+    modelling the subflow return the interpreter performs.
+    """
+    from openadapt_flow.ir import StateKind
+
+    def nid(state_id: str) -> str:
+        return f"{prefix}{state_id}"
+
+    # success terminals in a subflow body are not drawn; edges into them redirect
+    # to the caller (a loop-back). local state id -> (target node id, label).
+    redirect: dict[str, tuple[str, str]] = {}
+    if return_target is not None:
+        for sid, term in graph.states.items():
+            if term.kind == StateKind.TERMINAL and term.outcome == "success":
+                redirect[sid] = (return_target, "next record")
+
+    def _add_edge(
+        source_id: str, target_sid: str, kind: EdgeKind, label: str, guard=None
+    ) -> None:
+        if target_sid in redirect:
+            tgt, rlabel = redirect[target_sid]
+            edges.append(
+                GraphEdge(
+                    source=source_id,
+                    target=tgt,
+                    kind=EdgeKind.SEQUENCE,
+                    label=label or rlabel,
+                    guard=guard,
+                )
+            )
+        else:
+            edges.append(
+                GraphEdge(
+                    source=source_id,
+                    target=nid(target_sid),
+                    kind=kind,
+                    label=label,
+                    guard=guard,
+                )
+            )
+
+    for sid in _ordered_state_ids(graph):
+        if sid in redirect:
+            continue  # elided success terminal (rendered as a loop-back edge)
+        state: "State" = graph.states[sid]
+        node_id = nid(sid)
+        idx = next_index()
         if state.kind == StateKind.ACTION and state.step is not None:
-            node = _action_node(state.step, idx, sid, NodeKind.ACTION)
+            node = _action_node(state.step, idx, node_id, NodeKind.ACTION)
         else:
             node = GraphNode(
-                id=sid,
+                id=node_id,
                 index=idx,
                 kind=NodeKind(state.kind.value),
                 title=_state_title(state),
@@ -375,41 +459,72 @@ def _build_program(workflow: "Workflow") -> tuple[list[GraphNode], list[GraphEdg
             ):
                 node.halts.append(f"terminal: {state.outcome}")
                 node.badges.append(state.outcome)
+        nodes.append(node)
         # exception handler edge
         if state.on_exception:
-            edges.append(
-                GraphEdge(
-                    source=sid,
-                    target=state.on_exception,
-                    kind=EdgeKind.EXCEPTION,
-                    label="on failure",
-                )
-            )
-        # loop body edge
+            _add_edge(node_id, state.on_exception, EdgeKind.EXCEPTION, "on failure")
+        # loop: link to the body entry, expand the body inline, loop back on
+        # each row's return, then fall through to the loop's own transitions.
         if state.kind == StateKind.LOOP and state.loop is not None:
             node.badges.append("loop")
-            edges.append(
-                GraphEdge(
-                    source=sid,
-                    target=state.loop.body,
-                    kind=EdgeKind.LOOP_BODY,
-                    label=f"per row of {state.loop.relation}",
+            body = workflow.subflows.get(state.loop.body)
+            if body is not None and state.loop.body not in ancestors:
+                body_prefix = f"{node_id}::"
+                edges.append(
+                    GraphEdge(
+                        source=node_id,
+                        target=f"{body_prefix}{body.entry}",
+                        kind=EdgeKind.LOOP_BODY,
+                        label=f"per row of {state.loop.relation}",
+                    )
                 )
-            )
+                _emit_graph(
+                    graph=body,
+                    workflow=workflow,
+                    prefix=body_prefix,
+                    return_target=node_id,
+                    nodes=nodes,
+                    edges=edges,
+                    next_index=next_index,
+                    ancestors=ancestors | {state.loop.body},
+                )
         # transitions
         for tr in state.transitions:
             guard_summary = _predicate_summary(tr.guard)
-            edges.append(
-                GraphEdge(
-                    source=sid,
-                    target=tr.target,
-                    kind=EdgeKind.BRANCH if tr.guard is not None else EdgeKind.SEQUENCE,
-                    label=tr.label or (guard_summary or ""),
-                    guard=guard_summary,
-                )
+            _add_edge(
+                node_id,
+                tr.target,
+                EdgeKind.BRANCH if tr.guard is not None else EdgeKind.SEQUENCE,
+                tr.label or (guard_summary or ""),
+                guard=guard_summary,
             )
-        nodes.append(node)
-    return nodes, edges
+
+
+def _ordered_state_ids(graph: "ProgramGraph") -> list[str]:
+    """Deterministic emission order for a graph's states: a preorder DFS from
+    ``entry`` following ``transitions`` (then ``on_exception``) so a straight
+    chain reads in execution order, with any unreachable state appended by id so
+    nothing is silently dropped."""
+    order: list[str] = []
+    seen: set[str] = set()
+
+    def visit(sid: str) -> None:
+        if sid in seen or sid not in graph.states:
+            return
+        seen.add(sid)
+        order.append(sid)
+        state = graph.states[sid]
+        for tr in state.transitions:
+            visit(tr.target)
+        if state.on_exception:
+            visit(state.on_exception)
+
+    visit(graph.entry)
+    for sid in sorted(graph.states):
+        if sid not in seen:
+            seen.add(sid)
+            order.append(sid)
+    return order
 
 
 def _state_title(state: "State") -> str:

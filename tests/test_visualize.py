@@ -229,6 +229,88 @@ def test_emitted_spec_validates_against_committed_schema() -> None:
     jsonschema.validate(json.loads(spec.model_dump_json()), schema)
 
 
+def _authored_loop_workflow() -> Workflow:
+    """A real ``program:true`` loop authored the same way the ``for-each`` CLI
+    authors one: a two-step demonstrated body wrapped in a ``LOOP`` over a
+    two-record worklist (the shape ``docs/showcase-encounter-loop`` ships)."""
+    from openadapt_flow.compiler.loop_authoring import author_data_driven_loop
+    from openadapt_flow.ir import ParamSpec
+
+    body = Workflow(
+        name="note-body",
+        steps=[
+            Step(
+                id="type_patient",
+                intent="type <patient_id>",
+                action=ActionKind.TYPE,
+                param="patient_id",
+            ),
+            Step(
+                id="type_note",
+                intent="type <note>",
+                action=ActionKind.TYPE,
+                param="note",
+            ),
+        ],
+        param_specs={
+            "patient_id": ParamSpec(name="patient_id", example="p1"),
+            "note": ParamSpec(name="note", example="n1"),
+        },
+    )
+    return author_data_driven_loop(
+        body,
+        [{"patient_id": "a", "note": "x"}, {"patient_id": "b", "note": "y"}],
+        loop_var="encounter",
+    )
+
+
+def test_loop_body_is_expanded_inline() -> None:
+    """A ``loop`` state's per-row body subflow projects as its own expanded
+    action nodes, linked by a ``loop_body`` edge, with the body's return drawn
+    as a ``next record`` loop-back edge and the loop's own exit as a
+    ``worklist exhausted`` edge to a single ``success`` terminal -- the real
+    cyclic structure the interpreter walks, not a dangling subflow reference."""
+    spec = build_program_graph(_authored_loop_workflow())
+    assert spec.bundle.is_program is True
+
+    loop_nodes = [n for n in spec.nodes if n.kind.value == "loop"]
+    assert len(loop_nodes) == 1
+    loop = loop_nodes[0]
+
+    # The demonstrated body's action steps render inline (with their real
+    # annotations), so the body is counted, not hidden behind a subflow id.
+    titles = [n.title for n in spec.nodes]
+    assert "type <patient_id>" in titles
+    assert "type <note>" in titles
+    assert spec.bundle.action_count == 2
+
+    # loop_body edge leaves the loop node into the (namespaced) body entry.
+    body_edges = [
+        e for e in spec.edges if e.kind.value == "loop_body" and e.source == loop.id
+    ]
+    assert len(body_edges) == 1
+    assert any(n.id == body_edges[0].target for n in spec.nodes)
+
+    # the body returns to the loop node once per row (loop-back edge).
+    assert any(e.target == loop.id and e.label == "next record" for e in spec.edges)
+
+    # the loop exits to exactly ONE success terminal when the worklist empties.
+    exhausted = [e for e in spec.edges if e.label == "worklist exhausted"]
+    assert len(exhausted) == 1
+    terminals = [n for n in spec.nodes if n.kind.value == "terminal"]
+    assert len(terminals) == 1  # the body's success return is an edge, not a node
+    assert terminals[0].id == exhausted[0].target
+    assert terminals[0].outcome == "success"
+
+
+def test_render_mermaid_shows_loop_structure() -> None:
+    src = render_mermaid(build_program_graph(_authored_loop_workflow()))
+    assert src.splitlines()[0] == "flowchart TD"
+    assert "per row of worklist" in src
+    assert "next record" in src
+    assert "worklist exhausted" in src
+
+
 def test_cli_visualize_writes_outputs(tmp_path) -> None:
     from openadapt_flow.__main__ import main
 

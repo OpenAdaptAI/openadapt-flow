@@ -41,10 +41,14 @@ benchmark/openimis_claims/out/
 # (synthetic OpenEMR public-demo data; see that dir's README). The
 # docs/showcase-loop/bundle is the same exception, one generation on: the
 # PHI-free data-driven-LOOP (program:true) artifact built from it.
+# docs/showcase-encounter-loop is a third exception: a compact, hand-authored,
+# PHI-free MockMed loop (linear body/ + program:true bundle/) for the README.
 /bundles/
 bundle/
 !docs/showcase-openemr/bundle/
 !docs/showcase-loop/bundle/
+!docs/showcase-encounter-loop/body/
+!docs/showcase-encounter-loop/bundle/
 *.bundle/
 # Local scrub/regeneration scratch venvs
 .venv-phi/

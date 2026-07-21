@@ -465,6 +465,61 @@ def test_committed_showcase_loop_bundle_is_a_valid_program(dirs):
     assert len(wf.data_sources[loop.relation].rows) >= 1
 
 
+def test_committed_encounter_showcase_loop_replays_through_the_interpreter(tmp_path):
+    """The SHIPPED compact showcase bundle
+    (``docs/showcase-encounter-loop/bundle``, built by
+    ``scripts/build_showcase_encounter_loop_bundle.py`` and rendered in the
+    launcher README) is a real, loadable, PHI-free ``program:true`` loop whose
+    body actually REPLAYS once per worklist record through the real
+    ``Replayer._interpret_program``: every record's consequential write is
+    INDEPENDENTLY effect-verified against the in-process MockMed system of
+    record and the run makes ZERO model calls -- the proof the README graph is
+    an interpreted program, not a hand-drawn diagram."""
+    repo = Path(__file__).resolve().parent.parent
+    bundle = repo / "docs" / "showcase-encounter-loop" / "bundle"
+    wf = Workflow.load(bundle)
+
+    # Static shape: program:true, PHI-free, exactly one LOOP whose body + relation
+    # resolve, guarded so it cannot silently regress to program:false.
+    assert wf.program is not None
+    assert wf.contains_phi is False
+    loop_states = [s for s in wf.program.states.values() if s.kind is StateKind.LOOP]
+    assert len(loop_states) == 1
+    loop = loop_states[0].loop
+    assert loop is not None
+    assert loop.body in wf.subflows
+    assert loop.relation in wf.data_sources
+    records = wf.data_sources[loop.relation].rows
+    assert len(records) >= 1
+
+    # Dynamic proof: the loop actually interprets, once per record.
+    run_dir = tmp_path / "run"
+    url, db, stop = fault_serve()
+    try:
+        backend = _RowWritingBackend(url)
+        report = Replayer(
+            backend,
+            vision=_vision_confirms_saved(),
+            effect_verifier=RestRecordVerifier(url),
+            poll_interval_s=0.01,
+        ).run(wf, bundle_dir=bundle, run_dir=run_dir)
+
+        assert report.success is True
+        assert report.terminal_outcome == "success"
+        assert report.model_calls == 0  # $0 runtime preserved across the loop
+        # The body ran once per record, in worklist order.
+        assert [pid for pid, _ in backend.posted] == [r["patient_id"] for r in records]
+        # Each record's consequential write was effect-verified (CONFIRMED).
+        saves = [r for r in report.results if r.step_id == "save"]
+        assert len(saves) == len(records)
+        assert all(r.effect_verified is True for r in saves)
+        # The system of record holds exactly the intended encounters.
+        written = {rec["patient_id"] for rec in db.snapshot()["records"]}
+        assert written == {r["patient_id"] for r in records}
+    finally:
+        stop()
+
+
 def test_poisoned_record_identity_mismatch_halts_no_wrong_click(dirs):
     """A body whose action is identity-gated (clicks a named target). The
     worklist's second record lands on a screen whose live band names a DIFFERENT

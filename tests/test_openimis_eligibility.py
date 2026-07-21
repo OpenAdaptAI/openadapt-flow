@@ -465,6 +465,9 @@ def test_oracle_role_bootstrap_revokes_accumulated_privileges_before_granting() 
     assert "REVOKE CREATE ON SCHEMA public FROM PUBLIC" in grant_sql
     assert 'REVOKE CREATE ON DATABASE "IMIS" FROM PUBLIC' in grant_sql
     assert 'REVOKE TEMPORARY ON DATABASE "IMIS" FROM PUBLIC' in grant_sql
+    assert (
+        "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC" in grant_sql
+    )
     assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public" in grant_sql
     assert "REVOKE CREATE ON SCHEMA public" in grant_sql
     assert 'REVOKE CREATE ON DATABASE "IMIS" FROM "oa_eligibility_oracle"' in grant_sql

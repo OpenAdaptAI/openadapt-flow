@@ -30,14 +30,16 @@ that no application artifact contains sensitive or prohibited data. The
 repository's \texttt{paper/ARTIFACT\_CHECKLIST.md} is the submission gate.
 
 \paragraph{Data availability and ethics.}
-Every dataset released with this paper is synthetic: the MockMed and MockLoan
+Every released system-of-record fixture is synthetic: the MockMed and MockLoan
 fixtures, their injected-fault suites, and the benchmark task packs contain no
-real patient, borrower, or customer data. The public-web corpus records only
-public, unauthenticated applications. Any workflow-hardening corpus assembled
-from real usage is contributed opt-in and with consent; raw recordings never
-leave the contributor's trusted boundary, and only sanitized, de-identified
-derivatives are retained, each produced through the type-specific handlers and
-rescan of Section~\ref{sec:governance} and bound to a review hash. Publicly
-released artifacts are synthetic derivatives only. Human review reduces but does
+real patient, borrower, or customer data. The separately released public-web
+corpus is \emph{not} synthetic; it records one-run observations of public,
+unauthenticated applications and contains no authenticated, private-customer, or
+account data. Any workflow-hardening corpus assembled from real usage is
+contributed opt-in and with consent; raw recordings never leave the contributor's
+trusted boundary, and only sanitized, de-identified derivatives are retained
+privately, each produced through the type-specific handlers and rescan of
+Section~\ref{sec:governance} and bound to a review hash. Public artifacts from
+that hardening lane are synthetic examples only. Human review reduces but does
 not prove de-identification, so we treat sanitization as a defense-in-depth
 control rather than a guarantee.

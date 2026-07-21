@@ -1,12 +1,15 @@
 name: Release and PyPI Publish
 
-# Two paths:
-#   push to main       -> Python Semantic Release auto-versions from Conventional
-#                         Commits (feat -> minor, fix/perf -> patch), tags, and
+# Two explicit paths, both dispatched from protected main:
+#   semantic-release   -> Python Semantic Release coalesces the Conventional
+#                         Commits since the last tag, versions, tags, and
 #                         publishes to PyPI (OIDC) + GitHub Releases.
-#   workflow_dispatch  -> build & publish an existing ref/tag to PyPI (manual /
-#                         recovery, e.g. when a tag was created but the publish
-#                         step failed).
+#   publish-existing-ref -> build & publish an existing ref/tag to PyPI
+#                           (recovery, e.g. when a tag exists but publish failed).
+#
+# Releases are deliberately not triggered by every merge. Maintainers can merge
+# a reviewed train, require green protected-main CI, and publish one coherent
+# version only after its source and artifact boundaries are complete.
 #
 # Prerequisites (repo/org settings): secrets.ADMIN_TOKEN (org-level, visibility
 # "all") to push the release commit/tag past branch protection; PyPI Trusted
@@ -19,19 +22,28 @@ name: Release and PyPI Publish
 # repo-scoped fine-grained token or GitHub App to narrow its blast radius.
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
+      operation:
+        description: "Release operation"
+        type: choice
+        required: true
+        default: semantic-release
+        options:
+          - semantic-release
+          - publish-existing-ref
       ref:
         description: "Tag or ref to build and publish to PyPI (e.g. v0.4.0)"
-        required: true
+        required: false
+        default: main
 
 jobs:
-  # ---- Auto-release on merge to main -------------------------------------
+  # ---- Coalesced semantic release, explicitly dispatched ------------------
   auto-release:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'semantic-release' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency: release
     environment: pypi
@@ -127,7 +139,10 @@ jobs:
   manual-publish:
     # Always run the current protected-main workflow as the guard. The target
     # artifact ref is checked out separately below.
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'publish-existing-ref' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -101,12 +101,18 @@ def test_release_workflow_uses_pinned_actions() -> None:
     assert "# v10.6.1" in workflow
 
 
-def test_auto_release_waits_for_exact_head_ci_before_semantic_release() -> None:
+def test_semantic_release_is_manual_and_waits_for_exact_head_ci() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
 
+    triggers = workflow[workflow.index("\non:\n") : workflow.index("\njobs:\n")]
     wait_index = workflow.index("- name: Wait for exact-head CI")
     release_index = workflow.index("- name: Python Semantic Release")
 
+    assert "  push:" not in triggers
+    assert "operation:" in triggers
+    assert "- semantic-release" in triggers
+    assert "- publish-existing-ref" in triggers
+    assert "inputs.operation == 'semantic-release'" in workflow
     assert "actions: read # inspect the exact-head CI run before publishing" in workflow
     assert wait_index < release_index
     assert "actions/workflows/ci.yml/runs" in workflow
@@ -124,6 +130,7 @@ def test_manual_publish_uses_current_guard_and_exact_target_ci() -> None:
     publish_index = manual.index("- name: Publish to PyPI")
 
     assert "github.ref == 'refs/heads/main'" in manual
+    assert "inputs.operation == 'publish-existing-ref'" in manual
     assert "actions: read" in manual
     assert "git merge-base --is-ancestor" in manual
     assert 'head_sha="${TARGET_SHA}"' in manual

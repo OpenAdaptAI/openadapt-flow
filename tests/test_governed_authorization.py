@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from openadapt_flow.ir import (
     ActionKind,
+    Anchor,
     Guard,
     Interstitial,
     Postcondition,
@@ -148,6 +149,40 @@ def test_runtime_interstitial_change_halts_before_action(tmp_path):
     assert backend.actions == []
     assert report.results[0].step_id == "<authorization>"
     assert "interstitial declarations" in (report.results[0].error or "")
+
+
+def test_runtime_interstitial_missing_asset_halts_authorization(tmp_path):
+    step = context_click_step("Jane Sample 1980-01-15 MRN 123")
+    workflow, bundle = _seal(
+        tmp_path, Workflow(name="interstitial_missing_asset", steps=[step])
+    )
+    declaration = Interstitial(
+        name="release note",
+        detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+        dismiss_anchor=Anchor(
+            template="templates/not-sealed.png",
+            region=(0, 0, 10, 10),
+            click_point=(5, 5),
+            ocr_text="Close",
+        ),
+        risk="reversible",
+        consequential=False,
+        clearance=Predicate(kind=PredicateKind.TEXT_ABSENT, text="release note"),
+    )
+    authorization = _authorization(workflow, interstitials=[declaration])
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=resolving_vision(),
+        governed_authorization=authorization,
+        interstitials=[declaration],
+    ).run(workflow, bundle_dir=bundle, run_dir=tmp_path / "run")
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].step_id == "<authorization>"
+    assert "not sealed in the bundle manifest" in (report.results[0].error or "")
 
 
 def test_target_asset_mutation_after_validation_halts_before_action(tmp_path):

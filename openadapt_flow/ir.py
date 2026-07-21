@@ -630,10 +630,22 @@ class Interstitial(BaseModel):
                 "interstitial must declare at most one dismissal mechanism"
             )
         if self.dismiss_anchor is not None and not self.dismiss_anchor.template.strip():
-            raise ValueError(
-                "automatic interstitial click dismissal requires a non-empty "
-                "sealed anchor template"
+            structural = self.dismiss_anchor.structural
+            has_structural_identity = structural is not None and any(
+                value and value.strip()
+                for value in (
+                    structural.selector,
+                    structural.role,
+                    structural.name,
+                    structural.automation_id,
+                    structural.window_name,
+                )
             )
+            if not has_structural_identity:
+                raise ValueError(
+                    "automatic interstitial click dismissal requires either a "
+                    "sealed anchor template or a non-empty structural locator"
+                )
         has_dismissal = self.dismiss_key is not None or self.dismiss_anchor is not None
         if self.dismiss_key is not None and self.dismiss_key.strip() != "Escape":
             raise ValueError(

@@ -3294,17 +3294,44 @@ class Replayer:
     def _resettle_after_interstitial(
         self, before_png: bytes
     ) -> tuple[bytes, Optional[str]]:
-        """Settle once after a declared dismissal, preserving fail-closed mode."""
-        if self.require_settled:
-            return self._wait_starting_state_settled(before_png)
+        """Require a settled frame after every automatic dismissal.
+
+        Interstitial handling is itself opt-in, so unlike the legacy entry-frame
+        behavior there is no backwards-compatibility reason to accept a
+        proceed-anyway settle timeout here. A transient blank frame could make a
+        ``TEXT_ABSENT`` clearance pass immediately before the overlay returned.
+        """
+        fn = getattr(self.vision, "wait_settled_result", None)
+        if not callable(fn):
+            return before_png, (
+                "The configured vision facade cannot verify that the screen "
+                "settled after an interstitial dismissal - refusing to act; "
+                "run aborted."
+            )
         try:
-            return self.vision.wait_settled(self.backend), None
+            result = fn(
+                self.backend,
+                interval_s=self.poll_interval_s,
+                timeout_s=self.settle_readiness_timeout_s,
+            )
+            frame = result.png
+            settled = result.settled
+            if not isinstance(frame, bytes) or not isinstance(settled, bool):
+                raise TypeError("invalid settle result")
         except Exception as exc:
             return before_png, (
-                "The screen could not be re-settled after dismissing an "
+                "The screen readiness check failed after dismissing an "
                 f"interstitial ({type(exc).__name__}) - refusing to act; run "
                 "aborted."
             )
+        if not settled:
+            return frame, (
+                "The screen did not settle after the interstitial dismissal "
+                f"within {self.settle_readiness_timeout_s:.1f}s - refusing to "
+                "verify clearance on a mid-transition frame or act beneath it; "
+                "run aborted."
+            )
+        return frame, None
 
     def _handle_interstitials(
         self,
@@ -3353,6 +3380,7 @@ class Replayer:
                 )
         interstitials = validated
 
+        handled_indices: set[int] = set()
         while True:
             active_index = next(
                 (
@@ -3371,6 +3399,18 @@ class Replayer:
             if active_index is None:
                 return before_png, None
             it = interstitials[active_index]
+            if active_index in handled_indices:
+                return before_png, (
+                    f"Interstitial '{it.name}' reappeared after a verified "
+                    "dismissal in the same step - refusing an automatic retry; "
+                    "run aborted."
+                )
+            if len(handled_indices) >= len(interstitials):
+                return before_png, (
+                    "The interstitial dismissal bound was exhausted before the "
+                    "step entry state became clear - refusing further automatic "
+                    "actions; run aborted."
+                )
             if it.dismiss_key is None and it.dismiss_anchor is None:
                 # A known BLOCKING interstitial with no safe auto-dismissal.
                 return before_png, (
@@ -3439,6 +3479,7 @@ class Replayer:
                 before_frame_sha256=hashlib.sha256(before_png).hexdigest(),
             )
             audit_events.append(event)
+            handled_indices.add(active_index)
             try:
                 if it.dismiss_key is not None:
                     self.backend.press(it.dismiss_key)
@@ -3544,6 +3585,10 @@ class Replayer:
         # (1) Readiness: never act on a frame that never settled.
         before_png, readiness_error = self._wait_starting_state_settled(before_png)
         if readiness_error is not None:
+            # Like an interstitial refusal, a not-ready starting state is a
+            # safety halt. A program on_exception edge must not convert the
+            # explicit refusal into a successful terminal outcome.
+            result.safety_halt = True
             return False, readiness_error, before_png
 
         # (2) Interstitials: dismiss a KNOWN overlay, or HALT gracefully.

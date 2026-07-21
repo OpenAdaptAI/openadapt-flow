@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from openadapt_flow.ir import (
     BundleManifest,
     BundleProvenance,
+    Interstitial,
     Predicate,
     ProgramGraph,
     State,
@@ -96,14 +97,7 @@ def _referenced_asset_paths(workflow: "Workflow") -> set[str]:
         for pc in step.expect:
             if pc.template:
                 refs.add(pc.template)
-    for interstitial in workflow.interstitials:
-        anchor = interstitial.dismiss_anchor
-        if anchor is not None and anchor.template:
-            refs.add(anchor.template)
-        for predicate_anchor in _predicate_templates(
-            interstitial.detect, interstitial.clearance
-        ):
-            refs.add(predicate_anchor)
+    refs.update(interstitial_asset_paths(workflow.interstitials))
     return refs
 
 
@@ -126,6 +120,25 @@ def _predicate_templates(*predicates: Optional[Predicate]) -> Iterator[str]:
         if p.anchor is not None and p.anchor.template:
             yield p.anchor.template
         preds.extend(p.operands)
+
+
+def interstitial_asset_paths(interstitials: Iterable[Interstitial]) -> set[str]:
+    """Return every explicit asset path used by interstitial declarations.
+
+    A structural-only dismissal legitimately carries no template path.  Once a
+    declaration names an asset, however, governed admission requires that exact
+    path to be present in the bundle's sealed file-hash manifest; silently
+    falling through to another resolution rung would defeat the declaration's
+    integrity boundary.
+    """
+
+    refs: set[str] = set()
+    for interstitial in interstitials:
+        anchor = interstitial.dismiss_anchor
+        if anchor is not None and anchor.template.strip():
+            refs.add(anchor.template)
+        refs.update(_predicate_templates(interstitial.detect, interstitial.clearance))
+    return refs
 
 
 def compute_file_hashes(workflow: "Workflow", bundle_dir: Path | str) -> dict[str, str]:

@@ -33,6 +33,7 @@ from openadapt_flow.ir import (
     RunReport,
     State,
     StateKind,
+    StructuralLocator,
     Transition,
     Workflow,
 )
@@ -227,6 +228,44 @@ def test_require_settled_rejects_an_invalid_timeout():
         )
 
 
+def test_program_exception_handler_cannot_bypass_readiness_halt(bundle, run_dir):
+    """A never-settled entry frame is a safety refusal, not a recoverable task
+    exception that an ``on_exception`` edge may convert into success."""
+
+    step = click_step()
+    program = ProgramGraph(
+        entry="open",
+        states={
+            "open": State(
+                id="open",
+                kind=StateKind.ACTION,
+                step=step,
+                transitions=[Transition(target="done")],
+                on_exception="recover",
+            ),
+            "recover": State(id="recover", kind=StateKind.TERMINAL, outcome="success"),
+            "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+        },
+    )
+    backend = FakeBackend()
+    report = Replayer(
+        backend,
+        vision=SettleVision(settled=False),
+        require_settled=True,
+        settle_readiness_timeout_s=0.05,
+    ).run(
+        Workflow(name="program", program=program),
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is False
+    assert report.terminal_outcome == "halt"
+    assert backend.actions == []
+    assert report.results[0].safety_halt is True
+    assert report.results[0].exception_handled is False
+
+
 # -- interstitials: dismiss-if-known, else halt gracefully -------------------
 
 
@@ -241,7 +280,7 @@ def _cleared(text: str) -> Predicate:
 
 
 def test_known_interstitial_dismissed_by_key_then_step_runs(bundle, run_dir):
-    vision = FakeVision()
+    vision = SettleVision(settled=True)
     vision.text_results = {
         "rate us": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
     }
@@ -284,7 +323,7 @@ def test_known_interstitial_dismissed_by_key_then_step_runs(bundle, run_dir):
 
 
 def test_known_interstitial_dismissed_by_anchor_click(bundle, run_dir):
-    vision = FakeVision()
+    vision = SettleVision(settled=True)
     vision.text_results = {
         "What's New": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
     }
@@ -359,7 +398,7 @@ def test_interstitial_resettle_failure_halts_before_underlying_step(bundle, run_
     ).run(wf, bundle_dir=bundle, run_dir=run_dir)
 
     assert report.success is False
-    assert "starting state not ready" in report.results[0].error
+    assert "did not settle after the interstitial dismissal" in report.results[0].error
     assert backend.actions == [("press", "Escape")]
     assert vision.result_calls == 2
     dismissal = report.results[0].interstitial_actions[0]
@@ -367,6 +406,40 @@ def test_interstitial_resettle_failure_halts_before_underlying_step(bundle, run_
     assert dismissal.clearance_ok is None
     assert dismissal.ok is False
     assert dismissal.error is not None
+
+
+def test_interstitial_resettle_is_fail_closed_when_entry_gate_is_off(bundle, run_dir):
+    """Automatic dismissal requires a readiness-aware outcome even when the
+    optional global entry-frame ``require_settled`` gate is disabled."""
+
+    vision = FakeVision()  # legacy facade cannot report settled vs timed out
+    vision.text_results = {
+        "rate us": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
+    }
+    backend = FakeBackend()
+    workflow = Workflow(
+        name="wf",
+        steps=[click_step()],
+        interstitials=[
+            Interstitial(
+                name="satisfaction survey",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="rate us"),
+                dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("rate us"),
+            )
+        ],
+    )
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.005).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == [("press", "Escape")]
+    assert "cannot verify that the screen settled" in (report.results[0].error or "")
+    assert report.results[0].safety_halt is True
 
 
 def test_blocking_interstitial_with_no_dismissal_halts_gracefully(bundle, run_dir):
@@ -450,7 +523,7 @@ def test_program_exception_handler_cannot_bypass_interstitial_halt(bundle, run_d
 def test_interstitial_failed_clearance_halts_without_blind_retry(bundle, run_dir):
     """A dismissal whose declared clearance fails emits exactly one audited
     action, then HALTs rather than retrying or acting beneath the overlay."""
-    vision = FakeVision()
+    vision = SettleVision(settled=True)
     # Always present (never absent): dismissal never clears it.
     vision.text_results = {"stuck": Match((10, 10), (0, 0, 5, 5))}
     backend = FakeBackend()
@@ -481,10 +554,57 @@ def test_interstitial_failed_clearance_halts_without_blind_retry(bundle, run_dir
     assert dismissal.ok is False
 
 
+def test_alternating_interstitials_halt_on_recurrence(bundle, run_dir):
+    """Two overlays may reveal each other, but the runtime never enters an
+    unbounded A -> B -> A automatic-action cycle within one workflow step."""
+
+    match = Match((10, 10), (0, 0, 5, 5))
+    vision = SettleVision(settled=True)
+    vision.text_results = {
+        # A: detect, clear, confirm absent, skip while B is active, then recur.
+        "overlay A": [match, None, None, None, match],
+        # B: detect after A, clear, and confirm absent.
+        "overlay B": [match, None, None],
+    }
+    backend = FakeBackend()
+    workflow = Workflow(
+        name="cycle",
+        steps=[click_step()],
+        interstitials=[
+            Interstitial(
+                name="overlay A",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="overlay A"),
+                dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("overlay A"),
+            ),
+            Interstitial(
+                name="overlay B",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="overlay B"),
+                dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("overlay B"),
+            ),
+        ],
+    )
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.005).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == [("press", "Escape"), ("press", "Escape")]
+    assert len(report.results[0].interstitial_actions) == 2
+    assert "reappeared" in (report.results[0].error or "")
+    assert report.results[0].safety_halt is True
+
+
 def test_operator_supplied_interstitial_applies_without_recompiling(bundle, run_dir):
     """An operator can pass interstitials to the Replayer; they merge with the
     bundle's own (here the bundle declares none)."""
-    vision = FakeVision()
+    vision = SettleVision(settled=True)
     vision.text_results = {
         "release tip": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
     }
@@ -676,7 +796,7 @@ def test_click_dismissal_requires_sealed_template_before_any_action(bundle, run_
         click_point=(5, 5),
         ocr_text="Close",
     )
-    with pytest.raises(ValueError, match="non-empty sealed anchor template"):
+    with pytest.raises(ValueError, match="sealed anchor template"):
         Interstitial(
             name="release note",
             detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
@@ -685,6 +805,23 @@ def test_click_dismissal_requires_sealed_template_before_any_action(bundle, run_
             consequential=False,
             clearance=_cleared("release note"),
         )
+
+    structural_only = Interstitial(
+        name="structural release note",
+        detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+        dismiss_anchor=empty_anchor.model_copy(
+            update={
+                "structural": StructuralLocator(
+                    role="button", name="Close release note"
+                )
+            }
+        ),
+        risk="reversible",
+        consequential=False,
+        clearance=_cleared("release note"),
+    )
+    assert structural_only.dismiss_anchor is not None
+    assert structural_only.dismiss_anchor.template == ""
 
     interstitial = Interstitial(
         name="release note",

@@ -62,6 +62,35 @@ def runtime_inputs_digest(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def interstitial_declarations_digest(
+    workflow: Workflow,
+    interstitials: list[Interstitial] | None,
+) -> str:
+    """Hash the exact bundle and runtime interstitial declarations.
+
+    The workflow declarations are already covered by the bundle digest, while
+    runtime declarations are also covered by :func:`runtime_inputs_digest`.
+    This dedicated digest closes a different boundary: it proves that the run
+    gate evaluated the same complete action surface later carried by the
+    authorization factory.
+    """
+
+    payload = {
+        "workflow": [
+            interstitial.model_dump(mode="json")
+            for interstitial in workflow.interstitials
+        ],
+        "runtime": [
+            interstitial.model_dump(mode="json")
+            for interstitial in (interstitials or [])
+        ],
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class UnverifiedWriteApproval(BaseModel):
     """Approval for one GUI step whose effects lack an independent verifier."""
 
@@ -186,6 +215,34 @@ class GovernedRunAuthorization(BaseModel):
         if refusal is not None:
             return refusal, {}
         assert workflow.manifest is not None
+
+        declarations = [*workflow.interstitials, *(interstitials or [])]
+        validated_interstitials: list[Interstitial] = []
+        try:
+            for declaration in declarations:
+                validated_interstitials.append(
+                    Interstitial.model_validate(declaration.model_dump(mode="python"))
+                )
+        except Exception as exc:
+            return (
+                "governed run authorization contains an invalid interstitial "
+                f"declaration ({type(exc).__name__})",
+                {},
+            )
+
+        from openadapt_flow.bundle_validation import interstitial_asset_paths
+
+        unsealed_interstitial_assets = sorted(
+            interstitial_asset_paths(validated_interstitials)
+            - set(workflow.manifest.file_hashes)
+        )
+        if unsealed_interstitial_assets:
+            return (
+                "governed run authorization interstitial declaration references "
+                "asset(s) that are not sealed in the bundle manifest: "
+                + ", ".join(unsealed_interstitial_assets),
+                {},
+            )
 
         from openadapt_flow.bundle_validation import (
             BundleIntegrityError,

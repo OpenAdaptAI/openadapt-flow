@@ -100,11 +100,26 @@ def audited_tables(db_path: Path) -> tuple[str, ...]:
     return tuple(n for n in names if n not in _UI_ECHO_TABLES)
 
 
+def _quote_identifier(name: str) -> str:
+    """Quote a SQLite identifier discovered from ``sqlite_master``.
+
+    Table names are data, not trusted SQL source.  Doubling embedded quotes is
+    SQLite's identifier-escaping rule and keeps dynamically discovered names
+    such as ``outbox events`` both valid and confined to one identifier.
+    """
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _table_counts(db_path: Path) -> dict[str, int]:
     conn = _connect_ro(db_path)
     try:
         return {
-            name: int(conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0])
+            name: int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {_quote_identifier(name)}"
+                ).fetchone()[0]
+            )
             for name in audited_tables(db_path)
         }
     finally:

@@ -186,8 +186,9 @@ def _seed_db(path, *, extra_tables=()):
             """
         )
         for name in extra_tables:
+            quoted = '"' + name.replace('"', '""') + '"'
             conn.execute(
-                f"CREATE TABLE {name} (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"
+                f"CREATE TABLE {quoted} (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"
             )
         conn.commit()
     finally:
@@ -199,10 +200,14 @@ def test_ground_truth_audits_are_dynamic_and_exclude_banner(tmp_path):
 
     db = tmp_path / "rec.db"
     # A THIRD, never-hardcoded business surface exists in the DB.
-    _seed_db(db, extra_tables=("outbox",))
+    _seed_db(db, extra_tables=("outbox events",))
     audited = ground_truth.audited_tables(db)
     # Discovered dynamically: encounters, billing, AND the new outbox surface.
-    assert "encounters" in audited and "billing" in audited and "outbox" in audited
+    assert (
+        "encounters" in audited
+        and "billing" in audited
+        and "outbox events" in audited
+    )
     # The app's UI-echo banner is NEVER audited as ground truth (avoids circularity).
     assert "banner" not in audited
 
@@ -215,7 +220,7 @@ def test_ground_truth_catches_collateral_write_to_a_new_surface(tmp_path):
 
     db = tmp_path / "rec.db"
     # A surface the original hardcoded (encounters, billing) pair never named.
-    _seed_db(db, extra_tables=("audit_log",))
+    _seed_db(db, extra_tables=("audit-log",))
     before = ground_truth.capture(db)
 
     conn = sqlite3.connect(str(db))
@@ -227,7 +232,7 @@ def test_ground_truth_catches_collateral_write_to_a_new_surface(tmp_path):
             (TARGET_PATIENT, TARGET_TYPE, "the-note", "replay", None),
         )
         # ...but a collateral row also hits the NEW surface.
-        conn.execute("INSERT INTO audit_log (v) VALUES ('leak')")
+        conn.execute('INSERT INTO "audit-log" (v) VALUES (?)', ("leak",))
         conn.commit()
     finally:
         conn.close()
@@ -239,7 +244,7 @@ def test_ground_truth_catches_collateral_write_to_a_new_surface(tmp_path):
     # no longer holds.
     assert gt.correct is False
     assert gt.fault_class == "collateral_write"
-    assert gt.table_deltas.get("audit_log") == 1
+    assert gt.table_deltas.get("audit-log") == 1
 
 
 def test_ground_truth_does_not_share_the_effect_kit_delta_primitive():

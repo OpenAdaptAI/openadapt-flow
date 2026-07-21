@@ -9,26 +9,6 @@
   animation: none !important;
 }
 
-/* Determinism for pixel/template evidence: the runtime crops a template around
-   the click point and re-matches it at a strict TM_CCOEFF_NORMED threshold
-   (resolver.TEMPLATE_THRESHOLD). The browser's default :focus ring and the
-   blinking text caret are the only per-render transients left in this
-   otherwise animation-free app -- either one can land inside a crop and, on a
-   heal that re-crops from a focused control, push a subsequent template match
-   just under threshold on some platforms (observed as a nondeterministic extra
-   heal in the healed-bundle replay). Removing both keeps a control's pixels
-   identical whether or not it currently holds focus, without touching any
-   layout or the healing assertions. */
-*:focus,
-*:focus-visible {
-  outline: none !important;
-}
-
-input,
-textarea {
-  caret-color: transparent !important;
-}
-
 html, body {
   font-family: Arial, Helvetica, sans-serif;
   font-size: 16px;

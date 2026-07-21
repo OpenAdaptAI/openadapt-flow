@@ -553,6 +553,52 @@ class Guard(BaseModel):
 Predicate.model_rebuild()  # resolve the self-referential `operands`
 
 
+class Interstitial(BaseModel):
+    """A KNOWN recurring interstitial that can appear at a step's entry frame
+    and would otherwise block the run (docs/LIMITS.md "state dependency").
+
+    Examples are the survey / "rate this" modal, a "What's New" release notice,
+    a cookie or consent banner, a "session about to expire" nudge -- overlays
+    that are NOT part of the recorded task but appear intermittently and, left
+    unhandled, either steal the click (a silent wrong action) or make the target
+    unresolvable (a babysit-the-queue halt every time they show).
+
+    Detection is model-free: ``detect`` is a Phase-1 :class:`Predicate` (a
+    ``TEXT_PRESENT`` on the overlay's signature text is typical), evaluated over
+    the settled entry frame with ZERO model calls. Handling is declarative:
+
+    - ``dismiss_key`` set -> press that key (e.g. ``"Escape"``, ``"Enter"``) to
+      dismiss it, then re-settle and re-check.
+    - ``dismiss_anchor`` set -> resolve+click that control (e.g. an "OK" /
+      "Continue" button) via the SAME model-free resolution ladder, then
+      re-settle and re-check.
+    - NEITHER set -> a known BLOCKING interstitial with no safe automatic
+      dismissal: the run HALTS gracefully NAMING it (a clear report, not a blind
+      "target not found"), so an operator handles it deliberately.
+
+    A never-dismissed interstitial (still detected after the bounded number of
+    dismissal attempts) also HALTS -- the safe direction. Interstitials are
+    checked at EVERY step's entry, before the guard / wait_until gates, since an
+    overlay can appear at any point in a workflow, not only at its start.
+    """
+
+    name: str = Field(description="Human-readable label for reports/HALT text.")
+    detect: Predicate = Field(
+        description="Model-free condition that is TRUE when this interstitial is "
+        "on the current frame (typically TEXT_PRESENT on its signature text)."
+    )
+    dismiss_key: Optional[str] = Field(
+        default=None,
+        description="Key/chord to press to dismiss it (e.g. 'Escape', 'Enter'). "
+        "Mutually exclusive with dismiss_anchor in practice; when set it wins.",
+    )
+    dismiss_anchor: Optional[Anchor] = Field(
+        default=None,
+        description="Control to resolve+click to dismiss it (e.g. an OK button). "
+        "Used when no key dismisses the overlay.",
+    )
+
+
 class Step(BaseModel):
     id: str
     intent: str = Field(description="Human-readable purpose of the step")
@@ -1048,6 +1094,13 @@ class Workflow(BaseModel):
         ),
     )
     steps: list[Step] = Field(default_factory=list)
+    # KNOWN recurring interstitials (survey modal, "What's New" notice, cookie
+    # banner, ...) the runtime detects (model-free) at EACH step's entry and
+    # either auto-dismisses (dismiss_key / dismiss_anchor) or HALTs on gracefully
+    # (docs/LIMITS.md "state dependency"). Empty by default, so a bundle that
+    # declares none behaves exactly as before. An operator can also supply extra
+    # interstitials at run time (Replayer(interstitials=...)) WITHOUT recompiling.
+    interstitials: list["Interstitial"] = Field(default_factory=list)
     # Workflow-program IR, Phase 2 (RFC §2): the parameterized STATE MACHINE.
     # ALL optional and additive -- when ``program`` is None the runtime executes
     # the linear ``steps`` loop above byte-for-byte (today's behavior); a linear

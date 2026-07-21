@@ -204,9 +204,7 @@ def test_ground_truth_audits_are_dynamic_and_exclude_banner(tmp_path):
     audited = ground_truth.audited_tables(db)
     # Discovered dynamically: encounters, billing, AND the new outbox surface.
     assert (
-        "encounters" in audited
-        and "billing" in audited
-        and "outbox events" in audited
+        "encounters" in audited and "billing" in audited and "outbox events" in audited
     )
     # The app's UI-echo banner is NEVER audited as ground truth (avoids circularity).
     assert "banner" not in audited

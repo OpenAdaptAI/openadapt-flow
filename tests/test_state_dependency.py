@@ -87,22 +87,25 @@ class SettleVision(FakeVision):
     vision module exposes. ``settled`` is scripted so a test can force the
     never-settling (slow-load) path deterministically."""
 
-    def __init__(self, settled: bool = True):
+    def __init__(self, settled: bool | list[bool] = True):
         super().__init__()
-        self.settled = settled
+        self.settled = [settled] if isinstance(settled, bool) else list(settled)
         self.result_calls = 0
+        self.timeouts: list[float] = []
 
     def wait_settled_result(
         self, backend, *, interval_s=0.1, stable_frames=2, timeout_s=3.0
     ):
         from openadapt_flow.vision import SettleResult
 
+        outcome = self.settled[min(self.result_calls, len(self.settled) - 1)]
         self.result_calls += 1
+        self.timeouts.append(timeout_s)
         png = backend.screenshot()
         return SettleResult(
             png=png,
-            settled=self.settled,
-            stable_frames=stable_frames if self.settled else 1,
+            settled=outcome,
+            stable_frames=stable_frames if outcome else 1,
             required_frames=stable_frames,
             elapsed_s=0.0,
         )
@@ -159,6 +162,8 @@ def test_require_settled_halts_on_a_screen_that_never_settles(bundle, run_dir):
     assert report.success is False
     assert "starting state not ready" in report.results[0].error
     assert backend.actions == []  # no click on the un-ready screen
+    assert vision.result_calls == 1  # the settle primitive owns the full bound
+    assert vision.timeouts == [0.05]
 
 
 def test_require_settled_proceeds_once_the_screen_settles(bundle, run_dir):
@@ -175,6 +180,7 @@ def test_require_settled_proceeds_once_the_screen_settles(bundle, run_dir):
     ).run(wf, bundle_dir=bundle, run_dir=run_dir)
     assert report.success is True
     assert ("click", 110, 105, False) in backend.actions
+    assert vision.result_calls == 1
 
 
 def test_require_settled_off_by_default_preserves_behavior(bundle, run_dir):
@@ -191,9 +197,8 @@ def test_require_settled_off_by_default_preserves_behavior(bundle, run_dir):
     assert any(a[0] == "click" for a in backend.actions)
 
 
-def test_require_settled_degrades_when_facade_cannot_report(bundle, run_dir):
-    """A lightweight vision facade without wait_settled_result must not crash or
-    block when require_settled is on -- it falls back to proceed-with-warning."""
+def test_require_settled_halts_when_facade_cannot_report(bundle, run_dir):
+    """Opting into readiness cannot silently degrade to proceed-anyway."""
     vision = FakeVision()  # no wait_settled_result
     vision.template_results = [Match((110, 105), (100, 100, 50, 20))]
     backend = FakeBackend()
@@ -201,7 +206,19 @@ def test_require_settled_degrades_when_facade_cannot_report(bundle, run_dir):
     report = Replayer(
         backend, vision=vision, poll_interval_s=0.005, require_settled=True
     ).run(wf, bundle_dir=bundle, run_dir=run_dir)
-    assert report.success is True
+    assert report.success is False
+    assert "cannot report whether the screen settled" in report.results[0].error
+    assert backend.actions == []
+
+
+def test_require_settled_rejects_an_invalid_timeout():
+    with pytest.raises(ValueError, match="settle_readiness_timeout_s"):
+        Replayer(
+            FakeBackend(),
+            vision=SettleVision(),
+            require_settled=True,
+            settle_readiness_timeout_s=0,
+        )
 
 
 # -- interstitials: dismiss-if-known, else halt gracefully -------------------
@@ -273,6 +290,40 @@ def test_known_interstitial_dismissed_by_anchor_click(bundle, run_dir):
     assert report.success is True
     assert backend.actions[0] == ("click", 200, 20, False)  # dismiss first
     assert ("click", 110, 105, False) in backend.actions  # then the target
+
+
+def test_interstitial_resettle_failure_halts_before_underlying_step(bundle, run_dir):
+    """The screen must become ready again after the declared dismissal."""
+    vision = SettleVision(settled=[True, False])
+    vision.text_results = {
+        "rate us": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
+    }
+    vision.template_results = [Match((110, 105), (100, 100, 50, 20))]
+    backend = FakeBackend()
+    wf = Workflow(
+        name="wf",
+        steps=[click_step()],
+        interstitials=[
+            Interstitial(
+                name="satisfaction survey",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="rate us"),
+                dismiss_key="Escape",
+            )
+        ],
+    )
+
+    report = Replayer(
+        backend,
+        vision=vision,
+        poll_interval_s=0.005,
+        require_settled=True,
+        settle_readiness_timeout_s=0.05,
+    ).run(wf, bundle_dir=bundle, run_dir=run_dir)
+
+    assert report.success is False
+    assert "starting state not ready" in report.results[0].error
+    assert backend.actions == [("press", "Escape")]
+    assert vision.result_calls == 2
 
 
 def test_blocking_interstitial_with_no_dismissal_halts_gracefully(bundle, run_dir):
@@ -364,6 +415,29 @@ def test_no_interstitials_declared_is_byte_for_byte_unchanged(bundle, run_dir):
     )
     assert report.success is True
     assert backend.actions == [("click", 110, 105, False)]
+
+
+def test_interstitial_rejects_ambiguous_dismissal():
+    with pytest.raises(ValueError, match="at most one dismissal"):
+        Interstitial(
+            name="ambiguous",
+            detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="notice"),
+            dismiss_key="Escape",
+            dismiss_anchor=Anchor(
+                template="templates/btn.png",
+                region=(0, 0, 10, 10),
+                click_point=(5, 5),
+            ),
+        )
+
+
+def test_interstitial_rejects_nonvisual_or_negative_detection():
+    with pytest.raises(ValueError, match="affirmative visual evidence"):
+        Interstitial(
+            name="blind",
+            detect=Predicate(kind=PredicateKind.TEXT_ABSENT, text="notice"),
+            dismiss_key="Escape",
+        )
 
 
 # -- IR round-trip ------------------------------------------------------------

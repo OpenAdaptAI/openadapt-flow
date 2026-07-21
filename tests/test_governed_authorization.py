@@ -5,6 +5,7 @@ from __future__ import annotations
 from openadapt_flow.ir import (
     ActionKind,
     Guard,
+    Interstitial,
     Postcondition,
     PostconditionKind,
     Predicate,
@@ -70,12 +71,18 @@ def _authorization(
     *,
     params: dict[str, str] | None = None,
     worklists: dict[str, list[dict[str, str]]] | None = None,
+    interstitials: list[Interstitial] | None = None,
     required: tuple[str, ...] = (),
 ) -> GovernedRunAuthorization:
     assert workflow.manifest is not None
     return GovernedRunAuthorization(
         bundle_content_digest=workflow.manifest.content_digest,
-        runtime_inputs_digest=runtime_inputs_digest(workflow, params, worklists),
+        runtime_inputs_digest=runtime_inputs_digest(
+            workflow,
+            params,
+            worklists,
+            interstitials=interstitials,
+        ),
         admitted_policy_name="test-governed",
         required_identity_step_ids=required,
     )
@@ -114,6 +121,30 @@ def test_bundle_asset_mismatch_halts_before_action(tmp_path):
     assert report.success is False
     assert backend.actions == []
     assert "bundle integrity failed" in (report.results[0].error or "")
+
+
+def test_runtime_interstitial_change_halts_before_action(tmp_path):
+    step = context_click_step("Jane Sample 1980-01-15 MRN 123")
+    workflow, bundle = _seal(tmp_path, Workflow(name="interstitials", steps=[step]))
+    authorization = _authorization(workflow)
+    runtime_interstitial = Interstitial(
+        name="survey",
+        detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="rate us"),
+        dismiss_key="Escape",
+    )
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=resolving_vision(),
+        governed_authorization=authorization,
+        interstitials=[runtime_interstitial],
+    ).run(workflow, bundle_dir=bundle, run_dir=tmp_path / "run")
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].step_id == "<authorization>"
+    assert "interstitial declarations" in (report.results[0].error or "")
 
 
 def test_target_asset_mutation_after_validation_halts_before_action(tmp_path):

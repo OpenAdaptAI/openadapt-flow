@@ -288,10 +288,10 @@ class Replayer:
             gracefully if the screen never settles (a still-loading /
             mid-transition frame) instead of acting on a stale frame. OFF by
             default (behavior unchanged; animated UIs are not over-halted).
-            Recommended ON for slow-loading / state-sensitive targets. Only
-            active when the injected vision exposes ``wait_settled_result``.
-        settle_readiness_timeout_s: Outer retry window for the readiness gate
-            (seconds) before it HALTs on a never-settling screen.
+            Recommended ON for slow-loading / state-sensitive targets. Fails
+            closed when the injected vision cannot report settledness.
+        settle_readiness_timeout_s: Single bounded settle window for the
+            readiness gate (seconds) before it HALTs.
         interstitials: Operator-supplied KNOWN interstitials (survey modal,
             "What's New" notice, cookie banner) detected model-free at each
             step's entry and auto-dismissed or halted-on gracefully. Merged with
@@ -425,6 +425,10 @@ class Replayer:
         # and it never touches structural or text_absent postconditions.
         self.state_verifier = state_verifier
         self.poll_interval_s = poll_interval_s
+        if not math.isfinite(settle_readiness_timeout_s) or (
+            settle_readiness_timeout_s <= 0
+        ):
+            raise ValueError("settle_readiness_timeout_s must be finite and > 0")
         # Point of the most recent successful click (the focusing click for
         # a following TYPE step); reset per run.
         self._last_click_point: Optional[Point] = None
@@ -440,13 +444,12 @@ class Replayer:
         # (the wait_settled proceed-anyway path). OFF by default so behavior is
         # byte-for-byte unchanged (and inherently-animated UIs are not over-
         # halted); recommended ON for slow-loading / state-sensitive targets.
-        # Only engages when the injected vision exposes ``wait_settled_result``
-        # (the real module does); a facade without it degrades to today's
-        # proceed-with-warning, so existing mocks are unaffected.
+        # The real vision module exposes ``wait_settled_result``. An opt-in
+        # caller that injects a facade without that readiness signal HALTs
+        # before action rather than silently degrading to proceed-anyway.
         self.require_settled = require_settled
-        # How long the readiness gate keeps re-settling before it HALTs. Each
-        # settle poll is itself bounded (vision.wait_settled_result timeout_s);
-        # this caps the outer retry window so a slow load has time to finish.
+        # One settle poll owns this complete bound. The replayer does not wrap
+        # it in an outer retry loop, avoiding unaccounted blind retries.
         self.settle_readiness_timeout_s = settle_readiness_timeout_s
         # Operator-supplied KNOWN interstitials, merged with the bundle's own
         # (Workflow.interstitials) at each step's entry. None/empty (default) =>
@@ -577,6 +580,7 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 params=params,
                 worklists=worklists,
+                interstitials=self._interstitials,
                 continuation=self.governed_continuation,
             )
             self._governed_asset_snapshot = assets
@@ -2330,8 +2334,15 @@ class Replayer:
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
 
-        # Settle before the pre-action screenshot.
-        before_png = self.vision.wait_settled(self.backend)
+        # Default behavior settles exactly as before. The opt-in readiness gate
+        # owns its own single bounded settle call inside ``_apply_step_gates``;
+        # capture only a raw diagnostic frame here so it is not preceded by an
+        # unobservable proceed-anyway settle attempt.
+        before_png = (
+            self.backend.screenshot()
+            if self.require_settled
+            else self.vision.wait_settled(self.backend)
+        )
         result.before_png = self._save_step_png(run_dir, step.id, "before", before_png)
         last_frame = before_png
         # Structural start state (URL/title/page count, when the backend
@@ -3224,52 +3235,70 @@ class Replayer:
 
     # -- state-dependency robustness: readiness + interstitials -----------------
 
-    def _settle_frame(self) -> bytes:
-        """A freshly settled frame. Uses the readiness-aware
-        ``wait_settled_result`` when the injected vision exposes it (returning
-        the last frame regardless of settledness -- the caller decides), else
-        falls back to plain ``wait_settled``. Never raises."""
-        fn = getattr(self.vision, "wait_settled_result", None)
-        if fn is None:
-            return self.vision.wait_settled(self.backend)
-        return fn(self.backend).png
-
     def _wait_starting_state_settled(
         self, before_png: bytes
     ) -> tuple[bytes, Optional[str]]:
         """Readiness gate: refuse to act on a frame that never settled.
 
-        When ``require_settled`` is on AND the vision facade can report
-        settledness (``wait_settled_result``), keep re-settling until the screen
-        stabilizes or ``settle_readiness_timeout_s`` elapses. A screen that never
-        settles (slow load, perpetual spinner) HALTs gracefully rather than
-        acting on an arbitrary mid-transition frame -- the concrete fix for
-        "wait_settled proceeds on stale frames".
+        When ``require_settled`` is on, invoke exactly ONE readiness-aware settle
+        operation bounded by ``settle_readiness_timeout_s``. A screen that never
+        settles (slow load, perpetual spinner), a facade that cannot report
+        settledness, or an invalid/erroring settle result HALTs gracefully rather
+        than acting on an arbitrary mid-transition frame.
 
-        Returns ``(frame, None)`` when ready (or when the gate is off / the
-        facade cannot report), else ``(frame, halt_reason)``.
+        Returns ``(frame, None)`` when ready (or when the gate is off), else
+        ``(frame, halt_reason)``.
         """
         if not self.require_settled:
             return before_png, None
         fn = getattr(self.vision, "wait_settled_result", None)
-        if fn is None:
-            # The facade cannot report settledness (a lightweight test mock);
-            # preserve today's proceed-with-warning behavior rather than block.
-            return before_png, None
-        deadline = time.monotonic() + self.settle_readiness_timeout_s
-        result = fn(self.backend)
-        while not result.settled and time.monotonic() < deadline:
-            time.sleep(self.poll_interval_s)
-            result = fn(self.backend)
-        if not result.settled:
-            return result.png, (
+        if not callable(fn):
+            return before_png, (
+                "The configured vision facade cannot report whether the screen "
+                "settled (wait_settled_result is unavailable) - refusing to "
+                "act while require_settled=True; run aborted (starting state "
+                "not ready)."
+            )
+        try:
+            result = fn(
+                self.backend,
+                interval_s=self.poll_interval_s,
+                timeout_s=self.settle_readiness_timeout_s,
+            )
+            frame = result.png
+            settled = result.settled
+            if not isinstance(frame, bytes) or not isinstance(settled, bool):
+                raise TypeError("invalid settle result")
+        except Exception as exc:
+            return before_png, (
+                "The screen readiness check failed "
+                f"({type(exc).__name__}) - refusing to act while "
+                "require_settled=True; run aborted (starting state not ready)."
+            )
+        if not settled:
+            return frame, (
                 "The screen never stopped changing (still loading or animating) "
                 f"within {self.settle_readiness_timeout_s:.1f}s - refusing to act "
                 "on a mid-transition frame; run aborted (starting state not "
                 "ready). If this UI animates continuously, disable the readiness "
                 "gate (require_settled=False)."
             )
-        return result.png, None
+        return frame, None
+
+    def _resettle_after_interstitial(
+        self, before_png: bytes
+    ) -> tuple[bytes, Optional[str]]:
+        """Settle once after a declared dismissal, preserving fail-closed mode."""
+        if self.require_settled:
+            return self._wait_starting_state_settled(before_png)
+        try:
+            return self.vision.wait_settled(self.backend), None
+        except Exception as exc:
+            return before_png, (
+                "The screen could not be re-settled after dismissing an "
+                f"interstitial ({type(exc).__name__}) - refusing to act; run "
+                "aborted."
+            )
 
     def _handle_interstitials(
         self,
@@ -3299,16 +3328,25 @@ class Replayer:
         if not interstitials:
             return before_png, None
 
-        attempts = 0
+        attempts = [0] * len(interstitials)
         while True:
-            active = [
-                it
-                for it in interstitials
-                if self._predicate_holds(it.detect, before_png, bundle_dir, params)
-            ]
-            if not active:
+            active_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(interstitials)
+                    if self._predicate_holds(
+                        candidate.detect,
+                        before_png,
+                        bundle_dir,
+                        params,
+                        workflow=workflow,
+                    )
+                ),
+                None,
+            )
+            if active_index is None:
                 return before_png, None
-            it = active[0]
+            it = interstitials[active_index]
             if it.dismiss_key is None and it.dismiss_anchor is None:
                 # A known BLOCKING interstitial with no safe auto-dismissal.
                 return before_png, (
@@ -3317,7 +3355,7 @@ class Replayer:
                     "automatic dismissal - refusing to act beneath it; run "
                     "aborted (handle it, then re-run)."
                 )
-            if attempts >= self._max_interstitial_dismissals:
+            if attempts[active_index] >= self._max_interstitial_dismissals:
                 # Detected again after the bounded number of dismissals.
                 return before_png, (
                     f"Interstitial '{it.name}' persisted after "
@@ -3328,7 +3366,13 @@ class Replayer:
                 self.backend.press(it.dismiss_key)
             else:
                 assert it.dismiss_anchor is not None
-                template_png = self._asset_bytes(bundle_dir, it.dismiss_anchor.template)
+                template_png = self._asset_bytes(
+                    bundle_dir,
+                    it.dismiss_anchor.template,
+                    workflow=workflow,
+                )
+                if self._governed_asset_mutation is not None:
+                    return before_png, self._governed_asset_mutation
                 res = resolve(
                     it.dismiss_anchor,
                     before_png,
@@ -3347,8 +3391,10 @@ class Replayer:
                     )
                 resolution, _region = res
                 self.backend.click(int(resolution.point[0]), int(resolution.point[1]))
-            attempts += 1
-            before_png = self._settle_frame()
+            attempts[active_index] += 1
+            before_png, settle_error = self._resettle_after_interstitial(before_png)
+            if settle_error is not None:
+                return before_png, settle_error
 
     # -- Workflow-program IR gates: guard + wait_until --------------------------
 
@@ -3400,7 +3446,11 @@ class Replayer:
 
         # Guard (precondition) on the entry frame.
         guard_holds = step.guard is None or self._predicate_holds(
-            step.guard.predicate, before_png, bundle_dir, params
+            step.guard.predicate,
+            before_png,
+            bundle_dir,
+            params,
+            workflow=workflow,
         )
         if self._governed_asset_mutation is not None:
             return False, self._governed_asset_mutation, before_png
@@ -3425,7 +3475,13 @@ class Replayer:
             pred = step.wait_until
             deadline = time.monotonic() + pred.timeout_s
             while True:
-                if self._predicate_holds(pred, before_png, bundle_dir, params):
+                if self._predicate_holds(
+                    pred,
+                    before_png,
+                    bundle_dir,
+                    params,
+                    workflow=workflow,
+                ):
                     return True, None, before_png
                 if time.monotonic() >= deadline:
                     return (
@@ -3450,6 +3506,8 @@ class Replayer:
         frame_png: bytes,
         bundle_dir: Path,
         params: dict[str, str],
+        *,
+        workflow: Optional[Workflow] = None,
     ) -> bool:
         """Evaluate a Predicate against the current frame / run params.
 
@@ -3463,7 +3521,11 @@ class Replayer:
         if kind is PredicateKind.ANCHOR_RESOLVES:
             if pred.anchor is None:
                 return False
-            template_png = self._asset_bytes(bundle_dir, pred.anchor.template)
+            template_png = self._asset_bytes(
+                bundle_dir,
+                pred.anchor.template,
+                workflow=workflow,
+            )
             return (
                 resolve(
                     pred.anchor,
@@ -3486,17 +3548,33 @@ class Replayer:
             )
         if kind is PredicateKind.AND:
             return all(
-                self._predicate_holds(op, frame_png, bundle_dir, params)
+                self._predicate_holds(
+                    op,
+                    frame_png,
+                    bundle_dir,
+                    params,
+                    workflow=workflow,
+                )
                 for op in pred.operands
             )
         if kind is PredicateKind.OR:
             return any(
-                self._predicate_holds(op, frame_png, bundle_dir, params)
+                self._predicate_holds(
+                    op,
+                    frame_png,
+                    bundle_dir,
+                    params,
+                    workflow=workflow,
+                )
                 for op in pred.operands
             )
         if kind is PredicateKind.NOT:
             return bool(pred.operands) and not self._predicate_holds(
-                pred.operands[0], frame_png, bundle_dir, params
+                pred.operands[0],
+                frame_png,
+                bundle_dir,
+                params,
+                workflow=workflow,
             )
         return False
 
@@ -4179,7 +4257,13 @@ class Replayer:
                     bundle_dir=bundle_dir,
                     params=params,
                 )
-            return self._predicate_holds(stop_pred, frame_png, bundle_dir, params)
+            return self._predicate_holds(
+                stop_pred,
+                frame_png,
+                bundle_dir,
+                params,
+                workflow=workflow,
+            )
 
         holds = readiness_holds(before_png)
         if self._governed_asset_mutation is not None:

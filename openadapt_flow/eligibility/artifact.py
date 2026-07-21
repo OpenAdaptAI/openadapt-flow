@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 from contextlib import contextmanager
@@ -26,7 +27,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from openadapt_flow.eligibility.client import EligibilityResult
+from openadapt_flow.eligibility.client import (
+    EligibilityRequest,
+    EligibilityResult,
+    eligibility_request_sha256,
+)
 from openadapt_flow.runtime.effects.document_hash import DocumentHashVerifier
 from openadapt_flow.runtime.effects.effect import (
     Effect,
@@ -47,6 +52,11 @@ _CSV_COLUMNS = [
     "payer",
     "payer_id",
     "member_id",
+    "date_of_service",
+    "network_code",
+    "coverage_level_code",
+    "time_qualifier_code",
+    "procedure_code",
     "status",
     "plan_name",
     "copay",
@@ -59,6 +69,7 @@ _CSV_COLUMNS = [
     "source",
     "raw_271_sha256",
     "operation_id",
+    "request_sha256",
 ]
 
 
@@ -268,15 +279,21 @@ def _transaction_id(policy: PracticeArtifactPolicy, operation_id: str) -> str:
 
 
 def _normalized_payload(
-    result: EligibilityResult, *, member_id: Optional[str], payer: Optional[str]
+    result: EligibilityResult, *, request: EligibilityRequest
 ) -> dict[str, object]:
+    selection = request.benefit_selection
     return {
         "schema_version": 2,
         "operation_id": result.operation_id,
         "checked_at": result.checked_at,
-        "payer": payer or result.payer_name or "",
+        "payer": result.payer_name or "",
         "payer_id": result.payer_id,
-        "member_id": member_id or "",
+        "member_id": request.member_id or "",
+        "date_of_service": request.date_of_service,
+        "network_code": selection.network_code or "",
+        "coverage_level_code": selection.coverage_level_code or "",
+        "time_qualifier_code": selection.time_qualifier_code or "",
+        "procedure_code": selection.procedure_code or "",
         "status": result.status.value,
         "plan_name": result.plan_name or "",
         "plan_begin": result.plan_begin or "",
@@ -294,6 +311,7 @@ def _normalized_payload(
         "service_type_codes": list(result.service_type_codes),
         "source": result.source,
         "raw_271_sha256": result.raw_271_sha256,
+        "request_sha256": result.request_sha256,
     }
 
 
@@ -369,10 +387,42 @@ def _artifact_from_manifest(
     )
 
 
-def _load_manifest(tx_dir: Path) -> dict[str, object]:
+def _load_manifest(
+    tx_dir: Path, policy: Optional[PracticeArtifactPolicy] = None
+) -> dict[str, object]:
     raw = json.loads(_read_regular(tx_dir / "manifest.json"))
     if not isinstance(raw, dict) or raw.get("schema_version") != 2:
         raise ValueError("eligibility transaction manifest is malformed")
+    tx_id = tx_dir.name.removeprefix("tx_")
+    suffix = (
+        _ENCRYPTED_SUFFIX
+        if policy is not None
+        and policy.encryption is ArtifactEncryption.APPLICATION_AES256_GCM
+        else ""
+    )
+    expected = {
+        "raw_file": f"raw_271_{tx_id}.json{suffix}",
+        "normalized_file": f"result_{tx_id}.json{suffix}",
+        "results_index": RESULTS_CSV + suffix,
+    }
+    if not re.fullmatch(r"[0-9a-f]{24}", tx_id):
+        raise ValueError("eligibility transaction directory name is malformed")
+    if policy is not None and raw.get("boundary_id") != policy.boundary_id:
+        raise ValueError("eligibility transaction escaped its PHI boundary")
+    for field, value in expected.items():
+        if raw.get(field) != value:
+            raise ValueError(f"eligibility transaction {field} is malformed")
+    for field in (
+        "raw_plain_sha256",
+        "raw_storage_sha256",
+        "normalized_plain_sha256",
+        "normalized_storage_sha256",
+        "request_sha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(raw.get(field, ""))):
+            raise ValueError(f"eligibility transaction {field} is malformed")
+    if raw.get("egress") != "none":
+        raise ValueError("eligibility transaction egress policy is malformed")
     return raw
 
 
@@ -384,9 +434,19 @@ def _rebuild_index(
     for tx_dir in sorted(transactions.iterdir()):
         if not tx_dir.is_dir() or tx_dir.is_symlink():
             raise ValueError("transaction store contains a non-directory entry")
-        manifest = _load_manifest(tx_dir)
+        manifest = _load_manifest(tx_dir, policy)
+        raw_name = str(manifest["raw_file"])
+        raw_stored = _read_regular(tx_dir / raw_name)
+        if _sha(raw_stored) != manifest["raw_storage_sha256"]:
+            raise ValueError("raw artifact fails its committed storage digest")
+        raw_aad = f"{policy.boundary_id}:{tx_dir.name}:{raw_name}".encode()
+        raw_plain = _unprotect(raw_stored, key=key, aad=raw_aad)
+        if _sha(raw_plain) != manifest["raw_plain_sha256"]:
+            raise ValueError("raw artifact fails its committed plaintext digest")
         normalized_name = str(manifest["normalized_file"])
         stored = _read_regular(tx_dir / normalized_name)
+        if _sha(stored) != manifest["normalized_storage_sha256"]:
+            raise ValueError("normalized artifact fails its committed storage digest")
         aad = f"{policy.boundary_id}:{tx_dir.name}:{normalized_name}".encode()
         plain = _unprotect(stored, key=key, aad=aad)
         if _sha(plain) != manifest["normalized_plain_sha256"]:
@@ -410,12 +470,23 @@ def write_eligibility_artifacts(
     result: EligibilityResult,
     artifact_dir: Union[str, Path],
     *,
+    request: EligibilityRequest,
     policy: PracticeArtifactPolicy,
-    member_id: Optional[str] = None,
-    payer: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> EligibilityArtifact:
     """Atomically promote a PHI-bearing raw+normalized transaction."""
+    if not result.is_answer:
+        raise ValueError(
+            "only an exact unambiguous eligibility answer may be promoted as consumable"
+        )
+    request_sha256 = eligibility_request_sha256(request)
+    if (
+        result.operation_id != request.operation_id
+        or result.payer_id != request.payer_id
+        or result.service_type_codes != request.service_type_codes
+        or result.request_sha256 != request_sha256
+    ):
+        raise ValueError("eligibility result is not bound to the supplied request")
     if result.raw_271_bytes is None or result.raw_271_sha256 is None:
         raise ValueError(
             "a raw response is required for a consumable eligibility artifact"
@@ -430,9 +501,7 @@ def write_eligibility_artifacts(
     _ensure_secure_dir(transactions)
     tx_id = _transaction_id(policy, result.operation_id)
     tx_dir = transactions / f"tx_{tx_id}"
-    normalized_plain = _canonical(
-        _normalized_payload(result, member_id=member_id, payer=payer)
-    )
+    normalized_plain = _canonical(_normalized_payload(result, request=request))
     raw_plain = result.raw_271_bytes
     suffix = _ENCRYPTED_SUFFIX if key is not None else ""
     raw_name = f"raw_271_{tx_id}.json{suffix}"
@@ -444,9 +513,10 @@ def write_eligibility_artifacts(
                 raise ValueError(
                     "idempotency target is not a regular transaction directory"
                 )
-            manifest = _load_manifest(tx_dir)
+            manifest = _load_manifest(tx_dir, policy)
             if (
                 manifest.get("operation_id") != result.operation_id
+                or manifest.get("request_sha256") != request_sha256
                 or manifest.get("raw_plain_sha256") != _sha(raw_plain)
                 or manifest.get("normalized_plain_sha256") != _sha(normalized_plain)
             ):
@@ -474,6 +544,7 @@ def write_eligibility_artifacts(
             committed_manifest: dict[str, object] = {
                 "schema_version": 2,
                 "operation_id": result.operation_id,
+                "request_sha256": request_sha256,
                 "boundary_id": policy.boundary_id,
                 "retention_expires_at": expiry,
                 "egress": "none",
@@ -501,18 +572,16 @@ def write_and_verify(
     result: EligibilityResult,
     artifact_dir: Union[str, Path],
     *,
+    request: EligibilityRequest,
     policy: PracticeArtifactPolicy,
-    member_id: Optional[str] = None,
-    payer: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> tuple[EligibilityArtifact, list[EffectVerdict]]:
     root = Path(artifact_dir)
     artifact = write_eligibility_artifacts(
         result,
         root,
+        request=request,
         policy=policy,
-        member_id=member_id,
-        payer=payer,
         env=env,
     )
     # Re-open without following links before consulting the generic verifier.
@@ -521,6 +590,8 @@ def write_and_verify(
     verifier = DocumentHashVerifier(root, glob=f"{TRANSACTIONS_DIR}/tx_*/*")
     before = verifier.capture_pre_state()
     verdicts = [verifier.verify(effect, before) for effect in artifact.effects]
+    if not all_confirmed(verdicts):
+        raise RuntimeError("eligibility artifact effect verification did not confirm")
     return artifact, verdicts
 
 

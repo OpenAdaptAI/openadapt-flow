@@ -30,6 +30,7 @@ if TYPE_CHECKING:  # pragma: no cover
         RetryDisposition,
         StediAccountBoundary,
         StediEligibilityClient,
+        eligibility_request_sha256,
     )
     from openadapt_flow.eligibility.waterfall import (
         EligibilityRoute,
@@ -57,6 +58,7 @@ __all__ = [
     "RouteDecision",
     "StediAccountBoundary",
     "StediEligibilityClient",
+    "eligibility_request_sha256",
     "load_payer_routes",
     "resolve_route",
     "run_waterfall",
@@ -75,6 +77,7 @@ _CLIENT = (
     "RetryDisposition",
     "StediAccountBoundary",
     "StediEligibilityClient",
+    "eligibility_request_sha256",
 )
 _WATERFALL = (
     "EligibilityRoute",

@@ -136,6 +136,11 @@ def test_request_shape_and_phi_safe_repr():
     }
 
 
+def test_date_of_service_is_required_for_a_deterministic_answer():
+    with pytest.raises(ValueError, match="date_of_service"):
+        dental_request(date_of_service=None)
+
+
 def test_client_uses_current_bare_authorization_header():
     seen = {}
 

@@ -56,6 +56,7 @@ def request(operation_id="artifact-check-1") -> EligibilityRequest:
         provider_organization="One",
         member_id="U3141592653",
         service_type_codes=["35"],
+        date_of_service="20260721",
         benefit_selection=BenefitSelection(network_code="Y", coverage_level_code="IND"),
     )
 
@@ -90,9 +91,8 @@ def test_raw_and_normalized_records_promote_together_and_verify(tmp_path):
     artifact, verdicts = write_and_verify(
         active_result(),
         tmp_path,
+        request=request(),
         policy=volume_policy(),
-        member_id="U3141592653",
-        payer="Cigna Dental",
     )
     assert artifact.created
     assert len(verdicts) == 4
@@ -112,12 +112,19 @@ def test_raw_and_normalized_records_promote_together_and_verify(tmp_path):
 
 
 def test_csv_is_derived_and_formula_neutralized(tmp_path):
+    bound_request = request().model_copy(update={"member_id": '=HYPERLINK("bad")'})
+    response = json.loads(json.dumps(ACTIVE))
+    response["payer"]["name"] = "+malicious"
+    result = parse_271(
+        bound_request,
+        json.dumps(response).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
     artifact, verdicts = write_and_verify(
-        active_result(),
+        result,
         tmp_path,
+        request=bound_request,
         policy=volume_policy(),
-        member_id='=HYPERLINK("bad")',
-        payer="+malicious",
     )
     assert all_confirmed(verdicts)
     with Path(artifact.results_csv).open(newline="") as handle:
@@ -131,10 +138,10 @@ def test_csv_is_derived_and_formula_neutralized(tmp_path):
 
 def test_same_operation_and_content_is_idempotent(tmp_path):
     first, first_verdicts = write_and_verify(
-        active_result(), tmp_path, policy=volume_policy(), member_id="member"
+        active_result(), tmp_path, request=request(), policy=volume_policy()
     )
     second, second_verdicts = write_and_verify(
-        active_result(), tmp_path, policy=volume_policy(), member_id="member"
+        active_result(), tmp_path, request=request(), policy=volume_policy()
     )
     assert first.created and not second.created
     assert first.transaction_dir == second.transaction_dir
@@ -145,7 +152,7 @@ def test_same_operation_and_content_is_idempotent(tmp_path):
 
 def test_operation_id_reuse_with_changed_content_refuses(tmp_path):
     write_eligibility_artifacts(
-        active_result(), tmp_path, policy=volume_policy(), member_id="member"
+        active_result(), tmp_path, request=request(), policy=volume_policy()
     )
     changed = {**ACTIVE, "controlNumber": "changed"}
     changed_result = parse_271(
@@ -153,13 +160,13 @@ def test_operation_id_reuse_with_changed_content_refuses(tmp_path):
     )
     with pytest.raises(FileExistsError, match="different content"):
         write_eligibility_artifacts(
-            changed_result, tmp_path, policy=volume_policy(), member_id="member"
+            changed_result, tmp_path, request=request(), policy=volume_policy()
         )
 
 
 def test_tampered_storage_is_refuted(tmp_path):
     artifact, verdicts = write_and_verify(
-        active_result(), tmp_path, policy=volume_policy()
+        active_result(), tmp_path, request=request(), policy=volume_policy()
     )
     assert all_confirmed(verdicts)
     raw = Path(artifact.raw_271_file)
@@ -176,8 +183,8 @@ def test_application_encryption_leaks_no_member_or_raw_payload(tmp_path):
     artifact, verdicts = write_and_verify(
         active_result(),
         tmp_path,
+        request=request(),
         policy=encrypted_policy(),
-        member_id="U3141592653",
         env={"ELIGIBILITY_ARTIFACT_KEY": key},
     )
     assert all_confirmed(verdicts)
@@ -194,6 +201,7 @@ def test_application_encryption_requires_real_32_byte_key(tmp_path):
         write_eligibility_artifacts(
             active_result(),
             tmp_path,
+            request=request(),
             policy=encrypted_policy(),
             env={
                 "ELIGIBILITY_ARTIFACT_KEY": base64.urlsafe_b64encode(b"short").decode()
@@ -202,11 +210,14 @@ def test_application_encryption_requires_real_32_byte_key(tmp_path):
 
 
 def test_boundary_policy_mismatch_fails_loud(tmp_path):
-    write_eligibility_artifacts(active_result(), tmp_path, policy=volume_policy())
+    write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=volume_policy()
+    )
     with pytest.raises(ValueError, match="different PHI policy"):
         write_eligibility_artifacts(
             active_result("other-operation"),
             tmp_path,
+            request=request("other-operation"),
             policy=volume_policy("practice-2"),
         )
     assert (tmp_path / BOUNDARY_FILE).exists()
@@ -221,15 +232,22 @@ def test_symlinked_root_and_index_are_refused(tmp_path):
     except OSError:
         pytest.skip("symlinks unavailable")
     with pytest.raises(ValueError, match="not a link"):
-        write_eligibility_artifacts(active_result(), linked, policy=volume_policy())
+        write_eligibility_artifacts(
+            active_result(), linked, request=request(), policy=volume_policy()
+        )
 
     root = tmp_path / "root"
-    write_eligibility_artifacts(active_result(), root, policy=volume_policy())
+    write_eligibility_artifacts(
+        active_result(), root, request=request(), policy=volume_policy()
+    )
     (root / RESULTS_CSV).unlink()
     (root / RESULTS_CSV).symlink_to(outside / "stolen.csv")
     with pytest.raises(ValueError, match="symlinked"):
         write_eligibility_artifacts(
-            active_result("next-operation"), root, policy=volume_policy()
+            active_result("next-operation"),
+            root,
+            request=request("next-operation"),
+            policy=volume_policy(),
         )
 
 
@@ -237,7 +255,9 @@ def test_concurrent_writer_lock_fails_fast(tmp_path):
     tmp_path.chmod(0o700)
     (tmp_path / ".eligibility-write.lock").mkdir()
     with pytest.raises(BlockingIOError, match="holds the lock"):
-        write_eligibility_artifacts(active_result(), tmp_path, policy=volume_policy())
+        write_eligibility_artifacts(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )
 
 
 def test_atomic_promotion_failure_leaves_no_consumable_transaction(
@@ -252,7 +272,9 @@ def test_atomic_promotion_failure_leaves_no_consumable_transaction(
 
     monkeypatch.setattr(os, "rename", fail_stage)
     with pytest.raises(OSError, match="injected"):
-        write_eligibility_artifacts(active_result(), tmp_path, policy=volume_policy())
+        write_eligibility_artifacts(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )
     transactions = tmp_path / "transactions"
     assert transactions.exists()
     assert list(transactions.iterdir()) == []
@@ -264,4 +286,45 @@ def test_transport_outcome_without_raw_response_is_not_promoted(tmp_path):
         update={"raw_271_bytes": None, "raw_271_sha256": None}
     )
     with pytest.raises(ValueError, match="raw response"):
-        write_eligibility_artifacts(result, tmp_path, policy=volume_policy())
+        write_eligibility_artifacts(
+            result, tmp_path, request=request(), policy=volume_policy()
+        )
+
+
+def test_non_answer_and_wrong_subject_binding_are_not_consumable(tmp_path):
+    ambiguous_body = json.loads(json.dumps(ACTIVE))
+    ambiguous_body["benefitsInformation"].append(
+        {"code": "6", "serviceTypeCodes": ["35"]}
+    )
+    ambiguous = parse_271(
+        request(),
+        json.dumps(ambiguous_body).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
+    with pytest.raises(ValueError, match="unambiguous"):
+        write_eligibility_artifacts(
+            ambiguous, tmp_path / "ambiguous", request=request(), policy=volume_policy()
+        )
+
+    wrong_subject = request().model_copy(update={"member_id": "OTHER-MEMBER"})
+    with pytest.raises(ValueError, match="not bound"):
+        write_eligibility_artifacts(
+            active_result(),
+            tmp_path / "wrong-subject",
+            request=wrong_subject,
+            policy=volume_policy(),
+        )
+
+
+def test_tampered_manifest_cannot_escape_transaction_directory(tmp_path):
+    artifact = write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=volume_policy()
+    )
+    manifest_path = Path(artifact.transaction_dir) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["normalized_file"] = "../../../outside.json"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="normalized_file"):
+        write_eligibility_artifacts(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )

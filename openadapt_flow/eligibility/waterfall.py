@@ -9,11 +9,12 @@ Network and its own portal policy.
 from __future__ import annotations
 
 import re
+from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from openadapt_flow.eligibility.client import (
     ApplicationMode,
@@ -49,6 +50,13 @@ class PayerCapability(BaseModel):
     portal_banned: bool = False
     verified_on: Optional[str] = None
     notes: str = ""
+
+    @field_validator("verified_on")
+    @classmethod
+    def _verification_date(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            date.fromisoformat(value)
+        return value
 
     @model_validator(mode="after")
     def _api_binding_complete(self) -> "PayerCapability":
@@ -88,9 +96,20 @@ class PayerRegistry(BaseModel):
 
     @model_validator(mode="after")
     def _unique_names(self) -> "PayerRegistry":
+        if self.default_route is not EligibilityRoute.QUEUE:
+            raise ValueError("unmatched payers must default to the attended queue")
         seen: dict[str, str] = {}
         for key, cap in self.payers.items():
-            for name in (key, cap.key, cap.display_name, *cap.aliases):
+            for name in (
+                key,
+                cap.key,
+                cap.display_name,
+                cap.request_payer_id,
+                cap.stedi_id,
+                *cap.aliases,
+            ):
+                if name is None:
+                    continue
                 normalized = _normalize(name)
                 if not normalized:
                     continue
@@ -109,7 +128,13 @@ class PayerRegistry(BaseModel):
         for cap in self.payers.values():
             if any(
                 _normalize(name) == wanted
-                for name in (cap.key, cap.display_name, *cap.aliases)
+                for name in (
+                    cap.key,
+                    cap.display_name,
+                    cap.request_payer_id,
+                    cap.stedi_id,
+                    *cap.aliases,
+                )
                 if name
             ):
                 return cap

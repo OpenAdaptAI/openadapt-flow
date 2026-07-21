@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import os
+from datetime import datetime, timezone
 
 import pytest
 
@@ -55,6 +56,7 @@ def test_stedi_dental_mock_roundtrip_three_trials(tmp_path, trial):
         provider_npi="1999999984",
         provider_organization="One",
         service_type_codes=["35"],
+        date_of_service=datetime.now(timezone.utc).strftime("%Y%m%d"),
         benefit_selection=BenefitSelection(network_code="Y", coverage_level_code="IND"),
     )
     result = client.check(request)
@@ -73,9 +75,8 @@ def test_stedi_dental_mock_roundtrip_three_trials(tmp_path, trial):
     artifact, verdicts = write_and_verify(
         result,
         tmp_path,
+        request=request,
         policy=policy,
-        member_id="U3141592653",
-        payer="Cigna Dental test catalog",
         env={"LIVE_TEST_ARTIFACT_KEY": artifact_key},
     )
     assert all_confirmed(verdicts), [v.reason for v in verdicts]

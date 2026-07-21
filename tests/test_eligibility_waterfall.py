@@ -37,6 +37,7 @@ def request_for(payer_id: str = "62308", services=None) -> EligibilityRequest:
         provider_organization="One",
         member_id="123",
         service_type_codes=services or ["35"],
+        date_of_service="20260721",
     )
 
 
@@ -46,7 +47,7 @@ def api_capability(**overrides) -> PayerCapability:
         display_name="Cigna Dental",
         route=EligibilityRoute.API,
         request_payer_id="62308",
-        stedi_id="SX071",
+        stedi_id="HGJLR",
         application_mode=ApplicationMode.TEST,
         practice_account_id="practice-1",
         supported_service_type_codes=["35"],
@@ -89,7 +90,7 @@ def test_shipped_registry_is_a_complete_synthetic_test_binding():
     cap = loaded.payers["cigna_dental_mock"]
     assert cap.application_mode is ApplicationMode.TEST
     assert cap.request_payer_id == "62308"
-    assert cap.stedi_id == "SX071"
+    assert cap.stedi_id == "HGJLR"
     assert cap.supported_service_type_codes == ["35"]
     assert len(cap.payer_record_sha256 or "") == 64
 
@@ -103,6 +104,19 @@ def test_unknown_payer_queues_instead_of_guessing_a_portal():
     decision = resolve_route("Unknown Dental", registry())
     assert decision.route is EligibilityRoute.QUEUE
     assert "no exact reviewed route" in decision.reason
+
+
+def test_exact_request_and_stedi_ids_resolve_the_same_reviewed_route():
+    exact = resolve_route("62308", registry())
+    stable = resolve_route("HGJLR", registry())
+    assert exact.route is EligibilityRoute.API
+    assert stable.route is EligibilityRoute.API
+    assert exact.capability == stable.capability
+
+
+def test_non_queue_default_is_refused():
+    with pytest.raises(ValueError, match="attended queue"):
+        PayerRegistry(default_route=EligibilityRoute.PORTAL)
 
 
 def test_alias_collision_fails_loud():

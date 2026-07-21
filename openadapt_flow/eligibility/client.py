@@ -164,7 +164,7 @@ class EligibilityRequest(BaseModel):
     provider_first_name: Optional[str] = None
     provider_last_name: Optional[str] = None
     service_type_codes: list[str] = Field(default_factory=lambda: [SERVICE_TYPE_DENTAL])
-    date_of_service: Optional[str] = None
+    date_of_service: str
     benefit_selection: BenefitSelection = Field(default_factory=BenefitSelection)
 
     @field_validator("operation_id")
@@ -230,8 +230,7 @@ class EligibilityRequest(BaseModel):
             if value:
                 subscriber[key] = value
         encounter: dict[str, Any] = {"serviceTypeCodes": list(self.service_type_codes)}
-        if self.date_of_service:
-            encounter["dateOfService"] = self.date_of_service
+        encounter["dateOfService"] = self.date_of_service
         return {
             "tradingPartnerServiceId": self.payer_id,
             "provider": provider,
@@ -292,6 +291,7 @@ class EligibilityResult(BaseModel):
     checked_at: str = ""
     source: str = "stedi"
     attempt_count: int = 1
+    request_sha256: str
 
     @property
     def is_answer(self) -> bool:
@@ -315,6 +315,14 @@ class EligibilityResult(BaseModel):
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def eligibility_request_sha256(request: EligibilityRequest) -> str:
+    """Digest the exact JSON request body without persisting its PHI."""
+    payload = json.dumps(
+        request.to_stedi_body(), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _benefit_entries(body: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -542,6 +550,7 @@ def _base_result(request: EligibilityRequest, body_bytes: bytes) -> dict[str, An
         "raw_271_sha256": hashlib.sha256(body_bytes).hexdigest(),
         "raw_271_bytes": body_bytes,
         "checked_at": _utcnow(),
+        "request_sha256": eligibility_request_sha256(request),
     }
 
 
@@ -808,6 +817,7 @@ def parse_271(
         raw_271_sha256=hashlib.sha256(body_bytes).hexdigest(),
         raw_271_bytes=body_bytes,
         checked_at=_utcnow(),
+        request_sha256=eligibility_request_sha256(request),
         service_type_codes=list(request.service_type_codes),
         copay=selections["copay"],
         coinsurance_percent=selections["coinsurance_percent"],
@@ -912,6 +922,7 @@ class StediEligibilityClient:
             ),
             reason=reason,
             checked_at=_utcnow(),
+            request_sha256=eligibility_request_sha256(request),
         )
 
     def _check_once(self, request: EligibilityRequest) -> EligibilityResult:

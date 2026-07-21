@@ -35,6 +35,11 @@ records:
 This keeps the route mechanism open while keeping productionized payer recipes
 inside the deployment boundary.
 
+The committed synthetic Cigna binding was rechecked against Stedi's public
+Payer Network on 2026-07-21: primary payer ID `62308`, current Stedi payer ID
+`HGJLR` (`SX071` is an alias), and dental eligibility support. Both exact IDs
+resolve to the same reviewed route; fuzzy payer search never selects a route.
+
 ## Parsing without “first match” shortcuts
 
 `parse_271` retains every qualified patient-responsibility entry and populates
@@ -84,6 +89,10 @@ requires:
 - a retention period and `egress: none`;
 - symlink-safe, exclusive writes and a bounded single-writer lock.
 
+Only an exact, unambiguous answer can enter the consumable result store. The
+artifact writer requires the original `EligibilityRequest`, verifies its
+canonical SHA-256 against the result, and derives member/date/benefit-selector
+fields from that request rather than accepting caller-supplied identity labels.
 The raw response and normalized practice record are staged, hashed, fsynced,
 and promoted together as one transaction directory. The CSV is a derived index,
 not the source of truth. Repeating the same `operation_id` and content is

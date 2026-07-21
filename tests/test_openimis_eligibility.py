@@ -18,7 +18,14 @@ from pathlib import Path
 import pytest
 
 from openadapt_flow.deployment import build_effect_verifier, load_deployment
-from openadapt_flow.runtime.effects import EffectKind, SqlRecordVerifier
+from openadapt_flow.ir import StructuralLocator
+from openadapt_flow.runtime.effects import (
+    EffectKind,
+    EffectState,
+    SqlRecordVerifier,
+    Verdict,
+)
+from openadapt_flow.runtime.effects._common import judge_records
 from openadapt_flow.runtime.effects.sql import assert_read_only_sql
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,11 +34,44 @@ for entry in (REPO_ROOT / "benchmark", REPO_ROOT / "scripts"):
         sys.path.insert(0, str(entry))
 
 from openimis_claims import fixture as oi  # noqa: E402
-from openimis_eligibility_demo import eligibility_effects  # noqa: E402
+from openimis_eligibility_demo import (  # noqa: E402
+    OpenIMISEligibilityBackend,
+    eligibility_effects,
+)
 
 DEPLOYMENT_YAML = (
     REPO_ROOT / "benchmark" / "openimis_claims" / "deployment.eligibility.yaml"
 )
+
+
+def test_browser_adapter_records_stable_structural_and_run_bound_identity() -> None:
+    class Page:
+        viewport_size = {"width": 1280, "height": 800}
+
+        @staticmethod
+        def evaluate(script: str, point: list[int]) -> object:
+            assert point == [320, 240]
+            if "target_kind" in script:
+                return (
+                    '{"target_kind":"eligibility_service",'
+                    '"target_id":"service_code","insurance_no":"999000003"}'
+                )
+            return {
+                "selector": 'input[placeholder^="Search Service"]',
+                "role": "textbox",
+                "name": "Search Service",
+            }
+
+    backend = OpenIMISEligibilityBackend(Page())  # type: ignore[arg-type]
+    locator = backend.structural_locator_at(320, 240)
+    assert locator == StructuralLocator(
+        selector='input[placeholder^="Search Service"]',
+        role="textbox",
+        name="Search Service",
+    )
+    identity = backend.structured_text_at(320, 240)
+    assert identity is not None
+    assert '"insurance_no":"999000003"' in identity
 
 
 # -- the committed deployment YAML -------------------------------------------
@@ -45,8 +85,10 @@ def test_deployment_yaml_wires_the_sql_kit() -> None:
     assert config.effects.sql_connect_args["user"] == oi.ORACLE_ROLE
     assert config.effects.sql_connect_args["port"] == oi.DB_PORT
     assert config.effects.sql_connect_args["host"] == "127.0.0.1"
-    # Run-parameter binding is explicit: the probe follows the run's insuree.
+    # Run-parameter binding is explicit: the verifier follows the full question.
     assert config.effects.sql_query_params["insurance_no"].param == "insurance_no"
+    assert config.effects.sql_query_params["service_code"].param == "service_code"
+    assert config.effects.sql_query_params["as_of_date"].param == "as_of_date"
 
 
 def test_deployment_query_matches_the_fixture_oracle() -> None:
@@ -59,6 +101,25 @@ def test_deployment_query_matches_the_fixture_oracle() -> None:
 def test_deployment_query_is_read_only() -> None:
     config = load_deployment(DEPLOYMENT_YAML)
     assert_read_only_sql(config.effects.sql_query)
+
+
+def test_deployment_query_proves_the_declared_service_and_date_window() -> None:
+    """The fixture asks a specific benefit question, not merely "row exists"."""
+    query = load_deployment(DEPLOYMENT_YAML).effects.sql_query
+    for required in (
+        'JOIN "tblProductServices"',
+        'JOIN "tblServices"',
+        's."ServCode" = %(service_code)s',
+        'p."PolicyStatus" = 2',
+        'p."EffectiveDate" <= CAST(%(as_of_date)s AS date)',
+        'p."ExpiryDate" >= CAST(%(as_of_date)s AS date)',
+        'ip."EffectiveDate" <= CAST(%(as_of_date)s AS date)',
+        'ip."ExpiryDate" >= CAST(%(as_of_date)s AS date)',
+        'CAST(ps."ValidityFrom" AS date)',
+        'CAST(s."ValidityFrom" AS date)',
+    ):
+        assert required in query
+    assert "CURRENT_DATE" not in query, "reference result must not rot with host time"
 
 
 def _stub_psycopg(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,9 +156,20 @@ def test_verifier_builds_with_secret_and_params(
     _stub_psycopg(monkeypatch)
     monkeypatch.setenv(oi.ORACLE_PASSWORD_ENV, "synthetic-test-secret")
     config = load_deployment(DEPLOYMENT_YAML)
-    verifier = build_effect_verifier(config.effects, {"insurance_no": oi.LAPSED_CHF})
+    verifier = build_effect_verifier(
+        config.effects,
+        {
+            "insurance_no": oi.LAPSED_CHF,
+            "service_code": oi.ELIGIBILITY_SERVICE_CODE,
+            "as_of_date": oi.ELIGIBILITY_AS_OF_DATE,
+        },
+    )
     assert isinstance(verifier, SqlRecordVerifier)
-    assert verifier.query_params == {"insurance_no": oi.LAPSED_CHF}
+    assert verifier.query_params == {
+        "insurance_no": oi.LAPSED_CHF,
+        "service_code": oi.ELIGIBILITY_SERVICE_CODE,
+        "as_of_date": oi.ELIGIBILITY_AS_OF_DATE,
+    }
 
 
 def test_verifier_refuses_an_unbound_run_param(
@@ -115,35 +187,108 @@ def test_verifier_refuses_an_unbound_run_param(
 
 def test_eligibility_effects_bind_the_run_param() -> None:
     effects = eligibility_effects()
-    assert [e.kind for e in effects] == [
-        EffectKind.RECORD_WRITTEN,
-        EffectKind.FIELD_EQUALS,
-    ]
-    for effect in effects:
-        assert effect.match["chf_id"].param == "insurance_no"
-    exactly_one, coverage_active = effects
-    assert exactly_one.expected_count == 1
-    assert coverage_active.field == "coverage"
-    assert str(coverage_active.value) == "Active"
+    assert [e.kind for e in effects] == [EffectKind.FIELD_EQUALS]
+    outcome = effects[0]
+    assert outcome.match["chf_id"].param == "insurance_no"
+    assert outcome.match["service_code"].param == "service_code"
+    assert outcome.match["as_of_date"].param == "as_of_date"
+    assert outcome.field == "eligibility"
+    assert str(outcome.value) == "Eligible"
 
 
-def test_eligibility_effects_resolve_to_the_checked_policyholder() -> None:
-    params = {"insurance_no": oi.SECOND_ACTIVE_CHF}
+def test_eligibility_effects_resolve_to_the_complete_question() -> None:
+    params = {
+        "insurance_no": oi.SECOND_ACTIVE_CHF,
+        "service_code": oi.ELIGIBILITY_SERVICE_CODE,
+        "as_of_date": oi.ELIGIBILITY_AS_OF_DATE,
+    }
     for effect in eligibility_effects():
         resolved = effect.resolve(params)
         assert str(resolved.match["chf_id"]) == oi.SECOND_ACTIVE_CHF
+        assert str(resolved.match["service_code"]) == oi.ELIGIBILITY_SERVICE_CODE
+        assert str(resolved.match["as_of_date"]) == oi.ELIGIBILITY_AS_OF_DATE
+
+
+def _outcome_row(chf: str, eligibility: str = "Eligible") -> dict[str, str]:
+    return {
+        "chf_id": chf,
+        "service_code": oi.ELIGIBILITY_SERVICE_CODE,
+        "as_of_date": oi.ELIGIBILITY_AS_OF_DATE,
+        "eligibility": eligibility,
+    }
+
+
+def _judge(chf: str, current: list[dict[str, str]], *, before=None):
+    effect = eligibility_effects()[0].resolve(
+        {
+            "insurance_no": chf,
+            "service_code": oi.ELIGIBILITY_SERVICE_CODE,
+            "as_of_date": oi.ELIGIBILITY_AS_OF_DATE,
+        }
+    )
+    baseline = current if before is None else before
+    return judge_records(
+        effect,
+        EffectState(substrate="sql", reachable=True, records=baseline),
+        current,
+        substrate="sql",
+    )
+
+
+def test_preexisting_eligible_row_is_a_confirmed_read_outcome_not_a_mutation() -> None:
+    """Eligibility is expected to pre-exist; no fabricated write is required."""
+    existing = [_outcome_row(oi.SECOND_ACTIVE_CHF)]
+    verdict = _judge(oi.SECOND_ACTIVE_CHF, existing, before=existing)
+    assert verdict.verdict is Verdict.CONFIRMED
+    assert verdict.kind is EffectKind.FIELD_EQUALS
+
+
+@pytest.mark.parametrize(
+    ("chf", "records"),
+    [
+        (oi.LAPSED_CHF, [_outcome_row(oi.LAPSED_CHF, "Ineligible")]),
+        (oi.FUTURE_CHF, [_outcome_row(oi.FUTURE_CHF, "Ineligible")]),
+        (
+            oi.SECOND_ACTIVE_CHF,
+            [
+                _outcome_row(oi.SECOND_ACTIVE_CHF),
+                _outcome_row(oi.SECOND_ACTIVE_CHF),
+            ],
+        ),
+        (oi.SECOND_ACTIVE_CHF, []),
+    ],
+    ids=["expired", "not-yet-effective", "duplicate", "no-row"],
+)
+def test_eligibility_outcome_refuses_every_negative_case(
+    chf: str, records: list[dict[str, str]]
+) -> None:
+    assert _judge(chf, records).verdict is Verdict.REFUTED
 
 
 # -- the fixture's eligibility scenario --------------------------------------
 
 
 def test_scenario_constants_are_synthetic_and_distinct() -> None:
-    chfs = {oi.POLICYHOLDER_CHF, oi.LAPSED_CHF, oi.SECOND_ACTIVE_CHF}
-    assert len(chfs) == 3
+    chfs = {oi.POLICYHOLDER_CHF, oi.LAPSED_CHF, oi.SECOND_ACTIVE_CHF, oi.FUTURE_CHF}
+    assert len(chfs) == 4
     for chf in chfs:
         assert chf.startswith("999"), "synthetic 999* insuree-number range"
     assert oi.POLICY_STATUS_ACTIVE == 2
     assert oi.POLICY_STATUS_EXPIRED == 8
+
+
+def test_fixture_supports_isolated_project_ports_and_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENIMIS_COMPOSE_PROJECT", "openadapt-pr145-isolated")
+    monkeypatch.setenv("OPENIMIS_DB_PORT", "9442")
+    monkeypatch.setenv("OPENIMIS_STATE_DIR", str(tmp_path / "state"))
+    fixture = oi.OpenIMISFixture(http_port=9441)
+    assert fixture.project_name == "openadapt-pr145-isolated"
+    assert fixture.http_port == 9441
+    assert fixture.db_port == 9442
+    assert fixture.state_dir == tmp_path / "state"
+    assert fixture._compose_env()["OPENIMIS_DB_PORT"] == "9442"
 
 
 def test_policyholder_sql_template_refuses_suspicious_values() -> None:
@@ -166,3 +311,19 @@ def test_coverage_oracle_refuses_suspicious_insuree_numbers() -> None:
     fixture = oi.OpenIMISFixture.__new__(oi.OpenIMISFixture)
     with pytest.raises(oi.FixtureError, match="suspicious"):
         fixture.coverage("1; DROP TABLE x")
+
+
+@pytest.mark.parametrize(
+    ("service", "as_of"),
+    [("A1; DROP TABLE x", oi.ELIGIBILITY_AS_OF_DATE), ("A1", "07/18/2026")],
+)
+def test_coverage_oracle_refuses_suspicious_service_or_date(
+    service: str, as_of: str
+) -> None:
+    fixture = oi.OpenIMISFixture.__new__(oi.OpenIMISFixture)
+    with pytest.raises(oi.FixtureError):
+        fixture.coverage(
+            oi.POLICYHOLDER_CHF,
+            service_code=service,
+            as_of_date=as_of,
+        )

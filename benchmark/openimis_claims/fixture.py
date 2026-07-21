@@ -15,8 +15,8 @@ It is a DEMO/reference environment, not a benchmark:
   and pixels never establish success), plus an exact one-row cardinality check;
 * every value is synthetic. The upstream openIMIS demo dataset is a fictional
   fixture (invented regions, facilities, insurees, tariffs), and the bootstrap
-  adds one more synthetic policyholder with in-force coverage so the recorded
-  claim shows an active policy.
+  adds synthetic policyholders with active, expired, and future-dated policies
+  so both confirmed and refused outcomes can be exercised.
 
 Mutable state (generated secrets) is confined to ``state_dir``. All published
 ports bind to loopback only.
@@ -24,7 +24,9 @@ ports bind to loopback only.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import os
 import secrets
 import subprocess
 import time
@@ -49,22 +51,31 @@ POLICYHOLDER_NAME = "Avery Doe"
 
 # Synthetic policyholders created by ``bootstrap_eligibility()`` for the
 # coverage / eligibility-check reference workflow (SYNTHETIC DATA ONLY):
-# one policyholder whose coverage LAPSED (the halt-on-anomaly scenario) and a
-# second in-force policyholder (so replay can parameterize onto a
-# policyholder the demonstration never saw).
+# one policyholder whose coverage LAPSED (the halt-on-anomaly scenario), a
+# second active policyholder (so replay can parameterize onto a policyholder
+# the demonstration never saw), and one not-yet-effective policyholder.
 LAPSED_CHF = "999000002"
 LAPSED_NAME = "Jordan Roe"
 LAPSED_EXPIRY = "2026-05-31"  # in the past -> coverage lapsed
 SECOND_ACTIVE_CHF = "999000003"
 SECOND_ACTIVE_NAME = "Sam Poe"
+FUTURE_CHF = "999000004"
+FUTURE_NAME = "Taylor Foe"
+
+# The reference run asks one explicit, reproducible eligibility question:
+# whether General Consultation (A1) is covered on 2026-07-21.  Keeping the
+# as-of date in the governed run parameters (rather than consulting the host
+# clock) prevents the committed fixture from changing meaning as time passes.
+ELIGIBILITY_SERVICE_CODE = "A1"
+ELIGIBILITY_AS_OF_DATE = "2026-07-21"
 
 # openIMIS tblPolicy.PolicyStatus codes (upstream schema).
 POLICY_STATUS_ACTIVE = 2
 POLICY_STATUS_EXPIRED = 8
 
-# Read-only PostgreSQL role the SQL effect verifier connects as
+# Read-only PostgreSQL role the SQL outcome verifier connects as
 # (deployment.eligibility.yaml). Created by ``bootstrap_eligibility()`` with
-# SELECT on exactly the three policy-lookup tables and
+# SELECT on exactly the five policy/product/service lookup tables and
 # default_transaction_read_only=on; its generated password lives in the
 # ignored ``out/state/secrets.json`` and is surfaced to the verifier ONLY via
 # the OPENIMIS_ORACLE_PASSWORD environment variable (kit convention: secrets
@@ -73,27 +84,49 @@ ORACLE_ROLE = "oa_eligibility_oracle"
 ORACLE_PASSWORD_ENV = "OPENIMIS_ORACLE_PASSWORD"
 DB_PORT = 9402
 
-# The ONE read-only SELECT both the SQL effect verifier
+# The ONE read-only SELECT both the SQL outcome verifier
 # (deployment.eligibility.yaml) and the fixture's own coverage oracle run:
-# resolve the checked policyholder's in-force policy row and derive
-# ``coverage`` (Active only when the policy is in status Active AND unexpired
-# — the same truth the enquiry UI renders, read from the system of record
-# instead of the screen). Kept here so the committed deployment YAML and the
-# fixture can never drift apart (tests assert they match).
+# resolve the checked policyholder's UNIQUE policy/product/service row and
+# derive ``eligibility`` for the explicitly requested service and as-of date.
+# A positive result requires an active policy whose effective/expiry dates
+# contain the as-of date and whose product includes the requested, current
+# service.  Kept here so the committed deployment YAML and the fixture can
+# never drift apart (tests assert they match).
 ELIGIBILITY_ORACLE_SQL = """\
 SELECT i."CHFID" AS chf_id,
        i."LastName" AS last_name,
        i."OtherNames" AS other_names,
+       s."ServCode" AS service_code,
+       CAST(CAST(%(as_of_date)s AS date) AS text) AS as_of_date,
        CAST(p."PolicyStatus" AS text) AS policy_status,
+       CAST(p."EffectiveDate" AS text) AS effective_date,
        CAST(p."ExpiryDate" AS text) AS expiry_date,
-       CASE WHEN p."PolicyStatus" = 2 AND p."ExpiryDate" >= CURRENT_DATE
-            THEN 'Active' ELSE 'Inactive' END AS coverage
+       CASE WHEN p."PolicyStatus" = 2
+                  AND p."EffectiveDate" IS NOT NULL
+                  AND p."EffectiveDate" <= CAST(%(as_of_date)s AS date)
+                  AND p."ExpiryDate" IS NOT NULL
+                  AND p."ExpiryDate" >= CAST(%(as_of_date)s AS date)
+                  AND ip."EffectiveDate" IS NOT NULL
+                  AND ip."EffectiveDate" <= CAST(%(as_of_date)s AS date)
+                  AND ip."ExpiryDate" IS NOT NULL
+                  AND ip."ExpiryDate" >= CAST(%(as_of_date)s AS date)
+                  AND CAST(ps."ValidityFrom" AS date)
+                      <= CAST(%(as_of_date)s AS date)
+                  AND CAST(s."ValidityFrom" AS date)
+                      <= CAST(%(as_of_date)s AS date)
+            THEN 'Eligible' ELSE 'Ineligible' END AS eligibility
 FROM "tblInsuree" i
 JOIN "tblInsureePolicy" ip ON ip."InsureeID" = i."InsureeID"
 JOIN "tblPolicy" p ON p."PolicyID" = ip."PolicyId"
+JOIN "tblProductServices" ps ON ps."ProdID" = p."ProdID"
+JOIN "tblServices" s ON s."ServiceID" = ps."ServiceID"
 WHERE i."CHFID" = %(insurance_no)s
+  AND s."ServCode" = %(service_code)s
   AND i."ValidityTo" IS NULL
+  AND ip."ValidityTo" IS NULL
   AND p."ValidityTo" IS NULL
+  AND ps."ValidityTo" IS NULL
+  AND s."ValidityTo" IS NULL
 """
 
 # Demonstrated claim scenario (all values exist in the upstream synthetic
@@ -126,9 +159,28 @@ def _require_pinned(image: str, name: str) -> str:
 class OpenIMISFixture:
     """Compose orchestration + synthetic bootstrap + SQL claim oracle."""
 
-    def __init__(self, state_dir: Path | None = None, http_port: int = HTTP_PORT):
+    def __init__(
+        self,
+        state_dir: Path | None = None,
+        http_port: int = HTTP_PORT,
+        db_port: int | None = None,
+        project_name: str | None = None,
+    ):
         self.http_port = http_port
-        self.state_dir = state_dir or (HERE / "out" / "state")
+        self.db_port = int(
+            db_port
+            if db_port is not None
+            else os.environ.get("OPENIMIS_DB_PORT", DB_PORT)
+        )
+        self.project_name = project_name or os.environ.get(
+            "OPENIMIS_COMPOSE_PROJECT", COMPOSE_PROJECT
+        )
+        configured_state = os.environ.get("OPENIMIS_STATE_DIR")
+        self.state_dir = state_dir or (
+            Path(configured_state) if configured_state else HERE / "out" / "state"
+        )
+        if not (1 <= self.http_port <= 65535 and 1 <= self.db_port <= 65535):
+            raise FixtureError("openIMIS fixture ports must be between 1 and 65535")
         self.lock = json.loads((HERE / "environment.lock.json").read_text())
         self.images = {
             name: _require_pinned(image, name)
@@ -181,6 +233,7 @@ class OpenIMISFixture:
             "OPENIMIS_REDIS_PASSWORD": creds["redis_password"],
             "OPENIMIS_SECRET_KEY": creds["secret_key"],
             "OPENIMIS_HTTP_PORT": str(self.http_port),
+            "OPENIMIS_DB_PORT": str(self.db_port),
         }
 
     def _compose(self, *args: str, input_text: str | None = None) -> str:
@@ -190,7 +243,7 @@ class OpenIMISFixture:
             "docker",
             "compose",
             "--project-name",
-            COMPOSE_PROJECT,
+            self.project_name,
             "-f",
             str(HERE / "compose.yml"),
             *args,
@@ -439,9 +492,9 @@ COMMIT;
     def _bootstrap_oracle_role(self) -> None:
         """Create/refresh the read-only SQL-oracle role (idempotent).
 
-        The role is the REAL read-only enforcement behind the SQL effect
+        The role is the REAL read-only enforcement behind the SQL outcome
         verifier (the kit's statement filter is only defense in depth): LOGIN
-        with SELECT on exactly the three policy-lookup tables, plus
+        with SELECT on exactly the five policy/product/service tables, plus
         ``default_transaction_read_only=on``.
         """
         password = self.oracle_password().replace("'", "''")
@@ -458,21 +511,23 @@ COMMIT;
             f'ALTER ROLE "{ORACLE_ROLE}" SET default_transaction_read_only = on;\n'
             f'GRANT CONNECT ON DATABASE "IMIS" TO "{ORACLE_ROLE}";\n'
             f'GRANT USAGE ON SCHEMA public TO "{ORACLE_ROLE}";\n'
-            f'GRANT SELECT ON "tblInsuree", "tblPolicy", "tblInsureePolicy" '
+            f'GRANT SELECT ON "tblInsuree", "tblPolicy", "tblInsureePolicy", '
+            f'"tblProductServices", "tblServices" '
             f'TO "{ORACLE_ROLE}";'
         )
 
     def bootstrap_eligibility(self) -> dict[str, dict[str, str]]:
         """Provision the coverage-check scenario (idempotent, synthetic only).
 
-        Ensures three synthetic policyholders exist -- the claims demo's
-        in-force policyholder (Avery Doe), a LAPSED policyholder (Jordan Roe,
-        policy expired ``LAPSED_EXPIRY``, status Expired) for the halt-on-anomaly
-        scenario, and a second in-force policyholder (Sam Poe) so replay can
-        parameterize onto a policyholder the demonstration never saw -- and
-        creates the read-only SQL-oracle role the effect verifier connects as.
+        Ensures four synthetic policyholders exist -- the claims demo's
+        A1/date-eligible policyholder (Avery Doe), an expired policyholder
+        (Jordan Roe, expired ``LAPSED_EXPIRY``) for the halt-on-anomaly
+        scenario, a second A1/date-eligible policyholder (Sam Poe) so replay
+        can parameterize onto a policyholder the demonstration never saw, and
+        a not-yet-effective policyholder (Taylor Foe) for the negative contract
+        -- and creates the read-only SQL-oracle role the verifier connects as.
         """
-        self.bootstrap()  # Avery Doe, in force (idempotent)
+        self.bootstrap()  # Avery Doe, eligible on the declared date (idempotent)
         self._bootstrap_policyholder(
             chf=LAPSED_CHF,
             last="Roe",
@@ -495,27 +550,50 @@ COMMIT;
             expiry="2027-06-30",
             status=POLICY_STATUS_ACTIVE,
         )
+        self._bootstrap_policyholder(
+            chf=FUTURE_CHF,
+            last="Foe",
+            other="Taylor",
+            dob="1988-11-12",
+            gender="F",
+            address="18 Synthetic Lane",
+            enroll="2026-08-01",
+            expiry="2027-07-31",
+            status=POLICY_STATUS_ACTIVE,
+        )
         self._bootstrap_oracle_role()
         holders = {
             chf: self.coverage(chf)
-            for chf in (POLICYHOLDER_CHF, LAPSED_CHF, SECOND_ACTIVE_CHF)
+            for chf in (
+                POLICYHOLDER_CHF,
+                LAPSED_CHF,
+                SECOND_ACTIVE_CHF,
+                FUTURE_CHF,
+            )
         }
         expected = {
-            POLICYHOLDER_CHF: "Active",
-            LAPSED_CHF: "Inactive",
-            SECOND_ACTIVE_CHF: "Active",
+            POLICYHOLDER_CHF: "Eligible",
+            LAPSED_CHF: "Ineligible",
+            SECOND_ACTIVE_CHF: "Eligible",
+            FUTURE_CHF: "Ineligible",
         }
         for chf, want in expected.items():
-            got = holders[chf]["coverage"]
+            got = holders[chf]["eligibility"]
             if got != want:
                 raise FixtureError(
-                    f"eligibility bootstrap: {chf} coverage is {got!r}, "
+                    f"eligibility bootstrap: {chf} outcome is {got!r}, "
                     f"expected {want!r}"
                 )
         return holders
 
-    def coverage(self, chf: str) -> dict[str, str]:
-        """The coverage oracle row for one policyholder (read-only).
+    def coverage(
+        self,
+        chf: str,
+        *,
+        service_code: str = ELIGIBILITY_SERVICE_CODE,
+        as_of_date: str = ELIGIBILITY_AS_OF_DATE,
+    ) -> dict[str, str]:
+        """The eligibility outcome row for one policyholder (read-only).
 
         Runs the SAME ``ELIGIBILITY_ORACLE_SQL`` the deployed effect verifier
         uses, so the fixture's ground truth and the verifier's probe can never
@@ -523,23 +601,53 @@ COMMIT;
         """
         if not chf.isdigit():
             raise FixtureError(f"refusing suspicious insuree number {chf!r}")
-        sql = ELIGIBILITY_ORACLE_SQL.replace("%(insurance_no)s", f"'{chf}'")
+        if not service_code.replace("-", "").isalnum():
+            raise FixtureError(f"refusing suspicious service code {service_code!r}")
+        try:
+            parsed_date = dt.date.fromisoformat(as_of_date)
+        except ValueError as exc:
+            raise FixtureError(
+                f"invalid eligibility as-of date {as_of_date!r}"
+            ) from exc
+        if parsed_date.isoformat() != as_of_date:
+            raise FixtureError(
+                f"eligibility as-of date is not canonical: {as_of_date!r}"
+            )
+        sql = ELIGIBILITY_ORACLE_SQL
+        sql = sql.replace("%(insurance_no)s", f"'{chf}'")
+        sql = sql.replace("%(service_code)s", f"'{service_code}'")
+        sql = sql.replace("%(as_of_date)s", f"'{as_of_date}'")
         out = self._psql(sql + ";").strip()
         if not out:
             raise FixtureError(
-                f"no in-force policy row for insuree {chf!r}; "
-                "run bootstrap_eligibility first"
+                f"no policy/service row for insuree {chf!r}, service "
+                f"{service_code!r}; run bootstrap_eligibility first"
             )
         rows = out.splitlines()
         if len(rows) > 1:
-            raise FixtureError(f"expected one policy row for {chf!r}, got {len(rows)}")
-        chf_id, last, other, status, expiry, coverage = rows[0].split("|")
+            raise FixtureError(
+                f"expected one policy/service row for {chf!r}, got {len(rows)}"
+            )
+        (
+            chf_id,
+            last,
+            other,
+            observed_service,
+            observed_as_of,
+            status,
+            effective,
+            expiry,
+            eligibility,
+        ) = rows[0].split("|")
         return {
             "chf_id": chf_id,
             "name": f"{other} {last}",
+            "service_code": observed_service,
+            "as_of_date": observed_as_of,
             "policy_status": status,
+            "policy_effective": effective,
             "policy_expiry": expiry,
-            "coverage": coverage,
+            "eligibility": eligibility,
         }
 
     # -- claim oracle --------------------------------------------------------

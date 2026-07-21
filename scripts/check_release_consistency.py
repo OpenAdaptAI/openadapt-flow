@@ -817,13 +817,16 @@ FORBIDDEN_SDIST_PATHS = frozenset(
     {
         "THIRD_PARTY_NOTICES.md",
         "scripts/openimis_claims_demo.py",
+        "scripts/openimis_eligibility_demo.py",
         "tests/test_openimis_claims_fixture.py",
+        "tests/test_openimis_eligibility.py",
     }
 )
 FORBIDDEN_SDIST_PREFIXES = (
     "benchmark/openimis_claims/",
     "benchmark/frappe_lending/agent-arm/",
     "benchmark/openemr_local/agent-arm/",
+    "docs/showcase-openimis/",
 )
 
 FORBIDDEN_PUBLIC_SOURCE_PATHS = frozenset(
@@ -865,8 +868,6 @@ def validate_public_source_policy(root: Path = ROOT) -> None:
             "per-system driver recipes that belong only in the private "
             f"OpenAdaptAI/openadapt-corpus repo: {sorted(hits)}"
         )
-
-
 def _expected_license_bytes(license_file: Path | None = None) -> bytes:
     path = license_file or (ROOT / "LICENSE")
     try:

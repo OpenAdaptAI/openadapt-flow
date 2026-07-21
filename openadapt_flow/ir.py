@@ -202,6 +202,18 @@ class IdentityTemplate(BaseModel):
     structured: Optional[str] = Field(
         default=None, description="salted hash of the structured identity string"
     )
+    structured_params: list[str] = Field(
+        default_factory=list,
+        # Keep pre-feature sealed bundles byte-semantically compatible: an
+        # absent/empty parameter list carries no meaning and must not move the
+        # canonical bundle digest. Non-empty lists remain serialized and sealed.
+        exclude_if=lambda value: not value,
+        description=(
+            "Workflow parameters embedded in the structured identity. Their "
+            "demonstrated values are replaced by fixed sentinels before "
+            "hashing; replay substitutes the run's value before exact compare."
+        ),
+    )
     param_token_indices: dict[str, list[int]] = Field(default_factory=dict)
     rests_on_confusable_identifier: bool = False
 

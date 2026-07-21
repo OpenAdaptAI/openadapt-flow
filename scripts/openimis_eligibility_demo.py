@@ -4,35 +4,41 @@ Drives the INSURANCE reference environment in ``benchmark/openimis_claims``
 through a front-office **coverage verification**: look up a policyholder by
 insuree number in openIMIS's Insuree Enquiry, confirm the policy panel and a
 service-eligibility answer, and certify the result against the SYSTEM OF
-RECORD -- a read-only SQL effect contract on the policy row itself
+RECORD -- a read-only SQL effect contract over the exact policy/product/service
+rows
 (``docs/EFFECT_KIT.md``), never the pixels.
 
 1. ``up``         start the pinned stack (loopback-only, synthetic demo data)
-2. ``bootstrap``  synthetic policyholders (one in force, one LAPSED, one more
-                  in force) + the read-only SQL-oracle role
+2. ``bootstrap``  synthetic policyholders (two eligible on the declared date,
+                  one expired, one future-dated) + the read-only SQL-oracle role
 3. ``record``     scripted demonstration of the enquiry lookup, captured
-                  through ``Recorder`` (frames + events; replay never uses
-                  selectors)
-4. ``compile``    recording -> bundle, with the coverage effect contracts
-                  bound to the run's ``insurance_no`` parameter
+                  through ``Recorder`` (frames + structural/visual evidence)
+4. ``compile``    recording -> bundle, with the eligibility outcome bound to
+                  the run's insuree, service, and as-of-date parameters
 5. ``replay``     replay the bundle for any policyholder; every run is
                   verified by the SQL effect verifier built from
-                  ``deployment.eligibility.yaml``. A policyholder whose
-                  coverage is NOT in force REFUTES the contract and the run
-                  HALTS -- the demo's halt-on-anomaly moment
+                  ``deployment.eligibility.yaml``. A policyholder who is NOT
+                  eligible for the declared service/date REFUTES the contract
+                  and the run HALTS -- the demo's halt-on-anomaly moment
                   (``--insuree 999000002 --expect-halt``)
 6. ``down``       stop the stack
 
 Why the effect contract is the point: the enquiry dialog for the LAPSED
 policyholder still renders a service-eligibility thumbs-up -- a screen a
 human (or a screen-scraping bot) can misread as "covered". The system-of-
-record read refuses: coverage != Active -> REFUTED -> HALT with evidence.
+record read refuses: eligibility = Ineligible -> REFUTED -> HALT with evidence.
 
-Record time is allowed to cheat with Playwright locators (to find pixel
-coordinates via ``bounding_box()``); every action is performed through
-``Recorder``. Authentication is declared unmeasured setup, mirroring the
-claims demo's setup boundary. ``--record-video`` opt-in captures a WebM for
-the media pipeline; it never changes what is recorded or replayed.
+The declared question is fixed and reproducible: is service A1 (General
+Consultation) eligible on 2026-07-21 for the run's ``insurance_no``?  The
+oracle joins the policy to its product/service benefit and evaluates policy
+status plus effective/expiry dates; it never consults the host clock.
+
+Record time uses Playwright locators to find pixel coordinates, while the
+recorder also captures stable DOM locators and run-bound structured identity
+for the three clicked controls. Every action is performed through ``Recorder``.
+Authentication is declared unmeasured setup, mirroring the claims demo's setup
+boundary. ``--record-video`` opt-in captures a WebM for the media pipeline; it
+never changes what is recorded or replayed.
 
 All data is synthetic. Any published screenshot must be labelled as the
 "openIMIS reference environment" and must not imply a customer deployment.
@@ -55,6 +61,8 @@ sys.path.insert(0, str(REPO_ROOT / "benchmark"))
 from openimis_claims.fixture import (  # noqa: E402
     ACTOR_PASSWORD,
     ACTOR_USER,
+    ELIGIBILITY_AS_OF_DATE,
+    ELIGIBILITY_SERVICE_CODE,
     LAPSED_CHF,
     ORACLE_PASSWORD_ENV,
     POLICYHOLDER_CHF,
@@ -62,6 +70,9 @@ from openimis_claims.fixture import (  # noqa: E402
     FixtureError,
     OpenIMISFixture,
 )
+
+from openadapt_flow.backends.playwright_backend import PlaywrightBackend  # noqa: E402
+from openadapt_flow.ir import StructuralLocator  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DEPLOYMENT_YAML = (
@@ -77,37 +88,122 @@ SETTLE = {
 }
 
 
+class OpenIMISEligibilityBackend(PlaywrightBackend):
+    """Browser backend with openIMIS-specific stable target evidence.
+
+    Material UI renders the global enquiry and service inputs with generated
+    class names/ids, and the service options in a portal outside the dialog.
+    Generic pixel recording therefore cannot reliably bind these controls to
+    the checked policyholder.  This narrow adapter records stable semantic
+    locators and a structured identity string that includes the run's insuree
+    number for dialog-scoped actions.  The compiler parameterizes that value,
+    so replay verifies the current run's policyholder before acting.
+    """
+
+    _STRUCTURAL_JS = r"""([px, py]) => {
+        const hit = document.elementFromPoint(px, py);
+        if (!hit) return null;
+        const input = hit.closest('input');
+        const placeholder = input ? (input.getAttribute('placeholder') || '') : '';
+        if (placeholder.startsWith('Insuree enquiry')) {
+            return {
+                selector: 'input[placeholder^="Insuree enquiry"]',
+                role: 'textbox',
+                name: 'Insuree enquiry'
+            };
+        }
+        if (placeholder.startsWith('Search Service')) {
+            return {
+                selector: 'input[placeholder^="Search Service"]',
+                role: 'textbox',
+                name: 'Search Service'
+            };
+        }
+        const option = hit.closest('[role="option"]');
+        if (option) {
+            const name = (option.textContent || '').replace(/\s+/g, ' ').trim();
+            return name ? {role: 'option', name: name} : null;
+        }
+        return null;
+    }"""
+
+    _IDENTITY_JS = r"""([px, py]) => {
+        const hit = document.elementFromPoint(px, py);
+        if (!hit) return null;
+        const input = hit.closest('input');
+        const placeholder = input ? (input.getAttribute('placeholder') || '') : '';
+        let targetKind = null;
+        let targetId = null;
+        if (placeholder.startsWith('Insuree enquiry')) {
+            targetKind = 'eligibility_lookup';
+            targetId = 'insurance_no';
+        } else if (placeholder.startsWith('Search Service')) {
+            targetKind = 'eligibility_service';
+            targetId = 'service_code';
+        } else {
+            const option = hit.closest('[role="option"]');
+            if (option) {
+                targetKind = 'eligibility_service_option';
+                targetId = (option.textContent || '').replace(/\s+/g, ' ').trim();
+            }
+        }
+        if (!targetKind) return null;
+        const context = {target_kind: targetKind, target_id: targetId};
+        if (targetKind !== 'eligibility_lookup') {
+            const dialog = document.querySelector('[role="dialog"]');
+            const match = dialog && (dialog.innerText || '').match(/\b999\d{6}\b/);
+            if (!match) return null;
+            context.insurance_no = match[0];
+        }
+        return JSON.stringify(context);
+    }"""
+
+    def structural_locator_at(self, x: int, y: int) -> StructuralLocator | None:
+        try:
+            result = self.page.evaluate(self._STRUCTURAL_JS, [int(x), int(y)])
+        except Exception:
+            return None
+        if not result:
+            return None
+        return StructuralLocator(
+            selector=result.get("selector"),
+            role=result.get("role"),
+            name=result.get("name"),
+        )
+
+    def structured_text_at(self, x: int, y: int) -> str | None:
+        try:
+            result = self.page.evaluate(self._IDENTITY_JS, [int(x), int(y)])
+        except Exception:
+            return None
+        return str(result) if result else None
+
+
 def eligibility_effects() -> list[Any]:
-    """The coverage contracts bound to the run's ``insurance_no`` parameter.
+    """The eligibility outcome bound to the run's ``insurance_no``.
 
     Substrate-neutral (``docs/EFFECT_KIT.md``); the committed
     ``deployment.eligibility.yaml`` wires them to the read-only SQL verifier
-    over openIMIS's own PostgreSQL policy tables.
+    over openIMIS's own PostgreSQL policy/product/service tables.
     """
     from openadapt_flow.runtime.effects import Effect, ValueExpr
 
-    chf = ValueExpr(param="insurance_no")
     return [
         Effect(
-            kind="record_written",
-            match={"chf_id": chf},
-            expected_count=1,
-            risk="reversible",
-            probe=(
-                "exactly one in-force policy row exists for the checked policyholder"
-            ),
-        ),
-        Effect(
             kind="field_equals",
-            match={"chf_id": chf},
-            field="coverage",
-            value=ValueExpr(literal="Active"),
+            match={
+                "chf_id": ValueExpr(param="insurance_no"),
+                "service_code": ValueExpr(param="service_code"),
+                "as_of_date": ValueExpr(param="as_of_date"),
+            },
+            field="eligibility",
+            value=ValueExpr(literal="Eligible"),
             risk="reversible",
             probe=(
-                "the checked policyholder's policy is Active and unexpired in "
-                "the system of record"
+                f"service {ELIGIBILITY_SERVICE_CODE} is covered by exactly one "
+                f"active, effective policy on {ELIGIBILITY_AS_OF_DATE}"
             ),
-        ),
+        )
     ]
 
 
@@ -168,9 +264,7 @@ def _demonstrate_eligibility(recorder: Any, page: Any, *, insuree: str) -> None:
 
 
 def _launch(fixture: OpenIMISFixture, *, headed: bool, video_dir: str | None):
-    from openadapt_flow.backends.playwright_backend import PlaywrightBackend
-
-    return PlaywrightBackend.launch(
+    return OpenIMISEligibilityBackend.launch(
         fixture.front_url,
         headless=not headed,
         record_video_dir=video_dir,
@@ -197,10 +291,14 @@ def _stage_oracle_password(fixture: OpenIMISFixture) -> None:
     os.environ.setdefault(ORACLE_PASSWORD_ENV, fixture.oracle_password())
 
 
-def _build_verifier(params: dict[str, str]) -> Any:
+def _build_verifier(params: dict[str, str], *, oracle_port: int) -> Any:
     from openadapt_flow.deployment import build_effect_verifier, load_deployment
 
     config = load_deployment(DEPLOYMENT_YAML)
+    # The committed deployment uses the canonical fixture port (9402). An
+    # isolated rehearsal may select another loopback port; only the transport
+    # endpoint changes, never the query, role, or outcome contract.
+    config.effects.sql_connect_args["port"] = oracle_port
     verifier = build_effect_verifier(config.effects, params)
     if verifier is None:
         raise FixtureError(f"{DEPLOYMENT_YAML} wired no effect verifier")
@@ -208,7 +306,7 @@ def _build_verifier(params: dict[str, str]) -> Any:
 
 
 def cmd_up(args: argparse.Namespace) -> int:
-    fixture = OpenIMISFixture(http_port=args.port)
+    fixture = OpenIMISFixture(http_port=args.port, db_port=args.oracle_port)
     print(f"starting pinned openIMIS stack on {fixture.base_url} ...")
     fixture.up()
     print("stack ready:", fixture.front_url)
@@ -216,7 +314,7 @@ def cmd_up(args: argparse.Namespace) -> int:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    fixture = OpenIMISFixture(http_port=args.port)
+    fixture = OpenIMISFixture(http_port=args.port, db_port=args.oracle_port)
     holders = fixture.bootstrap_eligibility()
     for chf, holder in holders.items():
         print(f"synthetic policyholder {chf}:", holder)
@@ -224,7 +322,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    fixture = OpenIMISFixture(http_port=args.port)
+    fixture = OpenIMISFixture(http_port=args.port, db_port=args.oracle_port)
     fixture.down(volumes=args.volumes)
     print("stack stopped")
     return 0
@@ -236,12 +334,14 @@ def cmd_record(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     if out_dir.exists():
         raise FixtureError(f"recording path already exists: {out_dir}")
-    fixture = OpenIMISFixture(http_port=args.port)
+    fixture = OpenIMISFixture(http_port=args.port, db_port=args.oracle_port)
     coverage = fixture.coverage(args.insuree)
-    if coverage["coverage"] != "Active":
+    if coverage["eligibility"] != "Eligible":
         raise FixtureError(
-            f"demonstration insuree {args.insuree} is not in force "
-            f"({coverage}); demonstrate on an ACTIVE policyholder"
+            f"demonstration insuree {args.insuree} is not eligible "
+            f"for service {ELIGIBILITY_SERVICE_CODE} on "
+            f"{ELIGIBILITY_AS_OF_DATE} ({coverage}); demonstrate on a "
+            "policyholder eligible for that declared question"
         )
     backend, close = _launch(fixture, headed=args.headed, video_dir=args.record_video)
     try:
@@ -267,6 +367,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
     )
     if not workflow.steps:
         raise FixtureError("compiler produced no steps")
+    # Make the complete eligibility question explicit in every run report and
+    # bind all three dimensions into both the effect selector and SQL query.
+    workflow.params["service_code"] = ELIGIBILITY_SERVICE_CODE
+    workflow.params["as_of_date"] = ELIGIBILITY_AS_OF_DATE
     # Bind the coverage contracts to the LAST demonstrated step: verification
     # runs after the eligibility answer is on screen, certifying the check
     # against the system of record before the run may report success.
@@ -284,12 +388,16 @@ def cmd_replay(args: argparse.Namespace) -> int:
     from openadapt_flow.ir import Workflow
     from openadapt_flow.runtime import Replayer
 
-    fixture = OpenIMISFixture(http_port=args.port)
+    fixture = OpenIMISFixture(http_port=args.port, db_port=args.oracle_port)
     insuree = args.insuree
     expected = fixture.coverage(insuree)  # fail fast if bootstrap has not run
     _stage_oracle_password(fixture)
-    params = {"insurance_no": insuree}
-    verifier = _build_verifier(params)
+    params = {
+        "insurance_no": insuree,
+        "service_code": ELIGIBILITY_SERVICE_CODE,
+        "as_of_date": ELIGIBILITY_AS_OF_DATE,
+    }
+    verifier = _build_verifier(params, oracle_port=args.oracle_port)
     bundle_dir = Path(args.bundle)
     run_dir = Path(
         args.run_dir
@@ -348,6 +456,12 @@ def main() -> int:
         default=OpenIMISFixture().http_port,
         help="loopback port the pinned stack serves on",
     )
+    parser.add_argument(
+        "--oracle-port",
+        type=int,
+        default=OpenIMISFixture().db_port,
+        help="loopback PostgreSQL port for the read-only eligibility verifier",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("up", help="start the pinned stack and wait until ready")
@@ -356,8 +470,8 @@ def main() -> int:
     p = sub.add_parser(
         "bootstrap",
         help=(
-            "create the synthetic policyholders (active + lapsed) and the "
-            "read-only SQL-oracle role (idempotent)"
+            "create the synthetic policyholders (eligible + expired + future) "
+            "and the read-only SQL-oracle role (idempotent)"
         ),
     )
     p.set_defaults(func=cmd_bootstrap)
@@ -367,7 +481,7 @@ def main() -> int:
     p.add_argument(
         "--insuree",
         default=POLICYHOLDER_CHF,
-        help="insuree number to demonstrate on (must be in force)",
+        help="insuree number to demonstrate on (must be eligible for A1/date)",
     )
     p.add_argument("--headed", action="store_true", help="run the browser headed")
     p.add_argument(
@@ -399,8 +513,8 @@ def main() -> int:
         "--insuree",
         default=SECOND_ACTIVE_CHF,
         help=(
-            "insuree number to check (default: the in-force policyholder the "
-            "demonstration never saw)"
+            "insuree number to check (default: the A1/date-eligible "
+            "policyholder the demonstration never saw)"
         ),
     )
     p.add_argument("--run-dir", default=None)

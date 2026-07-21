@@ -149,6 +149,22 @@ run. That is the right shape for a task nobody has automated before, and the
 wrong one for the 500th referral this month. openadapt-flow compiles the
 demonstration instead.
 
+```mermaid
+flowchart LR
+  R["record<br/>--backend web / windows / macos / linux / rdp"] --> C["compile<br/>demo to a bundle"]
+  C --> G["lint / certify<br/>policy gates"]
+  G --> P["replay / run<br/>0 model calls on the healthy path"]
+  P -->|bounded drift| H["heal<br/>reviewable diff back into the bundle"]
+  H --> P
+  P -->|identity or effect fails| X{{"HALT<br/>for a human or an AI"}}
+```
+
+*Text summary (PyPI does not render Mermaid): record on any substrate, compile
+the demonstration to a bundle, gate it with lint / certify, then replay or run
+with zero model calls on the healthy path. Bounded drift heals back into the
+bundle as a reviewable diff; an identity or effect failure halts for a human or
+an AI.*
+
 Each compiled step carries a template crop, an OCR label, geometry landmarks,
 a structural locator, and postconditions derived from what the demo actually
 changed on screen. At replay time a resolution ladder tries them in order: a
@@ -303,6 +319,50 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
   salted-hash, shape-preserving `IdentityTemplate` instead of a plaintext
   name / DOB / MRN band, so a compiled bundle need carry no readable PHI while
   still enforcing identity (`openadapt_flow/runtime/identity_template.py`).
+
+### What `visualize` shows
+
+This is the actual Mermaid that `visualize` emits for the bundled MockMed
+triage sample, produced by
+`openadapt-flow visualize docs/showcase/bundle --format mermaid` (nothing
+below is hand-drawn):
+
+```mermaid
+flowchart TD
+  n0("click at (214, 195)")
+  n1("type 'nurse.demo'")
+  n2("click at (214, 264)")
+  n3("type 'mockmed-demo-pass'")
+  n4("click 'Sign In'")
+  n5("click 'Open'")
+  n6("click 'New Encounter'")
+  n7("click 'Triage'")
+  n8("click at (344, 290)")
+  n9("type <note>")
+  n10("click 'Save Encounter'")
+  n11{{"Success"}}
+  n0 --> n1
+  n1 --> n2
+  n2 --> n3
+  n3 --> n4
+  n4 --> n5
+  n5 --> n6
+  n6 --> n7
+  n7 --> n8
+  n8 --> n9
+  n9 --> n10
+  n10 --> n11
+  classDef irreversible stroke:#b4530a,stroke-width:2px;
+  classDef halt stroke:#b21f2d,stroke-width:2px;
+```
+
+*Text summary (PyPI does not render Mermaid): the compiled MockMed triage
+bundle is eleven ordered steps, signing in, opening the patient, starting a new
+encounter, opening triage, typing the `<note>` parameter, and clicking Save
+Encounter, ending in a `Success` postcondition node (`n11`). The
+`irreversible` and `halt` style classes are the ones `visualize` reserves for
+write-shaped steps and halt points. The `--format html` output renders the same
+graph with per-step resolution-ladder and gate detail.*
 
 ## Benchmark
 

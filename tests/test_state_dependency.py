@@ -27,12 +27,15 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     Interstitial,
+    Postcondition,
+    PostconditionKind,
     Predicate,
     PredicateKind,
     ProgramGraph,
     RunReport,
     State,
     StateKind,
+    StructuralHandle,
     StructuralLocator,
     Transition,
     Workflow,
@@ -366,6 +369,162 @@ def test_known_interstitial_dismissed_by_anchor_click(bundle, run_dir):
     assert dismissal.delivered is True
     assert dismissal.clearance_ok is True
     assert dismissal.ok is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "state_key", "before", "after"),
+    [
+        (PostconditionKind.URL_CHANGED, "url", "https://before", "https://after"),
+        (PostconditionKind.TITLE_CHANGED, "page_title", "before", "after"),
+        (PostconditionKind.NEW_TAB_OPENED, "page_count", 1, 2),
+    ],
+)
+def test_interstitial_change_cannot_satisfy_action_structural_postcondition(
+    bundle, run_dir, kind, state_key, before, after
+):
+    """The structural baseline belongs to the workflow action, not Escape."""
+
+    class StructuralStateBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.state = before
+
+        def __getattr__(self, name):
+            if name == state_key:
+                return self.state
+            raise AttributeError(name)
+
+        def press(self, key):
+            super().press(key)
+            self.state = after
+
+    vision = SettleVision()
+    vision.text_results = {"release note": [Match((10, 10), (0, 0, 5, 5)), None, None]}
+    vision.template_results = [Match((110, 105), (100, 100, 50, 20))]
+    backend = StructuralStateBackend()
+    step = click_step()
+    step.expect = [Postcondition(kind=kind, timeout_s=0)]
+    workflow = Workflow(
+        name="wf",
+        steps=[step],
+        interstitials=[
+            Interstitial(
+                name="release note",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+                dismiss_key="Escape",
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("release note"),
+            )
+        ],
+    )
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.005).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert report.results[0].postconditions_ok is False
+    assert backend.actions == [
+        ("press", "Escape"),
+        ("click", 110, 105, False),
+    ]
+
+
+def test_structural_only_interstitial_uses_native_locate_and_act(bundle, run_dir):
+    class StructuralBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.locators = []
+
+        def locate_structural(self, locator):
+            self.locators.append(locator)
+            return StructuralHandle(
+                point=(15, 15),
+                region=(10, 10, 10, 10),
+                target_fingerprint="a" * 64,
+            )
+
+        def act_structural(self, locator, handle, *, double=False):
+            self.actions.append(
+                ("act_structural", locator.name, handle.target_fingerprint)
+            )
+
+    vision = SettleVision()
+    vision.text_results = {"release note": [Match((10, 10), (0, 0, 5, 5)), None, None]}
+    vision.template_results = [Match((110, 105), (100, 100, 50, 20))]
+    backend = StructuralBackend()
+    workflow = Workflow(
+        name="wf",
+        steps=[click_step()],
+        interstitials=[
+            Interstitial(
+                name="release note",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+                dismiss_anchor=Anchor(
+                    template="",
+                    structural=StructuralLocator(role="button", name="Close notice"),
+                    region=(10, 10, 10, 10),
+                    click_point=(15, 15),
+                ),
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("release note"),
+            )
+        ],
+    )
+
+    report = Replayer(backend, vision=vision).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is True, report.results[0]
+    assert len(backend.locators) == 1
+    assert backend.actions[0] == (
+        "act_structural",
+        "Close notice",
+        "a" * 64,
+    )
+    assert backend.actions[1] == ("click", 110, 105, False)
+
+
+def test_structural_only_interstitial_never_downgrades_to_ocr(bundle, run_dir):
+    vision = SettleVision()
+    vision.text_results = {
+        "release note": Match((10, 10), (0, 0, 5, 5)),
+        "Close notice": Match((15, 15), (10, 10, 10, 10)),
+    }
+    backend = FakeBackend()  # no structural locate/act capability
+    workflow = Workflow(
+        name="wf",
+        steps=[click_step()],
+        interstitials=[
+            Interstitial(
+                name="release note",
+                detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+                dismiss_anchor=Anchor(
+                    template="",
+                    structural=StructuralLocator(role="button", name="Close notice"),
+                    region=(10, 10, 10, 10),
+                    click_point=(15, 15),
+                    ocr_text="Close notice",
+                ),
+                risk="reversible",
+                consequential=False,
+                clearance=_cleared("release note"),
+            )
+        ],
+    )
+
+    report = Replayer(backend, vision=vision).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert "refusing an OCR/geometry/coordinate downgrade" in (
+        report.results[0].error or ""
+    )
 
 
 def test_interstitial_resettle_failure_halts_before_underlying_step(bundle, run_dir):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
@@ -36,6 +38,7 @@ from tests.test_replayer import (
     FakeVision,
     Match,
     OcrLine,
+    click_step,
     context_click_step,
     make_png,
     resolving_vision,
@@ -183,6 +186,67 @@ def test_runtime_interstitial_missing_asset_halts_authorization(tmp_path):
     assert backend.actions == []
     assert report.results[0].step_id == "<authorization>"
     assert "not sealed in the bundle manifest" in (report.results[0].error or "")
+
+
+@pytest.mark.parametrize("source", ["runtime", "workflow"])
+@pytest.mark.parametrize("field", ["detect", "clearance", "dismissal"])
+def test_interstitial_callback_mutation_refuses_before_action(tmp_path, source, field):
+    declaration = Interstitial(
+        name="release note",
+        detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+        dismiss_key="Escape",
+        risk="reversible",
+        consequential=False,
+        clearance=Predicate(kind=PredicateKind.TEXT_ABSENT, text="release note"),
+    )
+    workflow, bundle = _seal(
+        tmp_path,
+        Workflow(
+            name=f"interstitial_{source}_{field}",
+            steps=[click_step()],
+            interstitials=[declaration] if source == "workflow" else [],
+        ),
+    )
+    runtime_interstitials = [declaration] if source == "runtime" else None
+    if source == "workflow":
+        declaration = workflow.interstitials[0]
+    authorization = _authorization(
+        workflow,
+        interstitials=runtime_interstitials,
+    )
+
+    class MutatingBackend(FakeBackend):
+        mutated = False
+
+        def screenshot(self):
+            if not self.mutated:
+                self.mutated = True
+                if field == "detect":
+                    declaration.detect.text = "changed after admission"
+                elif field == "clearance":
+                    assert declaration.clearance is not None
+                    declaration.clearance.text = "changed after admission"
+                else:
+                    declaration.dismiss_key = "Enter"
+            return super().screenshot()
+
+    backend = MutatingBackend()
+    vision = resolving_vision()
+    vision.text_results = {
+        "release note": Match((10, 10), (0, 0, 5, 5)),
+    }
+    report = Replayer(
+        backend,
+        vision=vision,
+        governed_authorization=authorization,
+        interstitials=runtime_interstitials,
+    ).run(workflow, bundle_dir=bundle, run_dir=tmp_path / "run")
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].step_id != "<authorization>"
+    assert report.results[0].safety_halt is True
+    assert "changed after admission" in (report.results[0].error or "")
 
 
 def test_target_asset_mutation_after_validation_halts_before_action(tmp_path):

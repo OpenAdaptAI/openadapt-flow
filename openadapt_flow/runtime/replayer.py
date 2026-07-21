@@ -34,6 +34,7 @@ healed bundle is written.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import time
@@ -452,12 +453,31 @@ class Replayer:
         # One settle poll owns this complete bound. The replayer does not wrap
         # it in an outer retry loop, avoiding unaccounted blind retries.
         self.settle_readiness_timeout_s = settle_readiness_timeout_s
-        # Operator-supplied KNOWN interstitials, merged with the bundle's own
-        # at each step's entry. The IR validator only admits automatic actions
-        # declared reversible + non-consequential with visual clearance, and
-        # the governed runtime-input digest binds the full declaration.
-        # None/empty (default) => no interstitial handling, behavior unchanged.
-        self._interstitials: list[Interstitial] = list(interstitials or [])
+        # Operator-supplied KNOWN interstitials, merged with the bundle's own at
+        # each step's entry.  Keep both the caller-owned source and a deep,
+        # canonical private snapshot: governed authorization validates and
+        # execution consumes the snapshot, while the source is re-fingerprinted
+        # immediately before any dismissal so a callback/concurrent mutation is
+        # detected rather than changing the admitted action surface.
+        self._runtime_interstitial_source = (
+            interstitials if interstitials is not None else []
+        )
+        self._runtime_interstitial_snapshot_error: Optional[str] = None
+        try:
+            (
+                self._interstitials,
+                self._runtime_interstitial_snapshot,
+            ) = self._canonical_interstitial_snapshot(self._runtime_interstitial_source)
+        except Exception as exc:
+            self._interstitials = ()
+            self._runtime_interstitial_snapshot = ()
+            self._runtime_interstitial_snapshot_error = (
+                "runtime interstitial declarations could not be snapshotted "
+                f"({type(exc).__name__})"
+            )
+        self._workflow_interstitials: tuple[Interstitial, ...] = ()
+        self._workflow_interstitial_snapshot: tuple[str, ...] = ()
+        self._workflow_interstitial_snapshot_error: Optional[str] = None
 
     # -- public API ----------------------------------------------------------
 
@@ -536,6 +556,23 @@ class Replayer:
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
+        # Snapshot bundle declarations before authorization validation and
+        # before the first backend/vision callback.  Execution uses only this
+        # deep copy; the caller-owned workflow remains available solely for a
+        # mutation comparison immediately before an interstitial action.
+        self._workflow_interstitial_snapshot_error = None
+        try:
+            (
+                self._workflow_interstitials,
+                self._workflow_interstitial_snapshot,
+            ) = self._canonical_interstitial_snapshot(workflow.interstitials)
+        except Exception as exc:
+            self._workflow_interstitials = ()
+            self._workflow_interstitial_snapshot = ()
+            self._workflow_interstitial_snapshot_error = (
+                "workflow interstitial declarations could not be snapshotted "
+                f"({type(exc).__name__})"
+            )
         # Stable-per-run identity (P0-3): distinct across runs, constant within
         # one. Exposed to effect-contract resolution under the reserved
         # ``__run_id__`` param so an idempotency key can be bound PER-RUN (via
@@ -581,7 +618,7 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 params=params,
                 worklists=worklists,
-                interstitials=self._interstitials,
+                interstitials=list(self._interstitials),
                 continuation=self.governed_continuation,
             )
             self._governed_asset_snapshot = assets
@@ -2346,10 +2383,6 @@ class Replayer:
         )
         result.before_png = self._save_step_png(run_dir, step.id, "before", before_png)
         last_frame = before_png
-        # Structural start state (URL/title/page count, when the backend
-        # can observe them): structural postconditions compare the step's
-        # END state against this — never against a recorded literal.
-        start_state = self._structural_state()
         # System-of-record pre-state, snapshotted just before the action when
         # the step declares effects (see the block guarding self._act below).
         effect_pre_state: Optional[EffectState] = None
@@ -2395,6 +2428,13 @@ class Replayer:
                 )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
+
+            # Structural postconditions must compare the workflow action's end
+            # state against the state immediately BEFORE that action.  Entry
+            # readiness/interstitial gates may themselves change URL, title, or
+            # page count; sampling before them could let a dismissal falsely
+            # satisfy URL_CHANGED/TITLE_CHANGED/NEW_TAB_OPENED.
+            start_state = self._structural_state()
 
             resolution, matched_region, error = self._resolve_step(
                 step, before_png, bundle_dir, workflow
@@ -3241,6 +3281,71 @@ class Replayer:
 
     # -- state-dependency robustness: readiness + interstitials -----------------
 
+    @staticmethod
+    def _canonical_interstitial_snapshot(
+        declarations: Any,
+    ) -> tuple[tuple[Interstitial, ...], tuple[str, ...]]:
+        """Deep-validate declarations and return an immutable fingerprint.
+
+        Pydantic models are mutable.  A shallow list copy therefore does not
+        bind a governed run: a backend/vision callback could edit a nested
+        detection, clearance, or dismissal field after authorization validation
+        but before delivery.  The returned models share no nested objects with
+        the caller, and the canonical strings let the runtime detect any such
+        edit immediately before an interstitial action.
+        """
+
+        validated = tuple(
+            Interstitial.model_validate(declaration.model_dump(mode="python"))
+            for declaration in declarations
+        )
+        canonical = tuple(
+            json.dumps(
+                declaration.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            for declaration in validated
+        )
+        return validated, canonical
+
+    def _interstitial_declaration_mutation(
+        self, workflow: Optional[Workflow]
+    ) -> Optional[str]:
+        """Return a refusal when caller-owned declarations changed mid-run."""
+
+        snapshot_error = (
+            self._runtime_interstitial_snapshot_error
+            or self._workflow_interstitial_snapshot_error
+        )
+        if snapshot_error is not None:
+            return f"{snapshot_error} - refusing to emit an action; run aborted."
+        try:
+            _runtime, runtime_snapshot = self._canonical_interstitial_snapshot(
+                self._runtime_interstitial_source
+            )
+            workflow_snapshot: tuple[str, ...] = ()
+            if workflow is not None:
+                _workflow, workflow_snapshot = self._canonical_interstitial_snapshot(
+                    workflow.interstitials
+                )
+        except Exception as exc:
+            return (
+                "Interstitial declarations changed after admission and are no "
+                f"longer valid ({type(exc).__name__}) - refusing to emit an "
+                "action; run aborted."
+            )
+        if (
+            runtime_snapshot != self._runtime_interstitial_snapshot
+            or workflow_snapshot != self._workflow_interstitial_snapshot
+        ):
+            return (
+                "Interstitial declarations changed after admission - refusing "
+                "to emit an action under a stale authorization; run aborted."
+            )
+        return None
+
     def _wait_starting_state_settled(
         self, before_png: bytes
     ) -> tuple[bytes, Optional[str]]:
@@ -3357,10 +3462,10 @@ class Replayer:
         resolve). This method only automates the RECURRING, declared ones so
         they do not force a babysit-the-queue halt every time they appear.
         """
-        interstitials: list[Interstitial] = list(
-            getattr(workflow, "interstitials", None) or []
-        )
-        interstitials.extend(self._interstitials)
+        mutation_error = self._interstitial_declaration_mutation(workflow)
+        if mutation_error is not None:
+            return before_png, mutation_error
+        interstitials = [*self._workflow_interstitials, *self._interstitials]
         if not interstitials:
             return before_png, None
 
@@ -3384,6 +3489,9 @@ class Replayer:
 
         handled_indices: set[int] = set()
         while True:
+            mutation_error = self._interstitial_declaration_mutation(workflow)
+            if mutation_error is not None:
+                return before_png, mutation_error
             active_index = next(
                 (
                     index
@@ -3398,6 +3506,12 @@ class Replayer:
                 ),
                 None,
             )
+            # Detection invokes vision and can therefore cross a callback
+            # boundary. Recheck the caller-owned declarations before trusting
+            # its result or preparing an action.
+            mutation_error = self._interstitial_declaration_mutation(workflow)
+            if mutation_error is not None:
+                return before_png, mutation_error
             if active_index is None:
                 return before_png, None
             it = interstitials[active_index]
@@ -3443,6 +3557,23 @@ class Replayer:
                 action = "key"
             else:
                 assert it.dismiss_anchor is not None
+                structural_only = (
+                    not it.dismiss_anchor.template.strip()
+                    and it.dismiss_anchor.structural is not None
+                )
+                structural = (
+                    self.backend
+                    if self.use_structural
+                    and hasattr(self.backend, "locate_structural")
+                    else None
+                )
+                if structural_only and structural is None:
+                    return before_png, (
+                        f"Interstitial '{it.name}' requires a structural-only "
+                        "dismissal, but this backend cannot perform structural "
+                        "resolution - refusing an OCR/geometry/coordinate "
+                        "downgrade; run aborted."
+                    )
                 template_png = self._asset_bytes(
                     bundle_dir,
                     it.dismiss_anchor.template,
@@ -3458,6 +3589,7 @@ class Replayer:
                     it.name,
                     template_png=template_png,
                     viewport=self.backend.viewport,
+                    structural=structural,
                 )
                 if res is None:
                     return before_png, (
@@ -3467,7 +3599,20 @@ class Replayer:
                         "aborted."
                     )
                 resolution, _region = res
+                if structural_only and resolution.rung != "structural":
+                    return before_png, (
+                        f"Interstitial '{it.name}' structural dismissal did not "
+                        "resolve uniquely - refusing an OCR/geometry/coordinate "
+                        "downgrade; run aborted."
+                    )
                 action = "click"
+
+            # Resolution can invoke vision or a structural backend.  A callback
+            # must not be able to replace the declaration between authorization
+            # and the audit-before-delivery boundary.
+            mutation_error = self._interstitial_declaration_mutation(workflow)
+            if mutation_error is not None:
+                return before_png, mutation_error
 
             # Append BEFORE delivery: a backend exception can never create an
             # unreported key/click attempt. The event carries the exact admitted
@@ -3487,9 +3632,26 @@ class Replayer:
                     self.backend.press(it.dismiss_key)
                 else:
                     assert resolution is not None
-                    self.backend.click(
-                        int(resolution.point[0]), int(resolution.point[1])
-                    )
+                    assert it.dismiss_anchor is not None
+                    if resolution.rung == "structural":
+                        native_act = getattr(self.backend, "act_structural", None)
+                        if (
+                            not callable(native_act)
+                            or resolution.structural_handle is None
+                            or it.dismiss_anchor.structural is None
+                        ):
+                            raise StructuralResolutionRefused(
+                                "structural dismissal cannot be delivered "
+                                "natively without a stable element handle"
+                            )
+                        native_act(
+                            it.dismiss_anchor.structural,
+                            resolution.structural_handle,
+                        )
+                    else:
+                        self.backend.click(
+                            int(resolution.point[0]), int(resolution.point[1])
+                        )
                 event.delivered = True
             except Exception as exc:
                 event.error = (

@@ -191,13 +191,20 @@ jobs:
   # of the artifact.
   effectbench-standalone:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        # Running from the checkout makes Python discover ``openadapt_flow``
+        # through the implicit current-directory entry on ``sys.path`` even
+        # when the engine package was never installed. Execute from outside
+        # the repository so this job tests the installed EffectBench artifact.
+        working-directory: /tmp
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install ONLY the standalone benchmark (no engine on the path)
-        run: pip install "./benchmark/effectbench[test]"
+        run: pip install "$GITHUB_WORKSPACE/benchmark/effectbench[test]"
       - name: Assert the engine is NOT importable (true standalone)
         run: |
           python - <<'PY'
@@ -206,12 +213,16 @@ jobs:
               "openadapt_flow must not be installed for the standalone job"
           )
           import effectbench
+          from importlib.metadata import version
+          assert effectbench.__version__ == version("effectbench"), (
+              effectbench.__version__, version("effectbench")
+          )
           print("effectbench", effectbench.__version__)
           PY
       - name: Reproduce the reference result
         run: python -m effectbench reference
       - name: Run the standalone benchmark test suite
-        run: python -m pytest benchmark/effectbench/tests -q
+        run: python -m pytest "$GITHUB_WORKSPACE/benchmark/effectbench/tests" -q
 
   # --- Cross-package schema boundary (required-check candidate) -----------
   # This must remain a distinct job with the `interop` extra installed. The

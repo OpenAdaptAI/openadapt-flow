@@ -12,7 +12,11 @@ import json
 from pathlib import Path
 
 import pytest
-import tomllib
+
+try:  # stdlib on 3.11+, the declared ``tomli`` dependency on 3.10
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from benchmark.environments import registry
 from benchmark.environments.registry import (

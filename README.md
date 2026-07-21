@@ -303,6 +303,15 @@ correct rows with zero silent wrong writes, zero over-halts, and $0 model
 cost**. The paid agent arm and full per-cell trial counts are the next stage
 of the matrix.
 
+The silent-wrong-effect result is also packaged as a standalone, versioned,
+independently runnable benchmark — **EffectBench** — that a third party can
+`pip install` and run against their own agent with pydantic as the only
+dependency (no OpenAdapt codebase). It defines the Silent Wrong-Effect Rate
+(SWER) metric, the fault taxonomy, the oracle contract, and a leaderboard /
+submission format, and ships the public synthetic MockMed sample plus the
+reference scorer. Spec: [`benchmark/effectbench/SPEC.md`](benchmark/effectbench/SPEC.md);
+submission format: [`benchmark/effectbench/LEADERBOARD.md`](benchmark/effectbench/LEADERBOARD.md).
+
 ## Capability and qualification
 
 The reference browser path runs record, compile, policy-check, deterministic

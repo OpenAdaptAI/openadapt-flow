@@ -286,7 +286,7 @@
           "proves": "Underdetermined targets surface as explicit disambiguation rather than a guessed click."
         },
         {
-          "path": "tests/test_identity_corpus_rates.py",
+          "path": "tests/test_identity_fuzz.py",
           "kind": "test",
           "exists": true,
           "strength": "supported",
@@ -294,7 +294,7 @@
           "node": null,
           "node_found": null,
           "junit_status": null,
-          "proves": "Held-out identity corpus rates (the ROC / false-accept guard behind the gate)."
+          "proves": "Public property-based checks preserve the never-false-accept invariant for collapsible identifiers while requiring clean identifiers to remain verifiable."
         },
         {
           "path": "tests/test_identity_ladder.py",

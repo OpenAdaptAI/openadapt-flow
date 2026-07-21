@@ -96,8 +96,14 @@ def main() -> None:
     require_close(drift["agent"]["wall_s"], 87.4, "drift agent wall")
     require_close(drift["agent"]["cost_usd"], 0.63, "drift agent cost")
 
-    reliability = load("benchmark/reliability/results.json")
-    require_equal(len(reliability["results"]), 29, "reliability apps")
+    reliability = load("benchmark/reliability/summary.json")
+    require_equal(reliability["summary"]["n_apps"], 29, "reliability apps")
+    require_equal(
+        reliability["scope"]["condition"],
+        "record, compile, then replay once on unchanged UI",
+        "reliability condition",
+    )
+    require_equal(reliability["scope"]["model_calls"], 0, "reliability model calls")
     outcomes = reliability["summary"]["outcomes"]
     require_equal(outcomes.get("success"), 17, "reliability successes")
     require_equal(outcomes.get("safe_halt"), 10, "reliability safe halts")
@@ -306,6 +312,42 @@ def main() -> None:
     intro_tex = load_text("paper/sections/01_introduction.tex")
     methodology_tex = load_text("paper/sections/04_methodology.tex")
     results_tex = load_text("paper/sections/05_results.tex")
+    reproducibility_tex = load_text("paper/sections/07_reproducibility.tex")
+    paper_readme = load_text("paper/README.md")
+
+    # The public/private evaluation boundary is part of the evidence contract.
+    # Prevent future paper edits from claiming that every raw row or target
+    # recipe is released merely because each headline constant is checked.
+    require_contains(
+        main_tex,
+        "either a reviewed raw artifact or a bounded aggregate summary",
+        "abstract public evidence boundary",
+    )
+    require_contains(
+        reproducibility_tex,
+        "Grown identity and reliability corpora, deployment-derived tuning, "
+        "target-specific recipes, and raw private rows are deliberately excluded",
+        "reproducibility private evidence boundary",
+    )
+    require_contains(
+        paper_readme,
+        "released raw result or a bounded aggregate summary",
+        "paper README public evidence boundary",
+    )
+    forbidden_release_claims = (
+        "Every headline number in this paper is bound by a released machine-check "
+        "to its raw artifact",
+        "Raw run rows, aggregate JSON, task definitions",
+        "binds the raw benchmark results to the comparison artifact",
+    )
+    combined_evidence_prose = "\n".join(
+        (main_tex, intro_tex, reproducibility_tex, paper_readme)
+    )
+    for claim in forbidden_release_claims:
+        if claim in combined_evidence_prose:
+            raise AssertionError(
+                f"paper overstates public raw-artifact availability: {claim!r}"
+            )
 
     # End-to-end silent-wrong-effect headline (54 -> 9 -> 0). Bind the abstract,
     # introduction, and results prose to the effect_e2e artifact so the headline
@@ -405,7 +447,7 @@ def main() -> None:
 
     require_contains(
         main_tex,
-        f"a {len(reliability['results'])}-application public-web corpus",
+        f"a {reliability['summary']['n_apps']}-application public-web corpus",
         "abstract reliability-corpus count",
     )
     require_contains(
@@ -438,7 +480,7 @@ def main() -> None:
     require_contains(
         results_tex,
         (
-            f"all {len(reliability['results'])} recordings compiled; "
+            f"all {reliability['summary']['n_apps']} recordings compiled; "
             f"{outcomes['success']} replays reached a verified success, "
             f"{outcomes['safe_halt']} halted safely, and "
             f"{outcomes['wrong_action']} reported success"

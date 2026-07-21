@@ -178,10 +178,37 @@ openadapt-flow-vlm-service = "openadapt_flow.services.vlm_service.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openadapt_flow"]
+# Publication artifacts carry the public mechanism, interfaces, and
+# conservative runtime defaults -- never the grown identity corpora, their ROC
+# tuning surface, or repository-only reliability recipes/results.  Keep this
+# list in lockstep with the sdist target and the archive validator below.
+exclude = [
+    "/.hypothesis",
+    "/benchmark/reliability",
+    "/docs/validation/IDENTITY_ROC.md",
+    "/docs/validation/adversary_corpus_manifest.json",
+    "/docs/validation/adversary_corpus_v2_manifest.json",
+    "/docs/validation/adversary_corpus_v3_manifest.json",
+    "/docs/validation/identity_roc.json",
+    "/docs/validation/identity_roc.png",
+    "/openadapt_flow/benchmark/reliability_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus_v2.py",
+    "/openadapt_flow/validation/adversary_corpus_v3.py",
+    "/openadapt_flow/validation/identity_roc.py",
+    "/scripts/reliability",
+    "/tests/test_adversary_corpus.py",
+    "/tests/test_adversary_corpus_v2.py",
+    "/tests/test_adversary_corpus_v3.py",
+    "/tests/test_identity_corpus_rates.py",
+    "/tests/test_identity_out_of_corpus.py",
+    "/tests/test_reliability.py",
+]
 # Ship the PEP 561 marker so downstream type-checkers honor our annotations.
 [tool.hatch.build.targets.wheel.force-include]
 "openadapt_flow/py.typed" = "openadapt_flow/py.typed"
 "schemas" = "openadapt_flow/schemas"
+"public-artifacts.json" = "openadapt_flow/public-artifacts.json"
 # NOTE: the operator console's static UI (openadapt_flow/console/static/) is
 # package data hatchling already ships by default -- do NOT force-include it
 # (a duplicate-path entry fails the wheel build).
@@ -190,12 +217,36 @@ packages = ["openadapt_flow"]
 # Keep PyPI artifacts under the declared MIT package license. The source
 # checkout carries an isolated openIMIS reference environment whose adapted
 # deployment files remain AGPL-3.0-only; ship none of that benchmark surface
-# (including its launcher/test and repository-only notice) in the sdist.
+# (including its launcher/test and repository-only notice) in the sdist. The
+# exclusions below are defense in depth for former paths and future regressions:
+# grown identity corpora, ROC tuning artifacts, and detailed public-web target
+# recipes/raw rows are absent from the current public tree. Public mechanisms,
+# fake-patient synthetic fixtures, and bounded aggregate evidence remain.
 exclude = [
+    "/.hypothesis",
     "/THIRD_PARTY_NOTICES.md",
     "/benchmark/openimis_claims",
+    "/benchmark/reliability",
+    "/docs/validation/IDENTITY_ROC.md",
+    "/docs/validation/adversary_corpus_manifest.json",
+    "/docs/validation/adversary_corpus_v2_manifest.json",
+    "/docs/validation/adversary_corpus_v3_manifest.json",
+    "/docs/validation/identity_roc.json",
+    "/docs/validation/identity_roc.png",
+    "/openadapt_flow/benchmark/reliability_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus_v2.py",
+    "/openadapt_flow/validation/adversary_corpus_v3.py",
+    "/openadapt_flow/validation/identity_roc.py",
     "/scripts/openimis_claims_demo.py",
+    "/scripts/reliability",
+    "/tests/test_adversary_corpus.py",
+    "/tests/test_adversary_corpus_v2.py",
+    "/tests/test_adversary_corpus_v3.py",
+    "/tests/test_identity_corpus_rates.py",
+    "/tests/test_identity_out_of_corpus.py",
     "/tests/test_openimis_claims_fixture.py",
+    "/tests/test_reliability.py",
 ]
 
 [tool.pytest.ini_options]
@@ -320,8 +371,8 @@ follow_imports_for_stubs = true
 #     runtime.grounder, runtime.healing.perturbation
 #   - the VLM microservice (FastAPI, dynamic): services.vlm_service.*
 #   - offline validation harnesses (not on the runtime path):
-#     validation.* (adversary_corpus, dense_surface, identity_ladder,
-#     identity_roc, pixel_identity_probe, pixel_identity_aligned,
+#     validation.* (dense_surface, identity_ladder,
+#     pixel_identity_probe, pixel_identity_aligned,
 #     vlm_identity_probe)
 #   - perceptual hashing on numpy internals: vision.hashing
 [[tool.mypy.overrides]]
@@ -340,10 +391,8 @@ module = [
     "openadapt_flow.services.vlm_service.app",
     "openadapt_flow.services.vlm_service.backends",
     "openadapt_flow.services.vlm_service.batching",
-    "openadapt_flow.validation.adversary_corpus",
     "openadapt_flow.validation.dense_surface",
     "openadapt_flow.validation.identity_ladder",
-    "openadapt_flow.validation.identity_roc",
     "openadapt_flow.validation.pixel_identity_probe",
     "openadapt_flow.validation.pixel_identity_aligned",
     "openadapt_flow.validation.vlm_identity_probe",

@@ -599,6 +599,10 @@ jobs:
           # version-agnostic so it keeps holding across releases) and that the
           # py.typed marker shipped inside the wheel.
           cd /tmp && /tmp/clean/bin/python -c "import os, importlib.metadata as m, openadapt_flow; v = openadapt_flow.__version__; dist = m.version('openadapt-flow'); print('attr', v, 'dist', dist); assert v == dist, (v, dist); p = os.path.join(os.path.dirname(openadapt_flow.__file__), 'py.typed'); assert os.path.exists(p), 'py.typed missing from installed package'; print('py.typed present, import OK')"
+          # The public reliability MECHANISM remains importable, while frozen
+          # corpora, ROC tuning, and repository-only recipes are absent from
+          # the installed distribution (checked outside the source tree).
+          cd /tmp && /tmp/clean/bin/python -c "import importlib.util as u; import openadapt_flow.benchmark.reliability; forbidden = ('openadapt_flow.benchmark.reliability_corpus', 'openadapt_flow.validation.adversary_corpus', 'openadapt_flow.validation.adversary_corpus_v2', 'openadapt_flow.validation.adversary_corpus_v3', 'openadapt_flow.validation.identity_roc'); missing = [name for name in forbidden if u.find_spec(name) is not None]; assert not missing, missing; print('source-boundary carve OK')"
 
       - name: Install production extras and verify spaCy runtime imports
         run: |

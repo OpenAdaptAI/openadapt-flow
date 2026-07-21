@@ -1,6 +1,6 @@
 """Dense sibling-surface false-abort / false-accept study of the identity band.
 
-The headline identity ROC (``docs/validation/IDENTITY_ROC.md``: false accept
+The bounded identity evidence (``docs/validation/IDENTITY_EVIDENCE.md``: false accept
 0.000%, false abort 26.17%) is measured on SYNTHETIC corpora — string pairs
 with hand-injected OCR noise — and, at the product level, on CLEAN OpenEMR
 identity banners. Neither is the surface where a wrong-patient write actually
@@ -1071,7 +1071,7 @@ def aggregate(result: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 SYNTHETIC_FALSE_ABORT = (
-    0.4831  # docs/validation/IDENTITY_ROC.md, v1+v2+v3 (9th reopening)
+    0.4831  # docs/validation/IDENTITY_EVIDENCE.md, bounded synthetic evidence
 )
 SYNTHETIC_FALSE_ACCEPT = 0.0
 
@@ -1128,7 +1128,7 @@ def render_markdown(result: dict[str, Any], agg: dict[str, Any]) -> str:
         "# Dense sibling-surface false-abort / false-accept study",
         "",
         "The identity band matcher's headline numbers "
-        "(`docs/validation/IDENTITY_ROC.md`: **false accept 0.000%, false "
+        "(`docs/validation/IDENTITY_EVIDENCE.md`: **false accept 0.000%, false "
         f"abort {_pct(SYNTHETIC_FALSE_ABORT)}**) are measured on SYNTHETIC "
         "corpora (string pairs with hand-injected OCR noise) and, at the "
         "product level, on CLEAN OpenEMR identity banners. This study "

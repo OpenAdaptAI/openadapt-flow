@@ -112,7 +112,7 @@ COVERAGE_THRESHOLD = 0.8
 # beyond recognition, a 1-char counter) while a replaced name —
 # "Jane Li" -> "Ann Wu" leaves 6 contiguous uncovered chars — fails.
 # Operating point picked from the held-out adversarial ROC
-# (docs/validation/IDENTITY_ROC.md).
+# (docs/validation/IDENTITY_EVIDENCE.md).
 UNCOVERED_RUN_CAP = 4
 
 # Token matching (see band_match): a recorded token is MATCHED only when
@@ -1300,7 +1300,7 @@ def embedded_params(context_text: str, param_examples: dict[str, str]) -> list[s
 
 def _band_ok_sans_glyph(match: BandMatch) -> bool:
     """Every pinned budget EXCEPT the glyph-confusable-identifier one
-    (docs/validation/IDENTITY_ROC.md): coverage, uncovered-run,
+    (docs/validation/IDENTITY_EVIDENCE.md): coverage, uncovered-run,
     contradiction, suspect (letter-letter collision), unexplained-name and
     absent-name. These are the AFFIRMATIVE different-entity signals; a band
     that fails any of them is a real ``mismatch``. The glyph budget is

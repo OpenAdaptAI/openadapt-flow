@@ -128,8 +128,11 @@ def test_adversarial_search_finds_hits_deterministically() -> None:
     test should be re-pointed at whatever the frozen corpus still lists.
     """
     fixture = fx.repeated_icons(n=3, true_idx=0, glyph="bars")
-    hits_a = H.adversarial_search(fixture, iters=30, seed=7)
-    hits_b = H.adversarial_search(fixture, iters=30, seed=7)
+    # Seed 1 reaches a committed local-drift corpus case in the bounded search.
+    # The harness derives its PRNG state with SHA-256, so this sequence is
+    # identical even when Python's per-process hash randomization changes.
+    hits_a = H.adversarial_search(fixture, iters=30, seed=1)
+    hits_b = H.adversarial_search(fixture, iters=30, seed=1)
     assert hits_a, "adversarial search found no silent-wrong on a look-alike surface"
     assert [h.perturbation.key() for h in hits_a] == [
         h.perturbation.key() for h in hits_b

@@ -189,7 +189,7 @@ def main() -> None:
         )
 
     # End-to-end silent-wrong-effect harness (through the REAL replayer): the
-    # genuinely independent, non-circular version of the silent-wrong result.
+    # operationally independent, non-circular version of the silent-wrong result.
     # Screen-verify silently accepts the 2xx-but-wrong persistence faults; the
     # out-of-band REST record oracle drives that WAY down but not to zero (a
     # collateral write to an unaudited surface slips its read path); a complete

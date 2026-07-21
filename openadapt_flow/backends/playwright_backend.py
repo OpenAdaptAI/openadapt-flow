@@ -205,6 +205,63 @@ class PlaywrightBackend:
             return None
         return result or None
 
+    def text_value_at(self, x: int, y: int) -> Optional[str]:
+        """Return the exact value of the editable control under ``(x, y)``.
+
+        This is an optional structural observation used only to verify that a
+        TYPE action landed. It never appears in a report or event log. A point
+        over a non-editable control, an inaccessible custom widget, or an
+        evaluation error returns ``None`` so the runtime falls back to its
+        visual verifier.
+        """
+        try:
+            result = self.page.evaluate(
+                """([px, py]) => {
+                    const hit = document.elementFromPoint(px, py);
+                    if (!hit) return null;
+                    const el = hit.closest(
+                        'input, textarea, [contenteditable="true"],' +
+                        ' [role="textbox"]'
+                    );
+                    if (!el) return null;
+                    if ('value' in el && typeof el.value === 'string') {
+                        return el.value;
+                    }
+                    if (el.isContentEditable ||
+                            el.getAttribute('role') === 'textbox') {
+                        return el.textContent || '';
+                    }
+                    return null;
+                }""",
+                [int(x), int(y)],
+            )
+        except Exception:
+            return None
+        return result if isinstance(result, str) else None
+
+    def focused_text_value(self) -> Optional[str]:
+        """Return the exact value of the currently focused editable control."""
+        try:
+            result = self.page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    if (!el) return null;
+                    const editable = el.matches(
+                        'input, textarea, [contenteditable="true"],' +
+                        ' [role="textbox"]'
+                    ) ? el : null;
+                    if (!editable) return null;
+                    if ('value' in editable &&
+                            typeof editable.value === 'string') {
+                        return editable.value;
+                    }
+                    return editable.textContent || '';
+                }"""
+            )
+        except Exception:
+            return None
+        return result if isinstance(result, str) else None
+
     # -- structural action (openadapt_flow.backend.StructuralActionBackend) --
 
     def structural_locator_at(self, x: int, y: int) -> Optional[StructuralLocator]:

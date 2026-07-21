@@ -115,9 +115,9 @@ PC_STRUCTURAL_TEMPLATE_THRESHOLD = 0.8
 FIELD_REGION_SIZE = (640, 240)
 FIELD_REGION_PAD = 16
 
-# Typed-input verification, diff-only acceptance: when the typed value is
-# OCR-able but OCR cannot find it, a pixel change alone is accepted only if
-# the field region gained no other READABLE text — masked fields render
+# Typed-input verification, secret-only diff acceptance: when a SECRET typed
+# value is OCR-able but OCR cannot find it, a pixel change alone is accepted
+# only if the field region gained no other READABLE text — masked fields render
 # dots, which OCR reads as nothing, low-confidence noise, or punctuation
 # runs, while a dialog rendering over the region adds confident words.
 # "Readable" therefore counts alphanumeric characters of lines OCR is
@@ -3120,6 +3120,9 @@ class Replayer:
             elif self._prev_was_click(workflow, step_index, graph_ctx):
                 field_point = self._last_click_point
                 field_region = self._last_click_region
+            baseline_field_value = self._text_value_at(field_point)
+            if baseline_field_value is None:
+                baseline_field_value = self._text_value_at(None)
             self.backend.type_text(text)
             if not text:
                 return None  # nothing typed, nothing to verify
@@ -3130,6 +3133,8 @@ class Replayer:
                 before_png,
                 result,
                 field_region=field_region,
+                baseline_field_value=baseline_field_value,
+                allow_masked=step.secret,
             )
 
         if step.action is ActionKind.KEY:
@@ -3672,6 +3677,26 @@ class Replayer:
             total += len(alnum)
         return total
 
+    def _text_value_at(self, field_point: Optional[Point]) -> Optional[str]:
+        """Read an exact editable value when the backend can expose one.
+
+        ``None`` means the substrate cannot make this observation. Empty text
+        is returned as ``""`` and remains distinguishable from unavailable.
+        Exceptions fail closed into the visual verifier rather than escaping.
+        """
+        reader = getattr(
+            self.backend,
+            "text_value_at" if field_point is not None else "focused_text_value",
+            None,
+        )
+        if not callable(reader):
+            return None
+        try:
+            value = reader(*field_point) if field_point is not None else reader()
+        except Exception:
+            return None
+        return value if isinstance(value, str) else None
+
     def _typed_input_landed(
         self,
         text: str,
@@ -3679,18 +3704,20 @@ class Replayer:
         baseline_png: bytes,
         *,
         field_region: Optional[Region] = None,
+        baseline_field_value: Optional[str] = None,
+        allow_masked: bool = False,
     ) -> tuple[bool, bool]:
         """Did the just-typed ``text`` visibly land?
 
-        For an OCR-able value (>= ``identity.MIN_PARAM_CHARS`` squashed
-        chars) the OCR layer decides: a contiguous squashed run of the
-        value (scaled for short values, retried at 2x resolution) must be
-        readable in the field region. A pixel change alone is accepted
-        only when the region gained no other readable text — that is the
-        masked-field rendering (password dots read as nothing); a dialog
-        painting over the region changes pixels AND adds readable text
-        without the value, and must never count as "input landed". Values
-        too short for OCR to arbitrate fall back to the diff alone.
+        Exact structural readback is authoritative when the backend exposes
+        it. Otherwise, for an OCR-able value (>=
+        ``identity.MIN_PARAM_CHARS`` squashed chars), a contiguous squashed
+        run of the value (retried at 2x resolution) must be readable in the
+        field region. Pixel-only acceptance is restricted to steps declared
+        ``secret``: masked password dots may render no readable text. A dialog
+        painting over the region or an unreadable ordinary field must never
+        count as "input landed". Values too short for OCR to arbitrate retain
+        the legacy diff fallback.
 
         Returns:
             ``(landed, changed)`` — the verdict, and whether the field
@@ -3699,6 +3726,40 @@ class Replayer:
         """
         after_png = self.vision.wait_settled(self.backend)
         region = self._field_region(field_point, field_region)
+        if baseline_field_value is not None:
+            expected = baseline_field_value + text
+            after_at_point = (
+                self._text_value_at(field_point) if field_point is not None else None
+            )
+            after_focused = self._text_value_at(None)
+
+            # Focus-bound readback is the strongest confirmation. A full-page
+            # cover can hide the field from hit-testing while leaving that
+            # exact editable element focused, so focused readback also
+            # preserves the intended safe-halt-at-the-next-action behavior.
+            if after_focused == expected:
+                return True, expected != baseline_field_value
+
+            # If hit-testing can read the value but focus moved elsewhere, an
+            # interstitial/dialog stole focus after delivery. That is an
+            # unknown state, not a success: the value could belong to an
+            # obscured/replaced control.
+            if after_at_point == expected:
+                return False, True
+
+            observed = [
+                value for value in (after_at_point, after_focused) if value is not None
+            ]
+            if observed and all(value == baseline_field_value for value in observed):
+                return False, False
+            if observed:
+                # A partial/different value is an unknown state and must halt
+                # without destructive select-all.
+                return False, True
+            # A structurally readable field disappearing after delivery means
+            # it was covered, replaced, or navigated away. Do not downgrade to
+            # OCR, which could read the intended text elsewhere on the screen.
+            return False, True
         changed = self.vision.pixels_changed(baseline_png, after_png, region=region)
         needle = identity_mod.squash(text)
         if len(needle) < identity_mod.MIN_PARAM_CHARS:
@@ -3721,6 +3782,8 @@ class Replayer:
         # nothing, noise, or punctuation — platform-dependent). Anything
         # else (a dialog over the field, another widget's text) must fail
         # the verdict.
+        if not allow_masked:
+            return False, changed
         landed = (
             self._readable_chars(after_png, region)
             <= self._readable_chars(baseline_png, region) + MASKED_NEW_TEXT_SLACK
@@ -3736,11 +3799,14 @@ class Replayer:
         result: StepResult,
         *,
         field_region: Optional[Region] = None,
+        baseline_field_value: Optional[str] = None,
+        allow_masked: bool = False,
     ) -> Optional[str]:
         """Verify a TYPE action landed; one guarded refocus-and-retype retry.
 
-        The retry only fires when the first attempt changed NOTHING in the
-        field region (keystrokes fell on a non-rendering target): re-click
+        The retry only fires when exact readback or pixels prove the first
+        attempt changed NOTHING in the field (keystrokes fell on a
+        non-rendering target): re-click
         the field (when its point is known), select-all so a false-negative
         first attempt is replaced rather than duplicated, retype. When the
         region DID change but the value cannot be read (a dialog over the
@@ -3756,6 +3822,8 @@ class Replayer:
             field_point,
             baseline_png,
             field_region=field_region,
+            baseline_field_value=baseline_field_value,
+            allow_masked=allow_masked,
         )
         if landed:
             result.input_verified = True
@@ -3782,6 +3850,10 @@ class Replayer:
             field_point,
             retry_baseline,
             field_region=field_region,
+            # Select-all means the retry's expected exact value is ``text``
+            # regardless of what the field contained before replacement.
+            baseline_field_value="" if baseline_field_value is not None else None,
+            allow_masked=allow_masked,
         )
         if landed:
             result.input_verified = True

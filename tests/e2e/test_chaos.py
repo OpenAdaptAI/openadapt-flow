@@ -87,9 +87,9 @@ class TestBlockingModalMidRun:
         self, bundle, mockmed_url, _browser, tmp_path
     ) -> None:
         """SAFE-HALT. An opaque 'maintenance' overlay appears after the
-        note is typed. Every resolution rung fails (nothing recorded is
-        visible), the ladder retries until the step timeout, and the run
-        aborts naming the save step — no click was fired into the overlay."""
+        note is typed. Focus-bound exact readback confirms delivery even though
+        the cover hides the field from hit-testing; save resolution then fails
+        before a click is fired into the overlay."""
 
         def inject(page):
             page.evaluate(

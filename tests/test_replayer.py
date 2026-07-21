@@ -141,10 +141,21 @@ class FakeVision:
 
 
 class FakeBackend:
-    def __init__(self, frame=None, viewport=VIEWPORT):
+    def __init__(
+        self,
+        frame=None,
+        viewport=VIEWPORT,
+        *,
+        text_value_supported=True,
+        type_accept_results=None,
+    ):
         self._frame = frame if frame is not None else make_png(viewport)
         self._viewport = viewport
         self.actions: list = []
+        self._text_value_supported = text_value_supported
+        self._text_value = ""
+        self._select_all = False
+        self._type_accept_results = list(type_accept_results or [])
 
     @property
     def viewport(self):
@@ -158,12 +169,26 @@ class FakeBackend:
 
     def type_text(self, text):
         self.actions.append(("type", text))
+        accepted = (
+            self._type_accept_results.pop(0) if self._type_accept_results else True
+        )
+        if accepted:
+            self._text_value = text if self._select_all else self._text_value + text
+        self._select_all = False
 
     def press(self, key):
         self.actions.append(("press", key))
+        if key == "ControlOrMeta+a":
+            self._select_all = True
 
     def scroll(self, dx, dy):
         self.actions.append(("scroll", dx, dy))
+
+    def text_value_at(self, x, y):
+        return self._text_value if self._text_value_supported else None
+
+    def focused_text_value(self):
+        return self._text_value if self._text_value_supported else None
 
 
 def click_step(
@@ -1257,7 +1282,7 @@ def test_no_identity_check_without_recorded_context(bundle, run_dir):
 # -- typed-input verification ---------------------------------------------------
 
 
-def test_type_verification_passes_when_field_changes(bundle, run_dir):
+def test_type_verification_passes_with_exact_field_readback(bundle, run_dir):
     vision = FakeVision()
     vision.template_results = [
         Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
@@ -1279,8 +1304,8 @@ def test_type_verification_passes_when_field_changes(bundle, run_dir):
     assert report.success is True
     assert report.results[1].input_verified is True
     assert report.results[1].input_retried is False
-    # The diff was constrained to the field region around the focusing click.
-    assert vision.pixels_changed_calls and (vision.pixels_changed_calls[0] is not None)
+    # Exact structural readback is authoritative; no OCR/pixel guess is needed.
+    assert vision.pixels_changed_calls == []
 
 
 def test_type_verification_prefers_exact_structural_field_region() -> None:
@@ -1308,8 +1333,7 @@ def test_type_verification_refocuses_and_retypes_once(bundle, run_dir):
     vision.template_results = [
         Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     ]
-    vision.pixels_changed_results = [False]  # first attempt: nothing landed
-    backend = FakeBackend()
+    backend = FakeBackend(type_accept_results=[False, True])
     workflow = Workflow(
         name="wf",
         steps=[
@@ -1342,8 +1366,7 @@ def test_type_verification_failure_halts_run(bundle, run_dir):
     vision.template_results = [
         Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
     ]
-    vision.pixels_changed_results = [False, False]
-    backend = FakeBackend()
+    backend = FakeBackend(type_accept_results=[False, False])
     workflow = Workflow(
         name="wf",
         steps=[
@@ -1391,7 +1414,7 @@ def test_type_verification_ocr_reads_the_value(bundle, run_dir):
     readable in the field region — verified, no retry."""
     vision = _type_vision()
     vision.ocr_results = [[OcrLine("hello world")]]
-    backend = FakeBackend()
+    backend = FakeBackend(text_value_supported=False)
     report = Replayer(backend, vision=vision).run(
         _type_workflow(),
         params={"note": "hello world"},
@@ -1416,7 +1439,7 @@ def test_type_dialog_over_field_halts_without_retyping(bundle, run_dir):
     # heuristic re-reads the after and baseline regions.
     vision.ocr_results = [dialog, dialog, dialog, []]
     vision.pixels_changed_results = [True]
-    backend = FakeBackend()
+    backend = FakeBackend(text_value_supported=False)
     report = Replayer(backend, vision=vision).run(
         _type_workflow(),
         params={"note": "hello world"},
@@ -1433,16 +1456,52 @@ def test_type_dialog_over_field_halts_without_retyping(bundle, run_dir):
     assert ("press", "ControlOrMeta+a") not in backend.actions
 
 
-def test_type_masked_field_accepts_diff_without_new_text(bundle, run_dir):
+def test_ordinary_field_never_uses_masked_pixel_acceptance(bundle, run_dir):
+    """Unreadable ordinary text is not a password-dot success shape.
+
+    This is the macOS focus-steal regression: pixels changed after the retry,
+    OCR read no value, and the old generic masked heuristic returned success
+    even though the field remained empty.
+    """
+    vision = _type_vision()
+    vision.ocr_results = [[], [], [], []]
+    vision.pixels_changed_results = [True]
+    backend = FakeBackend(text_value_supported=False)
+    report = Replayer(backend, vision=vision).run(
+        _type_workflow(),
+        params={"note": "hello world"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+    assert report.success is False
+    result = report.results[1]
+    assert result.input_verified is False
+    assert result.input_retried is False
+    assert "retyping is unsafe" in (result.error or "")
+
+
+def test_type_masked_field_accepts_diff_without_new_text(bundle, run_dir, monkeypatch):
     """Masked fields (password dots) render pixels but no readable text:
     the diff plus an unchanged-OCR region is the accepted masked shape."""
     vision = _type_vision()
     vision.ocr_results = [[], [], [], []]  # nothing readable before/after
     vision.pixels_changed_results = [True]
-    backend = FakeBackend()
+    backend = FakeBackend(text_value_supported=False)
+    monkeypatch.setenv("OPENADAPT_FLOW_SECRET_NOTE", "hunter2secret")
     report = Replayer(backend, vision=vision).run(
-        _type_workflow(),
-        params={"note": "hunter2secret"},
+        Workflow(
+            name="wf",
+            steps=[
+                click_step(),
+                Step(
+                    id="t1",
+                    intent="type secret",
+                    action=ActionKind.TYPE,
+                    param="note",
+                    secret=True,
+                ),
+            ],
+        ),
         bundle_dir=bundle,
         run_dir=run_dir,
     )
@@ -1451,7 +1510,7 @@ def test_type_masked_field_accepts_diff_without_new_text(bundle, run_dir):
     assert report.results[1].input_retried is False
 
 
-def test_type_masked_dots_reading_as_noise_still_accepts(bundle, run_dir):
+def test_type_masked_dots_reading_as_noise_still_accepts(bundle, run_dir, monkeypatch):
     """FIXED 2026-07-09 (CI regression): on some platform renderers the
     password dots OCR not as nothing but as punctuation runs,
     low-confidence glyph noise, or even CONFIDENT homogeneous digit runs
@@ -1468,10 +1527,22 @@ def test_type_masked_dots_reading_as_noise_still_accepts(bundle, run_dir):
     ]
     vision.ocr_results = [dots, dots, dots, []]
     vision.pixels_changed_results = [True]
-    backend = FakeBackend()
+    backend = FakeBackend(text_value_supported=False)
+    monkeypatch.setenv("OPENADAPT_FLOW_SECRET_NOTE", "mockmed-demo-pass")
     report = Replayer(backend, vision=vision).run(
-        _type_workflow(),
-        params={"note": "mockmed-demo-pass"},
+        Workflow(
+            name="wf",
+            steps=[
+                click_step(),
+                Step(
+                    id="t1",
+                    intent="type secret",
+                    action=ActionKind.TYPE,
+                    param="note",
+                    secret=True,
+                ),
+            ],
+        ),
         bundle_dir=bundle,
         run_dir=run_dir,
     )
@@ -1486,7 +1557,9 @@ def test_type_without_known_field_diffs_full_frame_and_cannot_refocus(bundle, ru
     retypes without a refocus click."""
     vision = FakeVision()
     vision.pixels_changed_results = [False, False]
-    backend = FakeBackend()
+    backend = FakeBackend(
+        text_value_supported=False, type_accept_results=[False, False]
+    )
     workflow = Workflow(
         name="wf",
         steps=[

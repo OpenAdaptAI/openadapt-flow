@@ -49,14 +49,15 @@ columns and the characterization tests pin the new behavior.
    rule (never bake a parameterized value's rendering into compiled
    *postconditions*) still holds untouched.
 2. **Unverified typed input** → **typed-input verification**
-   (`Replayer._verify_typed_input`). After every TYPE action, an OCR-able
-   typed value must be READ back from the field region (around the
-   focusing click; whole frame when focus was moved by keyboard;
-   2x-resolution retry). A pixel change alone is accepted only when the
-   region gained no other readable text — the masked-field (password
-   dots) shape — so a dialog rendering over the field cannot
-   false-verify while keystrokes fell elsewhere. When nothing changed at
-   all: ONE refocus-and-retype retry (re-click the field, select-all so a
+   (`Replayer._verify_typed_input`). After every TYPE action, the browser
+   backend reads the exact focused editable value; other substrates use OCR
+   over the field region (around the focusing click; whole frame when focus
+   was moved by keyboard; 2x-resolution retry). A pixel change alone is
+   accepted only for steps explicitly declared `secret`, and only when the
+   region gained no other readable text — the masked-field (password dots)
+   shape — so an ordinary unreadable field or a dialog rendering over the
+   field cannot false-verify while keystrokes fell elsewhere. When nothing
+   changed at all: ONE refocus-and-retype retry (re-click the field, select-all so a
    false-negative first attempt is replaced rather than duplicated,
    retype), then safe-halt. When the region changed but the value is
    unreadable: immediate safe-halt WITHOUT retyping (retyping into an
@@ -684,7 +685,7 @@ Automated in `tests/e2e/test_primitives.py`. Exploration evidence:
 | native `<select>`, mouse | unsupported | the dropdown popup is browser chrome — it never appears in page screenshots (predicted in FINDINGS.md, confirmed) |
 | native `<select>`, arrow keys | **hazard** | inert in this harness (macOS headless): recording changed nothing — no visual change AND no structural change (URL/title/tab count all static), so even the 2026-07-09 structural fallback has nothing to assert; the steps compile with **zero postconditions** and replay is a **vacuous success**, disclosed |
 | native `<select>`, type-prefix + Enter | supported (workaround) | `Species set to Dog.` replays — the keyboard fallback FINDINGS.md predicted |
-| native date input, typed digits | **partial / hazard → platform-shaped** | segment-, locale-, AND renderer-dependent. macOS shape: typing `07082026` produced value `70820-02-06` *at record time*; the initial fix replayed the same garbage byte-for-byte, and since 2026-07-09 the replay SAFE-HALTS at the type step instead (read-back cannot find the typed digits in the transformed rendering). Linux shape: the widget ignores the digits entirely — the recording is itself a no-op and the replay reproduces the no-op, verifying vacuously through the masked acceptance (focus rendering changes, no readable text). No wrong date value is written in either shape; the false abort and the vacuous verify are both disclosed in docs/LIMITS.md; the calendar popup is invisible browser chrome |
+| native date input, typed digits | **partial / hazard → platform-shaped, fail-closed** | segment-, locale-, AND renderer-dependent. macOS shape: typing `07082026` produced value `70820-02-06` *at record time*. Linux shape: the widget ignores the digits entirely. Exact browser value readback now SAFE-HALTS both at the type step because neither field value equals the intended digits; ordinary fields cannot use the secret-only masked-pixel fallback. No wrong date value is written; the calendar popup remains invisible browser chrome |
 | iframe-heavy pages | supported | OpenEMR: 6+ nested iframes, modal-in-iframe-in-modal — vision-only replay never noticed (docs/showcase-openemr/FINDINGS.md) |
 | new tab / `target=_blank` | **unsupported / silent → verified structurally (2026-07-09)** | the single-page frame never shows the new tab and before/after frames are identical, but the recorder now captures the backend's page count and the compiler mines a `NEW_TAB_OPENED` fallback postcondition — the step fails at replay if no tab actually opened. What happens INSIDE the new tab is still unobserved (single-window scope) |
 | file upload | unsupported (structural) | the native file chooser is OS chrome; neither recordable nor drivable vision-only |

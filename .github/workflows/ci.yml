@@ -181,6 +181,38 @@ jobs:
       - name: Consistency gate (docs vs. code)
         run: python scripts/check_consistency.py
 
+  # --- EffectBench standalone benchmark artifact --------------------------
+  # The SWER benchmark ships as a SELF-CONTAINED, pip-installable package under
+  # benchmark/effectbench/ with pydantic as its ONLY dependency. This job proves
+  # a third party can install and run it WITHOUT the openadapt-flow codebase: it
+  # installs the package into a clean environment (no `-e .`, no PYTHONPATH into
+  # the engine) and runs the package's own test suite, including the
+  # source-availability boundary self-check that keeps crown-jewel material out
+  # of the artifact.
+  effectbench-standalone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install ONLY the standalone benchmark (no engine on the path)
+        run: pip install "./benchmark/effectbench[test]"
+      - name: Assert the engine is NOT importable (true standalone)
+        run: |
+          python - <<'PY'
+          import importlib.util
+          assert importlib.util.find_spec("openadapt_flow") is None, (
+              "openadapt_flow must not be installed for the standalone job"
+          )
+          import effectbench
+          print("effectbench", effectbench.__version__)
+          PY
+      - name: Reproduce the reference result
+        run: python -m effectbench reference
+      - name: Run the standalone benchmark test suite
+        run: python -m pytest benchmark/effectbench/tests -q
+
   # --- Cross-package schema boundary (required-check candidate) -----------
   # This must remain a distinct job with the `interop` extra installed. The
   # test module deliberately skips when openadapt-types is absent so a minimal

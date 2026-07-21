@@ -35,13 +35,18 @@ It also guards two specific honesty facts the audit surfaced:
   Windows UIA, Linux AT-SPI, and native macOS AX -- each expose both the
   structured-text identity read and the deterministic structural action rung.
 
-Membership is derived from each protocol's own ``__protocol_attrs__`` rather than
-hard-coded, so extending a protocol's surface is reflected automatically and a
-partial (some-but-not-all-members) implementation cannot masquerade as full
-conformance.
+Membership is derived from each protocol's own declared members (via the
+supported ``get_protocol_members`` accessor) rather than hard-coded, so
+extending a protocol's surface is reflected automatically and a partial
+(some-but-not-all-members) implementation cannot masquerade as full conformance.
 """
 
 from __future__ import annotations
+
+try:  # Python 3.13+ exposes the accessor in the stdlib.
+    from typing import get_protocol_members
+except ImportError:  # < 3.13: the backport (always installed via pydantic et al.).
+    from typing_extensions import get_protocol_members
 
 from openadapt_flow.backend import (
     Backend,
@@ -135,10 +140,16 @@ def _protocol_members(protocol: type) -> frozenset[str]:
 
     Derived from the protocol itself so a member added to the protocol is
     enforced here automatically (a partial implementation cannot pass).
+
+    Uses ``get_protocol_members`` -- the supported public accessor -- rather than
+    the private ``__protocol_attrs__`` class attribute, which CPython only sets
+    natively on Python 3.12+. Reading the dunder directly returned an empty/absent
+    value on the 3.10 and 3.11 matrix legs, silently disabling this guarantee;
+    the accessor returns the identical member set on every supported interpreter.
     """
-    attrs = getattr(protocol, "__protocol_attrs__", None)
-    assert attrs, f"{protocol.__name__} exposes no __protocol_attrs__"
-    return frozenset(attrs)
+    members = get_protocol_members(protocol)
+    assert members, f"{protocol.__name__} exposes no protocol members"
+    return frozenset(members)
 
 
 def _implements(cls: type, protocol: type) -> bool:

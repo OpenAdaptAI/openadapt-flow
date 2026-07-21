@@ -1,13 +1,14 @@
 # OpenAdapt arXiv paper
 
 This directory contains the source for the OpenAdapt technical paper. It is a
-submission draft, not a submitted paper. The draft deliberately carries no
-named byline until every author has approved the author list and order.
+submission draft, not a submitted paper. The byline is currently
+Richard Abrich, OpenAdapt (MLDSAI Inc.); the final author list and order are
+confirmed as a submission gate below.
 
 ## Submission blockers
 
-- Replace the contributor placeholder with the agreed author list, order, and
-  affiliations.
+- Confirm the final author list, order, ORCIDs, and affiliations (byline
+  currently set to Richard Abrich, OpenAdapt / MLDSAI Inc.).
 - Choose an arXiv category and complete any required endorsement.
 - Record the commit and release artifact used for the final evaluation.
 - Re-run every promoted experiment from the release candidate and archive the
@@ -32,9 +33,10 @@ make -C paper
 - `paper/build/main.pdf` — the full technical report (canonical artifact).
 - `paper/workshop/build/main.pdf` — an ~8-page workshop condensation
   (`paper/workshop/main.tex`) reframed around the silent-wrong-effect finding.
-  It shares `references.bib` (via a symlink) and the same benchmark constants;
-  `check_artifacts.py` binds both. Retarget its document class when a specific
-  workshop venue is chosen.
+  It shares `references.bib` via a byte-identical copy (a regular file, not a
+  symlink, so the sdist packages cleanly) and the same benchmark constants;
+  `check_artifacts.py` binds both and asserts the two bib files stay identical.
+  Retarget its document class when a specific workshop venue is chosen.
 
 `make -C paper clean` removes generated files.
 

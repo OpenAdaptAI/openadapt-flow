@@ -183,6 +183,7 @@ packages = ["openadapt_flow"]
 # tuning surface, or repository-only reliability recipes/results.  Keep this
 # list in lockstep with the sdist target and the archive validator below.
 exclude = [
+    "/.hypothesis",
     "/benchmark/reliability",
     "/docs/validation/IDENTITY_ROC.md",
     "/docs/validation/adversary_corpus_manifest.json",
@@ -216,11 +217,12 @@ exclude = [
 # checkout carries an isolated openIMIS reference environment whose adapted
 # deployment files remain AGPL-3.0-only; ship none of that benchmark surface
 # (including its launcher/test and repository-only notice) in the sdist. The
-# public checkout also retains reproducibility evidence that is not part of the
-# distributable engine: frozen/grown identity corpora, ROC tuning artifacts,
-# and the public-web reliability recipes/raw results. The public mechanisms and
-# bounded aggregate evidence remain available in the source repository.
+# exclusions below are defense in depth for former paths and future regressions:
+# grown identity corpora, ROC tuning artifacts, and detailed public-web target
+# recipes/raw rows are absent from the current public tree. Public mechanisms,
+# fake-patient synthetic fixtures, and bounded aggregate evidence remain.
 exclude = [
+    "/.hypothesis",
     "/THIRD_PARTY_NOTICES.md",
     "/benchmark/openimis_claims",
     "/benchmark/reliability",
@@ -368,8 +370,8 @@ follow_imports_for_stubs = true
 #     runtime.grounder, runtime.healing.perturbation
 #   - the VLM microservice (FastAPI, dynamic): services.vlm_service.*
 #   - offline validation harnesses (not on the runtime path):
-#     validation.* (adversary_corpus, dense_surface, identity_ladder,
-#     identity_roc, pixel_identity_probe, pixel_identity_aligned,
+#     validation.* (dense_surface, identity_ladder,
+#     pixel_identity_probe, pixel_identity_aligned,
 #     vlm_identity_probe)
 #   - perceptual hashing on numpy internals: vision.hashing
 [[tool.mypy.overrides]]
@@ -388,10 +390,8 @@ module = [
     "openadapt_flow.services.vlm_service.app",
     "openadapt_flow.services.vlm_service.backends",
     "openadapt_flow.services.vlm_service.batching",
-    "openadapt_flow.validation.adversary_corpus",
     "openadapt_flow.validation.dense_surface",
     "openadapt_flow.validation.identity_ladder",
-    "openadapt_flow.validation.identity_roc",
     "openadapt_flow.validation.pixel_identity_probe",
     "openadapt_flow.validation.pixel_identity_aligned",
     "openadapt_flow.validation.vlm_identity_probe",

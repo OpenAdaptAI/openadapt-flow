@@ -131,7 +131,7 @@ unarmed actions, review the inferred risk and tags, and test identity against
 real near-match and same-name records. Pure-pixel substrates should expect more
 safe halts because OCR ambiguity cannot always be resolved. The adversarial
 identity evidence and measured over-halt tradeoff are documented in
-[`IDENTITY_ROC.md`](validation/IDENTITY_ROC.md) and the generated claim registry
+[`IDENTITY_EVIDENCE.md`](validation/IDENTITY_EVIDENCE.md) and the generated claim registry
 in [`VERIFICATION.md`](VERIFICATION.md).
 
 **Pixel-verify enable bar.** The pixel tier's positive **verify** path is built

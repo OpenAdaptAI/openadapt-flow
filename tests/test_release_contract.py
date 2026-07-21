@@ -21,6 +21,9 @@ from scripts.check_release_consistency import (
     PRIVATE_DISTRIBUTION_EXACT_PATHS,
     PRIVATE_DISTRIBUTION_PATH_PREFIXES,
     PRIVATE_DISTRIBUTION_PATH_TOKENS,
+    PUBLIC_SOURCE_RELIABILITY_ALLOWED_PATHS,
+    PUBLIC_SOURCE_REPOSITORY_ONLY_EXACT_PATHS,
+    PUBLIC_SOURCE_REPOSITORY_ONLY_PREFIXES,
     REPOSITORY_ONLY_EVALUATION_EXACT_PATHS,
     REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES,
     REPOSITORY_ONLY_EVALUATION_PATH_TOKENS,
@@ -28,6 +31,7 @@ from scripts.check_release_consistency import (
     release_versions,
     sync_lock_version,
     validate_distribution_directory,
+    validate_public_source_tree,
     validate_sdist_license_boundary,
     validate_wheel_license_boundary,
 )
@@ -55,6 +59,7 @@ SOURCE_BOUNDARY_EXCLUDES = {
     "/tests/test_identity_out_of_corpus.py",
     "/tests/test_reliability.py",
 }
+EPHEMERAL_BUILD_EXCLUDES = {"/.hypothesis"}
 
 
 def test_release_versions_are_synchronized() -> None:
@@ -92,6 +97,8 @@ def test_wheel_and_sdist_exclude_repository_only_evidence() -> None:
 
     assert SOURCE_BOUNDARY_EXCLUDES <= set(targets["wheel"]["exclude"])
     assert SOURCE_BOUNDARY_EXCLUDES <= set(targets["sdist"]["exclude"])
+    assert EPHEMERAL_BUILD_EXCLUDES <= set(targets["wheel"]["exclude"])
+    assert EPHEMERAL_BUILD_EXCLUDES <= set(targets["sdist"]["exclude"])
 
     # The archive guard is semantic, not an exact-file-only denylist: a future
     # corpus version or renamed reliability recipe must fail closed too.
@@ -106,6 +113,34 @@ def test_wheel_and_sdist_exclude_repository_only_evidence() -> None:
     assert "reliability_corpus" in REPOSITORY_ONLY_EVALUATION_PATH_TOKENS
     assert "benchmark/reliability/" in REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES
     assert "tests/test_reliability.py" in REPOSITORY_ONLY_EVALUATION_EXACT_PATHS
+
+
+def test_public_source_tree_excludes_private_data_and_recipes(tmp_path: Path) -> None:
+    allowed = tmp_path / "benchmark/reliability"
+    allowed.mkdir(parents=True)
+    (allowed / "summary.json").write_text("{}\n")
+    (allowed / "RELIABILITY.md").write_text("bounded aggregate\n")
+    validate_public_source_tree(tmp_path)
+
+    forbidden = tmp_path / "benchmark/reliability/results.json"
+    forbidden.write_text("{}\n")
+    with pytest.raises(ValueError, match="public source tree contains private"):
+        validate_public_source_tree(tmp_path)
+
+    assert "benchmark/reliability/results.json" in (
+        PUBLIC_SOURCE_REPOSITORY_ONLY_EXACT_PATHS
+    )
+    assert "benchmark/reliability/summary.json" in (
+        PUBLIC_SOURCE_RELIABILITY_ALLOWED_PATHS
+    )
+    assert "benchmark/reliability/" in PUBLIC_SOURCE_REPOSITORY_ONLY_PREFIXES
+    assert "scripts/reliability/" in PUBLIC_SOURCE_REPOSITORY_ONLY_PREFIXES
+
+    forbidden.unlink()
+    renamed_raw_rows = tmp_path / "benchmark/reliability/per-target-rows.json"
+    renamed_raw_rows.write_text("{}\n")
+    with pytest.raises(ValueError, match="public source tree contains private"):
+        validate_public_source_tree(tmp_path)
 
 
 def test_lock_sync_updates_only_editable_root_version(tmp_path: Path) -> None:

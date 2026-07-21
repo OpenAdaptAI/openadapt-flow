@@ -37,10 +37,10 @@ Before pointing this harness at anyone else, we pointed it at ourselves —
 repeatedly. The single most dangerous thing a GUI replayer can do is the wrong
 write, silently, so we tried to make ours do exactly that. It reopened **five
 times**, each by an out-of-distribution adversary we did not anticipate, each
-fixed, and each pinned as a permanent test on a **frozen, SHA-manifested
-held-out corpus committed BEFORE the fix it evaluates** (the full found-fixed-
-reopened arc is in [VALIDATION.md](VALIDATION.md); the ROC, operating point
-and per-class tables are in [IDENTITY_ROC.md](IDENTITY_ROC.md)):
+fixed, and each pinned as a permanent regression. The version-bound held-out
+corpora and operating-point sweeps were frozen before their corresponding
+fixes and are now maintained privately; the bounded aggregate is public in
+[IDENTITY_EVIDENCE.md](IDENTITY_EVIDENCE.md):
 
 1. **Pixel-lookalike rows** — template confidence is pixel similarity, not
    identity; a crop of the wrong row matches beautifully.
@@ -57,10 +57,9 @@ and per-class tables are in [IDENTITY_ROC.md](IDENTITY_ROC.md)):
    only, so a *different* patient's identifier one confusable character apart
    ("A01234" vs "AO1234") silently verified.
 
-Where it lands now, across the whole frozen corpus (v1+v2+v3, ~6,900 pairs)
-plus 18 out-of-corpus reviewer probes: **false-accept — a wrong-patient verify
-— 0.000%**, bought with a **false-abort rate of about 26% overall (28% on the
-noisiest identifier rows)**, each one a *safe halt* — a fallback or a human
+Where it lands now, across 6,900 synthetic pairs plus 18 reviewer probes:
+**0 measured false accepts**, bought with a **48.31% false-abort rate** on
+same-entity pairs; each false abort is a *safe halt* — a fallback or a human
 retry, never a wrong write. And under the same three row-identity drift modes
 this study runs against other tools, our own **pre-fix** replayer silently
 wrote a Triage encounter to the wrong patient **3/3** and reported success —

@@ -1,6 +1,6 @@
 # Dense sibling-surface false-abort / false-accept study
 
-The identity band matcher's headline numbers (`docs/validation/IDENTITY_ROC.md`: **false accept 0.000%, false abort 48.31%**) are measured on SYNTHETIC corpora (string pairs with hand-injected OCR noise) and, at the product level, on CLEAN OpenEMR identity banners. This study measures the SAME matcher on the surface where a wrong-patient write actually does damage: a dense, sibling-heavy record LIST, rendered as HTML, screenshotted, and read by the repo's own OCR (RapidOCR). Every band string below came out of OCR reading a rendered PNG — nothing is a fabricated string.
+The identity band matcher's bounded aggregate (`docs/validation/IDENTITY_EVIDENCE.md`: **0 measured false accepts, 48.31% false aborts**) comes from synthetic string pairs and review probes. This study measures the same matcher on a dense, sibling-heavy rendered record list read by the repository's OCR path. Every band string in this study came from OCR reading a rendered image.
 
 ## Method (faithful to record + replay)
 

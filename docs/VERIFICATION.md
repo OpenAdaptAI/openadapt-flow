@@ -100,7 +100,7 @@
 |---|---|---|---|---|
 | `tests/test_identity.py` | test | ci (required PR gate (test)) | supported | Wrong-entity / near-name sibling / generic-band / param-in-band probes: the identity check refuses to verify a mismatched target and never arms on non-discriminative bands. |
 | `tests/test_disambiguation.py` | test | ci (required PR gate (test)) | supported | Underdetermined targets surface as explicit disambiguation rather than a guessed click. |
-| `tests/test_identity_corpus_rates.py` | test | ci (required PR gate (test)) | supported | Held-out identity corpus rates (the ROC / false-accept guard behind the gate). |
+| `tests/test_identity_fuzz.py` | test | ci (required PR gate (test)) | supported | Public property-based checks preserve the never-false-accept invariant for collapsible identifiers while requiring clean identifiers to remain verifiable. |
 | `tests/test_identity_ladder.py` | test | ci (required PR gate (test)) | supported | The identity resolution ladder (structural/template/OCR) escalation. |
 
 **Caveats (honest limits):**

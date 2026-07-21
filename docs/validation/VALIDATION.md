@@ -3,8 +3,8 @@
 Date: 2026-07-08 (initial audit and same-day fix); updated 2026-07-09
 (postcondition-mining fix + live re-run); updated 2026-07-10 (identity
 matcher rebuilt after the THIRD wrong-patient reopening — near-name
-siblings — with a frozen held-out adversarial corpus and a published
-ROC; see the 2026-07-10 fix update). This document is the
+siblings — against a frozen held-out adversarial corpus; see the bounded
+public summary in [IDENTITY_EVIDENCE.md](IDENTITY_EVIDENCE.md)). This document is the
 result of deliberately trying to break compiled replay before anyone else
 does. Every experiment ran with **zero model calls and $0 of API spend**:
 compiled-replay only, no grounder, no agent arm. Failures found here are
@@ -305,255 +305,26 @@ Known remaining, documented here deliberately (not attempted):
 - **REGION_STABLE templates can embed rendered parameter pixels** (see the
   lint scope note above) — false-halt direction only.
 
-## Fix update (2026-07-10, `feat/identity-roc`): the THIRD wrong-patient reopening
+## Identity-verification hardening (bounded public summary)
 
-Said plainly: the wrong-patient P0 reopened a **third** time. History:
-pixel-lookalike rows (fixed 2026-07-08 by the context bands) → residue-
-blind coverage + short-param disarm (fixed 2026-07-09 by the token
-matcher + residue cap) → **near-name siblings** (this fix). The
-2026-07-09 matcher returned `(coverage=1.0, residue=0)` — VERIFIED — for
-all four of these reproduced probes:
+Adversarial review repeatedly found false-accept classes in the target-context
+identity gate. The production response was structural: armed actions require
+fresh identity evidence, ambiguous OCR-only identifiers abstain, and the runtime
+halts when a plausible sibling cannot be excluded. The public mechanism and
+conservative defaults are pinned by boundary tests.
 
-- recorded `Belford, Phil 1985-03-12 M` vs observed
-  `Belford, Philip 1985-03-12 M` (containment tier: 'Phil' ⊂ 'Philip');
-- the reverse direction (similarity tier: ratio 0.8);
-- `Smith, John 1985-03-12 M` vs `Smith, Joan 1985-03-12 M` (similarity
-  tier: SequenceMatcher('John','Joan') = 0.75 >= 0.7);
-- `Belford, Phil ...` vs `Belford, Phillipa ...` (containment tier).
+The bounded aggregate evidence covers 6,900 synthetic string pairs plus 18
+review probes: 0 measured false accepts, a 48.31% false-abort rate, and 100%
+abort on deliberately indistinguishable pairs. A separate rendered/OCR
+dense-surface exercise measured 26/360 false accepts before pixel-identity
+hardening and 0/360 after it. See [IDENTITY_EVIDENCE.md](IDENTITY_EVIDENCE.md).
 
-Real EMR rows are full of near-name siblings — family members sharing a
-surname, Jr/Sr, John/Joan — and downstream note verification does NOT
-catch a wrong-patient write: the note really is saved, in the wrong
-chart. All four probes are pinned as permanent mismatches in
-`tests/test_identity.py`.
-
-**Methodology change — held-out corpus BEFORE the fix.** The recurring
-failure mode of this document is fixing against exactly the adversaries
-that found the last bug (a fixed point, not a false-negative rate). This
-fix broke the cycle: a deterministic, seeded adversarial corpus
-(`openadapt_flow/validation/adversary_corpus.py`, seed 20260710, 4360
-pairs — 2200 `different_entity` across 10 generator categories, 2160
-`same_entity` OCR-noise pairs across 9) was generated and **frozen
-first** — its sha256 manifest is committed
-(`adversary_corpus_manifest.json`) and pinned by tests, so post-hoc
-tuning of the corpus toward the matcher is detectable in git history —
-and only then was the matcher evaluated and rebuilt. No generator bugs
-were found or fixed after first evaluation (the generator is byte-
-identical to the pre-evaluation commit).
-
-**Measured, before → after** (full tables and the ROC chart:
-[IDENTITY_ROC.md](IDENTITY_ROC.md), `identity_roc.png`):
-
-| corpus category (`different_entity`) | old matcher false-accept | new |
-|---|---|---|
-| DOB off by one field | 99.1% | 0.0% |
-| generational suffix (Jr/Sr/II) | 99.1% | 0.0% |
-| single-letter edit (John/Joan) | 98.2% | 0.0% |
-| transposition | 95.5% | 0.0% |
-| prefix extension (Phil/Philip) | 72.3% | 0.0% |
-| MRN digit swap | 50.0% | 0.0% |
-| same surname, different first | 15.5% | 0.0% |
-| **overall (2200 pairs)** | **53.9%** | **0.0%** |
-
-(Scope caveat, added 2026-07-10: this 0.0% is on corpus v1 ONLY, and the
-out-of-corpus review later the same day showed it was partially
-tautological — v1's labeling rule excludes confusion-collided names,
-short-token discriminators, observed supersets and absent-name shapes
-by construction, and 13 probes in those classes all VERIFIED against
-this exact matcher. See the out-of-corpus fix update below.)
-
-False aborts on the `same_entity` side: 12.1% → 10.7% (i.e. the fix also
-*reduced* the availability cost slightly; the remainder is ~90%
-concentrated in the occlusion category — ~~bands whose identity tokens
-were never read, where refusing is the correct epistemic outcome~~
-**CORRECTED by the 2026-07-10 out-of-corpus review's recount**: 102 of
-the 216 occlusion aborts at this operating point still had BOTH name
-tokens readable and aborted on trailing DOB/MRN loss. Roughly half the
-occlusion refusals were a plain availability cost on rows whose name
-WAS readable — a priced trade-off, not the epistemic virtue this
-paragraph originally claimed; see the out-of-corpus fix update below).
-
-**The rebuild** (`runtime/identity.py`): token matching accepts ONLY
-OCR-equivalence — identity under the character-confusion classes real
-engines produce (l/1/i, O/0, 5/s, 2/z, 8/b, 9/g, rn/m, cl/d, vv/w) —
-plus full-consumption token splits/joins; the containment and raw-
-similarity tiers are gone. Unmatched tokens are split into *absence*
-(uncovered runs, budgeted as before — OCR dropout, the cheap direction)
-and *contradiction* (near-miss similarity >= 0.62 on canonical forms,
-semantic containment with alphabetic residue, replacement by an
-unexplained observed token, generational suffix on one side), which has
-its own budget of ZERO characters. The modal-band permutation class, OCR
-jitter, splits/joins and the MockMed/OpenEMR true-row shapes all still
-verify (pinned).
-
-**Operating point, chosen from the ROC with the weighting said out
-loud** (a wrong-patient write is catastrophic; a false abort is a ~$0.10
-hybrid fallback — we price that at 4+ orders of magnitude): coverage
-0.8, uncovered-run cap 4, contradiction_sim 0.62, contradiction cap 0.
-NOT the on-corpus Pareto-minimal false-abort corner (coverage 0.7 / run
-cap 8, FAbort 7.96%): that corner's zero false accepts rests entirely on
-the contradiction rule (evade it and FA is 60.8%), while at 0.8/4 the
-older coverage/run budgets independently stop 79.5% of the corpus even
-with contradiction disabled — defense in depth bought with 2.7pp of
-false aborts concentrated in occlusion shapes (~~unreadable-name~~ see
-the recount correction above: about half of those bands still had
-readable names). Regression nets: the operating point is pinned by
-boundary tests, and a corpus-wide test asserts **zero** false accepts
-(a rate, not a probe list) plus a false-abort budget. (Both the zero
-and the budget were superseded the same day — see the out-of-corpus
-fix update below.)
-
-**Protection coverage became a first-class metric in the same change**
-(it was previously a buried sentence in a live-check note): the live
-2026-07-09 OpenEMR check armed only **4 of 12** click steps — every
-identity guarantee above applies to armed steps ONLY, and an unarmed
-click proceeds with no identity check at all. Now: `workflow.json`
-carries per-step `identity_armed` / `identity_unarmed_reason` (bundle
-auditable before running), every REPORT.md states "N of M click steps
-identity-armed" and lists unarmed steps by id with the compile-time
-reason, benchmark BENCHMARK.md methodology sections carry the metric
-(historical results.json files lack the per-run data; the generators now
-record it and the committed files note that), and docs/LIMITS.md leads
-the dangerous list with it.
-
-## Fix update (2026-07-10, out-of-corpus review): the corpus-v1 zero was partially tautological
-
-Said plainly: the wrong-patient P0 reopened a **fourth** time, hours
-after the third fix — and this time the frozen corpus itself was part of
-the failure. The review verified **13 probes against the shipped matcher
-at the shipped operating point; all 13 silently VERIFIED**, and every
-one belongs to a class corpus v1 excluded BY CONSTRUCTION (its labeling
-rule treats confusion-equivalent bands as same-entity and rejects them
-as "mislabeled"; short-token, observed-superset and absent-name shapes
-were never generated). The probes are pinned verbatim in
-`tests/test_identity_out_of_corpus.py`, committed FIRST (failing) as the
-acceptance criteria:
-
-- **Blocker 1 — canonicalization equates distinct names.** 'Smith,
-  Neil' vs 'Smith, Nell' (i/l), 'Clay, Susan' vs 'Day, Susan' (cl/d),
-  'Baker, Marnie' vs 'Baker, Mamie' (rn/m), 'Gail Turner' vs 'Gall
-  Turner' (i/l): different real patients whose names canonicalize
-  identically all verified at coverage 1.0. Param mode was NOT
-  vulnerable — its raw `longest_run` check rejects Neil→Nell — i.e. the
-  stricter raw pattern already existed in the codebase.
-- **Blocker 2 — sub-MIN_BLOCK tokens invisible to contradiction.** A
-  changed middle initial ('John J' vs 'John K'), the SEX column ('M' vs
-  'F'), and changed 2-char names ('Al'/'Bo', 'Jo'/'Ed') all verified.
-- **Blocker 3 — observed-side supersets always verified.** Context mode
-  had no unexplained-observed-token budget (param mode HAS one):
-  appended middle names, a two-row OCR merge, and the realistic shape —
-  a message/cc row that merely MENTIONS the recorded patient — all
-  verified.
-- **Major 4 — absent identity token at the run cap.** 'Belford, Phil'
-  vs 'Belford,' verified with the 4-char first name never read; the
-  shape was even PINNED AS CORRECT in the operating-point boundary test
-  (that pin is now flipped).
-
-**The redesign** (same file, `runtime/identity.py`): three new budgets
-and one class weighting, all zero-tolerance at the operating point —
-*suspect* characters (a name-plausible token matched only by a
-LETTER-LETTER confusion: indistinguishable from a real sibling, so it
-refuses; digit/symbol confusions stay clean matches because names
-contain no digits), *unexplained observed name-shaped tokens*
-(closes the superset hole; lowercase adjacent-row bleed stays exempt),
-count-based *short-token replacement* contradiction (a replaced initial
-that duplicates the sex column is caught by the multiset even when
-per-pair matching looks "explained"), and an *absent name-like token*
-cap (absence of a 4+ char alphabetic token refuses even inside the
-generic run cap — trailing-numerics dropout keeps the old tolerance).
-The replayer also now extracts the LIVE band exactly as the compiler
-extracted the recorded band (target's own crop excluded, volatile lines
-dropped against the replay date) — the earlier asymmetry is what made an
-observed-superset budget impossible.
-
-**Corpus v2** (frozen with its own seed and SHA manifest BEFORE the
-matcher redesign was evaluated on it — same freeze discipline, and v1's
-generator and manifest are untouched): 2240 pairs across the excluded
-classes, including a third label, **indistinguishable** — the true row
-misread by a letter-letter confusion, textually identical to a real
-sibling. ABORT is the correct outcome for BOTH readings there: an abort
-is a justified abort (never a false abort), a verify is a false accept
-for the different-entity twin.
-
-**Measured, at the re-picked operating point** (full tables, occlusion
-recount and the realistic-exposure analysis: IDENTITY_ROC.md):
-
-- false accepts: **0 across v1 (2200 wrong-entity pairs), v2 (1590
-  wrong-entity + 200 indistinguishable), and the 13-probe set** — a
-  claim scoped to those corpora, NOT to the world; the operating point
-  is fit on the same corpora that produce the headline, and v1's own
-  zero was shown tautological one review ago. The regression net
-  (`tests/test_identity_corpus_rates.py`) asserts the zero on both
-  corpora.
-- false aborts: v1 **21.2%** (up from 10.7% — the availability bill of
-  closing the four blockers, concentrated in occlusion 93%, compound
-  noise 38%, letter-letter confusion noise 33%, capitalized adjacent
-  bleed 26%), v2 legitimate-noise classes **0.0%**.
-- indistinguishable class: **200/200 abort** (correct for both
-  readings). The same mechanism prices v1's letter-letter
-  `ocr_confusion` aborts: v1 labels them same-entity because its
-  generator KNOWS it applied noise; the matcher cannot know that, and
-  treating them as verifiable was exactly Blocker 1.
-- occlusion recount: at the shipped decision, **102 of 216** occlusion
-  aborts still had both name tokens readable (the abort was trailing
-  DOB/MRN loss) — the earlier "identity tokens were never read"
-  framing was wrong and is corrected above and in LIMITS.md.
-- realistic exposure: the Blocker-1 probes used IDENTICAL MRNs on
-  different patients (unrealistic — MRNs are unique). On realistic
-  NAME-collided pairs with differing readable DOB/MRN, the absence/
-  contradiction budgets alone catch 180/180 even with the suspect rule
-  disabled; the TRUE residual-exposure shape is the band where the
-  name is the ONLY discriminative token (180/180 caught, but by the
-  suspect rule alone, which only covers collisions inside the frozen
-  confusion table). Remaining verify classes, disclosed in LIMITS.md:
-  'Ann Marie'/'Annmarie' token-join equivalence, case/whitespace-only
-  name differences, 1-2 char letter-letter confusions (an 'I' vs 'L'
-  initial), and an ADDED (not replaced) 1-2 char token.
-  **CAVEAT ADDED BY THE SECOND REVIEW:** the "differing readable DOB/MRN
-  -> caught 180/180 without the suspect rule" claim held only because
-  those pairs differ in the NAME. It did NOT cover a pair differing only
-  in the IDENTITY value by a letter/DIGIT confusion — the 5th reopening
-  below — where the absence/contradiction budgets do NOT fire (the token
-  count and coverage are identical) and the pre-fix suspect rule was OFF
-  for digit-bearing tokens. See the next subsection.
-
-### Fix update (2026-07-10, SECOND review): the 5th wrong-patient reopening — identifier letter/digit collision
-
-The suspect budget above guarded NAME tokens only: ``_name_plausible``
-returns False for any token containing a digit, so the rule was OFF for
-MRNs/account numbers — while the confusion canonicalization (l/1, O/0,
-S/5, Z/2, B/8, g/9) still applied to them. A DIFFERENT patient's
-alphanumeric identifier differing only by one letter/digit-confusable
-character silently VERIFIED as same-entity:
-
-- ``Belford Jane MRN l482913 …`` vs ``… MRN 1482913 …`` -> verified;
-- ``Chen Wei MRN O52133 …`` vs ``… 052133 …`` -> verified;
-- ``Doe John MRN AO1234`` vs ``Doe John MRN A01234`` -> verified (two
-  same-name patients whose ONLY difference is one MRN char — the
-  canonical clinical case); fired in param mode too. All-DIGIT MRN
-  differences (748291 vs 748292) correctly mismatched — the hole was
-  precisely the letter/digit boundary. v1's ``mrn_digit_swap`` class
-  only ever swapped/changed DIGITS, so it never surfaced this.
-
-The five identifier probes are pinned in
-``tests/test_identity_out_of_corpus.py`` (``TestBlocker5*``), committed
-FAILING first. **The fix** (option A of the review, no corroboration
-escape): the suspect rule now also fires on a confusion-only match where
-the RECORDED token contains a digit — an identifier. Scoping on the
-recorded token keeps name-with-digit-noise verifying ('Belford' is
-all-alpha, so 'Be1ford' is clean OCR noise) while an identifier aborts.
-Option B (allow if name+DOB raw-match) was rejected: two real patients
-can share a name and DOB, so it would ALLOW exactly the Doe John
-wrong-patient case. **Corpus v3** (300 pairs, own seed 20260712 and SHA
-manifest, frozen before the fix) is the ``id_letter_digit_collision``
-class; the matcher scores **0/300** false accepts on it, and the full
-ROC re-ran on v1+v2+v3 (IDENTITY_ROC.md). **Availability cost, honest:**
-true-row identifier OCR noise now aborts too (indistinguishable at band
-level from a different patient) — v2 ``digit_confusion_true_row`` rose
-0% -> ~49%, v1 overall false aborts 21.2% -> 28.2%. Residual verify
-classes gain one entry: a short (1-2 char) ALL-ALPHA code confused with
-a digit (recorded token has no digit, under the 3-char name floor);
-full-length identifiers are covered.
+Those numbers are not a universal reliability claim: the operating point was
+selected using the same synthetic evidence, the validation is not independent,
+and prior zero measurements were reopened by new adversarial classes. The raw
+corpora, grids, reviewer recipes, and deployment-derived tuning are maintained
+privately; product qualification requires workflow-specific identity and effect
+evidence.
 
 ## Outcome vocabulary
 

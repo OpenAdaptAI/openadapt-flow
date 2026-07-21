@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import stat
 import tarfile
@@ -27,11 +28,12 @@ AGPL_CONTENT_SIGNATURES = (
 # Private, deployment-derived hardening artifacts -- the GROWN failure corpus
 # from real deployments, the TUNED metamorphic-adversary parameters/weights,
 # deployment-derived THRESHOLDS, effect-verification oracle RECIPES, and
-# real-EMR datasets -- live ONLY in the private OpenAdaptAI/openadapt-corpus repo
-# and must never ride inside an MIT wheel or sdist. The public synthetic
-# baseline under benchmark/vision_hardening/ is explicitly NOT private and is
-# allowed. This mirrors the AGPL boundary above: both a path-token check and a
-# content-signature check, so a rename cannot smuggle a private artifact in.
+# customer/deployment-derived real-EMR datasets -- live ONLY in the private
+# OpenAdaptAI/openadapt-corpus repo and must never ride inside an MIT wheel or
+# sdist. Reproducible synthetic fixtures and fake-patient public-demo evidence
+# remain public; they are mechanisms/samples, not customer-derived data. This
+# mirrors the AGPL boundary above: both a path-token check and a content-signature
+# check, so a rename cannot smuggle a private artifact in.
 PRIVATE_DISTRIBUTION_PATH_TOKENS = (
     "openadapt-corpus",
     "adversary_corpus",
@@ -54,10 +56,10 @@ PRIVATE_DISTRIBUTION_EXACT_PATHS = frozenset(
     }
 )
 
-# This public-web study is not a deployment-derived crown jewel, but its
-# curated workflows, raw rows, and generated report are evaluation DATA rather
-# than the distributable engine. Keep the generic reliability harness public
-# and shippable while refusing these repository-only recipes/results.
+# This public-web study is not customer-derived, but the complete target list,
+# per-target workflows, raw rows, and generated report are high-leverage
+# evaluation DATA rather than the engine mechanism. Keep the generic harness
+# and bounded aggregate public while refusing the detailed recipes/results.
 REPOSITORY_ONLY_EVALUATION_PATH_TOKENS = ("reliability_corpus",)
 REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES = (
     "benchmark/reliability/",
@@ -66,6 +68,41 @@ REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES = (
 REPOSITORY_ONLY_EVALUATION_EXACT_PATHS = frozenset(
     {
         "tests/test_reliability.py",
+    }
+)
+
+# Current-tree guard. Public source retains mechanisms, interfaces, conservative
+# defaults, and bounded aggregate evidence. Raw/grown data, tuning sweeps,
+# target recipes, and per-target rows must be absent from the public checkout,
+# not merely excluded from package archives.
+PUBLIC_SOURCE_REPOSITORY_ONLY_PREFIXES = (
+    "benchmark/reliability/",
+    "scripts/reliability/",
+)
+PUBLIC_SOURCE_RELIABILITY_ALLOWED_PATHS = frozenset(
+    {
+        "benchmark/reliability/RELIABILITY.md".lower(),
+        "benchmark/reliability/summary.json",
+    }
+)
+PUBLIC_SOURCE_REPOSITORY_ONLY_EXACT_PATHS = frozenset(
+    {
+        "benchmark/reliability/corpus.json",
+        "benchmark/reliability/results.json",
+        "tests/test_reliability.py",
+    }
+)
+PUBLIC_SOURCE_IGNORED_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
     }
 )
 # Assembled from parts so this guard (which ships in the sdist) does not itself
@@ -103,6 +140,41 @@ def _repository_only_evaluation_hits(members: set[str]) -> set[str]:
             token in member.lower() for token in REPOSITORY_ONLY_EVALUATION_PATH_TOKENS
         )
     }
+
+
+def validate_public_source_tree(root: Path = ROOT) -> None:
+    """Fail if private data/recipes/tuning re-enter the public checkout."""
+    members: set[str] = set()
+    for directory, directories, filenames in os.walk(root):
+        directories[:] = [
+            name
+            for name in directories
+            if name not in PUBLIC_SOURCE_IGNORED_DIRECTORIES
+        ]
+        directory_path = Path(directory)
+        for filename in filenames:
+            members.add((directory_path / filename).relative_to(root).as_posix())
+
+    private = _private_distribution_hits(members, set())
+    repository_only = {
+        member
+        for member in members
+        if member.lower() in PUBLIC_SOURCE_REPOSITORY_ONLY_EXACT_PATHS
+        or any(
+            member.lower().startswith(prefix)
+            and member.lower() not in PUBLIC_SOURCE_RELIABILITY_ALLOWED_PATHS
+            for prefix in PUBLIC_SOURCE_REPOSITORY_ONLY_PREFIXES
+        )
+        or any(
+            token in member.lower() for token in REPOSITORY_ONLY_EVALUATION_PATH_TOKENS
+        )
+    }
+    forbidden = private | repository_only
+    if forbidden:
+        raise ValueError(
+            "public source tree contains private data, recipes, tuning, or raw "
+            f"evaluation artifacts: {sorted(forbidden)}"
+        )
 
 
 LOCK_PACKAGE_PATTERN = re.compile(
@@ -521,6 +593,11 @@ def main() -> int:
 
     if args.sync:
         sync_lock_version()
+
+    try:
+        validate_public_source_tree()
+    except ValueError as error:
+        parser.error(str(error))
 
     versions = release_versions()
     unique_versions = set(versions.values())

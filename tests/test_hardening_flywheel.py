@@ -92,8 +92,9 @@ def test_committed_corpus_is_faithful_to_head(
     """Freeze discipline: the committed corpus is exactly the current
     template-tier silent-wrong set.
 
-    Mirrors ``tests/test_adversary_corpus.py`` — a resolver change that flips a
-    known silent-wrong to safe (the goal!) or introduces a new one must
+    The public synthetic baseline demonstrates the same freeze contract used by
+    the private grown-corpus pack: a resolver change that flips a known
+    silent-wrong to safe (the goal!) or introduces a new one must
     regenerate the corpus in the same reviewed change, so the catalog never
     silently drifts from reality. If this fails after a deliberate resolver
     change, run ``python -m openadapt_flow.validation.hardening --write``.

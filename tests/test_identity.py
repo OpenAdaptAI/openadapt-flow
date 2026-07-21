@@ -24,18 +24,12 @@ off-by-one DOBs, swapped MRN digits. All pinned in TestSiblingProbes /
 TestFieldLevelSiblings below; the matcher was rebuilt around strict
 OCR-equivalence plus contradiction budgets and its operating point was
 picked from a FROZEN held-out adversarial corpus
-(docs/validation/IDENTITY_ROC.md) — pinned in TestOperatingPoint.
+(docs/validation/IDENTITY_EVIDENCE.md) — pinned in TestOperatingPoint.
 
-OUT-OF-CORPUS REVIEW (2026-07-10, PR #16): thirteen probes outside
-corpus v1's label rule all VERIFIED (confusion-collided distinct names,
-short-token discriminators, observed-side supersets, absent name
-tokens) — pinned in tests/test_identity_out_of_corpus.py, fixed by the
-suspect / short-token-replacement / unexplained-name / absent-name
-budgets. Two consequences flipped pins HERE: letter-letter confusion
-jitter on the TRUE row now aborts (indistinguishable from a Neil/Nell
-sibling — see TestTruePositives), and the pure-absence boundary at the
-run cap now refuses when the absent token is name-like (see
-TestOperatingPoint).
+Additional held-out review classes remain in the private regression pack.
+The small public examples below pin the resulting conservative boundaries:
+confusion-only true-row evidence abstains, and name-like token absence at the
+run cap refuses instead of guessing.
 """
 
 from __future__ import annotations
@@ -356,7 +350,7 @@ class TestBandMatch:
 
 class TestOperatingPoint:
     """Pin the ROC-chosen decision parameters and their boundaries
-    (docs/validation/IDENTITY_ROC.md). Moving any of these constants
+    (docs/validation/IDENTITY_EVIDENCE.md). Moving any of these constants
     invalidates the committed ROC — regenerate it in the same change."""
 
     def test_pinned_constants(self):

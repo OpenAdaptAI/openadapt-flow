@@ -89,6 +89,16 @@ def _clamp_region(region: Region, width: int, height: int) -> Optional[Region]:
 LOCALITY_MIN_PX = 48
 # Bound on the number of peaks enumerated per frame (cost guard).
 MAX_PEAKS = 16
+# Correlation score at/above which a SECOND, spatially-distinct response on the
+# GLOBAL rung is treated as a degraded sibling of the same repeated widget
+# (evidence the surface is ambiguous), not background noise. Chosen well above
+# flat-background/text correlation (~0.1-0.5) yet below a same-theme redraw of
+# an occluded/blurred/compressed look-alike (~0.75-0.95): a genuinely UNIQUE
+# moved target produces nothing else this high, so it is still kept; a repeated
+# widget whose true instance dimmed just under the accept threshold does, so the
+# lone crisp decoy is refused. A refusal here falls through to the ocr/geometry/
+# grounder rungs (stronger POSITION evidence), never to a silent click.
+AMBIGUITY_SUSPICION_SCORE = 0.7
 
 
 def _peaks_above(
@@ -193,8 +203,37 @@ def _find_template_arrays(
         elif len(peaks) >= 2:
             # Multiple look-alikes, none where expected: not uniquely present.
             return None
-        # else: a single peak far from expected -> legitimately moved unique
-        # target; keep the arg-max match unchanged.
+        elif search_region is not None:
+            # LOCAL-rung tightening. ``search_region`` set means the caller is
+            # confirming the target NEAR where it was recorded (the resolution
+            # ladder's local ``template`` rung, seeded with the recorded region
+            # padded by ``search_pad``). No peak sits near the expected spot, so
+            # the single peak that cleared threshold is a NEIGHBORING repeated
+            # widget the padded window happened to include (the target's own
+            # cell is degraded/unpainted -- a partial render / latency frame).
+            # Committing to a neighbor is the wrong-row/wrong-icon silent-wrong;
+            # refuse and let the GLOBAL rung's full-frame uniqueness gate decide
+            # (it halts when >= 2 identical widgets exist and none is where
+            # expected). A legitimately MOVED unique target is unaffected: it
+            # resolves on the global rung, which keeps a lone far peak.
+            return None
+        elif len(_peaks_above(result, AMBIGUITY_SUSPICION_SCORE, mw, mh)) >= 2:
+            # GLOBAL rung, one peak clears threshold far from expected, but a
+            # SECOND spatially-distinct location is elevated just BELOW threshold
+            # -- a DEGRADED sibling of the same repeated widget (a look-alike the
+            # perturbation blurred/occluded/compressed under the accept bar,
+            # while one instance stayed crisp). The surface therefore has
+            # repeated widgets and the lone crisp peak is NOT uniquely the
+            # target; refuse rather than click it. A genuinely moved UNIQUE
+            # target has no such second response (nothing else on the frame
+            # resembles it), so it is kept by the branch below. This closes the
+            # asymmetric-degradation silent-wrong (the true target dimmed just
+            # under threshold while a decoy stayed sharp) without weakening the
+            # moved-unique-target path.
+            return None
+        # else: search_region is None -> the GLOBAL rung, exactly one elevated
+        # response anywhere on the frame: a legitimately moved UNIQUE target;
+        # keep the arg-max match unchanged.
 
     rx, ry = off_x + mx, off_y + my
     region: Region = (rx, ry, mw, mh)

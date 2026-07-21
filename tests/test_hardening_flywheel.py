@@ -117,8 +117,17 @@ def test_committed_corpus_is_faithful_to_head(
 
 def test_adversarial_search_finds_hits_deterministically() -> None:
     """The attacker works: a bounded seeded search finds confident-wrong cases,
-    reproducibly."""
-    fixture = fx.repeated_icons(n=4, true_idx=0)
+    reproducibly.
+
+    Targets a fixture that STILL has a residual silent-wrong after the
+    locality/uniqueness gate + the local-rung and global-suspicion hardening
+    (``bars`` n=3, true_idx=0 under deep left-region drift: the true target
+    blurs below the ambiguity-suspicion floor while a crisp decoy remains, so it
+    reads as a legitimately moved unique target). The attacker must still surface
+    it -- if a future fix closes it, this fixture stops producing hits and the
+    test should be re-pointed at whatever the frozen corpus still lists.
+    """
+    fixture = fx.repeated_icons(n=3, true_idx=0, glyph="bars")
     hits_a = H.adversarial_search(fixture, iters=30, seed=7)
     hits_b = H.adversarial_search(fixture, iters=30, seed=7)
     assert hits_a, "adversarial search found no silent-wrong on a look-alike surface"

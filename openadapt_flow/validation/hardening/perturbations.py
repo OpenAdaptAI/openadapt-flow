@@ -286,6 +286,69 @@ def local_drift(
     )
 
 
+def unpainted_target(pad: int = 8) -> Perturbation:
+    """The true target's own cell has not painted yet (latency / partial render).
+
+    A real remote-display artifact: a slow session paints the surface region by
+    region, so a frame can arrive with the true target's cell still showing the
+    background placeholder while its identical siblings elsewhere are already
+    crisp. The true target is ABSENT from this frame, so the ONLY safe outcome
+    is a HALT (there are >= 2 identical look-alikes and none is uniquely the
+    target where expected). The DANGEROUS failure this probes is the local rung
+    grabbing the nearest painted NEIGHBOR (a wrong-row / wrong-icon silent
+    click); the metamorphic oracle flags exactly that. Ground truth is unchanged
+    (identity affine): the target's recorded location is where the blank cell
+    sits, so a resolver that lands anywhere else has silently mis-resolved."""
+
+    def _apply(png: bytes, vp: tuple[int, int], t: Point) -> PerturbResult:
+        bgr = _to_bgr(png)
+        h, w = bgr.shape[:2]
+        tx, ty = t
+        # Sample the frame's corner as the background/placeholder colour so the
+        # fill matches the surface (no synthetic edge to correlate against).
+        bg = bgr[1, 1].tolist()
+        r = 26
+        x0, y0 = max(0, tx - r - pad), max(0, ty - r - pad)
+        x1, y1 = min(w, tx + r + pad), min(h, ty + r + pad)
+        bgr[y0:y1, x0:x1] = np.array(bg, dtype=np.uint8)
+        return PerturbResult(png=_to_png(bgr), scale=1.0, offset=(0.0, 0.0))
+
+    return Perturbation("unpainted_target", {"pad": pad}, "severe", _apply)
+
+
+def uniform_scroll(dx: int = 0, dy: int = 40) -> Perturbation:
+    """Translate ALL content by ``(dx, dy)`` (the surface scrolled, or a top
+    banner/toolbar appeared and pushed everything down uniformly).
+
+    Dynamic reflow that PRESERVES the target's identity and its relation to
+    every decoy: the whole layout shifts rigidly, so ground truth maps exactly
+    by the affine offset. A correct resolver must FOLLOW a small shift (the
+    target is still within the padded local window) and, for a large shift that
+    carries the target out of the search window while identical decoys remain,
+    HALT rather than click whatever now occupies the vacated location. It must
+    never silently land on a decoy. The vacated strip is filled with the
+    surface background so no synthetic edge is introduced."""
+    dist = max(abs(dx), abs(dy))
+    sev: Severity = "mild" if dist <= 50 else "severe"
+
+    def _apply(png: bytes, vp: tuple[int, int], _t: Point) -> PerturbResult:
+        bgr = _to_bgr(png)
+        h, w = bgr.shape[:2]
+        bg = bgr[1, 1].tolist()
+        m = np.array([[1, 0, dx], [0, 1, dy]], dtype=np.float32)
+        out = cv2.warpAffine(
+            bgr,
+            m,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=bg,
+        )
+        return PerturbResult(png=_to_png(out), scale=1.0, offset=(float(dx), float(dy)))
+
+    return Perturbation("uniform_scroll", {"dx": dx, "dy": dy}, sev, _apply)
+
+
 def compose(*perts: Perturbation) -> Perturbation:
     """Left-to-right composition of perturbations (multiplies the affines)."""
 
@@ -330,8 +393,23 @@ def standard_grid() -> list[Perturbation]:
         for cov in (0.4, 0.6, 0.9):
             grid.append(occlude_target(kind=kind, coverage=cov))
     grid.append(local_drift((0.0, 0.0, 0.5, 1.0)))
+    # Latency / partial render: the target's own cell has not painted while its
+    # identical siblings have — the wrong-neighbor silent-click probe.
+    grid.append(unpainted_target(pad=8))
+    # Dynamic reflow: a rigid VERTICAL scroll / a top banner pushing the
+    # (horizontally-laid-out) fixtures down. Small = follow it (correct); large
+    # = the target left the padded window while its horizontally-offset decoys
+    # remain, so no peak sits where expected and the resolver must halt, never
+    # click a decoy. (A horizontal scroll on a horizontal widget strip would
+    # align a decoy to the expected column — an unfair, pixel-identical-to-
+    # nominal case no pixel-only resolver can win — so it is deliberately
+    # excluded here and documented as a known ladder limitation.)
+    grid.append(uniform_scroll(dx=0, dy=30))
+    grid.append(uniform_scroll(dx=0, dy=90))
     # Combined drift — the realistic remote-display case.
     grid.append(compose(dpi_scale(1.25), jpeg(20)))
     grid.append(compose(occlude_target("tooltip", 0.6), jpeg(20)))
     grid.append(compose(dpi_scale(1.5), theme_invert()))
+    # Latency under compression: a partly-painted target on a lossy session.
+    grid.append(compose(unpainted_target(pad=8), jpeg(20)))
     return grid

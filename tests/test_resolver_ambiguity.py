@@ -188,6 +188,69 @@ def test_resolve_accepts_unique_target_at_expected() -> None:
     assert abs(resolution.point[0] - 345) <= 20 and abs(resolution.point[1] - 116) <= 20
 
 
+def test_local_rung_refuses_neighbor_when_target_cell_absent() -> None:
+    """LOCAL rung (search_region set): the target cell is unpainted/degraded and
+    the padded window catches a NEIGHBORING identical widget -> refuse (None).
+
+    The dangerous partial-render / latency case: a lone peak inside the local
+    search window that is NOT where the target was recorded is a neighbor, not
+    the moved target. Committing to it is the wrong-row/wrong-icon silent click;
+    the tightened rung returns None so the ladder defers to the global uniqueness
+    gate (which halts) instead.
+    """
+    scr = _blank(shade=235)
+    for gx in (150, 250, 350, 450):  # tight 100px pitch: neighbor inside the pad
+        _gear(scr, gx, 200)
+    template = scr[180:220, 230:270].copy()  # the gear at x=250
+    # Blank the target's OWN cell (its render is pending) -> only neighbors show.
+    cv2.rectangle(scr, (228, 178), (272, 222), (235, 235, 235), -1)
+    m = find_template(
+        _png(scr),
+        _png(template),
+        search_region=(180, 160, 140, 80),  # padded window around x=250
+        threshold=0.985,
+        prefer_near=(230, 180),
+    )
+    assert m is None  # refused the neighbor at x=350/150, did not click it
+
+
+def test_global_suspicion_halts_on_degraded_sibling() -> None:
+    """GLOBAL rung: one crisp peak far from expected, but a degraded SIBLING of
+    the same repeated widget is elevated just below threshold -> refuse.
+
+    Distinguishes 'a repeated widget whose true instance dimmed under the accept
+    bar while a decoy stayed sharp' (halt) from 'a genuinely moved UNIQUE target'
+    (kept, see :func:`test_single_unique_far_match_is_kept`)."""
+    scr = _blank()
+    _button(scr, 300, 100, "Save")  # expected location (will be blurred)
+    _button(scr, 300, 350, "Save")  # crisp decoy far away
+    template = scr[100:132, 300:390].copy()
+    # Blur ONLY the expected instance so it drops below threshold but stays a
+    # clearly-elevated sibling (scores ~0.8, above the ambiguity-suspicion floor
+    # and well above background/text-fragment correlation, not a decoy tie).
+    roi = scr[96:136, 296:396]
+    scr[96:136, 296:396] = cv2.GaussianBlur(roi, (3, 3), 0.8)
+    m = find_template(
+        _png(scr), _png(template), threshold=0.985, prefer_near=(300, 100)
+    )
+    assert m is None  # not uniquely present: the crisp decoy is refused
+
+
+def test_resolve_halts_on_unpainted_target_cell() -> None:
+    """Integration: an unpainted target cell among identical icons -> HALT.
+
+    The whole ladder must not silently click a painted neighbor when the true
+    target's cell has not rendered (a partial-render / latency frame)."""
+    scr = _blank(shade=235)
+    for gx in (150, 250, 350, 450):
+        _gear(scr, gx, 200)
+    template = scr[180:220, 230:270].copy()
+    cv2.rectangle(scr, (228, 178), (272, 222), (235, 235, 235), -1)  # target pending
+    anchor = _anchor((230, 180, 40, 40), (250, 200), ocr_text=None, pad=120)
+    result = resolver.resolve(anchor, _png(scr), VISION, template_png=_png(template))
+    assert result is None
+
+
 def test_peaks_above_suppresses_neighbors() -> None:
     """The NMS peak enumerator yields one peak per identical instance."""
     scr = _blank(shade=235)

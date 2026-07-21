@@ -14,9 +14,32 @@ A screen may paint success after a partial, duplicate, rejected, or stale write.
 Consequential steps can therefore declare typed effects and use an independent
 verifier against REST, FHIR, or document state. The verifier snapshots the
 system of record before and after an action and returns confirmed, refuted, or
-indeterminate. A declared effect without a configured verifier halts. Effects
-are currently authored per deployment; the compiler does not infer them from a
-single demonstration. This is the classic \emph{oracle problem}
+indeterminate. A declared effect without a configured verifier halts.
+
+Crucially, the strong-oracle read is performed \emph{out of band}: the verifier
+queries the system of record through its own interface (a SQL read on a
+read-only role, a REST or FHIR read, or a document or file read), independently
+of the substrate that carried the write. It does not parse the pixel stream or
+scrape the rendered page. The same effect contract therefore holds whether the
+write was driven through a browser DOM, native accessibility, or a pixel-only
+remote session: what changes is only the connector, not the check. Because the
+read is out of band, an unreachable, unreadable, or unauthenticated system of
+record maps to indeterminate and halts; the runtime never upgrades ``I could not
+read the record'' into a reported success.
+
+Two consequences follow for pixel-only substrates such as RDP and Citrix. First,
+the effect check still applies as long as some out-of-band read path exists: the
+RDP qualification in Section~\ref{sec:results}, for instance, reads the persisted
+file through guest tools, a channel independent of the RDP display. Second, when
+a locked-down session exposes \emph{no} such path, no database, no reachable API,
+and no readable file, the transactional strong oracle is simply unavailable. The
+only fallback is a same-application re-read of the record, which cannot catch a
+partial save, a duplicate, a stale overwrite, or a lost update, and the honest
+runtime treats that as a halt rather than a confirmation. On such substrates the
+safety guarantee rests instead on the identity gate and halt-on-ambiguity, not on
+effect verification. Effects are currently authored per deployment; the compiler
+does not infer them from a single demonstration. This is the classic \emph{oracle
+problem}
 \cite{barr2015oracle} made concrete: the screen is a weak oracle and the
 application's own state is the strong oracle (Figure~\ref{fig:oracle}). Many of
 the faults it catches---duplicate submission, double delivery, stale

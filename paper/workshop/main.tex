@@ -123,7 +123,13 @@ not sufficient. A consequential step additionally declares a typed \emph{effect}
 and checks it with an independent verifier that snapshots the system of record
 before and after the action---over REST, FHIR, or document state---and returns
 confirmed, refuted, or indeterminate. A declared effect without a configured
-verifier halts rather than proceeding on trust.
+verifier halts rather than proceeding on trust. The read is performed \emph{out
+of band}, through the record's own interface (a read-only SQL query, a REST or
+FHIR read, or a file read) rather than by parsing the screen, so the check is
+independent of the substrate that carried the write; an unreachable or unreadable
+record maps to indeterminate and halts. Where a locked-down pixel-only session
+exposes no such read path, the transactional strong oracle is unavailable and the
+runtime falls back to identity verification and halt-on-ambiguity.
 
 \begin{figure}[t]
 \centering

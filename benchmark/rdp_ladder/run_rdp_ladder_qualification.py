@@ -100,6 +100,12 @@ class DockerX11RdpTransport:
             if (w, h) == (self._w, self._h):
                 img = self._grab()
                 if len(img.getcolors(maxcolors=1 << 24) or []) > 1:
+                    self._focus_client()
+                    # FreeRDP establishes its X11 input grab asynchronously.
+                    # Focus once per connection, then leave it alone: repeated
+                    # focus calls immediately before XTest motion can suppress
+                    # that motion while still allowing the later button edge.
+                    time.sleep(3.0)
                     return
             time.sleep(0.5)
         raise RuntimeError("no painted RDP frame within timeout")
@@ -117,12 +123,77 @@ class DockerX11RdpTransport:
         img = self._grab()
         return img, img.width, img.height
 
+    def _focus_client(self) -> None:
+        """Focus the isolated FreeRDP window before injecting XTest input.
+
+        The fixture runs a minimal Openbox session. Focusing its only visible
+        FreeRDP window once is deterministic and remains entirely inside
+        display ``:1`` in the container.
+        """
+        self._exec([
+            "xdotool",
+            "search",
+            "--onlyvisible",
+            "--name",
+            "^FreeRDP:",
+            "windowfocus",
+            "%@",
+        ])
+
+    def _remote_pointer(self) -> Optional[tuple[int, int]]:
+        """Return the fixture server's cursor as a delivery acknowledgement.
+
+        This is deliberately fixture-only.  Input is still injected into the
+        FreeRDP *client* on display ``:1`` and crosses the RDP wire; polling
+        display ``:0`` merely prevents a button edge from racing an
+        asynchronous MotionNotify in this two-Xvfb qualification laboratory.
+        """
+        cmd = [
+            "docker", "exec", "-e", "DISPLAY=:0", self._c,
+            "xdotool", "getmouselocation", "--shell",
+        ]
+        res = subprocess.run(cmd, capture_output=True, timeout=10, check=False)
+        if res.returncode != 0:
+            return None
+        fields = {}
+        for line in res.stdout.decode(errors="replace").splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                fields[key] = value
+        try:
+            return int(fields["X"]), int(fields["Y"])
+        except (KeyError, ValueError):
+            return None
+
     def pointer(self, x: int, y: int, button: str, down: bool) -> None:
         btn = {"left": "1", "right": "3", "middle": "2"}.get(button, "1")
         self._last_pointer = (int(x), int(y))
-        verb = "mousedown" if down else "mouseup"
-        self._exec(["xdotool", "mousemove", "--sync", str(int(x)), str(int(y)),
-                    verb, btn])
+        # Deliver the complete gesture in one xdotool/X11 client on the DOWN
+        # edge. Separate docker-exec clients for mousedown and mouseup can lose
+        # the held-button state before FreeRDP forwards it. Keeping both edges
+        # in one invocation, with a conservative hold, makes the virtual RDP
+        # wire deterministic. The backend's matching UP edge is then a no-op.
+        if not down:
+            return
+        target = (int(x), int(y))
+        delivered = False
+        for _attempt in range(3):
+            self._exec([
+                "xdotool", "mousemove", str(target[0]), str(target[1]),
+            ])
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if self._remote_pointer() == target:
+                    delivered = True
+                    break
+                time.sleep(0.1)
+            if delivered:
+                break
+        if not delivered:
+            raise RuntimeError(
+                f"RDP fixture did not acknowledge pointer motion to {target}"
+            )
+        self._exec(["xdotool", "click", btn])
 
     def key(self, keysym_or_char: str, down: bool) -> None:
         keysym = _XDOTOOL_KEYS.get(keysym_or_char, keysym_or_char)
@@ -211,15 +282,13 @@ def run_qualification(container: str, *, out_dir: Path,
     trials: list[dict] = []
     t_start = time.monotonic()
 
-    # ---- Trial 1: healthy record -> compile -> replay through the ladder ----
+    # ---- Record once, then replay each condition independently --------------
     _reset_kiosk(container)
     transport = DockerX11RdpTransport(container)
     backend = FreeRDPBackend(transport, connect=True)
 
     rec_dir = work / "recording"
     bundle_dir = work / "bundle"
-    run_dir = work / "run_healthy"
-
     rec = Recorder(backend, rec_dir, settle_interval_s=0.3,
                    settle_stable_frames=2, settle_timeout_s=6.0)
     rec.click(*ADA_ROW)                       # select patient (visual rung)
@@ -229,70 +298,116 @@ def run_qualification(container: str, *, out_dir: Path,
     rec.finish()
 
     workflow = compile_recording(rec_dir, bundle_dir, name="rdp-vision-ladder")
-
-    _reset_kiosk(container)
-    transport2 = DockerX11RdpTransport(container)
-    backend2 = FreeRDPBackend(transport2, connect=True)
-    report = Replayer(backend2, poll_interval_s=0.3).run(
-        workflow, params={NOTE_PARAM: NOTE_VALUE},
-        bundle_dir=bundle_dir, run_dir=run_dir)
-
-    saved = _read_saved_note(container)
     expected_saved = f"{EXPECTED_MRN}\t{NOTE_VALUE}"
-    effect_confirmed = saved == expected_saved
-    rung_counts = dict(report.rung_counts)
-    structural_used = rung_counts.get("structural", 0)
-    visual_rungs = {k: v for k, v in rung_counts.items()
-                    if k in ("template", "template_global", "ocr", "geometry")}
-    healthy_ok = (report.success and report.model_calls == 0
-                  and structural_used == 0 and bool(visual_rungs)
-                  and effect_confirmed)
-    trials.append({
-        "trial": 1, "kind": "healthy_record_compile_replay",
-        "success": bool(report.success), "model_calls": int(report.model_calls),
-        "rung_counts": rung_counts, "structural_rung_used": int(structural_used),
-        "visual_rungs_used": visual_rungs,
-        "effect_confirmed": effect_confirmed,
-        "effect_expected": expected_saved, "effect_observed": saved,
-        "passed": bool(healthy_ok),
-        "failure_class": None if healthy_ok else "healthy_contract_violation",
-    })
 
-    # ---- Trial 2: halt-under-drift (simulated DPI+theme+JPEG on real frame) --
-    _reset_kiosk(container)
-    transport3 = DockerX11RdpTransport(container)
-    backend3 = FreeRDPBackend(transport3, connect=True)
-    drift_backend = _DriftBackend(backend3)
-    run_dir_drift = work / "run_drift"
-    drift_report = Replayer(drift_backend, poll_interval_s=0.3).run(
-        workflow, params={NOTE_PARAM: NOTE_VALUE},
-        bundle_dir=bundle_dir, run_dir=run_dir_drift)
-    saved_after_drift = _read_saved_note(container)
-    # Contract: under heavy drift the ladder must HALT (not succeed) and must
-    # NOT have silently written the note (no wrong/partial effect).
-    drift_halted = (not drift_report.success)
-    drift_no_silent_write = saved_after_drift != expected_saved
-    drift_no_model = drift_report.model_calls == 0
-    drift_ok = drift_halted and drift_no_silent_write and drift_no_model
-    trials.append({
-        "trial": 2, "kind": "halt_under_injected_drift",
-        "drift": "downscale_0.4x_blur + theme_invert + jpeg_q8 (simulated on real session)",
-        "halted": bool(drift_halted),
-        "model_calls": int(drift_report.model_calls),
-        "silent_write": bool(saved_after_drift == expected_saved),
-        "effect_after_drift": saved_after_drift,
-        "passed": bool(drift_ok),
-        "failure_class": None if drift_ok else "drift_not_safely_halted",
-    })
+    healthy_trials: list[dict] = []
+    for condition_trial in range(1, 4):
+        _reset_kiosk(container)
+        replay_backend = FreeRDPBackend(
+            DockerX11RdpTransport(container), connect=True
+        )
+        report = Replayer(replay_backend, poll_interval_s=0.3).run(
+            workflow,
+            params={NOTE_PARAM: NOTE_VALUE},
+            bundle_dir=bundle_dir,
+            run_dir=work / f"run_healthy_{condition_trial}",
+        )
+        saved = _read_saved_note(container)
+        effect_confirmed = saved == expected_saved
+        rung_counts = dict(report.rung_counts)
+        structural_used = rung_counts.get("structural", 0)
+        visual_rungs = {
+            k: v for k, v in rung_counts.items()
+            if k in ("template", "template_global", "ocr", "geometry")
+        }
+        silent_incorrect_success = bool(report.success and not effect_confirmed)
+        over_halt = bool(not report.success)
+        healthy_ok = (
+            report.success
+            and report.model_calls == 0
+            and structural_used == 0
+            and bool(visual_rungs)
+            and effect_confirmed
+        )
+        trial = {
+            "trial": len(trials) + 1,
+            "condition_trial": condition_trial,
+            "kind": "healthy_record_compile_replay",
+            "success": bool(report.success),
+            "model_calls": int(report.model_calls),
+            "rung_counts": rung_counts,
+            "structural_rung_used": int(structural_used),
+            "visual_rungs_used": visual_rungs,
+            "effect_confirmed": effect_confirmed,
+            "effect_expected": expected_saved,
+            "effect_observed": saved,
+            "silent_incorrect_success": silent_incorrect_success,
+            "over_halt": over_halt,
+            "passed": bool(healthy_ok),
+            "failure_class": (
+                None if healthy_ok
+                else "silent_incorrect_success" if silent_incorrect_success
+                else "healthy_over_halt" if over_halt
+                else "healthy_contract_violation"
+            ),
+        }
+        healthy_trials.append(trial)
+        trials.append(trial)
+
+    drift_trials: list[dict] = []
+    for condition_trial in range(1, 4):
+        _reset_kiosk(container)
+        drift_backend = _DriftBackend(FreeRDPBackend(
+            DockerX11RdpTransport(container), connect=True
+        ))
+        drift_report = Replayer(drift_backend, poll_interval_s=0.3).run(
+            workflow,
+            params={NOTE_PARAM: NOTE_VALUE},
+            bundle_dir=bundle_dir,
+            run_dir=work / f"run_drift_{condition_trial}",
+        )
+        saved_after_drift = _read_saved_note(container)
+        # Under heavy drift the ladder must halt and must not have silently
+        # written the expected or any partial/wrong effect.
+        drift_halted = not drift_report.success
+        silent_write = saved_after_drift is not None
+        drift_no_model = drift_report.model_calls == 0
+        drift_ok = drift_halted and not silent_write and drift_no_model
+        trial = {
+            "trial": len(trials) + 1,
+            "condition_trial": condition_trial,
+            "kind": "halt_under_injected_drift",
+            "drift": (
+                "downscale_0.4x_blur + theme_invert + jpeg_q8 "
+                "(simulated on real session)"
+            ),
+            "halted": bool(drift_halted),
+            "model_calls": int(drift_report.model_calls),
+            "silent_write": bool(silent_write),
+            "false_completion": bool(drift_report.success),
+            "effect_after_drift": saved_after_drift,
+            "passed": bool(drift_ok),
+            "failure_class": None if drift_ok else "drift_contract_violation",
+        }
+        drift_trials.append(trial)
+        trials.append(trial)
 
     _reset_kiosk(container)
 
     successes = sum(1 for t in trials if t["passed"])
-    accepted = (len(trials) == 2 and successes == 2
-                and trials[0]["model_calls"] == 0
-                and trials[0]["structural_rung_used"] == 0
-                and trials[0]["effect_confirmed"]
-                and trials[1]["halted"] and not trials[1]["silent_write"])
+    accepted = (
+        len(healthy_trials) == 3
+        and len(drift_trials) == 3
+        and successes == 6
+        and all(t["model_calls"] == 0 for t in trials)
+        and all(t["structural_rung_used"] == 0 for t in healthy_trials)
+        and all(t["effect_confirmed"] for t in healthy_trials)
+        and not any(t["silent_incorrect_success"] for t in healthy_trials)
+        and not any(t["over_halt"] for t in healthy_trials)
+        and all(t["halted"] for t in drift_trials)
+        and not any(t["silent_write"] for t in drift_trials)
+        and not any(t["false_completion"] for t in drift_trials)
+    )
 
     evidence = {
         "schema_version": "openadapt.rdp-ladder-qualification.v1",
@@ -304,12 +419,39 @@ def run_qualification(container: str, *, out_dir: Path,
                  "no structural backend; confirm the write via an independent "
                  "document oracle; and halt under injected DPI/theme/JPEG drift"),
         "contract": {
-            "healthy_zero_model_calls": trials[0]["model_calls"] == 0,
-            "healthy_structural_rung_used": trials[0]["structural_rung_used"],
-            "healthy_visual_rungs_used": trials[0]["visual_rungs_used"],
-            "healthy_effect_confirmed": trials[0]["effect_confirmed"],
-            "drift_safely_halted": trials[1]["halted"],
-            "drift_no_silent_write": not trials[1]["silent_write"],
+            "healthy_trials": len(healthy_trials),
+            "healthy_zero_model_calls": all(
+                t["model_calls"] == 0 for t in healthy_trials
+            ),
+            "healthy_structural_rung_used": sum(
+                t["structural_rung_used"] for t in healthy_trials
+            ),
+            "healthy_visual_rungs_used": {
+                rung: sum(t["visual_rungs_used"].get(rung, 0)
+                          for t in healthy_trials)
+                for rung in ("template", "template_global", "ocr", "geometry")
+                if any(t["visual_rungs_used"].get(rung, 0)
+                       for t in healthy_trials)
+            },
+            "healthy_effects_confirmed": sum(
+                bool(t["effect_confirmed"]) for t in healthy_trials
+            ),
+            "healthy_silent_incorrect_successes": sum(
+                bool(t["silent_incorrect_success"]) for t in healthy_trials
+            ),
+            "healthy_over_halts": sum(
+                bool(t["over_halt"]) for t in healthy_trials
+            ),
+            "drift_trials": len(drift_trials),
+            "drift_safely_halted": sum(
+                bool(t["halted"]) for t in drift_trials
+            ),
+            "drift_silent_writes": sum(
+                bool(t["silent_write"]) for t in drift_trials
+            ),
+            "drift_false_completions": sum(
+                bool(t["false_completion"]) for t in drift_trials
+            ),
         },
         "environment": {
             "rdp_server": "freerdp-shadow-cli3 (FreeRDP3 server)",
@@ -326,7 +468,8 @@ def run_qualification(container: str, *, out_dir: Path,
         "oracle": "docker exec cat of the kiosk-persisted note file",
         "failure_taxonomy": [
             "connect_or_frame_failure", "healthy_contract_violation",
-            "effect_not_confirmed", "drift_not_safely_halted",
+            "silent_incorrect_success", "healthy_over_halt",
+            "effect_not_confirmed", "drift_contract_violation",
         ],
         "caveat": ("Real RDP-transported pixels + input, but NOT Citrix ICA/HDX, "
                    "NOT the aardwolf transport, and the drift is "
@@ -335,7 +478,7 @@ def run_qualification(container: str, *, out_dir: Path,
         "trials": trials,
         "run_count": len(trials),
         "successes": successes,
-        "model_calls": trials[0]["model_calls"],
+        "model_calls": sum(t["model_calls"] for t in trials),
         "total_s": round(time.monotonic() - t_start, 3),
         "accepted": bool(accepted),
     }

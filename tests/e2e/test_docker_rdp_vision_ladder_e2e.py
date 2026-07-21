@@ -64,14 +64,25 @@ def test_real_rdp_vision_ladder_contract(rdp_fixture, tmp_path):
 
     evidence = mod.run_qualification(rdp_fixture, out_dir=tmp_path)
 
-    healthy = evidence["trials"][0]
-    drift = evidence["trials"][1]
-    assert healthy["success"], healthy
-    assert healthy["model_calls"] == 0, healthy
-    assert healthy["structural_rung_used"] == 0, healthy
-    assert healthy["visual_rungs_used"], healthy
-    assert healthy["effect_confirmed"], healthy
-    assert drift["halted"], drift
-    assert not drift["silent_write"], drift
-    assert drift["model_calls"] == 0, drift
+    healthy = [
+        trial for trial in evidence["trials"]
+        if trial["kind"] == "healthy_record_compile_replay"
+    ]
+    drift = [
+        trial for trial in evidence["trials"]
+        if trial["kind"] == "halt_under_injected_drift"
+    ]
+    assert len(healthy) == 3, healthy
+    assert len(drift) == 3, drift
+    assert all(trial["success"] for trial in healthy), healthy
+    assert all(trial["model_calls"] == 0 for trial in healthy), healthy
+    assert all(trial["structural_rung_used"] == 0 for trial in healthy), healthy
+    assert all(trial["visual_rungs_used"] for trial in healthy), healthy
+    assert all(trial["effect_confirmed"] for trial in healthy), healthy
+    assert not any(trial["silent_incorrect_success"] for trial in healthy)
+    assert not any(trial["over_halt"] for trial in healthy)
+    assert all(trial["halted"] for trial in drift), drift
+    assert not any(trial["silent_write"] for trial in drift), drift
+    assert not any(trial["false_completion"] for trial in drift), drift
+    assert all(trial["model_calls"] == 0 for trial in drift), drift
     assert evidence["accepted"], evidence

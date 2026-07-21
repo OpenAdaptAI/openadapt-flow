@@ -17,14 +17,14 @@ adjacent proofs:
 `compile_recording` → `Replayer` over a genuine RDP round-trip, with **no
 structural backend**, and asserts the validation contract:
 
-- **healthy**: record → compile → replay a patient-note write **succeeds**, with
+- **healthy (3 trials)**: record → compile → replay a patient-note write **succeeds**, with
   **zero model calls**, resolution through the **visual rungs only** (the
   structural rung is never used), and the write **independently confirmed** by a
   document oracle (the note the kiosk persisted equals the intended value);
-- **halt-under-drift**: with DPI + theme-inversion + JPEG-compression drift
+- **halt-under-drift (3 trials)**: with DPI + theme-inversion + JPEG-compression drift
   injected onto the real session, the ladder **HALTS** — no model call, no
-  silent write. This is the substrate complement to the ambiguity/look-alike
-  hardening in `~/.private/vision_hardening_2026_07_20.md` (#165/#166).
+  silent write. Evidence reports silent incorrect success and healthy over-halt
+  explicitly, rather than collapsing them into aggregate success.
 
 Evidence is written to `results.json`
 (`schema_version: openadapt.rdp-ladder-qualification.v1`) with an `accepted`
@@ -58,6 +58,12 @@ trips the identity band on write steps (a real, but fixture-induced, over-halt).
 DPI/theme/compression realism is injected in software on top of this clean
 baseline (the harness `_DriftBackend`) — a deliberate, labeled degradation.
 
+The two-Xvfb fixture also waits for the server-side cursor to acknowledge each
+client-side XTest move before sending the button edge. The move is still
+injected only into the FreeRDP client and crosses the RDP wire; the acknowledgement
+prevents the headless laboratory from racing an asynchronous MotionNotify and
+clicking at the previous remote cursor position.
+
 ## Honest scope
 
 Real RDP-transported pixels + input, raw-bitmap RDP frames, the real
@@ -86,7 +92,7 @@ python3 benchmark/rdp_ladder/run_rdp_ladder_qualification.py \
 docker rm -f oaflow-rdp-ladder
 ```
 
-Exit code `0` iff `accepted` is true. The run takes a few minutes (the transport
+Exit code `0` iff all six trials are accepted. The run takes a few minutes (the transport
 screenshots/injects over `docker exec`, one op at a time).
 
 The env-gated pytest wrapper `tests/e2e/test_docker_rdp_vision_ladder_e2e.py`

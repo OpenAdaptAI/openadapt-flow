@@ -24,6 +24,13 @@ sleep 3
 log "starting client display :1"
 Xvfb :1 -screen 0 1280x800x24 -ac >/tmp/xvfb1.log 2>&1 &
 sleep 2
+# FreeRDP's X11 client needs normal focus/grab semantics to translate synthetic
+# MotionNotify events into RDP pointer packets. Without a window manager,
+# button events arrive but XTest pointer motion can be ignored, leaving clicks
+# at the remote session's previous cursor location. Openbox is headless here;
+# it manages only the isolated client display inside this container.
+DISPLAY=:1 openbox >/tmp/openbox.log 2>&1 &
+sleep 1
 log "connecting FreeRDP client (fullscreen, LOSSLESS raw bitmaps) -> localhost:3389"
 # Disable the RemoteFX / NSCodec / GFX-pipeline lossy codecs so the client
 # decodes raw bitmap updates: frames are then pixel-DETERMINISTIC between the

@@ -24,7 +24,7 @@ RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       xvfb x11-utils python3-tk fonts-dejavu-core \
       freerdp3-shadow-x11 freerdp3-x11 \
-      imagemagick xdotool procps \
+      imagemagick xdotool openbox procps \
  && rm -rf /var/lib/apt/lists/*
 
 COPY kiosk_app.py /opt/rdp_fixture/kiosk_app.py

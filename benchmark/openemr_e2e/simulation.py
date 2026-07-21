@@ -423,6 +423,21 @@ class SimBackend:
         self.actions.append(("type", text))
         self.last_typed = text
 
+    def text_value_at(self, x: int, y: int) -> str:
+        """Return the fixture textarea value for exact delivery verification.
+
+        The deterministic benchmark has one editable control.  Exposing its
+        value models the structural readback available from the real browser
+        backend and keeps this fixture from relying on an unsafe pixel-only
+        success heuristic.
+        """
+        del x, y
+        return self.last_typed
+
+    def focused_text_value(self) -> str:
+        """Return the value of the fixture's sole focused editable control."""
+        return self.last_typed
+
     def press(self, key: str) -> None:
         self.actions.append(("press", key))
         # Model the app: the commit keypress POSTs the encounter to the SoR.

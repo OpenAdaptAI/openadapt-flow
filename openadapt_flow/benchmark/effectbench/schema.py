@@ -84,18 +84,12 @@ class Substrate(str, Enum):
 
 
 class DivergenceCategory(str, Enum):
-    """The mechanisms by which a green screen hides a wrong record.
+    """The seven mechanisms by which a green screen hides a wrong record.
 
     C1-C5 are the transactional fault classes the ``fault_model`` study already
     validated as silently mishandled; C6-C7 are the wrong-record / silent-no-op
-    classes grounded in the identity and dense-surface corpora. C8 is a
-    collateral write to a SECOND mutable surface: the target record is written
-    correctly, but a stray row also lands on a surface a single-surface oracle
-    does not read (the clinical ``collateral_unaudited`` / the lending
-    unauthorized-fee fault); it is caught only by a COMPLETE read path over every
-    mutable surface. C1-C7 are covered by the MockMed task pack; C8 is exercised
-    by the lending (MockLoan) single-surface-vs-complete-read-path study. Every
-    task declares exactly one primary category (design doc section 2.1).
+    classes grounded in the identity and dense-surface corpora. Every task
+    declares exactly one primary category (design doc section 2.1).
     """
 
     C1_PARTIAL_SAVE = "C1_partial_save"
@@ -105,7 +99,6 @@ class DivergenceCategory(str, Enum):
     C5_DOUBLE_DELIVERED_INPUT = "C5_double_delivered_input"
     C6_WRONG_RECORD_HOMONYM = "C6_wrong_record_homonym"
     C7_SILENT_NOOP_WRONG_TARGET = "C7_silent_noop_wrong_target"
-    C8_COLLATERAL_UNAUDITED = "C8_collateral_unaudited"
     CONTROL = "control"  # a clean / idempotent-fix control, not a fault
 
 

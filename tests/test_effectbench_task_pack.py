@@ -59,13 +59,7 @@ def test_pack_validates_and_is_the_right_size() -> None:
 def test_all_seven_divergence_categories_are_covered() -> None:
     cats = category_counts()
     for c in DivergenceCategory:
-        # CONTROL is not a fault; C8 (collateral write to a second surface) is
-        # exercised by the lending single-surface-vs-complete-read study, not the
-        # MockMed task pack.
-        if c in (
-            DivergenceCategory.CONTROL,
-            DivergenceCategory.C8_COLLATERAL_UNAUDITED,
-        ):
+        if c is DivergenceCategory.CONTROL:
             continue
         assert cats.get(c.value, 0) >= 1, f"missing category {c.value}"
     assert cats.get("control", 0) >= 3
@@ -169,12 +163,7 @@ def test_injected_faults_are_silent_under_screen_only(live_episodes) -> None:
         if e.arm == "screen_only" and e.outcome is OutcomeLabel.SILENT_WRONG_EFFECT
     }
     for c in DivergenceCategory:
-        # C8 (collateral write to a second surface) is demonstrated by the
-        # lending study, not the MockMed pack these live episodes come from.
-        if c in (
-            DivergenceCategory.CONTROL,
-            DivergenceCategory.C8_COLLATERAL_UNAUDITED,
-        ):
+        if c in (DivergenceCategory.CONTROL,):
             continue
         assert c in silent_cats, f"no silent wrong-effect demonstrated for {c.value}"
 

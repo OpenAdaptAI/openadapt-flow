@@ -23,25 +23,25 @@ complete-read-path), so the two domains are directly comparable:
   every mutable surface at ``GET /api/db`` (disbursements + fees). It sees the
   collateral row and drives the residual to 0.
 
-Only ``reported_success`` (and the arm's own read path) differs between the arms;
-the independent benchmark oracle handed to ``score_episode`` is identical - the
-COMPLETE read path over ``/api/db`` - so it is the SAME ground truth judging all
-three arms. An injected fault classifies as ``silent_wrong_effect`` under
+Only ``reported_success`` (and the arm's own read path) differs between the arms.
+A benchmark-local read-only SQLite oracle is the separate ground-truth path
+judging all three arms. It discovers business tables and uses its own row/delta
+classifier rather than the runtime effect-kit classifier. An injected fault classifies as
+``silent_wrong_effect`` under
 ``screen_only``; every non-collateral fault is caught under BOTH effect arms; the
 ``collateral`` fault is a residual silent-wrong-effect under
 ``effect_verify_single`` (invisible to a single-surface oracle) and caught under
 ``effect_verify_full`` - the headline this second domain now shows with the SAME
 honest residual the clinical study reports.
 
-Oracle independence (confirming the sibling ``effect_e2e`` design, unchanged):
-the ground-truth oracle reads the true effect over the COMPLETE read path
-(``/api/db``, both surfaces) - pre-state captured BEFORE the write, post-state
-read AFTER - and never trusts the agent's self-report or the screen. Every trial
-binds a TRIAL-UNIQUE memo (and idempotency key), so the oracle checks THIS run's
-exact write and cross-trial contamination is detectable. The C6 wrong-record task
-exercises the identity gate on the consequential step: a same-name decoy loan is
-seeded, a blind write funds the wrong loan, and the intended loan stays empty
-behind a green screen.
+Oracle independence: the ground-truth oracle opens the persisted SQLite ledger
+read-only before and after the write, bypassing both HTTP verifier paths, and
+never trusts the agent's self-report or screen. Every trial binds a TRIAL-UNIQUE
+memo (and idempotency key), so the oracle checks THIS run's exact write and
+cross-trial contamination is detectable. The C6 wrong-record task exercises
+post-action identity-sensitive readback: a decoy loan is seeded, a blind write
+funds the wrong loan, and the trial-unique persisted row is found by
+memo/product before its ``loan_id`` is checked against the intended record.
 
 Both MockMed and MockLoan are SYNTHETIC apps built by the same team, so a
 matching residual across the two is SUGGESTIVE of generalizability, not proof.
@@ -85,12 +85,14 @@ from openadapt_flow.benchmark.effectbench import (
 )
 from openadapt_flow.mockloan.fault_server import LedgerDB, serve
 
+from .ground_truth import SQLiteGroundTruthVerifier
+
 HERE = Path(__file__).resolve().parent
 
 TARGET_LOAN = "L1001"
 TARGET_PRODUCT = "Personal"
 TARGET_AMOUNT = "18500"
-# A same-name decoy loan for the homonym / wrong-record identity task.
+# A decoy loan for the wrong-record identity task.
 DECOY_LOAN = "L1009"
 DECOY_AMOUNT = "40000"
 
@@ -145,6 +147,24 @@ def _memo_effect(match: dict[str, object]) -> Effect:
         value=ValueExpr(param="memo"),
         risk="irreversible",
         probe="the persisted disbursement memo equals the authorized memo",
+        timeout_s=MOCKLOAN_TIMEOUT_S,
+    )
+
+
+def _loan_identity_effect() -> Effect:
+    """Find this trial's write, then verify the persisted loan identity.
+
+    Matching on the trial-unique memo and product ensures a wrong-loan write is
+    observed as a persisted record whose ``loan_id`` is wrong. Matching on the
+    intended loan first would misclassify that irreversible write as absent.
+    """
+    return Effect(
+        kind=EffectKind.FIELD_EQUALS,
+        match={"product": _expr(TARGET_PRODUCT), "memo": _expr({"param": "memo"})},
+        field="loan_id",
+        value=_expr(TARGET_LOAN),
+        risk="irreversible",
+        probe="the trial-unique persisted disbursement belongs to the intended loan",
         timeout_s=MOCKLOAN_TIMEOUT_S,
     )
 
@@ -243,10 +263,10 @@ TASKS: tuple[LendingTask, ...] = (
         correct_action_available=False,
     ),
     LendingTask(
-        "lending_c6_homonym_wrong_loan",
+        "lending_c6_wrong_loan",
         DivergenceCategory.C6_WRONG_RECORD_HOMONYM,
         "",
-        _record_effect(_target_match()),
+        _loan_identity_effect(),
         correct_action_available=True,
         write={
             "loan_id": DECOY_LOAN,
@@ -266,8 +286,8 @@ TASKS: tuple[LendingTask, ...] = (
         write=None,
     ),
     LendingTask(
-        "lending_c8_collateral_unaudited",
-        DivergenceCategory.C8_COLLATERAL_UNAUDITED,
+        "lending_collateral_unaudited",
+        DivergenceCategory.C2_DUPLICATE_SUBMISSION,
         "collateral",
         # The CORRECT disbursement to the target loan IS booked; the effect
         # contract is exactly the clean-write contract. A disbursements-only
@@ -384,11 +404,20 @@ def _agent_action(
 
 
 def run_episode(
-    task: LendingTask, *, arm: str, trial: int, base_url: str
+    task: LendingTask, *, arm: str, trial: int, base_url: str, db: LedgerDB
 ) -> EpisodeRecord:
     params = trial_params(task.task_id, trial)
     _reset_and_seed(base_url, task, params)
-    oracle = RestRecordVerifier(base_url, records_path="/api/db", records_key="records")
+    # Ground truth deliberately bypasses both HTTP read paths used by the SUT
+    # arms. It opens the persisted SQLite ledger in read-only/query-only mode,
+    # so even a corrupt or lying ``GET /api/db`` response cannot fool the judge.
+    oracle = SQLiteGroundTruthVerifier(
+        db.database_path,
+        intended_loan=TARGET_LOAN,
+        intended_product=TARGET_PRODUCT,
+        intended_amount=TARGET_AMOUNT,
+        intended_memo=params["memo"],
+    )
     return score_episode(
         episode_id=f"{arm}::{task.task_id}::{trial}",
         task_id=task.task_id,
@@ -413,14 +442,71 @@ def run_pack(
     trials: int = 3,
 ) -> list[EpisodeRecord]:
     episodes: list[EpisodeRecord] = []
-    with serve_mockloan() as (base_url, _db):
+    with serve_mockloan() as (base_url, db):
         for task in tasks:
             for arm in arms:
                 for trial in range(trials):
                     episodes.append(
-                        run_episode(task, arm=arm, trial=trial, base_url=base_url)
+                        run_episode(
+                            task,
+                            arm=arm,
+                            trial=trial,
+                            base_url=base_url,
+                            db=db,
+                        )
                     )
     return episodes
+
+
+_PUBLIC_ARM_SUMMARY_FIELDS = (
+    "arm",
+    "n_episodes",
+    "n_tasks",
+    "arms",
+    "swer",
+    "swer_wrong_write",
+    "swer_phantom",
+    "over_halt",
+    "task_success",
+    "screen_success",
+    "success_effect_gap",
+    "total_cost_usd",
+    "mean_cost_usd",
+    "cells",
+    "outcome_counts",
+)
+_PUBLIC_RATE_FIELDS = (
+    "swer",
+    "swer_wrong_write",
+    "swer_phantom",
+    "over_halt",
+    "task_success",
+    "screen_success",
+)
+
+
+def _public_rate(rate: dict) -> dict:
+    """Keep deterministic counts/rate; omit inferential intervals."""
+    return {key: rate[key] for key in ("numerator", "denominator", "rate")}
+
+
+def _public_arm_summary(summary: object) -> dict:
+    """Project an EffectBench summary onto its deterministic public fields."""
+    payload = summary.model_dump(mode="json")  # type: ignore[attr-defined]
+    projected = {field: payload[field] for field in _PUBLIC_ARM_SUMMARY_FIELDS}
+    for metric in _PUBLIC_RATE_FIELDS:
+        projected[metric] = _public_rate(payload[metric])
+    projected["cells"] = [
+        {
+            **{
+                key: cell[key]
+                for key in ("category", "substrate", "n", "success_effect_gap")
+            },
+            **{metric: _public_rate(cell[metric]) for metric in _PUBLIC_RATE_FIELDS},
+        }
+        for cell in payload["cells"]
+    ]
+    return projected
 
 
 def measure(trials: int = 3) -> dict:
@@ -441,19 +527,23 @@ def measure(trials: int = 3) -> dict:
             "synthetic": True,
             "domain": "lending (MockLoan) - loan disbursement authorization",
             "oracle": (
-                "runtime.effects.RestRecordVerifier over the COMPLETE read path "
-                "GET /api/db (disbursements + fees)"
+                "benchmark-local read-only SQLite ground truth with independent "
+                "row and open-world table-delta classification"
+            ),
+            "judge_read_path": (
+                "direct read-only SQLite capture over sqlite_master-discovered "
+                "business tables"
             ),
             "single_surface_read_path": SINGLE_RECORDS_PATH,
             "full_read_path": FULL_RECORDS_PATH,
-            "ground_truth": "mockloan.fault_server in-process ledger",
+            "ground_truth": "mockloan.fault_server isolated temporary SQLite ledger",
             "arms": list(ARMS),
             "tasks": len(TASKS),
             "trials_per_task_per_arm": trials,
             "deterministic": True,
             "model_calls": 0,
         },
-        **{arm: summaries[arm].model_dump(mode="json") for arm in ARMS},
+        **{arm: _public_arm_summary(summaries[arm]) for arm in ARMS},
     }
 
 
@@ -463,10 +553,11 @@ The non-healthcare replication of the SWER headline on a second system of
 record, run as the SAME three-arm ladder as the clinical `effect_e2e` study so
 the two domains are directly comparable: screen-only, a SINGLE-surface oracle
 (disbursements ledger only, `GET /api/disbursements`), and the COMPLETE read path
-over every mutable surface (disbursements + fees, `GET /api/db`). The ground
-truth judging all three arms is the complete read path; each arm never trusts the
-screen or its own self-report. Every trial binds a trial-unique memo + idempotency
-key. Zero model calls.
+over every mutable surface (disbursements + fees, `GET /api/db`). A separate
+benchmark-local ground truth judges all three arms through a read-only SQLite
+connection and its own row/table-delta classifier, never either HTTP response,
+the runtime effect classifier, the screen, or an arm's self-report. Every trial
+binds a trial-unique memo + idempotency key. Zero model calls.
 
 **The primary gate is SILENT WRONG-EFFECT - reporting/rendering success while the
 ledger disagrees.** A single out-of-band oracle collapses it to a residual on
@@ -500,14 +591,14 @@ def to_markdown(result: dict) -> str:
     screen = by_arm["screen_only"]
     lines = [_MD_HEADER, ""]
     lines.append(
-        f"Tasks: {m['tasks']} (divergence classes C1-C8 + clean / idempotent "
-        f"controls).  "
+        f"Tasks: {m['tasks']} (EffectBench classes C1-C7, a lending-local "
+        f"cross-surface collateral variant, and clean / idempotent controls)."
     )
     lines.append(
         f"Trials per task per arm: {m['trials_per_task_per_arm']} "
         "(DETERMINISTIC replays; run-to-run variance ~ 0, so these are a "
         "coverage matrix over scenarios, not a sampled rate - no confidence "
-        "interval is implied).  "
+        "interval is implied)."
     )
     lines.append("")
     lines.append("## Headline - the ladder")
@@ -572,11 +663,17 @@ def to_markdown(result: dict) -> str:
     lines.append(
         "All three arms drive the SAME writes against the SAME fault server; "
         "only `reported_success` (and, for the effect arms, which surface the "
-        "arm's OWN verifier reads) differs. The independent ground-truth oracle "
-        "handed to `score_episode` is a `RestRecordVerifier` reading the "
-        "COMPLETE path `/api/db` (both surfaces) pre-action and post-action, and "
-        "it is a DISTINCT instance from any arm's own verifier - the arm cannot "
-        "influence the judge. The `collateral` (C8) fault books the correct "
+        "arm's OWN verifier reads) differs. The ground-truth oracle handed to "
+        "`score_episode` is benchmark-local: it opens the persisted SQLite "
+        "ledger read-only before and after the action, discovers every business "
+        "table from `sqlite_master`, and classifies row/table deltas without "
+        "the runtime effect-kit classifier. The SUT "
+        "arms use the rendered banner, `GET /api/disbursements`, or `GET "
+        "/api/db`; none consumes the judge's SQL connection. The full arm and "
+        "judge encode the same intended business outcome independently; read-path "
+        "and classifier-code independence still cannot prove that the shared "
+        "business intent itself is complete. The lending-local "
+        "`collateral` variant books the correct "
         "disbursement AND a spurious fee to the separate fees / general-ledger "
         "surface with the same loan and funding memo: the disbursements-only "
         "read counts one correct money-movement row (CONFIRMED), while the "
@@ -584,9 +681,9 @@ def to_markdown(result: dict) -> str:
         "violated -> REFUTED). That is why the single-surface arm reports a "
         "silent success and the complete-read-path arm refuses to certify the "
         "already-persisted incorrect effect. The C6 task seeds "
-        "a same-name decoy loan and funds it; the intended loan stays empty, so "
+        "a decoy loan and funds it; the intended loan stays empty, so "
         "a blind (identity-less) write is a silent wrong-effect under "
-        "`screen_only` and an over-halt (caught, safe) under both effect arms."
+        "`screen_only` and a detected `wrong_action` under both effect arms."
     )
     lines.append("")
     lines.append("## Honest disclosure")
@@ -608,9 +705,14 @@ def to_markdown(result: dict) -> str:
         "- **The committed JSON is a bounded public aggregate.** It retains "
         "overall and category-level EffectBench metrics, but no raw episode "
         "rows, payloads, environment fingerprints, or target recipes.\n"
+        "- **Measured latency is not published in the committed aggregate.** "
+        "Local timing remains available on raw in-memory episodes, but omitting "
+        "it keeps regeneration byte-for-byte deterministic without fabricating "
+        "a stable latency.\n"
         "- **No confidence intervals are implied.** These are deterministic "
         "replays (variance ~ 0); the table is a coverage matrix over scenarios, "
-        "not a sampled estimate."
+        "not a sampled estimate. Inferential intervals and pass@k are omitted "
+        "from the bounded public aggregate."
     )
     lines.append("")
     lines.append("## Reproduce")

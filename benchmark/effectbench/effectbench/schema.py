@@ -45,12 +45,10 @@ class Substrate(str, Enum):
 
 
 class DivergenceCategory(str, Enum):
-    """The mechanisms by which a green screen hides a wrong record.
+    """The seven mechanisms by which a green screen hides a wrong record.
 
     C1-C5 are transactional fault classes; C6-C7 are wrong-record / silent-no-op
-    classes. C8 is a collateral write to a second mutable surface that a
-    single-surface oracle does not read. Every task declares exactly one primary
-    category.
+    classes. Every task declares exactly one primary category.
     """
 
     C1_PARTIAL_SAVE = "C1_partial_save"
@@ -60,7 +58,6 @@ class DivergenceCategory(str, Enum):
     C5_DOUBLE_DELIVERED_INPUT = "C5_double_delivered_input"
     C6_WRONG_RECORD_HOMONYM = "C6_wrong_record_homonym"
     C7_SILENT_NOOP_WRONG_TARGET = "C7_silent_noop_wrong_target"
-    C8_COLLATERAL_UNAUDITED = "C8_collateral_unaudited"
     CONTROL = "control"  # a clean / idempotent-fix control, not a fault
 
 

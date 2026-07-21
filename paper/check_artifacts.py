@@ -239,9 +239,9 @@ def main() -> None:
         0,
         "lending screen-only over-halts",
     )
-    require_equal(lend_overhalt, 6, "lending complete-read-path over-halts")
+    require_equal(lend_overhalt, 3, "lending complete-read-path over-halts")
     require_equal(
-        lend_wrong_action, 15, "lending complete-read-path detected wrong actions"
+        lend_wrong_action, 18, "lending complete-read-path detected wrong actions"
     )
 
     # EffectBench: the metric + fault taxonomy packaged as a standalone, versioned,
@@ -325,6 +325,7 @@ def main() -> None:
     main_tex = load_text("paper/main.tex")
     intro_tex = load_text("paper/sections/01_introduction.tex")
     methodology_tex = load_text("paper/sections/04_methodology.tex")
+    limitations_tex = load_text("paper/sections/06_limitations.tex")
     results_tex = load_text("paper/sections/05_results.tex")
     reproducibility_tex = load_text("paper/sections/07_reproducibility.tex")
     paper_readme = load_text("paper/README.md")
@@ -426,7 +427,7 @@ def main() -> None:
     )
     require_contains(
         results_tex,
-        f"cost of {lend_overhalt} of {lend_den} safe over-halts",
+        f"with {lend_overhalt} of {lend_den} over-halts",
         "results lending over-halts",
     )
     require_contains(
@@ -448,6 +449,31 @@ def main() -> None:
         results_tex,
         f"classified {lend_wrong_action} of {lend_den} runs as wrong actions",
         "lending post-write detection disclosure",
+    )
+    require_contains(
+        methodology_tex,
+        "Twelve tasks span the seven EffectBench divergence categories",
+        "lending methodology task count",
+    )
+    require_contains(
+        methodology_tex,
+        "discovers business tables from SQLite's catalog",
+        "lending methodology independent SQLite judge",
+    )
+    require_contains(
+        methodology_tex,
+        "benchmark-local row and table-delta classification",
+        "lending methodology independent classifier",
+    )
+    require_contains(
+        methodology_tex,
+        "post-action, identity-sensitive readback",
+        "lending methodology identity-sensitive readback",
+    )
+    require_contains(
+        limitations_tex,
+        "twelve tasks, three trials each",
+        "lending limitations task count",
     )
 
     # Released standalone benchmark reference.

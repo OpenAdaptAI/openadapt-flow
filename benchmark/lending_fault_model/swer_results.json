@@ -4,10 +4,11 @@
     "evidence_scope": "bounded_aggregate",
     "synthetic": true,
     "domain": "lending (MockLoan) - loan disbursement authorization",
-    "oracle": "runtime.effects.RestRecordVerifier over the COMPLETE read path GET /api/db (disbursements + fees)",
+    "oracle": "benchmark-local read-only SQLite ground truth with independent row and open-world table-delta classification",
+    "judge_read_path": "direct read-only SQLite capture over sqlite_master-discovered business tables",
     "single_surface_read_path": "/api/disbursements",
     "full_read_path": "/api/db",
-    "ground_truth": "mockloan.fault_server in-process ledger",
+    "ground_truth": "mockloan.fault_server isolated temporary SQLite ledger",
     "arms": [
       "screen_only",
       "effect_verify_single",
@@ -28,733 +29,324 @@
     "swer": {
       "numerator": 24,
       "denominator": 36,
-      "rate": 0.6666666666666666,
-      "ci": {
-        "lo": 0.5033399787115652,
-        "hi": 0.7978538117569468,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.6666666666666666
     },
     "swer_wrong_write": {
-      "numerator": 15,
+      "numerator": 18,
       "denominator": 36,
-      "rate": 0.4166666666666667,
-      "ci": {
-        "lo": 0.2714056205144606,
-        "hi": 0.5779974842512834,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.5
     },
     "swer_phantom": {
-      "numerator": 9,
+      "numerator": 6,
       "denominator": 36,
-      "rate": 0.25,
-      "ci": {
-        "lo": 0.13750477662994834,
-        "hi": 0.41070453766728354,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.16666666666666666
     },
     "over_halt": {
       "numerator": 0,
       "denominator": 36,
-      "rate": 0.0,
-      "ci": {
-        "lo": 0.0,
-        "hi": 0.09641862859446367,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.0
     },
     "task_success": {
       "numerator": 6,
       "denominator": 36,
-      "rate": 0.16666666666666666,
-      "ci": {
-        "lo": 0.07870447595018114,
-        "hi": 0.31890794311279463,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.16666666666666666
     },
     "screen_success": {
       "numerator": 30,
       "denominator": 36,
-      "rate": 0.8333333333333334,
-      "ci": {
-        "lo": 0.6810920568872054,
-        "hi": 0.9212955240498188,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.8333333333333334
     },
     "success_effect_gap": 0.6666666666666666,
-    "success_effect_gap_ci": {
-      "lo": 0.5,
-      "hi": 0.8055555555555556,
-      "method": "bootstrap",
-      "confidence": 0.95
-    },
     "total_cost_usd": 0.0,
     "mean_cost_usd": 0.0,
-    "mean_latency_s": 0.2517666666666665,
-    "pass_hat_k": {
-      "1": 0.16666666666666666,
-      "2": 0.16666666666666666,
-      "4": 0.0,
-      "8": 0.0
-    },
     "cells": [
       {
         "category": "C1_partial_save",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 1.0,
         "swer": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_wrong_write": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
+          "rate": 1.0
+        }
       },
       {
         "category": "C2_duplicate_submission",
         "substrate": "web",
-        "n": 3,
+        "n": 6,
+        "success_effect_gap": 1.0,
         "swer": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "numerator": 6,
+          "denominator": 6,
+          "rate": 1.0
         },
         "swer_wrong_write": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "numerator": 6,
+          "denominator": 6,
+          "rate": 1.0
         },
         "swer_phantom": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "screen_success": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
+          "numerator": 6,
+          "denominator": 6,
+          "rate": 1.0
+        }
       },
       {
         "category": "C3_optimistic_then_reject",
         "substrate": "web",
         "n": 9,
+        "success_effect_gap": 0.3333333333333333,
         "swer": {
           "numerator": 3,
           "denominator": 9,
-          "rate": 0.3333333333333333,
-          "ci": {
-            "lo": 0.1205838183869109,
-            "hi": 0.6457978644196036,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.3333333333333333
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 3,
           "denominator": 9,
-          "rate": 0.3333333333333333,
-          "ci": {
-            "lo": 0.1205838183869109,
-            "hi": 0.6457978644196036,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.3333333333333333
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 9,
-          "rate": 0.3333333333333333,
-          "ci": {
-            "lo": 0.1205838183869109,
-            "hi": 0.6457978644196036,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.3333333333333333
+          "rate": 0.3333333333333333
+        }
       },
       {
         "category": "C4_stale_overwrite",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 1.0,
         "swer": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_wrong_write": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
+          "rate": 1.0
+        }
       },
       {
         "category": "C5_double_delivered_input",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 1.0,
         "swer": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_wrong_write": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
+          "rate": 1.0
+        }
       },
       {
         "category": "C6_wrong_record_homonym",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 1.0,
         "swer": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_wrong_write": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "swer_phantom": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
+        },
+        "swer_phantom": {
+          "numerator": 0,
+          "denominator": 3,
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
+          "rate": 1.0
+        }
       },
       {
         "category": "C7_silent_noop_wrong_target",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 1.0,
         "swer": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
-      },
-      {
-        "category": "C8_collateral_unaudited",
-        "substrate": "web",
-        "n": 3,
-        "swer": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "swer_wrong_write": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "swer_phantom": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "over_halt": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "task_success": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "screen_success": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
+          "rate": 1.0
+        }
       },
       {
         "category": "control",
         "substrate": "web",
         "n": 6,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 6,
           "denominator": 6,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.6096657120978346,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "screen_success": {
           "numerator": 6,
           "denominator": 6,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.6096657120978346,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 1.0
+        }
       }
     ],
     "outcome_counts": {
@@ -774,740 +366,331 @@
     "swer": {
       "numerator": 3,
       "denominator": 36,
-      "rate": 0.08333333333333333,
-      "ci": {
-        "lo": 0.02874861133599338,
-        "hi": 0.2182669124927263,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.08333333333333333
     },
     "swer_wrong_write": {
       "numerator": 3,
       "denominator": 36,
-      "rate": 0.08333333333333333,
-      "ci": {
-        "lo": 0.02874861133599338,
-        "hi": 0.2182669124927263,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.08333333333333333
     },
     "swer_phantom": {
       "numerator": 0,
       "denominator": 36,
-      "rate": 0.0,
-      "ci": {
-        "lo": 0.0,
-        "hi": 0.09641862859446367,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.0
     },
     "over_halt": {
-      "numerator": 6,
+      "numerator": 3,
       "denominator": 36,
-      "rate": 0.16666666666666666,
-      "ci": {
-        "lo": 0.07870447595018114,
-        "hi": 0.31890794311279463,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.08333333333333333
     },
     "task_success": {
       "numerator": 9,
       "denominator": 36,
-      "rate": 0.25,
-      "ci": {
-        "lo": 0.13750477662994834,
-        "hi": 0.41070453766728354,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.25
     },
     "screen_success": {
       "numerator": 12,
       "denominator": 36,
-      "rate": 0.3333333333333333,
-      "ci": {
-        "lo": 0.2021461882430531,
-        "hi": 0.4966600212884348,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.3333333333333333
     },
     "success_effect_gap": 0.08333333333333333,
-    "success_effect_gap_ci": {
-      "lo": 0.0,
-      "hi": 0.16666666666666666,
-      "method": "bootstrap",
-      "confidence": 0.95
-    },
     "total_cost_usd": 0.0,
     "mean_cost_usd": 0.0,
-    "mean_latency_s": 0.39189722222222223,
-    "pass_hat_k": {
-      "1": 0.25,
-      "2": 0.25,
-      "4": 0.0,
-      "8": 0.0
-    },
     "cells": [
       {
         "category": "C1_partial_save",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C2_duplicate_submission",
         "substrate": "web",
-        "n": 3,
+        "n": 6,
+        "success_effect_gap": 0.5,
         "swer": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "numerator": 3,
+          "denominator": 6,
+          "rate": 0.5
         },
         "swer_wrong_write": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "numerator": 3,
+          "denominator": 6,
+          "rate": 0.5
         },
         "swer_phantom": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "screen_success": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "numerator": 3,
+          "denominator": 6,
+          "rate": 0.5
+        }
       },
       {
         "category": "C3_optimistic_then_reject",
         "substrate": "web",
         "n": 9,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 3,
           "denominator": 9,
-          "rate": 0.3333333333333333,
-          "ci": {
-            "lo": 0.1205838183869109,
-            "hi": 0.6457978644196036,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.3333333333333333
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 9,
-          "rate": 0.3333333333333333,
-          "ci": {
-            "lo": 0.1205838183869109,
-            "hi": 0.6457978644196036,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.3333333333333333
+        }
       },
       {
         "category": "C4_stale_overwrite",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C5_double_delivered_input",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C6_wrong_record_homonym",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
-          "numerator": 3,
+          "numerator": 0,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C7_silent_noop_wrong_target",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
-      },
-      {
-        "category": "C8_collateral_unaudited",
-        "substrate": "web",
-        "n": 3,
-        "swer": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "swer_wrong_write": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "swer_phantom": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "over_halt": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "task_success": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "screen_success": {
-          "numerator": 3,
-          "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 1.0
+          "rate": 0.0
+        }
       },
       {
         "category": "control",
         "substrate": "web",
         "n": 6,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 6,
           "denominator": 6,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.6096657120978346,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "screen_success": {
           "numerator": 6,
           "denominator": 6,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.6096657120978346,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 1.0
+        }
       }
     ],
     "outcome_counts": {
       "success": 9,
-      "wrong_action": 12,
+      "wrong_action": 15,
       "safe_halt": 6,
-      "over_halt": 6,
+      "over_halt": 3,
       "silent_wrong_effect": 3
     }
   },
@@ -1521,740 +704,331 @@
     "swer": {
       "numerator": 0,
       "denominator": 36,
-      "rate": 0.0,
-      "ci": {
-        "lo": 0.0,
-        "hi": 0.09641862859446367,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.0
     },
     "swer_wrong_write": {
       "numerator": 0,
       "denominator": 36,
-      "rate": 0.0,
-      "ci": {
-        "lo": 0.0,
-        "hi": 0.09641862859446367,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.0
     },
     "swer_phantom": {
       "numerator": 0,
       "denominator": 36,
-      "rate": 0.0,
-      "ci": {
-        "lo": 0.0,
-        "hi": 0.09641862859446367,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.0
     },
     "over_halt": {
-      "numerator": 6,
+      "numerator": 3,
       "denominator": 36,
-      "rate": 0.16666666666666666,
-      "ci": {
-        "lo": 0.07870447595018114,
-        "hi": 0.31890794311279463,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.08333333333333333
     },
     "task_success": {
       "numerator": 9,
       "denominator": 36,
-      "rate": 0.25,
-      "ci": {
-        "lo": 0.13750477662994834,
-        "hi": 0.41070453766728354,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.25
     },
     "screen_success": {
       "numerator": 9,
       "denominator": 36,
-      "rate": 0.25,
-      "ci": {
-        "lo": 0.13750477662994834,
-        "hi": 0.41070453766728354,
-        "method": "wilson",
-        "confidence": 0.95
-      }
+      "rate": 0.25
     },
     "success_effect_gap": 0.0,
-    "success_effect_gap_ci": {
-      "lo": 0.0,
-      "hi": 0.0,
-      "method": "bootstrap",
-      "confidence": 0.95
-    },
     "total_cost_usd": 0.0,
     "mean_cost_usd": 0.0,
-    "mean_latency_s": 0.4105277777777778,
-    "pass_hat_k": {
-      "1": 0.25,
-      "2": 0.25,
-      "4": 0.0,
-      "8": 0.0
-    },
     "cells": [
       {
         "category": "C1_partial_save",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C2_duplicate_submission",
         "substrate": "web",
-        "n": 3,
+        "n": 6,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "denominator": 6,
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "denominator": 6,
+          "rate": 0.0
+        }
       },
       {
         "category": "C3_optimistic_then_reject",
         "substrate": "web",
         "n": 9,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 9,
-          "rate": 0.0,
-          "ci": {
-            "lo": 0.0,
-            "hi": 0.2991450484195441,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 3,
           "denominator": 9,
-          "rate": 0.3333333333333333,
-          "ci": {
-            "lo": 0.1205838183869109,
-            "hi": 0.6457978644196036,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.3333333333333333
         },
         "screen_success": {
           "numerator": 3,
           "denominator": 9,
-          "rate": 0.3333333333333333,
-          "ci": {
-            "lo": 0.1205838183869109,
-            "hi": 0.6457978644196036,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.3333333333333333
+        }
       },
       {
         "category": "C4_stale_overwrite",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C5_double_delivered_input",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C6_wrong_record_homonym",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
-          "numerator": 3,
+          "numerator": 0,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "C7_silent_noop_wrong_target",
         "substrate": "web",
         "n": 3,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 3,
           "denominator": 3,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.4385029682449546,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "task_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "screen_success": {
           "numerator": 0,
           "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
-      },
-      {
-        "category": "C8_collateral_unaudited",
-        "substrate": "web",
-        "n": 3,
-        "swer": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "swer_wrong_write": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "swer_phantom": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "over_halt": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "task_success": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "screen_success": {
-          "numerator": 0,
-          "denominator": 3,
-          "rate": 0.0,
-          "ci": {
-            "lo": 5.551115123125783e-17,
-            "hi": 0.5614970317550454,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 0.0
+        }
       },
       {
         "category": "control",
         "substrate": "web",
         "n": 6,
+        "success_effect_gap": 0.0,
         "swer": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_wrong_write": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "swer_phantom": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "over_halt": {
           "numerator": 0,
           "denominator": 6,
-          "rate": 0.0,
-          "ci": {
-            "lo": 2.7755575615628914e-17,
-            "hi": 0.3903342879021653,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 0.0
         },
         "task_success": {
           "numerator": 6,
           "denominator": 6,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.6096657120978346,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
+          "rate": 1.0
         },
         "screen_success": {
           "numerator": 6,
           "denominator": 6,
-          "rate": 1.0,
-          "ci": {
-            "lo": 0.6096657120978346,
-            "hi": 1.0,
-            "method": "wilson",
-            "confidence": 0.95
-          }
-        },
-        "success_effect_gap": 0.0
+          "rate": 1.0
+        }
       }
     ],
     "outcome_counts": {
       "success": 9,
-      "wrong_action": 15,
+      "wrong_action": 18,
       "safe_halt": 6,
-      "over_halt": 6
+      "over_halt": 3
     }
   }
 }

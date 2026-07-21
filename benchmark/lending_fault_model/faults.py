@@ -42,11 +42,12 @@ catches every fault that lands on THAT surface, but a single out-of-band record
 oracle is NOT sufficient in general: a write to a surface it does not read is
 invisible to it. The companion SWER study
 (``benchmark/lending_fault_model/swer.py``) makes this explicit with a
-``collateral`` fault (class C8) that books the correct disbursement AND a
-spurious fee to a SEPARATE fees / general-ledger surface. A single-surface oracle
-leaves a residual silent-wrong-effect on exactly that class (the lending analog
-of the clinical study's 9/90 single-surface residual); only a COMPLETE read path
-over every mutable surface reaches 0. Both MockLoan and the clinical MockMed are
+``collateral`` scenario---a lending-local cross-surface variant of EffectBench's
+C2 extra-write category---that books the correct disbursement AND a spurious fee
+to a SEPARATE fees / general-ledger surface. A single-surface oracle leaves a
+residual silent-wrong-effect on exactly that scenario (the lending analog of the
+clinical study's 9/90 single-surface residual); only a COMPLETE read path over
+every mutable surface reaches 0. Both MockLoan and the clinical MockMed are
 SYNTHETIC apps built by the same team - a matching residual across the two is
 suggestive of generalizability, not proof.
 """

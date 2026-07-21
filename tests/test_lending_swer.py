@@ -5,8 +5,8 @@ Two layers, both CI-fast and model-free:
 - Pure-Python tests of the lending outcome taxonomy
   (``benchmark.lending_fault_model.faults``) and the fault registry.
 - A LIVE three-arm Silent Wrong-Effect run through the shared EffectBench
-  contract (``benchmark.lending_fault_model.swer``) against the MockLoan fault
-  server's real HTTP persistence boundary (``GET /api/db``) - asserting the
+contract (``benchmark.lending_fault_model.swer``) against the MockLoan fault
+server's SQLite persistence boundary - asserting the
   headline: screen-only leaves silent wrong effects, a single-surface verifier
   leaves the collateral residual, and the complete read path drives SWER to
   zero. No Playwright browser is needed
@@ -16,7 +16,11 @@ Two layers, both CI-fast and model-free:
 
 from __future__ import annotations
 
+import inspect
+import sqlite3
+
 from benchmark.lending_fault_model import faults as F
+from benchmark.lending_fault_model import ground_truth as G
 from benchmark.lending_fault_model import swer as S
 from openadapt_flow.benchmark.effectbench import summarize
 from openadapt_flow.mockloan.fault_server import LedgerDB
@@ -113,6 +117,39 @@ class TestRegistry:
 
 
 class TestLedgerDB:
+    def test_ground_truth_import_graph_excludes_product_verifiers_and_judge(
+        self,
+    ) -> None:
+        source = inspect.getsource(G)
+        assert "judge_records" not in source
+        assert "RestRecordVerifier" not in source
+        assert "SqlRecordVerifier" not in source
+
+    def test_ground_truth_discovers_business_tables_only(self) -> None:
+        db = LedgerDB()
+        assert G.audited_tables(db.database_path) == ("records",)
+
+    def test_ground_truth_catches_new_business_table_without_record_row(self) -> None:
+        db = LedgerDB()
+        before = G.capture(db.database_path)
+        with sqlite3.connect(db.database_path) as conn:
+            conn.execute("CREATE TABLE outbound_payments (id INTEGER PRIMARY KEY)")
+            conn.execute("INSERT INTO outbound_payments(id) VALUES (1)")
+        after = G.capture(db.database_path)
+        truth = G.judge(
+            before,
+            after,
+            intended_loan=S.TARGET_LOAN,
+            intended_product=S.TARGET_PRODUCT,
+            intended_amount=S.TARGET_AMOUNT,
+            intended_memo="trial memo",
+        )
+
+        assert truth.correct is False
+        assert truth.fault_class == "collateral_write"
+        assert truth.persisted_count > 0
+        assert truth.table_deltas["outbound_payments"] == 1
+
     def test_idempotency_key_dedups(self) -> None:
         db = LedgerDB()
         db.reset()
@@ -165,7 +202,7 @@ class TestLedgerDB:
 
 
 class TestSwerCoverage:
-    def test_all_eight_categories_plus_controls(self) -> None:
+    def test_all_public_categories_plus_lending_collateral_variant(self) -> None:
         cats = {t.category.value for t in S.TASKS}
         for c in (
             "C1_partial_save",
@@ -175,10 +212,12 @@ class TestSwerCoverage:
             "C5_double_delivered_input",
             "C6_wrong_record_homonym",
             "C7_silent_noop_wrong_target",
-            "C8_collateral_unaudited",
             "control",
         ):
             assert c in cats, c
+        collateral = next(t for t in S.TASKS if t.fault == "collateral")
+        assert collateral.category.value == "C2_duplicate_submission"
+        assert collateral.task_id == "lending_collateral_unaudited"
 
     def test_three_arm_ladder(self) -> None:
         assert S.ARMS == (
@@ -254,22 +293,74 @@ class TestLiveThreeArmSwer:
             if e.arm == "effect_verify_single"
             and e.outcome.value == "silent_wrong_effect"
         }
-        assert silent == {"lending_c8_collateral_unaudited"}, silent
+        assert silent == {"lending_collateral_unaudited"}, silent
         # ...and the full read path catches that same class (not silent).
         collateral_full = [
             e
             for e in episodes
             if e.arm == "effect_verify_full"
-            and e.task_id == "lending_c8_collateral_unaudited"
+            and e.task_id == "lending_collateral_unaudited"
         ]
         assert collateral_full and all(
             e.outcome.value != "silent_wrong_effect" for e in collateral_full
         )
 
     def test_oracle_is_isolated_from_the_arm(self) -> None:
-        # The benchmark oracle reads the complete path /api/db, which the SPA
-        # never calls, and is a distinct instance from any arm's own verifier.
+        # The benchmark oracle reads SQLite directly; the product arm reads REST.
         episodes = S.run_pack(
             tasks=(S.TASKS[0],), arms=("effect_verify_full",), trials=1
         )
-        assert episodes[0].oracle.channel == "rest"
+        assert episodes[0].oracle.channel == "sqlite_ground_truth"
+
+    def test_independent_judge_classifies_wrong_loan_and_collateral_deltas(
+        self,
+    ) -> None:
+        wrong_loan = next(
+            task for task in S.TASKS if task.task_id == "lending_c6_wrong_loan"
+        )
+        collateral = next(task for task in S.TASKS if task.fault == "collateral")
+        with S.serve_mockloan() as (base_url, db):
+            wrong_episode = S.run_episode(
+                wrong_loan,
+                arm="effect_verify_full",
+                trial=0,
+                base_url=base_url,
+                db=db,
+            )
+            collateral_episode = S.run_episode(
+                collateral,
+                arm="effect_verify_full",
+                trial=0,
+                base_url=base_url,
+                db=db,
+            )
+
+        assert wrong_episode.outcome.value == "wrong_action"
+        assert "wrong_record" in wrong_episode.oracle.reason
+        assert "table_deltas={'records': 1}" in wrong_episode.oracle.reason
+        assert collateral_episode.outcome.value == "wrong_action"
+        assert "collateral_write" in collateral_episode.oracle.reason
+        assert "table_deltas={'records': 2}" in collateral_episode.oracle.reason
+
+    def test_lying_full_rest_readback_cannot_fool_sqlite_judge(self) -> None:
+        collateral = next(task for task in S.TASKS if task.fault == "collateral")
+        with S.serve_mockloan() as (base_url, db):
+            real_snapshot = db.snapshot
+
+            def hide_fee_surface(*, surface=None):
+                # Simulate a corrupt / incomplete REST handler: even /api/db
+                # returns only the disbursement surface.
+                return real_snapshot(surface="disbursements")
+
+            db.snapshot = hide_fee_surface  # type: ignore[method-assign]
+            episode = S.run_episode(
+                collateral,
+                arm="effect_verify_full",
+                trial=0,
+                base_url=base_url,
+                db=db,
+            )
+
+        assert episode.reported_success is True  # the lied-to REST arm certifies
+        assert episode.oracle.channel == "sqlite_ground_truth"
+        assert episode.outcome.value == "silent_wrong_effect"

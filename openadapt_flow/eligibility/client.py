@@ -607,6 +607,66 @@ def _qualified_benefits(body: Mapping[str, Any]) -> list[QualifiedBenefit]:
     return output
 
 
+def _selection_ambiguity(
+    benefits: list[QualifiedBenefit], request: EligibilityRequest
+) -> Optional[str]:
+    """Refuse an answer when explicit benefit qualifiers match no evidence.
+
+    Coverage status entries do not always carry network/coverage/time metadata.
+    When the caller declares one of those qualifiers, an unrelated active
+    service row must therefore not be enough to produce a consumable answer.
+    """
+    selection = request.benefit_selection
+    requested = {
+        "network": selection.network_code,
+        "coverage level": selection.coverage_level_code,
+        "time period": selection.time_qualifier_code,
+        "procedure": selection.procedure_code,
+    }
+    explicit = {name: value for name, value in requested.items() if value is not None}
+    if not explicit:
+        return None
+
+    service_date = _date_value(request.date_of_service)
+    service_candidates = [
+        benefit
+        for benefit in benefits
+        if any(
+            service in benefit.service_type_codes
+            for service in request.service_type_codes
+        )
+    ]
+    qualified = [
+        benefit
+        for benefit in service_candidates
+        if (
+            selection.network_code is None
+            or benefit.network_code in {selection.network_code, "W"}
+        )
+        and (
+            selection.coverage_level_code is None
+            or benefit.coverage_level_code == selection.coverage_level_code
+        )
+        and (
+            selection.time_qualifier_code is None
+            or benefit.time_qualifier_code == selection.time_qualifier_code
+        )
+        and (
+            selection.procedure_code is None
+            or benefit.procedure_code == selection.procedure_code
+        )
+        and (
+            service_date is None
+            or not benefit.benefit_dates
+            or _covers_service_date(benefit.benefit_dates, service_date) is True
+        )
+    ]
+    if qualified:
+        return None
+    labels = ", ".join(sorted(explicit))
+    return f"no patient-responsibility evidence matches requested {labels} qualifiers"
+
+
 def _select_value(
     benefits: list[QualifiedBenefit],
     request: EligibilityRequest,
@@ -957,7 +1017,8 @@ def parse_271(
         result.application_mode = application_mode
         return result
     selections: dict[str, Optional[str]] = {}
-    ambiguities: list[str] = []
+    selection_problem = _selection_ambiguity(benefits, request)
+    ambiguities: list[str] = [selection_problem] if selection_problem else []
     for field, code, time_code in (
         ("copay", "B", None),
         ("coinsurance_percent", "A", None),

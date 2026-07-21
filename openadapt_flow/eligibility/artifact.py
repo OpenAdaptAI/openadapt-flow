@@ -383,8 +383,12 @@ def _atomic_replace(path: Path, payload: bytes) -> None:
         raise ValueError("refusing to replace a symlinked artifact index")
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     _write_exclusive(temporary, payload)
-    os.replace(temporary, path)
-    _fsync_dir(path.parent)
+    try:
+        os.replace(temporary, path)
+        _fsync_dir(path.parent)
+    finally:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
 
 
 def _effect(name: str, digest: str, probe: str) -> list[Effect]:
@@ -432,13 +436,26 @@ def _artifact_from_manifest(
     )
 
 
+def _utc_timestamp(value: object, *, field: str) -> datetime:
+    try:
+        parsed = datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise ValueError(f"eligibility transaction {field} is malformed") from exc
+    return parsed
+
+
 def _load_manifest(
-    tx_dir: Path, policy: Optional[PracticeArtifactPolicy] = None
+    tx_dir: Path,
+    policy: Optional[PracticeArtifactPolicy] = None,
+    *,
+    transaction_id: Optional[str] = None,
 ) -> dict[str, object]:
     raw = json.loads(_read_regular(tx_dir / "manifest.json"))
     if not isinstance(raw, dict) or raw.get("schema_version") != 3:
         raise ValueError("eligibility transaction manifest is malformed")
-    tx_id = tx_dir.name.removeprefix("tx_")
+    tx_id = transaction_id or tx_dir.name.removeprefix("tx_")
     suffix = (
         _ENCRYPTED_SUFFIX
         if policy is not None
@@ -463,10 +480,18 @@ def _load_manifest(
         200 <= int(raw["http_status"]) < 300
     ):
         raise ValueError("eligibility transaction HTTP status is malformed")
-    try:
-        datetime.strptime(str(raw.get("committed_at", "")), "%Y-%m-%dT%H:%M:%SZ")
-    except ValueError as exc:
-        raise ValueError("eligibility transaction commit time is malformed") from exc
+    committed_at = _utc_timestamp(raw.get("committed_at", ""), field="commit time")
+    retention_expires_at = _utc_timestamp(
+        raw.get("retention_expires_at", ""), field="retention expiry"
+    )
+    if retention_expires_at <= committed_at:
+        raise ValueError("eligibility transaction retention interval is malformed")
+    if policy is not None and retention_expires_at != (
+        committed_at + timedelta(days=policy.retention_days)
+    ):
+        raise ValueError(
+            "eligibility transaction retention expiry does not match its bound policy"
+        )
     for field, value in expected.items():
         if raw.get(field) != value:
             raise ValueError(f"eligibility transaction {field} is malformed")
@@ -485,33 +510,92 @@ def _load_manifest(
     return raw
 
 
-def _rebuild_index(
-    root: Path, policy: PracticeArtifactPolicy, key: Optional[bytes]
-) -> str:
+def _verified_transaction_row(
+    tx_dir: Path,
+    policy: PracticeArtifactPolicy,
+    key: Optional[bytes],
+    *,
+    transaction_id: Optional[str] = None,
+    expected_manifest: Optional[dict[str, object]] = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Re-read and verify every byte that defines one consumable result."""
+    _require_secure_existing_dir(tx_dir, label="transaction")
+    manifest = _load_manifest(tx_dir, policy, transaction_id=transaction_id)
+    if expected_manifest is not None and manifest != expected_manifest:
+        raise ValueError("staged eligibility manifest does not match its contract")
+    final_tx_name = f"tx_{transaction_id}" if transaction_id else tx_dir.name
+    raw_name = str(manifest["raw_file"])
+    raw_stored = _read_regular(tx_dir / raw_name)
+    if _sha(raw_stored) != manifest["raw_storage_sha256"]:
+        raise ValueError("raw artifact fails its committed storage digest")
+    raw_aad = f"{policy.boundary_id}:{final_tx_name}:{raw_name}".encode()
+    raw_plain = _unprotect(raw_stored, key=key, aad=raw_aad)
+    if _sha(raw_plain) != manifest["raw_plain_sha256"]:
+        raise ValueError("raw artifact fails its committed plaintext digest")
+
+    normalized_name = str(manifest["normalized_file"])
+    normalized_stored = _read_regular(tx_dir / normalized_name)
+    if _sha(normalized_stored) != manifest["normalized_storage_sha256"]:
+        raise ValueError("normalized artifact fails its committed storage digest")
+    normalized_aad = f"{policy.boundary_id}:{final_tx_name}:{normalized_name}".encode()
+    normalized_plain = _unprotect(normalized_stored, key=key, aad=normalized_aad)
+    if _sha(normalized_plain) != manifest["normalized_plain_sha256"]:
+        raise ValueError("normalized artifact fails its committed digest")
+    parsed = json.loads(normalized_plain)
+    if not isinstance(parsed, dict):
+        raise ValueError("normalized artifact is not an object")
+    expected_fields = {
+        "operation_id": manifest.get("operation_id"),
+        "request_sha256": manifest.get("request_sha256"),
+        "response_subject_sha256": manifest.get("response_subject_sha256"),
+        "application_mode": manifest.get("application_mode"),
+        "http_status": manifest.get("http_status"),
+        "committed_at": manifest.get("committed_at"),
+        "raw_271_sha256": manifest.get("raw_plain_sha256"),
+    }
+    for field, expected in expected_fields.items():
+        if parsed.get(field) != expected:
+            raise ValueError(f"normalized artifact {field} does not match its manifest")
+    return manifest, parsed
+
+
+def _index_material(
+    root: Path,
+    policy: PracticeArtifactPolicy,
+    key: Optional[bytes],
+    *,
+    now: datetime,
+    excluded: frozenset[Path] = frozenset(),
+    staged: Optional[tuple[Path, str, dict[str, object]]] = None,
+) -> tuple[str, bytes, bytes]:
     rows: list[dict[str, object]] = []
     transactions = root / TRANSACTIONS_DIR
     for tx_dir in sorted(transactions.iterdir()):
-        _require_secure_existing_dir(tx_dir, label="transaction")
-        manifest = _load_manifest(tx_dir, policy)
-        raw_name = str(manifest["raw_file"])
-        raw_stored = _read_regular(tx_dir / raw_name)
-        if _sha(raw_stored) != manifest["raw_storage_sha256"]:
-            raise ValueError("raw artifact fails its committed storage digest")
-        raw_aad = f"{policy.boundary_id}:{tx_dir.name}:{raw_name}".encode()
-        raw_plain = _unprotect(raw_stored, key=key, aad=raw_aad)
-        if _sha(raw_plain) != manifest["raw_plain_sha256"]:
-            raise ValueError("raw artifact fails its committed plaintext digest")
-        normalized_name = str(manifest["normalized_file"])
-        stored = _read_regular(tx_dir / normalized_name)
-        if _sha(stored) != manifest["normalized_storage_sha256"]:
-            raise ValueError("normalized artifact fails its committed storage digest")
-        aad = f"{policy.boundary_id}:{tx_dir.name}:{normalized_name}".encode()
-        plain = _unprotect(stored, key=key, aad=aad)
-        if _sha(plain) != manifest["normalized_plain_sha256"]:
-            raise ValueError("normalized artifact fails its committed digest")
-        parsed = json.loads(plain)
-        if not isinstance(parsed, dict):
-            raise ValueError("normalized artifact is not an object")
+        if tx_dir in excluded or tx_dir.name.startswith("."):
+            continue
+        manifest, parsed = _verified_transaction_row(tx_dir, policy, key)
+        expires = _utc_timestamp(
+            manifest["retention_expires_at"], field="retention expiry"
+        )
+        if expires <= now:
+            raise ValueError(
+                "expired eligibility transaction is not consumable; purge it first"
+            )
+        rows.append(parsed)
+    if staged is not None:
+        stage, transaction_id, expected_manifest = staged
+        manifest, parsed = _verified_transaction_row(
+            stage,
+            policy,
+            key,
+            transaction_id=transaction_id,
+            expected_manifest=expected_manifest,
+        )
+        expires = _utc_timestamp(
+            manifest["retention_expires_at"], field="retention expiry"
+        )
+        if expires <= now:
+            raise ValueError("new eligibility transaction is already expired")
         rows.append(parsed)
     plain_csv = _csv_payload(rows)
     name = RESULTS_CSV + (_ENCRYPTED_SUFFIX if key is not None else "")
@@ -520,8 +604,196 @@ def _rebuild_index(
         key=key,
         aad=f"{policy.boundary_id}:index:{name}".encode(),
     )
-    _atomic_replace(root / name, payload)
+    return name, plain_csv, payload
+
+
+def _stage_verified_index(
+    root: Path,
+    policy: PracticeArtifactPolicy,
+    key: Optional[bytes],
+    *,
+    name: str,
+    plain_csv: bytes,
+    payload: bytes,
+) -> Path:
+    target = root / name
+    if target.is_symlink():
+        raise ValueError("refusing to replace a symlinked artifact index")
+    if target.exists():
+        _read_regular(target)
+    temporary = root / f".{name}.{uuid4().hex}.tmp"
+    try:
+        _write_exclusive(temporary, payload)
+        staged = _read_regular(temporary)
+        if staged != payload:
+            raise ValueError("staged eligibility index bytes changed during write")
+        observed_plain = _unprotect(
+            staged,
+            key=key,
+            aad=f"{policy.boundary_id}:index:{name}".encode(),
+        )
+        if observed_plain != plain_csv:
+            raise ValueError("staged eligibility index fails plaintext verification")
+        return temporary
+    except Exception:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
+        raise
+
+
+def _promote_staged_index(temporary: Path, target: Path) -> None:
+    if target.is_symlink():
+        raise ValueError("refusing to replace a symlinked artifact index")
+    os.replace(temporary, target)
+    _fsync_dir(target.parent)
+
+
+def _restore_index(target: Path, previous: Optional[bytes]) -> None:
+    """Restore the pre-transaction index after a failed two-path promotion."""
+    if previous is None:
+        if target.exists() or target.is_symlink():
+            if target.is_symlink():
+                raise ValueError("cannot roll back a symlinked artifact index")
+            target.unlink()
+            _fsync_dir(target.parent)
+        return
+    _atomic_replace(target, previous)
+
+
+def _rebuild_index(
+    root: Path,
+    policy: PracticeArtifactPolicy,
+    key: Optional[bytes],
+    *,
+    now: Optional[datetime] = None,
+) -> str:
+    effective_now = _effective_now(now)
+    name, plain_csv, payload = _index_material(root, policy, key, now=effective_now)
+    index_target = root / name
+    temporary = _stage_verified_index(
+        root,
+        policy,
+        key,
+        name=name,
+        plain_csv=plain_csv,
+        payload=payload,
+    )
+    try:
+        _promote_staged_index(temporary, index_target)
+    finally:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
     return name
+
+
+def _effective_now(now: Optional[datetime]) -> datetime:
+    value = now or datetime.now(timezone.utc)
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("eligibility retention time must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _purge_expired_locked(
+    root: Path,
+    policy: PracticeArtifactPolicy,
+    key: Optional[bytes],
+    *,
+    now: datetime,
+) -> list[str]:
+    """Hide expired transactions, publish a verified index, then delete them."""
+    transactions = root / TRANSACTIONS_DIR
+    expired: list[tuple[Path, str]] = []
+    for tx_dir in sorted(transactions.iterdir()):
+        if tx_dir.name.startswith("."):
+            continue
+        _require_secure_existing_dir(tx_dir, label="transaction")
+        manifest = _load_manifest(tx_dir, policy)
+        expires = _utc_timestamp(
+            manifest["retention_expires_at"], field="retention expiry"
+        )
+        if expires <= now:
+            expired.append((tx_dir, str(manifest["operation_id"])))
+    if not expired:
+        return []
+
+    excluded = frozenset(path for path, _operation_id in expired)
+    name, plain_csv, payload = _index_material(
+        root, policy, key, now=now, excluded=excluded
+    )
+    index_target = root / name
+    previous_index = (
+        _read_regular(index_target)
+        if index_target.exists() or index_target.is_symlink()
+        else None
+    )
+    temporary = _stage_verified_index(
+        root,
+        policy,
+        key,
+        name=name,
+        plain_csv=plain_csv,
+        payload=payload,
+    )
+    quarantined: list[tuple[Path, Path]] = []
+    try:
+        for original, _operation_id in expired:
+            quarantine = transactions / f".expired-{original.name}-{uuid4().hex}"
+            os.rename(original, quarantine)
+            quarantined.append((original, quarantine))
+        _fsync_dir(transactions)
+        _promote_staged_index(temporary, index_target)
+    except Exception:
+        index_changed = not temporary.exists()
+        for original, quarantine in reversed(quarantined):
+            if quarantine.exists() and not quarantine.is_symlink():
+                os.rename(quarantine, original)
+        _fsync_dir(transactions)
+        if index_changed:
+            _restore_index(index_target, previous_index)
+        raise
+    finally:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+
+    cleanup_errors: list[str] = []
+    for _original, quarantine in quarantined:
+        try:
+            _require_secure_existing_dir(quarantine, label="expired transaction")
+            shutil.rmtree(quarantine)
+        except OSError as exc:
+            cleanup_errors.append(type(exc).__name__)
+    _fsync_dir(transactions)
+    if cleanup_errors:
+        raise RuntimeError(
+            "expired eligibility data was deactivated but secure deletion failed: "
+            + ",".join(cleanup_errors)
+        )
+    return [operation_id for _path, operation_id in expired]
+
+
+def purge_expired_eligibility_artifacts(
+    artifact_dir: Union[str, Path],
+    *,
+    policy: PracticeArtifactPolicy,
+    env: Optional[Mapping[str, str]] = None,
+    now: Optional[datetime] = None,
+) -> list[str]:
+    """Purge expired PHI transactions and atomically remove them from the index.
+
+    A malformed manifest, insecure path, missing encryption key, or failed
+    index verification denies the purge before any transaction is hidden.
+    """
+    root = Path(artifact_dir)
+    if not root.exists() and not root.is_symlink():
+        return []
+    _ensure_secure_dir(root)
+    _bind_policy(root, policy)
+    key = _key(policy, env)
+    transactions = root / TRANSACTIONS_DIR
+    _ensure_secure_dir(transactions)
+    effective_now = _effective_now(now)
+    with _artifact_lock(root):
+        return _purge_expired_locked(root, policy, key, now=effective_now)
 
 
 def write_eligibility_artifacts(
@@ -573,6 +845,7 @@ def write_eligibility_artifacts(
     _ensure_secure_dir(root)
     _bind_policy(root, policy)
     key = _key(policy, env)
+    effective_now = _effective_now(None)
     transactions = root / TRANSACTIONS_DIR
     _ensure_secure_dir(transactions)
     tx_id = _transaction_id(policy, result.operation_id)
@@ -583,6 +856,7 @@ def write_eligibility_artifacts(
     normalized_name = f"result_{tx_id}.json{suffix}"
 
     with _artifact_lock(root):
+        _purge_expired_locked(root, policy, key, now=effective_now)
         if tx_dir.exists() or tx_dir.is_symlink():
             _require_secure_existing_dir(tx_dir, label="idempotency target")
             manifest = _load_manifest(tx_dir, policy)
@@ -602,13 +876,18 @@ def write_eligibility_artifacts(
                 raise FileExistsError(
                     "operation_id was already committed with different content"
                 )
-            _rebuild_index(root, policy, key)
+            _rebuild_index(root, policy, key, now=effective_now)
             return _artifact_from_manifest(root, tx_dir, manifest, created=False)
 
         stage = transactions / f".staging-{uuid4().hex}"
         stage.mkdir(mode=0o700)
+        staged_index: Optional[Path] = None
+        index_target: Optional[Path] = None
+        previous_index: Optional[bytes] = None
+        promotion_started = False
+        tx_promoted = False
         try:
-            committed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            committed_at = effective_now.strftime("%Y-%m-%dT%H:%M:%SZ")
             normalized_plain = _canonical(
                 _normalized_payload(
                     reparsed, request=request, committed_at=committed_at
@@ -622,9 +901,9 @@ def write_eligibility_artifacts(
             normalized_stored = _protect(normalized_plain, key=key, aad=normalized_aad)
             _write_exclusive(stage / raw_name, raw_stored)
             _write_exclusive(stage / normalized_name, normalized_stored)
-            expiry = (
-                datetime.now(timezone.utc) + timedelta(days=policy.retention_days)
-            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            expiry = (effective_now + timedelta(days=policy.retention_days)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             index_name = RESULTS_CSV + (_ENCRYPTED_SUFFIX if key is not None else "")
             committed_manifest: dict[str, object] = {
                 "schema_version": 3,
@@ -647,14 +926,89 @@ def write_eligibility_artifacts(
             }
             _write_exclusive(stage / "manifest.json", _canonical(committed_manifest))
             _fsync_dir(stage)
+
+            _manifest, staged_row = _verified_transaction_row(
+                stage,
+                policy,
+                key,
+                transaction_id=tx_id,
+                expected_manifest=committed_manifest,
+            )
+            if _canonical(staged_row) != normalized_plain:
+                raise ValueError(
+                    "staged normalized eligibility record changed during verification"
+                )
+            name, plain_csv, index_payload = _index_material(
+                root,
+                policy,
+                key,
+                now=effective_now,
+                staged=(stage, tx_id, committed_manifest),
+            )
+            if name != index_name:
+                raise ValueError("staged eligibility index name changed")
+            staged_index = _stage_verified_index(
+                root,
+                policy,
+                key,
+                name=name,
+                plain_csv=plain_csv,
+                payload=index_payload,
+            )
+            index_target = root / name
+            if index_target.exists() or index_target.is_symlink():
+                previous_index = _read_regular(index_target)
+
+            promotion_started = True
             os.rename(stage, tx_dir)
+            tx_promoted = True
             _fsync_dir(transactions)
+            _promote_staged_index(staged_index, index_target)
         except Exception:
+            index_changed = staged_index is not None and not staged_index.exists()
             if stage.exists() and not stage.is_symlink():
                 shutil.rmtree(stage)
+            if tx_promoted and tx_dir.exists() and not tx_dir.is_symlink():
+                _require_secure_existing_dir(tx_dir, label="failed transaction")
+                shutil.rmtree(tx_dir)
+                _fsync_dir(transactions)
+            if promotion_started and index_changed and index_target is not None:
+                _restore_index(index_target, previous_index)
             raise
-        _rebuild_index(root, policy, key)
+        finally:
+            if staged_index is not None and staged_index.exists():
+                if staged_index.is_symlink():
+                    raise ValueError("staged eligibility index became a symlink")
+                staged_index.unlink()
         return _artifact_from_manifest(root, tx_dir, committed_manifest, created=True)
+
+
+def _rollback_created_artifact(
+    artifact: EligibilityArtifact,
+    *,
+    policy: PracticeArtifactPolicy,
+    env: Optional[Mapping[str, str]],
+) -> None:
+    """Remove a newly promoted transaction if independent verification fails."""
+    root = Path(artifact.artifact_dir)
+    _ensure_secure_dir(root)
+    _bind_policy(root, policy)
+    key = _key(policy, env)
+    transactions = root / TRANSACTIONS_DIR
+    _require_secure_existing_dir(transactions, label="transactions")
+    tx_dir = Path(artifact.transaction_dir)
+    if tx_dir.parent != transactions or not re.fullmatch(
+        r"tx_[0-9a-f]{24}", tx_dir.name
+    ):
+        raise ValueError("refusing to roll back an unexpected transaction path")
+    effective_now = _effective_now(None)
+    with _artifact_lock(root):
+        if tx_dir.exists() or tx_dir.is_symlink():
+            _require_secure_existing_dir(tx_dir, label="failed transaction")
+            shutil.rmtree(tx_dir)
+            _fsync_dir(transactions)
+        _purge_expired_locked(root, policy, key, now=effective_now)
+        _rebuild_index(root, policy, key, now=effective_now)
 
 
 def write_and_verify(
@@ -673,15 +1027,24 @@ def write_and_verify(
         policy=policy,
         env=env,
     )
-    # Re-open without following links before consulting the generic verifier.
-    _read_regular(Path(artifact.raw_271_file))
-    _read_regular(Path(artifact.normalized_file))
-    verifier = DocumentHashVerifier(root, glob=f"{TRANSACTIONS_DIR}/tx_*/*")
-    before = verifier.capture_pre_state()
-    verdicts = [verifier.verify(effect, before) for effect in artifact.effects]
-    if not all_confirmed(verdicts):
-        raise RuntimeError("eligibility artifact effect verification did not confirm")
-    return artifact, verdicts
+    try:
+        # Re-open without following links before consulting the independent
+        # generic verifier. A newly created transaction is rolled back if any
+        # verification step fails, so a failed result never remains consumable.
+        _read_regular(Path(artifact.raw_271_file))
+        _read_regular(Path(artifact.normalized_file))
+        verifier = DocumentHashVerifier(root, glob=f"{TRANSACTIONS_DIR}/tx_*/*")
+        before = verifier.capture_pre_state()
+        verdicts = [verifier.verify(effect, before) for effect in artifact.effects]
+        if not all_confirmed(verdicts):
+            raise RuntimeError(
+                "eligibility artifact effect verification did not confirm"
+            )
+        return artifact, verdicts
+    except Exception:
+        if artifact.created:
+            _rollback_created_artifact(artifact, policy=policy, env=env)
+        raise
 
 
 def all_confirmed(verdicts: list[EffectVerdict]) -> bool:

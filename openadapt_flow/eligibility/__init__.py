@@ -16,6 +16,7 @@ if TYPE_CHECKING:  # pragma: no cover
         ArtifactEncryption,
         EligibilityArtifact,
         PracticeArtifactPolicy,
+        purge_expired_eligibility_artifacts,
         write_and_verify,
         write_eligibility_artifacts,
     )
@@ -60,6 +61,7 @@ __all__ = [
     "StediEligibilityClient",
     "eligibility_request_sha256",
     "load_payer_routes",
+    "purge_expired_eligibility_artifacts",
     "resolve_route",
     "run_waterfall",
     "write_and_verify",
@@ -91,6 +93,7 @@ _ARTIFACT = (
     "ArtifactEncryption",
     "EligibilityArtifact",
     "PracticeArtifactPolicy",
+    "purge_expired_eligibility_artifacts",
     "write_and_verify",
     "write_eligibility_artifacts",
 )

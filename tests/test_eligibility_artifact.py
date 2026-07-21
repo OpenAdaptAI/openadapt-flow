@@ -6,6 +6,7 @@ import base64
 import csv
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from openadapt_flow.eligibility.artifact import (
     ArtifactEncryption,
     PracticeArtifactPolicy,
     all_confirmed,
+    purge_expired_eligibility_artifacts,
     write_and_verify,
     write_eligibility_artifacts,
 )
@@ -310,6 +312,161 @@ def test_atomic_promotion_failure_leaves_no_consumable_transaction(
     assert transactions.exists()
     assert list(transactions.iterdir()) == []
     assert not (tmp_path / RESULTS_CSV).exists()
+
+
+@pytest.mark.parametrize("target", ["raw", "normalized", "manifest", "index"])
+def test_every_staged_contract_is_verified_before_promotion(
+    tmp_path, monkeypatch, target
+):
+    import openadapt_flow.eligibility.artifact as artifact_module
+
+    real_write = artifact_module._write_exclusive
+
+    def corrupt_after_write(path, payload):
+        real_write(path, payload)
+        name = path.name
+        selected = (
+            (target == "raw" and name.startswith("raw_271_"))
+            or (target == "normalized" and name.startswith("result_"))
+            or (target == "manifest" and name == "manifest.json")
+            or (target == "index" and name.startswith(f".{RESULTS_CSV}."))
+        )
+        if selected:
+            with path.open("ab") as handle:
+                handle.write(b"corrupt")
+
+    monkeypatch.setattr(artifact_module, "_write_exclusive", corrupt_after_write)
+    with pytest.raises((ValueError, json.JSONDecodeError)):
+        write_eligibility_artifacts(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )
+    transactions = tmp_path / TRANSACTIONS_DIR
+    assert transactions.is_dir()
+    assert list(transactions.iterdir()) == []
+    assert not (tmp_path / RESULTS_CSV).exists()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_index_promotion_failure_rolls_back_promoted_transaction(tmp_path, monkeypatch):
+    real_replace = os.replace
+
+    def fail_index(source, destination):
+        if Path(destination).name == RESULTS_CSV:
+            raise OSError("injected index promotion failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_index)
+    with pytest.raises(OSError, match="index promotion"):
+        write_eligibility_artifacts(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )
+    assert list((tmp_path / TRANSACTIONS_DIR).iterdir()) == []
+    assert not (tmp_path / RESULTS_CSV).exists()
+
+
+def test_independent_effect_failure_rolls_back_new_transaction(tmp_path, monkeypatch):
+    import openadapt_flow.eligibility.artifact as artifact_module
+
+    monkeypatch.setattr(artifact_module, "all_confirmed", lambda _verdicts: False)
+    with pytest.raises(RuntimeError, match="did not confirm"):
+        write_and_verify(
+            active_result(), tmp_path, request=request(), policy=volume_policy()
+        )
+    assert list((tmp_path / TRANSACTIONS_DIR).iterdir()) == []
+    with (tmp_path / RESULTS_CSV).open(newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+
+
+def test_expired_transaction_is_purged_and_cannot_be_reused(tmp_path):
+    policy = PracticeArtifactPolicy(
+        boundary_id="practice-retention",
+        application_mode=ApplicationMode.TEST,
+        encryption=ArtifactEncryption.PLATFORM_VOLUME,
+        volume_encryption_attested=True,
+        retention_days=1,
+    )
+    artifact = write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=policy
+    )
+    manifest = json.loads(
+        (Path(artifact.transaction_dir) / "manifest.json").read_text()
+    )
+    expires = datetime.strptime(
+        manifest["retention_expires_at"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+    removed = purge_expired_eligibility_artifacts(
+        tmp_path, policy=policy, now=expires + timedelta(seconds=1)
+    )
+    assert removed == [request().operation_id]
+    assert not Path(artifact.transaction_dir).exists()
+    with (tmp_path / RESULTS_CSV).open(newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+
+    replacement = write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=policy
+    )
+    assert replacement.created
+
+
+def test_retention_index_failure_restores_expired_transaction(tmp_path, monkeypatch):
+    policy = PracticeArtifactPolicy(
+        boundary_id="practice-retention-rollback",
+        application_mode=ApplicationMode.TEST,
+        encryption=ArtifactEncryption.PLATFORM_VOLUME,
+        volume_encryption_attested=True,
+        retention_days=1,
+    )
+    artifact = write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=policy
+    )
+    manifest = json.loads(
+        (Path(artifact.transaction_dir) / "manifest.json").read_text()
+    )
+    expires = datetime.strptime(
+        manifest["retention_expires_at"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+    real_replace = os.replace
+
+    def fail_index(source, destination):
+        if Path(destination).name == RESULTS_CSV:
+            raise OSError("injected retention index failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_index)
+    with pytest.raises(OSError, match="retention index"):
+        purge_expired_eligibility_artifacts(
+            tmp_path, policy=policy, now=expires + timedelta(seconds=1)
+        )
+    assert Path(artifact.transaction_dir).is_dir()
+    with (tmp_path / RESULTS_CSV).open(newline="") as handle:
+        assert len(list(csv.DictReader(handle))) == 1
+
+
+@pytest.mark.parametrize(
+    ("expiry", "error"),
+    [
+        ("not-a-timestamp", "retention expiry"),
+        ("2099-01-01T00:00:00Z", "bound policy"),
+    ],
+)
+def test_invalid_retention_manifest_denies_purge_without_deleting(
+    tmp_path, expiry, error
+):
+    policy = volume_policy("practice-retention-denial")
+    artifact = write_eligibility_artifacts(
+        active_result(), tmp_path, request=request(), policy=policy
+    )
+    manifest_path = Path(artifact.transaction_dir) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["retention_expires_at"] = expiry
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match=error):
+        purge_expired_eligibility_artifacts(
+            tmp_path,
+            policy=policy,
+            now=datetime.now(timezone.utc) + timedelta(days=365),
+        )
+    assert Path(artifact.transaction_dir).is_dir()
 
 
 def test_transport_outcome_without_raw_response_is_not_promoted(tmp_path):

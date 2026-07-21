@@ -294,5 +294,6 @@ def test_lazy_package_exports():
 
     assert eligibility.EligibilityRoute is EligibilityRoute
     assert callable(eligibility.run_waterfall)
+    assert callable(eligibility.purge_expired_eligibility_artifacts)
     with pytest.raises(AttributeError):
         eligibility.nope

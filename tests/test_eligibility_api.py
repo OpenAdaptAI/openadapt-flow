@@ -213,6 +213,45 @@ def test_qualifier_aware_values_do_not_choose_out_of_network_or_remaining_as_tot
     assert result.raw_271_bytes == payload
 
 
+@pytest.mark.parametrize(
+    ("selection", "mutations", "label"),
+    [
+        (
+            BenefitSelection(network_code="Y", coverage_level_code="IND"),
+            {
+                "inPlanNetworkIndicatorCode": "N",
+                "coverageLevelCode": "FAM",
+            },
+            "coverage level, network",
+        ),
+        (
+            BenefitSelection(time_qualifier_code="23"),
+            {"timeQualifierCode": "29"},
+            "time period",
+        ),
+    ],
+)
+def test_explicit_qualifier_without_matching_evidence_never_answers(
+    selection, mutations, label
+):
+    body = json.loads(json.dumps(ACTIVE_271))
+    for entry in body["benefitsInformation"]:
+        if entry.get("code") in {"A", "B", "C", "G"}:
+            entry.update(mutations)
+    result = parse_271(
+        dental_request(benefit_selection=selection),
+        json.dumps(body).encode(),
+        expected_mode=ApplicationMode.TEST,
+    )
+    assert result.status is EligibilityStatus.ACTIVE
+    assert not result.is_answer
+    assert result.error_category is ErrorCategory.RESPONSE_AMBIGUOUS
+    assert (
+        f"no patient-responsibility evidence matches requested {label} qualifiers"
+        in result.ambiguities
+    )
+
+
 def test_raw_phi_response_is_excluded_from_repr_and_serialization():
     body = json.loads(json.dumps(ACTIVE_271))
     body["subscriber"] = {"memberId": "SECRET-MEMBER-123"}

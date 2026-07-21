@@ -168,6 +168,8 @@ def test_require_settled_halts_on_a_screen_that_never_settles(bundle, run_dir):
     ).run(wf, bundle_dir=bundle, run_dir=run_dir)
     assert report.success is False
     assert "starting state not ready" in report.results[0].error
+    assert "bounded per-step wait_until readiness predicate" in report.results[0].error
+    assert "require_settled=False" not in report.results[0].error
     assert backend.actions == []  # no click on the un-ready screen
     assert vision.result_calls == 1  # the settle primitive owns the full bound
     assert vision.timeouts == [0.05]

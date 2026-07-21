@@ -3286,8 +3286,10 @@ class Replayer:
                 "The screen never stopped changing (still loading or animating) "
                 f"within {self.settle_readiness_timeout_s:.1f}s - refusing to act "
                 "on a mid-transition frame; run aborted (starting state not "
-                "ready). If this UI animates continuously, disable the readiness "
-                "gate (require_settled=False)."
+                "ready). If this UI animates continuously, qualify the workflow "
+                "with a bounded per-step wait_until readiness predicate over a "
+                "stable observation region before retrying; otherwise keep the "
+                "readiness gate enabled and halt."
             )
         return frame, None
 

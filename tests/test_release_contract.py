@@ -18,6 +18,12 @@ from scripts.check_release_consistency import (
     FORBIDDEN_SDIST_PATHS,
     FORBIDDEN_SDIST_PREFIXES,
     PRIVATE_CORPUS_CONTENT_SIGNATURES,
+    PRIVATE_DISTRIBUTION_EXACT_PATHS,
+    PRIVATE_DISTRIBUTION_PATH_PREFIXES,
+    PRIVATE_DISTRIBUTION_PATH_TOKENS,
+    REPOSITORY_ONLY_EVALUATION_EXACT_PATHS,
+    REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES,
+    REPOSITORY_ONLY_EVALUATION_PATH_TOKENS,
     REQUIRED_SDIST_PATHS,
     release_versions,
     sync_lock_version,
@@ -28,6 +34,27 @@ from scripts.check_release_consistency import (
 
 ROOT = Path(__file__).resolve().parents[1]
 MIT_LICENSE = (ROOT / "LICENSE").read_bytes()
+SOURCE_BOUNDARY_EXCLUDES = {
+    "/benchmark/reliability",
+    "/docs/validation/IDENTITY_ROC.md",
+    "/docs/validation/adversary_corpus_manifest.json",
+    "/docs/validation/adversary_corpus_v2_manifest.json",
+    "/docs/validation/adversary_corpus_v3_manifest.json",
+    "/docs/validation/identity_roc.json",
+    "/docs/validation/identity_roc.png",
+    "/openadapt_flow/benchmark/reliability_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus_v2.py",
+    "/openadapt_flow/validation/adversary_corpus_v3.py",
+    "/openadapt_flow/validation/identity_roc.py",
+    "/scripts/reliability",
+    "/tests/test_adversary_corpus.py",
+    "/tests/test_adversary_corpus_v2.py",
+    "/tests/test_adversary_corpus_v3.py",
+    "/tests/test_identity_corpus_rates.py",
+    "/tests/test_identity_out_of_corpus.py",
+    "/tests/test_reliability.py",
+}
 
 
 def test_release_versions_are_synchronized() -> None:
@@ -54,6 +81,31 @@ def test_required_wheel_job_builds_and_validates_actual_sdist() -> None:
     assert "python -m build\n" in wheel_job
     assert "python -m build --wheel" not in wheel_job
     assert "python scripts/check_release_consistency.py --require-dist" in wheel_job
+    assert "import openadapt_flow.benchmark.reliability" in wheel_job
+    assert "openadapt_flow.validation.adversary_corpus" in wheel_job
+    assert "openadapt_flow.benchmark.reliability_corpus" in wheel_job
+
+
+def test_wheel_and_sdist_exclude_repository_only_evidence() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    targets = pyproject["tool"]["hatch"]["build"]["targets"]
+
+    assert SOURCE_BOUNDARY_EXCLUDES <= set(targets["wheel"]["exclude"])
+    assert SOURCE_BOUNDARY_EXCLUDES <= set(targets["sdist"]["exclude"])
+
+    # The archive guard is semantic, not an exact-file-only denylist: a future
+    # corpus version or renamed reliability recipe must fail closed too.
+    assert {"adversary_corpus", "identity_roc", "held_out_corpus"} <= set(
+        PRIVATE_DISTRIBUTION_PATH_TOKENS
+    )
+    assert "private/" in PRIVATE_DISTRIBUTION_PATH_PREFIXES
+    assert {
+        "tests/test_identity_corpus_rates.py",
+        "tests/test_identity_out_of_corpus.py",
+    } <= PRIVATE_DISTRIBUTION_EXACT_PATHS
+    assert "reliability_corpus" in REPOSITORY_ONLY_EVALUATION_PATH_TOKENS
+    assert "benchmark/reliability/" in REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES
+    assert "tests/test_reliability.py" in REPOSITORY_ONLY_EVALUATION_EXACT_PATHS
 
 
 def test_lock_sync_updates_only_editable_root_version(tmp_path: Path) -> None:
@@ -325,7 +377,9 @@ def test_wheel_refuses_private_corpus_material(tmp_path: Path) -> None:
         {
             license_path,
             metadata_path,
+            "openadapt_flow/benchmark/reliability.py",
             "openadapt_flow/validation/hardening/corpus.py",
+            "openadapt_flow/validation/hardening/harness.py",
         },
     )
     validate_wheel_license_boundary(ok)
@@ -335,6 +389,10 @@ def test_wheel_refuses_private_corpus_material(tmp_path: Path) -> None:
             "openadapt_flow/validation/hardening/grown_corpus/deploy.json",
             "openadapt_flow/tuned_adversary/weights.json",
             "openadapt_flow/data/real_emr/patients.json",
+            "openadapt_flow/validation/adversary_corpus_v4.py",
+            "openadapt_flow/validation/identity_roc.py",
+            "tests/test_identity_out_of_corpus.py",
+            "private/identity/operating-point.json",
             "openadapt_flow/renamed-neutral.json",  # caught by banner, not path
         )
     ):
@@ -358,7 +416,16 @@ def test_sdist_refuses_private_corpus_material(tmp_path: Path) -> None:
 
     # The committed public synthetic corpus is allowed in the sdist.
     ok = tmp_path / "public-corpus-ok.tar.gz"
-    _write_sdist(ok, {*clean_members, "benchmark/vision_hardening/corpus.json"})
+    _write_sdist(
+        ok,
+        {
+            *clean_members,
+            "benchmark/vision_hardening/corpus.json",
+            "docs/validation/VALIDATION.md",
+            "openadapt_flow/benchmark/reliability.py",
+            "openadapt_flow/validation/hardening/harness.py",
+        },
+    )
     validate_sdist_license_boundary(ok)
 
     for index, forbidden in enumerate(
@@ -366,6 +433,10 @@ def test_sdist_refuses_private_corpus_material(tmp_path: Path) -> None:
             "benchmark/vision_hardening/grown_corpus/deploy.json",
             "vendor/openadapt-corpus/thresholds.json",
             "benchmark/effect_oracle_recipe/openemr.yml",
+            "docs/validation/adversary_corpus_v4_manifest.json",
+            "docs/validation/identity_roc.json",
+            "tests/test_identity_corpus_rates.py",
+            "private/identity/operating-point.json",
             "benchmark/renamed-neutral.json",  # caught by banner, not path
         )
     ):
@@ -380,6 +451,60 @@ def test_sdist_refuses_private_corpus_material(tmp_path: Path) -> None:
             ),
         )
         with pytest.raises(ValueError, match="private, deployment-derived"):
+            validate_sdist_license_boundary(mixed)
+
+
+def test_wheel_refuses_repository_only_evaluation_data(tmp_path: Path) -> None:
+    """The generic reliability harness ships; its curated corpus does not."""
+    license_path = "openadapt_flow-1.0.dist-info/licenses/LICENSE"
+    metadata_path = "openadapt_flow-1.0.dist-info/METADATA"
+    clean_members = {
+        license_path,
+        metadata_path,
+        "openadapt_flow/benchmark/reliability.py",
+    }
+    clean = tmp_path / "reliability-harness-ok.whl"
+    _write_wheel(clean, clean_members)
+    validate_wheel_license_boundary(clean)
+
+    for index, forbidden in enumerate(
+        (
+            "openadapt_flow/benchmark/reliability_corpus.py",
+            "openadapt_flow/benchmark/reliability_corpus_v2.py",
+            "benchmark/reliability/results.json",
+            "scripts/reliability/run.py",
+            "tests/test_reliability.py",
+        )
+    ):
+        mixed = tmp_path / f"repository-only-{index}.whl"
+        _write_wheel(mixed, {*clean_members, forbidden})
+        with pytest.raises(ValueError, match="repository-only evaluation"):
+            validate_wheel_license_boundary(mixed)
+
+
+def test_sdist_refuses_repository_only_evaluation_data(tmp_path: Path) -> None:
+    """Public-source recipes/results stay out of the installation archive."""
+    clean_members = {
+        *REQUIRED_SDIST_PATHS,
+        "PKG-INFO",
+        "openadapt_flow/benchmark/reliability.py",
+    }
+    clean = tmp_path / "reliability-harness-ok.tar.gz"
+    _write_sdist(clean, clean_members)
+    validate_sdist_license_boundary(clean)
+
+    for index, forbidden in enumerate(
+        (
+            "openadapt_flow/benchmark/reliability_corpus.py",
+            "benchmark/reliability/corpus.json",
+            "benchmark/reliability/results.json",
+            "scripts/reliability/run.py",
+            "tests/test_reliability.py",
+        )
+    ):
+        mixed = tmp_path / f"repository-only-{index}.tar.gz"
+        _write_sdist(mixed, {*clean_members, forbidden})
+        with pytest.raises(ValueError, match="repository-only evaluation"):
             validate_sdist_license_boundary(mixed)
 
 

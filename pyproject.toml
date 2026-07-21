@@ -178,6 +178,31 @@ openadapt-flow-vlm-service = "openadapt_flow.services.vlm_service.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["openadapt_flow"]
+# Publication artifacts carry the public mechanism, interfaces, and
+# conservative runtime defaults -- never the grown identity corpora, their ROC
+# tuning surface, or repository-only reliability recipes/results.  Keep this
+# list in lockstep with the sdist target and the archive validator below.
+exclude = [
+    "/benchmark/reliability",
+    "/docs/validation/IDENTITY_ROC.md",
+    "/docs/validation/adversary_corpus_manifest.json",
+    "/docs/validation/adversary_corpus_v2_manifest.json",
+    "/docs/validation/adversary_corpus_v3_manifest.json",
+    "/docs/validation/identity_roc.json",
+    "/docs/validation/identity_roc.png",
+    "/openadapt_flow/benchmark/reliability_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus_v2.py",
+    "/openadapt_flow/validation/adversary_corpus_v3.py",
+    "/openadapt_flow/validation/identity_roc.py",
+    "/scripts/reliability",
+    "/tests/test_adversary_corpus.py",
+    "/tests/test_adversary_corpus_v2.py",
+    "/tests/test_adversary_corpus_v3.py",
+    "/tests/test_identity_corpus_rates.py",
+    "/tests/test_identity_out_of_corpus.py",
+    "/tests/test_reliability.py",
+]
 # Ship the PEP 561 marker so downstream type-checkers honor our annotations.
 [tool.hatch.build.targets.wheel.force-include]
 "openadapt_flow/py.typed" = "openadapt_flow/py.typed"
@@ -190,12 +215,35 @@ packages = ["openadapt_flow"]
 # Keep PyPI artifacts under the declared MIT package license. The source
 # checkout carries an isolated openIMIS reference environment whose adapted
 # deployment files remain AGPL-3.0-only; ship none of that benchmark surface
-# (including its launcher/test and repository-only notice) in the sdist.
+# (including its launcher/test and repository-only notice) in the sdist. The
+# public checkout also retains reproducibility evidence that is not part of the
+# distributable engine: frozen/grown identity corpora, ROC tuning artifacts,
+# and the public-web reliability recipes/raw results. The public mechanisms and
+# bounded aggregate evidence remain available in the source repository.
 exclude = [
     "/THIRD_PARTY_NOTICES.md",
     "/benchmark/openimis_claims",
+    "/benchmark/reliability",
+    "/docs/validation/IDENTITY_ROC.md",
+    "/docs/validation/adversary_corpus_manifest.json",
+    "/docs/validation/adversary_corpus_v2_manifest.json",
+    "/docs/validation/adversary_corpus_v3_manifest.json",
+    "/docs/validation/identity_roc.json",
+    "/docs/validation/identity_roc.png",
+    "/openadapt_flow/benchmark/reliability_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus.py",
+    "/openadapt_flow/validation/adversary_corpus_v2.py",
+    "/openadapt_flow/validation/adversary_corpus_v3.py",
+    "/openadapt_flow/validation/identity_roc.py",
     "/scripts/openimis_claims_demo.py",
+    "/scripts/reliability",
+    "/tests/test_adversary_corpus.py",
+    "/tests/test_adversary_corpus_v2.py",
+    "/tests/test_adversary_corpus_v3.py",
+    "/tests/test_identity_corpus_rates.py",
+    "/tests/test_identity_out_of_corpus.py",
     "/tests/test_openimis_claims_fixture.py",
+    "/tests/test_reliability.py",
 ]
 
 [tool.pytest.ini_options]

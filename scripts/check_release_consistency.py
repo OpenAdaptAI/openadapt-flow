@@ -34,12 +34,39 @@ AGPL_CONTENT_SIGNATURES = (
 # content-signature check, so a rename cannot smuggle a private artifact in.
 PRIVATE_DISTRIBUTION_PATH_TOKENS = (
     "openadapt-corpus",
+    "adversary_corpus",
+    "identity_roc",
     "grown_corpus",
     "tuned_adversary",
     "deployment_corpus",
     "deployment_thresholds",
     "effect_oracle_recipe",
+    "held_out_corpus",
+    "oracle_recipe",
+    "pixel_verify_cert",
     "real_emr",
+)
+PRIVATE_DISTRIBUTION_PATH_PREFIXES = ("private/",)
+PRIVATE_DISTRIBUTION_EXACT_PATHS = frozenset(
+    {
+        "tests/test_identity_corpus_rates.py",
+        "tests/test_identity_out_of_corpus.py",
+    }
+)
+
+# This public-web study is not a deployment-derived crown jewel, but its
+# curated workflows, raw rows, and generated report are evaluation DATA rather
+# than the distributable engine. Keep the generic reliability harness public
+# and shippable while refusing these repository-only recipes/results.
+REPOSITORY_ONLY_EVALUATION_PATH_TOKENS = ("reliability_corpus",)
+REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES = (
+    "benchmark/reliability/",
+    "scripts/reliability/",
+)
+REPOSITORY_ONLY_EVALUATION_EXACT_PATHS = frozenset(
+    {
+        "tests/test_reliability.py",
+    }
 )
 # Assembled from parts so this guard (which ships in the sdist) does not itself
 # trip the content scan; every private-corpus artifact carries the full banner.
@@ -51,10 +78,31 @@ def _private_distribution_hits(members: set[str], signature_hits: set[str]) -> s
     hits = {
         member
         for member in members
-        if any(token in member.lower() for token in PRIVATE_DISTRIBUTION_PATH_TOKENS)
+        if member.lower() in PRIVATE_DISTRIBUTION_EXACT_PATHS
+        or any(
+            member.lower().startswith(prefix)
+            for prefix in PRIVATE_DISTRIBUTION_PATH_PREFIXES
+        )
+        or any(token in member.lower() for token in PRIVATE_DISTRIBUTION_PATH_TOKENS)
     }
     hits.update(signature_hits)
     return hits
+
+
+def _repository_only_evaluation_hits(members: set[str]) -> set[str]:
+    """Members that are public-source evaluation data, not package runtime."""
+    return {
+        member
+        for member in members
+        if member.lower() in REPOSITORY_ONLY_EVALUATION_EXACT_PATHS
+        or any(
+            member.lower().startswith(prefix)
+            for prefix in REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES
+        )
+        or any(
+            token in member.lower() for token in REPOSITORY_ONLY_EVALUATION_PATH_TOKENS
+        )
+    }
 
 
 LOCK_PACKAGE_PATTERN = re.compile(
@@ -270,6 +318,13 @@ def validate_sdist_license_boundary(
             "recipes / real-EMR datasets) that belongs only in the private "
             f"OpenAdaptAI/openadapt-corpus repo: {sorted(private)}"
         )
+    repository_only = _repository_only_evaluation_hits(members)
+    if repository_only:
+        raise ValueError(
+            "source distribution contains repository-only evaluation data or "
+            "recipes that are not part of the distributable engine: "
+            f"{sorted(repository_only)}"
+        )
     missing = REQUIRED_SDIST_PATHS - members
     if missing:
         raise ValueError(
@@ -361,6 +416,13 @@ def validate_wheel_license_boundary(
             "(grown corpus / tuned adversary / thresholds / oracle recipes / "
             "real-EMR datasets) that belongs only in the private "
             f"OpenAdaptAI/openadapt-corpus repo: {sorted(private)}"
+        )
+    repository_only = _repository_only_evaluation_hits(members)
+    if repository_only:
+        raise ValueError(
+            "wheel contains repository-only evaluation data or recipes that "
+            "are not part of the distributable engine: "
+            f"{sorted(repository_only)}"
         )
     forbidden = {
         member

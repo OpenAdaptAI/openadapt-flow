@@ -1,6 +1,6 @@
 {
   "instrument": "silent-wrong-effect rate, end-to-end through the replayer",
-  "generated_at": "2026-07-21T05:35:08.430864+00:00",
+  "generated_at": "2026-07-21T06:40:00.293507+00:00",
   "platform": "macOS-15.7.3-arm64-arm-64bit",
   "model_calls": 0,
   "n_per_scenario": 9,
@@ -24,7 +24,7 @@
   "independence": {
     "write_path": "POST /api/encounter via the replayer's ApiActuator (governed actuation) -> on-disk SQLite mutation",
     "verifier_readback_path": "GET /api/records (screen arm: GET /api/ui/last-save) -- a different HTTP verb/endpoint/connection than the write; the replayer's effect_verifier CONFIRMS/REFUTES/HALTs",
-    "ground_truth_path": "direct read-only SQLite file connection over every table, with an independent classifier + audit_table_deltas -- bypasses the service; the write's success flag never reaches it"
+    "ground_truth_path": "direct read-only SQLite file connection over every persisted system-of-record table (discovered dynamically from sqlite_master, not a hardcoded pair; the UI-echo banner excluded), with an independent classifier and its OWN per-table delta audit (NOT the effect kit's audit_table_deltas) -- bypasses the service; the write's success flag never reaches it"
   },
   "headline": {
     "screen_silent_wrong": 54,
@@ -1503,7 +1503,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1525,7 +1525,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1547,7 +1547,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1569,7 +1569,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1591,7 +1591,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1613,7 +1613,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1635,7 +1635,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1657,7 +1657,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -1679,7 +1679,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3483,7 +3483,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3505,7 +3505,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3527,7 +3527,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3549,7 +3549,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3571,7 +3571,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3593,7 +3593,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3615,7 +3615,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3637,7 +3637,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -3659,7 +3659,7 @@
       "error": null,
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5463,7 +5463,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5485,7 +5485,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5507,7 +5507,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5529,7 +5529,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5551,7 +5551,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5573,7 +5573,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5595,7 +5595,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5617,7 +5617,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1
@@ -5639,7 +5639,7 @@
       "error": "System-of-record effect verification HALTED step 'save' (save encounter): record_written refuted against the sql system of record and could not be reconciled (escalated) \u2014 [sql] record_written: 1 records match the target selector but exactly 0 was expected (duplicate / double-delivered write -- not at-most-once) -- no compensator available for an irreversible refuted effect -- durably halt and escalate \u2014 run aborted",
       "gt_correct": false,
       "gt_fault": "collateral_write",
-      "gt_detail": "target encounter is correct, but a collateral row was written to the unaudited billing surface (billing delta +1)",
+      "gt_detail": "target encounter is correct, but a collateral row was written to a surface the encounters record oracle does not read (billing delta +1)",
       "table_deltas": {
         "billing": 1,
         "encounters": 1

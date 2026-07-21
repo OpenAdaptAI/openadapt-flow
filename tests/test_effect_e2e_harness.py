@@ -146,3 +146,121 @@ def test_markdown_renders_and_states_the_numbers(results):
     # Every scenario appears in the per-fault matrix.
     for sc in SCENARIOS:
         assert f"`{sc.name}`" in md
+
+
+def test_markdown_foregrounds_realistic_residual_and_closed_world(results):
+    # The honest framing must be present: the realistic middle rung is
+    # foregrounded and the 0 is explicitly conditioned on a closed world.
+    md = render_markdown(results).lower()
+    assert "closed world" in md
+    assert "middle rung" in md
+    # And the deterministic-statistics disclosure (no invented CIs).
+    assert "deterministic" in md
+    assert "coverage matrix" in md
+    assert "confidence interval" in md
+
+
+# -- ground-truth open-world + primitive-independence unit tests ------------
+# These pin finding #3 of the second adversarial review: the judge must be
+# open-world over the system of record (not a hardcoded table pair) and must not
+# share the effect kit's delta primitive.
+
+
+def _seed_db(path, *, extra_tables=()):
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE encounters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id TEXT, type TEXT, note TEXT, source TEXT, key TEXT
+            );
+            CREATE TABLE billing (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT, amount TEXT
+            );
+            CREATE TABLE banner (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT, type TEXT, note TEXT
+            );
+            """
+        )
+        for name in extra_tables:
+            quoted = '"' + name.replace('"', '""') + '"'
+            conn.execute(
+                f"CREATE TABLE {quoted} (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_ground_truth_audits_are_dynamic_and_exclude_banner(tmp_path):
+    from benchmark.effect_e2e import ground_truth
+
+    db = tmp_path / "rec.db"
+    # A THIRD, never-hardcoded business surface exists in the DB.
+    _seed_db(db, extra_tables=("outbox events",))
+    audited = ground_truth.audited_tables(db)
+    # Discovered dynamically: encounters, billing, AND the new outbox surface.
+    assert (
+        "encounters" in audited and "billing" in audited and "outbox events" in audited
+    )
+    # The app's UI-echo banner is NEVER audited as ground truth (avoids circularity).
+    assert "banner" not in audited
+
+
+def test_ground_truth_catches_collateral_write_to_a_new_surface(tmp_path):
+    import sqlite3
+
+    from benchmark.effect_e2e import ground_truth
+    from benchmark.effect_e2e.record_service import TARGET_PATIENT, TARGET_TYPE
+
+    db = tmp_path / "rec.db"
+    # A surface the original hardcoded (encounters, billing) pair never named.
+    _seed_db(db, extra_tables=("audit-log",))
+    before = ground_truth.capture(db)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        # The intended encounter lands EXACTLY correct...
+        conn.execute(
+            "INSERT INTO encounters (patient_id, type, note, source, key) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (TARGET_PATIENT, TARGET_TYPE, "the-note", "replay", None),
+        )
+        # ...but a collateral row also hits the NEW surface.
+        conn.execute('INSERT INTO "audit-log" (v) VALUES (?)', ("leak",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    after = ground_truth.capture(db)
+    gt = ground_truth.judge(before, after, intended_note="the-note")
+    # Open-world: the judge flags the collateral write to a surface it was never
+    # told about in advance -- the criticism "the judge's world is two tables"
+    # no longer holds.
+    assert gt.correct is False
+    assert gt.fault_class == "collateral_write"
+    assert gt.table_deltas.get("audit-log") == 1
+
+
+def test_ground_truth_does_not_share_the_effect_kit_delta_primitive():
+    # Independence of the delta primitive (not just the connection): the judge
+    # must not import or reuse the effect kit's audit_table_deltas.
+    import inspect
+
+    from benchmark.effect_e2e import ground_truth
+
+    # Not imported into the module namespace...
+    assert not hasattr(ground_truth, "audit_table_deltas"), (
+        "ground truth must NOT import the effect kit's audit_table_deltas "
+        "(shared-primitive coupling, review #2 finding #3.2)"
+    )
+    # ...and never CALLED (a mere prose mention that it is deliberately avoided
+    # is fine; an invocation is the coupling we forbid).
+    src = inspect.getsource(ground_truth)
+    assert "audit_table_deltas(" not in src, (
+        "ground truth must use its OWN per-table delta audit, not a call to the "
+        "effect kit's audit_table_deltas (review #2 finding #3.2)"
+    )

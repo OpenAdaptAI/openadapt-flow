@@ -140,9 +140,31 @@ class TestLedgerDB:
         rec = db.add("L1001", "Personal", "18500", "")
         assert rec["memo"] == ""
 
+    def test_fees_surface_hidden_from_single_surface_read(self) -> None:
+        db = LedgerDB()
+        db.reset()
+        db.add("L1001", "Personal", "18500", "m")  # disbursement
+        db.add("L1001", "Personal", "18500", "m", surface="fees")  # collateral
+        full = db.snapshot()["records"]
+        single = db.snapshot(surface="disbursements")["records"]
+        # The complete read path sees both surfaces; the single-surface read
+        # path is blind to the fees-surface (collateral) row.
+        assert len(full) == 2
+        assert len(single) == 1
+        assert single[0]["surface"] == "disbursements"
+
+    def test_overwrite_loan_is_surface_scoped(self) -> None:
+        db = LedgerDB()
+        db.reset()
+        db.add("L1001", "Personal", "18500", "m", surface="fees")
+        # A last-write-wins disbursement must not wipe the fees-surface row.
+        db.add("L1001", "Personal", "18500", "m2", overwrite_loan=True)
+        surfaces = sorted(r["surface"] for r in db.snapshot()["records"])
+        assert surfaces == ["disbursements", "fees"]
+
 
 class TestSwerCoverage:
-    def test_all_seven_categories_plus_controls(self) -> None:
+    def test_all_eight_categories_plus_controls(self) -> None:
         cats = {t.category.value for t in S.TASKS}
         for c in (
             "C1_partial_save",
@@ -152,31 +174,68 @@ class TestSwerCoverage:
             "C5_double_delivered_input",
             "C6_wrong_record_homonym",
             "C7_silent_noop_wrong_target",
+            "C8_collateral_unaudited",
             "control",
         ):
             assert c in cats, c
 
+    def test_three_arm_ladder(self) -> None:
+        assert S.ARMS == (
+            "screen_only",
+            "effect_verify_single",
+            "effect_verify_full",
+        )
 
-class TestLiveTwoArmSwer:
-    """The headline, live through the independent /api/db oracle."""
 
-    def test_screen_only_is_silently_wrong_but_effect_verify_is_zero(self) -> None:
+class TestLiveThreeArmSwer:
+    """The headline ladder, live through the independent complete-read oracle."""
+
+    def test_ladder_screen_then_single_residual_then_full_zero(self) -> None:
         episodes = S.run_pack(trials=3)
         screen = summarize(episodes, arm="screen_only")
-        effect = summarize(episodes, arm="effect_verify")
+        single = summarize(episodes, arm="effect_verify_single")
+        full = summarize(episodes, arm="effect_verify_full")
 
         # The screen-only arm silently mishandles the injected faults.
         assert screen.swer.rate > 0.4, screen.swer.rate
-        # Effect verification drives the SILENT wrong-effect rate to zero.
-        assert effect.swer.numerator == 0, effect.outcome_counts
-        assert effect.swer.rate == 0.0
+        # The single-surface oracle leaves a NON-ZERO residual (the collateral
+        # write on the fees surface it cannot see) - the lending analog of the
+        # clinical 9/90 single-surface residual.
+        assert single.swer.numerator > 0, single.outcome_counts
+        assert single.swer.numerator < screen.swer.numerator
+        # The COMPLETE read path over every mutable surface drives it to zero.
+        assert full.swer.numerator == 0, full.outcome_counts
+        assert full.swer.rate == 0.0
         # The controls still succeed under effect verification (not always-halt).
-        assert effect.task_success.numerator > 0
-        # The success-effect gap collapses under effect verification.
-        assert effect.success_effect_gap < screen.success_effect_gap
+        assert full.task_success.numerator > 0
+        # The success-effect gap collapses down the ladder.
+        assert full.success_effect_gap <= single.success_effect_gap
+        assert single.success_effect_gap < screen.success_effect_gap
+
+    def test_single_surface_residual_is_exactly_the_collateral_class(self) -> None:
+        episodes = S.run_pack(trials=3)
+        silent = {
+            e.task_id
+            for e in episodes
+            if e.arm == "effect_verify_single"
+            and e.outcome.value == "silent_wrong_effect"
+        }
+        assert silent == {"lending_c8_collateral_unaudited"}, silent
+        # ...and the full read path catches that same class (not silent).
+        collateral_full = [
+            e
+            for e in episodes
+            if e.arm == "effect_verify_full"
+            and e.task_id == "lending_c8_collateral_unaudited"
+        ]
+        assert collateral_full and all(
+            e.outcome.value != "silent_wrong_effect" for e in collateral_full
+        )
 
     def test_oracle_is_isolated_from_the_arm(self) -> None:
-        # The benchmark oracle reads /api/db, a path the SPA never calls, and is
-        # a distinct instance from the effect_verify arm's own verifier.
-        episodes = S.run_pack(tasks=(S.TASKS[0],), arms=("effect_verify",), trials=1)
+        # The benchmark oracle reads the complete path /api/db, which the SPA
+        # never calls, and is a distinct instance from any arm's own verifier.
+        episodes = S.run_pack(
+            tasks=(S.TASKS[0],), arms=("effect_verify_full",), trials=1
+        )
         assert episodes[0].oracle.channel == "rest"

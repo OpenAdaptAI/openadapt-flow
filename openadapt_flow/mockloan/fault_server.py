@@ -40,6 +40,26 @@ Fault modes (selected by ``?fault=`` on the write POST, forwarded by the app):
                      disbursements (the borrower is paid twice).
 - ``idempotent``  -- like ``duplicate`` but the app sends an idempotency key
                      and the core de-duplicates on it (the RECOMMENDED fix).
+- ``collateral``  -- the CORRECT disbursement to the target loan is booked (the
+                     disbursements ledger looks perfect), but a spurious
+                     money-movement (an unauthorized servicing fee referencing
+                     the same loan and funding memo) is ALSO written to a
+                     SEPARATE fees / general-ledger surface. This is the lending
+                     analog of the clinical ``collateral_unaudited`` fault (a
+                     correct encounter plus a stray billing row). A
+                     disbursements-only oracle certifies the write; only a
+                     COMPLETE read path spanning both ledgers sees the extra row.
+
+The ledger records two surfaces: ``disbursements`` (the money paid out to the
+borrower) and ``fees`` (a general-ledger / charges surface). A record carries a
+``surface`` field (default ``"disbursements"``). Two read paths expose them:
+
+- ``GET /api/disbursements`` -- the SINGLE-surface read path: only the
+  disbursements ledger. A single out-of-band oracle over this path is blind to a
+  fees-surface write (the lending analog of the clinical single-surface REST
+  oracle over encounters only).
+- ``GET /api/db`` -- the COMPLETE read path: every mutable surface. The full
+  read path an effect oracle needs to reach 0 residual.
 
 A ``DELETE /api/disbursement/<id>`` route (additive; never used by a ``?fault=``
 path) lets an EffectVerifier compensation hook reconcile a detected duplicate
@@ -71,10 +91,13 @@ class LedgerDB:
     """Thread-safe in-process store of disbursement writes (the ground truth).
 
     A record is ``{"id", "loan_id", "product", "amount", "memo", "source",
-    "key"}``. ``source`` is ``"replay"`` for writes made during a run and
-    ``"other"`` for rows seeded to model a concurrent actor. The store is
-    deliberately dumb: it records exactly what the fault path did, so the study
-    can judge the replay against effects rather than against the screen.
+    "key", "surface"}``. ``source`` is ``"replay"`` for writes made during a run
+    and ``"other"`` for rows seeded to model a concurrent actor. ``surface`` is
+    ``"disbursements"`` (money paid to the borrower) or ``"fees"`` (a
+    general-ledger / charges surface); a single-surface oracle reads only the
+    former. The store is deliberately dumb: it records exactly what the fault
+    path did, so the study can judge the replay against effects rather than
+    against the screen.
     """
 
     def __init__(self) -> None:
@@ -102,6 +125,7 @@ class LedgerDB:
                         "memo": "URGENT: fraud hold placed - do not disburse",
                         "source": "other",
                         "key": None,
+                        "surface": "disbursements",
                     }
                 )
 
@@ -114,6 +138,7 @@ class LedgerDB:
         *,
         key: Optional[str] = None,
         overwrite_loan: bool = False,
+        surface: str = "disbursements",
     ) -> dict:
         with self._lock:
             if key is not None:
@@ -121,9 +146,17 @@ class LedgerDB:
                     if r.get("key") == key:
                         return r  # idempotent: de-duplicate on the key
             if overwrite_loan:
-                # Last-write-wins: drop every existing row for this loan
-                # (including a concurrent officer's hold) before writing ours.
-                self._records = [r for r in self._records if r["loan_id"] != loan_id]
+                # Last-write-wins: drop every existing row for this loan on the
+                # SAME surface (including a concurrent officer's hold) before
+                # writing ours.
+                self._records = [
+                    r
+                    for r in self._records
+                    if not (
+                        r["loan_id"] == loan_id
+                        and r.get("surface", "disbursements") == surface
+                    )
+                ]
             self._seq += 1
             rec = {
                 "id": self._seq,
@@ -133,6 +166,7 @@ class LedgerDB:
                 "memo": memo,
                 "source": "replay",
                 "key": key,
+                "surface": surface,
             }
             self._records.append(rec)
             return rec
@@ -155,10 +189,18 @@ class LedgerDB:
             self._records = [r for r in self._records if r["id"] != record_id]
             return len(self._records) != before
 
-    def snapshot(self) -> dict:
+    def snapshot(self, *, surface: Optional[str] = None) -> dict:
+        """Return the ledger. ``surface=None`` is the COMPLETE read path (every
+        mutable surface); ``surface="disbursements"`` is the SINGLE-surface read
+        path a disbursements-only oracle sees (blind to a fees-surface write)."""
         with self._lock:
+            records = [
+                dict(r)
+                for r in self._records
+                if surface is None or r.get("surface", "disbursements") == surface
+            ]
             return {
-                "records": [dict(r) for r in self._records],
+                "records": records,
                 "rejected_writes": self.rejected_writes,
             }
 
@@ -193,7 +235,12 @@ def _make_handler(db: LedgerDB, directory: str):
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path == "/api/db":
+                # Complete read path: every mutable surface (disbursements + fees).
                 self._send_json(200, db.snapshot())
+                return
+            if path == "/api/disbursements":
+                # Single-surface read path: the disbursements ledger only.
+                self._send_json(200, db.snapshot(surface="disbursements"))
                 return
             super().do_GET()
 
@@ -269,6 +316,17 @@ def _make_handler(db: LedgerDB, directory: str):
                     loan_id, product, amount, memo, key=key, overwrite_loan=True
                 )
                 self._send_json(200, {"ok": True, "id": rec["id"]})
+                return
+            if fault == "collateral":
+                # Book the CORRECT disbursement (the disbursements ledger looks
+                # perfect), then ALSO book a spurious money-movement to a
+                # SEPARATE fees / general-ledger surface: an unauthorized
+                # servicing fee referencing the same loan and funding memo. A
+                # disbursements-only oracle certifies the write; only a complete
+                # read path over both surfaces sees the collateral row.
+                rec = db.add(loan_id, product, amount, memo, key=key)
+                db.add(loan_id, product, amount, memo, surface="fees")
+                self._send_json(200, {"ok": True, "id": rec["id"], "collateral": True})
                 return
             # ok / duplicate / double / idempotent: a plain accepted write.
             # ``idempotent`` de-duplicates because the app supplies ``key``.

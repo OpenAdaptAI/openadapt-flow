@@ -5,31 +5,51 @@ The effect-verified companion to ``benchmark/lending_fault_model/run.py``. Where
 screen-only postcondition contract (and measures how often that silently
 mishandles a transactional fault), THIS module measures the same faults through
 the shared EffectBench scoring contract
-(:func:`openadapt_flow.benchmark.effectbench.score_episode`) under two arms:
+(:func:`openadapt_flow.benchmark.effectbench.score_episode`) under a THREE-arm
+ladder that mirrors the clinical ``effect_e2e`` study (screen / single-surface /
+complete-read-path), so the two domains are directly comparable:
 
 - ``screen_only`` - the deceptive witness: the agent believes the rendered
   "Disbursement authorized" banner.
-- ``effect_verify`` - the agent consults its OWN independent
-  :class:`~openadapt_flow.runtime.effects.RestRecordVerifier` (reading the loan
-  ledger at ``GET /api/db``, a path the SPA never calls) and halts unless the
-  disbursement is CONFIRMED.
+- ``effect_verify_single`` - the agent consults its OWN independent
+  :class:`~openadapt_flow.runtime.effects.RestRecordVerifier` reading a SINGLE
+  surface, the disbursements ledger at ``GET /api/disbursements`` (a path the SPA
+  never calls), and halts unless the disbursement is CONFIRMED. This is the
+  lending analog of the clinical single-surface REST oracle (encounters only): it
+  catches every same-surface fault but is BLIND to a ``collateral`` write that
+  lands on the separate fees / general-ledger surface, so it leaves a residual
+  silent-wrong-effect on exactly that one class - the honest 9/90-style residual.
+- ``effect_verify_full`` - the same agent reading the COMPLETE read path over
+  every mutable surface at ``GET /api/db`` (disbursements + fees). It sees the
+  collateral row and drives the residual to 0.
 
-Only ``reported_success`` differs between the arms; the independent benchmark
-oracle handed to ``score_episode`` is identical, so an injected fault classifies
-as ``silent_wrong_effect`` under ``screen_only`` and ``success`` / ``safe_halt``
-/ ``over_halt`` / ``false_abort`` under ``effect_verify`` - the headline the
-benchmark exists to measure, now shown on a SECOND, non-healthcare domain.
+Only ``reported_success`` (and the arm's own read path) differs between the arms;
+the independent benchmark oracle handed to ``score_episode`` is identical - the
+COMPLETE read path over ``/api/db`` - so it is the SAME ground truth judging all
+three arms. An injected fault classifies as ``silent_wrong_effect`` under
+``screen_only``; every non-collateral fault is caught under BOTH effect arms; the
+``collateral`` fault is a residual silent-wrong-effect under
+``effect_verify_single`` (invisible to a single-surface oracle) and caught under
+``effect_verify_full`` - the headline this second domain now shows with the SAME
+honest residual the clinical study reports.
 
 Oracle independence (confirming the sibling ``effect_e2e`` design, unchanged):
-the oracle reads the true effect from ``/api/db`` - pre-state captured BEFORE the
-write, post-state read AFTER - and never trusts the agent's self-report or the
-screen. Every trial binds a TRIAL-UNIQUE memo (and idempotency key), so the
-oracle checks THIS run's exact write and cross-trial contamination is
-detectable. The C6 wrong-record task exercises the identity gate on the
-consequential step: a same-name decoy loan is seeded, a blind write funds the
-wrong loan, and the intended loan stays empty behind a green screen.
+the ground-truth oracle reads the true effect over the COMPLETE read path
+(``/api/db``, both surfaces) - pre-state captured BEFORE the write, post-state
+read AFTER - and never trusts the agent's self-report or the screen. Every trial
+binds a TRIAL-UNIQUE memo (and idempotency key), so the oracle checks THIS run's
+exact write and cross-trial contamination is detectable. The C6 wrong-record task
+exercises the identity gate on the consequential step: a same-name decoy loan is
+seeded, a blind write funds the wrong loan, and the intended loan stays empty
+behind a green screen.
 
-No model calls, no browser, localhost only - runs in CI.
+Both MockMed and MockLoan are SYNTHETIC apps built by the same team, so a
+matching residual across the two is SUGGESTIVE of generalizability, not proof.
+
+No model calls, no browser, localhost only - runs in CI. Every fault is injected
+deterministically at the boundary and the writes are fixed, so run-to-run
+variance is ~0: results are reported as a coverage matrix over scenarios, not a
+sampled rate.
 
 Usage::
 
@@ -76,7 +96,16 @@ TARGET_AMOUNT = "18500"
 DECOY_LOAN = "L1009"
 DECOY_AMOUNT = "40000"
 
-ARMS = ("screen_only", "effect_verify")
+ARMS = ("screen_only", "effect_verify_single", "effect_verify_full")
+# The COMPLETE read path (every mutable surface) vs the SINGLE-surface read path
+# (the disbursements ledger only). The ground-truth oracle always reads the
+# complete path; the effect arms differ only in which their OWN verifier reads.
+FULL_RECORDS_PATH = "/api/db"
+SINGLE_RECORDS_PATH = "/api/disbursements"
+_ARM_READ_PATH = {
+    "effect_verify_single": SINGLE_RECORDS_PATH,
+    "effect_verify_full": FULL_RECORDS_PATH,
+}
 _DOUBLE_POST = {"duplicate", "double", "idempotent"}
 _HTTP_TIMEOUT_S = 5.0
 MOCKLOAN_TIMEOUT_S = 0.2
@@ -239,6 +268,19 @@ TASKS: tuple[LendingTask, ...] = (
         write=None,
     ),
     LendingTask(
+        "lending_c8_collateral_unaudited",
+        DivergenceCategory.C8_COLLATERAL_UNAUDITED,
+        "collateral",
+        # The CORRECT disbursement to the target loan IS booked; the effect
+        # contract is exactly the clean-write contract. A disbursements-only
+        # oracle therefore certifies it. The fault is a SPURIOUS money-movement
+        # ALSO written to the separate fees / general-ledger surface (same loan +
+        # funding memo), which the COMPLETE read path counts as a second matching
+        # money-movement row for one authorization (at-most-once violated).
+        _record_effect(_target_match()),
+        correct_action_available=True,
+    ),
+    LendingTask(
         "lending_ctl_idempotent_fix",
         DivergenceCategory.CONTROL,
         "idempotent",
@@ -320,8 +362,12 @@ def _agent_action(
         )
 
     def effect_verify() -> AgentReport:
+        # The arm's OWN verifier reads its arm-specific surface coverage:
+        # ``effect_verify_single`` reads only the disbursements ledger and is
+        # blind to a fees-surface (collateral) write; ``effect_verify_full``
+        # reads the complete path over every mutable surface.
         own = RestRecordVerifier(
-            base_url, records_path="/api/db", records_key="records"
+            base_url, records_path=_ARM_READ_PATH[arm], records_key="records"
         )
         own_before = own.capture_pre_state()
         _perform_writes(base_url, task, params)
@@ -330,10 +376,13 @@ def _agent_action(
         return AgentReport(
             reported_success=verdict.confirmed,
             halted=not verdict.confirmed,
-            message=f"self-verified effect: {verdict.verdict.value}",
+            message=f"self-verified effect ({_ARM_READ_PATH[arm]}): "
+            f"{verdict.verdict.value}",
         )
 
-    return {"screen_only": screen_only, "effect_verify": effect_verify}[arm]
+    if arm == "screen_only":
+        return screen_only
+    return effect_verify
 
 
 def run_episode(
@@ -376,122 +425,226 @@ def run_pack(
     return episodes
 
 
+def _coverage_matrix(episodes: list[EpisodeRecord]) -> list[dict]:
+    """Per-scenario (task x arm) outcome, the deterministic-replay unit.
+
+    Because every fault is injected deterministically and the writes are fixed,
+    all trials of a (task, arm) agree; this collapses them to one cell per
+    scenario and flags the silent-wrong-effect residual explicitly.
+    """
+    rows: list[dict] = []
+    for task in TASKS:
+        row: dict = {
+            "task_id": task.task_id,
+            "category": task.category.value,
+            "fault": task.fault or "(identity/no-op)",
+        }
+        for arm in ARMS:
+            outs = sorted(
+                {
+                    e.outcome.value
+                    for e in episodes
+                    if e.task_id == task.task_id and e.arm == arm
+                }
+            )
+            row[arm] = "|".join(outs)
+            row[f"{arm}_silent"] = "silent_wrong_effect" in outs
+        rows.append(row)
+    return rows
+
+
 def measure(trials: int = 3) -> dict:
     episodes = run_pack(trials=trials)
-    screen = summarize(episodes, arm="screen_only")
-    effect = summarize(episodes, arm="effect_verify")
+    summaries = {arm: summarize(episodes, arm=arm) for arm in ARMS}
     return {
         "meta": {
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "platform": f"{platform.system()} {platform.machine()} "
             f"py{platform.python_version()}",
             "domain": "lending (MockLoan) - loan disbursement authorization",
-            "oracle": "runtime.effects.RestRecordVerifier over GET /api/db",
+            "oracle": (
+                "runtime.effects.RestRecordVerifier over the COMPLETE read path "
+                "GET /api/db (disbursements + fees)"
+            ),
+            "single_surface_read_path": SINGLE_RECORDS_PATH,
+            "full_read_path": FULL_RECORDS_PATH,
             "ground_truth": "mockloan.fault_server in-process ledger",
             "arms": list(ARMS),
             "tasks": len(TASKS),
             "trials_per_task_per_arm": trials,
+            "deterministic": True,
             "model_calls": 0,
         },
-        "screen_only": screen.model_dump(mode="json"),
-        "effect_verify": effect.model_dump(mode="json"),
+        **{arm: summaries[arm].model_dump(mode="json") for arm in ARMS},
+        "coverage_matrix": _coverage_matrix(episodes),
         "episodes": [e.model_dump(mode="json") for e in episodes],
     }
 
 
-_MD_HEADER = """# Lending (MockLoan) Silent Wrong-Effect Rate - screen-only vs effect-verified
+_MD_HEADER = """# Lending (MockLoan) Silent Wrong-Effect Rate - screen / single-surface / complete read path
 
 The non-healthcare replication of the SWER headline on a second system of
-record. Judged by an independent `RestRecordVerifier` reading the MockLoan ledger
-at `GET /api/db` (a path the SPA never calls), never the screen or the agent's
-self-report. Every trial binds a trial-unique memo + idempotency key. Zero model
-calls.
+record, run as the SAME three-arm ladder as the clinical `effect_e2e` study so
+the two domains are directly comparable: screen-only, a SINGLE-surface oracle
+(disbursements ledger only, `GET /api/disbursements`), and the COMPLETE read path
+over every mutable surface (disbursements + fees, `GET /api/db`). The ground
+truth judging all three arms is the complete read path; each arm never trusts the
+screen or its own self-report. Every trial binds a trial-unique memo + idempotency
+key. Zero model calls.
 
 **The gate (AGENTS.md safety asymmetry): the only dangerous error is a SILENT
-WRONG-EFFECT - reporting/rendering success while the ledger disagrees. It must be
-~0 under effect verification.** Over-halt (halting when the write was actually
-fine) is the safe error; it is reported as the availability cost.
+WRONG-EFFECT - reporting/rendering success while the ledger disagrees.** A single
+out-of-band oracle collapses it to a residual on exactly one class (a collateral
+write to a surface it does not read); only a complete read path over every
+mutable surface reaches 0. Over-halt (halting when the write was actually fine) is
+the safe error; it is reported as the availability cost.
+
+Both MockLoan and the clinical MockMed are SYNTHETIC apps built by the same team.
+A matching single-surface residual across the two domains is SUGGESTIVE of
+generalizability, not proof; the point it earns is narrower and honest: a single
+out-of-band record oracle is not sufficient - 0 requires a read path covering
+every mutable surface.
 """
 
 
+def _fmt_rate(d: dict) -> str:
+    return (
+        f"**{round(d['swer']['rate'], 3)}** "
+        f"({d['swer']['numerator']}/{d['swer']['denominator']})"
+    )
+
+
 def to_markdown(result: dict) -> str:
-    s = result["screen_only"]
-    e = result["effect_verify"]
     m = result["meta"]
+    arms = m["arms"]
+    by_arm = {arm: result[arm] for arm in arms}
+    single = by_arm["effect_verify_single"]
+    full = by_arm["effect_verify_full"]
+    screen = by_arm["screen_only"]
     lines = [_MD_HEADER, ""]
     lines.append(f"Generated: {m['generated_at']}  ")
     lines.append(f"Platform: {m['platform']}  ")
     lines.append(
-        f"Tasks: {m['tasks']} (all seven divergence categories + clean / "
-        f"idempotent controls).  "
+        f"Tasks: {m['tasks']} (divergence classes C1-C8 + clean / idempotent "
+        f"controls).  "
     )
-    lines.append(f"Trials per task per arm: {m['trials_per_task_per_arm']}.  ")
+    lines.append(
+        f"Trials per task per arm: {m['trials_per_task_per_arm']} "
+        "(DETERMINISTIC replays; run-to-run variance ~ 0, so these are a "
+        "coverage matrix over scenarios, not a sampled rate - no confidence "
+        "interval is implied).  "
+    )
     lines.append("")
-    lines.append("## Headline")
+    lines.append("## Headline - the ladder")
     lines.append("")
     lines.append(
-        "| arm | episodes | SWER | over-halt | task success | screen success | success-effect gap |"
+        "| arm | read path | episodes | SWER | over-halt | task success | "
+        "success-effect gap |"
     )
     lines.append("|---|---|---|---|---|---|---|")
-    for name, d in (("screen_only", s), ("effect_verify", e)):
+    read_paths = {
+        "screen_only": "the rendered banner",
+        "effect_verify_single": f"single surface (`{m['single_surface_read_path']}`)",
+        "effect_verify_full": f"complete (`{m['full_read_path']}`)",
+    }
+    for arm in arms:
+        d = by_arm[arm]
         lines.append(
-            f"| `{name}` | {d['n_episodes']} | "
-            f"**{d['swer']['rate']}** ({d['swer']['numerator']}/{d['swer']['denominator']}) | "
-            f"{d['over_halt']['rate']} | {d['task_success']['rate']} | "
-            f"{d['screen_success']['rate']} | {round(d['success_effect_gap'], 3)} |"
+            f"| `{arm}` | {read_paths[arm]} | {d['n_episodes']} | "
+            f"{_fmt_rate(d)} | {round(d['over_halt']['rate'], 3)} | "
+            f"{round(d['task_success']['rate'], 3)} | "
+            f"{round(d['success_effect_gap'], 3)} |"
         )
     lines.append("")
     lines.append(
-        f"- **Screen-only SWER = {s['swer']['rate']}** "
-        f"({s['swer']['numerator']}/{s['swer']['denominator']}): the injected "
-        "transactional faults render a clean 'Disbursement authorized' banner "
-        "while the ledger is wrong (a partial/phantom/duplicate/lost-update/"
-        "wrong-loan write)."
+        f"- Screen-only SWER = {_fmt_rate(screen)}: the injected faults "
+        "render a clean 'Disbursement authorized' banner while the ledger is "
+        "wrong (a partial/phantom/duplicate/lost-update/wrong-loan/collateral "
+        "write)."
     )
     lines.append(
-        f"- **Effect-verified SWER = {e['swer']['rate']}** "
-        f"({e['swer']['numerator']}/{e['swer']['denominator']}): reading the "
-        "true effect from the ledger collapses the silent-wrong-effect rate; "
-        f"the residual cost is over-halt = {e['over_halt']['rate']} (safe: a "
-        "human finishes a recoverable case)."
+        f"- Single-surface SWER = {_fmt_rate(single)}: a single out-of-band "
+        "oracle over the disbursements ledger catches every same-surface fault "
+        "but is BLIND to the `collateral` write on the fees surface, leaving a "
+        "residual silent-wrong-effect on exactly that one class. This is the "
+        "lending analog of the clinical single-surface REST oracle's 9/90 "
+        "residual (the SAME honest finding, a second domain)."
     )
     lines.append(
-        f"- **Success-effect gap** shrinks from {round(s['success_effect_gap'], 3)} "
-        f"(screen-only) to {round(e['success_effect_gap'], 3)} (effect-verified)."
+        f"- Complete-read-path SWER = {_fmt_rate(full)}: reading every "
+        "mutable surface (disbursements + fees) sees the collateral row and "
+        f"drives the residual to 0; the residual cost is over-halt = "
+        f"{round(full['over_halt']['rate'], 3)} (safe: a human finishes a "
+        "recoverable "
+        "case). 0 requires a read path covering EVERY mutable surface."
     )
+    lines.append("")
+    lines.append("## Coverage matrix (deterministic - one cell per scenario)")
+    lines.append("")
+    lines.append(
+        "| task | class | fault | screen_only | effect_verify_single | "
+        "effect_verify_full |"
+    )
+    lines.append("|---|---|---|---|---|---|")
+    for row in result["coverage_matrix"]:
+        def _cell(arm: str, row: dict = row) -> str:
+            mark = " (SILENT)" if row[f"{arm}_silent"] else ""
+            return f"{row[arm]}{mark}"
+
+        lines.append(
+            f"| `{row['task_id']}` | {row['category']} | {row['fault']} | "
+            f"{_cell('screen_only')} | {_cell('effect_verify_single')} | "
+            f"{_cell('effect_verify_full')} |"
+        )
     lines.append("")
     lines.append("## Per-outcome counts")
     lines.append("")
-    lines.append(
-        "| arm | "
-        + " | ".join(
-            sorted(
-                set(list(s["outcome_counts"].keys()) + list(e["outcome_counts"].keys()))
-            )
-        )
-        + " |"
-    )
-    keys = sorted(
-        set(list(s["outcome_counts"].keys()) + list(e["outcome_counts"].keys()))
-    )
+    keys = sorted({k for arm in arms for k in by_arm[arm]["outcome_counts"]})
+    lines.append("| arm | " + " | ".join(keys) + " |")
     lines.append("|---|" + "---|" * len(keys))
-    for name, d in (("screen_only", s), ("effect_verify", e)):
+    for arm in arms:
+        d = by_arm[arm]
         row = " | ".join(str(d["outcome_counts"].get(k, 0)) for k in keys)
-        lines.append(f"| `{name}` | {row} |")
+        lines.append(f"| `{arm}` | {row} |")
     lines.append("")
     lines.append("## Method / oracle independence")
     lines.append("")
     lines.append(
-        "Both arms drive the SAME writes against the SAME fault server; only "
-        "`reported_success` differs. The independent oracle handed to "
-        "`score_episode` is a `RestRecordVerifier` reading `/api/db` "
-        "pre-action and post-action, and it is a DISTINCT instance from the "
-        "`effect_verify` arm's own verifier - the arm cannot influence the "
-        "judge. The C6 task seeds a same-name decoy loan and funds it; the "
-        "intended loan stays empty, so a blind (identity-less) write is a "
-        "silent wrong-effect under `screen_only` and an over-halt (caught, "
-        "safe) under `effect_verify` - the identity gate on the consequential "
-        "step."
+        "All three arms drive the SAME writes against the SAME fault server; "
+        "only `reported_success` (and, for the effect arms, which surface the "
+        "arm's OWN verifier reads) differs. The independent ground-truth oracle "
+        "handed to `score_episode` is a `RestRecordVerifier` reading the "
+        "COMPLETE path `/api/db` (both surfaces) pre-action and post-action, and "
+        "it is a DISTINCT instance from any arm's own verifier - the arm cannot "
+        "influence the judge. The `collateral` (C8) fault books the correct "
+        "disbursement AND a spurious fee to the separate fees / general-ledger "
+        "surface with the same loan and funding memo: the disbursements-only "
+        "read counts one correct money-movement row (CONFIRMED), while the "
+        "complete read path counts two for one authorization (at-most-once "
+        "violated -> REFUTED). That is why the single-surface arm reports a "
+        "silent success and the complete-read-path arm halts. The C6 task seeds "
+        "a same-name decoy loan and funds it; the intended loan stays empty, so "
+        "a blind (identity-less) write is a silent wrong-effect under "
+        "`screen_only` and an over-halt (caught, safe) under both effect arms."
+    )
+    lines.append("")
+    lines.append("## Honest disclosure")
+    lines.append("")
+    lines.append(
+        "- **Both apps are SYNTHETIC.** MockLoan and MockMed are toy apps built "
+        "by the same team; two synthetic domains agreeing is suggestive of "
+        "generalizability, not proof.\n"
+        "- **The single-surface oracle leaves a residual on the collateral "
+        "class**, exactly as the clinical study's single-surface REST oracle "
+        "does (9/90). The two domains are therefore comparable: neither reaches "
+        "0 with a single out-of-band record oracle.\n"
+        "- **0 requires a COMPLETE read path** covering every mutable surface. "
+        "The complete-read-path arm reaches 0 here only because `/api/db` spans "
+        "both the disbursements and the fees surfaces; a real deployment must "
+        "enumerate and read every surface a consequential write can touch.\n"
+        "- **No confidence intervals are implied.** These are deterministic "
+        "replays (variance ~ 0); the table is a coverage matrix over scenarios, "
+        "not a sampled estimate."
     )
     lines.append("")
     lines.append("## Reproduce")
@@ -516,10 +669,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     (HERE / "swer_results.json").write_text(json.dumps(result, indent=2) + "\n")
     (HERE / "SWER.md").write_text(to_markdown(result))
     s = result["screen_only"]["swer"]
-    e = result["effect_verify"]["swer"]
+    sg = result["effect_verify_single"]["swer"]
+    fu = result["effect_verify_full"]["swer"]
     print(
         f"lending SWER: screen_only={s['rate']} ({s['numerator']}/{s['denominator']}), "
-        f"effect_verify={e['rate']} ({e['numerator']}/{e['denominator']}) "
+        f"effect_verify_single={sg['rate']} ({sg['numerator']}/{sg['denominator']}), "
+        f"effect_verify_full={fu['rate']} ({fu['numerator']}/{fu['denominator']}) "
         f"-> wrote swer_results.json + SWER.md under {HERE}"
     )
     return 0

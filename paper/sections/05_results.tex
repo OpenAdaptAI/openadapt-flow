@@ -1,25 +1,51 @@
 \section{Results}
 \label{sec:results}
 
-\paragraph{Headline: an effect check catches silent wrong actions that the
-screen misses.} The paper's central claim is a safety one, and it is the
-cleanest, most repeated result. We injected seven persistence faults behind a
-real HTTP boundary and ran each ten times (Section~\ref{sec:method}). Judged by
-the \emph{screen}---the same signal an agent or a script trusts---replay
-silently accepted 50 of 90 fault runs and additionally aborted 10 runs that had
-in fact succeeded. When the consequential step declared a typed effect checked
-against the system of record, silent acceptance fell to \emph{zero} and the
-spurious aborts to zero (Figure~\ref{fig:silentbar}). Concretely, screen-only
+\paragraph{Headline: an independent effect check catches silent wrong actions
+that the screen misses, and only as far as it can read.} The paper's central
+claim is a safety one, and we measure it end to end through the live replayer.
+Ten persistence scenarios, seven fault classes plus an accepted-write control and
+two delivery controls, are each driven nine times per arm through the real
+governed path: the replayer's actuator issues an HTTP write to an on-disk system
+of record, and every run is judged three genuinely independent ways
+(Section~\ref{sec:method}). Judged by the \emph{screen}, the same signal an agent
+or a script trusts, replay silently accepted a wrong persisted effect on 54 of 90
+fault runs (60\%). An out-of-band effect verifier that reads the record back over
+a different endpoint than the write drove silent acceptance down to 9 of 90
+(10\%). Extending that verifier to a complete system-of-record read path, one
+that covers every mutable surface the action can touch, drove it to 0 of 90
+(Figure~\ref{fig:silentbar}). The residual 9 of 90 is the honest mechanism
+finding: they are a single fault class, a collateral write to a billing surface
+the out-of-band oracle's read path never covered, so the guarantee is exactly as
+strong as the oracle's read coverage. False aborts are a constant 9 of 90 in all
+three arms, a conservative halt on a commit whose outcome is unknown to the
+client, so they do not distinguish the oracles. This end-to-end measurement
+supersedes an earlier in-process fault study whose effect and ground-truth checks
+read the same object, which made its zero circular by construction; the numbers
+here come from the real replayer with three genuinely distinct write, read-back,
+and ground-truth paths.
+
+\paragraph{Per class, the screen misses five of seven fault types.} In a
+companion transactional study at the same persistence boundary, screen-only
 verification silently mishandled five of seven injected fault classes: partial
 save, duplicate submission, optimistic UI followed by rejection, stale overwrite,
 and double delivery. There were 10 consistent repeats per class. When the step
-declared the expected effect, a system-of-record verifier reading the
-persistence boundary refuted all five classes, and a refuted effect halts. This
-effect-verified arm is a mechanism measurement rather than an end-to-end replay:
-the verifier is exercised directly against the same persistence boundary the
-ground-truth judge reads, not through the full browser-and-replayer path used
-for the screen-only arm. This improvement has two non-optional preconditions:
-the effect must be authored and the verifier deployed.
+declared the expected effect and a system-of-record verifier was configured,
+those five classes refuted and halted. This improvement has two non-optional
+preconditions: the effect must be authored and the verifier deployed.
+
+\paragraph{Generalization: the same silent-wrong gap on a second, non-healthcare
+domain.} The effect-verification result is not specific to clinical records. On
+MockLoan, a loan-disbursement authorization workflow with its own ledger,
+screen-only verification silently accepted 21 of 33 wrong ledger effects (64\%)
+while over-halting none; reading the true effect from the ledger through an
+independent verifier drove silent wrong effects to 0 of 33, at a cost of 6 of 33
+safe over-halts. Broken out by class, screen-only verification again silently
+mishandled five of seven injected fault classes. A decoy-loan task shows the
+identity gate doing its job on the money-movement step: a blind write to a
+same-name loan is a silent wrong effect under screen-only verification and a
+caught, safe over-halt under effect verification. This is the same mechanism as
+the healthcare study, on a different system of record.
 
 \begin{figure}[t]
 \centering
@@ -32,25 +58,29 @@ the effect must be authored and the verifier deployed.
   ymin=0, ymax=90,
   ylabel={runs (of 90)},
   ylabel style={font=\footnotesize},
-  symbolic x coords={Screen-only, Effect-verified},
+  symbolic x coords={Screen-only, {Effect (out-of-band)}, {Effect (complete read)}},
   xtick=data,
-  xticklabel style={font=\small},
+  xticklabel style={font=\footnotesize},
   ytick={0,15,30,45,60,75,90},
   yticklabel style={font=\footnotesize},
-  enlarge x limits=0.5,
+  enlarge x limits=0.28,
   legend style={font=\footnotesize, at={(0.5,1.14)}, anchor=south,
     legend columns=-1, /tikz/every even column/.append style={column sep=8pt}},
   nodes near coords, nodes near coords style={font=\scriptsize},
 ]
-\addplot[fill=oared!75, draw=oared] coordinates {(Screen-only,50) (Effect-verified,0)};
-\addplot[fill=oaamber!70, draw=oaamber] coordinates {(Screen-only,10) (Effect-verified,0)};
-\legend{silent wrong action, false abort}
+\addplot[fill=oared!75, draw=oared] coordinates {(Screen-only,54) ({Effect (out-of-band)},9) ({Effect (complete read)},0)};
+\addplot[fill=oaamber!70, draw=oaamber] coordinates {(Screen-only,9) ({Effect (out-of-band)},9) ({Effect (complete read)},9)};
+\legend{silent wrong effect, false abort}
 \end{axis}
 \end{tikzpicture}
-\caption{Same 90 injected-fault runs, two verification policies. Screen-only
-verification silently accepted 50 wrong outcomes and falsely aborted 10 correct
-ones; a system-of-record effect check reduced both to zero. This is the failure
-mode general computer-use agents and selector RPA do not measure.}
+\caption{Same 90 injected-fault runs, three verification policies, measured end
+to end through the live replayer and judged by an independent ground truth.
+Screen-only verification silently accepted 54 wrong persisted effects; an
+out-of-band effect oracle that reads the record back cut that to 9 (one
+uncovered collateral-write class); a complete system-of-record read path drove it
+to 0. False aborts are a constant 9, a safe halt on an unknown-outcome commit.
+This is the failure mode general computer-use agents and selector RPA do not
+measure.}
 \label{fig:silentbar}
 \end{figure}
 

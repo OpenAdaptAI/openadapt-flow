@@ -33,7 +33,7 @@
 \newcommand{\artifacturl}{\url{https://github.com/OpenAdaptAI/openadapt-flow}}
 
 \title{Compile Once, Govern Every Repair:\\Deterministic Replay for Repeated GUI Work}
-\author{Richard Abrich\\OpenAdapt (MLDSAI Inc.)\\\texttt{richard@openadapt.ai}}
+\author{Richard Abrich\\OpenAdapt.AI (MLDSAI Inc.)\\\texttt{richard@openadapt.ai}}
 \date{Draft of July 2026}
 
 \begin{document}
@@ -51,10 +51,15 @@ re-resolves the target and records the change as a reviewable \emph{repair}; and
 the runtime \emph{refuses} to continue when configured identity, postcondition,
 effect, or policy checks cannot verify an action. The central safety mechanism is
 system-of-record effect verification: a consequential step declares a typed
-effect and checks it against the application's own state, not the screen. In an
-injected-fault study, screen-only verification silently accepted 50 of 90 fault
-runs (five of seven fault classes), while the effect check caught every one
-(0 of 90), across ten repeats each. Bounded experiments span a public OpenEMR
+effect and checks it against the application's own state, not the screen.
+Measured end to end through the live replayer and judged by an independent
+system-of-record ground truth, screen-only verification silently accepted 54 of
+90 injected-fault runs; an out-of-band effect check cut that to 9 of 90 and a
+complete system-of-record read path to 0 of 90, the residual nine being one
+collateral-write class outside the out-of-band oracle's read coverage. The
+finding replicates on a second, non-healthcare lending domain: 21 of 33 silent
+wrong effects under screen-only verification, 0 of 33 under effect verification.
+Bounded experiments span a public OpenEMR
 workflow, a CI-reproducible fixture, a 29-application public-web corpus,
 transactional fault injection, adversarial identity tests, and scoped
 qualifications of native Windows UIA, macOS, and real-network RDP mechanisms.

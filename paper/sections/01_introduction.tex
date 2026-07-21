@@ -35,10 +35,12 @@ system of record, and the runtime refuses rather than guessing when it cannot
 verify. The distinction the paper foregrounds is not whether a task
 \emph{completed} but whether identity and external effects were \emph{verified},
 and whether the system can \emph{refuse} when evidence is insufficient. In an
-injected-fault study this distinction is decisive: screen-only verification
-silently accepted 50 of 90 fault runs (five of seven fault classes), whereas a
-system-of-record effect check caught all of them (0 of 90) over ten repeats each
-(Section~\ref{sec:results}).
+injected-fault study this distinction is decisive, and we measure it end to end
+through the live replayer and judge it by an independent system-of-record ground
+truth: screen-only verification silently accepted 54 of 90 fault runs, an
+out-of-band effect check cut that to 9 of 90, and a complete system-of-record
+read path to 0 of 90 (Section~\ref{sec:results}). The same gap replicates on a
+second, non-healthcare lending domain.
 
 This paper makes five contributions:
 \begin{enumerate}

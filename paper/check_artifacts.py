@@ -203,6 +203,32 @@ def main() -> None:
         0,
         "effect-e2e complete-read-path silent wrong",
     )
+    e2e_screen = e2e["screen"]["silent_wrong_count"]
+    e2e_rest = e2e["effect_rest"]["silent_wrong_count"]
+    e2e_full = e2e["effect_full"]["silent_wrong_count"]
+
+    # Second domain (non-healthcare): the MockLoan lending replication of the
+    # silent-wrong-effect result, judged by an out-of-band ledger verifier.
+    lending = load("benchmark/lending_fault_model/swer_results.json")
+    lend_screen = lending["screen_only"]["swer"]["numerator"]
+    lend_den = lending["screen_only"]["swer"]["denominator"]
+    lend_effect = lending["effect_verify"]["swer"]["numerator"]
+    lend_overhalt = lending["effect_verify"]["over_halt"]["numerator"]
+    require_equal(lend_screen, 21, "lending screen-only silent wrong")
+    require_equal(lend_den, 33, "lending episodes")
+    require_equal(lend_effect, 0, "lending effect-verified silent wrong")
+    require_equal(lend_overhalt, 6, "lending effect-verified over-halts")
+    require_equal(
+        lending["screen_only"]["over_halt"]["numerator"],
+        0,
+        "lending screen-only over-halts",
+    )
+
+    # EffectBench: the metric + fault taxonomy packaged as a standalone, versioned,
+    # independently runnable benchmark. Bind the released spec version the paper
+    # cites so the two cannot drift.
+    effectbench_version = load_text("benchmark/effectbench/VERSION").strip()
+    require_equal(effectbench_version, "1.0.0", "EffectBench spec version")
 
     identity = load("benchmark/identity_ladder/identity_ladder.json")
     expected_identity = {
@@ -277,8 +303,86 @@ def main() -> None:
     # benchmark drift; these assertions also catch a paper edit that changes a
     # headline number without changing its source artifact.
     main_tex = load_text("paper/main.tex")
+    intro_tex = load_text("paper/sections/01_introduction.tex")
     methodology_tex = load_text("paper/sections/04_methodology.tex")
     results_tex = load_text("paper/sections/05_results.tex")
+
+    # End-to-end silent-wrong-effect headline (54 -> 9 -> 0). Bind the abstract,
+    # introduction, and results prose to the effect_e2e artifact so the headline
+    # can never drift from the measured JSON. This is the real, non-circular
+    # measurement that supersedes the in-process silent_wrong_action study.
+    require_contains(
+        main_tex,
+        f"silently accepted {e2e_screen} of 90 injected-fault runs",
+        "abstract e2e screen silent-wrong",
+    )
+    require_contains(main_tex, f"cut that to {e2e_rest} of 90", "abstract e2e rest")
+    require_contains(
+        main_tex,
+        f"complete system-of-record read path to {e2e_full} of 90",
+        "abstract e2e complete-read",
+    )
+    require_contains(
+        intro_tex,
+        f"silently accepted {e2e_screen} of 90 fault runs",
+        "intro e2e screen silent-wrong",
+    )
+    require_contains(intro_tex, f"cut that to {e2e_rest} of 90", "intro e2e rest")
+    require_contains(
+        intro_tex,
+        f"complete system-of-record read path to {e2e_full} of 90",
+        "intro e2e complete-read",
+    )
+    require_contains(
+        results_tex,
+        f"silently accepted a wrong persisted effect on {e2e_screen} of 90",
+        "results e2e screen silent-wrong",
+    )
+    require_contains(
+        results_tex,
+        f"drove silent acceptance down to {e2e_rest} of 90",
+        "results e2e rest silent-wrong",
+    )
+    require_contains(results_tex, f"drove it to {e2e_full} of 90", "results e2e full")
+    require_contains(
+        results_tex,
+        f"The residual {e2e_rest} of 90 is the honest mechanism",
+        "results e2e residual honesty",
+    )
+
+    # Second-domain lending generalization prose bound to swer_results.json.
+    require_contains(
+        results_tex,
+        f"silently accepted {lend_screen} of {lend_den} wrong ledger effects",
+        "results lending screen silent-wrong",
+    )
+    require_contains(
+        results_tex,
+        f"drove silent wrong effects to {lend_effect} of {lend_den}",
+        "results lending effect-verified",
+    )
+    require_contains(
+        results_tex,
+        f"cost of {lend_overhalt} of {lend_den} safe over-halts",
+        "results lending over-halts",
+    )
+    require_contains(
+        main_tex,
+        f"{lend_screen} of {lend_den} silent",
+        "abstract lending screen silent-wrong",
+    )
+    require_contains(
+        main_tex,
+        f"{lend_effect} of {lend_den} under effect verification",
+        "abstract lending effect-verified",
+    )
+
+    # Released standalone benchmark reference.
+    require_contains(
+        methodology_tex,
+        f"specification version {effectbench_version}",
+        "methodology EffectBench version",
+    )
 
     openemr_source = source_results["OpenEMR"]
     mockmed_source = source_results["MockMed"]
@@ -447,19 +551,20 @@ def main() -> None:
     # the exact same benchmark-derived constants as the full report, so bind its
     # headline sentences to the same artifacts. Both PDFs are gate-checked here.
     workshop_tex = load_text("paper/workshop/main.tex")
-    n_runs = silent["metrics"]["n_runs"]
     require_contains(
         workshop_tex,
-        (
-            f"silently accepted {metrics['screen']['silent_wrong_count']} of "
-            f"{n_runs} fault runs"
-        ),
-        "workshop screen silent-accept count",
+        f"silently accepted a wrong persisted effect on {e2e_screen} of 90 runs",
+        "workshop e2e screen silent-accept count",
     )
     require_contains(
         workshop_tex,
-        f"drove that to {metrics['effect']['silent_wrong_count']} of {n_runs}",
-        "workshop effect silent-accept count",
+        f"cut that to {e2e_rest} of 90",
+        "workshop e2e out-of-band silent-accept count",
+    )
+    require_contains(
+        workshop_tex,
+        f"complete system-of-record read path to {e2e_full} of 90",
+        "workshop e2e complete-read silent-accept count",
     )
     require_contains(
         workshop_tex,

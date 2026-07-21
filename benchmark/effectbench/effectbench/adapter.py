@@ -60,9 +60,7 @@ class EnvHandle(Protocol):
 
     goal: str
 
-    def attempt_intended_action(
-        self, params: Mapping[str, str]
-    ) -> ScreenObservation:
+    def attempt_intended_action(self, params: Mapping[str, str]) -> ScreenObservation:
         """Perform the task's intended action once and return the screen banner."""
         ...
 
@@ -71,6 +69,14 @@ class EnvHandle(Protocol):
 
         A distinct object and read path from the harness oracle -- using it is
         the honest way an agent refuses to trust the screen.
+
+        REFERENCE CONVENIENCE, NOT A FREEBIE. On the built-in synthetic MockMed
+        fixture the reference provider hands a working verifier here so the
+        reference result is reproducible. On a REAL system of record, AUTHORING
+        this verifier is the actual cost the benchmark does NOT measure for you:
+        a :class:`~effectbench.provider.BenchmarkProvider` that does not supply
+        one returns ``None`` here, and :class:`EffectVerifiedSUT` then FAILS SAFE
+        (halts / over-halts) rather than getting a correct oracle for free.
         """
         ...
 

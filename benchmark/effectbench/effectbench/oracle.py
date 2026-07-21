@@ -178,6 +178,16 @@ class RecordSnapshotOracle:
     :func:`~effectbench.judge.judge_records` decision logic. Fail-safe:
     ``read_records`` returning ``None`` reads as unreachable -> INDETERMINATE ->
     the episode is UNREADABLE (never a guessed success).
+
+    REFERENCE IMPLEMENTATION. This is the ground-truth oracle for the built-in
+    synthetic :mod:`effectbench.fixtures.mockmed` fixture -- an oracle the
+    benchmark authored for its OWN synthetic app, over an in-memory read path
+    that is trivially cheap and correct. On a REAL legacy system of record,
+    authoring a cheap, correct, independent record-readback oracle is the whole
+    problem the benchmark does NOT solve for you. A third party scoring their own
+    system supplies their own :class:`~effectbench.effect.EffectVerifier` through
+    a :class:`~effectbench.provider.BenchmarkProvider`; this class is a template,
+    not a general oracle.
     """
 
     substrate = "snapshot"

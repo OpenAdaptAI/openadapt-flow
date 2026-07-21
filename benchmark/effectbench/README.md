@@ -93,6 +93,48 @@ class SystemUnderTest(Protocol):
 - The return `AgentReport.reported_success` is the untrusted witness; the oracle,
   not this value, decides the outcome.
 
+## Bring your OWN system of record + oracle
+
+The section above scores YOUR AGENT against OUR reference fixture (synthetic
+MockMed). MockMed ships its ground-truth oracle as a **freebie** - the benchmark
+authored a cheap, correct, independent record-readback oracle for its own
+synthetic app. On a **real** legacy system of record, authoring that oracle is
+the whole problem (SPEC §2.2, §5.2); the benchmark does not do it for you.
+
+To score EffectBench against a system of record **the benchmark authors did not
+build**, implement a `effectbench.provider.BenchmarkProvider`. It supplies (a)
+your environment/fixture + tasks and (b) your OWN independent ground-truth
+oracle, and runs through the same runner and the same two reference baselines:
+
+```python
+from effectbench import EpisodeSetup, evaluate_provider
+from effectbench.adapter import EffectVerifiedSUT, ScreenOnlySUT
+
+class MyProvider:
+    name = "my-system"
+    def tasks(self):                      # opaque task handles
+        ...
+    def provision(self, task, trial) -> EpisodeSetup:
+        # build a FRESH system-of-record state, an arm-facing env, and an
+        # INDEPENDENT oracle the SUT can never reach; return an EpisodeSetup.
+        ...
+
+episodes = evaluate_provider(ScreenOnlySUT(), MyProvider(), trials=10)
+```
+
+If your provider does **not** author a product verifier for the SUT
+(`EnvHandle.product_effect_verifier()` returns `None`), `EffectVerifiedSUT`
+**fails safe** - it halts rather than getting a correct oracle for free. That is
+the point: the freebie only exists on the built-in synthetic fixture.
+
+> **Honest status.** The public reusable surface currently ships **one** synthetic
+> reference fixture (MockMed). **No independent third-party system of record has
+> been scored yet** - the two baselines (`screen_only`, `effect_verified`) are
+> OpenAdapt's own arms on OpenAdapt's own fixture. This interface exists so a
+> third party *can* bring a real system of record + oracle; authoring that oracle
+> is the real-world cost the benchmark abstracts away on the reference fixture
+> only.
+
 ## Submit a result
 
 ```bash
@@ -113,9 +155,10 @@ reproducibility manifest.
 | `effectbench.oracle` | the classifier + `score_episode` + the snapshot oracle |
 | `effectbench.metrics` | `summarize` → SWER + co-metrics with Wilson / bootstrap CIs |
 | `effectbench.adapter` | the `SystemUnderTest` interface + two reference baselines |
-| `effectbench.fixtures.mockmed` | the public **synthetic** MockMed system of record |
+| `effectbench.provider` | the `BenchmarkProvider` seam - bring your OWN system of record + oracle |
+| `effectbench.fixtures.mockmed` | the public **synthetic**, **reference-only** MockMed system of record |
 | `effectbench.tasks.mockmed` | the public synthetic task pack (the anchor suite) |
-| `effectbench.runner` | `evaluate(sut, trials=…)` → episode rows |
+| `effectbench.runner` | `evaluate(sut, trials=…)` and `evaluate_provider(sut, provider, …)` → episode rows |
 | `effectbench.reference` | the reference result (regression anchor) |
 | `effectbench.leaderboard` | submission build + reproducibility manifest + verifier |
 

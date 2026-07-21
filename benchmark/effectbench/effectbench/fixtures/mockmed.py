@@ -1,9 +1,13 @@
-"""MockMed -- the public, synthetic system-of-record fixture.
+"""MockMed -- the public, synthetic system-of-record fixture (REFERENCE ONLY).
 
 MockMed is a tiny in-memory clinical record store with a transactional
 persistence boundary. It is entirely synthetic (no real patient data, no
 network, no Docker) and is the reference environment the public EffectBench
-sample runs against. A "save" mutates an in-process list of encounter records;
+sample runs against. It is the ONE synthetic reference fixture the reusable
+package ships; results on it are a REFERENCE result about this fixture, not a
+general result about any real system of record. A third party scores their own
+system of record by implementing a :class:`~effectbench.provider.BenchmarkProvider`.
+A "save" mutates an in-process list of encounter records;
 the dangerous failures for consequential writes live at that boundary and are
 injected by a ``fault`` mode on the write:
 
@@ -129,8 +133,11 @@ class MockMedSoR:
 
         if fault == "partial":
             self._append(
-                patient_id=patient_id, enc_type=enc_type, note="",
-                source="replay", key=key,
+                patient_id=patient_id,
+                enc_type=enc_type,
+                note="",
+                source="replay",
+                key=key,
             )
             return ScreenObservation(banner, "partial: note field dropped")
 
@@ -139,8 +146,11 @@ class MockMedSoR:
             # silently destroyed.
             self._records = []
             self._append(
-                patient_id=patient_id, enc_type=enc_type, note=note,
-                source="replay", key=key,
+                patient_id=patient_id,
+                enc_type=enc_type,
+                note=note,
+                source="replay",
+                key=key,
             )
             return ScreenObservation(banner, "stale: concurrent row clobbered")
 
@@ -150,15 +160,21 @@ class MockMedSoR:
             if key is not None:
                 self._seen_keys.add(key)
             self._append(
-                patient_id=patient_id, enc_type=enc_type, note=note,
-                source="replay", key=key,
+                patient_id=patient_id,
+                enc_type=enc_type,
+                note=note,
+                source="replay",
+                key=key,
             )
             return ScreenObservation(banner, "idempotent: first write persisted")
 
         # ok / duplicate / double / timeout: persist the row normally.
         self._append(
-            patient_id=patient_id, enc_type=enc_type, note=note,
-            source="replay", key=key,
+            patient_id=patient_id,
+            enc_type=enc_type,
+            note=note,
+            source="replay",
+            key=key,
         )
         if fault == "timeout":
             # Committed, but the client aborts before the ack -> the UI shows an
@@ -205,7 +221,15 @@ class MockMedEnv:
         return obs
 
     def product_effect_verifier(self) -> Any:
-        """The agent's OWN independent verifier, or ``None`` if unavailable."""
+        """The agent's OWN independent verifier, or ``None`` if unavailable.
+
+        REFERENCE CONVENIENCE: this synthetic fixture hands the SUT a working
+        verifier so the reference result is reproducible. On a real system of
+        record, authoring this verifier is the SUT's own cost -- an external
+        :class:`~effectbench.provider.BenchmarkProvider` that does not supply one
+        leaves ``_verifier_factory`` unset, so this returns ``None`` and
+        :class:`~effectbench.adapter.EffectVerifiedSUT` fails safe.
+        """
         if self._verifier_factory is None:
             return None
         return self._verifier_factory()

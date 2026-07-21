@@ -189,7 +189,33 @@ rows (this is what `LEADERBOARD.md`'s verifier does).
 - Report SWER + over-halt + task-success + screen-success + the gap, decomposed
   by `(category × substrate)` (Section 1.2).
 
-### 5.2 Non-gameability (the oracle contract)
+### 5.2 Pluggable providers: bring your OWN system of record + oracle
+
+The scoring protocol above is **provider-agnostic**. A `BenchmarkProvider`
+(`effectbench.provider`) supplies the two things the harness is otherwise
+hardcoded to: **(a)** the environment/fixture + task suite, and **(b)** the
+INDEPENDENT ground-truth oracle the harness scores with (a read path the system
+under test can never reach). The runner consumes a provider through
+`evaluate_provider(sut, provider, trials=…)`; the built-in `MockMedProvider` is
+one implementation, so `evaluate(sut)` is exactly
+`evaluate_provider(sut, MockMedProvider())`.
+
+This is the seam that lets EffectBench be scored on a system of record **the
+benchmark authors did not build**. Two honesty constraints are structural, not
+optional:
+
+- **The oracle is not a freebie off-fixture.** On the built-in synthetic MockMed
+  fixture the provider hands the system under test a working record-readback
+  verifier (`EnvHandle.product_effect_verifier()`) so the reference result
+  reproduces. Authoring a cheap, correct, independent oracle for a **real** legacy
+  system of record is the actual cost this benchmark does NOT measure for you. A
+  provider that does not author one returns `None` there, and the
+  `effect_verified` baseline then **fails safe** (halts / over-halts) rather than
+  getting a correct oracle for free.
+- **The oracle must still satisfy §5.2** (isolated read path, trial-unique
+  payload, adversarially audited) whoever authors it.
+
+### 5.2.1 Non-gameability (the oracle contract)
 
 Every oracle reads **pre/post system-of-record state, not the agent's report or
 a banner**. An agent can paint any screen; it cannot make a row it did not write
@@ -228,6 +254,16 @@ reaches SWER 0. The same numbers are produced by the OpenAdapt engine's in-tree
 re-expression, so this standalone port is verifiable against the reference
 implementation.
 
+**Honest scope of this result.** The two baselines are **OpenAdapt's own arms**,
+run on **OpenAdapt's own synthetic fixture** (MockMed). This is a REFERENCE
+result about that one fixture, not a general result about any real system of
+record, and **no independent third-party system of record has been scored yet**.
+The reusable public surface ships exactly ONE synthetic reference fixture; the
+`BenchmarkProvider` interface (§5.2) exists so a third party *can* bring a real
+system of record + its own independent oracle and run the same baselines against
+it - but authoring that oracle is the real-world cost the benchmark abstracts
+away on the reference fixture only.
+
 ---
 
 ## 7. Source-availability boundary (what this artifact contains)
@@ -237,9 +273,11 @@ EffectBench (this package) is **open (MIT)** and contains only:
 - the **mechanism** — the typed `Effect` contract, the substrate-independent
   judge, the outcome classifier, and the metrics;
 - the **SWER metric definition** and the outcome/fault taxonomy;
-- a **public synthetic sample** — the MockMed in-memory fixture and task pack (no
-  real data, no network, no Docker);
-- the **reference scorer** and the two reference baselines.
+- a **public synthetic sample** - ONE reference-only MockMed in-memory fixture
+  and task pack (no real data, no network, no Docker);
+- the **reference scorer** and the two reference baselines (OpenAdapt's own arms);
+- the **`BenchmarkProvider` interface** (§5.2) so a third party can plug in their
+  OWN system of record + independent oracle - the fixture and oracle stay theirs.
 
 It deliberately contains **none** of the crown-jewel artifacts: the grown
 hardening failure corpus, tuned metamorphic-adversary parameters,

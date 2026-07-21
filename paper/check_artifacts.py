@@ -228,7 +228,9 @@ def main() -> None:
     require_equal(lend_den, 36, "lending episodes per arm")
     require_equal(lend_screen, 24, "lending screen silent wrong")
     require_equal(
-        lend_single, 3, "lending single-surface-oracle silent wrong (collateral residual)"
+        lend_single,
+        3,
+        "lending single-surface-oracle silent wrong (collateral residual)",
     )
     require_equal(lend_full, 0, "lending complete-read-path silent wrong")
     require_equal(

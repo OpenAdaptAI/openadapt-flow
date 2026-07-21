@@ -587,6 +587,7 @@ def to_markdown(result: dict) -> str:
     )
     lines.append("|---|---|---|---|---|---|")
     for row in result["coverage_matrix"]:
+
         def _cell(arm: str, row: dict = row) -> str:
             mark = " (SILENT)" if row[f"{arm}_silent"] else ""
             return f"{row[arm]}{mark}"

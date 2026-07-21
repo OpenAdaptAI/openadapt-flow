@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "content_digest": "b3519d3a46f6bdc353b76fd5a5e84f3941b42663d5fdd9e10d9e43ab4e96f684",
+  "content_digest": "039e0554216a2f3423dc613fc77895597dfffe151be8613f8dc706b16e42f78b",
   "file_hashes": {
     "templates/step_000.png": "f1828b7d1644fbe316c20d5e85904149f582bc851516a4f57ab87854e09d91f6",
     "templates/step_000_expect.png": "a191ba28eaf2691ea2bdbde6043f87eeea0bda377ed1dbd92ed8f99e4645c38e",

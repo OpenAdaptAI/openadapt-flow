@@ -29,6 +29,12 @@ benchmark/cosmetic_drift/_recording/
 benchmark/fault_model/runs/
 benchmark/fault_model/_bundle/
 benchmark/fault_model/_recording/
+# Lending (MockLoan) fault-model study scratch (recording/bundle/replay dirs);
+# the committed evidence is results.json + *.md only.
+benchmark/lending_fault_model/_bundle/
+benchmark/lending_fault_model/_recording/
+benchmark/lending_fault_model/runs/
+benchmark/lending_fault_model/runs_ladder/
 # openIMIS claims reference environment: recordings, bundles, generated
 # stack secrets, and media captures all stay local.
 benchmark/openimis_claims/out/

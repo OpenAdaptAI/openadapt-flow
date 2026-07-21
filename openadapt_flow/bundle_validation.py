@@ -95,6 +95,10 @@ def _referenced_asset_paths(workflow: "Workflow") -> set[str]:
         for pc in step.expect:
             if pc.template:
                 refs.add(pc.template)
+    for interstitial in workflow.interstitials:
+        anchor = interstitial.dismiss_anchor
+        if anchor is not None and anchor.template:
+            refs.add(anchor.template)
     return refs
 
 
@@ -145,7 +149,16 @@ def _workflow_content(workflow: "Workflow") -> dict:
     Excludes the ``manifest`` field itself (the digest lives INSIDE the
     manifest, so it must be computed over everything else) so the digest is a
     pure function of the semantic bundle content."""
-    return workflow.model_dump(mode="json", exclude={"manifest"})
+    content = workflow.model_dump(mode="json", exclude={"manifest"})
+    # ``interstitials`` was added additively while schema v2 bundles were
+    # already in circulation.  An empty list has no runtime semantics, so keep
+    # its canonical representation identical to the pre-field representation.
+    # This preserves every existing sealed v2 digest without weakening the
+    # seal: a non-empty declaration remains in the digest, and removing or
+    # changing one still fails integrity verification.
+    if not content.get("interstitials"):
+        content.pop("interstitials", None)
+    return content
 
 
 def compute_content_digest(workflow: "Workflow", file_hashes: dict[str, str]) -> str:

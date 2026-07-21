@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openadapt_flow.ir import Step, Workflow
+from openadapt_flow.ir import Interstitial, Step, Workflow
 from openadapt_flow.traversal import iter_workflow_steps
 
 _CONSUMED_IDS: set[str] = set()
@@ -40,12 +40,22 @@ def runtime_inputs_digest(
     workflow: Workflow,
     params: dict[str, str] | None,
     worklists: dict[str, list[dict[str, str]]] | None,
+    *,
+    interstitials: list[Interstitial] | None = None,
 ) -> str:
     """Hash the exact effective runtime inputs without persisting their values."""
-    payload = {
+    payload: dict[str, object] = {
         "params": effective_runtime_params(workflow, params),
         "worklists": worklists or {},
     }
+    if interstitials:
+        # Runtime-supplied interstitials can issue pre-step key/click actions.
+        # Bind their complete declarative shape into governed authorization so
+        # a caller cannot add or change one after admission. Keep the empty case
+        # byte-compatible with authorizations created before this input existed.
+        payload["interstitials"] = [
+            interstitial.model_dump(mode="json") for interstitial in interstitials
+        ]
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
@@ -147,6 +157,7 @@ class GovernedRunAuthorization(BaseModel):
         bundle_dir: Path | str,
         params: dict[str, str] | None,
         worklists: dict[str, list[dict[str, str]]] | None,
+        interstitials: list[Interstitial] | None = None,
         continuation: bool = False,
     ) -> str | None:
         """Validate semantics, sealed assets, inputs, and single-use status."""
@@ -155,6 +166,7 @@ class GovernedRunAuthorization(BaseModel):
             bundle_dir=bundle_dir,
             params=params,
             worklists=worklists,
+            interstitials=interstitials,
             continuation=continuation,
         )
         return refusal
@@ -166,6 +178,7 @@ class GovernedRunAuthorization(BaseModel):
         bundle_dir: Path | str,
         params: dict[str, str] | None,
         worklists: dict[str, list[dict[str, str]]] | None,
+        interstitials: list[Interstitial] | None = None,
         continuation: bool = False,
     ) -> tuple[str | None, dict[str, bytes]]:
         """Validate once and return the exact sealed bytes execution may use."""
@@ -210,11 +223,16 @@ class GovernedRunAuthorization(BaseModel):
         except OSError as exc:
             return f"governed run authorization could not snapshot assets: {exc}", {}
 
-        actual_inputs = runtime_inputs_digest(workflow, params, worklists)
+        actual_inputs = runtime_inputs_digest(
+            workflow,
+            params,
+            worklists,
+            interstitials=interstitials,
+        )
         if actual_inputs != self.runtime_inputs_digest:
             return (
                 "governed run authorization is bound to different runtime "
-                "parameters or worklists",
+                "parameters or worklists, or interstitial declarations",
                 {},
             )
 

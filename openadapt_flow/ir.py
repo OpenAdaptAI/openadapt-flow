@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Iterator, Literal, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 if TYPE_CHECKING:
     # Type-only import for the Step.effects forward reference. The RUNTIME
@@ -597,6 +597,37 @@ class Interstitial(BaseModel):
         description="Control to resolve+click to dismiss it (e.g. an OK button). "
         "Used when no key dismisses the overlay.",
     )
+
+    @model_validator(mode="after")
+    def _validate_safe_detection_and_dismissal(self) -> "Interstitial":
+        if not self.name.strip():
+            raise ValueError("interstitial name must not be empty")
+        if self.dismiss_key is not None and not self.dismiss_key.strip():
+            raise ValueError("interstitial dismiss_key must not be empty")
+        if self.dismiss_key is not None and self.dismiss_anchor is not None:
+            raise ValueError(
+                "interstitial must declare at most one dismissal mechanism"
+            )
+
+        def affirmative_visual(pred: Predicate) -> bool:
+            if pred.kind is PredicateKind.TEXT_PRESENT:
+                return bool(pred.text and pred.text.strip())
+            if pred.kind is PredicateKind.ANCHOR_RESOLVES:
+                return pred.anchor is not None and bool(pred.anchor.template.strip())
+            if pred.kind in (PredicateKind.AND, PredicateKind.OR):
+                return bool(pred.operands) and all(
+                    affirmative_visual(operand) for operand in pred.operands
+                )
+            return False
+
+        if not affirmative_visual(self.detect):
+            raise ValueError(
+                "interstitial detection must use affirmative visual evidence "
+                "(TEXT_PRESENT or ANCHOR_RESOLVES, optionally composed with "
+                "AND/OR); absence, parameter, and negated predicates could "
+                "trigger a blind dismissal"
+            )
+        return self
 
 
 class Step(BaseModel):

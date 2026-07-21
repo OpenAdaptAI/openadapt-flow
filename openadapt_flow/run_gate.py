@@ -55,7 +55,7 @@ from pydantic import BaseModel, Field
 
 from openadapt_flow import crypto
 from openadapt_flow.deployment import DeploymentConfig
-from openadapt_flow.ir import Step, Workflow
+from openadapt_flow.ir import Interstitial, Step, Workflow
 from openadapt_flow.policy import (
     has_screen_postcondition,
     has_system_effect,
@@ -491,6 +491,7 @@ def build_runtime_authorization(
     approval_source: str = "local-cli-explicit-flag",
     params: Optional[dict[str, str]] = None,
     worklists: Optional[dict[str, list[dict[str, str]]]] = None,
+    interstitials: Optional[list[Interstitial]] = None,
 ) -> GovernedRunAuthorization:
     """Bind a successful admission decision to the exact sealed workflow.
 
@@ -528,7 +529,12 @@ def build_runtime_authorization(
 
     return GovernedRunAuthorization(
         bundle_content_digest=workflow.manifest.content_digest,
-        runtime_inputs_digest=runtime_inputs_digest(workflow, params, worklists),
+        runtime_inputs_digest=runtime_inputs_digest(
+            workflow,
+            params,
+            worklists,
+            interstitials=interstitials,
+        ),
         admitted_policy_name=report.policy_name,
         required_identity_step_ids=tuple(report.required_identity_step_ids),
         unverified_write_approvals=tuple(approvals),

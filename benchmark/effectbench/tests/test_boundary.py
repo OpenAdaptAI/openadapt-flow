@@ -48,6 +48,11 @@ def test_no_openadapt_flow_dependency() -> None:
         assert "from openadapt_flow" not in text, path
 
 
+def test_version_is_not_the_missing_file_fallback() -> None:
+    expected = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+    assert effectbench.__version__ == expected
+
+
 def test_no_crown_jewel_tokens_in_the_package() -> None:
     for path in _package_py_files():
         lowered = path.read_text(encoding="utf-8").lower()
@@ -85,8 +90,8 @@ def test_runtime_dependency_is_only_pydantic() -> None:
 
 _STDLIB = {
     "__future__", "argparse", "ast", "collections", "dataclasses", "datetime",
-    "enum", "hashlib", "json", "math", "pathlib", "platform", "random", "sys",
-    "time", "typing", "collections.abc",
+    "enum", "hashlib", "importlib", "json", "math", "pathlib", "platform",
+    "random", "sys", "time", "typing", "collections.abc",
 }
 
 

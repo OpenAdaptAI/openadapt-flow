@@ -22,6 +22,7 @@ Quick start::
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from effectbench.adapter import (
@@ -63,13 +64,18 @@ from effectbench.schema import (
 
 
 def _read_version() -> str:
-    # VERSION lives at the package root (benchmark/effectbench/VERSION), one
-    # level above the importable package directory.
+    # Source checkouts keep VERSION beside the importable package. Wheels do
+    # not carry that repository-level file, so installed distributions must use
+    # their authoritative package metadata instead of silently reporting
+    # ``0.0.0``.
     candidate = Path(__file__).resolve().parent.parent / "VERSION"
     try:
         return candidate.read_text(encoding="utf-8").strip()
-    except OSError:  # pragma: no cover - VERSION always ships
-        return "0.0.0"
+    except OSError:
+        try:
+            return version("effectbench")
+        except PackageNotFoundError:  # pragma: no cover - malformed install
+            return "0.0.0"
 
 
 __version__ = _read_version()

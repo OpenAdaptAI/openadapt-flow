@@ -16,9 +16,13 @@ and CLASSIFIES what the **real** resolver does on each generated case:
    fields per column, patient rows one glyph-confusable identifier apart) ×
    a parameterized **metamorphic perturbation space** (DPI 75–200 %, theme
    inversion, JPEG q50→q5, sub-pixel jitter, tooltip/cursor **occlusion of the
-   true target**, blur, colour-depth reduction, local mid-run drift, and
-   compositions). Fixtures render with PIL/cv2 — **no browser**, so the sweep is
-   hermetic and cheap enough for a per-PR gate.
+   true target**, blur, colour-depth reduction, local mid-run drift,
+   **latency / partial render of the target's own cell** (`unpainted_target`),
+   **dynamic reflow** (`uniform_scroll` — a rigid scroll / a top banner pushing
+   the layout), and compositions). Fixtures render with PIL/cv2 — **no
+   browser**, so the sweep is hermetic and cheap enough for a per-PR gate. The
+   fixture families include **denser look-alike strips** (n=8, tight pitch) so
+   the padded local search window contains multiple identical neighbors.
 2. **Run the real ladder** — each case calls the unmodified
    `runtime.resolver.resolve` with the real `openadapt_flow.vision` (real cv2
    template matcher + real RapidOCR). Nothing is faked.
@@ -95,23 +99,58 @@ so `openadapt-flow` builds, imports, and passes public CI with the private repo
 absent. Leave the variable unset (the public-CI state) to run against the
 public synthetic baseline.
 
-## Current measured baseline (this PR, on `main`)
+## Current measured baseline + the ratchet history
 
-Real numbers, template tier (font-free, deterministic):
+Real numbers, template tier (font-free, deterministic). The ratchet has now
+gone through **two proven ratchet-down cycles**:
 
-- **624 cases · silent-wrong = 171 · SWER = 27.4 %** (correct 123 / over-halt
-  186 / safe-halt 144).
-- Concentrated in `repeated_icons` (125) and `form_fields` (46); driven almost
-  entirely by **occlusion of the true target among look-alikes** (a degraded
-  true target falls below the local `template` threshold, then `template_global`
-  locks onto a pristine decoy at ~1.0 confidence).
+| Cycle | Grid | silent-wrong | SWER | What changed |
+| --- | --- | --- | --- | --- |
+| baseline | 624 | 171 | 27.4 % | pre-gate resolver (arg-max look-alike) |
+| #165 lands | 624 | 6 | 1.0 % | local-rung **locality + uniqueness → halt** gate |
+| harder grid + hardening | **900** | **2** | **0.2 %** | +276 harder cases, +2 resolver fixes |
 
-This is the **A1/A3 look-alike class** the vision-hardening review flagged as the
-moat's #1 weakness. Note the honest correction: that review presented PR #165
-(the local-rung locality/uniqueness → halt gate) as *shipped*, but **#165 is not
-merged on `main`** (only #166, the `template_global` landmark guard, is). This
-sweep measures the live gap, and the ratchet is the mechanism that will drive it
-to zero as #165-class fixes land.
+**Cycle 1 (#165).** The local-rung locality/uniqueness gate flipped **165 of the
+171** frozen silent-wrong cases to safe-halt/over-halt (halt-don't-guess),
+leaving 6 residual `local_drift` cases. Ratchet `171 → 6`.
+
+**Cycle 2 (harder cases + hardening).** The grid was expanded from 624 to **900**
+template-tier cases with significantly harder, more realistic degradations:
+**denser look-alike strips** (n=8), **latency / partial render** of the target's
+own cell (`unpainted_target`), and **dynamic reflow** (`uniform_scroll`). On that
+enlarged grid the #165-only resolver produces **38 silent-wrong (SWER 4.2 %)** —
+i.e. the harder cases *found 38 new dangerous mis-resolutions*. Two resolver
+fixes close 36 of them:
+
+1. **Local-rung tightening** — when the local `template` rung (a `prefer_near`
+   search over the recorded region padded by `search_pad`) finds **no peak near
+   the expected location**, it now REFUSES the lone far peak (a neighboring
+   repeated widget the padded window caught while the target's own cell was
+   degraded/unpainted) and defers to the global uniqueness gate, which halts.
+   This is the wrong-row/wrong-icon partial-render class.
+2. **Global-rung ambiguity-suspicion scan** — on the global `template_global`
+   rung, a lone peak that clears threshold far from expected is kept only if
+   **no second location is elevated** just below threshold. A degraded *sibling*
+   of the same repeated widget (blurred/occluded/compressed under the accept
+   bar) is evidence the surface is ambiguous → refuse rather than click the
+   crisp decoy. A genuinely moved **unique** target has no such second response
+   and is still kept.
+
+Both fixes only ever ADD halts (they never introduce a click), preserve the
+happy path (`test_identity_control_resolves_correctly`) and the moved-unique
+path (`test_single_unique_far_match_is_kept`), and are locked in by unit tests
+(`tests/test_resolver_ambiguity.py`). Ratchet `6 → 2`.
+
+The **2 residuals** are `repeated_icons` (`bars`, n=3, `true_idx` 0/1) under deep
+left-region `local_drift`: the true target blurs *below* the ambiguity-suspicion
+floor while a crisp decoy remains, so it reads as a legitimately moved unique
+target. Chasing them by lowering the suspicion floor would over-halt on real
+moved targets, so they are frozen as honest known-hard cases. Two degradations
+are documented as **irreducible at the pixel-only template tier** and are
+deliberately NOT gated (a pixel-only resolver cannot win them without landmark /
+OCR / structural signal): (a) a target cell blanked with **exactly one** decoy
+left (indistinguishable from a moved unique target), and (b) a **horizontal
+reflow by exactly one widget pitch** (pixel-identical to the nominal frame).
 
 The OCR tier (informational) adds `labeled_rows`, `duplicate_buttons`, and the
 glyph-collapse `mrn_rows` (wrong-record on the OCR rung).

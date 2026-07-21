@@ -451,6 +451,14 @@ def template_tier_fixtures() -> list[Fixture]:
         for ti in (0, n // 2, n - 1):
             out.append(repeated_icons(n=n, true_idx=ti, glyph="circle"))
             out.append(repeated_icons(n=n, true_idx=ti, glyph="bars"))
+    # Denser look-alike strips (n=8, tight 70px pitch): more identical
+    # neighbors inside the padded local search window, the harder no-DOM
+    # toolbar/gallery case where a degraded true target lets the resolver grab
+    # a wrong neighbor. The neighbor pitch (70px) is larger than the locality
+    # radius so a neighbor never counts as "at the expected spot".
+    for ti in (0, 4, 7):
+        out.append(repeated_icons(n=8, true_idx=ti, glyph="circle", spacing=70))
+        out.append(repeated_icons(n=8, true_idx=ti, glyph="bars", spacing=70))
     for n in (3, 4):
         for ti in (0, 1, n - 1):
             out.append(form_fields(n=n, true_idx=ti))

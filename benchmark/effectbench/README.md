@@ -96,7 +96,7 @@ class SystemUnderTest(Protocol):
 ## Bring your OWN system of record + oracle
 
 The section above scores YOUR AGENT against OUR reference fixture (synthetic
-MockMed). MockMed ships its ground-truth oracle as a **freebie** — the benchmark
+MockMed). MockMed ships its ground-truth oracle as a **freebie** - the benchmark
 authored a cheap, correct, independent record-readback oracle for its own
 synthetic app. On a **real** legacy system of record, authoring that oracle is
 the whole problem (SPEC §2.2, §5.2); the benchmark does not do it for you.
@@ -124,12 +124,12 @@ episodes = evaluate_provider(ScreenOnlySUT(), MyProvider(), trials=10)
 
 If your provider does **not** author a product verifier for the SUT
 (`EnvHandle.product_effect_verifier()` returns `None`), `EffectVerifiedSUT`
-**fails safe** — it halts rather than getting a correct oracle for free. That is
+**fails safe** - it halts rather than getting a correct oracle for free. That is
 the point: the freebie only exists on the built-in synthetic fixture.
 
 > **Honest status.** The public reusable surface currently ships **one** synthetic
 > reference fixture (MockMed). **No independent third-party system of record has
-> been scored yet** — the two baselines (`screen_only`, `effect_verified`) are
+> been scored yet** - the two baselines (`screen_only`, `effect_verified`) are
 > OpenAdapt's own arms on OpenAdapt's own fixture. This interface exists so a
 > third party *can* bring a real system of record + oracle; authoring that oracle
 > is the real-world cost the benchmark abstracts away on the reference fixture
@@ -155,7 +155,7 @@ reproducibility manifest.
 | `effectbench.oracle` | the classifier + `score_episode` + the snapshot oracle |
 | `effectbench.metrics` | `summarize` → SWER + co-metrics with Wilson / bootstrap CIs |
 | `effectbench.adapter` | the `SystemUnderTest` interface + two reference baselines |
-| `effectbench.provider` | the `BenchmarkProvider` seam — bring your OWN system of record + oracle |
+| `effectbench.provider` | the `BenchmarkProvider` seam - bring your OWN system of record + oracle |
 | `effectbench.fixtures.mockmed` | the public **synthetic**, **reference-only** MockMed system of record |
 | `effectbench.tasks.mockmed` | the public synthetic task pack (the anchor suite) |
 | `effectbench.runner` | `evaluate(sut, trials=…)` and `evaluate_provider(sut, provider, …)` → episode rows |

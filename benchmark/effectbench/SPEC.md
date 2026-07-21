@@ -261,7 +261,7 @@ record, and **no independent third-party system of record has been scored yet**.
 The reusable public surface ships exactly ONE synthetic reference fixture; the
 `BenchmarkProvider` interface (§5.2) exists so a third party *can* bring a real
 system of record + its own independent oracle and run the same baselines against
-it — but authoring that oracle is the real-world cost the benchmark abstracts
+it - but authoring that oracle is the real-world cost the benchmark abstracts
 away on the reference fixture only.
 
 ---
@@ -273,11 +273,11 @@ EffectBench (this package) is **open (MIT)** and contains only:
 - the **mechanism** — the typed `Effect` contract, the substrate-independent
   judge, the outcome classifier, and the metrics;
 - the **SWER metric definition** and the outcome/fault taxonomy;
-- a **public synthetic sample** — ONE reference-only MockMed in-memory fixture
+- a **public synthetic sample** - ONE reference-only MockMed in-memory fixture
   and task pack (no real data, no network, no Docker);
 - the **reference scorer** and the two reference baselines (OpenAdapt's own arms);
 - the **`BenchmarkProvider` interface** (§5.2) so a third party can plug in their
-  OWN system of record + independent oracle — the fixture and oracle stay theirs.
+  OWN system of record + independent oracle - the fixture and oracle stay theirs.
 
 It deliberately contains **none** of the crown-jewel artifacts: the grown
 hardening failure corpus, tuned metamorphic-adversary parameters,

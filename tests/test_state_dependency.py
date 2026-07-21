@@ -215,7 +215,9 @@ def _present_then_absent(match: Match) -> list:
 
 def test_known_interstitial_dismissed_by_key_then_step_runs(bundle, run_dir):
     vision = FakeVision()
-    vision.text_results = {"rate us": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))}
+    vision.text_results = {
+        "rate us": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
+    }
     vision.template_results = [Match((110, 105), (100, 100, 50, 20))]
     backend = FakeBackend()
     wf = Workflow(
@@ -240,7 +242,9 @@ def test_known_interstitial_dismissed_by_key_then_step_runs(bundle, run_dir):
 
 def test_known_interstitial_dismissed_by_anchor_click(bundle, run_dir):
     vision = FakeVision()
-    vision.text_results = {"What's New": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))}
+    vision.text_results = {
+        "What's New": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
+    }
     # First find_template resolves the dismiss button; second resolves the step.
     vision.template_results = [
         Match((200, 20), (190, 10, 30, 20)),  # "Continue" button
@@ -328,7 +332,9 @@ def test_operator_supplied_interstitial_applies_without_recompiling(bundle, run_
     """An operator can pass interstitials to the Replayer; they merge with the
     bundle's own (here the bundle declares none)."""
     vision = FakeVision()
-    vision.text_results = {"cookies": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))}
+    vision.text_results = {
+        "cookies": _present_then_absent(Match((10, 10), (0, 0, 5, 5)))
+    }
     vision.template_results = [Match((110, 105), (100, 100, 50, 20))]
     backend = FakeBackend()
     wf = Workflow(name="wf", steps=[click_step()])  # no bundle interstitials

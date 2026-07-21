@@ -3264,7 +3264,7 @@ class Replayer:
         if not result.settled:
             return result.png, (
                 "The screen never stopped changing (still loading or animating) "
-                f"within {self.settle_readiness_timeout_s:.1f}s — refusing to act "
+                f"within {self.settle_readiness_timeout_s:.1f}s - refusing to act "
                 "on a mid-transition frame; run aborted (starting state not "
                 "ready). If this UI animates continuously, disable the readiness "
                 "gate (require_settled=False)."
@@ -3314,14 +3314,14 @@ class Replayer:
                 return before_png, (
                     f"Known blocking interstitial '{it.name}' is on screen "
                     f"({self._describe_predicate(it.detect)}) and declares no "
-                    "automatic dismissal — refusing to act beneath it; run "
+                    "automatic dismissal - refusing to act beneath it; run "
                     "aborted (handle it, then re-run)."
                 )
             if attempts >= self._max_interstitial_dismissals:
                 # Detected again after the bounded number of dismissals.
                 return before_png, (
                     f"Interstitial '{it.name}' persisted after "
-                    f"{self._max_interstitial_dismissals} dismissal attempt(s) — "
+                    f"{self._max_interstitial_dismissals} dismissal attempt(s) - "
                     "refusing to act beneath it; run aborted."
                 )
             if it.dismiss_key is not None:
@@ -3342,13 +3342,11 @@ class Replayer:
                     return before_png, (
                         f"Interstitial '{it.name}' detected "
                         f"({self._describe_predicate(it.detect)}) but its dismiss "
-                        "control did not resolve on screen — refusing to act; run "
+                        "control did not resolve on screen - refusing to act; run "
                         "aborted."
                     )
                 resolution, _region = res
-                self.backend.click(
-                    int(resolution.point[0]), int(resolution.point[1])
-                )
+                self.backend.click(int(resolution.point[0]), int(resolution.point[1]))
             attempts += 1
             before_png = self._settle_frame()
 
@@ -3366,22 +3364,22 @@ class Replayer:
 
         Runs in state-dependency order, all model-free:
 
-        1. **readiness** (``require_settled``) — refuse to act on a frame that
+        1. **readiness** (``require_settled``) - refuse to act on a frame that
            never settled (still-loading / mid-transition); HALT gracefully.
-        2. **interstitials** — a KNOWN overlay (survey modal, cookie banner) on
+        2. **interstitials** - a KNOWN overlay (survey modal, cookie banner) on
            the entry frame is auto-dismissed (then re-settled) or HALTed on.
-        3. **guard** (precondition) on the entry frame — unmet HALTs (default)
+        3. **guard** (precondition) on the entry frame - unmet HALTs (default)
            or SKIPs (``on_unmet="skip"``).
-        4. **wait_until** (readiness predicate) — polled, bounded, HALT on
+        4. **wait_until** (readiness predicate) - polled, bounded, HALT on
            timeout (never proceed-anyway).
 
         Returns ``(proceed, error, before_png)``:
 
-        - ``(True, None, frame)`` — proceed to resolve/act (frame may have been
+        - ``(True, None, frame)`` - proceed to resolve/act (frame may have been
           re-settled while polling a wait_until predicate).
-        - ``(False, None, frame)`` — the guard was unmet with ``on_unmet="skip"``:
+        - ``(False, None, frame)`` - the guard was unmet with ``on_unmet="skip"``:
           the step is a no-op success (caller marks it ``skipped``).
-        - ``(False, error, frame)`` — HALT: an un-ready screen, a blocking /
+        - ``(False, error, frame)`` - HALT: an un-ready screen, a blocking /
           undismissable interstitial, an unmet ``halt`` guard, or a
           ``wait_until`` predicate that never held within its bound (fail-safe;
           the run NEVER proceeds-anyway on an unmet readiness predicate).

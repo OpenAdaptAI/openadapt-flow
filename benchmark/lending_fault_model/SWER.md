@@ -36,9 +36,9 @@ Trials per task per arm: 3 (DETERMINISTIC replays; run-to-run variance ~ 0, so t
 | `effect_verify_single` | single surface (`/api/disbursements`) | 36 | **0.083** (3/36) | 0.167 | 0.25 | 0.083 |
 | `effect_verify_full` | complete (`/api/db`) | 36 | **0.0** (0/36) | 0.167 | 0.25 | 0.0 |
 
-- **Screen-only SWER = **0.667** (24/36)**: the injected faults render a clean 'Disbursement authorized' banner while the ledger is wrong (a partial/phantom/duplicate/lost-update/wrong-loan/collateral write).
-- **Single-surface SWER = **0.083** (3/36)**: a single out-of-band oracle over the disbursements ledger catches every same-surface fault but is BLIND to the `collateral` write on the fees surface, leaving a residual silent-wrong-effect on exactly that one class. This is the lending analog of the clinical single-surface REST oracle's 9/90 residual (the SAME honest finding, a second domain).
-- **Complete-read-path SWER = **0.0** (0/36)**: reading every mutable surface (disbursements + fees) sees the collateral row and drives the residual to 0; the residual cost is over-halt = 0.167 (safe: a human finishes a recoverable case). 0 requires a read path covering EVERY mutable surface.
+- Screen-only SWER = **0.667** (24/36): the injected faults render a clean 'Disbursement authorized' banner while the ledger is wrong (a partial/phantom/duplicate/lost-update/wrong-loan/collateral write).
+- Single-surface SWER = **0.083** (3/36): a single out-of-band oracle over the disbursements ledger catches every same-surface fault but is BLIND to the `collateral` write on the fees surface, leaving a residual silent-wrong-effect on exactly that one class. This is the lending analog of the clinical single-surface REST oracle's 9/90 residual (the SAME honest finding, a second domain).
+- Complete-read-path SWER = **0.0** (0/36): reading every mutable surface (disbursements + fees) sees the collateral row and drives the residual to 0; the residual cost is over-halt = 0.167 (safe: a human finishes a recoverable case). 0 requires a read path covering EVERY mutable surface.
 
 ## Coverage matrix (deterministic - one cell per scenario)
 

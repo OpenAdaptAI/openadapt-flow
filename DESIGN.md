@@ -306,10 +306,14 @@ with the same action methods plus `type_text(text, param=None)` and
 ## Report / emit / CLI / bench / CI
 
 - `report.py`: `render_run_report(run_dir) -> Path` — REPORT.md in run_dir:
-  outcome, per-step table (intent, rung, confidence, ms, heal?), embedded
-  relative-path images for key steps and every heal (before/after side by
-  side), rung histogram, totals (ms, model calls, est cost).
-  `render_bench_report(bench.json, out) -> Path`.
+  outcome, per-step table (intent, rung, confidence, verified, ms, heal?), a
+  per-step evidence section with embedded relative-path before/after images for
+  EVERY step (each next to its resolution rung, identity-gate + effect-check
+  verdicts, and heal/halt status) plus each heal's healed frame, rung
+  histogram, totals (ms, model calls, est cost). The generator links only
+  retained regular-file artifacts inside the run directory (never paths or
+  symlinks that escape it) and never synthesizes pixels; a frame not retained
+  on disk is marked absent. `render_bench_report(bench.json, out) -> Path`.
 - `bench.py`: `run_bench(workflow_bundle, backend_factory, n) -> dict` —
   replay N times; success rate, p50/p95 total ms, rung histogram, model calls
   (0 in v0), cost 0; serialize bench.json.

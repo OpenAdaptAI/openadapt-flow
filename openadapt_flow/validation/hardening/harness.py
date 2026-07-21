@@ -24,6 +24,7 @@ classifier, and every silent-wrong is emitted as a frozen regression case.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
 from dataclasses import dataclass, field
@@ -245,7 +246,13 @@ def adversarial_search(
     Deterministic for a fixed ``seed``. Returns the distinct silent-wrong hits
     found (deduplicated by perturbation key), most-dangerous first.
     """
-    rng = random.Random((seed, fixture.key()).__hash__() & 0xFFFFFFFF)
+    # Python salts ``str.__hash__`` per process.  Using ``hash()`` here made a
+    # nominally seeded search choose different perturbations across CI workers,
+    # so a known corpus hit could disappear even though the resolver and seed
+    # were unchanged.  Derive the PRNG seed from stable bytes instead.
+    seed_material = f"{seed}\0{fixture.key()}".encode("utf-8")
+    stable_seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big")
+    rng = random.Random(stable_seed)
     hits: dict[str, AdversarialHit] = {}
     for _ in range(iters):
         perturbation = _random_perturbation(rng)

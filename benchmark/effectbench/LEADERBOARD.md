@@ -42,6 +42,11 @@ doc = build_submission(
 # write doc to my-agent.json
 ```
 
+To score against a system of record **the benchmark authors did not build**,
+implement a `effectbench.provider.BenchmarkProvider` (bring your own fixture +
+independent oracle) and use `evaluate_provider(sut, provider, trials=…)` instead
+of `evaluate`. See `README.md` and `SPEC.md` §5.2.
+
 ## Verifying a submission (reproduce it)
 
 ```bash
@@ -103,6 +108,13 @@ The `reproducibility` block pins everything needed to re-run:
 - `python`, `platform`, `dependencies` — the environment.
 
 ## The reference results
+
+**Honest status.** Every row below is **OpenAdapt's own arm** on **OpenAdapt's
+own synthetic fixture** (MockMed). **No independent third-party system of record
+has been scored yet.** The `BenchmarkProvider` interface exists so a third party
+*can* bring a real system of record + its own independent oracle; authoring that
+oracle is the real-world cost the benchmark abstracts away on the reference
+fixture only.
 
 | system | file | SWER | over-halt | notes |
 |---|---|---|---|---|

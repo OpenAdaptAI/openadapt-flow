@@ -1,9 +1,13 @@
-"""MockMed -- the public, synthetic system-of-record fixture.
+"""MockMed -- the public, synthetic system-of-record fixture (REFERENCE ONLY).
 
 MockMed is a tiny in-memory clinical record store with a transactional
 persistence boundary. It is entirely synthetic (no real patient data, no
 network, no Docker) and is the reference environment the public EffectBench
-sample runs against. A "save" mutates an in-process list of encounter records;
+sample runs against. It is the ONE synthetic reference fixture the reusable
+package ships; results on it are a REFERENCE result about this fixture, not a
+general result about any real system of record. A third party scores their own
+system of record by implementing a :class:`~effectbench.provider.BenchmarkProvider`.
+A "save" mutates an in-process list of encounter records;
 the dangerous failures for consequential writes live at that boundary and are
 injected by a ``fault`` mode on the write:
 
@@ -205,7 +209,15 @@ class MockMedEnv:
         return obs
 
     def product_effect_verifier(self) -> Any:
-        """The agent's OWN independent verifier, or ``None`` if unavailable."""
+        """The agent's OWN independent verifier, or ``None`` if unavailable.
+
+        REFERENCE CONVENIENCE: this synthetic fixture hands the SUT a working
+        verifier so the reference result is reproducible. On a real system of
+        record, authoring this verifier is the SUT's own cost -- an external
+        :class:`~effectbench.provider.BenchmarkProvider` that does not supply one
+        leaves ``_verifier_factory`` unset, so this returns ``None`` and
+        :class:`~effectbench.adapter.EffectVerifiedSUT` fails safe.
+        """
         if self._verifier_factory is None:
             return None
         return self._verifier_factory()

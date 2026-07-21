@@ -1,15 +1,20 @@
 """The runner -- evaluate a :class:`~effectbench.adapter.SystemUnderTest`.
 
-Given a system under test, the runner provisions a fresh synthetic MockMed
-system of record per (task x trial), drives the SUT through an
-:class:`~effectbench.fixtures.mockmed.MockMedEnv` (goal + params only), and
-scores it with an INDEPENDENT oracle the SUT can never reach -- one
-:class:`~effectbench.schema.EpisodeRecord` per episode. Every headline
+Given a system under test, the runner drives it against a
+:class:`~effectbench.provider.BenchmarkProvider` -- a pluggable reference system
+of record + its INDEPENDENT ground-truth oracle -- and scores each ``(task x
+trial)`` into one :class:`~effectbench.schema.EpisodeRecord`. Every headline
 (:func:`~effectbench.metrics.summarize`) is a pure function of those rows.
+
+The DEFAULT provider is :class:`MockMedProvider`, the synthetic MockMed reference
+fixture (marked REFERENCE-ONLY; see its docstring), so ``evaluate(sut)`` is
+exactly ``evaluate_provider(sut, MockMedProvider())``. A third party swaps in
+their own provider to score EffectBench on a system of record the benchmark
+authors did NOT build -- see :mod:`effectbench.provider`.
 
 Fairness / isolation by construction:
 
-- the harness oracle and the SUT's optional product verifier are DISTINCT
+- the harness oracle and any product verifier the SUT may reach are DISTINCT
   instances built over the same store (different objects / read paths);
 - the SUT receives only the task goal (never a step list) + the trial-unique
   params; it cannot reach the harness oracle;
@@ -24,6 +29,7 @@ from typing import Optional, Sequence
 from effectbench.adapter import SystemUnderTest
 from effectbench.fixtures.mockmed import MockMedEnv, MockMedSoR
 from effectbench.oracle import CompoundSnapshotOracle, score_episode
+from effectbench.provider import BenchmarkProvider, EpisodeSetup
 from effectbench.schema import EpisodeRecord
 from effectbench.tasks.mockmed import MOCKMED_TASKS, MockMedTask, trial_params
 
@@ -50,34 +56,45 @@ def _provision(task: MockMedTask, params: dict[str, str]) -> MockMedEnv:
     )
 
 
-def run_episode(
-    sut: SystemUnderTest, task: MockMedTask, trial: int
-) -> Optional[EpisodeRecord]:
-    """Run and score ONE (sut, task, trial). ``None`` if the episode is dropped."""
-    params = trial_params(task.spec.task_id, trial)
-    env = _provision(task, params)
-    resolved_extra = [e.resolve(params) for e in task.extra_effects]
-    # The harness oracle -- a SEPARATE instance over the same store.
-    oracle = CompoundSnapshotOracle(
-        env.sor.read_records, extra=resolved_extra, substrate="mockmed"
-    )
+class MockMedProvider:
+    """The built-in REFERENCE provider: the synthetic MockMed system of record.
 
-    def run_action():
-        return sut.run_task(task.spec, env, params=params)
+    REFERENCE-ONLY. This provider ships a correct, independent record-readback
+    oracle for its OWN synthetic fixture as a freebie -- the very cost a real
+    deployment must pay itself (see :mod:`effectbench.provider`). It exists to
+    reproduce the published reference result and to give a third party a runnable
+    template; it is NOT a general result about any real system of record.
 
-    try:
-        return score_episode(
-            episode_id=f"{sut.name}::{task.spec.task_id}::t{trial}",
-            task_id=task.spec.task_id,
-            arm=sut.name,
-            trial=trial,
-            substrate=task.spec.substrate,
-            category=task.spec.category,
+    It also hands the system under test a working product verifier through
+    :meth:`~effectbench.fixtures.mockmed.MockMedEnv.product_effect_verifier`,
+    again a convenience of the synthetic fixture. An external provider that does
+    not author its own product verifier returns ``None`` there, and
+    :class:`~effectbench.adapter.EffectVerifiedSUT` fails safe.
+    """
+
+    name = "mockmed"
+
+    def __init__(self, tasks: Sequence[MockMedTask] = MOCKMED_TASKS) -> None:
+        self._tasks = tuple(tasks)
+
+    def tasks(self) -> Sequence[MockMedTask]:
+        return self._tasks
+
+    def provision(self, task: MockMedTask, trial: int) -> EpisodeSetup:
+        params = trial_params(task.spec.task_id, trial)
+        env = _provision(task, params)
+        resolved_extra = [e.resolve(params) for e in task.extra_effects]
+        # The harness oracle -- a SEPARATE instance over the same store.
+        oracle = CompoundSnapshotOracle(
+            env.sor.read_records, extra=resolved_extra, substrate="mockmed"
+        )
+        return EpisodeSetup(
+            task=task.spec,
+            env=env,
             oracle=oracle,
-            expected_effect=task.spec.expected_effect,
-            run_action=run_action,
-            correct_action_available=task.correct_action_available,
             params=params,
+            correct_action_available=task.correct_action_available,
+            trial=trial,
             seed=trial,
             env_fingerprint={
                 "env": "mockmed",
@@ -86,9 +103,81 @@ def run_episode(
                 "synthetic": True,
             },
         )
+
+
+def run_setup(sut: SystemUnderTest, setup: EpisodeSetup) -> Optional[EpisodeRecord]:
+    """Run and score ONE provider-provisioned episode. ``None`` if it is dropped.
+
+    Provider-agnostic: it drives ``sut`` through ``setup.env`` (goal + params
+    only) and scores it with ``setup.oracle`` -- the independent ground-truth
+    oracle the SUT can never reach.
+    """
+    task = setup.task
+    env = setup.env
+    params = setup.params
+    expected_effect = setup.expected_effect or task.expected_effect
+    seed = setup.seed if setup.seed is not None else setup.trial
+    episode_id = setup.episode_id or f"{sut.name}::{task.task_id}::t{setup.trial}"
+
+    def run_action():
+        return sut.run_task(task, env, params=params)
+
+    try:
+        return score_episode(
+            episode_id=episode_id,
+            task_id=task.task_id,
+            arm=sut.name,
+            trial=setup.trial,
+            substrate=task.substrate,
+            category=task.category,
+            oracle=setup.oracle,
+            expected_effect=expected_effect,
+            run_action=run_action,
+            correct_action_available=setup.correct_action_available,
+            params=params,
+            seed=seed,
+            env_fingerprint=setup.env_fingerprint,
+        )
     except ValueError:
         # UNREADABLE oracle -> not scoreable. Drop rather than guess.
         return None
+
+
+def run_episode(
+    sut: SystemUnderTest, task: MockMedTask, trial: int
+) -> Optional[EpisodeRecord]:
+    """Run and score ONE (sut, MockMed task, trial). ``None`` if dropped.
+
+    A thin convenience over the default :class:`MockMedProvider`. New code that
+    scores a different system of record should implement a
+    :class:`~effectbench.provider.BenchmarkProvider` and use
+    :func:`evaluate_provider` instead.
+    """
+    return run_setup(sut, MockMedProvider().provision(task, trial))
+
+
+def evaluate_provider(
+    sut: SystemUnderTest,
+    provider: BenchmarkProvider,
+    *,
+    trials: int = 10,
+) -> list[EpisodeRecord]:
+    """Run ``sut`` over every task ``provider`` exposes, ``trials`` per task.
+
+    This is the provider-agnostic entry point: pass the built-in
+    :class:`MockMedProvider` for the reference fixture, or YOUR OWN
+    :class:`~effectbench.provider.BenchmarkProvider` to score EffectBench on a
+    system of record the benchmark authors did NOT build. Returns every scoreable
+    :class:`~effectbench.schema.EpisodeRecord`.
+    """
+    records: list[EpisodeRecord] = []
+    for task in provider.tasks():
+        for trial in range(trials):
+            setup = provider.provision(task, trial)
+            record = run_setup(sut, setup)
+            if record is not None:
+                records.append(record)
+    return records
 
 
 def evaluate(
@@ -97,15 +186,11 @@ def evaluate(
     tasks: Sequence[MockMedTask] = MOCKMED_TASKS,
     trials: int = 10,
 ) -> list[EpisodeRecord]:
-    """Run the whole MockMed anchor for ``sut``, ``trials`` per task.
+    """Run the whole synthetic MockMed anchor for ``sut``, ``trials`` per task.
 
-    Returns every scoreable :class:`~effectbench.schema.EpisodeRecord`. Summarize
-    with :func:`effectbench.metrics.summarize` to get SWER + co-metrics.
+    A convenience over :func:`evaluate_provider` with the built-in REFERENCE
+    :class:`MockMedProvider`. Returns every scoreable
+    :class:`~effectbench.schema.EpisodeRecord`. Summarize with
+    :func:`effectbench.metrics.summarize` to get SWER + co-metrics.
     """
-    records: list[EpisodeRecord] = []
-    for task in tasks:
-        for trial in range(trials):
-            record = run_episode(sut, task, trial)
-            if record is not None:
-                records.append(record)
-    return records
+    return evaluate_provider(sut, MockMedProvider(tasks), trials=trials)

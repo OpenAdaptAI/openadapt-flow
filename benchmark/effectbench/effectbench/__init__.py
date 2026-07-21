@@ -50,7 +50,14 @@ from effectbench.oracle import (
     effect_state,
     score_episode,
 )
-from effectbench.runner import evaluate, run_episode
+from effectbench.provider import BenchmarkProvider, EpisodeSetup
+from effectbench.runner import (
+    MockMedProvider,
+    evaluate,
+    evaluate_provider,
+    run_episode,
+    run_setup,
+)
 from effectbench.schema import (
     AgentReport,
     DivergenceCategory,
@@ -118,4 +125,10 @@ __all__ = [
     "EffectVerifiedSUT",
     "evaluate",
     "run_episode",
+    # pluggable external system-of-record + oracle
+    "BenchmarkProvider",
+    "EpisodeSetup",
+    "MockMedProvider",
+    "evaluate_provider",
+    "run_setup",
 ]

@@ -249,14 +249,12 @@ def find_text(
         A :class:`Match` centered on the best qualifying line's bounding box,
         or ``None`` if no line is similar enough.
     """
-    target = normalize_text(text)
-    if not target:
-        return None
-    qualifying: list[tuple[float, OcrLine]] = []
-    for line in ocr(screen_png, region=region):
-        ratio = difflib.SequenceMatcher(None, normalize_text(line.text), target).ratio()
-        if ratio >= min_ratio:
-            qualifying.append((ratio, line))
+    qualifying = _qualifying_text_lines(
+        screen_png,
+        text,
+        region=region,
+        min_ratio=min_ratio,
+    )
     if len(qualifying) > 1:
         if raise_on_ambiguity:
             raise AmbiguousOcrMatchError(
@@ -267,3 +265,58 @@ def find_text(
     ratio, line = max(qualifying, key=lambda item: item[0])
     x, y, w, h = line.region
     return Match(point=(x + w // 2, y + h // 2), region=line.region, confidence=ratio)
+
+
+def find_text_candidates(
+    screen_png: bytes,
+    text: str,
+    *,
+    region: Region | None = None,
+    min_ratio: float = 0.8,
+) -> list[Match]:
+    """Return every OCR line that qualifies for ``text``.
+
+    Target resolution needs the complete candidate set so it can distinguish
+    repeated labels with independent retained evidence (for example the
+    recorded target region or landmark relations).  This API deliberately
+    makes no selection: candidate order is not evidence, and callers must
+    prove uniqueness before acting.
+
+    Generic callers should continue to use :func:`find_text`, whose default
+    best-match behavior remains backward compatible.
+    """
+    matches: list[Match] = []
+    for ratio, line in _qualifying_text_lines(
+        screen_png,
+        text,
+        region=region,
+        min_ratio=min_ratio,
+    ):
+        x, y, w, h = line.region
+        matches.append(
+            Match(
+                point=(x + w // 2, y + h // 2),
+                region=line.region,
+                confidence=ratio,
+            )
+        )
+    return matches
+
+
+def _qualifying_text_lines(
+    screen_png: bytes,
+    text: str,
+    *,
+    region: Region | None,
+    min_ratio: float,
+) -> list[tuple[float, OcrLine]]:
+    """Return qualifying ``(similarity, line)`` pairs without selecting one."""
+    target = normalize_text(text)
+    if not target:
+        return []
+    qualifying: list[tuple[float, OcrLine]] = []
+    for line in ocr(screen_png, region=region):
+        ratio = difflib.SequenceMatcher(None, normalize_text(line.text), target).ratio()
+        if ratio >= min_ratio:
+            qualifying.append((ratio, line))
+    return qualifying

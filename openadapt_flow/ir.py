@@ -557,27 +557,32 @@ class Interstitial(BaseModel):
     """A KNOWN recurring interstitial that can appear at a step's entry frame
     and would otherwise block the run (docs/LIMITS.md "state dependency").
 
-    Examples are the survey / "rate this" modal, a "What's New" release notice,
-    a cookie or consent banner, a "session about to expire" nudge -- overlays
-    that are NOT part of the recorded task but appear intermittently and, left
-    unhandled, either steal the click (a silent wrong action) or make the target
-    unresolvable (a babysit-the-queue halt every time they show).
+    Examples are a reversible "rate this" modal or a "What's New" release
+    notice -- overlays that are NOT part of the recorded task but appear
+    intermittently and, left unhandled, either steal the click (a silent wrong
+    action) or make the target unresolvable (a babysit-the-queue halt every time
+    they show). Consent, authentication, submission, and other consequential
+    prompts are deliberately outside this automatic path.
 
     Detection is model-free: ``detect`` is a Phase-1 :class:`Predicate` (a
     ``TEXT_PRESENT`` on the overlay's signature text is typical), evaluated over
     the settled entry frame with ZERO model calls. Handling is declarative:
 
-    - ``dismiss_key`` set -> press that key (e.g. ``"Escape"``, ``"Enter"``) to
-      dismiss it, then re-settle and re-check.
-    - ``dismiss_anchor`` set -> resolve+click that control (e.g. an "OK" /
-      "Continue" button) via the SAME model-free resolution ladder, then
-      re-settle and re-check.
+    - ``dismiss_key`` set -> press Escape to dismiss it, then re-settle and
+      verify the declared ``clearance`` predicate.
+    - ``dismiss_anchor`` set -> resolve+click a non-consequential close control
+      via the SAME model-free resolution ladder, then re-settle and verify the
+      declared ``clearance`` predicate.
     - NEITHER set -> a known BLOCKING interstitial with no safe automatic
       dismissal: the run HALTS gracefully NAMING it (a clear report, not a blind
       "target not found"), so an operator handles it deliberately.
 
-    A never-dismissed interstitial (still detected after the bounded number of
-    dismissal attempts) also HALTS -- the safe direction. Interstitials are
+    Automatic dismissal is admitted only when ``risk`` is explicitly
+    ``"reversible"``, ``consequential`` is explicitly ``False``, and an
+    expected visual ``clearance`` predicate is declared. Every attempted
+    dismissal is recorded in the enclosing :class:`StepResult` before delivery;
+    a delivery error, failed clearance, or persistent detection HALTs after one
+    action (no blind retries). Interstitials are
     checked at EVERY step's entry, before the guard / wait_until gates, since an
     overlay can appear at any point in a workflow, not only at its start.
     """
@@ -589,13 +594,29 @@ class Interstitial(BaseModel):
     )
     dismiss_key: Optional[str] = Field(
         default=None,
-        description="Key/chord to press to dismiss it (e.g. 'Escape', 'Enter'). "
-        "Mutually exclusive with dismiss_anchor in practice; when set it wins.",
+        description="Key to press to dismiss it. Only 'Escape' is admitted on "
+        "the automatic non-consequential path. Mutually exclusive with "
+        "dismiss_anchor.",
     )
     dismiss_anchor: Optional[Anchor] = Field(
         default=None,
-        description="Control to resolve+click to dismiss it (e.g. an OK button). "
-        "Used when no key dismisses the overlay.",
+        description="Non-consequential close control to resolve+click. Used "
+        "when Escape does not dismiss the overlay.",
+    )
+    risk: Optional[Literal["reversible", "irreversible"]] = Field(
+        default=None,
+        description="Declared dismissal risk. Automatic dismissal requires an "
+        "explicit 'reversible' declaration.",
+    )
+    consequential: Optional[bool] = Field(
+        default=None,
+        description="Whether dismissal can create a consequential state change. "
+        "Automatic dismissal requires an explicit false declaration.",
+    )
+    clearance: Optional[Predicate] = Field(
+        default=None,
+        description="Expected visual postcondition after dismissal. It must hold "
+        "and the detection predicate must no longer hold before replay continues.",
     )
 
     @model_validator(mode="after")
@@ -607,6 +628,31 @@ class Interstitial(BaseModel):
         if self.dismiss_key is not None and self.dismiss_anchor is not None:
             raise ValueError(
                 "interstitial must declare at most one dismissal mechanism"
+            )
+        has_dismissal = self.dismiss_key is not None or self.dismiss_anchor is not None
+        if self.dismiss_key is not None and self.dismiss_key.strip() != "Escape":
+            raise ValueError(
+                "automatic interstitial key dismissal only permits Escape; "
+                "submit/confirm keys must be modeled as governed workflow steps"
+            )
+        if has_dismissal:
+            if self.risk != "reversible" or self.consequential is not False:
+                raise ValueError(
+                    "automatic interstitial dismissal requires explicit "
+                    "risk='reversible' and consequential=False declarations"
+                )
+            if self.clearance is None:
+                raise ValueError(
+                    "automatic interstitial dismissal requires an expected "
+                    "clearance postcondition"
+                )
+        elif any(
+            value is not None
+            for value in (self.risk, self.consequential, self.clearance)
+        ):
+            raise ValueError(
+                "blocking interstitials without a dismissal must not declare "
+                "dismissal risk or clearance"
             )
 
         def affirmative_visual(pred: Predicate) -> bool:
@@ -620,12 +666,32 @@ class Interstitial(BaseModel):
                 )
             return False
 
+        def visual_postcondition(pred: Predicate) -> bool:
+            if pred.kind in (PredicateKind.TEXT_PRESENT, PredicateKind.TEXT_ABSENT):
+                return bool(pred.text and pred.text.strip())
+            if pred.kind is PredicateKind.ANCHOR_RESOLVES:
+                return pred.anchor is not None and bool(pred.anchor.template.strip())
+            if pred.kind in (PredicateKind.AND, PredicateKind.OR):
+                return bool(pred.operands) and all(
+                    visual_postcondition(operand) for operand in pred.operands
+                )
+            if pred.kind is PredicateKind.NOT:
+                return len(pred.operands) == 1 and visual_postcondition(
+                    pred.operands[0]
+                )
+            return False
+
         if not affirmative_visual(self.detect):
             raise ValueError(
                 "interstitial detection must use affirmative visual evidence "
                 "(TEXT_PRESENT or ANCHOR_RESOLVES, optionally composed with "
                 "AND/OR); absence, parameter, and negated predicates could "
                 "trigger a blind dismissal"
+            )
+        if self.clearance is not None and not visual_postcondition(self.clearance):
+            raise ValueError(
+                "interstitial clearance must be a visual postcondition; "
+                "parameter-only predicates cannot verify a UI dismissal"
             )
         return self
 
@@ -1125,12 +1191,13 @@ class Workflow(BaseModel):
         ),
     )
     steps: list[Step] = Field(default_factory=list)
-    # KNOWN recurring interstitials (survey modal, "What's New" notice, cookie
-    # banner, ...) the runtime detects (model-free) at EACH step's entry and
-    # either auto-dismisses (dismiss_key / dismiss_anchor) or HALTs on gracefully
-    # (docs/LIMITS.md "state dependency"). Empty by default, so a bundle that
-    # declares none behaves exactly as before. An operator can also supply extra
-    # interstitials at run time (Replayer(interstitials=...)) WITHOUT recompiling.
+    # KNOWN recurring reversible, non-consequential interstitials the runtime
+    # detects (model-free) at EACH step's entry and either handles through an
+    # audited dismissal + declared visual clearance check, or HALTs on
+    # gracefully (docs/LIMITS.md "state dependency"). Empty by default, so a
+    # bundle that declares none behaves exactly as before. An operator can also
+    # supply extra interstitials at run time (Replayer(interstitials=...))
+    # WITHOUT recompiling; governed runs bind their full declarations.
     interstitials: list["Interstitial"] = Field(default_factory=list)
     # Workflow-program IR, Phase 2 (RFC §2): the parameterized STATE MACHINE.
     # ALL optional and additive -- when ``program`` is None the runtime executes
@@ -1517,6 +1584,31 @@ class HealEvent(BaseModel):
     applied: bool = False
 
 
+class InterstitialActionResult(BaseModel):
+    """Audited pre-step action for one declared interstitial dismissal.
+
+    The runtime appends this event before backend delivery, so an exception or
+    post-action refusal cannot hide the attempted key/click. ``delivered`` is
+    input-delivery evidence only; ``clearance_ok`` is the independent visual
+    outcome check that must be true before the workflow step may proceed.
+    """
+
+    interstitial: str
+    action: Literal["key", "click"]
+    key: Optional[str] = None
+    risk: Literal["reversible"] = "reversible"
+    consequential: Literal[False] = False
+    expected_clearance: Predicate
+    attempted: Literal[True] = True
+    delivered: bool = False
+    ok: bool = False
+    clearance_ok: Optional[bool] = None
+    resolution: Optional[Resolution] = None
+    before_frame_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    after_frame_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    error: Optional[str] = None
+
+
 class StepResult(BaseModel):
     step_id: str
     intent: str
@@ -1536,6 +1628,10 @@ class StepResult(BaseModel):
     input_verified: Optional[bool] = None  # TYPE steps: typed input landed
     input_retried: bool = False  # TYPE steps: refocus-and-retype fired
     postconditions_ok: Optional[bool] = None
+    # Every pre-step interstitial key/click is appended BEFORE backend delivery,
+    # so even an exception cannot produce an unreported action attempt. Failed
+    # delivery or visual clearance HALTs before the workflow step acts.
+    interstitial_actions: list[InterstitialActionResult] = Field(default_factory=list)
     # System-of-record effect verification (runtime.effects.EffectVerifier).
     # None when the step declared no `effects`; True when every declared
     # effect was CONFIRMED (or a duplicate was RECONCILED by compensation);

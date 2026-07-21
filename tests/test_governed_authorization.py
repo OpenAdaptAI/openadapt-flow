@@ -131,6 +131,9 @@ def test_runtime_interstitial_change_halts_before_action(tmp_path):
         name="survey",
         detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="rate us"),
         dismiss_key="Escape",
+        risk="reversible",
+        consequential=False,
+        clearance=Predicate(kind=PredicateKind.TEXT_ABSENT, text="rate us"),
     )
     backend = FakeBackend()
 

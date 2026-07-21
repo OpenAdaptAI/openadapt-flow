@@ -431,6 +431,39 @@ def test_interstitial_change_cannot_satisfy_action_structural_postcondition(
     ]
 
 
+def test_resolution_change_cannot_satisfy_action_structural_postcondition(
+    bundle, run_dir
+):
+    """Observation during target resolution is not an action outcome."""
+
+    class ResolutionChangesTitleBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.page_title = "before"
+
+        def locate_structural(self, locator):
+            self.page_title = "after"
+            return StructuralHandle(
+                point=(110, 105),
+                region=(100, 100, 50, 20),
+                target_fingerprint="a" * 64,
+            )
+
+    backend = ResolutionChangesTitleBackend()
+    step = click_step()
+    assert step.anchor is not None
+    step.anchor.structural = StructuralLocator(role="button", name="Submit")
+    step.expect = [Postcondition(kind=PostconditionKind.TITLE_CHANGED, timeout_s=0)]
+
+    report = Replayer(backend, vision=SettleVision(), poll_interval_s=0.005).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert report.results[0].postconditions_ok is False
+    assert backend.actions == [("click", 110, 105, False)]
+
+
 def test_structural_only_interstitial_uses_native_locate_and_act(bundle, run_dir):
     class StructuralBackend(FakeBackend):
         def __init__(self):

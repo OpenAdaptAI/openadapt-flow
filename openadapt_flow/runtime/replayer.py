@@ -2429,13 +2429,6 @@ class Replayer:
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
 
-            # Structural postconditions must compare the workflow action's end
-            # state against the state immediately BEFORE that action.  Entry
-            # readiness/interstitial gates may themselves change URL, title, or
-            # page count; sampling before them could let a dismissal falsely
-            # satisfy URL_CHANGED/TITLE_CHANGED/NEW_TAB_OPENED.
-            start_state = self._structural_state()
-
             resolution, matched_region, error = self._resolve_step(
                 step, before_png, bundle_dir, workflow
             )
@@ -2609,6 +2602,14 @@ class Replayer:
                 result.safety_halt = True
 
             if error is None:
+                # Structural postconditions compare against the final observed
+                # state immediately before action delivery.  Readiness gates,
+                # interstitial dismissal, target resolution, identity checks,
+                # and effect pre-state capture can all cross backend or time
+                # boundaries; none of their state changes may be credited to
+                # the workflow action as URL_CHANGED, TITLE_CHANGED, or
+                # NEW_TAB_OPENED.
+                start_state = self._structural_state()
                 error = self._act(
                     step,
                     resolution,

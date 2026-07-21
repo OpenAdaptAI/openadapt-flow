@@ -175,6 +175,35 @@ def main() -> None:
             f"{scenario} effect silent-wrong rate",
         )
 
+    # End-to-end silent-wrong-effect harness (through the REAL replayer): the
+    # genuinely independent, non-circular version of the silent-wrong result.
+    # Screen-verify silently accepts the 2xx-but-wrong persistence faults; the
+    # out-of-band REST record oracle drives that WAY down but not to zero (a
+    # collateral write to an unaudited surface slips its read path); a complete
+    # read path closes the gap. These are measured end-to-end, judged by an
+    # independent direct-sqlite ground truth.
+    effect_e2e = load("benchmark/effect_e2e/results.json")
+    e2e = effect_e2e["metrics"]["per_arm"]
+    require_equal(e2e["screen"]["n_runs"], 90, "effect-e2e screen runs")
+    require_equal(
+        e2e["screen"]["silent_wrong_count"], 54, "effect-e2e screen silent wrong"
+    )
+    require_equal(
+        e2e["effect_rest"]["silent_wrong_count"],
+        9,
+        "effect-e2e REST-oracle silent wrong (collateral write slips)",
+    )
+    require_equal(
+        e2e["effect_rest"]["silent_wrong_scenarios"],
+        ["collateral_unaudited"],
+        "effect-e2e REST-oracle slip class",
+    )
+    require_equal(
+        e2e["effect_full"]["silent_wrong_count"],
+        0,
+        "effect-e2e complete-read-path silent wrong",
+    )
+
     identity = load("benchmark/identity_ladder/identity_ladder.json")
     expected_identity = {
         "structured": (14, 14, 0, 0.0),

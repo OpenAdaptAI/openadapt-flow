@@ -151,6 +151,22 @@ def test_public_source_tree_excludes_private_data_and_recipes(tmp_path: Path) ->
         validate_public_source_tree(tmp_path)
 
 
+def test_public_lending_evidence_rejects_raw_rows_and_recipes(tmp_path: Path) -> None:
+    relative = Path("benchmark/lending_fault_model/swer_results.json")
+    source = json.loads((ROOT / relative).read_text())
+    destination = tmp_path / relative
+    destination.parent.mkdir(parents=True)
+    destination.write_text(json.dumps(source) + "\n")
+    write_public_artifact_inventory(tmp_path)
+    validate_public_source_tree(tmp_path)
+
+    source["episodes"] = [{"task_id": "private-row", "trial": 0}]
+    destination.write_text(json.dumps(source) + "\n")
+    write_public_artifact_inventory(tmp_path)
+    with pytest.raises(ValueError, match="bounded public lending evidence"):
+        validate_public_source_tree(tmp_path)
+
+
 def test_public_source_tree_inventory_fails_closed_on_neutral_renames(
     tmp_path: Path,
 ) -> None:

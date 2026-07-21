@@ -188,6 +188,64 @@ PUBLIC_SOURCE_FORBIDDEN_CATEGORIES = frozenset(
     }
 )
 
+LENDING_PUBLIC_EVIDENCE_PATH = "benchmark/lending_fault_model/swer_results.json"
+LENDING_PUBLIC_EVIDENCE_ARMS = frozenset(
+    {"screen_only", "effect_verify_single", "effect_verify_full"}
+)
+LENDING_PUBLIC_EVIDENCE_META_KEYS = frozenset(
+    {
+        "schema_version",
+        "evidence_scope",
+        "synthetic",
+        "domain",
+        "oracle",
+        "single_surface_read_path",
+        "full_read_path",
+        "ground_truth",
+        "arms",
+        "tasks",
+        "trials_per_task_per_arm",
+        "deterministic",
+        "model_calls",
+    }
+)
+LENDING_PUBLIC_EVIDENCE_ARM_KEYS = frozenset(
+    {
+        "arm",
+        "arms",
+        "n_episodes",
+        "n_tasks",
+        "swer",
+        "swer_wrong_write",
+        "swer_phantom",
+        "over_halt",
+        "task_success",
+        "screen_success",
+        "success_effect_gap",
+        "success_effect_gap_ci",
+        "total_cost_usd",
+        "mean_cost_usd",
+        "mean_latency_s",
+        "pass_hat_k",
+        "cells",
+        "outcome_counts",
+    }
+)
+LENDING_PUBLIC_EVIDENCE_CELL_KEYS = frozenset(
+    {
+        "category",
+        "substrate",
+        "n",
+        "swer",
+        "swer_wrong_write",
+        "swer_phantom",
+        "over_halt",
+        "task_success",
+        "screen_success",
+        "success_effect_gap",
+    }
+)
+
 
 def _canonical_source_path(path: str, *, source: str) -> str:
     """Return a canonical relative POSIX path or fail closed."""
@@ -331,7 +389,9 @@ def _parse_public_artifact_inventory(payload: bytes, *, source: str) -> dict[str
     try:
         document = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"could not parse reviewed public artifact inventory in {source}: {error}") from error
+        raise ValueError(
+            f"could not parse reviewed public artifact inventory in {source}: {error}"
+        ) from error
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
         "policy",
@@ -354,11 +414,15 @@ def _parse_public_artifact_inventory(payload: bytes, *, source: str) -> dict[str
         if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
             raise ValueError("public artifact inventory row has an unexpected schema")
         if not isinstance(row["path"], str) or not isinstance(row["sha256"], str):
-            raise ValueError("public artifact inventory path and SHA-256 must be strings")
+            raise ValueError(
+                "public artifact inventory path and SHA-256 must be strings"
+            )
         relative = _canonical_source_path(row["path"], source="inventory")
         digest = row["sha256"]
         if relative <= previous:
-            raise ValueError("public artifact inventory paths must be unique and sorted")
+            raise ValueError(
+                "public artifact inventory paths must be unique and sorted"
+            )
         if not _artifact_inventory_candidate(relative):
             raise ValueError(
                 f"public artifact inventory contains a non-artifact path: {relative}"
@@ -397,7 +461,9 @@ def _validate_public_artifact_inventory(
             f"missing={sorted(expected - observed)}"
         )
     changed = [
-        path for path in sorted(expected) if _sha256_file(files[path]) != inventory[path]
+        path
+        for path in sorted(expected)
+        if _sha256_file(files[path]) != inventory[path]
     ]
     if changed:
         raise ValueError(
@@ -405,6 +471,65 @@ def _validate_public_artifact_inventory(
             f"review it: {changed}"
         )
     return inventory
+
+
+def _validate_bounded_lending_evidence(files: dict[str, Path]) -> None:
+    """Keep the published lending result aggregate-only and schema-bounded."""
+    path = files.get(LENDING_PUBLIC_EVIDENCE_PATH)
+    if path is None:
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"could not parse bounded public lending evidence at {path}: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise ValueError("bounded public lending evidence must be a JSON object")
+    expected_top = {"meta", *LENDING_PUBLIC_EVIDENCE_ARMS}
+    if set(payload) != expected_top:
+        raise ValueError(
+            "bounded public lending evidence has unexpected top-level keys; "
+            "raw rows and scenario recipes must remain private/in-memory"
+        )
+    meta = payload.get("meta")
+    if not isinstance(meta, dict) or set(meta) != LENDING_PUBLIC_EVIDENCE_META_KEYS:
+        raise ValueError(
+            "bounded public lending evidence has an unexpected meta schema"
+        )
+    if (
+        meta.get("schema_version") != 1
+        or meta.get("evidence_scope") != "bounded_aggregate"
+        or meta.get("synthetic") is not True
+        or meta.get("arms")
+        != [
+            "screen_only",
+            "effect_verify_single",
+            "effect_verify_full",
+        ]
+    ):
+        raise ValueError("bounded public lending evidence metadata is invalid")
+    for arm in LENDING_PUBLIC_EVIDENCE_ARMS:
+        summary = payload.get(arm)
+        if (
+            not isinstance(summary, dict)
+            or set(summary) != LENDING_PUBLIC_EVIDENCE_ARM_KEYS
+        ):
+            raise ValueError(
+                f"bounded public lending evidence has an unexpected {arm} schema"
+            )
+        cells = summary.get("cells")
+        if not isinstance(cells, list) or not cells:
+            raise ValueError(
+                f"bounded public lending evidence {arm} must retain category cells"
+            )
+        if any(
+            not isinstance(cell, dict) or set(cell) != LENDING_PUBLIC_EVIDENCE_CELL_KEYS
+            for cell in cells
+        ):
+            raise ValueError(
+                f"bounded public lending evidence {arm} has an unexpected cell schema"
+            )
 
 
 def _wheel_member_source_path(member: str) -> str:
@@ -461,6 +586,7 @@ def validate_public_source_tree(root: Path = ROOT) -> None:
     files = _walk_public_source_files(root)
     members = set(files)
     _validate_public_artifact_inventory(files, root=root)
+    _validate_bounded_lending_evidence(files)
 
     private_signature_hits = {
         member
@@ -877,17 +1003,14 @@ def validate_distribution_directory(
         wheel_inventory = wheel_archive.read(WHEEL_ARTIFACT_INVENTORY_PATH)
     expected_sdist_root = sdist.name.removesuffix(".tar.gz")
     with tarfile.open(sdist, mode="r:gz") as sdist_archive:
-        sdist_member = (
-            f"{expected_sdist_root}/{PUBLIC_ARTIFACT_INVENTORY_PATH}"
-        )
+        sdist_member = f"{expected_sdist_root}/{PUBLIC_ARTIFACT_INVENTORY_PATH}"
         extracted = sdist_archive.extractfile(sdist_member)
         if extracted is None:  # already rejected by the individual validator
             raise ValueError("source distribution inventory could not be read")
         sdist_inventory = extracted.read()
     if wheel_inventory != sdist_inventory:
         raise ValueError(
-            "wheel and source distribution embed different public artifact "
-            "inventories"
+            "wheel and source distribution embed different public artifact inventories"
         )
     effective_version = version or wheel_version
     expected_prefix = f"{DIST_NAME}-{effective_version}"
@@ -926,7 +1049,12 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.write_public_artifact_inventory:
-        if args.sync or args.require_dist or args.validate_dist_dir or args.license_file:
+        if (
+            args.sync
+            or args.require_dist
+            or args.validate_dist_dir
+            or args.license_file
+        ):
             parser.error(
                 "--write-public-artifact-inventory cannot be combined with "
                 "release synchronization or distribution validation"

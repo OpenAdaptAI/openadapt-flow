@@ -4,11 +4,12 @@ Two layers, both CI-fast and model-free:
 
 - Pure-Python tests of the lending outcome taxonomy
   (``benchmark.lending_fault_model.faults``) and the fault registry.
-- A LIVE two-arm Silent Wrong-Effect run through the shared EffectBench
+- A LIVE three-arm Silent Wrong-Effect run through the shared EffectBench
   contract (``benchmark.lending_fault_model.swer``) against the MockLoan fault
   server's real HTTP persistence boundary (``GET /api/db``) - asserting the
-  headline: the screen-only arm silently mishandles the injected faults while
-  the effect-verified arm drives SWER to zero. No Playwright browser is needed
+  headline: screen-only leaves silent wrong effects, a single-surface verifier
+  leaves the collateral residual, and the complete read path drives SWER to
+  zero. No Playwright browser is needed
   (the writes go straight to the boundary), so this runs in the fast `test`
   gate, not the `e2e-browser` gate.
 """
@@ -211,6 +212,39 @@ class TestLiveThreeArmSwer:
         # The success-effect gap collapses down the ladder.
         assert full.success_effect_gap <= single.success_effect_gap
         assert single.success_effect_gap < screen.success_effect_gap
+
+    def test_committed_shape_is_a_bounded_public_aggregate(self) -> None:
+        result = S.measure(trials=1)
+
+        assert set(result) == {"meta", *S.ARMS}
+        assert result["meta"]["evidence_scope"] == "bounded_aggregate"
+        observed_keys: set[str] = set()
+
+        def collect_keys(value: object) -> None:
+            if isinstance(value, dict):
+                observed_keys.update(str(key) for key in value)
+                for child in value.values():
+                    collect_keys(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_keys(child)
+
+        collect_keys(result)
+        for raw_key in (
+            "episode_id",
+            "task_id",
+            "trial",
+            "params",
+            "env_fingerprint",
+            "expected_effect_hash",
+        ):
+            assert raw_key not in observed_keys
+
+        # EffectBench's category-level decomposition remains public; the raw
+        # task/episode matrix does not.
+        assert result["screen_only"]["cells"]
+        assert "episodes" not in result
+        assert "coverage_matrix" not in result
 
     def test_single_surface_residual_is_exactly_the_collateral_class(self) -> None:
         episodes = S.run_pack(trials=3)

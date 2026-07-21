@@ -64,9 +64,7 @@ import argparse
 import contextlib
 import hashlib
 import json
-import platform
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -425,42 +423,22 @@ def run_pack(
     return episodes
 
 
-def _coverage_matrix(episodes: list[EpisodeRecord]) -> list[dict]:
-    """Per-scenario (task x arm) outcome, the deterministic-replay unit.
-
-    Because every fault is injected deterministically and the writes are fixed,
-    all trials of a (task, arm) agree; this collapses them to one cell per
-    scenario and flags the silent-wrong-effect residual explicitly.
-    """
-    rows: list[dict] = []
-    for task in TASKS:
-        row: dict = {
-            "task_id": task.task_id,
-            "category": task.category.value,
-            "fault": task.fault or "(identity/no-op)",
-        }
-        for arm in ARMS:
-            outs = sorted(
-                {
-                    e.outcome.value
-                    for e in episodes
-                    if e.task_id == task.task_id and e.arm == arm
-                }
-            )
-            row[arm] = "|".join(outs)
-            row[f"{arm}_silent"] = "silent_wrong_effect" in outs
-        rows.append(row)
-    return rows
-
-
 def measure(trials: int = 3) -> dict:
+    """Run the study and return its bounded public aggregate.
+
+    ``run_pack`` remains the programmatic surface for tests that need individual
+    synthetic episodes. The committed/printed artifact deliberately contains no
+    per-episode rows, task identifiers, payloads, environment fingerprints, or
+    target recipes. Its mandatory EffectBench ``cells`` retain the bounded
+    category-level decomposition needed to interpret an overall rate.
+    """
     episodes = run_pack(trials=trials)
     summaries = {arm: summarize(episodes, arm=arm) for arm in ARMS}
     return {
         "meta": {
-            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "platform": f"{platform.system()} {platform.machine()} "
-            f"py{platform.python_version()}",
+            "schema_version": 1,
+            "evidence_scope": "bounded_aggregate",
+            "synthetic": True,
             "domain": "lending (MockLoan) - loan disbursement authorization",
             "oracle": (
                 "runtime.effects.RestRecordVerifier over the COMPLETE read path "
@@ -476,8 +454,6 @@ def measure(trials: int = 3) -> dict:
             "model_calls": 0,
         },
         **{arm: summaries[arm].model_dump(mode="json") for arm in ARMS},
-        "coverage_matrix": _coverage_matrix(episodes),
-        "episodes": [e.model_dump(mode="json") for e in episodes],
     }
 
 
@@ -492,12 +468,13 @@ truth judging all three arms is the complete read path; each arm never trusts th
 screen or its own self-report. Every trial binds a trial-unique memo + idempotency
 key. Zero model calls.
 
-**The gate (AGENTS.md safety asymmetry): the only dangerous error is a SILENT
-WRONG-EFFECT - reporting/rendering success while the ledger disagrees.** A single
-out-of-band oracle collapses it to a residual on exactly one class (a collateral
-write to a surface it does not read); only a complete read path over every
-mutable surface reaches 0. Over-halt (halting when the write was actually fine) is
-the safe error; it is reported as the availability cost.
+**The primary gate is SILENT WRONG-EFFECT - reporting/rendering success while the
+ledger disagrees.** A single out-of-band oracle collapses it to a residual on
+exactly one class (a collateral write to a surface it does not read); only a
+complete read path over every mutable surface reaches 0. `wrong_action` is
+reported separately because post-action verification can detect an incorrect
+effect after persistence but cannot retroactively prevent it. Over-halt (halting
+when the write was actually fine) is the safe availability cost.
 
 Both MockLoan and the clinical MockMed are SYNTHETIC apps built by the same team.
 A matching single-surface residual across the two domains is SUGGESTIVE of
@@ -522,8 +499,6 @@ def to_markdown(result: dict) -> str:
     full = by_arm["effect_verify_full"]
     screen = by_arm["screen_only"]
     lines = [_MD_HEADER, ""]
-    lines.append(f"Generated: {m['generated_at']}  ")
-    lines.append(f"Platform: {m['platform']}  ")
     lines.append(
         f"Tasks: {m['tasks']} (divergence classes C1-C8 + clean / idempotent "
         f"controls).  "
@@ -538,10 +513,10 @@ def to_markdown(result: dict) -> str:
     lines.append("## Headline - the ladder")
     lines.append("")
     lines.append(
-        "| arm | read path | episodes | SWER | over-halt | task success | "
-        "success-effect gap |"
+        "| arm | read path | episodes | SWER | wrong action | over-halt | "
+        "task success | success-effect gap |"
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|")
     read_paths = {
         "screen_only": "the rendered banner",
         "effect_verify_single": f"single surface (`{m['single_surface_read_path']}`)",
@@ -551,7 +526,8 @@ def to_markdown(result: dict) -> str:
         d = by_arm[arm]
         lines.append(
             f"| `{arm}` | {read_paths[arm]} | {d['n_episodes']} | "
-            f"{_fmt_rate(d)} | {round(d['over_halt']['rate'], 3)} | "
+            f"{_fmt_rate(d)} | {d['outcome_counts'].get('wrong_action', 0)}"
+            f"/{d['n_episodes']} | {round(d['over_halt']['rate'], 3)} | "
             f"{round(d['task_success']['rate'], 3)} | "
             f"{round(d['success_effect_gap'], 3)} |"
         )
@@ -573,30 +549,13 @@ def to_markdown(result: dict) -> str:
     lines.append(
         f"- Complete-read-path SWER = {_fmt_rate(full)}: reading every "
         "mutable surface (disbursements + fees) sees the collateral row and "
-        f"drives the residual to 0; the residual cost is over-halt = "
-        f"{round(full['over_halt']['rate'], 3)} (safe: a human finishes a "
-        "recoverable "
-        "case). 0 requires a read path covering EVERY mutable surface."
+        f"drives the *silent* residual to 0. It records "
+        f"{full['outcome_counts'].get('wrong_action', 0)}/{full['n_episodes']} "
+        "wrong actions detected after persistence and over-halt = "
+        f"{round(full['over_halt']['rate'], 3)}. Zero SWER therefore means no "
+        "incorrect effect was silently certified; it does not mean the "
+        "post-action verifier prevented every incorrect write."
     )
-    lines.append("")
-    lines.append("## Coverage matrix (deterministic - one cell per scenario)")
-    lines.append("")
-    lines.append(
-        "| task | class | fault | screen_only | effect_verify_single | "
-        "effect_verify_full |"
-    )
-    lines.append("|---|---|---|---|---|---|")
-    for row in result["coverage_matrix"]:
-
-        def _cell(arm: str, row: dict = row) -> str:
-            mark = " (SILENT)" if row[f"{arm}_silent"] else ""
-            return f"{row[arm]}{mark}"
-
-        lines.append(
-            f"| `{row['task_id']}` | {row['category']} | {row['fault']} | "
-            f"{_cell('screen_only')} | {_cell('effect_verify_single')} | "
-            f"{_cell('effect_verify_full')} |"
-        )
     lines.append("")
     lines.append("## Per-outcome counts")
     lines.append("")
@@ -623,7 +582,8 @@ def to_markdown(result: dict) -> str:
         "read counts one correct money-movement row (CONFIRMED), while the "
         "complete read path counts two for one authorization (at-most-once "
         "violated -> REFUTED). That is why the single-surface arm reports a "
-        "silent success and the complete-read-path arm halts. The C6 task seeds "
+        "silent success and the complete-read-path arm refuses to certify the "
+        "already-persisted incorrect effect. The C6 task seeds "
         "a same-name decoy loan and funds it; the intended loan stays empty, so "
         "a blind (identity-less) write is a silent wrong-effect under "
         "`screen_only` and an over-halt (caught, safe) under both effect arms."
@@ -642,7 +602,12 @@ def to_markdown(result: dict) -> str:
         "- **0 requires a COMPLETE read path** covering every mutable surface. "
         "The complete-read-path arm reaches 0 here only because `/api/db` spans "
         "both the disbursements and the fees surfaces; a real deployment must "
-        "enumerate and read every surface a consequential write can touch.\n"
+        "enumerate and read every surface a consequential write can touch. "
+        "This is post-action detection, not rollback or proof that no incorrect "
+        "write occurred.\n"
+        "- **The committed JSON is a bounded public aggregate.** It retains "
+        "overall and category-level EffectBench metrics, but no raw episode "
+        "rows, payloads, environment fingerprints, or target recipes.\n"
         "- **No confidence intervals are implied.** These are deterministic "
         "replays (variance ~ 0); the table is a coverage matrix over scenarios, "
         "not a sampled estimate."

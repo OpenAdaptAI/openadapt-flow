@@ -225,6 +225,7 @@ def main() -> None:
     lend_single = lending["effect_verify_single"]["swer"]["numerator"]
     lend_full = lending["effect_verify_full"]["swer"]["numerator"]
     lend_overhalt = lending["effect_verify_full"]["over_halt"]["numerator"]
+    lend_wrong_action = lending["effect_verify_full"]["outcome_counts"]["wrong_action"]
     require_equal(lend_den, 36, "lending episodes per arm")
     require_equal(lend_screen, 24, "lending screen silent wrong")
     require_equal(
@@ -239,6 +240,9 @@ def main() -> None:
         "lending screen-only over-halts",
     )
     require_equal(lend_overhalt, 6, "lending complete-read-path over-halts")
+    require_equal(
+        lend_wrong_action, 15, "lending complete-read-path detected wrong actions"
+    )
 
     # EffectBench: the metric + fault taxonomy packaged as a standalone, versioned,
     # independently runnable benchmark. Bind the released spec version the paper
@@ -439,6 +443,11 @@ def main() -> None:
         main_tex,
         f"{lend_full} of {lend_den} under a complete read path",
         "abstract lending complete-read-path",
+    )
+    require_contains(
+        results_tex,
+        f"classified {lend_wrong_action} of {lend_den} runs as wrong actions",
+        "lending post-write detection disclosure",
     )
 
     # Released standalone benchmark reference.

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.deployment import build_effect_verifier, load_deployment
 from openadapt_flow.ir import StructuralLocator
 from openadapt_flow.runtime.effects import (
@@ -44,6 +45,7 @@ from openimis_eligibility_demo import (  # noqa: E402
 DEPLOYMENT_YAML = (
     REPO_ROOT / "benchmark" / "openimis_claims" / "deployment.eligibility.yaml"
 )
+EXPECTED_CONTRACT_HASH = "sha256:" + "a" * 64
 
 
 def test_browser_adapter_records_stable_structural_and_run_bound_identity() -> None:
@@ -54,10 +56,13 @@ def test_browser_adapter_records_stable_structural_and_run_bound_identity() -> N
         def evaluate(script: str, point: list[int]) -> object:
             assert point == [320, 240]
             if "target_kind" in script:
-                return (
-                    '{"target_kind":"eligibility_service",'
-                    '"target_id":"service_code","insurance_no":"999000003"}'
-                )
+                return {
+                    "context": {
+                        "target_kind": "eligibility_service",
+                        "target_id": "service_code",
+                    },
+                    "dialog_identifiers": [["999000003"]],
+                }
             return {
                 "selector": 'input[placeholder^="Search Service"]',
                 "role": "textbox",
@@ -74,7 +79,99 @@ def test_browser_adapter_records_stable_structural_and_run_bound_identity() -> N
     identity = backend.structured_text_at(320, 240)
     assert identity is not None
     assert '"insurance_no":"999000003"' in identity
-    assert "insuranceNumbers.size !== 1" in backend._IDENTITY_JS
+
+
+@pytest.mark.parametrize(
+    "dialog_identifiers",
+    [
+        [["999000003"], ["999000003"]],
+        [["999000003"], ["999000004"]],
+        [["999000003", "999000004"]],
+        [],
+    ],
+    ids=[
+        "same-record-two-dialogs",
+        "different-records",
+        "two-ids-one-dialog",
+        "missing",
+    ],
+)
+def test_browser_adapter_refuses_ambiguous_record_dialogs(
+    dialog_identifiers: list[list[str]],
+) -> None:
+    class Page:
+        @staticmethod
+        def evaluate(script: str, point: list[int]) -> object:
+            assert point == [320, 240]
+            return {
+                "context": {
+                    "target_kind": "eligibility_service",
+                    "target_id": "service_code",
+                },
+                "dialog_identifiers": dialog_identifiers,
+            }
+
+    backend = OpenIMISEligibilityBackend(Page())  # type: ignore[arg-type]
+    assert backend.structured_text_at(320, 240) is None
+
+
+def test_browser_adapter_refuses_ambiguous_structural_candidates() -> None:
+    class Candidates:
+        @staticmethod
+        def evaluate_all(script: str) -> list[int]:
+            return [0, 1]
+
+    class Page:
+        @staticmethod
+        def locator(selector: str) -> Candidates:
+            assert selector == 'input[placeholder^="Search Service"]'
+            return Candidates()
+
+    backend = OpenIMISEligibilityBackend(Page())  # type: ignore[arg-type]
+    with pytest.raises(StructuralResolutionRefused, match="ambiguous"):
+        backend.locate_structural(
+            StructuralLocator(selector='input[placeholder^="Search Service"]')
+        )
+
+
+def test_browser_adapter_ignores_hidden_structural_duplicate() -> None:
+    class Candidate:
+        @staticmethod
+        def bounding_box() -> dict[str, float]:
+            return {"x": 100, "y": 50, "width": 40, "height": 20}
+
+        @staticmethod
+        def evaluate(script: str, point: list[int]) -> bool:
+            assert point == [120, 60]
+            return True
+
+    class Candidates:
+        @staticmethod
+        def evaluate_all(script: str) -> list[int]:
+            # CSS matched a hidden React template at index 0 and the sole live
+            # control at index 1; only the latter is returned by the JS filter.
+            return [1]
+
+        @staticmethod
+        def nth(index: int) -> Candidate:
+            assert index == 1
+            return Candidate()
+
+    class Page:
+        viewport_size = {"width": 1280, "height": 800}
+
+        @staticmethod
+        def locator(selector: str) -> Candidates:
+            assert selector == 'input[placeholder^="Search Service"]'
+            return Candidates()
+
+    backend = OpenIMISEligibilityBackend(Page())  # type: ignore[arg-type]
+    handle = backend.locate_structural(
+        StructuralLocator(selector='input[placeholder^="Search Service"]')
+    )
+    assert handle is not None
+    assert handle.point == (120, 60)
+    assert handle.candidate_count == 1
 
 
 def _report(*, success: bool, verdict: str | None, earlier_ok: bool = True):
@@ -86,7 +183,7 @@ def _report(*, success: bool, verdict: str | None, earlier_ok: bool = True):
     )
     final = SimpleNamespace(
         ok=success,
-        effect_contract_hashes=["a" * 64],
+        effect_contract_hashes=[EXPECTED_CONTRACT_HASH],
         effect_verified=(None if verdict is None else verdict == "CONFIRMED"),
         effect_results=(
             [] if verdict is None else [f"[sql] field_equals: {verdict} — evidence"]
@@ -98,23 +195,48 @@ def _report(*, success: bool, verdict: str | None, earlier_ok: bool = True):
 def test_demo_accepts_only_exact_confirmed_sql_outcome() -> None:
     assert (
         _report_contract_error(
-            _report(success=True, verdict="CONFIRMED"), expect_halt=False
+            _report(success=True, verdict="CONFIRMED"),
+            expect_halt=False,
+            expected_contract_hash=EXPECTED_CONTRACT_HASH,
         )
         is None
     )
     assert _report_contract_error(
-        _report(success=True, verdict=None), expect_halt=False
+        _report(success=True, verdict=None),
+        expect_halt=False,
+        expected_contract_hash=EXPECTED_CONTRACT_HASH,
+    )
+
+
+def test_demo_refuses_a_confirmed_but_different_effect_contract() -> None:
+    report = _report(success=True, verdict="CONFIRMED")
+    report.results[-1].effect_contract_hashes = ["sha256:" + "b" * 64]
+    assert _report_contract_error(
+        report,
+        expect_halt=False,
+        expected_contract_hash=EXPECTED_CONTRACT_HASH,
     )
 
 
 def test_expected_halt_refuses_unrelated_or_early_failure() -> None:
     exact = _report(success=False, verdict="REFUTED")
-    assert _report_contract_error(exact, expect_halt=True) is None
-    assert _report_contract_error(
-        _report(success=False, verdict=None), expect_halt=True
+    assert (
+        _report_contract_error(
+            exact,
+            expect_halt=True,
+            expected_contract_hash=EXPECTED_CONTRACT_HASH,
+        )
+        is None
     )
     assert _report_contract_error(
-        _report(success=False, verdict="REFUTED", earlier_ok=False), expect_halt=True
+        _report(success=False, verdict=None),
+        expect_halt=True,
+        expected_contract_hash=EXPECTED_CONTRACT_HASH,
+    )
+    assert _report_contract_error(
+        _report(success=False, verdict="REFUTED", earlier_ok=False),
+        expect_halt=True,
+        expected_contract_hash=EXPECTED_CONTRACT_HASH,
     )
 
 
@@ -329,21 +451,59 @@ def test_oracle_role_bootstrap_revokes_accumulated_privileges_before_granting() 
 
     def fake_psql(sql: str) -> str:
         statements.append(sql)
+        if "has_database_privilege" in sql:
+            return "read-only-exact"
         return "1" if "FROM pg_roles" in sql else ""
 
     fixture._psql = fake_psql  # type: ignore[method-assign]
     fixture._bootstrap_oracle_role()
 
-    grant_sql = statements[-1]
+    grant_sql = statements[-2]
+    privilege_audit_sql = statements[-1]
     assert "NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT" in grant_sql
     assert "NOREPLICATION NOBYPASSRLS" in grant_sql
+    assert "REVOKE CREATE ON SCHEMA public FROM PUBLIC" in grant_sql
+    assert 'REVOKE CREATE ON DATABASE "IMIS" FROM PUBLIC' in grant_sql
+    assert 'REVOKE TEMPORARY ON DATABASE "IMIS" FROM PUBLIC' in grant_sql
     assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public" in grant_sql
     assert "REVOKE CREATE ON SCHEMA public" in grant_sql
+    assert 'REVOKE CREATE ON DATABASE "IMIS" FROM "oa_eligibility_oracle"' in grant_sql
     assert 'REVOKE TEMPORARY ON DATABASE "IMIS"' in grant_sql
     assert (
         'GRANT SELECT ON "tblInsuree", "tblPolicy", "tblInsureePolicy", '
         '"tblProductServices", "tblServices"'
     ) in grant_sql
+    assert "has_database_privilege" in privilege_audit_sql
+    assert "has_schema_privilege" in privilege_audit_sql
+    assert "information_schema.table_privileges" in privilege_audit_sql
+    assert "grantee IN ('oa_eligibility_oracle', 'PUBLIC')" in privilege_audit_sql
+    assert "AND 5 = (" in privilege_audit_sql
+    assert "default_transaction_read_only=on" in privilege_audit_sql
+    assert "pg_auth_members" in privilege_audit_sql
+    assert "pg_class c" in privilege_audit_sql
+    assert "pg_namespace" in privilege_audit_sql
+    assert "pg_database" in privilege_audit_sql
+
+    # PUBLIC revokes do not strand the reference app: the isolated database is
+    # created under IMISuser, which retains owner privileges independently of
+    # grants made to PUBLIC.
+    compose = (REPO_ROOT / "benchmark/openimis_claims/compose.yml").read_text()
+    assert "POSTGRES_DB=IMIS" in compose
+    assert "POSTGRES_USER=IMISuser" in compose
+
+
+def test_oracle_role_bootstrap_fails_closed_on_unexpected_effective_privilege() -> None:
+    fixture = oi.OpenIMISFixture.__new__(oi.OpenIMISFixture)
+    fixture.oracle_password = lambda: "synthetic-oracle-password"  # type: ignore[method-assign]
+
+    def fake_psql(sql: str) -> str:
+        if "has_database_privilege" in sql:
+            return "unexpected-privileges"
+        return "1" if "FROM pg_roles" in sql else ""
+
+    fixture._psql = fake_psql  # type: ignore[method-assign]
+    with pytest.raises(oi.FixtureError, match="privilege audit"):
+        fixture._bootstrap_oracle_role()
 
 
 def test_fixture_supports_isolated_project_ports_and_state(

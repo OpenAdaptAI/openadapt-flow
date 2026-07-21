@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import os
 import sys
 import time
@@ -71,8 +72,9 @@ from openimis_claims.fixture import (  # noqa: E402
     OpenIMISFixture,
 )
 
+from openadapt_flow.backend import StructuralResolutionRefused  # noqa: E402
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend  # noqa: E402
-from openadapt_flow.ir import StructuralLocator  # noqa: E402
+from openadapt_flow.ir import StructuralHandle, StructuralLocator  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DEPLOYMENT_YAML = (
@@ -149,6 +151,7 @@ class OpenIMISEligibilityBackend(PlaywrightBackend):
         }
         if (!targetKind) return null;
         const context = {target_kind: targetKind, target_id: targetId};
+        let dialogIdentifiers = [];
         if (targetKind !== 'eligibility_lookup') {
             const visibleDialogs = Array.from(
                 document.querySelectorAll('[role="dialog"]')
@@ -158,19 +161,15 @@ class OpenIMISEligibilityBackend(PlaywrightBackend):
                 return style.display !== 'none' && style.visibility !== 'hidden'
                     && rect.width > 0 && rect.height > 0;
             });
-            const insuranceNumbers = new Set();
             for (const dialog of visibleDialogs) {
+                const identifiers = new Set();
                 for (const match of (dialog.innerText || '').matchAll(/\b999\d{6}\b/g)) {
-                    insuranceNumbers.add(match[0]);
+                    identifiers.add(match[0]);
                 }
+                if (identifiers.size) dialogIdentifiers.push(Array.from(identifiers));
             }
-            // Never take the first dialog/identifier: an ambiguous or missing
-            // visible record makes this identity tier unavailable, so replay
-            // falls through to another verifier or halts before acting.
-            if (insuranceNumbers.size !== 1) return null;
-            context.insurance_no = Array.from(insuranceNumbers)[0];
         }
-        return JSON.stringify(context);
+        return {context: context, dialog_identifiers: dialogIdentifiers};
     }"""
 
     def structural_locator_at(self, x: int, y: int) -> StructuralLocator | None:
@@ -191,7 +190,96 @@ class OpenIMISEligibilityBackend(PlaywrightBackend):
             result = self.page.evaluate(self._IDENTITY_JS, [int(x), int(y)])
         except Exception:
             return None
-        return str(result) if result else None
+        if not isinstance(result, dict) or not isinstance(result.get("context"), dict):
+            return None
+        context = dict(result["context"])
+        if context.get("target_kind") != "eligibility_lookup":
+            dialogs = result.get("dialog_identifiers")
+            # A single distinct identifier is not enough when two dialogs
+            # display the same record. Require exactly one record-bearing
+            # dialog and one identifier so Set de-duplication cannot collapse
+            # either same-record or different-record ambiguity.
+            if (
+                not isinstance(dialogs, list)
+                or len(dialogs) != 1
+                or not isinstance(dialogs[0], list)
+                or len(dialogs[0]) != 1
+                or not isinstance(dialogs[0][0], str)
+            ):
+                return None
+            context["insurance_no"] = dialogs[0][0]
+        return json.dumps(context, separators=(",", ":"))
+
+    def locate_structural(self, locator: StructuralLocator) -> StructuralHandle | None:
+        """Refuse duplicate semantic candidates instead of falling to pixels.
+
+        The generic browser backend treats an ambiguous structural locator as
+        a miss so less specialized workflows may continue down the evidence
+        ladder.  This reference adapter authors exact semantic locators for
+        every clicked control, so more than one live candidate is a record/
+        dialog ambiguity and must halt rather than let a visual rung pick one.
+        """
+        if locator.selector:
+            candidates = self.page.locator(locator.selector)
+        elif locator.role and locator.name:
+            candidates = self.page.get_by_role(
+                locator.role,  # type: ignore[arg-type]
+                name=locator.name,
+                exact=True,
+            )
+        else:
+            return None
+        try:
+            visible_indices = candidates.evaluate_all(
+                """elements => elements.flatMap((el, index) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    const visible = style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && style.visibility !== 'collapse'
+                        && rect.width > 0 && rect.height > 0
+                        && rect.right > 0 && rect.bottom > 0
+                        && rect.left < window.innerWidth
+                        && rect.top < window.innerHeight;
+                    return visible ? [index] : [];
+                })"""
+            )
+            if not isinstance(visible_indices, list) or not all(
+                isinstance(index, int) for index in visible_indices
+            ):
+                return None
+            if len(visible_indices) > 1:
+                raise StructuralResolutionRefused(
+                    "openIMIS eligibility target is structurally ambiguous"
+                )
+            if not visible_indices:
+                return None
+            candidate = candidates.nth(visible_indices[0])
+            box = candidate.bounding_box()
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                return None
+            cx = int(round(box["x"] + box["width"] / 2))
+            cy = int(round(box["y"] + box["height"] / 2))
+            vw, vh = self.viewport
+            if not (0 <= cx < vw and 0 <= cy < vh):
+                return None
+            topmost = candidate.evaluate(
+                """(el, pt) => {
+                    const n = document.elementFromPoint(pt[0], pt[1]);
+                    return !!n && (n === el || el.contains(n));
+                }""",
+                [cx, cy],
+            )
+            if not topmost:
+                return None
+            return StructuralHandle(point=(cx, cy), candidate_count=1)
+        except StructuralResolutionRefused:
+            raise
+        except Exception:
+            # Observation failures are a miss; the resolver may use other
+            # evidence, but a proven multi-candidate ambiguity above is a
+            # terminal refusal and never reaches a weaker rung.
+            return None
 
 
 def eligibility_effects() -> list[Any]:
@@ -320,7 +408,12 @@ def _build_verifier(params: dict[str, str], *, oracle_port: int) -> Any:
     return verifier
 
 
-def _report_contract_error(report: Any, *, expect_halt: bool) -> str | None:
+def _report_contract_error(
+    report: Any,
+    *,
+    expect_halt: bool,
+    expected_contract_hash: str,
+) -> str | None:
     """Return why a replay did not prove the one declared SQL outcome.
 
     ``--expect-halt`` is evidence tooling, so an unrelated resolver, login, or
@@ -334,6 +427,8 @@ def _report_contract_error(report: Any, *, expect_halt: bool) -> str | None:
     if len(contracted) != 1:
         return f"expected exactly one effect-armed step, observed {len(contracted)}"
     effect_step = contracted[0]
+    if list(effect_step.effect_contract_hashes) != [expected_contract_hash]:
+        return "the effect-armed step does not carry the exact eligibility contract"
     if not results or effect_step is not results[-1]:
         return "the effect-armed eligibility step was not the final executed step"
 
@@ -487,7 +582,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
                 f"step {result.step_id}: effect_verified={result.effect_verified} "
                 f"contracts={result.effect_contract_hashes}"
             )
-    contract_error = _report_contract_error(report, expect_halt=args.expect_halt)
+    expected_contract_hash = eligibility_effects()[0].resolve(params).contract_hash()
+    contract_error = _report_contract_error(
+        report,
+        expect_halt=args.expect_halt,
+        expected_contract_hash=expected_contract_hash,
+    )
     if contract_error is not None:
         print(f"error: {contract_error}", file=sys.stderr)
         return 1

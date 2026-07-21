@@ -104,8 +104,10 @@ policy, product-benefit, and service tables
 (`fixture.py::ELIGIBILITY_ORACLE_SQL`; a unit test pins the two to each
 other), executed as the dedicated read-only role
 `oa_eligibility_oracle` (SELECT on exactly five tables,
-`default_transaction_read_only=on` — the role, not the kit's statement
-filter, is the real enforcement). The bundle's single `field_equals` outcome
+`default_transaction_read_only=on`, no inherited/owner/schema/temp/write
+privileges, and a fail-closed effective-privilege audit at every bootstrap —
+the role, not the kit's statement filter, is the real enforcement). The
+bundle's single `field_equals` outcome
 contract binds to the run's `insurance_no` parameter and to the exact question
 shown in the UI: service **A1 (General Consultation)** on **2026-07-21**.
 
@@ -203,7 +205,7 @@ license is included at
 [`conf/nginx/LICENSE-AGPL-3.0.md`](conf/nginx/LICENSE-AGPL-3.0.md), and the
 aggregate Git-checkout/GitHub-generated-source-archive boundary is recorded in
 the root
-[`THIRD_PARTY_NOTICES.md`](../../../THIRD_PARTY_NOTICES.md). The MIT license
+[`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md). The MIT license
 does not relicense those adapted files.
 
 ## Reproduction commands

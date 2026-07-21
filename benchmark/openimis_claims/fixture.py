@@ -511,9 +511,17 @@ COMMIT;
             f'ALTER ROLE "{ORACLE_ROLE}" WITH LOGIN NOSUPERUSER NOCREATEDB '
             f"NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;\n"
             f'ALTER ROLE "{ORACLE_ROLE}" SET default_transaction_read_only = on;\n'
+            # PostgreSQL roles always inherit PUBLIC privileges. Revoking only
+            # from the named role does not remove PUBLIC's default schema/temp
+            # grants, so close those fixture-wide grants first. IMISuser owns
+            # this isolated synthetic database and retains owner privileges.
+            f"REVOKE CREATE ON SCHEMA public FROM PUBLIC;\n"
+            f'REVOKE CREATE ON DATABASE "IMIS" FROM PUBLIC;\n'
+            f'REVOKE TEMPORARY ON DATABASE "IMIS" FROM PUBLIC;\n'
             f"REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public "
             f'FROM "{ORACLE_ROLE}";\n'
             f'REVOKE CREATE ON SCHEMA public FROM "{ORACLE_ROLE}";\n'
+            f'REVOKE CREATE ON DATABASE "IMIS" FROM "{ORACLE_ROLE}";\n'
             f'REVOKE TEMPORARY ON DATABASE "IMIS" FROM "{ORACLE_ROLE}";\n'
             f'GRANT CONNECT ON DATABASE "IMIS" TO "{ORACLE_ROLE}";\n'
             f'GRANT USAGE ON SCHEMA public TO "{ORACLE_ROLE}";\n'
@@ -521,6 +529,78 @@ COMMIT;
             f'"tblProductServices", "tblServices" '
             f'TO "{ORACLE_ROLE}";'
         )
+        audit = self._psql(
+            f"""
+SELECT CASE WHEN
+  has_database_privilege('{ORACLE_ROLE}', 'IMIS', 'CONNECT')
+  AND NOT has_database_privilege('{ORACLE_ROLE}', 'IMIS', 'CREATE')
+  AND NOT has_database_privilege('{ORACLE_ROLE}', 'IMIS', 'TEMP')
+  AND has_schema_privilege('{ORACLE_ROLE}', 'public', 'USAGE')
+  AND NOT has_schema_privilege('{ORACLE_ROLE}', 'public', 'CREATE')
+  AND has_table_privilege(
+    '{ORACLE_ROLE}', 'public."tblInsuree"', 'SELECT'
+  )
+  AND has_table_privilege(
+    '{ORACLE_ROLE}', 'public."tblPolicy"', 'SELECT'
+  )
+  AND has_table_privilege(
+    '{ORACLE_ROLE}', 'public."tblInsureePolicy"', 'SELECT'
+  )
+  AND has_table_privilege(
+    '{ORACLE_ROLE}', 'public."tblProductServices"', 'SELECT'
+  )
+  AND has_table_privilege(
+    '{ORACLE_ROLE}', 'public."tblServices"', 'SELECT'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM information_schema.table_privileges
+    WHERE grantee IN ('{ORACLE_ROLE}', 'PUBLIC') AND table_schema = 'public'
+      AND (
+        privilege_type <> 'SELECT'
+        OR table_name NOT IN (
+          'tblInsuree', 'tblPolicy', 'tblInsureePolicy',
+          'tblProductServices', 'tblServices'
+        )
+      )
+  )
+  AND 5 = (
+    SELECT count(*) FROM information_schema.table_privileges
+    WHERE grantee = '{ORACLE_ROLE}' AND table_schema = 'public'
+      AND privilege_type = 'SELECT'
+  )
+  AND EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = '{ORACLE_ROLE}' AND rolcanlogin AND NOT rolsuper
+      AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit
+      AND NOT rolreplication AND NOT rolbypassrls
+      AND rolconfig @> ARRAY['default_transaction_read_only=on']::text[]
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_auth_members
+    WHERE member = (SELECT oid FROM pg_roles WHERE rolname = '{ORACLE_ROLE}')
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relowner = (SELECT oid FROM pg_roles WHERE rolname = '{ORACLE_ROLE}')
+      AND n.nspname = 'public'
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_namespace
+    WHERE nspowner = (SELECT oid FROM pg_roles WHERE rolname = '{ORACLE_ROLE}')
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_database
+    WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = '{ORACLE_ROLE}')
+  )
+THEN 'read-only-exact' ELSE 'unexpected-privileges' END;
+"""
+        ).strip()
+        if audit != "read-only-exact":
+            raise FixtureError(
+                "eligibility oracle role failed its effective read-only "
+                f"privilege audit: {audit!r}"
+            )
 
     def bootstrap_eligibility(self) -> dict[str, dict[str, str]]:
         """Provision the coverage-check scenario (idempotent, synthetic only).

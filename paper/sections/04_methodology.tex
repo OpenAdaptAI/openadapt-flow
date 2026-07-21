@@ -110,7 +110,16 @@ calls.
 The metric and fault taxonomy are packaged as EffectBench, a standalone,
 versioned, and independently runnable benchmark (specification version 1.0.0), so
 that the silent-wrong-effect rate can be measured against any GUI or API
-automation, not only ours.
+automation, not only ours. We state its current scope honestly. The public
+reference pack ships one synthetic system of record and its reference oracle, and
+the two baselines scored so far are our own screen-only and effect-verified arms;
+no independent third-party system has been scored yet, so fair cross-system
+ranking is a design property, not a demonstrated one. A pluggable interface lets
+a third party bring its own system of record and its own independent oracle, and
+the built-in oracle is marked reference-only rather than handed to the system
+under test as a general capability, because authoring a cheap, correct,
+independent oracle for a real system of record is the actual cost the reference
+fixture abstracts away.
 
 \paragraph{Identity ladder.}
 Adversarial same-name/same-date-of-birth homonyms differ by confusable glyphs

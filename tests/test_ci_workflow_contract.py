@@ -98,11 +98,13 @@ def test_required_test_job_parallelizes_only_profiled_identity_outliers() -> Non
 
     # The normal lane excludes only the two measured outliers, while the heavy
     # lane selects both exactly once. No test is removed from the required gate.
-    assert test_step.count(f"--ignore={heavy_module}") == 1
-    assert test_step.count(f"--deselect={heavy_node}") == 1
+    ignored = re.findall(r"--ignore=([^\s]+)", test_step)
+    deselected = re.findall(r"--deselect=([^\s]+)", test_step)
+    assert len(ignored) == 2
+    assert set(ignored) == {"tests/e2e", heavy_module}
+    assert deselected == [heavy_node]
     assert test_step.count(heavy_module) == 2
     assert test_step.count(heavy_node) == 2
-    assert "--ignore=tests/e2e" in test_step
 
     # Parallel pytest-cov writers must never share a data file or basetemp.
     assert test_step.count("COVERAGE_FILE=.coverage.normal") == 1

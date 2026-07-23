@@ -57,6 +57,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    ports:
+      # Loopback-only: the effect-verifier's read-only SQL oracle
+      # (deployment.eligibility.yaml -> role oa_eligibility_oracle, created by
+      # the eligibility bootstrap) reads the policy record from the host.
+      # Synthetic data; never bound to a LAN interface.
+      - "127.0.0.1:${OPENIMIS_DB_PORT:-9402}:5432"
     volumes:
       - database:/var/lib/postgresql/data
 

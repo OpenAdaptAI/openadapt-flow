@@ -2,10 +2,10 @@
 
 Gated by ``OAFLOW_CITRIX_STANDIN_E2E=1`` (needs Docker + the flow stack with
 cv2/rapidocr + a Playwright chromium). Builds the Part-1 canvas fixture
-(``benchmark/canvas_ladder/fixture``), then drives the REAL
-``CitrixWorkspaceBackend`` (window-scoped capture + OS input + all fail-loud
+(``benchmark/canvas_ladder/fixture``), then drives the
+``CitrixWorkspaceBackend`` (window-scoped capture + actuation + all fail-loud
 safety gates) over that no-DOM ``<canvas>`` through the ``WindowClient`` seam,
-and asserts the contract:
+and asserts the contract across three trials per condition:
 
   * healthy record->compile->replay succeeds with ZERO model calls, VISUAL rungs
     only (structural never used), the write EFFECT independently confirmed;
@@ -70,16 +70,41 @@ def test_citrix_backend_contract_over_canvas_standin(canvas_fixture, tmp_path):
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
 
     evidence = mod.run_qualification(
-        canvas_fixture, out_dir=tmp_path, base_url="http://localhost", port=PORT
+        canvas_fixture,
+        out_dir=tmp_path,
+        base_url="http://localhost",
+        port=PORT,
+        candidate_commit="a" * 40,
+        base_commit="b" * 40,
+        work_dir=tmp_path / "work",
     )
 
-    healthy, severe = evidence["trials"]
-    assert healthy["success"], healthy
-    assert healthy["model_calls"] == 0, healthy
-    assert healthy["structural_rung_used"] == 0, healthy
-    assert healthy["visual_rungs_used"], healthy
-    assert healthy["effect_confirmed"], healthy
-    assert severe["halted"], severe
-    assert not severe["silent_write"], severe
-    assert severe["model_calls"] == 0, severe
-    assert evidence["accepted"], evidence
+    healthy = [
+        trial
+        for trial in evidence["trials"]
+        if trial["kind"] == "healthy_record_compile_replay"
+    ]
+    severe = [
+        trial
+        for trial in evidence["trials"]
+        if trial["kind"] == "severe_drift_safe_halt"
+    ]
+
+    assert len(healthy) == 3, evidence
+    assert len(severe) == 3, evidence
+    assert all(trial["success"] for trial in healthy), healthy
+    assert all(trial["model_calls"] == 0 for trial in healthy), healthy
+    assert all(trial["structural_rung_used"] == 0 for trial in healthy), healthy
+    assert all(trial["visual_rungs_used"] for trial in healthy), healthy
+    assert all(trial["effect_confirmed"] for trial in healthy), healthy
+    assert not any(trial["silent_incorrect_success"] for trial in healthy), healthy
+    assert not any(trial["false_completion"] for trial in healthy), healthy
+    assert not any(trial["over_halt"] for trial in healthy), healthy
+    assert all(trial["halted"] for trial in severe), severe
+    assert not any(trial["silent_write"] for trial in severe), severe
+    assert not any(trial["silent_incorrect_success"] for trial in severe), severe
+    assert not any(trial["false_completion"] for trial in severe), severe
+    assert all(trial["model_calls"] == 0 for trial in severe), severe
+    assert evidence["run_count"] == 6, evidence
+    assert evidence["code_readiness_accepted"], evidence
+    assert evidence["ica_hdx_accepted"] is False, evidence

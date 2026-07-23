@@ -6,20 +6,17 @@ pixel backend (:class:`~openadapt_flow.backends.citrix_workspace.CitrixWorkspace
 a :class:`~openadapt_flow.backends.remote_display.RemoteDisplayBackend` preset)
 through the unmodified Recorder -> compile_recording -> Replayer, asserting the
 SAME validation contract as Part 1 (benchmark/canvas_ladder), but exercising the
-window-scoped-capture-plus-OS-input backend code path instead of the browser
-backend.
+window-scoped capture and actuation contract instead of the browser backend.
 
 HOW IT IS A REAL PROOF (not a mock of the backend): the backend is unmodified;
-only its ``WindowClient`` seam -- the OS window-server layer that captures a
-window by id and injects OS input into it -- is swapped for a
+only its ``WindowClient`` seam -- the boundary where a native host captures a
+window by id and injects input into it -- is swapped for a
 :class:`CanvasWindowClient` that captures the Part-1 no-DOM ``<canvas>`` and
-injects into it. This is the exact "point it at a different client window" seam
-``RemoteDisplayBackend`` was designed around, so ALL of the backend's real logic
-runs: window resolution, per-frame capture + DPI/scale computation, the
-pixel->screen-point map, the frame-freshness lease, the occlusion guard, and the
-fail-loud input-trust gate. Swapping ``CanvasWindowClient`` for the host's real
-Mac/Win client and the owner string for "Citrix Viewer" points the SAME backend
-at a live Citrix Workspace window (see ../README.md, "Real ICA/HDX release gate").
+injects into it. This exercises the backend's window resolution, per-frame
+capture and scale computation, pixel-to-window-point map, frame-freshness lease,
+occlusion guard, and fail-loud input-trust gate. It does not exercise a native
+host capture/input implementation or ICA/HDX transport; those remain part of
+the separate real-environment gate.
 
 HONEST LABEL: the surface here is the **no-DOM HTML5-canvas class** (the class
 Citrix Workspace-*web* presents), NOT Citrix ICA/HDX. This proves the Citrix
@@ -35,6 +32,8 @@ import importlib.util
 import io
 import json
 import os
+import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +54,35 @@ _CANVAS_HARNESS = (
     / "canvas_ladder"
     / "run_canvas_ladder_qualification.py"
 )
+TRIALS_PER_CONDITION = 3
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def _validate_source_provenance(candidate_commit: str, base_commit: str) -> None:
+    """Require exact immutable source identities in every evidence artifact."""
+    for label, value in (
+        ("candidate_commit", candidate_commit),
+        ("base_commit", base_commit),
+    ):
+        if _COMMIT_RE.fullmatch(value) is None:
+            raise ValueError(f"{label} must be a full lowercase 40-character SHA")
+    if candidate_commit == base_commit:
+        raise ValueError("candidate_commit and base_commit must differ")
+
+
+def _code_readiness_accepted(healthy: list[dict], drift: list[dict]) -> bool:
+    return (
+        len(healthy) == TRIALS_PER_CONDITION
+        and len(drift) == TRIALS_PER_CONDITION
+        and all(t["passed"] for t in healthy)
+        and all(t["passed"] for t in drift)
+        and not any(t["silent_incorrect_success"] for t in healthy)
+        and not any(t["over_halt"] for t in healthy)
+        and not any(t["false_completion"] for t in healthy)
+        and not any(t["silent_write"] for t in drift)
+        and not any(t["silent_incorrect_success"] for t in drift)
+        and not any(t["false_completion"] for t in drift)
+    )
 
 
 def _load_canvas_harness():
@@ -204,8 +232,9 @@ def run_qualification(
     out_dir: Path,
     base_url: str,
     port: int,
-    candidate_commit: str = "",
-    base_commit: str = "",
+    candidate_commit: str,
+    base_commit: str,
+    work_dir: Optional[Path] = None,
 ) -> dict:
     from playwright.sync_api import sync_playwright
 
@@ -213,8 +242,10 @@ def run_qualification(
     from openadapt_flow.recorder import Recorder
     from openadapt_flow.runtime.replayer import Replayer
 
+    _validate_source_provenance(candidate_commit, base_commit)
     cm = _load_canvas_harness()
-    work = out_dir / "work"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    work = work_dir or Path(tempfile.mkdtemp(prefix="oaflow-citrix-standin-"))
     work.mkdir(parents=True, exist_ok=True)
     rec_dir, bundle_dir = work / "recording", work / "bundle"
     trials: list[dict] = []
@@ -222,7 +253,8 @@ def run_qualification(
     expected_saved = f"{cm.EXPECTED_MRN}\t{cm.NOTE_VALUE}"
 
     with sync_playwright() as pw:
-        # ---- Trial 1: healthy record -> compile -> replay through the ladder --
+        # Record and compile once; each condition trial resets the application
+        # and constructs a fresh backend/browser/run directory.
         cm._reset_kiosk(container)
         browser, page = _make_page(pw, base_url, port, cm)
         try:
@@ -246,37 +278,42 @@ def run_qualification(
             rec_dir, bundle_dir, name="citrix-workspace-ladder"
         )
 
-        cm._reset_kiosk(container)
-        browser, page = _make_page(pw, base_url, port, cm)
-        try:
-            backend = _citrix_backend(page, cm)
-            report = Replayer(backend, poll_interval_s=0.3).run(
-                workflow,
-                params={cm.NOTE_PARAM: cm.NOTE_VALUE},
-                bundle_dir=bundle_dir,
-                run_dir=work / "run_healthy",
+        healthy_trials: list[dict] = []
+        for condition_trial in range(1, TRIALS_PER_CONDITION + 1):
+            cm._reset_kiosk(container)
+            browser, page = _make_page(pw, base_url, port, cm)
+            try:
+                backend = _citrix_backend(page, cm)
+                report = Replayer(backend, poll_interval_s=0.3).run(
+                    workflow,
+                    params={cm.NOTE_PARAM: cm.NOTE_VALUE},
+                    bundle_dir=bundle_dir,
+                    run_dir=work / f"run_healthy_{condition_trial}",
+                )
+            finally:
+                browser.close()
+            saved = cm._read_saved_note(container)
+            effect_confirmed = saved == expected_saved
+            rung_counts = dict(report.rung_counts)
+            structural_used = rung_counts.get("structural", 0)
+            visual_rungs = {
+                k: v
+                for k, v in rung_counts.items()
+                if k in ("template", "template_global", "ocr", "geometry")
+            }
+            silent_incorrect_success = bool(report.success and not effect_confirmed)
+            false_completion = silent_incorrect_success
+            over_halt = bool(not report.success)
+            healthy_ok = (
+                report.success
+                and report.model_calls == 0
+                and structural_used == 0
+                and bool(visual_rungs)
+                and effect_confirmed
             )
-        finally:
-            browser.close()
-        saved = cm._read_saved_note(container)
-        effect_confirmed = saved == expected_saved
-        rung_counts = dict(report.rung_counts)
-        structural_used = rung_counts.get("structural", 0)
-        visual_rungs = {
-            k: v
-            for k, v in rung_counts.items()
-            if k in ("template", "template_global", "ocr", "geometry")
-        }
-        healthy_ok = (
-            report.success
-            and report.model_calls == 0
-            and structural_used == 0
-            and bool(visual_rungs)
-            and effect_confirmed
-        )
-        trials.append(
-            {
-                "trial": 1,
+            trial = {
+                "trial": len(trials) + 1,
+                "condition_trial": condition_trial,
                 "kind": "healthy_record_compile_replay",
                 "success": bool(report.success),
                 "model_calls": int(report.model_calls),
@@ -286,34 +323,54 @@ def run_qualification(
                 "effect_confirmed": effect_confirmed,
                 "effect_expected": expected_saved,
                 "effect_observed": saved,
+                "silent_incorrect_success": silent_incorrect_success,
+                "false_completion": false_completion,
+                "over_halt": over_halt,
                 "passed": bool(healthy_ok),
-                "failure_class": None if healthy_ok else "healthy_contract_violation",
+                "failure_class": (
+                    None
+                    if healthy_ok
+                    else "silent_incorrect_success"
+                    if silent_incorrect_success
+                    else "healthy_over_halt"
+                    if over_halt
+                    else "healthy_contract_violation"
+                ),
             }
-        )
+            healthy_trials.append(trial)
+            trials.append(trial)
 
-        # ---- Trial 2: severe drift -> SAFE-HALT (no blind coordinate replay) --
-        cm._reset_kiosk(container)
-        browser, page = _make_page(pw, base_url, port, cm)
-        try:
-            backend = _citrix_backend(page, cm)
-            sev_report = Replayer(
-                cm._DriftBackend.severe(backend), poll_interval_s=0.3
-            ).run(
-                workflow,
-                params={cm.NOTE_PARAM: cm.NOTE_VALUE},
-                bundle_dir=bundle_dir,
-                run_dir=work / "run_drift_severe",
+        drift_trials: list[dict] = []
+        for condition_trial in range(1, TRIALS_PER_CONDITION + 1):
+            cm._reset_kiosk(container)
+            browser, page = _make_page(pw, base_url, port, cm)
+            try:
+                backend = _citrix_backend(page, cm)
+                sev_report = Replayer(
+                    cm._DriftBackend.severe(backend), poll_interval_s=0.3
+                ).run(
+                    workflow,
+                    params={cm.NOTE_PARAM: cm.NOTE_VALUE},
+                    bundle_dir=bundle_dir,
+                    run_dir=work / f"run_drift_severe_{condition_trial}",
+                )
+            finally:
+                browser.close()
+            saved_sev = cm._read_saved_note(container)
+            sev_halted = not sev_report.success
+            silent_write = saved_sev is not None
+            sev_no_model = sev_report.model_calls == 0
+            false_completion = bool(sev_report.success)
+            silent_incorrect_success = false_completion
+            sev_ok = (
+                sev_halted
+                and not silent_write
+                and sev_no_model
+                and not false_completion
             )
-        finally:
-            browser.close()
-        saved_sev = cm._read_saved_note(container)
-        sev_halted = not sev_report.success
-        sev_no_write = saved_sev != expected_saved
-        sev_no_model = sev_report.model_calls == 0
-        sev_ok = sev_halted and sev_no_write and sev_no_model
-        trials.append(
-            {
-                "trial": 2,
+            trial = {
+                "trial": len(trials) + 1,
+                "condition_trial": condition_trial,
                 "kind": "severe_drift_safe_halt",
                 "drift": (
                     "downscale_0.14x + gaussian_blur_2.0 + theme_invert + "
@@ -322,28 +379,33 @@ def run_qualification(
                 "halted": bool(sev_halted),
                 "rung_counts": dict(sev_report.rung_counts),
                 "model_calls": int(sev_report.model_calls),
-                "silent_write": bool(saved_sev == expected_saved),
+                "silent_write": silent_write,
+                "silent_incorrect_success": silent_incorrect_success,
+                "false_completion": false_completion,
+                "over_halt": False,
                 "effect_after_drift": saved_sev,
                 "passed": bool(sev_ok),
-                "failure_class": None if sev_ok else "drift_not_safely_halted",
+                "failure_class": (
+                    None
+                    if sev_ok
+                    else "drift_false_completion"
+                    if false_completion
+                    else "drift_unexpected_write"
+                    if silent_write
+                    else "drift_not_safely_halted"
+                ),
             }
-        )
+            drift_trials.append(trial)
+            trials.append(trial)
 
     cm._reset_kiosk(container)
 
     successes = sum(1 for t in trials if t["passed"])
-    accepted = (
-        len(trials) == 2
-        and successes == 2
-        and trials[0]["model_calls"] == 0
-        and trials[0]["structural_rung_used"] == 0
-        and trials[0]["effect_confirmed"]
-        and trials[1]["halted"]
-        and not trials[1]["silent_write"]
-    )
+    code_readiness_accepted = _code_readiness_accepted(healthy_trials, drift_trials)
 
     evidence = {
-        "schema_version": "openadapt.citrix-workspace-qualification.v1",
+        "schema_version": "openadapt.citrix-workspace-code-readiness.v2",
+        "evidence_scope": "synthetic_no_dom_standin_code_readiness",
         "substrate": "citrix-workspace-backend-over-no-dom-canvas-standin",
         "backend_under_test": "CitrixWorkspaceBackend (RemoteDisplayBackend preset)",
         "window_client": "CanvasWindowClient (noVNC canvas via Playwright)",
@@ -351,30 +413,58 @@ def run_qualification(
         "candidate_commit": candidate_commit,
         "base_commit": base_commit,
         "task": (
-            "record->compile->replay a patient-note write through the "
+            "record->compile->replay a bounded synthetic note write through the "
             "vision-only resolver ladder, driving the Citrix-Workspace-"
-            "window pixel backend (window-scoped capture + OS input) over a "
+            "window pixel backend (window-scoped capture + actuation) over a "
             "no-DOM canvas stand-in; confirm the write via an independent "
             "document oracle; and safe-halt under severe injected drift"
         ),
         "contract": {
-            "healthy_zero_model_calls": trials[0]["model_calls"] == 0,
-            "healthy_structural_rung_used": trials[0]["structural_rung_used"],
-            "healthy_visual_rungs_used": trials[0]["visual_rungs_used"],
-            "healthy_effect_confirmed": trials[0]["effect_confirmed"],
-            "severe_drift_safely_halted": trials[1]["halted"],
-            "severe_drift_no_silent_write": not trials[1]["silent_write"],
+            "healthy_trials": len(healthy_trials),
+            "healthy_zero_model_calls": all(
+                t["model_calls"] == 0 for t in healthy_trials
+            ),
+            "healthy_structural_rung_used": sum(
+                t["structural_rung_used"] for t in healthy_trials
+            ),
+            "healthy_visual_rungs_used": {
+                rung: sum(t["visual_rungs_used"].get(rung, 0) for t in healthy_trials)
+                for rung in ("template", "template_global", "ocr", "geometry")
+                if any(t["visual_rungs_used"].get(rung, 0) for t in healthy_trials)
+            },
+            "healthy_effects_confirmed": sum(
+                bool(t["effect_confirmed"]) for t in healthy_trials
+            ),
+            "healthy_silent_incorrect_successes": sum(
+                bool(t["silent_incorrect_success"]) for t in healthy_trials
+            ),
+            "healthy_over_halts": sum(bool(t["over_halt"]) for t in healthy_trials),
+            "healthy_false_completions": sum(
+                bool(t["false_completion"]) for t in healthy_trials
+            ),
+            "drift_trials": len(drift_trials),
+            "drift_safely_halted": sum(bool(t["halted"]) for t in drift_trials),
+            "drift_silent_writes": sum(bool(t["silent_write"]) for t in drift_trials),
+            "drift_silent_incorrect_successes": sum(
+                bool(t["silent_incorrect_success"]) for t in drift_trials
+            ),
+            "drift_false_completions": sum(
+                bool(t["false_completion"]) for t in drift_trials
+            ),
         },
         "oracle": "docker exec cat of the kiosk-persisted note file",
         "failure_taxonomy": [
             "connect_or_frame_failure",
             "healthy_contract_violation",
-            "effect_not_confirmed",
+            "silent_incorrect_success",
+            "healthy_over_halt",
+            "drift_false_completion",
+            "drift_unexpected_write",
             "drift_not_safely_halted",
         ],
         "caveat": (
-            "Exercises the REAL Citrix-Workspace-window pixel backend "
-            "(window-scoped capture + OS input through the inherited fail-loud "
+            "Exercises the Citrix-Workspace-window pixel backend "
+            "(window-scoped capture + actuation through the inherited fail-loud "
             "safety gates) over a no-DOM HTML5-canvas STAND-IN (the class Citrix "
             "Workspace-web presents) -- NOT Citrix ICA/HDX. Real ICA/HDX "
             "validation requires the separate 3+3 release gate in README."
@@ -389,9 +479,11 @@ def run_qualification(
         "trials": trials,
         "run_count": len(trials),
         "successes": successes,
-        "model_calls": trials[0]["model_calls"],
+        "model_calls": sum(t["model_calls"] for t in trials),
         "total_s": round(time.monotonic() - t_start, 3),
-        "accepted": bool(accepted),
+        "code_readiness_accepted": bool(code_readiness_accepted),
+        "ica_hdx_accepted": False,
+        "ica_hdx_status": "pending_real_environment_3_healthy_plus_3_drift",
     }
     return evidence
 
@@ -416,8 +508,16 @@ def main() -> int:
     ap.add_argument(
         "--output", type=Path, default=Path("benchmark/citrix_workspace/results.json")
     )
-    ap.add_argument("--candidate-commit", default="")
-    ap.add_argument("--base-commit", default="")
+    ap.add_argument(
+        "--candidate-commit",
+        required=True,
+        help="full lowercase 40-character SHA of the exact candidate under test",
+    )
+    ap.add_argument(
+        "--base-commit",
+        required=True,
+        help="full lowercase 40-character merge-base SHA used for comparison",
+    )
     args = ap.parse_args()
 
     out_dir = args.output.parent
@@ -433,8 +533,13 @@ def main() -> int:
     args.output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
     payload = json.dumps(evidence, sort_keys=True).encode()
     print(f"evidence sha256: {hashlib.sha256(payload).hexdigest()}")
-    print(f"accepted: {evidence['accepted']}  wrote: {args.output}")
-    return 0 if evidence["accepted"] else 1
+    print(
+        "code_readiness_accepted: "
+        f"{evidence['code_readiness_accepted']}  "
+        f"ica_hdx_accepted: {evidence['ica_hdx_accepted']}  "
+        f"wrote: {args.output}"
+    )
+    return 0 if evidence["code_readiness_accepted"] else 1
 
 
 if __name__ == "__main__":

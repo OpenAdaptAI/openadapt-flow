@@ -28,24 +28,28 @@ target-window-agnostic. This deliverable adds the thin **Citrix preset** over it
   default owner (no need to know the per-platform string; `--rdp-window`
   overrides it, `--rdp-window-title` disambiguates multiple sessions).
 
-## Status — DONE vs PENDING (honest)
+## Evidence scope
 
-**DONE (validated this pass):**
+**Synthetic code-readiness evidence:**
 - The backend records → compiles → replays through the vision-only ladder and
   **safe-halts under drift**, exercising the `RemoteDisplayBackend` code
-  paths (window resolution, per-frame capture + DPI/scale, pixel→screen-point
+  contract (window resolution, per-frame capture + scale, pixel→window-point
   map, frame-freshness lease, occlusion guard, input-trust gate) over a genuine
   no-DOM surface. Evidence: `results.json`
-  (`schema_version: openadapt.citrix-workspace-qualification.v1`, `accepted:true`):
-  - healthy: record→compile→replay succeeds, **0 model calls**, **visual rungs
-    only** (template ×3, structural never used), write **independently
-    confirmed** by the document oracle;
-  - severe (illegible) drift: **HALTS** with no write and no model call — no
-    blind coordinate replay.
+  (`schema_version: openadapt.citrix-workspace-code-readiness.v2`):
+  - 3 healthy record→compile→replay trials succeed with **0 model calls**,
+    **visual rungs only**, and writes independently confirmed by the document
+    oracle;
+  - 3 severe-drift trials **halt** with no write and no model call;
+  - silent incorrect success, false completion, and healthy over-halt are
+    reported explicitly.
 - Unit contract: `tests/test_citrix_workspace_backend.py` (owner presets,
   pixel-only protocol surface, factory wiring).
 
-**PENDING (needs the CVAD/DaaS trial lab + a GUI host):**
+This supports `code_readiness_accepted:true` for the synthetic stand-in. It does
+not support Citrix ICA/HDX acceptance: `ica_hdx_accepted:false`.
+
+**Real ICA/HDX acceptance gate:**
 - Validation against a **REAL Citrix Workspace window** on a **live ICA/HDX
   session**. The ICA-specific delta the canvas stand-in cannot cover: HDX codec
   artifacts, ICA compression, and the real Workspace-client input path.
@@ -58,8 +62,9 @@ target-window-agnostic. This deliverable adds the thin **Citrix preset** over it
 `CitrixWorkspaceBackend` over the Part-1 no-DOM canvas fixture
 (`benchmark/canvas_ladder/fixture`) by swapping only the backend's `WindowClient`
 seam for a `CanvasWindowClient` that captures the noVNC `<canvas>` and injects
-into it (Playwright). This is a **real** proof of the backend (all its logic
-runs), over the **no-DOM HTML5-canvas class** — **NOT** Citrix ICA/HDX.
+into it (Playwright). This exercises the backend contract over the **no-DOM
+HTML5-canvas class** — **NOT** the host-native capture/input implementation or
+Citrix ICA/HDX.
 
 ```bash
 # Reuses the Part-1 fixture container (benchmark/canvas_ladder):
@@ -70,12 +75,13 @@ sleep 15
 python3 benchmark/citrix_workspace/run_citrix_workspace_qualification.py \
     --container oaflow-canvas-ladder \
     --output benchmark/citrix_workspace/results.json \
-    --candidate-commit "$(git rev-parse HEAD)"
+    --candidate-commit "$(git rev-parse HEAD)" \
+    --base-commit "$(git merge-base HEAD origin/main)"
 docker rm -f oaflow-canvas-ladder
 ```
 
 Env-gated e2e: `tests/e2e/test_citrix_workspace_standin_e2e.py`
-(`OAFLOW_CITRIX_STANDIN_E2E=1`). Nightly draft CI:
+(`OAFLOW_CITRIX_STANDIN_E2E=1`). Path-filtered pull-request and manual CI:
 `.github/workflows/citrix-workspace-standin.yml`.
 
 ## Real ICA/HDX release gate

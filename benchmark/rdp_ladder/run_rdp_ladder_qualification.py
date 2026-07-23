@@ -53,7 +53,13 @@ from PIL import Image, ImageOps
 VIEWPORT = (1280, 800)
 ADA_ROW = (347, 192)  # "Ada Lovelace   MRN A1001" roster row
 GRACE_ROW = (347, 262)  # "Grace Hopper   MRN B2002" roster row
-NOTE_FIELD = (410, 588)  # clinical-note entry
+# Click close enough to the Entry's left edge that the 160px recorded target
+# crop includes its stable border. The former interior point produced a nearly
+# blank/generic template that could resolve with a small offset on the RDP
+# surface; translating the patient-identifier crop by that offset correctly
+# made identity abstain. A distinctive target crop keeps resolution and the
+# separately verified active-patient region in the same coordinate frame.
+NOTE_FIELD = (120, 588)  # clinical-note entry, left-border-bearing crop
 SAVE_BUTTON = (910, 588)  # "Save Note" button
 ADA_IDENTIFIER_REGION = (60, 168, 500, 48)
 # After Ada is selected, both the field-focus click and the consequential Save
@@ -646,6 +652,7 @@ def run_qualification(
             for result in report.results
             if result.step_id in report.required_identity_step_ids
         }
+        step_by_id = {step.id: step for step in workflow.steps}
         identity_diagnostics = {
             result.step_id: {
                 "mode": result.identity.mode if result.identity is not None else None,
@@ -659,6 +666,20 @@ def run_qualification(
                     result.identity.observed if result.identity is not None else None
                 ),
                 "error": result.error,
+                "resolution": (
+                    {
+                        "point": list(result.resolution.point),
+                        "rung": result.resolution.rung,
+                        "confidence": result.resolution.confidence,
+                    }
+                    if result.resolution is not None
+                    else None
+                ),
+                "recorded_click_point": (
+                    list(step_by_id[result.step_id].anchor.click_point)
+                    if step_by_id[result.step_id].anchor is not None
+                    else None
+                ),
             }
             for result in report.results
             if result.step_id in report.required_identity_step_ids

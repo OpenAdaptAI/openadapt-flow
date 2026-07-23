@@ -33,6 +33,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -56,18 +57,52 @@ _CANVAS_HARNESS = (
 )
 TRIALS_PER_CONDITION = 3
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _git_output(*args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed: {result.stderr.strip()[:200]}"
+        )
+    return result.stdout.strip()
 
 
 def _validate_source_provenance(candidate_commit: str, base_commit: str) -> None:
-    """Require exact immutable source identities in every evidence artifact."""
+    """Refuse evidence that is not bound to the exact clean source checkout."""
     for label, value in (
-        ("candidate_commit", candidate_commit),
-        ("base_commit", base_commit),
+        ("candidate", candidate_commit),
+        ("base", base_commit),
     ):
         if _COMMIT_RE.fullmatch(value) is None:
-            raise ValueError(f"{label} must be a full lowercase 40-character SHA")
-    if candidate_commit == base_commit:
-        raise ValueError("candidate_commit and base_commit must differ")
+            raise RuntimeError(
+                f"{label} commit must be a full lowercase 40-character git SHA"
+            )
+
+    head = _git_output("rev-parse", "HEAD")
+    if candidate_commit != head:
+        raise RuntimeError(
+            f"candidate commit {candidate_commit} does not match checkout HEAD {head}"
+        )
+    merge_base = _git_output("merge-base", candidate_commit, "origin/main")
+    if base_commit != merge_base:
+        raise RuntimeError(
+            f"base commit {base_commit} does not match origin/main merge-base "
+            f"{merge_base}"
+        )
+    dirty = _git_output("status", "--porcelain", "--untracked-files=no")
+    if dirty:
+        raise RuntimeError(
+            "qualification source checkout has tracked modifications; commit "
+            "them before producing candidate-bound evidence"
+        )
 
 
 def _code_readiness_accepted(healthy: list[dict], drift: list[dict]) -> bool:

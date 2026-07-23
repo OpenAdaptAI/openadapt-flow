@@ -69,13 +69,15 @@ def test_citrix_backend_contract_over_canvas_standin(canvas_fixture, tmp_path):
     sys.modules["citrix_ws_harness"] = mod
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
 
+    candidate_commit = mod._git_output("rev-parse", "HEAD")
+    base_commit = mod._git_output("merge-base", candidate_commit, "origin/main")
     evidence = mod.run_qualification(
         canvas_fixture,
         out_dir=tmp_path,
         base_url="http://localhost",
         port=PORT,
-        candidate_commit="a" * 40,
-        base_commit="b" * 40,
+        candidate_commit=candidate_commit,
+        base_commit=base_commit,
         work_dir=tmp_path / "work",
     )
 

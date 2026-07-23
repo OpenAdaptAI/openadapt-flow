@@ -38,6 +38,7 @@ on:
       - "openadapt_flow/runtime/**"
       - "openadapt_flow/vision/**"
       - "tests/test_citrix_workspace_backend.py"
+      - "tests/test_citrix_workspace_qualification.py"
       - "tests/e2e/test_citrix_workspace_standin_e2e.py"
   workflow_dispatch: {}
 

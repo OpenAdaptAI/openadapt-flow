@@ -368,8 +368,24 @@ def test_compiled_crop_arms_pixel_tier_in_replayer_ladder(tmp_path: Path) -> Non
     )
     assert not (same_check.mode == "pixel" and same_check.status == "verified")
 
+    # A deployment that has explicitly qualified positive pixel verification
+    # (the RDP ladder harness does so for its bounded synthetic fixture) must be
+    # able to consume the exact compiler-emitted crop and verify the unchanged
+    # live identifier before a governed pointer action.
+    qualified_replayer = Replayer(
+        _PixelBackend(same_png, VIEWPORT),
+        vision=vision,
+        pixel_verify_enabled=True,
+    )
+    qualified_check = qualified_replayer._verify_identity(
+        step, resolution, same_png, {}, workflow, bundle
+    )
+    assert qualified_check.mode == "pixel"
+    assert qualified_check.status == "verified"
+
     # The gate that makes the above unconditional: the pixel tier can never
-    # VERIFY, so it can never false-accept regardless of the crop captured.
+    # VERIFY by default, so it can never false-accept unless an exact bounded
+    # deployment has opted in after qualification.
     assert identity_mod.PIXEL_VERIFY_ENABLED is False
 
 

@@ -12,7 +12,11 @@ from __future__ import annotations
 import pytest
 from PIL import Image
 
-from openadapt_flow.__main__ import _resolve_backend_config, build_parser
+from openadapt_flow.__main__ import (
+    _report_backend_kind,
+    _resolve_backend_config,
+    build_parser,
+)
 from openadapt_flow.backends.factory import _normalize_kind, build_backend
 from openadapt_flow.deployment import BackendConfig, DeploymentConfig
 from openadapt_flow.ir import BackendHints, Workflow
@@ -371,6 +375,25 @@ def test_explicit_citrix_config_overrides_recorded_target_field_by_field() -> No
     assert merged.rdp_readiness_text == "Configured readiness"
 
 
+@pytest.mark.parametrize("alias", ["remote-display", "remote_display"])
+def test_rdp_alias_config_inherits_recorded_rdp_target(alias) -> None:
+    workflow = Workflow(
+        name="rdp",
+        backend_hints=BackendHints(
+            backend="rdp",
+            rdp_window="Microsoft Remote Desktop",
+            rdp_window_title="Finance VM",
+            rdp_readiness_text="Ledger",
+        ),
+    )
+    cfg = DeploymentConfig(backend=BackendConfig(kind=alias))
+    merged = _resolve_backend_config(_replay_args([]), cfg, workflow)
+    assert merged.kind == alias
+    assert merged.rdp_window == "Microsoft Remote Desktop"
+    assert merged.rdp_window_title == "Finance VM"
+    assert merged.rdp_readiness_text == "Ledger"
+
+
 def test_explicit_backend_does_not_inherit_different_recorded_target() -> None:
     workflow = Workflow(
         name="citrix",
@@ -388,6 +411,19 @@ def test_explicit_backend_does_not_inherit_different_recorded_target() -> None:
     assert merged.rdp_window is None
     assert merged.rdp_window_title is None
     assert merged.rdp_readiness_text is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("remote-display", "rdp"),
+        ("remote_display", "rdp"),
+        ("RDP", "rdp"),
+        ("citrix", "citrix"),
+    ],
+)
+def test_report_backend_kind_closes_execution_aliases(raw, expected) -> None:
+    assert _report_backend_kind(raw) == expected
 
 
 def test_config_backend_used_when_no_flag() -> None:

@@ -715,6 +715,70 @@ def test_cli_run_refuses_citrix_without_readiness_before_execution(
     assert "Nothing was executed" in out
 
 
+def test_cli_run_refuses_whitespace_only_configured_citrix_readiness(
+    tmp_path, monkeypatch, capsys
+):
+    import openadapt_flow.__main__ as main
+
+    _no_execute(monkeypatch)
+    wf = _good_workflow("citrix_blank_readiness")
+    _, bundle = _seal(wf, tmp_path, encrypt=False)
+    config = tmp_path / "citrix.yaml"
+    config.write_text(
+        "backend:\n  kind: citrix\n  rdp_window: wfica32\n  rdp_readiness_text: '   '\n"
+    )
+    args = main.build_parser().parse_args(
+        [
+            "run",
+            str(bundle),
+            "--config",
+            str(config),
+            "--allow-unencrypted",
+            "--approve-unverified-writes",
+        ]
+    )
+    assert args.func(args) == 2
+    out = capsys.readouterr().out
+    assert "governed Citrix execution requires" in out
+    assert "Nothing was executed" in out
+
+
+def test_backend_hints_reject_blank_readiness_and_hide_sensitive_input():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as blank:
+        BackendHints(backend="citrix", rdp_readiness_text="   ")
+    assert "at least 1 character" in str(blank.value)
+
+    sensitive = "Patient Jane Doe " * 40
+    with pytest.raises(ValidationError) as overlong:
+        BackendHints(backend="citrix", rdp_window_title=sensitive)
+    assert sensitive not in str(overlong.value)
+    assert "input_value" not in str(overlong.value)
+
+
+def test_cli_run_invalid_backend_hints_do_not_echo_sensitive_value(tmp_path, capsys):
+    import openadapt_flow.__main__ as main
+
+    bundle = tmp_path / "invalid-sensitive-hints"
+    bundle.mkdir()
+    sensitive = "Patient Jane Doe " * 40
+    payload = _good_workflow("invalid_sensitive_hints").model_dump(mode="json")
+    payload["backend_hints"] = {
+        "backend": "citrix",
+        "rdp_window_title": sensitive,
+        "rdp_readiness_text": "Claims queue",
+    }
+    (bundle / "workflow.json").write_text(json.dumps(payload))
+
+    args = main.build_parser().parse_args(["run", str(bundle), "--allow-unencrypted"])
+    assert args.func(args) == 2
+    out = capsys.readouterr().out
+    assert "bundle could not be loaded safely" in out
+    assert sensitive not in out
+    assert "input_value" not in out
+
+
 def test_cli_run_accepts_recorded_citrix_readiness_binding(tmp_path, monkeypatch):
     import openadapt_flow.__main__ as main
 

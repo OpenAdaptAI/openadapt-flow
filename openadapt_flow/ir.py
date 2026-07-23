@@ -1098,7 +1098,11 @@ class BackendHints(BaseModel):
     metadata and must still come from the deployment config.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        hide_input_in_errors=True,
+        str_strip_whitespace=True,
+    )
 
     backend: Literal["rdp", "citrix"]
     rdp_window: Optional[str] = Field(default=None, min_length=1, max_length=512)

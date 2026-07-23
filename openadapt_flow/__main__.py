@@ -302,7 +302,7 @@ def _resolve_backend_config(args: argparse.Namespace, cfg, workflow=None):
     configured_kind = backend.kind if "kind" in configured else None
     selected_kind = explicit_kind or configured_kind
     if hints is not None and (
-        selected_kind is None or str(selected_kind).strip().lower() == hints.backend
+        selected_kind is None or _report_backend_kind(selected_kind) == hints.backend
     ):
         updates: dict[str, object] = {}
         if selected_kind is None:
@@ -343,6 +343,34 @@ def _resolve_backend_config(args: argparse.Namespace, cfg, workflow=None):
             update={"rdp_readiness_text": args.rdp_readiness_text}
         )
     return backend
+
+
+def _report_backend_kind(kind: object) -> str:
+    """Return the closed hosted-summary token for a resolved backend kind.
+
+    Execution accepts ``remote-display`` / ``remote_display`` as RDP aliases.
+    Hosted summaries use a closed enum, so fold those aliases without
+    collapsing the distinct Citrix product token to generic RDP.
+    """
+    token = str(kind).strip().lower()
+    if token in ("remote-display", "remote_display"):
+        return "rdp"
+    return token
+
+
+def _refuse_missing_citrix_readiness(backend_cfg: object, *, operation: str) -> bool:
+    """Refuse governed Citrix actuation without a nonblank frame marker."""
+    kind = str(getattr(backend_cfg, "kind", "")).strip().lower()
+    marker = str(getattr(backend_cfg, "rdp_readiness_text", "") or "").strip()
+    if kind != "citrix" or marker:
+        return False
+    print(
+        f"{operation} REFUSED: governed Citrix execution requires a stable "
+        "current-frame readiness marker before any action. Set "
+        "backend.rdp_readiness_text in --config or pass "
+        "--rdp-readiness-text. Nothing was executed."
+    )
+    return True
 
 
 def _configured_replayer(
@@ -507,7 +535,7 @@ def _replay_desktop(
         if callable(close):
             close()  # RDP transports hold a live socket; browsers/agents don't
     return _finish_replay(
-        run_dir, report, args, backend_kind=str(backend_cfg.kind).strip().lower()
+        run_dir, report, args, backend_kind=_report_backend_kind(backend_cfg.kind)
     )
 
 
@@ -934,7 +962,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             stop()
 
     return _finish_replay(
-        run_dir, report, args, backend_kind=str(backend_cfg.kind).strip().lower()
+        run_dir, report, args, backend_kind=_report_backend_kind(backend_cfg.kind)
     )
 
 
@@ -965,8 +993,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # --config/env via OPENADAPT_BUNDLE_KEY); a missing/wrong key fails LOUDLY.
     try:
         workflow = Workflow.load(bundle)
-    except Exception as e:  # crypto / integrity / structural errors -> fail closed
-        print(f"run REFUSED: bundle could not be loaded safely: {e}")
+    except Exception:  # crypto / integrity / structural errors -> fail closed
+        # Never echo a provider/Pydantic error here. A malformed local bundle
+        # can contain PHI-bearing target metadata and validation errors may
+        # repeat the rejected input verbatim.
+        print("run REFUSED: bundle could not be loaded safely. Nothing was executed.")
         return 2
 
     gate_params = _replay_params(args.param, getattr(args, "params_file", None))
@@ -974,16 +1005,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         args, params=gate_params
     )
     backend_cfg = _resolve_backend_config(args, cfg, workflow)
-    if (
-        str(backend_cfg.kind).strip().lower() == "citrix"
-        and not backend_cfg.rdp_readiness_text
-    ):
-        print(
-            "run REFUSED: governed Citrix execution requires a stable "
-            "current-frame readiness marker before any action. Set "
-            "backend.rdp_readiness_text in --config or pass "
-            "--rdp-readiness-text. Nothing was executed."
-        )
+    if _refuse_missing_citrix_readiness(backend_cfg, operation="run"):
         return 2
     policy_source = args.policy or cfg.policy.policy
 
@@ -1050,16 +1072,25 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         )
         return 3
 
-    where = (
-        f"state '{pending.step_id}'"
-        if pending.program
-        else f"step {pending.step_index} '{pending.step_id}' "
-        f"(from index {resume_point(run_dir, key=ckpt_key)})"
-    )
-    print(
-        f"Resuming {run_dir} at {where}: {pending.category}. "
-        "Already-verified work is NOT re-run."
-    )
+    manifest = store.read_manifest()
+    if manifest is None:
+        print(
+            "Resume REFUSED: the durable run manifest is missing, so the "
+            "paused workflow cannot be identified safely. Nothing was executed."
+        )
+        return 3
+    from openadapt_flow.ir import Workflow
+
+    try:
+        workflow = Workflow.load(Path(manifest.bundle_dir), key=ckpt_key)
+    except Exception:  # crypto / integrity / structural errors -> fail closed
+        # Do not echo the exception: a malformed local backend hint can contain
+        # a PHI-bearing title and Pydantic/provider errors may repeat inputs.
+        print(
+            "Resume REFUSED: the paused workflow bundle could not be loaded "
+            "safely. Nothing was executed."
+        )
+        return 3
 
     # A GUI automation cannot be resumed without a LIVE backend/vision, so build
     # a fresh Replayer here (deployment wiring from --config) and hand it to the
@@ -1086,7 +1117,20 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     # (--backend / --agent-url / --rdp-host over --config), so a resume drives
     # the bundle's real substrate rather than always the browser. The default
     # (web / no flag) reproduces the historical Playwright path below exactly.
-    backend_cfg = _resolve_backend_config(args, cfg)
+    backend_cfg = _resolve_backend_config(args, cfg, workflow)
+    if _refuse_missing_citrix_readiness(backend_cfg, operation="Resume"):
+        return 2
+
+    where = (
+        f"state '{pending.step_id}'"
+        if pending.program
+        else f"step {pending.step_index} '{pending.step_id}' "
+        f"(from index {resume_point(run_dir, key=ckpt_key)})"
+    )
+    print(
+        f"Resuming {run_dir} at {where}: {pending.category}. "
+        "Already-verified work is NOT re-run."
+    )
 
     def _resume_with(backend: "Backend") -> "RunReport":
         replayer = Replayer(
@@ -1149,7 +1193,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         run_dir,
         report,
         args,
-        backend_kind=str(backend_cfg.kind).strip().lower(),
+        backend_kind=_report_backend_kind(backend_cfg.kind),
     )
     return 0 if report.success else 1
 

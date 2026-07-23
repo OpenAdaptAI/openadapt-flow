@@ -165,7 +165,11 @@ These values remain local execution metadata: plaintext in `meta.json` and in an
 explicitly unencrypted local bundle, encrypted inside `workflow.json.enc` when
 the bundle is sealed, and subject to the existing sanitized-derivative review
 before egress. They are never copied into `manifest.json`, hosted run summaries,
-or console logs.
+or console logs. Command-line values are still visible in process listings and
+shell history: use `--rdp-window-title` / `--rdp-readiness-text` only for stable,
+non-sensitive application chrome. Put sensitive deployment values in a
+permission-protected YAML config, or record them once and seal the compiled
+bundle rather than repeating them on the command line.
 
 ## Parameters
 

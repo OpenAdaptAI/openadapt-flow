@@ -84,7 +84,7 @@
     },
     {
       "path": ".github/workflows/citrix-workspace-standin.yml",
-      "sha256": "1b2c7956efecd90e334bcf1c9d9469025119efdac60c21d9e79ac456333c3e56"
+      "sha256": "241510b52a1db7f646488f741a571c86bac2c0a2da115ce68de607fb9c766819"
     },
     {
       "path": ".github/workflows/docker-rdp-vision-ladder.yml",
@@ -128,7 +128,7 @@
     },
     {
       "path": "benchmark/citrix_workspace/results.json",
-      "sha256": "4a81aa0ef319b01205e2de34df9bc9a0606b0605924358a04384177a2cff2687"
+      "sha256": "943bf16c88c6ee3e1f4b310481a66ac2a10247bac31c32d232d8b5c80b17ca75"
     },
     {
       "path": "benchmark/comparison_artifact/comparison.html",

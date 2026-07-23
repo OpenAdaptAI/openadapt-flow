@@ -1,27 +1,40 @@
 {
-  "accepted": true,
   "backend_under_test": "CitrixWorkspaceBackend (RemoteDisplayBackend preset)",
   "base_commit": "d952c363d1910f1699c1a4690002879b1990d743",
-  "candidate_commit": "624914c645c47658ba88154209d35476a3ab68c5",
-  "caveat": "Exercises the REAL Citrix-Workspace-window pixel backend (window-scoped capture + OS input through the inherited fail-loud safety gates) over a no-DOM HTML5-canvas STAND-IN (the class Citrix Workspace-web presents) -- NOT Citrix ICA/HDX. Real ICA/HDX validation requires the separate 3+3 release gate in README.",
+  "candidate_commit": "3cc30781c3260e35b4877e62c97795d1570d03f6",
+  "caveat": "Exercises the Citrix-Workspace-window pixel backend (window-scoped capture + actuation through the inherited fail-loud safety gates) over a no-DOM HTML5-canvas STAND-IN (the class Citrix Workspace-web presents) -- NOT Citrix ICA/HDX. Real ICA/HDX validation requires the separate 3+3 release gate in README.",
   "citrix_owner_preset": "Citrix Viewer",
+  "code_readiness_accepted": true,
   "contract": {
-    "healthy_effect_confirmed": true,
+    "drift_false_completions": 0,
+    "drift_safely_halted": 3,
+    "drift_silent_incorrect_successes": 0,
+    "drift_silent_writes": 0,
+    "drift_trials": 3,
+    "healthy_effects_confirmed": 3,
+    "healthy_false_completions": 0,
+    "healthy_over_halts": 0,
+    "healthy_silent_incorrect_successes": 0,
     "healthy_structural_rung_used": 0,
+    "healthy_trials": 3,
     "healthy_visual_rungs_used": {
-      "template": 3
+      "template": 9
     },
-    "healthy_zero_model_calls": true,
-    "severe_drift_no_silent_write": true,
-    "severe_drift_safely_halted": true
+    "healthy_zero_model_calls": true
   },
+  "evidence_scope": "synthetic_no_dom_standin_code_readiness",
   "failure_taxonomy": [
     "connect_or_frame_failure",
     "healthy_contract_violation",
-    "effect_not_confirmed",
+    "silent_incorrect_success",
+    "healthy_over_halt",
+    "drift_false_completion",
+    "drift_unexpected_write",
     "drift_not_safely_halted"
   ],
-  "generated_at": "2026-07-23T03:48:30.526905+00:00",
+  "generated_at": "2026-07-23T04:04:13.287647+00:00",
+  "ica_hdx_accepted": false,
+  "ica_hdx_status": "pending_real_environment_3_healthy_plus_3_drift",
   "model_calls": 0,
   "oracle": "docker exec cat of the kiosk-persisted note file",
   "pending_for_real_ica": [
@@ -30,24 +43,28 @@
     "zero silent incorrect success and explicit refusal under drift",
     "reviewed bounded aggregate with raw evidence retained privately"
   ],
-  "run_count": 2,
-  "schema_version": "openadapt.citrix-workspace-qualification.v1",
+  "run_count": 6,
+  "schema_version": "openadapt.citrix-workspace-code-readiness.v2",
   "substrate": "citrix-workspace-backend-over-no-dom-canvas-standin",
-  "successes": 2,
-  "task": "record->compile->replay a patient-note write through the vision-only resolver ladder, driving the Citrix-Workspace-window pixel backend (window-scoped capture + OS input) over a no-DOM canvas stand-in; confirm the write via an independent document oracle; and safe-halt under severe injected drift",
-  "total_s": 35.81,
+  "successes": 6,
+  "task": "record->compile->replay a bounded synthetic note write through the vision-only resolver ladder, driving the Citrix-Workspace-window pixel backend (window-scoped capture + actuation) over a no-DOM canvas stand-in; confirm the write via an independent document oracle; and safe-halt under severe injected drift",
+  "total_s": 84.762,
   "trials": [
     {
+      "condition_trial": 1,
       "effect_confirmed": true,
       "effect_expected": "MRN A1001\tfollowup in two weeks",
       "effect_observed": "MRN A1001\tfollowup in two weeks",
       "failure_class": null,
+      "false_completion": false,
       "kind": "healthy_record_compile_replay",
       "model_calls": 0,
+      "over_halt": false,
       "passed": true,
       "rung_counts": {
         "template": 3
       },
+      "silent_incorrect_success": false,
       "structural_rung_used": 0,
       "success": true,
       "trial": 1,
@@ -56,16 +73,96 @@
       }
     },
     {
+      "condition_trial": 2,
+      "effect_confirmed": true,
+      "effect_expected": "MRN A1001\tfollowup in two weeks",
+      "effect_observed": "MRN A1001\tfollowup in two weeks",
+      "failure_class": null,
+      "false_completion": false,
+      "kind": "healthy_record_compile_replay",
+      "model_calls": 0,
+      "over_halt": false,
+      "passed": true,
+      "rung_counts": {
+        "template": 3
+      },
+      "silent_incorrect_success": false,
+      "structural_rung_used": 0,
+      "success": true,
+      "trial": 2,
+      "visual_rungs_used": {
+        "template": 3
+      }
+    },
+    {
+      "condition_trial": 3,
+      "effect_confirmed": true,
+      "effect_expected": "MRN A1001\tfollowup in two weeks",
+      "effect_observed": "MRN A1001\tfollowup in two weeks",
+      "failure_class": null,
+      "false_completion": false,
+      "kind": "healthy_record_compile_replay",
+      "model_calls": 0,
+      "over_halt": false,
+      "passed": true,
+      "rung_counts": {
+        "template": 3
+      },
+      "silent_incorrect_success": false,
+      "structural_rung_used": 0,
+      "success": true,
+      "trial": 3,
+      "visual_rungs_used": {
+        "template": 3
+      }
+    },
+    {
+      "condition_trial": 1,
       "drift": "downscale_0.14x + gaussian_blur_2.0 + theme_invert + jpeg_q5 (illegible synthetic stand-in frame)",
       "effect_after_drift": null,
       "failure_class": null,
+      "false_completion": false,
       "halted": true,
       "kind": "severe_drift_safe_halt",
       "model_calls": 0,
+      "over_halt": false,
       "passed": true,
       "rung_counts": {},
+      "silent_incorrect_success": false,
       "silent_write": false,
-      "trial": 2
+      "trial": 4
+    },
+    {
+      "condition_trial": 2,
+      "drift": "downscale_0.14x + gaussian_blur_2.0 + theme_invert + jpeg_q5 (illegible synthetic stand-in frame)",
+      "effect_after_drift": null,
+      "failure_class": null,
+      "false_completion": false,
+      "halted": true,
+      "kind": "severe_drift_safe_halt",
+      "model_calls": 0,
+      "over_halt": false,
+      "passed": true,
+      "rung_counts": {},
+      "silent_incorrect_success": false,
+      "silent_write": false,
+      "trial": 5
+    },
+    {
+      "condition_trial": 3,
+      "drift": "downscale_0.14x + gaussian_blur_2.0 + theme_invert + jpeg_q5 (illegible synthetic stand-in frame)",
+      "effect_after_drift": null,
+      "failure_class": null,
+      "false_completion": false,
+      "halted": true,
+      "kind": "severe_drift_safe_halt",
+      "model_calls": 0,
+      "over_halt": false,
+      "passed": true,
+      "rung_counts": {},
+      "silent_incorrect_success": false,
+      "silent_write": false,
+      "trial": 6
     }
   ],
   "window_client": "CanvasWindowClient (noVNC canvas via Playwright)"

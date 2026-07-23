@@ -689,6 +689,22 @@ def run_qualification(
             identity_statuses.get(step_id) == "verified"
             for step_id in report.required_identity_step_ids
         )
+        step_diagnostics = [
+            {
+                "step_id": result.step_id,
+                "ok": result.ok,
+                "error": result.error,
+                "input_verified": result.input_verified,
+                "input_retried": result.input_retried,
+                "postconditions_ok": result.postconditions_ok,
+                "effect_verified": result.effect_verified,
+                "safety_halt": result.safety_halt,
+                "resolution_rung": (
+                    result.resolution.rung if result.resolution is not None else None
+                ),
+            }
+            for result in report.results
+        ]
         runtime_effect_verified = any(
             result.step_id == save_step_id and result.effect_verified is True
             for result in report.results
@@ -718,6 +734,7 @@ def run_qualification(
             "required_identity_step_ids": report.required_identity_step_ids,
             "identity_statuses": identity_statuses,
             "identity_diagnostics": identity_diagnostics,
+            "step_diagnostics": step_diagnostics,
             "identity_required": identity_required,
             "identity_verified": identity_verified,
             "runtime_effect_verified": runtime_effect_verified,

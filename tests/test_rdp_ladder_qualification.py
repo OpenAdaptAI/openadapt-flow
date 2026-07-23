@@ -244,6 +244,12 @@ def test_headless_bundle_is_encrypted_and_admitted_before_any_replay(
         )
     ]
     assert save_step_id == "step_003"
+    effect = governed.steps[-1].effects[0]
+    assert effect.match["name"].literal == qualification.ORACLE_FILENAME
+    assert effect.idempotency_key is not None
+    assert effect.idempotency_key.literal == qualification.ORACLE_FILENAME
+    assert effect.key_field == "name"
+    assert effect.count_new_only is True
     assert report.required_identity_step_ids == [
         "step_000",
         "step_001",

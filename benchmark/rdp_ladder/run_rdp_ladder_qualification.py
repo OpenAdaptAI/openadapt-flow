@@ -532,7 +532,13 @@ def _seal_and_admit_workflow(workflow, bundle_dir: Path, oracle_root: Path):
             match={"name": ORACLE_FILENAME},
             expected_count=1,
             count_new_only=True,
-            idempotency_key={"param": NOTE_PARAM},
+            # The filesystem substrate's stable operation key is the output
+            # path, not the note contents. DocumentHashVerifier exposes that
+            # path as ``name``; binding the key to a nonexistent generic
+            # ``key`` field would correctly filter every record out and halt
+            # even after the exact document landed.
+            idempotency_key=ORACLE_FILENAME,
+            key_field="name",
         )
     ]
 

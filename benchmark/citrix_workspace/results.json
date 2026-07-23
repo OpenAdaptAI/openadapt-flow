@@ -1,9 +1,9 @@
 {
   "accepted": true,
   "backend_under_test": "CitrixWorkspaceBackend (RemoteDisplayBackend preset)",
-  "base_commit": "",
-  "candidate_commit": "bd485c90c193e4f10e4fca1b41510c948742fcbf",
-  "caveat": "Exercises the REAL Citrix-Workspace-window pixel backend (window-scoped capture + OS input + all fail-loud safety gates) over a no-DOM HTML5-canvas STAND-IN (the class Citrix Workspace-web presents) -- NOT Citrix ICA/HDX. Real ICA/HDX validation is PENDING a live CVAD/DaaS session (see README).",
+  "base_commit": "d952c363d1910f1699c1a4690002879b1990d743",
+  "candidate_commit": "624914c645c47658ba88154209d35476a3ab68c5",
+  "caveat": "Exercises the REAL Citrix-Workspace-window pixel backend (window-scoped capture + OS input through the inherited fail-loud safety gates) over a no-DOM HTML5-canvas STAND-IN (the class Citrix Workspace-web presents) -- NOT Citrix ICA/HDX. Real ICA/HDX validation requires the separate 3+3 release gate in README.",
   "citrix_owner_preset": "Citrix Viewer",
   "contract": {
     "healthy_effect_confirmed": true,
@@ -21,21 +21,21 @@
     "effect_not_confirmed",
     "drift_not_safely_halted"
   ],
-  "generated_at": "2026-07-20T18:58:34.966182+00:00",
+  "generated_at": "2026-07-23T03:48:30.526905+00:00",
   "model_calls": 0,
   "oracle": "docker exec cat of the kiosk-persisted note file",
   "pending_for_real_ica": [
-    "point owner_substr at the real 'Citrix Viewer' window on a GUI host",
-    "grant Screen-Recording + Accessibility trust to the driver",
-    "set a session-lock readiness marker (readiness_text)",
-    "record HDX codec / adaptive-display settings in the manifest"
+    "3 healthy and 3 drift trials on one exact ICA/HDX environment",
+    "independent effect oracle for the bounded synthetic lab task",
+    "zero silent incorrect success and explicit refusal under drift",
+    "reviewed bounded aggregate with raw evidence retained privately"
   ],
   "run_count": 2,
   "schema_version": "openadapt.citrix-workspace-qualification.v1",
   "substrate": "citrix-workspace-backend-over-no-dom-canvas-standin",
   "successes": 2,
   "task": "record->compile->replay a patient-note write through the vision-only resolver ladder, driving the Citrix-Workspace-window pixel backend (window-scoped capture + OS input) over a no-DOM canvas stand-in; confirm the write via an independent document oracle; and safe-halt under severe injected drift",
-  "total_s": 36.191,
+  "total_s": 35.81,
   "trials": [
     {
       "effect_confirmed": true,
@@ -56,7 +56,7 @@
       }
     },
     {
-      "drift": "downscale_0.14x + gaussian_blur_2.0 + theme_invert + jpeg_q5 (illegible; simulated on real session)",
+      "drift": "downscale_0.14x + gaussian_blur_2.0 + theme_invert + jpeg_q5 (illegible synthetic stand-in frame)",
       "effect_after_drift": null,
       "failure_class": null,
       "halted": true,

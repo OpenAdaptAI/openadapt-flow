@@ -1,7 +1,7 @@
 {
   "backend_under_test": "CitrixWorkspaceBackend (RemoteDisplayBackend preset)",
   "base_commit": "d952c363d1910f1699c1a4690002879b1990d743",
-  "candidate_commit": "3cc30781c3260e35b4877e62c97795d1570d03f6",
+  "candidate_commit": "656952a9e6dd9e2e21830b064542ed3b5af3953f",
   "caveat": "Exercises the Citrix-Workspace-window pixel backend (window-scoped capture + actuation through the inherited fail-loud safety gates) over a no-DOM HTML5-canvas STAND-IN (the class Citrix Workspace-web presents) -- NOT Citrix ICA/HDX. Real ICA/HDX validation requires the separate 3+3 release gate in README.",
   "citrix_owner_preset": "Citrix Viewer",
   "code_readiness_accepted": true,
@@ -32,7 +32,7 @@
     "drift_unexpected_write",
     "drift_not_safely_halted"
   ],
-  "generated_at": "2026-07-23T04:04:13.287647+00:00",
+  "generated_at": "2026-07-23T04:14:54.499463+00:00",
   "ica_hdx_accepted": false,
   "ica_hdx_status": "pending_real_environment_3_healthy_plus_3_drift",
   "model_calls": 0,
@@ -48,7 +48,7 @@
   "substrate": "citrix-workspace-backend-over-no-dom-canvas-standin",
   "successes": 6,
   "task": "record->compile->replay a bounded synthetic note write through the vision-only resolver ladder, driving the Citrix-Workspace-window pixel backend (window-scoped capture + actuation) over a no-DOM canvas stand-in; confirm the write via an independent document oracle; and safe-halt under severe injected drift",
-  "total_s": 84.762,
+  "total_s": 79.727,
   "trials": [
     {
       "condition_trial": 1,

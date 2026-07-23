@@ -128,7 +128,7 @@
     },
     {
       "path": "benchmark/citrix_workspace/results.json",
-      "sha256": "938f54fe5d438f07fceb8d1c9f5414a1c3388142be3e28712965f1a955cc7378"
+      "sha256": "64d588f93bc4fcd5ade9962483aeb85d5facc6b764babddd0b90b750f59d4156"
     },
     {
       "path": "benchmark/comparison_artifact/comparison.html",

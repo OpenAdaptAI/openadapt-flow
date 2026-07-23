@@ -95,6 +95,23 @@ def test_source_provenance_requires_full_lowercase_shas() -> None:
         qualification._validate_source_provenance("0" * 40, "A" * 40)
 
 
+@pytest.mark.parametrize(("character", "keysym"), [("-", "minus"), ("/", "slash")])
+def test_rdp_fixture_transport_uses_unambiguous_punctuation_keysyms(
+    character: str, keysym: str
+) -> None:
+    transport = qualification.DockerX11RdpTransport("synthetic-fixture")
+    commands: list[list[str]] = []
+    transport._exec = lambda args, **_kwargs: commands.append(args)  # type: ignore[method-assign]
+
+    transport.key(character, True)
+    transport.key(character, False)
+
+    assert commands == [
+        ["xdotool", "keydown", "--clearmodifiers", keysym],
+        ["xdotool", "keyup", "--clearmodifiers", keysym],
+    ]
+
+
 def test_recorded_identity_regions_cover_every_pointer_action(tmp_path: Path) -> None:
     recording = tmp_path / "recording"
     recording.mkdir()

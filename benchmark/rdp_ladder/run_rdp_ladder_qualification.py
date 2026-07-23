@@ -97,6 +97,11 @@ _XDOTOOL_KEYS = {
     "shift": "shift",
     "alt": "alt",
     "meta": "super",
+    # xdotool parses punctuation tokens as key-sequence syntax (and a leading
+    # "-" as an option-like invalid sequence), so use the unambiguous X11
+    # keysym names for punctuation present in parameterized fixture values.
+    "-": "minus",
+    "/": "slash",
 }
 
 

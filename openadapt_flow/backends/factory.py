@@ -146,7 +146,7 @@ def build_backend(
 
     raise ValueError(
         "unknown backend.kind "
-        f"{cfg.kind!r} (expected: web | windows | macos | linux | rdp)"
+        f"{cfg.kind!r} (expected: web | windows | macos | linux | rdp | citrix)"
     )
 
 
@@ -176,7 +176,14 @@ def _build_rdp_backend(
     has_window = bool(cfg.rdp_window)
     readiness_probe = _build_rdp_readiness_probe(cfg)
 
-    if citrix and not has_host:
+    if citrix and (has_host or rdp_transport is not None):
+        raise ValueError(
+            "backend.kind 'citrix' drives a local Citrix Workspace window and "
+            "does not accept backend.rdp_host or an RDP transport; use "
+            "backend.kind 'rdp' for a network RDP session"
+        )
+
+    if citrix:
         from openadapt_flow.backends.citrix_workspace import CitrixWorkspaceBackend
 
         return CitrixWorkspaceBackend(

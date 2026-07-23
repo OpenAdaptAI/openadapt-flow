@@ -1,7 +1,7 @@
 # Citrix Workspace-window pixel backend
 
-Part 2 of the no-DOM/Citrix validation (`~/oa/src/.private/rdp_citrix_validation_2026_07_20.md`).
-A backend that drives a **Citrix Workspace/Viewer session WINDOW as a no-DOM
+Part 2 of the no-DOM/Citrix validation. A backend that drives a **Citrix
+Workspace/Viewer session WINDOW as a no-DOM
 pixel surface**: window-scoped screen capture + OS-level input injection into the
 Workspace window, **pixel-only** (no structural/a11y), conforming to the base
 `Backend` contract so the resolver ladder + effect verification run over it
@@ -32,7 +32,7 @@ target-window-agnostic. This deliverable adds the thin **Citrix preset** over it
 
 **DONE (validated this pass):**
 - The backend records → compiles → replays through the vision-only ladder and
-  **safe-halts under drift**, exercising the REAL `RemoteDisplayBackend` code
+  **safe-halts under drift**, exercising the `RemoteDisplayBackend` code
   paths (window resolution, per-frame capture + DPI/scale, pixel→screen-point
   map, frame-freshness lease, occlusion guard, input-trust gate) over a genuine
   no-DOM surface. Evidence: `results.json`
@@ -78,11 +78,10 @@ Env-gated e2e: `tests/e2e/test_citrix_workspace_standin_e2e.py`
 (`OAFLOW_CITRIX_STANDIN_E2E=1`). Nightly draft CI:
 `.github/workflows/citrix-workspace-standin.yml`.
 
-## Point at the real CVAD lab (when it is up)
+## Real ICA/HDX release gate
 
-A separate agent is standing up a CVAD 30-day-trial Azure lab
-(`~/oa/src/.private/rdp_citrix_validation_2026_07_20.md` §7). Once a published
-app is reachable via the Citrix Workspace app on a **GUI host we control**:
+Once a synthetic lab application is reachable via Citrix Workspace on a
+controlled GUI host:
 
 1. **Find the exact window owner/title.** On the host, enumerate on-screen
    windows and confirm the Workspace session window's owner (macOS: usually
@@ -99,14 +98,17 @@ app is reachable via the Citrix Workspace app on a **GUI host we control**:
    `client` (the host's native Mac/Win `WindowClient` is used automatically), or
    `--backend citrix` from the CLI. Everything else — the ladder, identity,
    effect, drift-halt — is identical to the stand-in harness.
-5. **Run the same contract** (record→compile→replay pixel-only + independent
-   oracle + drift halt) and commit `benchmark/citrix/…` evidence with an
-   **ICA-specific manifest** (HDX codec / adaptive-display settings recorded) and
-   a PHI-free sanitized report (reuse `scripts/sanitize_rdp_qualification_report.py`).
+5. **Run the release contract at least 3+3 times:** three healthy
+   record→compile→replay trials and three drift/refusal trials on one exact
+   client/server/application version matrix, with an independent synthetic-lab
+   effect oracle. Acceptance requires zero silent incorrect success, explicit
+   refusal under unresolved drift, and recorded failure taxonomy. Keep raw
+   screenshots, window fingerprints, detailed configuration, and per-system
+   recipes inside the private evidence boundary; publish only a reviewed,
+   bounded aggregate.
 
 ## Honest scope / label
 
 This proves the **Citrix backend contract + ladder + effect + safe-halt** over a
 **no-DOM HTML5-canvas STAND-IN** (the class Citrix Workspace-web presents). It is
-**NOT Citrix ICA/HDX**. We do not fake Citrix evidence; the real-ICA gate is a
-trial-clock + GUI-host constraint, not a code gap upstream of the window.
+**NOT Citrix ICA/HDX**. The real-ICA gate remains the 3+3 release contract above.

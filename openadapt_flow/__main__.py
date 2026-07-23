@@ -485,7 +485,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
     # SAME compile-ready recording format. Selection is fail-loud (a missing
     # target for the chosen backend raises rather than silently record web).
     backend = getattr(args, "backend", None) or "web"
-    if backend in ("windows", "macos", "linux", "rdp"):
+    if backend in ("windows", "macos", "linux", "rdp", "citrix"):
         return _cmd_record_desktop(args, backend)
 
     if getattr(args, "window", None) or getattr(args, "window_title", None):
@@ -494,7 +494,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
         # rather than silently ignore the operator's requested scope.
         raise SystemExit(
             "record: --window/--window-title apply only to the desktop "
-            "backends (--backend windows/macos/linux/rdp); --backend web "
+            "backends (--backend windows/macos/linux/rdp/citrix); --backend web "
             "records the Playwright page given by --url."
         )
 
@@ -1787,7 +1787,7 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
     """
     p.add_argument(
         "--backend",
-        choices=["web", "windows", "macos", "linux", "rdp"],
+        choices=["web", "windows", "macos", "linux", "rdp", "citrix"],
         default=None,
         help=(
             "Backend to drive: 'web' (default; Playwright/Chromium), 'windows' "
@@ -1795,8 +1795,11 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
             "'macos' (one native Mac app window — needs --macos-app), or "
             "'linux' (one exact AT-SPI app window — needs --linux-app and "
             "--linux-window-title), or "
-            "'rdp' (pixel-only remote desktop / Citrix — needs --rdp-host or a "
-            "configured rdp_window). Overrides backend.kind from --config."
+            "'rdp' (pixel-only network or local remote desktop — needs "
+            "--rdp-host or a configured rdp_window), or 'citrix' (the local "
+            "Citrix Workspace window; its owner defaults by host OS and a "
+            "configured rdp_window may override it). Overrides backend.kind "
+            "from --config."
         ),
     )
     p.add_argument(
@@ -2005,7 +2008,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Record a typed value as a PARAMETER; its demonstrated value "
             "becomes the default, overridable at replay with --param. For "
             "--backend web, FIELD is the field name/id. For --backend "
-            "windows/macos/linux/rdp (capture has no field identity), use "
+            "windows/macos/linux/rdp/citrix (capture has no field identity), use "
             "NAME=VALUE — the typed value equal to VALUE is marked as parameter "
             "NAME. Repeatable."
         ),
@@ -2022,7 +2025,7 @@ def build_parser() -> argparse.ArgumentParser:
             "replays (Citrix/RDP). For --backend web, FIELD is the field "
             "name/id (repeatable; the first marked field present at each "
             "click contributes its rect). For --backend "
-            "windows/macos/linux/rdp (a pixel capture has no field "
+            "windows/macos/linux/rdp/citrix (a pixel capture has no field "
             "identity), give the region once as X,Y,W,H in recording "
             "pixels. Unmarked recordings still get automatic crops on "
             "identity-armed pixel steps (from the OCR identity band)."
@@ -2033,7 +2036,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Task description for a desktop "
-            "(--backend windows/macos/linux/rdp) capture session "
+            "(--backend windows/macos/linux/rdp/citrix) capture session "
             "(stored in the recording metadata)."
         ),
     )
@@ -2042,7 +2045,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="OWNER",
         help=(
-            "Scope a desktop capture (--backend windows/macos/linux/rdp) to ONE "
+            "Scope a desktop capture "
+            "(--backend windows/macos/linux/rdp/citrix) to ONE "
             "window, recorded in that window's OWN pixel space (owner-app "
             "substring, e.g. --window Parallels / --window 'Citrix Workspace'). "
             "Closes the coordinate-space gap with the pixel (rdp) replay "
@@ -3091,9 +3095,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--backend",
-        choices=["web", "windows", "macos", "linux", "rdp"],
+        choices=["web", "windows", "macos", "linux", "rdp", "citrix"],
         default=None,
-        help="Backend/substrate this run executed on (web/windows/macos/linux/rdp)",
+        help=(
+            "Backend/substrate this run executed on "
+            "(web/windows/macos/linux/rdp/citrix)"
+        ),
     )
     p.add_argument(
         "--org-id",

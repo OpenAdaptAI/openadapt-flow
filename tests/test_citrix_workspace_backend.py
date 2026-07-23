@@ -13,6 +13,8 @@ Part-1 canvas). See that directory's README.
 
 from __future__ import annotations
 
+import pytest
+
 from openadapt_flow.backend import (
     Backend,
     IdentityBackend,
@@ -25,6 +27,8 @@ from openadapt_flow.backends.citrix_workspace import (
     CitrixWorkspaceBackend,
     default_citrix_owner,
 )
+from openadapt_flow.backends.factory import build_backend
+from openadapt_flow.deployment import BackendConfig
 
 
 class _NoopWindowClient:
@@ -57,10 +61,10 @@ def test_owner_and_title_overrides():
     be = CitrixWorkspaceBackend(
         _NoopWindowClient(),
         owner_substr="Citrix Viewer (2)",
-        window_title="Accuro - ICA",
+        window_title="Claims App - ICA",
     )
     assert be._owner_substr == "Citrix Viewer (2)"
-    assert be._title_substr == "Accuro - ICA"
+    assert be._title_substr == "Claims App - ICA"
 
 
 def test_pixel_only_protocol_surface():
@@ -79,24 +83,44 @@ def test_readiness_text_builds_probe():
 
 
 def test_factory_builds_citrix_backend_with_default_owner():
-    from openadapt_flow.backends.factory import build_backend
-    from openadapt_flow.deployment import BackendConfig
-
     be = build_backend(BackendConfig(kind="citrix"), window_client=_NoopWindowClient())
     assert isinstance(be, CitrixWorkspaceBackend)
     assert be._owner_substr == default_citrix_owner()
 
 
 def test_factory_citrix_owner_and_title_override():
-    from openadapt_flow.backends.factory import build_backend
-    from openadapt_flow.deployment import BackendConfig
-
     be = build_backend(
         BackendConfig(
-            kind="citrix", rdp_window="wfica32", rdp_window_title="Accuro - ICA"
+            kind="citrix",
+            rdp_window="wfica32",
+            rdp_window_title="Claims App - ICA",
         ),
         window_client=_NoopWindowClient(),
     )
     assert isinstance(be, CitrixWorkspaceBackend)
     assert be._owner_substr == "wfica32"
-    assert be._title_substr == "Accuro - ICA"
+    assert be._title_substr == "Claims App - ICA"
+
+
+def test_factory_refuses_network_rdp_host_for_citrix():
+    with pytest.raises(ValueError, match="local Citrix Workspace window"):
+        build_backend(
+            BackendConfig(kind="citrix", rdp_host="192.0.2.10"),
+            window_client=_NoopWindowClient(),
+        )
+
+
+def test_cli_exposes_citrix_record_replay_and_report_run():
+    from openadapt_flow.__main__ import _resolve_backend_config, build_parser
+    from openadapt_flow.deployment import DeploymentConfig
+
+    parser = build_parser()
+    record_args = parser.parse_args(
+        ["record", "--backend", "citrix", "--out", "recording"]
+    )
+    replay_args = parser.parse_args(["replay", "bundle", "--backend", "citrix"])
+    report_args = parser.parse_args(["report-run", "run", "--backend", "citrix"])
+
+    assert record_args.backend == "citrix"
+    assert _resolve_backend_config(replay_args, DeploymentConfig()).kind == "citrix"
+    assert report_args.backend == "citrix"

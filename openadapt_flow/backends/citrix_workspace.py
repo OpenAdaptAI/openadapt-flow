@@ -4,10 +4,11 @@ SESSION WINDOW as a no-DOM pixel surface.
 Over Citrix, the local machine holds a **Citrix Workspace/Viewer window that
 paints the pixels of a remote ICA/HDX session**; there is no in-guest agent on
 our side of the ICA boundary and **UIA/MSAA/DOM do not cross ICA**. So the
-production Accuro-over-Citrix wire is a **local-OS backend that screenshots the
-Workspace window and injects OS-level input into it** -- pixel-only, no
+Citrix execution wire is a **local-OS backend that screenshots the Workspace
+window and injects OS-level input into it** -- pixel-only, no
 structural/identity layer, resolution on the visual floor (template ->
-template_global -> ocr -> geometry), identity on the OCR name+DOB tier.
+template_global -> ocr -> geometry), with record-specific pixel/OCR identity
+evidence supplied by the compiled workflow.
 
 That backend already exists: :class:`~openadapt_flow.backends.remote_display.RemoteDisplayBackend`
 (window-scoped ``CGWindowListCreateImage`` / ``PrintWindow`` capture + ``CGEvent``
@@ -29,17 +30,18 @@ by owner/title and the *same* capture+inject code runs. This module is the thin,
   unavailable by construction: the Citrix pixel floor.
 
 Validation status (see ``benchmark/citrix_workspace/README.md``):
-* DONE: window-scoped pixel capture + OS input injection + all the fail-loud
-  safety gates (frame-freshness, occlusion, input-trust, DPI-consistency) are
-  inherited from ``RemoteDisplayBackend`` and are exercised END-TO-END by the
+* DONE: window-scoped pixel capture + OS input injection inherit the
+  ``RemoteDisplayBackend`` frame-freshness, occlusion, input-trust, and
+  DPI-consistency gates. The healthy gate path is exercised end-to-end by the
   record->compile->replay + drift contract over the no-DOM canvas stand-in
-  (``benchmark/canvas_ladder`` fixture) through the ``WindowClient`` seam.
+  (``benchmark/canvas_ladder`` fixture); the base backend's unit suite owns the
+  corresponding refusal cases.
 * PENDING: validation against a REAL Citrix Workspace window on a live CVAD/DaaS
   ICA/HDX session (needs the trial lab + a GUI host with Screen-Recording /
   Accessibility trust). Everything upstream of the window is already proven; the
   ICA-specific delta is HDX codec artifacts, ICA compression, and the exact
   Workspace-window owner/title + a session-lock readiness marker. See the
-  README's "Point at the real CVAD lab" runbook.
+  README's "Real ICA/HDX release gate" runbook.
 """
 
 from __future__ import annotations
@@ -100,7 +102,7 @@ class CitrixWorkspaceBackend(RemoteDisplayBackend):
     Args:
         client: Host-OS ``WindowClient`` (real Mac/Win client, or a stand-in
             such as the canvas ``WindowClient`` used in the fixture test). When
-            None, the host's native client is used.
+            None, the host's native macOS or Windows client is used.
         owner_substr: Override the Citrix owner name (defaults to the host's
             canonical Citrix Workspace window owner). Use this if your Workspace
             build reports a different owner.

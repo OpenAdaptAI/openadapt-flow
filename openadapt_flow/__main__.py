@@ -284,17 +284,36 @@ def _deployment_runtime(args: argparse.Namespace, params: dict[str, str] | None 
     return cfg, effect_verifier, api_actuator, durable, allow_egress
 
 
-def _resolve_backend_config(args: argparse.Namespace, cfg):
+def _resolve_backend_config(args: argparse.Namespace, cfg, workflow=None):
     """Merge the ``--backend`` family of CLI flags over ``cfg.backend``.
 
     A deployment ``--config`` supplies the backend section; direct flags
     (``--backend`` / ``--agent-url`` / ``--macos-app`` / ``--linux-app`` /
-    ``--rdp-host``) override individual
-    fields, exactly as the effects/actuation flags override their sections. With
-    no flags the config's backend (default ``web``) is returned unchanged, so an
-    unflagged web replay behaves precisely as before.
+    ``--rdp-host`` / ``--rdp-window`` / ``--rdp-window-title`` /
+    ``--rdp-readiness-text``) override individual fields, exactly as the
+    effects/actuation flags override their sections. A compiled window-scoped
+    RDP/Citrix workflow may contribute the exact target recorded with the
+    demonstration; explicit config/flags remain authoritative.
     """
     backend = cfg.backend
+    hints = getattr(workflow, "backend_hints", None)
+    configured = set(getattr(backend, "model_fields_set", set()))
+    explicit_kind = getattr(args, "backend", None)
+    configured_kind = backend.kind if "kind" in configured else None
+    selected_kind = explicit_kind or configured_kind
+    if hints is not None and (
+        selected_kind is None or str(selected_kind).strip().lower() == hints.backend
+    ):
+        updates: dict[str, object] = {}
+        if selected_kind is None:
+            updates["kind"] = hints.backend
+        for field in ("rdp_window", "rdp_window_title", "rdp_readiness_text"):
+            if field not in configured:
+                value = getattr(hints, field)
+                if value is not None:
+                    updates[field] = value
+        if updates:
+            backend = backend.model_copy(update=updates)
     if getattr(args, "backend", None):
         backend = backend.model_copy(update={"kind": args.backend})
     if getattr(args, "agent_url", None):
@@ -315,6 +334,14 @@ def _resolve_backend_config(args: argparse.Namespace, cfg):
         backend = backend.model_copy(update={"linux_allow_physical_input": True})
     if getattr(args, "rdp_host", None):
         backend = backend.model_copy(update={"rdp_host": args.rdp_host})
+    if getattr(args, "rdp_window", None):
+        backend = backend.model_copy(update={"rdp_window": args.rdp_window})
+    if getattr(args, "rdp_window_title", None):
+        backend = backend.model_copy(update={"rdp_window_title": args.rdp_window_title})
+    if getattr(args, "rdp_readiness_text", None):
+        backend = backend.model_copy(
+            update={"rdp_readiness_text": args.rdp_readiness_text}
+        )
     return backend
 
 
@@ -397,7 +424,11 @@ def _build_and_run_replayer(
 
 
 def _finish_replay(
-    run_dir: Path, report, args: Optional[argparse.Namespace] = None
+    run_dir: Path,
+    report,
+    args: Optional[argparse.Namespace] = None,
+    *,
+    backend_kind: Optional[str] = None,
 ) -> int:
     """Render the run report, print the outcome, and map it to an exit code."""
     from openadapt_flow.report import render_run_report
@@ -411,7 +442,7 @@ def _finish_replay(
             "screenshots could have left the box (see REPORT.md)."
         )
     _maybe_report_break(run_dir, report)
-    _maybe_report_run(run_dir, report, args)
+    _maybe_report_run(run_dir, report, args, backend_kind=backend_kind)
     return 0 if report.success else 1
 
 
@@ -475,7 +506,9 @@ def _replay_desktop(
         close = getattr(backend, "close", None)
         if callable(close):
             close()  # RDP transports hold a live socket; browsers/agents don't
-    return _finish_replay(run_dir, report, args)
+    return _finish_replay(
+        run_dir, report, args, backend_kind=str(backend_cfg.kind).strip().lower()
+    )
 
 
 def _cmd_record(args: argparse.Namespace) -> int:
@@ -488,12 +521,19 @@ def _cmd_record(args: argparse.Namespace) -> int:
     if backend in ("windows", "macos", "linux", "rdp", "citrix"):
         return _cmd_record_desktop(args, backend)
 
-    if getattr(args, "window", None) or getattr(args, "window_title", None):
+    if (
+        getattr(args, "window", None)
+        or getattr(args, "window_title", None)
+        or getattr(args, "rdp_window", None)
+        or getattr(args, "rdp_window_title", None)
+        or getattr(args, "rdp_readiness_text", None)
+    ):
         # --window scopes a pixel/desktop capture to one on-screen window; the
         # web recorder drives a Playwright page and has no such notion. Refuse
         # rather than silently ignore the operator's requested scope.
         raise SystemExit(
-            "record: --window/--window-title apply only to the desktop "
+            "record: --window/--window-title and --rdp-window/"
+            "--rdp-window-title/--rdp-readiness-text apply only to the desktop "
             "backends (--backend windows/macos/linux/rdp/citrix); --backend web "
             "records the Playwright page given by --url."
         )
@@ -569,8 +609,10 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
     # Window-scoping (optional): capture ONE window in its own pixel space.
     # Selectors are case-insensitive substrings (owner app / window title),
     # matching openadapt-capture's WindowTarget; None means full-screen capture.
-    window_owner = getattr(args, "window", None)
-    window_title = getattr(args, "window_title", None)
+    window_owner = getattr(args, "window", None) or getattr(args, "rdp_window", None)
+    window_title = getattr(args, "window_title", None) or getattr(
+        args, "rdp_window_title", None
+    )
     window: Optional[dict[str, Optional[str]]] = None
     if window_owner or window_title:
         window = {"owner": window_owner, "title": window_title}
@@ -584,14 +626,17 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
         params=params,
         identifier_region=identifier_region,
         window=window,
+        backend_kind=backend if backend in ("rdp", "citrix") else None,
+        replay_window=getattr(args, "rdp_window", None),
+        replay_window_title=getattr(args, "rdp_window_title", None),
+        readiness_text=getattr(args, "rdp_readiness_text", None),
     )
     print(f"Recording written to {out}")
     if window is not None:
         print(
-            "Window-scoped recording: "
-            f"owner={window_owner!r} title={window_title!r} "
-            "(frames are that window's own pixels; identity stored in "
-            "meta.json for the pixel/rdp replay surface)."
+            "Window-scoped recording completed (frames are that window's own "
+            "pixels; sensitive target identity is stored only in local "
+            "recording metadata for the pixel replay surface)."
         )
     if params:
         print(
@@ -785,7 +830,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     # Backend selection (web/native/remote, overriding --config). A
     # non-web backend drives a native desktop / RDP / remote-display session with
     # no browser: delegate to the desktop path. Default web is unchanged below.
-    backend_cfg = _resolve_backend_config(args, cfg)
+    backend_cfg = _resolve_backend_config(args, cfg, workflow)
     if _normalize_kind(backend_cfg.kind) != "web":
         return _replay_desktop(
             args,
@@ -888,7 +933,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if stop is not None:
             stop()
 
-    return _finish_replay(run_dir, report, args)
+    return _finish_replay(
+        run_dir, report, args, backend_kind=str(backend_cfg.kind).strip().lower()
+    )
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -926,6 +973,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
     cfg, effect_verifier, api_actuator, _durable, _egress = _deployment_runtime(
         args, params=gate_params
     )
+    backend_cfg = _resolve_backend_config(args, cfg, workflow)
+    if (
+        str(backend_cfg.kind).strip().lower() == "citrix"
+        and not backend_cfg.rdp_readiness_text
+    ):
+        print(
+            "run REFUSED: governed Citrix execution requires a stable "
+            "current-frame readiness marker before any action. Set "
+            "backend.rdp_readiness_text in --config or pass "
+            "--rdp-readiness-text. Nothing was executed."
+        )
+        return 2
     policy_source = args.policy or cfg.policy.policy
 
     report = evaluate_run_gate(
@@ -1086,7 +1145,12 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     report_md = render_run_report(run_dir)
     outcome = "success" if report.success else "FAILED"
     print(f"Resume {outcome}: {report_md}")
-    _maybe_report_run(run_dir, report, args)
+    _maybe_report_run(
+        run_dir,
+        report,
+        args,
+        backend_kind=str(backend_cfg.kind).strip().lower(),
+    )
     return 0 if report.success else 1
 
 
@@ -1705,7 +1769,13 @@ def _maybe_report_break(run_dir: Path, report) -> None:
         print(f"(break report skipped: {e})")
 
 
-def _maybe_report_run(run_dir: Path, report, args=None) -> None:
+def _maybe_report_run(
+    run_dir: Path,
+    report,
+    args=None,
+    *,
+    backend_kind: Optional[str] = None,
+) -> None:
     """Opt-in post-run hook: emit a PHI-free SUCCESS summary (the L0 rail).
 
     NEVER auto-uploads: it fires only when the operator explicitly opted in —
@@ -1727,7 +1797,9 @@ def _maybe_report_run(run_dir: Path, report, args=None) -> None:
         result = report_run(
             run_dir,
             workflow_id=os.environ.get("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID"),
-            backend=getattr(args, "backend", None),
+            # Only the closed backend token crosses this PHI-free rail. Window
+            # owner/title/readiness hints remain local bundle configuration.
+            backend=backend_kind or getattr(args, "backend", None),
         )
         if result.get("emitted"):
             print(
@@ -1861,8 +1933,39 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
         metavar="HOST",
         help=(
             "RDP host/IP for --backend rdp (network RDP via FreeRDP). Overrides "
-            "backend.rdp_host. For the local Citrix/Parallels window path set "
-            "backend.rdp_window in --config instead."
+            "backend.rdp_host. For a local client window use --rdp-window "
+            "instead."
+        ),
+    )
+    p.add_argument(
+        "--rdp-window",
+        default=None,
+        metavar="OWNER",
+        help=(
+            "Exact local remote-display window owner/process for --backend "
+            "rdp or citrix. On Windows this is the process basename (for "
+            "example wfica32); on macOS it is the app owner (for example "
+            "'Citrix Viewer'). Overrides backend.rdp_window."
+        ),
+    )
+    p.add_argument(
+        "--rdp-window-title",
+        default=None,
+        metavar="TITLE",
+        help=(
+            "Exact local remote-display window title used to disambiguate "
+            "multiple matching RDP/Citrix client windows. Overrides "
+            "backend.rdp_window_title."
+        ),
+    )
+    p.add_argument(
+        "--rdp-readiness-text",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Stable text that must be visible in the current remote frame "
+            "before input. Required for governed Citrix `run`; overrides "
+            "backend.rdp_readiness_text."
         ),
     )
 

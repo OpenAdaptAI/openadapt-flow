@@ -45,7 +45,7 @@ class _NoopWindowClient:
 
 def test_default_owner_per_platform():
     assert default_citrix_owner("darwin") == "Citrix Viewer"
-    assert default_citrix_owner("win32") == "Citrix Workspace"
+    assert default_citrix_owner("win32") == "wfica32"
     assert default_citrix_owner("linux") == "Citrix Viewer"
     # Every platform table is non-empty and its default is the first entry.
     for plat, owners in CITRIX_WINDOW_OWNERS.items():
@@ -139,9 +139,26 @@ def test_cli_exposes_citrix_record_replay_and_report_run():
     record_args = parser.parse_args(
         ["record", "--backend", "citrix", "--out", "recording"]
     )
-    replay_args = parser.parse_args(["replay", "bundle", "--backend", "citrix"])
+    replay_args = parser.parse_args(
+        [
+            "replay",
+            "bundle",
+            "--backend",
+            "citrix",
+            "--rdp-window",
+            "wfica32",
+            "--rdp-window-title",
+            "Claims App - ICA",
+            "--rdp-readiness-text",
+            "Claims queue",
+        ]
+    )
     report_args = parser.parse_args(["report-run", "run", "--backend", "citrix"])
 
     assert record_args.backend == "citrix"
-    assert _resolve_backend_config(replay_args, DeploymentConfig()).kind == "citrix"
+    resolved = _resolve_backend_config(replay_args, DeploymentConfig())
+    assert resolved.kind == "citrix"
+    assert resolved.rdp_window == "wfica32"
+    assert resolved.rdp_window_title == "Claims App - ICA"
+    assert resolved.rdp_readiness_text == "Claims queue"
     assert report_args.backend == "citrix"

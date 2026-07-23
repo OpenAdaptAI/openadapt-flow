@@ -25,8 +25,34 @@ target-window-agnostic. This deliverable adds the thin **Citrix preset** over it
     `IdentityBackend` / `StructuralActionBackend`), so the structural rung is
     unavailable — the ICA floor.
 - Factory: `--backend citrix` now builds `CitrixWorkspaceBackend` with the
-  default owner (no need to know the per-platform string; `--rdp-window`
-  overrides it, `--rdp-window-title` disambiguates multiple sessions).
+  default exact owner (`Citrix Viewer` on macOS; process basename `wfica32` on
+  Windows). `--rdp-window` overrides it and `--rdp-window-title` disambiguates
+  multiple exact matches. `CDViewer` is an explicit Windows alternate, never a
+  silent fallback.
+
+The product CLI closes the binding from demonstration to execution:
+
+```bash
+openadapt-flow record --backend citrix \
+  --window 'Citrix Viewer' \
+  --rdp-window 'Citrix Viewer' \
+  --rdp-window-title 'Ward A' \
+  --rdp-readiness-text 'Appointments' \
+  --out rec/
+openadapt-flow compile rec/ --out bundle/ --name ward-a
+openadapt-flow replay bundle/
+openadapt-flow run bundle/ --approve-unverified-effects
+```
+
+`--window` / `--window-title` are substring selectors used only to find the
+capture window. `--rdp-window` / `--rdp-window-title` are exact replay
+selectors. Compile carries the recorded Citrix kind, target, and readiness
+marker in closed local workflow hints; config and CLI overrides remain
+authoritative. Governed `run` refuses before action if a Citrix readiness marker
+is absent, while record and replay remain usable. Owner/title/readiness values
+can be sensitive: they are not copied to the plaintext manifest, hosted
+summary, or console output, and they are encrypted when the workflow bundle is
+sealed. An explicitly unencrypted local bundle remains plaintext by design.
 
 ## Evidence scope
 
@@ -91,7 +117,8 @@ controlled GUI host:
 
 1. **Find the exact window owner/title.** On the host, enumerate on-screen
    windows and confirm the Workspace session window's owner (macOS: usually
-   `Citrix Viewer`; Windows: `Citrix Workspace` / `wfica32` / `CDViewer`). Set
+   `Citrix Viewer`; Windows: process basename `wfica32`, with `CDViewer` as an
+   explicit alternate). Set
    `--rdp-window <owner>` if it differs from the preset, `--rdp-window-title` to
    disambiguate.
 2. **Grant input/capture trust** to the driver process (macOS: Screen Recording

@@ -63,9 +63,11 @@ from openadapt_flow.backends.remote_display import (
 CITRIX_WINDOW_OWNERS: dict[str, tuple[str, ...]] = {
     # macOS: the session window is owned by "Citrix Viewer".
     "darwin": ("Citrix Viewer",),
-    # Windows: the ICA session window is hosted by wfica32.exe; the app/owner
-    # surfaces as "Citrix Workspace" / "Citrix Viewer" / the CDViewer host.
-    "win32": ("Citrix Workspace", "Citrix Viewer", "wfica32", "CDViewer"),
+    # Windows native matching is against the exact owning PROCESS basename
+    # (``.exe`` optional), not a display label. The normal ICA session process
+    # is wfica32.exe; CDViewer is retained as a documented alternate that an
+    # operator can select explicitly after exact window inventory.
+    "win32": ("wfica32", "CDViewer"),
     # Linux: the native client (wfica / "Citrix Viewer").
     "linux": ("Citrix Viewer", "wfica"),
 }

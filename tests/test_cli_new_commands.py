@@ -643,6 +643,20 @@ def test_resume_refuses_blank_citrix_readiness_before_backend(
     assert "Nothing was executed" in out
 
 
+def test_resume_bundle_load_refusal_has_safe_constant_guidance(
+    tmp_path: Path, capsys
+) -> None:
+    run = _paused_run(tmp_path)
+    main(["approve", str(run)])
+    (tmp_path / "b" / "workflow.json").unlink()
+
+    assert main(["resume", str(run), "--require-approval"]) == 3
+    out = capsys.readouterr().out
+    assert "paused workflow bundle could not be loaded safely" in out
+    assert "OPENADAPT_BUNDLE_KEY" in out
+    assert "Nothing was executed" in out
+
+
 # ---------------------------------------------------------------------------
 # --version
 # ---------------------------------------------------------------------------

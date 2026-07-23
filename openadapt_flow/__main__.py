@@ -373,6 +373,12 @@ def _refuse_missing_citrix_readiness(backend_cfg: object, *, operation: str) -> 
     return True
 
 
+_SAFE_BUNDLE_LOAD_GUIDANCE = (
+    "Verify the bundle path and integrity; for a sealed bundle, set "
+    "OPENADAPT_BUNDLE_KEY."
+)
+
+
 def _configured_replayer(
     backend,
     *,
@@ -997,7 +1003,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # Never echo a provider/Pydantic error here. A malformed local bundle
         # can contain PHI-bearing target metadata and validation errors may
         # repeat the rejected input verbatim.
-        print("run REFUSED: bundle could not be loaded safely. Nothing was executed.")
+        print(
+            "run REFUSED: bundle could not be loaded safely. "
+            f"{_SAFE_BUNDLE_LOAD_GUIDANCE} Nothing was executed."
+        )
         return 2
 
     gate_params = _replay_params(args.param, getattr(args, "params_file", None))
@@ -1088,7 +1097,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         # a PHI-bearing title and Pydantic/provider errors may repeat inputs.
         print(
             "Resume REFUSED: the paused workflow bundle could not be loaded "
-            "safely. Nothing was executed."
+            f"safely. {_SAFE_BUNDLE_LOAD_GUIDANCE} Nothing was executed."
         )
         return 3
 

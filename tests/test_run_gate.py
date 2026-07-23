@@ -775,6 +775,7 @@ def test_cli_run_invalid_backend_hints_do_not_echo_sensitive_value(tmp_path, cap
     assert args.func(args) == 2
     out = capsys.readouterr().out
     assert "bundle could not be loaded safely" in out
+    assert "OPENADAPT_BUNDLE_KEY" in out
     assert sensitive not in out
     assert "input_value" not in out
 

@@ -49,7 +49,11 @@ from __future__ import annotations
 import sys
 from typing import Callable, Optional
 
-from openadapt_flow.backends.remote_display import RemoteDisplayBackend, WindowClient
+from openadapt_flow.backends.remote_display import (
+    RemoteDisplayBackend,
+    RemoteDisplayError,
+    WindowClient,
+)
 
 # Per-platform Citrix Workspace / Receiver *client window* owner names. These are
 # the on-screen owner-app identities of the window that paints the ICA session
@@ -125,6 +129,12 @@ class CitrixWorkspaceBackend(RemoteDisplayBackend):
         readiness_probe: Optional[Callable[[bytes], bool]] = None,
         **kwargs: object,
     ) -> None:
+        if client is None and sys.platform.startswith("linux"):
+            raise RemoteDisplayError(
+                "Citrix Workspace window replay on Linux requires an injected "
+                "WindowClient; the built-in default WindowClient is available "
+                "only on macOS (Quartz) and Windows (Win32)"
+            )
         owner = owner_substr or default_citrix_owner()
         if readiness_probe is None and readiness_text:
             readiness_probe = _ocr_marker_probe(readiness_text)

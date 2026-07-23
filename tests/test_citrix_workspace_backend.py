@@ -28,6 +28,7 @@ from openadapt_flow.backends.citrix_workspace import (
     default_citrix_owner,
 )
 from openadapt_flow.backends.factory import build_backend
+from openadapt_flow.backends.remote_display import RemoteDisplayError
 from openadapt_flow.deployment import BackendConfig
 
 
@@ -86,6 +87,26 @@ def test_factory_builds_citrix_backend_with_default_owner():
     be = build_backend(BackendConfig(kind="citrix"), window_client=_NoopWindowClient())
     assert isinstance(be, CitrixWorkspaceBackend)
     assert be._owner_substr == default_citrix_owner()
+
+
+def test_factory_builds_citrix_backend_on_linux_with_injected_client(monkeypatch):
+    monkeypatch.setattr(
+        "openadapt_flow.backends.citrix_workspace.sys.platform", "linux"
+    )
+    be = build_backend(BackendConfig(kind="citrix"), window_client=_NoopWindowClient())
+    assert isinstance(be, CitrixWorkspaceBackend)
+    assert be._owner_substr == CITRIX_WINDOW_OWNERS["linux"][0]
+
+
+def test_factory_refuses_default_citrix_client_on_linux(monkeypatch):
+    monkeypatch.setattr(
+        "openadapt_flow.backends.citrix_workspace.sys.platform", "linux"
+    )
+    with pytest.raises(
+        RemoteDisplayError,
+        match=r"Linux requires an injected WindowClient.*macOS.*Windows",
+    ):
+        build_backend(BackendConfig(kind="citrix"))
 
 
 def test_factory_citrix_owner_and_title_override():

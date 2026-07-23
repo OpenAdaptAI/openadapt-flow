@@ -16,7 +16,14 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from openadapt_flow.ir import ActionKind, Anchor, Step, Workflow
+from openadapt_flow.ir import (
+    ActionKind,
+    Anchor,
+    Postcondition,
+    PostconditionKind,
+    Step,
+    Workflow,
+)
 from openadapt_flow.policy import load_policy
 
 REPO = Path(__file__).resolve().parents[1]
@@ -213,6 +220,12 @@ def test_headless_bundle_is_encrypted_and_admitted_before_any_replay(
 
     assert report.passed, report.render()
     assert governed.encrypted is True
+    assert governed.steps[0].expect == [
+        Postcondition(
+            kind=PostconditionKind.TEXT_PRESENT,
+            text="Active: Ada Lovelace",
+        )
+    ]
     assert save_step_id == "step_003"
     assert report.required_identity_step_ids == [
         "step_000",

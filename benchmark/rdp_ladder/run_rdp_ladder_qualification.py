@@ -488,6 +488,22 @@ def _seal_and_admit_workflow(workflow, bundle_dir: Path, oracle_root: Path):
 
     if not workflow.steps:
         raise RuntimeError("compiled qualification workflow has no steps")
+    select_step = workflow.steps[0]
+    if select_step.action is not ActionKind.CLICK:
+        raise RuntimeError(
+            "first qualification step is not the patient-selection click"
+        )
+    # The RDP input edge is asynchronous: a visually stable frame can still
+    # precede the remote Tk repaint by one protocol round trip. Make this state
+    # dependency explicit so replay cannot advance to the note field until the
+    # selected-record banner is actually observable. This is a semantic
+    # postcondition evaluated on the real RDP-decoded frame, not a fixed sleep.
+    select_step.expect = [
+        Postcondition(
+            kind=PostconditionKind.TEXT_PRESENT,
+            text="Active: Ada Lovelace",
+        )
+    ]
     save_step = workflow.steps[-1]
     if save_step.action is not ActionKind.CLICK or save_step.risk != "irreversible":
         raise RuntimeError(
@@ -630,6 +646,23 @@ def run_qualification(
             for result in report.results
             if result.step_id in report.required_identity_step_ids
         }
+        identity_diagnostics = {
+            result.step_id: {
+                "mode": result.identity.mode if result.identity is not None else None,
+                "status": (
+                    result.identity.status if result.identity is not None else None
+                ),
+                # This fixture is synthetic. Retain enough evidence to
+                # distinguish a transport/state race from a true identity
+                # mismatch without publishing screenshots or tuned thresholds.
+                "observed": (
+                    result.identity.observed if result.identity is not None else None
+                ),
+                "error": result.error,
+            }
+            for result in report.results
+            if result.step_id in report.required_identity_step_ids
+        }
         identity_required = bool(report.required_identity_step_ids)
         identity_verified = identity_required and all(
             identity_statuses.get(step_id) == "verified"
@@ -663,6 +696,7 @@ def run_qualification(
             "visual_rungs_used": visual_rungs,
             "required_identity_step_ids": report.required_identity_step_ids,
             "identity_statuses": identity_statuses,
+            "identity_diagnostics": identity_diagnostics,
             "identity_required": identity_required,
             "identity_verified": identity_verified,
             "runtime_effect_verified": runtime_effect_verified,

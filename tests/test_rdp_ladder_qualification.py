@@ -153,21 +153,27 @@ def test_identity_marking_refuses_an_unexpected_recording_shape(tmp_path: Path) 
         qualification._arm_recorded_identifiers(recording)
 
 
-def test_committed_result_remains_honest_pre_fix_partial_evidence() -> None:
+def test_committed_result_is_exact_accepted_six_trial_evidence() -> None:
     result = json.loads(
         (REPO / "benchmark" / "rdp_ladder" / "results.json").read_text()
     )
-    assert result["schema_version"] == "openadapt.rdp-ladder-qualification.v1"
-    assert result["candidate_commit"] == ("5c4529bc5e80f6edba6b509ad3895f0b806e9219")
-    assert result["run_count"] == 2
-    assert result["successes"] == 1
-    assert result["accepted"] is False
+    assert result["schema_version"] == "openadapt.rdp-ladder-qualification.v2"
+    assert result["candidate_commit"] == ("6031fde559b942a1d8b1a560d8b6cee8a6bfc800")
+    assert result["base_commit"] == ("d952c363d1910f1699c1a4690002879b1990d743")
+    assert result["run_count"] == 6
+    assert result["successes"] == 6
+    assert result["accepted"] is True
+    assert qualification._accepted_contract(
+        result["trials"][: qualification.TRIALS_PER_CONDITION],
+        result["trials"][qualification.TRIALS_PER_CONDITION :],
+    )
 
 
-def test_unaccepted_qualification_workflow_is_manual_and_fail_loud() -> None:
+def test_qualification_workflow_is_path_filtered_manual_and_fail_loud() -> None:
     workflow = (
         REPO / ".github" / "workflows" / "docker-rdp-vision-ladder.yml"
     ).read_text()
+    assert "pull_request:" in workflow
     assert "workflow_dispatch:" in workflow
     assert "schedule:" not in workflow
     assert "|| pip install" not in workflow

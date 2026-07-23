@@ -380,7 +380,7 @@
     },
     {
       "path": "benchmark/rdp_ladder/results.json",
-      "sha256": "326022d86a3a8141212c2d55f33584d3a6d2007249e5651df2f72d8df768543b"
+      "sha256": "3b946dd098c4a4c2ca56c1ab531a2eaeeb37804aa10c440e576f7196a03ae37c"
     },
     {
       "path": "benchmark/reliability/summary.json",

@@ -20,14 +20,16 @@ or model calls. See
 prove this vision-ladder harness and does not establish general RDP application
 support.
 
-The committed `results.json` here is the latest actual run of the original v1
-harness (`candidate_commit: 5c4529b…`). It is intentionally
-`accepted: false`: the healthy replay over-halted and produced no confirmed
-effect; only the drift refusal passed. The deterministic input correction and
-the v2 governed identity/effect/policy contract were added afterward and have
-not been rerun in an authorized real-protocol environment. Do not present this
-directory as accepted until a current-head v2 artifact passes the exact 3+3
-matrix below.
+The committed `results.json` is the accepted v2 artifact from GitHub Actions
+run `29978847851`, attempt 2, at mechanism commit
+`6031fde559b942a1d8b1a560d8b6cee8a6bfc800` (base
+`d952c363d1910f1699c1a4690002879b1990d743`). All three healthy trials and all
+three drift trials passed. Healthy replay used only deterministic visual
+resolution, verified every governed pixel identity plus the runtime and host
+effects, and made zero model calls, with no over-halt or silent incorrect
+success. Every drift trial halted with no write or false completion. This is
+bounded evidence for the synthetic real-RDP surface described under
+[Honest scope](#honest-scope), not a general application-support claim.
 
 ## Acceptance contract
 
@@ -124,9 +126,9 @@ transport screenshots/injects over `docker exec`, one operation at a time).
 The env-gated pytest wrapper `tests/e2e/test_docker_rdp_vision_ladder_e2e.py`
 (`OAFLOW_DOCKER_RDP_E2E=1`) builds the fixture, runs the qualification, and
 asserts `accepted`. `.github/workflows/docker-rdp-vision-ladder.yml` is manual
-only until a rebased candidate produces a fresh accepted v2 artifact; it must
-not consume scheduled runner time or create recurring red main noise before
-then.
+via `workflow_dispatch` and also runs on pull requests that change the bounded
+RDP-ladder harness or its exact compiler/policy/runtime dependencies. It is not
+scheduled.
 
 ## License posture
 

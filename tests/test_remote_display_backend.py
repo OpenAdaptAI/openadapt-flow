@@ -270,11 +270,15 @@ def test_duplicate_exact_windows_refused_instead_of_largest_selection() -> None:
 
 def test_partial_owner_match_is_not_accepted() -> None:
     client = FakeClient()
+    sensitive_owner = "Patient Jane Doe - Citrix"
     backend = RemoteDisplayBackend(
-        client=client, owner_substr="Parallels", settle_s=0.0
+        client=client, owner_substr=sensitive_owner, settle_s=0.0
     )
-    with pytest.raises(RemoteDisplayError, match="no window exactly matching"):
+    with pytest.raises(
+        RemoteDisplayError, match="no window exactly matching"
+    ) as exc_info:
         backend.screenshot()
+    assert sensitive_owner not in str(exc_info.value)
 
 
 def test_same_pid_front_window_mismatch_refuses_keyboard_and_click() -> None:

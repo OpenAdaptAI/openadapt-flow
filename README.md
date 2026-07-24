@@ -221,9 +221,11 @@ runtime; none is a second-class add-on. Maturity is reported honestly per the
 | RDP (remote display) | `--backend rdp` | Available | Real-network Aardwolf RDP into Windows 11 passed 3/3 fixed remote-input trials with independent guest-tools file verification; a separate real-FreeRDP batch covers record → compile → governed replay and refusal |
 | Citrix / VDI (pixel ladder) | `--backend citrix` | Code-qualified | Dedicated exact-Workspace-window driver, readiness gate, durable resume, and 3 healthy + 3 drift-halt no-DOM trials; the retained artifact records `ica_hdx_accepted=false` until a counted ICA/HDX run is attached |
 
-These are accepted scoped qualifications. A customer application is qualified
-against its own controls, session/display policy, identity evidence, and effect
-oracle. Details:
+Every row is bounded to its stated evidence. Accepted application workflows are
+qualified against their own controls, session/display policy, identity evidence,
+and effect oracle; code-qualified Citrix deployments additionally attach the
+counted ICA/HDX record for their exact Workspace/server/application matrix.
+Details:
 [`docs/backends/RDP.md`](docs/backends/RDP.md),
 [`docs/desktop/LINUX_NATIVE.md`](docs/desktop/LINUX_NATIVE.md),
 [`docs/desktop/CITRIX_PIXEL.md`](docs/desktop/CITRIX_PIXEL.md).
@@ -514,7 +516,7 @@ openadapt-flow push ./triage.sanitized --kind recording
 openadapt-flow compile ./triage.sanitized --out ./triage.bundle --name triage
 openadapt-flow lint ./triage.bundle --strict
 openadapt-flow certify ./triage.bundle --policy permissive
-openadapt-flow replay ./triage.bundle --url https://example.internal/login \
+openadapt-flow replay ./triage.bundle --url https://app.example.com/login \
   --run-dir ./triage.run --param patient_id=example
 
 # Privacy-review the executable bytes. A changed executable is refused.
@@ -527,10 +529,16 @@ openadapt-flow approve-sanitized ./triage.bundle.sanitized \
 openadapt-flow validate-hosted \
   --recording ./triage.sanitized --bundle ./triage.bundle.sanitized \
   --run-dir ./triage.run --policy permissive --risk-class low \
-  --environment staging-v1 --target-url https://example.internal/login \
+  --environment staging-v1 --target-kind web \
+  --target-url https://app.example.com/login \
   --out triage.validation.json
 openadapt-flow push ./triage.bundle.sanitized --kind bundle \
   --validation-attestation triage.validation.json
+
+# Desktop/RDP/Citrix use the same validation command, deriving the signed
+# target kind from report.json. Their app/window/host details stay local:
+#   --target-kind citrix --environment clinic-citrix-qualified-v1
+# (omit --target-url and --allowed-host outside the web substrate).
 
 # To activate this as a new version of an existing workflow, add:
 #   --workflow-id 00000000-0000-0000-0000-000000000000

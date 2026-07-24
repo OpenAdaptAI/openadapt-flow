@@ -44,6 +44,17 @@ class CustomerStorage(Protocol):
         ...
 
 
+def _customer_path(root: Path, ref: str, *, kind: str) -> Path:
+    """Resolve one relative customer-storage key without crossing its root."""
+    if Path(ref).is_absolute() or "\\" in ref:
+        raise RuntimeError(f"{kind} ref must be a relative customer-storage key")
+    resolved_root = root.resolve()
+    resolved = (resolved_root / ref).resolve()
+    if resolved == resolved_root or resolved_root not in resolved.parents:
+        raise RuntimeError(f"{kind} ref escapes the configured customer storage root")
+    return resolved
+
+
 def extract_bundle_archive(zip_path: Path, dest: Path) -> None:
     """Extract a zip, refusing any entry that escapes ``dest`` (zip-slip)."""
     dest = dest.resolve()
@@ -66,12 +77,7 @@ class LocalCustomerStorage:
     def fetch_bundle_archive(self, ref: Optional[str], dest_file: Path) -> Path:
         if not ref:
             raise RuntimeError("byoc job has no storage.bundle_ref to read")
-        root = self.root.resolve()
-        src = (root / ref).resolve()
-        if src != root and root not in src.parents:
-            raise RuntimeError(
-                "bundle ref escapes the configured customer storage root"
-            )
+        src = _customer_path(self.root, ref, kind="bundle")
         if not src.exists():
             raise RuntimeError(f"bundle not found in customer storage: {src}")
         if not src.is_file():
@@ -86,7 +92,7 @@ class LocalCustomerStorage:
     def write_report(self, ref: Optional[str], report: dict[str, Any]) -> Optional[str]:
         if not ref:
             return None
-        dest = self.root / ref
+        dest = _customer_path(self.root, ref, kind="report")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(json.dumps(report, indent=2), encoding="utf-8")
         try:

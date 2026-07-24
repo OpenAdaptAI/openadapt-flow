@@ -366,6 +366,13 @@ def test_local_storage_copies_exact_archive_bytes(tmp_path):
     assert copied.read_bytes() == _BUNDLE_BYTES
 
 
+def test_local_storage_refuses_report_ref_outside_root(tmp_path):
+    storage = LocalCustomerStorage(str(tmp_path / "customer"))
+    with pytest.raises(RuntimeError, match="report ref escapes"):
+        storage.write_report("../escaped.json", {"success": True})
+    assert not (tmp_path / "escaped.json").exists()
+
+
 def test_governed_run_argv_uses_the_fail_closed_run_verb():
     job = parse_job(_payload(), lease_job_id="bjob_1")
     settings = ConnectorSettings(

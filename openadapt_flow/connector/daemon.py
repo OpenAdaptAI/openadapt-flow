@@ -71,7 +71,9 @@ def handle_job(
 ) -> dict[str, Any]:
     """Run one leased job end to end: execute -> PHI-free callback -> ack.
 
-    Never raises: a failure still reports PHI-free + releases the lease.
+    Never raises: an execution failure still reports PHI-free and is ACKed only
+    after Cloud accepts that outcome. A callback/ACK delivery failure leaves the
+    lease to expire as terminal ``lease_expired_uncertain`` without re-offer.
     """
     try:
         storage = storage_factory(job)
@@ -103,7 +105,7 @@ def handle_job(
         ack_status = "failed" if result.status == "failed" else "done"
         try:
             client.ack(job.lease_job_id, ack_status, result.error)
-        except Exception:  # noqa: BLE001 - lease will expire + re-offer if ack fails
+        except Exception:  # noqa: BLE001 - terminal uncertainty, never re-offered
             pass
 
     return {

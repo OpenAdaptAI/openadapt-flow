@@ -13,7 +13,7 @@ Loop (all outbound HTTPS; zero inbound ports):
                 (identity gates + effect verification + halt-don't-guess intact),
                 against the CUSTOMER'S own storage
     callback -> POST /api/internal/run-callback (PHI-free status/metrics)
-    ack      -> POST /api/connector/ack         (release the lease done|failed)
+    ack      -> POST /api/connector/ack         (only after callback acceptance)
 
 CLI: ``openadapt-flow connector enroll`` then ``openadapt-flow connector run``.
 """

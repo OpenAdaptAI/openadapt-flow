@@ -28,7 +28,7 @@ poll     -> POST /api/connector/poll        long-poll; lease the next queued job
 execute  -> openadapt-flow run ...          the governed admission gate + Replayer,
                                              against the CUSTOMER'S own storage
 callback -> POST /api/internal/run-callback  PHI-free status/metrics
-ack      -> POST /api/connector/ack          release the lease (done|failed)
+ack      -> POST /api/connector/ack          release only after callback acceptance
 ```
 
 ## Install and run
@@ -85,6 +85,12 @@ rung whose API key env is not set on this machine. The governed `run` itself
 refuses any bundle that is not certified, identity-armed, effect-verified, and
 encrypted — those engine gates are unchanged, so identity checks, effect
 verification, and halt-don't-guess all remain intact.
+
+The callback is retried a bounded three times. The Connector ACKs a job only
+after the control plane accepts its outcome. If delivery still fails, the lease
+is left unacknowledged; Cloud marks expiry as `lease_expired_uncertain` and
+never blindly re-offers it, so an operator checks the real effect before
+authorizing a fresh run.
 
 ## Enabling the lane (control plane)
 

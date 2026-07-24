@@ -408,6 +408,8 @@ class StubControlPlane:
         self.tokens = {}  # token -> org_id
         self.jobs = []  # queued jobs (each {id, org_id, payload, status, leased_by})
         self.callbacks = []
+        self.callback_attempts = 0
+        self.callback_status = 200
         self.acks = []
         self._n = 0
 
@@ -458,6 +460,9 @@ class StubControlPlane:
             return httpx.Response(200, json={"ok": True})
 
         if path == "/api/internal/run-callback":
+            self.callback_attempts += 1
+            if self.callback_status != 200:
+                return httpx.Response(self.callback_status, json={"ok": False})
             self.callbacks.append({"headers": dict(request.headers), "body": body})
             return httpx.Response(200, json={"ok": True})
 
@@ -518,6 +523,41 @@ def test_full_loop_dispatch_execute_callback_ack():
     # The lease was released done.
     assert len(cp.acks) == 1
     assert cp.acks[0]["status"] == "done"
+
+
+@pytest.mark.parametrize("callback_status", [400, 503])
+def test_callback_rejection_is_retried_but_never_acked(callback_status, monkeypatch):
+    monkeypatch.setattr("openadapt_flow.connector.daemon.time.sleep", lambda _: None)
+    cp = StubControlPlane()
+    cp.callback_status = callback_status
+    cp.enqueue("org_demo", _payload())
+    transport = httpx.MockTransport(cp.handler)
+    client = ConnectorClient("https://app.test", transport=transport)
+    client.enroll(enrollment_secret="s", org_id="org_demo", name="n")
+    settings = ConnectorSettings(
+        control_plane_url="https://app.test",
+        org_id="org_demo",
+        token=client.token,
+        poll_wait_s=0,
+    )
+
+    result = run_once(
+        client,
+        settings,
+        runner=_fake_success_runner(SUCCESS_REPORT),
+        storage_factory=lambda job: InMemoryCustomerStorage(bundle_bytes=_BUNDLE_BYTES),
+    )
+
+    assert result == {
+        "job_id": "bjob_1",
+        "run_id": _payload()["run_id"],
+        "status": "success",
+        "callback_accepted": False,
+    }
+    assert cp.callback_attempts == 3
+    assert cp.callbacks == []
+    assert cp.acks == []
+    assert cp.jobs[0]["status"] == "leased"
 
 
 def test_cross_org_isolation_connector_never_sees_another_orgs_job():

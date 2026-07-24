@@ -118,9 +118,9 @@ class ConnectorClient:
         """POST PHI-free run status/metrics via the existing callback boundary.
 
         Authenticated by the run-scoped ``x-run-token`` delivered in the job
-        (proves this run; forbids forging another's status). Best-effort:
-        observability/status must not crash the loop, but a hard transport error
-        propagates so the caller records it.
+        (proves this run; forbids forging another's status). Every non-2xx
+        response propagates: the caller must not ACK a lease whose authoritative
+        run outcome the control plane rejected or did not receive.
         """
         headers = {"content-type": "application/json"}
         if run_token:
@@ -128,7 +128,7 @@ class ConnectorClient:
         resp = self._client.post(
             "/api/internal/run-callback", json=body, headers=headers
         )
-        if resp.status_code >= 500:
+        if not 200 <= resp.status_code < 300:
             raise ConnectorClientError(
                 f"run-callback failed: {resp.status_code} {resp.text[:300]}"
             )

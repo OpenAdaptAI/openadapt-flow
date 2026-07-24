@@ -69,13 +69,21 @@ env var (`CONTROL_PLANE_URL`, `BYOC_CONNECTOR_TOKEN`, `BYOC_ORG_ID`, ...).
 * **The bundle and report bytes** are read from / written to the **customer's own
   storage** (`--storage-root`, a local encrypted volume). Our control plane holds
   no URL to them and signs no access.
+* **The staged bundle is the exact approved ZIP archive.** `bundle_sha256` binds
+  the dispatch to those archive bytes (separately from the bundle's semantic
+  content digest). The Connector copies and hashes that file before extraction,
+  refuses a missing/different digest or an unpacked directory, then safe-extracts
+  only the verified copy. A pre-verification failure never echoes the unverified
+  digest claim in its callback.
 
 **Fail-closed everywhere.** A dispatch is refused (reported `failed`, no GUI
 touched) when it is missing the governed safety policy, missing the run-scoped
-callback token, carries an our-owned signed URL, or when the org enabled a
-grounding rung whose API key env is not set on this machine. The governed `run`
-itself refuses any bundle that is not certified, identity-armed, effect-verified,
-and encrypted — those engine gates are unchanged, so identity checks, effect
+callback token, exact archive digest, or execution substrate; carries an
+our-owned signed URL; points at archive bytes that do not match the signed
+digest; conflicts with the substrate compatibility hint; or enables a grounding
+rung whose API key env is not set on this machine. The governed `run` itself
+refuses any bundle that is not certified, identity-armed, effect-verified, and
+encrypted — those engine gates are unchanged, so identity checks, effect
 verification, and halt-don't-guess all remain intact.
 
 ## Enabling the lane (control plane)

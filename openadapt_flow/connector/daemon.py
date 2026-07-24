@@ -40,7 +40,6 @@ def phi_free_callback_body(job: ByocJob, result: ExecutionResult) -> dict[str, A
         "workflow_id": job.workflow_id,
         "bundle_version_id": job.bundle_version_id,
         "runtime_validation_id": job.runtime_validation_id,
-        "bundle_sha256": job.bundle_sha256,
         "mode": job.mode,
         "status": result.status,
         "report_path": result.report_ref,
@@ -49,6 +48,10 @@ def phi_free_callback_body(job: ByocJob, result: ExecutionResult) -> dict[str, A
         # name internal paths). error_code is the exact enum run-callback accepts.
         "error_code": "runner_failure" if result.status == "failed" else None,
     }
+    if result.verified_bundle_sha256 is not None:
+        # Never echo the job's untrusted digest claim. This field exists only
+        # after the connector copied, hashed, and matched the exact archive.
+        body["bundle_sha256"] = result.verified_bundle_sha256
     if result.halt is not None:
         # run-callback reads only halt.present; the structured block is additive.
         body["halt"] = {"present": True}

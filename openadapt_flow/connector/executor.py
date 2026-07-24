@@ -9,8 +9,10 @@ closed on top.
 
 Fail-closed application of the control-plane-delivered policy:
 
-* :meth:`ByocJob.ensure_governed` must pass (policy present, callback token
-  present, bundle resolvable) or the job is refused before any GUI is touched;
+* :meth:`ByocJob.ensure_governed` must pass (policy, callback token, closed
+  substrate, and exact archive SHA present) or the job is refused before any
+  GUI is touched; customer storage must then return the exact approved ZIP
+  bytes, whose digest is checked before safe extraction;
 * if the org enabled a grounding rung (``grounding_model.enabled``) whose
   ``api_key_env`` is NOT set in the Connector's own environment, the job is
   refused — the org required a governed control this machine cannot honor, so we
@@ -31,6 +33,7 @@ posture and the delivered policy governs DISPATCH. See RUNNER_CLIENT_LIBRARY.md.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -42,7 +45,7 @@ from typing import Any, Callable, Optional
 
 from openadapt_flow.connector.config import ConnectorSettings
 from openadapt_flow.connector.protocol import ByocGovernanceError, ByocJob
-from openadapt_flow.connector.storage import CustomerStorage
+from openadapt_flow.connector.storage import CustomerStorage, extract_bundle_archive
 
 #: A run-gate refusal (fail-closed admission denied) exits 2 before the replay
 #: creates report.json.
@@ -69,6 +72,7 @@ class ExecutionResult:
     halt: Optional[dict[str, Any]]
     report_ref: Optional[str]
     error: Optional[str] = None
+    verified_bundle_sha256: Optional[str] = None
 
 
 def _grounding_env_available(job: ByocJob) -> bool:
@@ -80,6 +84,14 @@ def _grounding_env_available(job: ByocJob) -> bool:
         # engine's own grounding gate is the backstop. Do not block here.
         return True
     return bool(os.environ.get(gm.api_key_env))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_run_argv(
@@ -248,6 +260,7 @@ def execute_job(
 
     with tempfile.TemporaryDirectory(prefix="oa-byoc-") as tmp:
         tmp_path = Path(tmp)
+        bundle_archive = tmp_path / "approved-bundle.zip"
         bundle_scratch = tmp_path / "bundle"
         run_dir = tmp_path / "run"
         bundle_scratch.mkdir(parents=True, exist_ok=True)
@@ -255,11 +268,19 @@ def execute_job(
 
         _write_policy_audit(job, run_dir)
 
-        # 2. Resolve the bundle from the CUSTOMER'S OWN storage (never our URL).
+        # 2. Copy and verify the EXACT approved archive bytes from the customer's
+        # storage before extraction. The content digest inside workflow.json is
+        # a separate semantic binding; neither can substitute for this signed
+        # archive-byte identity.
         try:
-            bundle_dir = storage.fetch_bundle(
-                job.storage.bundle_ref if job.storage else None, bundle_scratch
+            fetched_archive = storage.fetch_bundle_archive(
+                job.storage.bundle_ref if job.storage else None, bundle_archive
             )
+            observed_sha256 = _sha256_file(fetched_archive)
+            if observed_sha256 != job.bundle_sha256:
+                raise RuntimeError("bundle archive SHA-256 does not match dispatch")
+            extract_bundle_archive(fetched_archive, bundle_scratch)
+            bundle_dir = bundle_scratch
         except Exception as exc:  # storage failure — fail closed, PHI-free msg
             return ExecutionResult(
                 "failed",
@@ -269,11 +290,21 @@ def execute_job(
                 f"customer-storage bundle fetch failed: {type(exc).__name__}",
             )
 
-        params_file = _write_params_file(job.params, run_dir)
+        try:
+            params_file = _write_params_file(job.params, run_dir)
 
-        # 3. The governed, fail-closed child invocation.
-        argv = build_run_argv(job, settings, Path(bundle_dir), run_dir, params_file)
-        outcome = runner(argv, run_dir)
+            # 3. The governed, fail-closed child invocation.
+            argv = build_run_argv(job, settings, Path(bundle_dir), run_dir, params_file)
+            outcome = runner(argv, run_dir)
+        except Exception as exc:
+            return ExecutionResult(
+                "failed",
+                {},
+                None,
+                job.report_ref(),
+                f"governed child invocation failed: {type(exc).__name__}",
+                verified_bundle_sha256=observed_sha256,
+            )
 
         report = outcome.report or {}
         status = status_from_report(outcome.returncode, report)
@@ -291,13 +322,14 @@ def execute_job(
         report_ref = job.report_ref()
         try:
             storage.write_report(report_ref, report)
-        except Exception as exc:  # pragma: no cover - report persist best-effort
+        except Exception as exc:  # no durable report means the run is not complete
             return ExecutionResult(
-                status,
+                "failed",
                 metrics_from_report(report),
                 halt_object(report),
                 report_ref,
                 f"customer-storage report write failed: {type(exc).__name__}",
+                verified_bundle_sha256=observed_sha256,
             )
 
         return ExecutionResult(
@@ -306,4 +338,5 @@ def execute_job(
             halt=halt_object(report),
             report_ref=report_ref,
             error=outcome_error,
+            verified_bundle_sha256=observed_sha256,
         )

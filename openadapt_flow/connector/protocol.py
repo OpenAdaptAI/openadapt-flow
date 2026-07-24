@@ -105,7 +105,10 @@ class ByocJob(BaseModel):
     run_token: Optional[str] = None
     bundle_version_id: Optional[str] = None
     runtime_validation_id: Optional[str] = None
-    bundle_sha256: Optional[str] = None
+    #: SHA-256 of the exact approved sanitized derivative ZIP bytes staged at
+    #: ``storage.bundle_ref``. Distinct from the bundle's semantic content
+    #: digest; required so a valid but different archive cannot be executed.
+    bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     # --- Governed policy delivery (fail-closed) --------------------------------
     #: The org's resolved (baseline-filled) Tier-3 safety block. Always fully
@@ -158,6 +161,11 @@ class ByocJob(BaseModel):
             raise ByocGovernanceError(
                 "byoc dispatch is missing a run-scoped callback token; refusing "
                 "to run a job whose outcome we could not report (fail closed)"
+            )
+        if not self.bundle_version_id or not self.runtime_validation_id:
+            raise ByocGovernanceError(
+                "byoc dispatch is missing its immutable bundle-version or "
+                "runtime-validation binding (fail closed)"
             )
         storage_ref = self.storage.bundle_ref if self.storage else None
         if not storage_ref:

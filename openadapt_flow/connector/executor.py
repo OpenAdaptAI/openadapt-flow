@@ -111,6 +111,7 @@ def build_run_argv(
     policy = settings.policy
     if policy:
         argv += ["--policy", policy]
+    argv += ["--backend", job.target_kind]
     if params_file is not None:
         argv += ["--params-file", str(params_file)]
     if job.target_url:
@@ -202,6 +203,7 @@ def _write_policy_audit(job: ByocJob, run_dir: Path) -> None:
                 {
                     "run_id": job.run_id,
                     "org_id": job.org_id,
+                    "target_kind": job.target_kind,
                     "safety": job.safety,
                     "grounding_model": job.grounding_model.model_dump(),
                 },
@@ -275,6 +277,15 @@ def execute_job(
 
         report = outcome.report or {}
         status = status_from_report(outcome.returncode, report)
+        report_target_kind = report.get("execution_target_kind")
+        if report_target_kind != job.target_kind:
+            status = "failed"
+            outcome_error = (
+                "governed child report execution_target_kind does not match "
+                "the signed dispatch target_kind (fail closed)"
+            )
+        else:
+            outcome_error = None
 
         # 4. The PHI-bearing report body goes to the CUSTOMER'S store, never ours.
         report_ref = job.report_ref()
@@ -294,4 +305,5 @@ def execute_job(
             metrics=metrics_from_report(report),
             halt=halt_object(report),
             report_ref=report_ref,
+            error=outcome_error,
         )

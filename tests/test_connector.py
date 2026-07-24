@@ -49,6 +49,7 @@ def _payload(**overrides):
         "run_id": "00000000-0000-4000-8000-000000000005",
         "org_id": "org_demo",
         "workflow_id": "wf_demo_1",
+        "target_kind": "web",
         "storage": {
             "backend": "local",
             "bundle_ref": "bundles/wf_demo_1/bundle.zip",
@@ -81,6 +82,7 @@ def _fake_success_runner(report):
 
 SUCCESS_REPORT = {
     "workflow_name": "wf_demo_1",
+    "execution_target_kind": "web",
     "results": [
         {"step_id": "s1", "ok": True, "intent": "click Login"},
         {"step_id": "s2", "ok": True, "intent": "type patient MRN 12345"},
@@ -114,6 +116,21 @@ def test_execute_job_success_writes_report_to_customer_storage_only():
     assert storage.written["org_demo/run_5/report.json"]["success"] is True
 
 
+def test_execute_job_refuses_child_report_for_different_substrate():
+    job = parse_job(_payload(), lease_job_id="bjob_1")
+    settings = ConnectorSettings(profile=None)
+    storage = InMemoryCustomerStorage(bundle_dir=Path("/tmp"))
+    mismatched = {**SUCCESS_REPORT, "execution_target_kind": "citrix"}
+
+    result = execute_job(
+        job, settings, storage, runner=_fake_success_runner(mismatched)
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert "does not match" in result.error
+
+
 def test_callback_body_is_phi_free():
     job = parse_job(_payload(), lease_job_id="bjob_1")
     result = ExecutionResult(
@@ -145,6 +162,7 @@ def test_callback_body_is_phi_free():
 
 def test_halt_maps_to_halt_status_and_present_flag():
     halt_report = {
+        "execution_target_kind": "web",
         "results": [{"step_id": "s1", "ok": True}],
         "success": False,
         "terminal_outcome": "halt",
@@ -172,6 +190,50 @@ def test_halt_maps_to_halt_status_and_present_flag():
 def test_dispatch_without_policy_is_refused():
     job = parse_job(_payload(safety={}), lease_job_id="bjob_1")
     with pytest.raises(ByocGovernanceError, match="safety policy"):
+        job.ensure_governed()
+
+
+def test_dispatch_without_first_class_target_kind_is_refused():
+    payload = _payload()
+    payload.pop("target_kind")
+    with pytest.raises(ValueError, match="connector contract"):
+        parse_job(payload, lease_job_id="bjob_1")
+
+
+def test_dispatch_with_unknown_target_kind_is_refused():
+    with pytest.raises(ValueError, match="connector contract"):
+        parse_job(_payload(target_kind="mainframe"), lease_job_id="bjob_1")
+
+
+def test_compatibility_target_kind_must_equal_first_class_value():
+    job = parse_job(
+        _payload(
+            target_kind="citrix",
+            target_url=None,
+            allowed_hosts=[],
+            params={"vendor": "ACME", "target_kind": "rdp"},
+        ),
+        lease_job_id="bjob_1",
+    )
+    with pytest.raises(ByocGovernanceError, match="disagrees"):
+        job.ensure_governed()
+
+
+def test_compatibility_target_kind_is_optional():
+    job = parse_job(
+        _payload(params={"vendor": "ACME"}),
+        lease_job_id="bjob_1",
+    )
+    job.ensure_governed()
+
+
+@pytest.mark.parametrize("target_kind", ["windows", "macos", "linux", "rdp", "citrix"])
+def test_native_remote_dispatch_refuses_browser_boundary(target_kind):
+    job = parse_job(
+        _payload(target_kind=target_kind, params={"target_kind": target_kind}),
+        lease_job_id="bjob_1",
+    )
+    with pytest.raises(ByocGovernanceError, match="browser target boundary"):
         job.ensure_governed()
 
 
@@ -228,7 +290,23 @@ def test_governed_run_argv_uses_the_fail_closed_run_verb():
     assert "--config" in argv and "/opt/openadapt/deployment.yaml" in argv
     assert "--policy" in argv and "clinical-write" in argv
     assert "--params-file" in argv
+    assert argv[argv.index("--backend") + 1] == "web"
     assert "replay" not in argv
+
+
+def test_native_dispatch_routes_exact_first_class_target_kind():
+    job = parse_job(
+        _payload(
+            target_kind="citrix",
+            target_url=None,
+            allowed_hosts=[],
+            params={"vendor": "ACME", "target_kind": "citrix"},
+        ),
+        lease_job_id="bjob_1",
+    )
+    argv = build_run_argv(job, ConnectorSettings(), Path("/b"), Path("/r"), None)
+    assert argv[argv.index("--backend") + 1] == "citrix"
+    assert "--url" not in argv
 
 
 # --------------------------------------------------------------------------

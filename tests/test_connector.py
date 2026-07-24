@@ -38,6 +38,7 @@ from openadapt_flow.connector import (
     phi_free_callback_body,
     run_once,
     save_enrollment,
+    status_from_report,
 )
 from openadapt_flow.connector.executor import RunOutcome
 from openadapt_flow.connector.protocol import ByocGovernanceError
@@ -145,6 +146,11 @@ def test_execute_job_refuses_child_report_for_different_substrate():
     assert result.status == "failed"
     assert result.error is not None
     assert "does not match" in result.error
+
+
+def test_malformed_child_report_never_becomes_success():
+    assert status_from_report(0, {"success": "true"}) == "failed"
+    assert status_from_report(0, {"success": True, "halt": {}}) == "halt"
 
 
 def test_callback_body_is_phi_free():

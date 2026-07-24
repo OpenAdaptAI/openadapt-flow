@@ -23,7 +23,7 @@ inbound ports.**
 ## The loop (all outbound)
 
 ```
-register -> POST /api/connector/register   enroll once, get a per-connector token
+create   -> authenticated Cloud settings  mint a revocable org-scoped token once
 poll     -> POST /api/connector/poll        long-poll; lease the next queued job
 execute  -> openadapt-flow run ...          the governed admission gate + Replayer,
                                              against the CUSTOMER'S own storage
@@ -39,22 +39,24 @@ the *same* fail-closed `openadapt-flow run` you would run locally.
 ```bash
 pip install openadapt-flow
 
-# 1. Enroll this machine once (mints + persists a per-connector token, 0600).
-openadapt-flow connector enroll \
+# 1. In app.openadapt.ai, open Dashboard → Settings →
+#    Customer-controlled connector, create a connector, and copy its token once
+#    into this machine's service manager or secret store.
+export BYOC_CONNECTOR_TOKEN='<shown-once token>'
+
+# 2. Run the daemon (poll -> execute -> report -> ack, until interrupted).
+openadapt-flow connector run \
   --control-plane-url https://app.openadapt.ai \
-  --enrollment-secret "$BYOC_ENROLLMENT_SECRET" \
   --org-id org_your_clinic \
   --profile /opt/openadapt/deployment.yaml \
   --storage-backend local \
   --storage-root /srv/openadapt        # a full-disk-encrypted customer volume
-
-# 2. Run the daemon (poll -> execute -> report -> ack, until interrupted).
-openadapt-flow connector run
 ```
 
-Enrollment persists to `~/.openadapt/connector.toml` (mode 0600 — it holds the
-token). A bare `connector run` reads it back. Every flag also resolves from an
-env var (`CONTROL_PLANE_URL`, `BYOC_CONNECTOR_TOKEN`, `BYOC_ORG_ID`, ...).
+Every flag also resolves from an environment variable
+(`CONTROL_PLANE_URL`, `BYOC_CONNECTOR_TOKEN`, `BYOC_ORG_ID`, ...).
+`connector enroll` remains available for mock/development control planes; live
+Cloud token creation is authenticated and organization-scoped in the dashboard.
 
 ## Data boundary and safety
 
@@ -95,8 +97,9 @@ authorizing a fresh run.
 ## Enabling the lane (control plane)
 
 The lane is off by default. An operator enables it with
-`BYOC_ENABLED=true` **and** a configured `BYOC_ENROLLMENT_SECRET`, and flips the
-org's `deployment_kind` to `byoc`. See openadapt-cloud `src/lib/byocLane.ts`.
+`BYOC_ENABLED=true` and authenticated run callbacks
+(`RUNNER_SHARED_SECRET`), then sets the organization's `deployment_kind` to
+`byoc`. See openadapt-cloud `src/lib/byocLane.ts`.
 
 ## What works today vs. what remains for production
 
@@ -112,9 +115,9 @@ org's `deployment_kind` to `byoc`. See openadapt-cloud `src/lib/byocLane.ts`.
 
 **Remaining for production:**
 
-* **Hardened auth.** Enrollment is a single org-shared secret today; production
-  wants per-org (ideally short-lived, rotating) enrollment tokens, plus
-  mTLS/private-link between the Connector and the control plane.
+* **Private transport options.** Connector tokens are organization-scoped,
+  revocable, and stored only as hashes in Cloud. Deployments that require
+  mTLS/private-link add that transport at the customer network boundary.
 * **Full policy materialization.** The delivered safety block governs *dispatch*
   and the two fail-closed gates above; materializing every safety key into the
   engine's runtime config (so e.g. the delivered grounding endpoint is the one

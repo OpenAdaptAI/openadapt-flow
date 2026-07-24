@@ -3411,7 +3411,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pe = csub.add_parser(
         "enroll",
-        help="Enroll this machine as a Connector and persist the token (0600)",
+        help="Enroll against a mock/development control plane and persist its token",
     )
     pe.add_argument(
         "--control-plane-url", help="Control plane base URL (or CONTROL_PLANE_URL)"
@@ -3632,8 +3632,9 @@ def _cmd_connector(args: argparse.Namespace) -> int:
     # verb == "run"
     if not settings.token:
         print(
-            "connector run: not enrolled. Run `openadapt-flow connector enroll` "
-            "first, or pass --token / BYOC_CONNECTOR_TOKEN."
+            "connector run: no token. Create an organization connector in "
+            "OpenAdapt Cloud → Settings, then pass --token or set "
+            "BYOC_CONNECTOR_TOKEN."
         )
         return 2
     client = ConnectorClient(settings.control_plane_url, token=settings.token)

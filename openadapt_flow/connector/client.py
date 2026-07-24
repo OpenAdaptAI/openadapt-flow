@@ -6,14 +6,15 @@ HTTPS connections and PULLS jobs down them (the shape of a GitHub self-hosted
 runner or a Citrix Cloud Connector). The customer opens ZERO inbound ports.
 
 Endpoints (all outbound):
-  * ``POST /api/connector/register``     enroll once -> per-connector token
+  * ``POST /api/connector/register``     mock/dev enrollment compatibility
   * ``POST /api/connector/poll``         long-poll -> lease the next job
   * ``POST /api/connector/ack``          release the lease (done|failed)
   * ``POST /api/internal/run-callback``  PHI-free status/metrics (existing boundary)
 
-Auth: the per-connector token as ``Authorization: Bearer`` on poll/ack; the org
-enrollment secret (``x-byoc-enrollment-secret``) once on enroll; the run-scoped
-``x-run-token`` on the callback. Only ``httpx`` (already core) + stdlib is used.
+Auth: the organization-scoped per-connector token as ``Authorization: Bearer``
+on poll/ack and the run-scoped ``x-run-token`` on the callback. Live Cloud
+mints the connector token through its authenticated settings API; the legacy
+enrollment secret is used only by mock/development control planes.
 
 A custom ``transport`` (an :class:`httpx.BaseTransport`) may be injected so tests
 drive the whole enroll -> poll -> callback -> ack loop with ZERO network.

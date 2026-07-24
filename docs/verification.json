@@ -15,7 +15,7 @@
       ],
       "strongest_evidence": "supported",
       "caveats": [
-        "\"Supported\" is scoped to the reference headless-browser backend in this registry. Desktop and remote-display workflows use the separately scoped acceptance and design-partner claims below.",
+        "\"Supported\" is scoped to the reference headless-browser backend in this registry. Desktop and remote-display workflows use the separately scoped acceptance and code-qualified claims below.",
         "The full record->compile->replay e2e runs in the post-merge/nightly full suite; the fast required PR gate covers the replayer + demo units."
       ],
       "evidence": [
@@ -720,7 +720,7 @@
     },
     {
       "id": "citrix-pixel-validating",
-      "claim": "Citrix uses the governed pixel-only remote-display contract and enters design-partner qualification in the customer's exact ICA/HDX application, with identity, ambiguity refusal, and independent effects above the driver.",
+      "claim": "Citrix uses a dedicated exact-Workspace-window backend beneath the governed pixel-only remote-display contract. The backend, readiness gate, durable resume, identity/refusal ladder, and independent effects are code-qualified; live ICA/HDX acceptance remains separately bound to the exact deployment.",
       "tier": "validating",
       "reproducibility": null,
       "surfaces": [
@@ -731,7 +731,7 @@
       "strongest_evidence": "supported",
       "caveats": [
         "PIXEL-ONLY: no UIA/DOM crosses to the driver. On-screen OCR read-back is SAME-SURFACE, not an independent system-of-record check.",
-        "A Parallels VM window is a Citrix ANALOG; real HDX/latency/DPI/lock- screen drift is not simulated. OPT-IN + infra-gated (`OAFLOW_CITRIX_PIXEL_E2E=1`, macOS screen-recording + accessibility); never runs on default CI, and does not replace design-partner validation."
+        "A Parallels VM window is a Citrix ANALOG; real HDX/latency/DPI/lock- screen drift is not simulated. OPT-IN + infra-gated (`OAFLOW_CITRIX_PIXEL_E2E=1`, macOS screen-recording + accessibility); never runs on default CI, and does not replace a counted live ICA/HDX acceptance record."
       ],
       "evidence": [
         {
@@ -757,6 +757,28 @@
           "proves": "The pixel-substrate identity probe behind the on-pixels identity gate."
         },
         {
+          "path": "tests/e2e/test_citrix_workspace_standin_e2e.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (post-merge/nightly full suite)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The dedicated Citrix backend passes three healthy effect-confirmed record->compile->replay trials and three severe-drift safe-halts over a no-DOM surface, with zero model calls, false completion, or silent incorrect success."
+        },
+        {
+          "path": "benchmark/citrix_workspace/results.json",
+          "kind": "artifact",
+          "exists": true,
+          "strength": "roadmap",
+          "gating": "artifact (doc/benchmark)",
+          "node": null,
+          "node_found": null,
+          "junit_status": null,
+          "proves": "The retained six-trial record reports code_readiness_accepted=true and ica_hdx_accepted=false, keeping driver readiness distinct from a counted live ICA/HDX qualification."
+        },
+        {
           "path": "docs/desktop/CITRIX_PIXEL.md",
           "kind": "doc",
           "exists": true,
@@ -765,7 +787,7 @@
           "node": null,
           "node_found": null,
           "junit_status": null,
-          "proves": "The Citrix driver model, reusable evidence, design-partner acceptance contract, independent-effect boundary, and customer-controlled posture."
+          "proves": "The Citrix driver model, reusable evidence, exact-deployment acceptance contract, independent-effect boundary, and customer-controlled posture."
         }
       ],
       "errors": []
@@ -803,7 +825,7 @@
           "node": null,
           "node_found": null,
           "junit_status": null,
-          "proves": "The remote-display contract the client implements and the evidence ladder for qualifying it (Parallels/RDP client-window analog first, then design-partner Citrix)."
+          "proves": "The remote-display contract the client implements and the evidence ladder for qualifying it (Parallels/RDP client-window analog first, then a counted live Citrix host run)."
         }
       ],
       "errors": []

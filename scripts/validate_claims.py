@@ -385,9 +385,9 @@ def render_markdown(results: list[ClaimResult], now: str, junit_used: bool) -> s
         "must be backed by a test that actually runs on the default (non-opt-in) "
         "CI suite; a `validating` claim must be grounded in a REAL opt-in / "
         "infra-gated proof or a field test, and is never presented as "
-        "supported. It does NOT replace the human half — third-party "
-        "design-partner validation of the `validating` surfaces (Windows, "
-        "Citrix) is exactly the evidence this repository cannot self-generate."
+        "supported. It does not replace workflow- and deployment-specific "
+        "acceptance: application controls, identity rules, effect oracles, and "
+        "live transport conditions remain bound to their counted evidence."
     )
     lines.append("")
 

@@ -6,7 +6,7 @@
 - Green-check against a junit artifact: **not run** (no `--junit` artifact supplied)
 - Gate: `python scripts/validate_claims.py --check` (a claim whose tier outranks its strongest backing evidence fails CI).
 
-**What this harness does and does not do.** It makes each public maturity claim a *function* of automated evidence: a `supported` claim must be backed by a test that actually runs on the default (non-opt-in) CI suite; a `validating` claim must be grounded in a REAL opt-in / infra-gated proof or a field test, and is never presented as supported. It does NOT replace the human half — third-party design-partner validation of the `validating` surfaces (Windows, Citrix) is exactly the evidence this repository cannot self-generate.
+**What this harness does and does not do.** It makes each public maturity claim a *function* of automated evidence: a `supported` claim must be backed by a test that actually runs on the default (non-opt-in) CI suite; a `validating` claim must be grounded in a REAL opt-in / infra-gated proof or a field test, and is never presented as supported. It does not replace workflow- and deployment-specific acceptance: application controls, identity rules, effect oracles, and live transport conditions remain bound to their counted evidence.
 
 ## What is CI-proven today vs. being validated
 
@@ -31,7 +31,7 @@
 
 **Caveats (honest limits):**
 
-- "Supported" is scoped to the reference headless-browser backend in this registry. Desktop and remote-display workflows use the separately scoped acceptance and design-partner claims below.
+- "Supported" is scoped to the reference headless-browser backend in this registry. Desktop and remote-display workflows use the separately scoped acceptance and code-qualified claims below.
 - The full record->compile->replay e2e runs in the post-merge/nightly full suite; the fast required PR gate covers the replayer + demo units.
 
 ### `deterministic-zero-model-replay` — supported — CI-proven today
@@ -252,7 +252,7 @@
 
 ### `citrix-pixel-validating` — validating — opt-in / infra-gated or field test
 
-> Citrix uses the governed pixel-only remote-display contract and enters design-partner qualification in the customer's exact ICA/HDX application, with identity, ambiguity refusal, and independent effects above the driver.
+> Citrix uses a dedicated exact-Workspace-window backend beneath the governed pixel-only remote-display contract. The backend, readiness gate, durable resume, identity/refusal ladder, and independent effects are code-qualified; live ICA/HDX acceptance remains separately bound to the exact deployment.
 
 - Surfaces: README.md, docs, website
 - Strongest evidence strength: **supported** (tier is `validating`)
@@ -261,12 +261,14 @@
 |---|---|---|---|---|
 | `tests/e2e/test_citrix_pixel_e2e.py` | test | opt-in (OAFLOW_CITRIX_PIXEL_E2E) | validating | OPT-IN pixel-only proof: structural_armed_coverage == 0, replay resolves on template/ocr/geometry only, on-screen OCR read-back verifies the write, the identity gate HALTs on a look-alike patient, and render drift triggers halt-on-ambiguity. |
 | `tests/test_pixel_identity_probe.py` | test | ci (required PR gate (test)) | supported | The pixel-substrate identity probe behind the on-pixels identity gate. |
-| `docs/desktop/CITRIX_PIXEL.md` | doc | artifact (doc/benchmark) | roadmap | The Citrix driver model, reusable evidence, design-partner acceptance contract, independent-effect boundary, and customer-controlled posture. |
+| `tests/e2e/test_citrix_workspace_standin_e2e.py` | test | ci (post-merge/nightly full suite) | supported | The dedicated Citrix backend passes three healthy effect-confirmed record->compile->replay trials and three severe-drift safe-halts over a no-DOM surface, with zero model calls, false completion, or silent incorrect success. |
+| `benchmark/citrix_workspace/results.json` | artifact | artifact (doc/benchmark) | roadmap | The retained six-trial record reports code_readiness_accepted=true and ica_hdx_accepted=false, keeping driver readiness distinct from a counted live ICA/HDX qualification. |
+| `docs/desktop/CITRIX_PIXEL.md` | doc | artifact (doc/benchmark) | roadmap | The Citrix driver model, reusable evidence, exact-deployment acceptance contract, independent-effect boundary, and customer-controlled posture. |
 
 **Caveats (honest limits):**
 
 - PIXEL-ONLY: no UIA/DOM crosses to the driver. On-screen OCR read-back is SAME-SURFACE, not an independent system-of-record check.
-- A Parallels VM window is a Citrix ANALOG; real HDX/latency/DPI/lock- screen drift is not simulated. OPT-IN + infra-gated (`OAFLOW_CITRIX_PIXEL_E2E=1`, macOS screen-recording + accessibility); never runs on default CI, and does not replace design-partner validation.
+- A Parallels VM window is a Citrix ANALOG; real HDX/latency/DPI/lock- screen drift is not simulated. OPT-IN + infra-gated (`OAFLOW_CITRIX_PIXEL_E2E=1`, macOS screen-recording + accessibility); never runs on default CI, and does not replace a counted live ICA/HDX acceptance record.
 
 ### `win32-window-replay-roadmap` — roadmap — designed, not yet proven
 
@@ -278,7 +280,7 @@
 | Backing evidence | Kind | Gating / CI stage | Strength | Proves |
 |---|---|---|---|---|
 | `tests/test_win32_window_client.py` | test | ci (required PR gate (test)) | supported | MOCK-ONLY conformance: the win32 WindowClient implements the remote-display WindowClient seam (exact process/title/class selection with ambiguity halt, client-area coordinate mapping under per-monitor DPI awareness, PrintWindow-then-BitBlt capture fallback, focus-verification refusal, and the UIPI elevation guard) against a scripted Win32 API — never against a real Windows host. |
-| `docs/desktop/CITRIX_PIXEL.md` | doc | artifact (doc/benchmark) | roadmap | The remote-display contract the client implements and the evidence ladder for qualifying it (Parallels/RDP client-window analog first, then design-partner Citrix). |
+| `docs/desktop/CITRIX_PIXEL.md` | doc | artifact (doc/benchmark) | roadmap | The remote-display contract the client implements and the evidence ladder for qualifying it (Parallels/RDP client-window analog first, then a counted live Citrix host run). |
 
 **Caveats (honest limits):**
 

@@ -172,10 +172,11 @@ def test_linux_backend_implements_existing_runtime_capabilities() -> None:
 def test_execution_context_identity_is_live_and_title_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session_facts = {"value": ("12345678-1234-1234-1234-123456789abc", 42, 501)}
     monkeypatch.setattr(
         linux_backend_module,
         "_linux_session_facts",
-        lambda: ("12345678-1234-1234-1234-123456789abc", 42, 501),
+        lambda: session_facts["value"],
     )
     title = "Patient Alice Example MRN 100512"
     window = LinuxWindow("0.1", "Accuro EMR", title, 9001, (100, 200, 640, 480))
@@ -193,7 +194,14 @@ def test_execution_context_identity_is_live_and_title_free(
         LinuxWindow("0.2", "Unrelated App", title, 9002, (100, 200, 640, 480))
     ]
     assert target.application_identity() is None
-    assert target.session_identity() is None
+    assert target.session_identity() == session
+
+    session_facts["value"] = (
+        "12345678-1234-1234-1234-123456789abc",
+        43,
+        501,
+    )
+    assert target.session_identity() != session
 
 
 def test_import_and_injected_client_are_headless_safe() -> None:

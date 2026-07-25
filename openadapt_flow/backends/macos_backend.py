@@ -624,19 +624,12 @@ class MacOSBackend(RemoteDisplayBackend):
         return _application_identifier(window.owner)
 
     def session_identity(self) -> Optional[str]:
-        """Hash the live macOS audit session, uid, and exact application."""
+        """Hash only live macOS audit/login-session continuity facts."""
 
-        try:
-            window = self._resolve_window(refresh=True)
-        except Exception:
-            return None
-        if window.owner.casefold() != self._owner_substr.casefold():
-            return None
-        application = _application_identifier(window.owner)
         session_id = _mac_audit_session_id()
-        if application is None or session_id is None:
+        if session_id is None:
             return None
-        material = f"macos-session-v1\0{os.getuid()}\0{session_id}\0{application}"
+        material = f"macos-session-v1\0{os.getuid()}\0{session_id}"
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def workflow_state_identity(self) -> Optional[str]:

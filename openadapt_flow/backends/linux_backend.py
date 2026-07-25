@@ -389,20 +389,13 @@ class LinuxBackend:
         return _application_identifier(window.app_name)
 
     def session_identity(self) -> Optional[str]:
-        """Hash the live kernel boot/audit session and exact application."""
+        """Hash only live kernel boot/audit-session continuity facts."""
 
-        try:
-            window = self._resolve_window()
-        except Exception:
-            return None
-        if window.app_name.casefold() != self._app.casefold():
-            return None
-        application = _application_identifier(window.app_name)
         facts = _linux_session_facts()
-        if application is None or facts is None:
+        if facts is None:
             return None
         boot_id, session_id, uid = facts
-        material = f"linux-session-v1\0{boot_id}\0{session_id}\0{uid}\0{application}"
+        material = f"linux-session-v1\0{boot_id}\0{session_id}\0{uid}"
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def workflow_state_identity(self) -> Optional[str]:

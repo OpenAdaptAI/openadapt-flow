@@ -151,10 +151,11 @@ def test_native_backend_exposes_ax_structured_identity_capability() -> None:
 def test_execution_context_identity_is_live_and_title_free(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    audit_session = {"value": 7171}
     monkeypatch.setattr(
         macos_backend_module,
         "_mac_audit_session_id",
-        lambda: 7171,
+        lambda: audit_session["value"],
     )
     title = "Patient Alice Example MRN 100512"
     window = WindowInfo(41, "Accuro EMR", title, 9001, (10, 20, 400, 300))
@@ -170,7 +171,10 @@ def test_execution_context_identity_is_live_and_title_free(
 
     client.windows = [WindowInfo(42, "Unrelated App", title, 9002, (10, 20, 400, 300))]
     assert target.application_identity() is None
-    assert target.session_identity() is None
+    assert target.session_identity() == session
+
+    audit_session["value"] = 7272
+    assert target.session_identity() != session
 
 
 def test_target_window_capture_and_exact_focused_text_delivery() -> None:

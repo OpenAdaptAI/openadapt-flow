@@ -61,7 +61,7 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from PIL import Image
 
@@ -591,15 +591,19 @@ class RemoteDisplayBackend:
                 win = self._resolve_window(refresh=True)
                 # on_screen alone is insufficient: a window occluded by another
                 # app is still "on screen", yet clicks would hit the occluder.
-                if (
-                    win.on_screen
-                    and self._client.frontmost_pid() == win.pid
-                    and self._client.key_window_id(win.pid) == win.window_id
-                ):
+                if win.on_screen and self._window_focus_matches(win):
                     return
         raise RemoteDisplayError(
             "configured client window did not come to the foreground "
             "(frontmost check failed)"
+        )
+
+    def _window_focus_matches(self, window: WindowInfo) -> bool:
+        """Whether global input is presently routed to this exact window."""
+
+        return (
+            self._client.frontmost_pid() == window.pid
+            and self._client.key_window_id(window.pid) == window.window_id
         )
 
     # -- Backend protocol ----------------------------------------------------
@@ -690,11 +694,7 @@ class RemoteDisplayBackend:
             self._client.activate(win.pid)
             time.sleep(self._settle_s)
             win = self._resolve_window(refresh=True)
-            if (
-                not win.on_screen
-                or self._client.frontmost_pid() != win.pid
-                or self._client.key_window_id(win.pid) != win.window_id
-            ):
+            if not win.on_screen or not self._window_focus_matches(win):
                 raise RemoteDisplayError(
                     "the exact remote-display window is not visible, "
                     "app-frontmost, and keyboard-frontmost; refusing to acquire "
@@ -709,8 +709,7 @@ class RemoteDisplayBackend:
                 or current.pid != lease.pid
                 or current.bounds != lease.bounds
                 or not current.on_screen
-                or self._client.frontmost_pid() != current.pid
-                or self._client.key_window_id(current.pid) != current.window_id
+                or not self._window_focus_matches(current)
             ):
                 raise RemoteDisplayError(
                     "remote-display window identity, focus, or geometry changed "
@@ -885,11 +884,7 @@ class RemoteDisplayBackend:
             self._client.activate(win.pid)
             time.sleep(self._settle_s)
         current = self._resolve_window(refresh=True)
-        if (
-            not current.on_screen
-            or self._client.frontmost_pid() != current.pid
-            or self._client.key_window_id(current.pid) != current.window_id
-        ):
+        if not current.on_screen or not self._window_focus_matches(current):
             raise RemoteDisplayError(
                 "the exact remote-display window is not visible, app-frontmost, "
                 "and keyboard-frontmost after activation; refusing input"
@@ -977,8 +972,7 @@ class RemoteDisplayBackend:
         post = self._resolve_window(refresh=True)
         if (
             not post.on_screen
-            or self._client.frontmost_pid() != post.pid
-            or self._client.key_window_id(post.pid) != post.window_id
+            or not self._window_focus_matches(post)
             or post.window_id != lease.window_id
             or post.pid != lease.pid
             or post.bounds != lease.bounds
@@ -1372,6 +1366,202 @@ class MacWindowClient:
                 and bool(is_main)
             )
         except Exception:  # noqa: BLE001 - caller verifies exact topmost id
+            return False
+
+    @staticmethod
+    def _focused_element_for_window(window: WindowInfo) -> Any:
+        """Return the exact window's focused AX element, or ``None``.
+
+        The returned value is an opaque, process-local AX object.  It is never
+        serialized or logged: the native backend retains it only across the
+        final identity check so delivery can prove that focus did not move to
+        another control whose pixels happen to be indistinguishable.
+        """
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCreateApplication,
+                kAXFocusedUIElementAttribute,
+                kAXFocusedWindowAttribute,
+                kAXMainAttribute,
+                kAXTitleAttribute,
+                kAXTopLevelUIElementAttribute,
+                kAXWindowsAttribute,
+            )
+
+            app = AXUIElementCreateApplication(int(window.pid))
+            windows_error, ax_windows = AXUIElementCopyAttributeValue(
+                app, kAXWindowsAttribute, None
+            )
+            if windows_error != 0 or ax_windows is None:
+                return None
+            matching_windows = []
+            for candidate in ax_windows:
+                title_error, title = AXUIElementCopyAttributeValue(
+                    candidate, kAXTitleAttribute, None
+                )
+                if title_error == 0 and str(title or "") == window.title:
+                    matching_windows.append(candidate)
+            if len(matching_windows) != 1:
+                return None
+            target = matching_windows[0]
+
+            focused_window_error, focused_window = AXUIElementCopyAttributeValue(
+                app, kAXFocusedWindowAttribute, None
+            )
+            main_error, is_main = AXUIElementCopyAttributeValue(
+                target, kAXMainAttribute, None
+            )
+            if (
+                focused_window_error != 0
+                or focused_window != target
+                or main_error != 0
+                or not bool(is_main)
+            ):
+                return None
+
+            focused_error, focused = AXUIElementCopyAttributeValue(
+                app, kAXFocusedUIElementAttribute, None
+            )
+            if focused_error != 0 or focused is None:
+                return None
+            top_error, top_level = AXUIElementCopyAttributeValue(
+                focused, kAXTopLevelUIElementAttribute, None
+            )
+            if top_error != 0 or top_level is None or top_level != target:
+                return None
+            top_title_error, top_title = AXUIElementCopyAttributeValue(
+                top_level, kAXTitleAttribute, None
+            )
+            if top_title_error != 0 or str(top_title or "") != window.title:
+                return None
+            return focused
+        except Exception:  # noqa: BLE001 - unknown AX focus fails closed
+            return None
+
+    def focused_element_token(self, window: WindowInfo) -> Any:
+        """Opaque token for the exact live AX focus, never customer content."""
+        return self._focused_element_for_window(window)
+
+    def focused_element_token_at_point(
+        self,
+        window: WindowInfo,
+        x: float,
+        y: float,
+    ) -> Any:
+        """Return focus only when the hit-tested control is that same control."""
+        focused = self._focused_element_for_window(window)
+        if focused is None:
+            return None
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXUIElementCopyElementAtPosition,
+                AXUIElementCreateApplication,
+                kAXParentAttribute,
+                kAXTitleAttribute,
+                kAXTopLevelUIElementAttribute,
+            )
+
+            app = AXUIElementCreateApplication(int(window.pid))
+            hit_error, hit = AXUIElementCopyElementAtPosition(
+                app,
+                float(x),
+                float(y),
+                None,
+            )
+            if hit_error != 0 or hit is None:
+                return None
+            top_error, top_level = AXUIElementCopyAttributeValue(
+                hit,
+                kAXTopLevelUIElementAttribute,
+                None,
+            )
+            if top_error != 0 or top_level is None:
+                return None
+            title_error, title = AXUIElementCopyAttributeValue(
+                top_level,
+                kAXTitleAttribute,
+                None,
+            )
+            if title_error != 0 or str(title or "") != window.title:
+                return None
+
+            # A hit test may return an internal text child while AX focus is on
+            # its editable parent (or vice versa). Admit only that direct
+            # ancestry relationship; never accept merely sharing the same
+            # top-level window, which would confuse sibling fields.
+            def _lineage(element: Any) -> list[Any]:
+                lineage = [element]
+                current = element
+                for _ in range(6):
+                    parent_error, parent = AXUIElementCopyAttributeValue(
+                        current,
+                        kAXParentAttribute,
+                        None,
+                    )
+                    if parent_error != 0 or parent is None or parent == top_level:
+                        break
+                    lineage.append(parent)
+                    current = parent
+                return lineage
+
+            hit_lineage = _lineage(hit)
+            focused_lineage = _lineage(focused)
+            if not any(
+                hit_node == focused_node
+                for hit_node in hit_lineage
+                for focused_node in focused_lineage
+            ):
+                return None
+            return focused
+        except Exception:  # noqa: BLE001 - unknown hit/focus relation refuses
+            return None
+
+    def focused_element_matches(self, window: WindowInfo, expected: Any) -> bool:
+        """Whether the exact same AX object remains focused in ``window``."""
+        if expected is None:
+            return False
+        current = self._focused_element_for_window(window)
+        return current is not None and current == expected
+
+    def replace_selected_text_guarded(
+        self,
+        window: WindowInfo,
+        text: str,
+        *,
+        expected_focused_element: Any,
+    ) -> bool:
+        """Write only to the AX element retained from final revalidation.
+
+        The current focused object must equal the opaque retained object.  The
+        setter is then addressed to that object itself, so a subsequent focus
+        switch cannot redirect the write to a different control.
+        """
+        try:
+            from ApplicationServices import (
+                AXUIElementIsAttributeSettable,
+                AXUIElementSetAttributeValue,
+                kAXSelectedTextAttribute,
+            )
+
+            focused = self._focused_element_for_window(window)
+            if (
+                focused is None
+                or expected_focused_element is None
+                or focused != expected_focused_element
+            ):
+                return False
+            settable_error, settable = AXUIElementIsAttributeSettable(
+                focused, kAXSelectedTextAttribute, None
+            )
+            if settable_error != 0 or not settable:
+                return False
+            return (
+                AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute, text)
+                == 0
+            )
+        except Exception:  # noqa: BLE001 - unsupported AX is a safe refusal
             return False
 
     def replace_selected_text(self, window: WindowInfo, text: str) -> bool:

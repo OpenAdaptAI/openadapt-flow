@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 
 import pytest
@@ -8,6 +9,8 @@ from PIL import Image
 from openadapt_flow.backend import (
     Backend,
     ExecutionContextIdentityBackend,
+    GuardedCoordinateActionBackend,
+    GuardedKeyboardActionBackend,
     IdentityBackend,
     NativeStructuralActionBackend,
     StructuralActionBackend,
@@ -77,6 +80,7 @@ class FakeLinuxClient:
         self.truncated = truncated
         self.calls: list[tuple] = []
         self.text_at_point: LinuxElement | None = TARGET_ELEMENT
+        self.focused: LinuxElement | None = TEXT_ELEMENT
         self.text_value = "Account 100512"
         self.native_succeeds = True
         self.replace_succeeds = True
@@ -116,6 +120,10 @@ class FakeLinuxClient:
     def element_at_point(self, window, x, y):
         self.calls.append(("element-at", window.native_id, x, y))
         return self.text_at_point
+
+    def focused_element(self, window):
+        self.calls.append(("focused-element", window.native_id))
+        return self.focused
 
     def find_candidates(self, window, locator):
         self.calls.append(("find", window.native_id, locator))
@@ -167,6 +175,24 @@ def test_linux_backend_implements_existing_runtime_capabilities() -> None:
     assert isinstance(target, IdentityBackend)
     assert isinstance(target, StructuralActionBackend)
     assert isinstance(target, NativeStructuralActionBackend)
+    assert isinstance(target, GuardedCoordinateActionBackend)
+    assert isinstance(target, GuardedKeyboardActionBackend)
+
+
+def test_guarded_keyboard_refuses_focus_change_before_delivery() -> None:
+    client = FakeLinuxClient(candidates=[TEXT_ELEMENT])
+    target = backend(client, allow_physical_input=True)
+    frame = target.guarded_keyboard_frame()
+    target.arm_guarded_keyboard(300, 200)
+    client.focused = TARGET_ELEMENT
+
+    with pytest.raises(LinuxBackendError, match="focused element changed"):
+        target.type_text_guarded(
+            "must not land",
+            expected_frame_sha256=hashlib.sha256(frame).hexdigest(),
+        )
+
+    assert not any(call[0] == "replace" for call in client.calls)
 
 
 def test_execution_context_identity_is_live_and_title_free(

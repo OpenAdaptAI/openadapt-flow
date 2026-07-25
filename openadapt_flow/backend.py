@@ -276,6 +276,26 @@ class GuardedCoordinateActionBackend(Protocol):
 
 
 @runtime_checkable
+class FocusedElementActuationLeaseBackend(Protocol):
+    """Optional focused-control binding layered onto a remote frame lease.
+
+    Native backends that already use :class:`RemoteActuationBackend` for an
+    exact frame/window lease can additionally bind the freshly resolved target
+    point to one accessibility-focused element before final identity readback.
+    Delivery must refuse if that opaque element changes while the pixels remain
+    indistinguishable.
+    """
+
+    def arm_focused_element_lease(self, x: int, y: int) -> None:
+        """Bind the current focused element to the resolved target point."""
+        ...
+
+    def cancel_focused_element_lease(self) -> None:
+        """Cancel an unconsumed focused-element binding."""
+        ...
+
+
+@runtime_checkable
 class GuardedKeyboardActionBackend(Protocol):
     """Optional browser-local focus/record lease for consequential keyboard I/O.
 

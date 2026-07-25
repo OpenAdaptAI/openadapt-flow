@@ -47,6 +47,7 @@ from urllib.parse import urlsplit
 
 from openadapt_flow.backend import (
     Backend,
+    FocusedElementActuationLeaseBackend,
     GuardedCoordinateActionBackend,
     GuardedKeyboardActionBackend,
     RemoteActuationBackend,
@@ -3774,6 +3775,69 @@ class Replayer:
 
         if isinstance(self.backend, GuardedKeyboardActionBackend):
             self.backend.cancel_guarded_keyboard()
+        if isinstance(self.backend, FocusedElementActuationLeaseBackend):
+            self.backend.cancel_focused_element_lease()
+
+    def _local_atomic_capability_error(
+        self,
+        step: Step,
+        resolution: Optional[Resolution],
+        workflow: Workflow,
+        *,
+        arm_keyboard: bool,
+    ) -> Optional[str]:
+        """Refuse before input when a local identity lease cannot be enforced.
+
+        Consequential TYPE has two input edges: its optional focusing click and
+        the subsequent keyboard delivery.  The first revalidation must prove
+        both local seams are available before it focuses anything.  The second
+        revalidation (``arm_keyboard=True``) only needs the keyboard seam.
+        Structural focusing actions already carry a native target fingerprint;
+        visual/coordinate focusing actions require the coordinate guard.
+        """
+
+        if isinstance(self.backend, RemoteActuationBackend):
+            return None
+
+        requires_keyboard = self._requires_atomic_identity_keyboard(step, workflow)
+        if requires_keyboard and not isinstance(
+            self.backend, GuardedKeyboardActionBackend
+        ):
+            return (
+                f"Step '{step.id}' ({step.intent}) is a consequential "
+                "identity-gated keyboard action, but this backend cannot bind "
+                "the verified focus and execution context to the same input "
+                "operation — refusing unguarded keyboard delivery; run aborted"
+            )
+
+        requires_pointer = self._requires_atomic_identity_pointer(step, workflow)
+        pointer_edge_pending = step.action in (
+            ActionKind.CLICK,
+            ActionKind.DOUBLE_CLICK,
+        ) or (step.action is ActionKind.TYPE and not arm_keyboard)
+        structural_pointer = bool(
+            resolution is not None
+            and resolution.rung == "structural"
+            and resolution.structural_handle is not None
+            and resolution.structural_handle.target_fingerprint is not None
+            and step.anchor is not None
+            and step.anchor.structural is not None
+            and callable(getattr(self.backend, "act_structural", None))
+        )
+        if (
+            requires_pointer
+            and pointer_edge_pending
+            and resolution is not None
+            and not structural_pointer
+            and not isinstance(self.backend, GuardedCoordinateActionBackend)
+        ):
+            return (
+                f"Step '{step.id}' ({step.intent}) is a consequential "
+                "identity-gated pointer action, but this backend cannot bind "
+                "target and context verification to the same actuation operation "
+                "— refusing raw coordinate delivery; run aborted"
+            )
+        return None
 
     def _revalidate_consequential_actuation(
         self,
@@ -3803,11 +3867,28 @@ class Replayer:
         if not self._step_needs_consequential_revalidation(step, workflow):
             return resolution, matched_region, before_png, None
 
+        capability_error = self._local_atomic_capability_error(
+            step,
+            resolution,
+            workflow,
+            arm_keyboard=arm_keyboard,
+        )
+        if capability_error is not None:
+            result.safety_halt = True
+            result.failure_category = "safety_halt"
+            return resolution, matched_region, before_png, capability_error
+
         guarded_keyboard_backend = (
             arm_keyboard
             and self._requires_atomic_identity_keyboard(step, workflow)
             and not isinstance(self.backend, RemoteActuationBackend)
             and isinstance(self.backend, GuardedKeyboardActionBackend)
+        )
+        focused_element_backend = (
+            arm_keyboard
+            and self._step_is_consequential(step)
+            and isinstance(self.backend, RemoteActuationBackend)
+            and isinstance(self.backend, FocusedElementActuationLeaseBackend)
         )
         guarded_type_pointer_backend = (
             step.action is ActionKind.TYPE
@@ -3892,6 +3973,11 @@ class Replayer:
                 cast(GuardedKeyboardActionBackend, self.backend).arm_guarded_keyboard(
                     *fresh_resolution.point
                 )
+            if focused_element_backend:
+                cast(
+                    FocusedElementActuationLeaseBackend,
+                    self.backend,
+                ).arm_focused_element_lease(*fresh_resolution.point)
             try:
                 error = self._identity_gate_error(
                     step,
@@ -3907,10 +3993,14 @@ class Replayer:
                     self._cancel_guarded_coordinate()
                 if guarded_keyboard:
                     self._cancel_guarded_keyboard()
+                if focused_element_backend:
+                    self._cancel_guarded_keyboard()
                 raise
             if error is not None and guarded_coordinate:
                 self._cancel_guarded_coordinate()
             if error is not None and guarded_keyboard:
+                self._cancel_guarded_keyboard()
+            if error is not None and focused_element_backend:
                 self._cancel_guarded_keyboard()
         return fresh_resolution, fresh_region, fresh_png, error
 
@@ -4119,6 +4209,23 @@ class Replayer:
                     f"Step '{step.id}' ({step.intent}) is a TYPE step with "
                     "neither text nor param"
                 )
+            requires_atomic_keyboard = self._requires_atomic_identity_keyboard(
+                step, workflow
+            )
+            if (
+                requires_atomic_keyboard
+                and not isinstance(self.backend, RemoteActuationBackend)
+                and not isinstance(self.backend, GuardedKeyboardActionBackend)
+            ):
+                result.safety_halt = True
+                result.failure_category = "safety_halt"
+                return (
+                    f"Step '{step.id}' ({step.intent}) is a consequential "
+                    "identity-gated keyboard action, but this backend cannot "
+                    "bind the verified focus and execution context to the same "
+                    "input operation — refusing unguarded keyboard delivery; "
+                    "run aborted"
+                )
             # The field point: this step's own focusing click (anchored
             # TYPE), or the immediately preceding step's click point (the
             # recorder's click-to-focus-then-type pattern). When focus was
@@ -4160,6 +4267,18 @@ class Replayer:
                             ).hexdigest(),
                         )
                         result.actuation = "guarded_coordinate"
+                    elif requires_atomic_identity and not isinstance(
+                        self.backend, RemoteActuationBackend
+                    ):
+                        result.safety_halt = True
+                        result.failure_category = "safety_halt"
+                        return (
+                            f"Step '{step.id}' ({step.intent}) is a consequential "
+                            "identity-gated focusing click, but this backend "
+                            "cannot bind target and context verification to the "
+                            "same coordinate operation — refusing raw coordinate "
+                            "delivery; run aborted"
+                        )
                     else:
                         self.backend.click(x, y)
                 field_point = (x, y)
@@ -4207,7 +4326,7 @@ class Replayer:
             if baseline_field_value is None:
                 baseline_field_value = self._text_value_at(None)
             guarded_type = (
-                self._requires_atomic_identity_keyboard(step, workflow)
+                requires_atomic_keyboard
                 and not isinstance(self.backend, RemoteActuationBackend)
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
@@ -4219,6 +4338,16 @@ class Replayer:
                     expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
                 )
                 result.actuation = "guarded_keyboard"
+            elif requires_atomic_keyboard and not isinstance(
+                self.backend, RemoteActuationBackend
+            ):
+                result.safety_halt = True
+                result.failure_category = "safety_halt"
+                return (
+                    f"Step '{step.id}' ({step.intent}) lost its guarded keyboard "
+                    "capability before delivery — refusing unguarded text input; "
+                    "run aborted"
+                )
             else:
                 self.backend.type_text(text)
             if not text:
@@ -4238,8 +4367,11 @@ class Replayer:
         if step.action is ActionKind.KEY:
             if not step.key:
                 return f"Step '{step.id}' ({step.intent}) is a KEY step with no key"
+            requires_atomic_keyboard = self._requires_atomic_identity_keyboard(
+                step, workflow
+            )
             guarded_key = (
-                self._requires_atomic_identity_keyboard(step, workflow)
+                requires_atomic_keyboard
                 and not isinstance(self.backend, RemoteActuationBackend)
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
@@ -4251,6 +4383,16 @@ class Replayer:
                     expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
                 )
                 result.actuation = "guarded_keyboard"
+            elif requires_atomic_keyboard and not isinstance(
+                self.backend, RemoteActuationBackend
+            ):
+                result.safety_halt = True
+                result.failure_category = "safety_halt"
+                return (
+                    f"Step '{step.id}' ({step.intent}) lost its guarded keyboard "
+                    "capability before delivery — refusing unguarded key input; "
+                    "run aborted"
+                )
             else:
                 self.backend.press(step.key)
             return None

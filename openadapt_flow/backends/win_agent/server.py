@@ -8,6 +8,8 @@ matching the Windows Agent Arena Flask contract (the WAADirect pattern):
                                image/png; NOT base64 JSON)
     POST /context/identity  -> PHI-free foreground-app + logon-session identity
     POST /input             -> bounded physical input operations (typed JSON)
+    POST /input/guarded     -> frame/context/focus check + bounded input in one
+                               serialized request
     POST /uia/locator-at    -> stable UIA locator at a demonstrated point
     POST /uia/text-at-point -> structured row text for identity verification
     POST /uia/find          -> zero / unique / ambiguous exact candidates
@@ -541,7 +543,7 @@ def _perform_uia_initialized(
     auto: Any, operation: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     """Perform one typed UIA operation in an initialized COM apartment."""
-    if operation in {"locator-at", "text-at-point"}:
+    if operation in {"locator-at", "text-at-point", "focused-at-point"}:
         data = _exact_object(payload, required=frozenset({"x", "y"}), label=operation)
         x = _bounded_int(data["x"], "x")
         y = _bounded_int(data["y"], "y")
@@ -564,6 +566,44 @@ def _perform_uia_initialized(
             node = _parent(node)
             if node is None:
                 break
+        if operation == "focused-at-point":
+            point_control = actionable or element
+            try:
+                focused = auto.GetFocusedControl()
+            except Exception as exc:  # noqa: BLE001
+                raise AgentRequestError(
+                    503, "uia_unavailable", "focused UIA control is unavailable"
+                ) from exc
+            if focused is None:
+                return {"status": "ok", "focused": False}
+            focused_actionable: Optional[object] = None
+            node = focused
+            for _ in range(6):
+                if (
+                    str(_control_value(node, "ControlTypeName", ""))
+                    in _ACTIONABLE_TYPES
+                ):
+                    focused_actionable = node
+                    break
+                node = _parent(node)
+                if node is None:
+                    break
+            focused_control = focused_actionable or focused
+            point_candidate = _candidate(point_control)
+            focused_candidate = _candidate(focused_control)
+            if point_candidate is None or focused_candidate is None:
+                return {"status": "ok", "focused": False}
+            matches = hmac.compare_digest(
+                point_candidate["fingerprint"],
+                focused_candidate["fingerprint"],
+            )
+            return {
+                "status": "ok",
+                "focused": matches,
+                "target_fingerprint": (
+                    point_candidate["fingerprint"] if matches else None
+                ),
+            }
         return {"status": "ok", "locator": _locator_from_control(actionable or element)}
 
     data = _exact_object(
@@ -1015,6 +1055,7 @@ def make_handler_class(
                             "screenshot",
                             "context_identity_v1",
                             "typed_input_v1",
+                            "guarded_input_v1",
                             "uia_v1",
                             *(["legacy_exec"] if config.allow_legacy_exec else []),
                         ],
@@ -1049,6 +1090,7 @@ def make_handler_class(
         def do_POST(self) -> None:  # noqa: N802 - stdlib naming
             typed_routes = {
                 "/input": ("input", ""),
+                "/input/guarded": ("guarded-input", ""),
                 "/context/identity": ("context", "identity"),
                 "/uia/locator-at": ("uia", "locator-at"),
                 "/uia/text-at-point": ("uia", "text-at-point"),
@@ -1115,13 +1157,128 @@ def make_handler_class(
                 try:
                     if kind == "context":
                         _exact_object(data, label="context identity request")
-                    result = (
-                        input_fn(data)
-                        if kind == "input"
-                        else context_fn()
-                        if kind == "context"
-                        else uia_fn(operation, data)
-                    )
+                    if kind == "guarded-input":
+                        guarded = _exact_object(
+                            data,
+                            required=frozenset(
+                                {
+                                    "expected_frame_sha256",
+                                    "expected_context",
+                                    "input",
+                                }
+                            ),
+                            optional=frozenset({"focus_point"}),
+                            label="guarded input request",
+                        )
+                        expected_frame = guarded["expected_frame_sha256"]
+                        if (
+                            not isinstance(expected_frame, str)
+                            or len(expected_frame) != 64
+                            or any(
+                                char not in "0123456789abcdef"
+                                for char in expected_frame
+                            )
+                        ):
+                            raise AgentRequestError(
+                                400,
+                                "invalid_schema",
+                                "expected_frame_sha256 must be lowercase SHA-256",
+                            )
+                        expected_context = _exact_object(
+                            guarded["expected_context"],
+                            required=frozenset(
+                                {"application", "session", "workflow_state"}
+                            ),
+                            label="expected_context",
+                        )
+                        for key, value in expected_context.items():
+                            if value is not None and (
+                                not isinstance(value, str) or not 1 <= len(value) <= 128
+                            ):
+                                raise AgentRequestError(
+                                    400,
+                                    "invalid_schema",
+                                    f"expected_context.{key} is invalid",
+                                )
+                        input_payload = _exact_object(
+                            guarded["input"],
+                            optional=frozenset(
+                                {
+                                    "action",
+                                    "x",
+                                    "y",
+                                    "double",
+                                    "text",
+                                    "interval_s",
+                                    "keys",
+                                    "horizontal_notches",
+                                    "vertical_notches",
+                                }
+                            ),
+                            label="guarded input payload",
+                        )
+                        current_png = grab_fn()
+                        if not current_png.startswith(_PNG_SIGNATURE):
+                            raise AgentRequestError(
+                                503,
+                                "capture_unavailable",
+                                "guarded frame capture is unavailable",
+                            )
+                        if not hmac.compare_digest(
+                            hashlib.sha256(current_png).hexdigest(),
+                            expected_frame,
+                        ):
+                            raise AgentRequestError(
+                                409,
+                                "stale_frame",
+                                "desktop frame changed after identity verification",
+                            )
+                        current_context = context_fn()
+                        for key, expected in expected_context.items():
+                            if current_context.get(key) != expected:
+                                raise AgentRequestError(
+                                    409,
+                                    "stale_context",
+                                    "execution context changed after identity "
+                                    "verification",
+                                )
+                        focus_point = guarded.get("focus_point")
+                        action = input_payload.get("action")
+                        if action in {"type_text", "press"}:
+                            focus = _exact_object(
+                                focus_point,
+                                required=frozenset({"x", "y"}),
+                                label="focus_point",
+                            )
+                            focus_result = uia_fn(
+                                "focused-at-point",
+                                {
+                                    "x": _bounded_int(focus["x"], "focus_point.x"),
+                                    "y": _bounded_int(focus["y"], "focus_point.y"),
+                                },
+                            )
+                            if focus_result.get("focused") is not True:
+                                raise AgentRequestError(
+                                    409,
+                                    "stale_focus",
+                                    "focused UIA target changed after identity "
+                                    "verification",
+                                )
+                        elif focus_point is not None:
+                            raise AgentRequestError(
+                                400,
+                                "invalid_schema",
+                                "focus_point is only valid for keyboard input",
+                            )
+                        result = input_fn(input_payload)
+                    else:
+                        result = (
+                            input_fn(data)
+                            if kind == "input"
+                            else context_fn()
+                            if kind == "context"
+                            else uia_fn(operation, data)
+                        )
                 except AgentRequestError as exc:
                     self._send_json(
                         exc.status,

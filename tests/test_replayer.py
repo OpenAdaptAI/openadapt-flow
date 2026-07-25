@@ -169,6 +169,7 @@ class FakeBackend:
         self._select_all = False
         self._type_accept_results = list(type_accept_results or [])
         self._guarded_point = None
+        self._guarded_keyboard_point = None
 
     @property
     def viewport(self):
@@ -208,6 +209,43 @@ class FakeBackend:
             delivered_at="2026-07-25T00:00:00+00:00",
         )
 
+    def guarded_keyboard_frame(self):
+        return self._frame
+
+    def arm_guarded_keyboard(self, x, y):
+        self._guarded_keyboard_point = (int(x), int(y))
+
+    def cancel_guarded_keyboard(self):
+        self._guarded_keyboard_point = None
+
+    def _consume_guarded_keyboard(self, expected_frame_sha256):
+        point = self._guarded_keyboard_point
+        self._guarded_keyboard_point = None
+        if point is None:
+            raise RuntimeError("guarded keyboard target was not pre-armed")
+        if hashlib.sha256(self._frame).hexdigest() != expected_frame_sha256:
+            raise RuntimeError("guarded keyboard frame changed")
+
+    def type_text_guarded(self, text, *, expected_frame_sha256):
+        self._consume_guarded_keyboard(expected_frame_sha256)
+        self.type_text(text)
+        return ActionDeliveryReceipt(
+            receipt_id="test-guarded-type",
+            operation="guarded_type",
+            native=False,
+            delivered_at="2026-07-25T00:00:00+00:00",
+        )
+
+    def press_guarded(self, key, *, expected_frame_sha256):
+        self._consume_guarded_keyboard(expected_frame_sha256)
+        self.press(key)
+        return ActionDeliveryReceipt(
+            receipt_id="test-guarded-key",
+            operation="guarded_key",
+            native=False,
+            delivered_at="2026-07-25T00:00:00+00:00",
+        )
+
     def type_text(self, text):
         self.actions.append(("type", text))
         accepted = (
@@ -241,11 +279,18 @@ class RemoteLeaseBackend(FakeBackend):
         self.acquire_count = 0
         self.click_attempts = 0
         self.raise_after_click = False
+        self.focused_element_points = []
 
     def acquire_actuation_frame(self) -> bytes:
         self.acquire_count += 1
         self._frame = self.fresh_frame
         return self._frame
+
+    def arm_focused_element_lease(self, x, y):
+        self.focused_element_points.append((int(x), int(y)))
+
+    def cancel_focused_element_lease(self):
+        self.focused_element_points.clear()
 
     def click(self, x, y, *, double=False):
         self.click_attempts += 1
@@ -396,6 +441,7 @@ def test_consequential_remote_anchored_type_reacquires_after_focus_click(
 
     assert report.success is True
     assert backend.acquire_count == 2
+    assert backend.focused_element_points == [(110, 105)]
     assert backend.actions == [
         ("click", 110, 105, False),
         ("type", "hello"),
@@ -1280,6 +1326,55 @@ def test_consequential_identity_click_refuses_raw_local_coordinates(bundle, run_
     assert backend.actions == []
     assert report.results[0].safety_halt is True
     assert "same actuation operation" in (report.results[0].error or "")
+
+
+@pytest.mark.parametrize("action", [ActionKind.TYPE, ActionKind.KEY])
+def test_consequential_identity_keyboard_refuses_raw_local_input(
+    bundle, run_dir, action
+):
+    class RawKeyboardBackend:
+        def __init__(self):
+            self.frame = make_png()
+            self.actions = []
+
+        @property
+        def viewport(self):
+            return VIEWPORT
+
+        def screenshot(self):
+            return self.frame
+
+        def click(self, x, y, *, double=False):
+            self.actions.append(("click", x, y, double))
+
+        def type_text(self, text):
+            self.actions.append(("type", text))
+
+        def press(self, key):
+            self.actions.append(("press", key))
+
+        def scroll(self, dx, dy):
+            self.actions.append(("scroll", dx, dy))
+
+    vision = resolving_vision()
+    vision.ocr_lines = [OcrLine("Jane Sample Knee pain referral High")]
+    backend = RawKeyboardBackend()
+    step = context_click_step(
+        "Jane Sample Knee pain referral High",
+        risk="irreversible",
+    )
+    step.action = action
+    step.text = "must not land" if action is ActionKind.TYPE else None
+    step.key = "Enter" if action is ActionKind.KEY else None
+
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]), bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].safety_halt is True
+    assert "unguarded keyboard delivery" in (report.results[0].error or "")
 
 
 def test_identity_param_mode_reanchors_on_run_value(bundle, run_dir):

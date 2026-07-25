@@ -8,6 +8,7 @@ real desktop is needed — the suite runs on macOS/Linux CI.
 
 from __future__ import annotations
 
+import hashlib
 import struct
 import sys
 import threading
@@ -98,6 +99,8 @@ def typed_agent() -> Iterator[RunningAgent]:
         }
 
     def uia_fn(operation, payload):
+        if operation == "focused-at-point":
+            return {"status": "ok", "focused": True}
         if operation == "find":
             return {
                 "status": "ok",
@@ -208,6 +211,93 @@ def test_typed_input_and_uia_receipts_never_claim_outcome(
     ).json()
     assert acted["receipt"]["native"] is True
     assert acted["receipt"]["outcome_verified"] is False
+
+
+def test_windows_backend_guarded_key_roundtrip(typed_agent: RunningAgent) -> None:
+    from openadapt_flow.backends import WindowsBackend
+
+    backend = WindowsBackend(typed_agent.url, viewport=(4, 2))
+    frame = backend.guarded_keyboard_frame()
+    backend.arm_guarded_keyboard(1, 1)
+    receipt = backend.press_guarded(
+        "Enter",
+        expected_frame_sha256=hashlib.sha256(frame).hexdigest(),
+    )
+
+    assert receipt.operation == "physical_press"
+    assert receipt.outcome_verified is False
+
+
+@pytest.mark.parametrize("mutation", ["frame", "context", "focus"])
+def test_guarded_input_refuses_post_identity_change(mutation: str) -> None:
+    state = {
+        "frame": _fake_png(),
+        "application": "accuro",
+        "focused": True,
+    }
+    delivered: list[dict] = []
+
+    def grab_fn():
+        return state["frame"]
+
+    def input_fn(payload):
+        delivered.append(payload)
+        return {
+            "status": "delivered",
+            "receipt_id": "guarded-1",
+            "operation": "physical_press",
+            "native": False,
+            "target_fingerprint": None,
+            "delivered_at": "2026-07-25T00:00:00+00:00",
+            "outcome_verified": False,
+        }
+
+    def context_fn():
+        return {
+            "status": "ok",
+            "application": state["application"],
+            "session": "a" * 64,
+            "workflow_state": None,
+        }
+
+    def uia_fn(operation, payload):
+        assert operation == "focused-at-point"
+        return {"status": "ok", "focused": state["focused"]}
+
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0),
+        grab_fn=grab_fn,
+        input_fn=input_fn,
+        uia_fn=uia_fn,
+        context_fn=context_fn,
+    )
+    try:
+        expected_frame = hashlib.sha256(state["frame"]).hexdigest()
+        if mutation == "frame":
+            state["frame"] += b"changed"
+        elif mutation == "context":
+            state["application"] = "other-app"
+        else:
+            state["focused"] = False
+        response = requests.post(
+            f"{agent.url}/input/guarded",
+            json={
+                "expected_frame_sha256": expected_frame,
+                "expected_context": {
+                    "application": "accuro",
+                    "session": "a" * 64,
+                    "workflow_state": None,
+                },
+                "focus_point": {"x": 1, "y": 1},
+                "input": {"action": "press", "keys": ["enter"]},
+            },
+            timeout=5,
+        )
+    finally:
+        agent.close()
+
+    assert response.status_code == 409
+    assert delivered == []
 
 
 def test_invalid_input_schema_refuses_before_loading_pyautogui(monkeypatch) -> None:

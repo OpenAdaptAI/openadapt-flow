@@ -182,15 +182,30 @@ class OpenEMRFixture:
         finally:
             os.close(fd)
 
+    def _loopback_port(self, name: str, default: str) -> str:
+        """Read one validated loopback port from the prepared runtime state.
+
+        The compose file always binds to ``127.0.0.1``; the exact host port is
+        part of the prepared state (``runtime.env``) rather than a source-code
+        constant, so multiple prepared states can coexist on one machine.
+        """
+        try:
+            value = self._runtime_values().get(name, default)
+        except FixtureError:
+            value = default
+        if not re.fullmatch(r"[0-9]{4,5}", value) or not 1024 <= int(value) <= 65535:
+            raise FixtureError(f"runtime.env {name} is not a sane loopback port")
+        return value
+
     @property
     def ui_base_url(self) -> str:
         """HTTP is loopback-only and avoids trusting the fixture TLS cert in UI."""
-        return "http://127.0.0.1:9301"
+        return f"http://127.0.0.1:{self._loopback_port('OPENEMR_HTTP_PORT', '9301')}"
 
     @property
     def api_base_url(self) -> str:
         """OAuth and REST use the official image's self-signed HTTPS endpoint."""
-        return "https://127.0.0.1:9300"
+        return f"https://127.0.0.1:{self._loopback_port('OPENEMR_HTTPS_PORT', '9300')}"
 
     def _validate_lock(self) -> None:
         if self.lock.get("schema_version") != 1:
@@ -276,12 +291,13 @@ class OpenEMRFixture:
             "OPENEMR_IMAGE": self.lock["services"]["openemr"],
             "MARIADB_IMAGE": self.lock["services"]["mariadb"],
             "OPENEMR_ACTOR_USER": "openadapt_actor",
-            "OPENEMR_HTTP_PORT": "9301",
-            "OPENEMR_HTTPS_PORT": "9300",
         }
         for name, value in expected.items():
             if values.get(name) != value:
                 raise FixtureError(f"runtime.env {name} differs from the lock")
+        # Ports are state, not lock identity: require sane loopback ports.
+        self._loopback_port("OPENEMR_HTTP_PORT", "9301")
+        self._loopback_port("OPENEMR_HTTPS_PORT", "9300")
         for secret_name in (
             "MARIADB_ROOT_PASSWORD",
             "OPENEMR_DB_PASSWORD",

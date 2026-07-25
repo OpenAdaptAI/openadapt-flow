@@ -1498,6 +1498,7 @@ def _parse_qualification_signal(
     signal_regions: dict[str, tuple[int, int, int, int]] | None = None,
     signal_params: dict[str, list[str]] | None = None,
     signal_extracts: dict[str, str] | None = None,
+    signal_expecteds: dict[str, str] | None = None,
 ):
     from openadapt_flow.qualification import (
         IdentityEvidenceSource,
@@ -1535,6 +1536,7 @@ def _parse_qualification_signal(
             ),
             params=(signal_params or {}).get(key, []),
             extract_pattern=(signal_extracts or {}).get(key),
+            expected_value=(signal_expecteds or {}).get(key),
         )
     except ValueError as exc:
         raise SystemExit(f"invalid --signal {raw!r}: {exc}") from exc
@@ -1688,16 +1690,27 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
                 if key in signal_extracts:
                     raise SystemExit(f"--signal-extract repeats signal key {key!r}")
                 signal_extracts[key] = pattern
+            signal_expecteds: dict[str, str] = {}
+            for raw_expected in args.signal_expected:
+                key, separator, expected = raw_expected.partition("=")
+                if not separator or not key or not expected:
+                    raise SystemExit("--signal-expected expects KEY=VALUE")
+                if key in signal_expecteds:
+                    raise SystemExit(f"--signal-expected repeats signal key {key!r}")
+                signal_expecteds[key] = expected
             signal_keys = {raw.split("=", 1)[0] for raw in args.signal if "=" in raw}
             unknown_options = sorted(
                 (
-                    set(signal_regions) | set(signal_params) | set(signal_extracts)
+                    set(signal_regions)
+                    | set(signal_params)
+                    | set(signal_extracts)
+                    | set(signal_expecteds)
                 ).difference(signal_keys)
             )
             if unknown_options:
                 raise SystemExit(
-                    "--signal-region/--signal-param/--signal-extract references "
-                    "unknown signal "
+                    "--signal-region/--signal-param/--signal-extract/"
+                    "--signal-expected references unknown signal "
                     "key(s): " + ", ".join(unknown_options)
                 )
             signals = [
@@ -1707,6 +1720,7 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
                     signal_regions=signal_regions,
                     signal_params=signal_params,
                     signal_extracts=signal_extracts,
+                    signal_expecteds=signal_expecteds,
                 )
                 for raw in args.signal
             ]
@@ -3249,6 +3263,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Extract one named (?P<value>...) field from a structured or "
             "captured-context signal"
+        ),
+    )
+    q.add_argument(
+        "--signal-expected",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Bind a qualified PHI-free expected value to an "
+            "application/session/workflow-state signal"
         ),
     )
     q.add_argument("--quorum", type=int)

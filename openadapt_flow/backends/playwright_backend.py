@@ -80,7 +80,7 @@ _WORKFLOW_STATE_IDENTITY_PATTERN = re.compile(
 
 @dataclass
 class _StructuralGuard:
-    """Private one-shot binding; no target text or selector is retained."""
+    """Private one-shot binding retaining only token, scope, and frame selectors."""
 
     token: str
     scope: Any
@@ -93,8 +93,8 @@ class _FramePoint:
     """A top-level point projected into one concrete document viewport."""
 
     scope: Any
-    x: int
-    y: int
+    x: float
+    y: float
     frame_path: tuple[str, ...]
 
 
@@ -487,14 +487,56 @@ _FRAME_SELECTOR_JS = r"""(el) => {
     return null;
 }"""
 
-_FRAME_METRICS_JS = r"""(el) => ({
-    clientLeft: el.clientLeft,
-    clientTop: el.clientTop,
-    clientWidth: el.clientWidth,
-    clientHeight: el.clientHeight,
-    offsetWidth: el.offsetWidth,
-    offsetHeight: el.offsetHeight,
-})"""
+_PROJECT_FRAME_POINT_JS = r"""(el, point) => {
+    const [px, py] = point;
+    if (document.elementFromPoint(px, py) !== el) return null;
+
+    // getBoundingClientRect can safely invert only positive axis-aligned
+    // scale/translation. Reject rotation, skew, mirroring, perspective, and
+    // 3-D transforms on the frame or any ancestor rather than guessing.
+    const epsilon = 1e-7;
+    for (let node = el; node; node = node.parentElement) {
+        const style = window.getComputedStyle(node);
+        if (style.perspective && style.perspective !== 'none') return null;
+        const rotate = style.rotate;
+        if (rotate && rotate !== 'none' && rotate !== '0deg') return null;
+        const scale = style.scale;
+        if (scale && scale !== 'none') {
+            const components = scale.trim().split(/\s+/).map(Number);
+            if (components.length < 1 || components.length > 2 ||
+                    components.some(value => !Number.isFinite(value) || value <= 0)) {
+                return null;
+            }
+        }
+        const transform = style.transform;
+        if (transform && transform !== 'none') {
+            let matrix;
+            try { matrix = new DOMMatrixReadOnly(transform); }
+            catch (_) { return null; }
+            if (!matrix.is2D || Math.abs(matrix.b) > epsilon ||
+                    Math.abs(matrix.c) > epsilon || matrix.a <= 0 || matrix.d <= 0) {
+                return null;
+            }
+        }
+    }
+
+    const rect = el.getBoundingClientRect();
+    const offsetWidth = Number(el.offsetWidth);
+    const offsetHeight = Number(el.offsetHeight);
+    if (!(rect.width > 0 && rect.height > 0 &&
+            offsetWidth > 0 && offsetHeight > 0)) return null;
+    const scaleX = rect.width / offsetWidth;
+    const scaleY = rect.height / offsetHeight;
+    if (!(Number.isFinite(scaleX) && Number.isFinite(scaleY) &&
+            scaleX > 0 && scaleY > 0)) return null;
+    const contentX = rect.left + Number(el.clientLeft) * scaleX;
+    const contentY = rect.top + Number(el.clientTop) * scaleY;
+    const localX = (px - contentX) / scaleX;
+    const localY = (py - contentY) / scaleY;
+    const inside = localX >= 0 && localY >= 0 &&
+        localX < Number(el.clientWidth) && localY < Number(el.clientHeight);
+    return inside ? {inside: true, x: localX, y: localY} : {inside: false};
+}"""
 
 
 def _normalize_chord(key: str) -> str:
@@ -841,93 +883,79 @@ class PlaywrightBackend:
 
     # -- structural action (openadapt_flow.backend.StructuralActionBackend) --
 
-    @staticmethod
-    def _frame_depth(frame: Any) -> int:
-        depth = 0
-        current = frame
-        while current.parent_frame is not None:
-            depth += 1
-            current = current.parent_frame
-        return depth
-
-    def _frame_path(self, frame: Any) -> Optional[tuple[str, ...]]:
-        """Derive a bounded selector chain without retaining frame URLs."""
-
-        selectors: list[str] = []
-        current = frame
-        try:
-            while current.parent_frame is not None:
-                frame_element = current.frame_element()
-                selector = frame_element.evaluate(_FRAME_SELECTOR_JS)
-                if not isinstance(selector, str) or not selector or len(selector) > 512:
-                    return None
-                selectors.append(selector)
-                if len(selectors) > 8:
-                    return None
-                current = current.parent_frame
-        except Exception:
-            return None
-        selectors.reverse()
-        return tuple(selectors)
-
     def _frame_point(self, x: int, y: int) -> Optional[_FramePoint]:
-        """Project a top-level CSS-pixel point into the deepest child frame.
+        """Follow the actual hit-tested frame chain and project into its document.
 
-        Playwright reports frame-element boxes in top-level viewport CSS
-        pixels. Border and axis-aligned CSS scale are removed explicitly before
-        ``document.elementFromPoint`` runs inside the child. Overlapping frames
-        at the same depth are ambiguous and return no structural observation.
+        At each document boundary ``elementFromPoint`` must return the exact
+        iframe/frame element we descend through. Hidden, occluded, and
+        ``pointer-events:none`` frames therefore cannot contribute structural
+        evidence. Entering frame content fails closed if the selector,
+        positive axis-aligned transform, or child-frame mapping cannot be
+        proven; it never falls back to the parent document.
         """
 
-        candidates: list[tuple[int, Any, int, int, tuple[str, ...]]] = []
-        for frame in self.page.frames:
-            if frame == self.page.main_frame:
-                continue
+        scope: Any = self.page
+        local_x = float(x)
+        local_y = float(y)
+        path: list[str] = []
+        for _depth in range(9):
+            hit = None
+            candidate = None
             try:
-                element = frame.frame_element()
-                box = element.bounding_box()
-                metrics = element.evaluate(_FRAME_METRICS_JS)
-                if not isinstance(box, dict) or not isinstance(metrics, dict):
-                    continue
-                offset_width = float(metrics.get("offsetWidth") or 0)
-                offset_height = float(metrics.get("offsetHeight") or 0)
-                if offset_width <= 0 or offset_height <= 0:
-                    continue
-                scale_x = float(box["width"]) / offset_width
-                scale_y = float(box["height"]) / offset_height
-                if scale_x <= 0 or scale_y <= 0:
-                    continue
-                content_x = float(box["x"]) + float(metrics["clientLeft"]) * scale_x
-                content_y = float(box["y"]) + float(metrics["clientTop"]) * scale_y
-                local_x = (float(x) - content_x) / scale_x
-                local_y = (float(y) - content_y) / scale_y
-                if not (
-                    0 <= local_x < float(metrics["clientWidth"])
-                    and 0 <= local_y < float(metrics["clientHeight"])
+                hit = scope.evaluate_handle(
+                    "([px, py]) => document.elementFromPoint(px, py)",
+                    [local_x, local_y],
+                ).as_element()
+                if hit is None:
+                    return None
+                tag = hit.evaluate("el => el.localName")
+                if tag not in {"iframe", "frame"}:
+                    return _FramePoint(scope, local_x, local_y, tuple(path))
+
+                projection = hit.evaluate(_PROJECT_FRAME_POINT_JS, [local_x, local_y])
+                if not isinstance(projection, dict):
+                    return None
+                # A hit on the frame's border belongs to the parent document.
+                if projection.get("inside") is not True:
+                    return _FramePoint(scope, local_x, local_y, tuple(path))
+                if len(path) >= 8:
+                    return None
+                selector = hit.evaluate(_FRAME_SELECTOR_JS)
+                if not isinstance(selector, str) or not selector or len(selector) > 512:
+                    return None
+                matches = scope.locator(selector)
+                if matches.count() != 1:
+                    return None
+                candidate = matches.element_handle()
+                if candidate is None or not hit.evaluate(
+                    "(el, candidate) => el === candidate", candidate
                 ):
-                    continue
-                path = self._frame_path(frame)
-                if path is None:
-                    continue
-                candidates.append(
-                    (
-                        self._frame_depth(frame),
-                        frame,
-                        int(round(local_x)),
-                        int(round(local_y)),
-                        path,
-                    )
+                    return None
+                child = hit.content_frame()
+                if child is None:
+                    return None
+                child_width, child_height = child.evaluate(
+                    "() => [window.innerWidth, window.innerHeight]"
                 )
+                next_x = float(projection["x"])
+                next_y = float(projection["y"])
+                if not (
+                    0 <= next_x < float(child_width)
+                    and 0 <= next_y < float(child_height)
+                ):
+                    return None
+                path.append(selector)
+                scope = child
+                local_x = next_x
+                local_y = next_y
             except Exception:
-                continue
-        if not candidates:
-            return _FramePoint(self.page, int(x), int(y), ())
-        deepest = max(candidate[0] for candidate in candidates)
-        matches = [candidate for candidate in candidates if candidate[0] == deepest]
-        if len(matches) != 1:
-            return None
-        _, scope, local_x, local_y, path = matches[0]
-        return _FramePoint(scope, local_x, local_y, path)
+                return None
+            finally:
+                if candidate is not None:
+                    candidate.dispose()
+                if hit is not None:
+                    hit.dispose()
+        return None
 
     def _resolve_scope(self, frame_path: tuple[str, ...]) -> Optional[Any]:
         scope: Any = self.page

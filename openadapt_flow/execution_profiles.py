@@ -210,6 +210,13 @@ def classify_execution_outcome(
         )
         if observed_results != expected_results:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
+    required_identity_ids = set(report.required_identity_step_ids)
+    if any(
+        result.identity is None or result.identity.status != "verified"
+        for result in report.results
+        if not result.skipped and result.step_id in required_identity_ids
+    ):
+        return ExecutionOutcome.COMPLETED_UNVERIFIED
     minimum = required_effect_tier(workflow, resolved)
     assert minimum is not None
     for result in report.results:
@@ -298,17 +305,15 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
     )
 
     required_identity_ids = set(report.required_identity_step_ids)
-    required_identity = len(required_identity_ids)
+    identity_results = [
+        result
+        for result in report.results
+        if not result.skipped and result.step_id in required_identity_ids
+    ]
+    required_identity = len(identity_results)
     passed_identity = sum(
-        1
-        for step_id in required_identity_ids
-        if any(
-            result.step_id == step_id
-            and not result.skipped
-            and result.identity is not None
-            and result.identity.status == "verified"
-            for result in report.results
-        )
+        result.identity is not None and result.identity.status == "verified"
+        for result in identity_results
     )
 
     required_postconditions = 0

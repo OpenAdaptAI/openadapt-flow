@@ -289,6 +289,7 @@ class DurableRun:
                     effect_approved_unverified=result.effect_approved_unverified,
                     effect_contract_hashes=list(result.effect_contract_hashes),
                     effect_evidence=list(result.effect_evidence),
+                    identity=result.identity,
                     governed_authorization_id=(
                         self.governed_authorization.authorization_id
                         if self.governed_authorization is not None
@@ -452,6 +453,7 @@ def resumed_step_results(
                 effect_evidence=(
                     list(checkpoint.effect_evidence) if checkpoint is not None else []
                 ),
+                identity=checkpoint.identity if checkpoint is not None else None,
                 postconditions_ok=(
                     checkpoint.postconditions_ok if checkpoint is not None else None
                 ),

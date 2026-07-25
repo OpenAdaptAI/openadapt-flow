@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -829,7 +830,7 @@ def test_standard_verified_run_records_tiered_effect_evidence(tmp_path):
     assert report.outcome_envelope is not None
     assert report.outcome_envelope.required_contracts.model_dump() == {
         "authorization": 1,
-        "identity": 0,
+        "identity": 1,
         "postcondition": 0,
         "effect": 1,
     }
@@ -840,6 +841,7 @@ def test_standard_verified_run_records_tiered_effect_evidence(tmp_path):
     assert report.outcome_envelope.evidence_classes == [
         "authorization",
         "effect_tier_1",
+        "identity",
     ]
     assert report.outcome_envelope.model_calls == 0
 
@@ -892,6 +894,60 @@ def test_standard_resume_retains_structured_effect_evidence(tmp_path):
         resumed.model_dump_json(indent=2)
     )
     assert resumed.results[0].effect_evidence[0].verification_tier == 1
+    assert resumed.results[0].identity is not None
+    assert resumed.results[0].identity.status == "verified"
+
+
+def test_standard_resume_from_legacy_checkpoint_is_unverified(tmp_path):
+    workflow, bundle = _sealed(
+        tmp_path,
+        _key_workflow("legacy-resume", with_effect=True),
+        encrypted=False,
+    )
+    gate = _gate(
+        workflow,
+        bundle,
+        ExecutionProfile.STANDARD,
+        verifier=_TieredVerifier(),
+        durable=True,
+    )
+    authorization = build_runtime_authorization(workflow, gate)
+    backend = FakeBackend()
+    run_dir = tmp_path / "legacy-resume"
+    initial = Replayer(
+        backend,
+        vision=_ReadyVision(),
+        effect_verifier=_TieredVerifier(),
+        governed_authorization=authorization,
+        durable=True,
+        require_settled=True,
+    ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+    assert initial.execution_outcome == ExecutionOutcome.VERIFIED.value
+
+    checkpoint_path = next((run_dir / "checkpoints").glob("step_*.json"))
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint.pop("identity")
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    actions_before_resume = list(backend.actions)
+
+    resumed = Replayer(
+        backend,
+        vision=_ReadyVision(),
+        effect_verifier=_TieredVerifier(),
+        governed_authorization=authorization,
+        governed_continuation=True,
+        durable=True,
+        require_settled=True,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        resume_from=1,
+    )
+
+    assert backend.actions == actions_before_resume
+    assert resumed.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
+    assert resumed.success is False
 
 
 def test_standard_program_routes_ordinary_failure_to_authored_handler(tmp_path):

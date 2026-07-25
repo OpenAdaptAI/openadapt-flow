@@ -44,7 +44,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from openadapt_flow.ir import EffectVerificationEvidence
+from openadapt_flow.ir import EffectVerificationEvidence, IdentityCheck
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import ApprovalRecord
 from openadapt_flow.runtime.durable.program_checkpoint import (
@@ -128,6 +128,7 @@ class RunCheckpoint(BaseModel):
     effect_approved_unverified: bool = False
     effect_contract_hashes: list[str] = Field(default_factory=list)
     effect_evidence: list[EffectVerificationEvidence] = Field(default_factory=list)
+    identity: Optional[IdentityCheck] = None
     governed_authorization_id: Optional[str] = None
     governed_approval_source: Optional[str] = None
     postconditions_ok: Optional[bool] = None

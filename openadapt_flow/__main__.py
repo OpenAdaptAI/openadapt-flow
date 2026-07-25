@@ -1130,8 +1130,8 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     if args.require_approval and pending.status != "approved":
         print(
             f"Pending escalation at {run_dir} is {pending.status!r}, not "
-            "'approved'. Re-run without --require-approval to resume anyway, "
-            f"or approve it first:\n    openadapt-flow approve {run_dir}"
+            "'approved'. Approval is required before resume:\n"
+            f"    openadapt flow approve {run_dir}"
         )
         return 3
 

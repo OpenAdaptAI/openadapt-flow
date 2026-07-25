@@ -1084,6 +1084,45 @@ def test_semantic_signal_label_cannot_relabel_unrelated_structured_text() -> Non
 
 
 @pytest.mark.parametrize(
+    "expected",
+    [
+        "https://app.example.test",
+        "https://app.example.test:8443",
+        "https://[2001:db8::1]",
+        f"https://{'a' * 63}.{'b' * 63}.{'c' * 63}.test",
+    ],
+)
+def test_application_signal_accepts_exact_browser_origin(expected: str) -> None:
+    signal = IdentitySignalPolicy(
+        key="application",
+        source="application",
+        expected_value=expected,
+    )
+
+    assert signal.expected_value == expected
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        "https://app.example.test/patient/1",
+        "https://user@app.example.test",
+        "HTTPS://app.example.test",
+        "https://[2001:db8::1]:invalid",
+    ],
+)
+def test_application_signal_rejects_noncanonical_or_sensitive_origin(
+    expected: str,
+) -> None:
+    with pytest.raises(ValueError, match="canonical HTTP"):
+        IdentitySignalPolicy(
+            key="application",
+            source="application",
+            expected_value=expected,
+        )
+
+
+@pytest.mark.parametrize(
     ("key", "expected"),
     [
         ("application", "reference.application"),

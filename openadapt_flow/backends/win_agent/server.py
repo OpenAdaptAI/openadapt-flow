@@ -6,6 +6,7 @@ matching the Windows Agent Arena Flask contract (the WAADirect pattern):
 
     GET  /screenshot        -> raw PNG bytes of the desktop (Content-Type
                                image/png; NOT base64 JSON)
+    POST /context/identity  -> PHI-free foreground-app + logon-session identity
     POST /input             -> bounded physical input operations (typed JSON)
     POST /uia/locator-at    -> stable UIA locator at a demonstrated point
     POST /uia/text-at-point -> structured row text for identity verification
@@ -75,6 +76,7 @@ import secrets
 import subprocess
 import time
 import traceback
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -94,6 +96,7 @@ KEYFILE_ENV_VAR = "OAFLOW_AGENT_KEYFILE"
 GrabFn = Callable[[], bytes]
 InputFn = Callable[[dict[str, Any]], dict[str, Any]]
 UiaFn = Callable[[str, dict[str, Any]], dict[str, Any]]
+ContextFn = Callable[[], dict[str, Any]]
 
 _MAX_BODY_BYTES = 1_048_576
 _MAX_TEXT_CHARS = 65_536
@@ -756,11 +759,206 @@ def _active_console_session() -> int:
         return -1
 
 
+def _bounded_application_identifier(name: str) -> Optional[str]:
+    """Canonicalize one executable basename into the public context-id syntax."""
+
+    stem = os.path.splitext(os.path.basename(name))[0]
+    ascii_name = (
+        unicodedata.normalize("NFKD", stem)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    identifier = "".join(
+        char.casefold()
+        if char.isascii() and (char.isalnum() or char in "._:/-")
+        else "-"
+        for char in ascii_name
+    )
+    identifier = "-".join(part for part in identifier.split("-") if part)
+    identifier = identifier.strip("-._:/")[:128]
+    if not identifier or not identifier[0].isalnum():
+        return None
+    return identifier
+
+
+def _foreground_application_identity() -> Optional[str]:
+    """Observe the foreground executable without reading its window title."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if win_dll is None:
+            return None
+        user32 = win_dll("user32", use_last_error=True)
+        kernel32 = win_dll("kernel32", use_last_error=True)
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        pid = wintypes.DWORD()
+        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or not pid.value:
+            return None
+        process = kernel32.OpenProcess(0x1000, False, pid.value)
+        if not process:
+            return None
+        try:
+            size = wintypes.DWORD(32768)
+            path = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(
+                process, 0, path, ctypes.byref(size)
+            ):
+                return None
+            return _bounded_application_identifier(path.value)
+        finally:
+            kernel32.CloseHandle(process)
+    except Exception:  # noqa: BLE001 - unavailable means unverifiable
+        return None
+
+
+def _native_session_digest() -> Optional[str]:
+    """Hash the live machine + interactive Windows logon-session identity."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes  # noqa: PLC0415
+        import importlib  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        class Luid(ctypes.Structure):
+            _fields_ = [
+                ("LowPart", wintypes.DWORD),
+                ("HighPart", wintypes.LONG),
+            ]
+
+        class TokenStatistics(ctypes.Structure):
+            _fields_ = [
+                ("TokenId", Luid),
+                ("AuthenticationId", Luid),
+                ("ExpirationTime", ctypes.c_longlong),
+                ("TokenType", wintypes.DWORD),
+                ("ImpersonationLevel", wintypes.DWORD),
+                ("DynamicCharged", wintypes.DWORD),
+                ("DynamicAvailable", wintypes.DWORD),
+                ("GroupCount", wintypes.DWORD),
+                ("PrivilegeCount", wintypes.DWORD),
+                ("ModifiedId", Luid),
+            ]
+
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if win_dll is None:
+            return None
+        kernel32 = win_dll("kernel32", use_last_error=True)
+        advapi32 = win_dll("advapi32", use_last_error=True)
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.ProcessIdToSessionId.argtypes = [
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        session_id = wintypes.DWORD()
+        if not kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session_id)):
+            return None
+        if int(session_id.value) != _active_console_session():
+            return None
+
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
+        ):
+            return None
+        try:
+            stats = TokenStatistics()
+            returned = wintypes.DWORD()
+            if not advapi32.GetTokenInformation(
+                token,
+                10,  # TokenStatistics
+                ctypes.byref(stats),
+                ctypes.sizeof(stats),
+                ctypes.byref(returned),
+            ):
+                return None
+        finally:
+            kernel32.CloseHandle(token)
+
+        winreg = importlib.import_module("winreg")
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Cryptography",
+        ) as key:
+            machine_guid = str(winreg.QueryValueEx(key, "MachineGuid")[0])
+        authentication_id = (
+            f"{int(stats.AuthenticationId.HighPart)}:"
+            f"{int(stats.AuthenticationId.LowPart)}"
+        )
+        material = (
+            f"windows-session-v1\0{machine_guid}\0{int(session_id.value)}"
+            f"\0{authentication_id}"
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    except Exception:  # noqa: BLE001 - unavailable means unverifiable
+        return None
+
+
+def _execution_context_identity() -> dict[str, Any]:
+    """Return PHI-free identities observed from live Windows OS state."""
+
+    return {
+        "status": "ok",
+        "application": _foreground_application_identity(),
+        "session": _native_session_digest(),
+        "workflow_state": None,
+    }
+
+
 def make_handler_class(
     config: AgentConfig,
     grab_fn: GrabFn = _grab_desktop_png,
     input_fn: InputFn = _perform_input,
     uia_fn: UiaFn = _perform_uia,
+    context_fn: ContextFn = _execution_context_identity,
 ) -> type[BaseHTTPRequestHandler]:
     """Build the request-handler class bound to ``config`` and ``grab_fn``.
 
@@ -814,6 +1012,7 @@ def make_handler_class(
                         "auth_required": config.authed(),
                         "capabilities": [
                             "screenshot",
+                            "context_identity_v1",
                             "typed_input_v1",
                             "uia_v1",
                             *(["legacy_exec"] if config.allow_legacy_exec else []),
@@ -849,6 +1048,7 @@ def make_handler_class(
         def do_POST(self) -> None:  # noqa: N802 - stdlib naming
             typed_routes = {
                 "/input": ("input", ""),
+                "/context/identity": ("context", "identity"),
                 "/uia/locator-at": ("uia", "locator-at"),
                 "/uia/text-at-point": ("uia", "text-at-point"),
                 "/uia/find": ("uia", "find"),
@@ -912,8 +1112,14 @@ def make_handler_class(
             if self.path in typed_routes:
                 kind, operation = typed_routes[self.path]
                 try:
+                    if kind == "context":
+                        _exact_object(data, label="context identity request")
                     result = (
-                        input_fn(data) if kind == "input" else uia_fn(operation, data)
+                        input_fn(data)
+                        if kind == "input"
+                        else context_fn()
+                        if kind == "context"
+                        else uia_fn(operation, data)
                     )
                 except AgentRequestError as exc:
                     self._send_json(
@@ -990,6 +1196,7 @@ def create_server(
     grab_fn: GrabFn = _grab_desktop_png,
     input_fn: InputFn = _perform_input,
     uia_fn: UiaFn = _perform_uia,
+    context_fn: ContextFn = _execution_context_identity,
 ) -> HTTPServer:
     """Build (but do not start) the COM-affine agent HTTP server.
 
@@ -1005,7 +1212,7 @@ def create_server(
         because UIA controls are COM-apartment-bound.
     """
     config = config or AgentConfig()
-    handler = make_handler_class(config, grab_fn, input_fn, uia_fn)
+    handler = make_handler_class(config, grab_fn, input_fn, uia_fn, context_fn)
     # UIAutomation controls and patterns are apartment/thread-affine. A
     # single-threaded HTTPServer keeps every request on the serve_forever
     # thread; _perform_uia initializes that thread's COM apartment per request.

@@ -38,7 +38,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import sys
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -132,6 +136,45 @@ _MAC_ACTION_MAP = {
     "AXIncrement": "increment",
     "AXDecrement": "decrement",
 }
+
+_CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+
+
+def _application_identifier(name: str) -> Optional[str]:
+    """Return a bounded PHI-free identifier derived only from an app owner.
+
+    Window titles are deliberately excluded: native applications commonly put
+    patient, account, or document names in their title bar.  The configured
+    owner is exact-validated against the live window before this helper runs.
+    """
+
+    ascii_name = (
+        unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    )
+    identifier = re.sub(r"[^A-Za-z0-9._:/-]+", "-", ascii_name).strip("-._:/")
+    identifier = identifier.casefold()[:128]
+    return identifier if _CONTEXT_ID_RE.fullmatch(identifier) else None
+
+
+def _mac_audit_session_id() -> Optional[int]:
+    """Return the current macOS audit/login session id, if the OS exposes it."""
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes  # noqa: PLC0415
+        import ctypes.util  # noqa: PLC0415
+
+        library = ctypes.util.find_library("bsm") or "/usr/lib/libbsm.dylib"
+        audit_session_self = ctypes.CDLL(library).audit_session_self
+        audit_session_self.argtypes = []
+        audit_session_self.restype = ctypes.c_uint32
+        session_id = int(audit_session_self())
+        if session_id in {0, 0xFFFFFFFF}:
+            return None
+        return session_id
+    except Exception:  # noqa: BLE001 - unavailable means unverifiable
+        return None
 
 
 @dataclass(frozen=True)
@@ -559,6 +602,49 @@ class MacOSBackend(RemoteDisplayBackend):
         frame = super().screenshot()
         self._captured_window = self._resolve_window()
         return frame
+
+    # -- live execution-context identity -----------------------------------
+
+    def application_identity(self) -> Optional[str]:
+        """Return the exact live application owner, never the window title.
+
+        ``find_windows`` is an exact owner/title query in the shipped client,
+        but the equality check is intentionally repeated here so an injected or
+        future client cannot turn a broad selector into a verified identity.
+        Observation failure is ``None`` (unverifiable), never the configured
+        expected value echoed back to the runtime.
+        """
+
+        try:
+            window = self._resolve_window(refresh=True)
+        except Exception:
+            return None
+        if window.owner.casefold() != self._owner_substr.casefold():
+            return None
+        return _application_identifier(window.owner)
+
+    def session_identity(self) -> Optional[str]:
+        """Hash the live macOS audit session, uid, and exact application."""
+
+        try:
+            window = self._resolve_window(refresh=True)
+        except Exception:
+            return None
+        if window.owner.casefold() != self._owner_substr.casefold():
+            return None
+        application = _application_identifier(window.owner)
+        session_id = _mac_audit_session_id()
+        if application is None or session_id is None:
+            return None
+        material = (
+            f"macos-session-v1\0{os.getuid()}\0{session_id}\0{application}"
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def workflow_state_identity(self) -> Optional[str]:
+        """Workflow state requires an explicitly qualified AX marker."""
+
+        return None
 
     def _assert_bound_physical_target(
         self,

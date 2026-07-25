@@ -43,12 +43,15 @@ class RunningAgent:
         *,
         input_fn=None,
         uia_fn=None,
+        context_fn=None,
     ) -> None:
         kwargs = {"grab_fn": grab_fn}
         if input_fn is not None:
             kwargs["input_fn"] = input_fn
         if uia_fn is not None:
             kwargs["uia_fn"] = uia_fn
+        if context_fn is not None:
+            kwargs["context_fn"] = context_fn
         self.server = create_server(config, **kwargs)
         host, port = self.server.server_address[:2]
         self.url = f"http://{host}:{port}"
@@ -143,6 +146,7 @@ def test_default_agent_disables_arbitrary_exec_and_advertises_typed_contract(
     typed_agent: RunningAgent,
 ) -> None:
     health = requests.get(f"{typed_agent.url}/health", timeout=5).json()
+    assert "context_identity_v1" in health["capabilities"]
     assert "typed_input_v1" in health["capabilities"]
     assert "uia_v1" in health["capabilities"]
     assert "legacy_exec" not in health["capabilities"]
@@ -157,6 +161,26 @@ def test_default_agent_disables_arbitrary_exec_and_advertises_typed_contract(
 def test_typed_input_and_uia_receipts_never_claim_outcome(
     typed_agent: RunningAgent,
 ) -> None:
+    context = requests.post(
+        f"{typed_agent.url}/context/identity",
+        json={},
+        timeout=5,
+    )
+    assert context.status_code == 200
+    assert set(context.json()) == {
+        "status",
+        "application",
+        "session",
+        "workflow_state",
+    }
+    assert "title" not in context.text.casefold()
+    expected_echo = requests.post(
+        f"{typed_agent.url}/context/identity",
+        json={"expected": "accuro"},
+        timeout=5,
+    )
+    assert expected_echo.status_code == 400
+
     delivered = requests.post(
         f"{typed_agent.url}/input",
         json={"action": "click", "x": 1, "y": 2, "double": False},
@@ -341,6 +365,43 @@ def test_health_open_even_when_token_set(authed_agent: RunningAgent) -> None:
     r = requests.get(f"{authed_agent.url}/health", timeout=5)
     assert r.status_code == 200
     assert r.json()["auth_required"] is True
+
+
+def test_windows_context_identity_is_live_bounded_and_authenticated() -> None:
+    state = {"application": "accuro", "session": "a" * 64}
+
+    def context_fn():
+        return {
+            "status": "ok",
+            **state,
+            "workflow_state": None,
+        }
+
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0, token="secret"),
+        context_fn=context_fn,
+    )
+    try:
+        from openadapt_flow.backends import WindowsBackend
+
+        backend = WindowsBackend(agent.url, auth_token="secret")
+        assert backend.application_identity() == "accuro"
+        assert backend.session_identity() == "a" * 64
+        assert backend.workflow_state_identity() is None
+
+        state.update(application="unrelated-app", session="b" * 64)
+        assert backend.application_identity() == "unrelated-app"
+        assert backend.session_identity() == "b" * 64
+
+        state.update(application="Patient Alice Example", session="NOT-A-DIGEST")
+        assert backend.application_identity() is None
+        assert backend.session_identity() is None
+
+        unauthenticated = WindowsBackend(agent.url)
+        assert unauthenticated.application_identity() is None
+        assert unauthenticated.session_identity() is None
+    finally:
+        agent.close()
 
 
 # -- screenshot ---------------------------------------------------------------

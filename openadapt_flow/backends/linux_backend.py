@@ -29,9 +29,13 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
+import sys
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, Protocol, runtime_checkable
 
 from PIL import Image, ImageGrab
@@ -160,6 +164,46 @@ _ACTION_ALIASES = {
     "toggle": frozenset({"check", "toggle", "uncheck"}),
     "select": frozenset({"select"}),
 }
+
+_CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+
+
+def _application_identifier(name: str) -> Optional[str]:
+    """Return a bounded app id without including a sensitive window title."""
+
+    ascii_name = (
+        unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    )
+    identifier = re.sub(r"[^A-Za-z0-9._:/-]+", "-", ascii_name).strip("-._:/")
+    identifier = identifier.casefold()[:128]
+    return identifier if _CONTEXT_ID_RE.fullmatch(identifier) else None
+
+
+def _linux_session_facts() -> Optional[tuple[str, int, int]]:
+    """Return kernel boot/audit-session facts, never environment assertions."""
+
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="ascii"
+        ).strip()
+        session_text = Path("/proc/self/sessionid").read_text(
+            encoding="ascii"
+        ).strip()
+        if not re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            boot_id,
+        ):
+            return None
+        session_id = int(session_text)
+        # UINT32_MAX is the kernel's "audit session not assigned" sentinel.
+        if session_id < 0 or session_id == 0xFFFFFFFF:
+            return None
+        return boot_id.casefold(), session_id, os.getuid()
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def _clean_text(value: object) -> Optional[str]:
@@ -332,6 +376,43 @@ class LinuxBackend:
         self._captured_window = current
         self._viewport = (width, height)
         return png
+
+    # -- live execution-context identity -----------------------------------
+
+    def application_identity(self) -> Optional[str]:
+        """Return a live exact AT-SPI application id, never a window title."""
+
+        try:
+            window = self._resolve_window()
+        except Exception:
+            return None
+        if window.app_name.casefold() != self._app.casefold():
+            return None
+        return _application_identifier(window.app_name)
+
+    def session_identity(self) -> Optional[str]:
+        """Hash the live kernel boot/audit session and exact application."""
+
+        try:
+            window = self._resolve_window()
+        except Exception:
+            return None
+        if window.app_name.casefold() != self._app.casefold():
+            return None
+        application = _application_identifier(window.app_name)
+        facts = _linux_session_facts()
+        if application is None or facts is None:
+            return None
+        boot_id, session_id, uid = facts
+        material = (
+            f"linux-session-v1\0{boot_id}\0{session_id}\0{uid}\0{application}"
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def workflow_state_identity(self) -> Optional[str]:
+        """Workflow state requires an explicitly qualified AT-SPI marker."""
+
+        return None
 
     def _global_point(
         self, x: int, y: int, *, require_active: bool = True

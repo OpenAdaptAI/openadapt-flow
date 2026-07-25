@@ -7,9 +7,11 @@ from PIL import Image
 
 from openadapt_flow.backend import (
     Backend,
+    ExecutionContextIdentityBackend,
     IdentityBackend,
     StructuralActionBackend,
 )
+from openadapt_flow.backends import macos_backend as macos_backend_module
 from openadapt_flow.backends.factory import build_backend
 from openadapt_flow.backends.macos_backend import MacOSBackend, MacOSBackendError
 from openadapt_flow.backends.remote_display import WindowInfo
@@ -144,6 +146,33 @@ def test_native_backend_exposes_ax_structured_identity_capability() -> None:
     # (record/locate/refuse) is covered in test_macos_structural.py.
     assert isinstance(target, IdentityBackend)
     assert isinstance(target, StructuralActionBackend)
+
+
+def test_execution_context_identity_is_live_and_title_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        macos_backend_module,
+        "_mac_audit_session_id",
+        lambda: 7171,
+    )
+    title = "Patient Alice Example MRN 100512"
+    window = WindowInfo(41, "Accuro EMR", title, 9001, (10, 20, 400, 300))
+    client = FakeMacClient(windows=[window])
+    target = MacOSBackend(client, app="Accuro EMR", window_title=title)
+
+    assert isinstance(target, ExecutionContextIdentityBackend)
+    assert target.application_identity() == "accuro-emr"
+    session = target.session_identity()
+    assert session is not None and len(session) == 64 and session == session.casefold()
+    assert title not in target.application_identity()
+    assert target.workflow_state_identity() is None
+
+    client.windows = [
+        WindowInfo(42, "Unrelated App", title, 9002, (10, 20, 400, 300))
+    ]
+    assert target.application_identity() is None
+    assert target.session_identity() is None
 
 
 def test_target_window_capture_and_exact_focused_text_delivery() -> None:

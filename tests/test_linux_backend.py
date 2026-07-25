@@ -7,11 +7,13 @@ from PIL import Image
 
 from openadapt_flow.backend import (
     Backend,
+    ExecutionContextIdentityBackend,
     IdentityBackend,
     NativeStructuralActionBackend,
     StructuralActionBackend,
     StructuralResolutionRefused,
 )
+from openadapt_flow.backends import linux_backend as linux_backend_module
 from openadapt_flow.backends.factory import build_backend
 from openadapt_flow.backends.linux_backend import (
     LinuxBackend,
@@ -165,6 +167,33 @@ def test_linux_backend_implements_existing_runtime_capabilities() -> None:
     assert isinstance(target, IdentityBackend)
     assert isinstance(target, StructuralActionBackend)
     assert isinstance(target, NativeStructuralActionBackend)
+
+
+def test_execution_context_identity_is_live_and_title_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        linux_backend_module,
+        "_linux_session_facts",
+        lambda: ("12345678-1234-1234-1234-123456789abc", 42, 501),
+    )
+    title = "Patient Alice Example MRN 100512"
+    window = LinuxWindow("0.1", "Accuro EMR", title, 9001, (100, 200, 640, 480))
+    client = FakeLinuxClient(windows=[window])
+    target = LinuxBackend(client, app="Accuro EMR", window_title=title)
+
+    assert isinstance(target, ExecutionContextIdentityBackend)
+    assert target.application_identity() == "accuro-emr"
+    session = target.session_identity()
+    assert session is not None and len(session) == 64 and session == session.casefold()
+    assert title not in target.application_identity()
+    assert target.workflow_state_identity() is None
+
+    client.windows = [
+        LinuxWindow("0.2", "Unrelated App", title, 9002, (100, 200, 640, 480))
+    ]
+    assert target.application_identity() is None
+    assert target.session_identity() is None
 
 
 def test_import_and_injected_client_are_headless_safe() -> None:

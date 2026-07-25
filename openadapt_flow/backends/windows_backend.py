@@ -36,6 +36,7 @@ base64-encoded to PowerShell ``Set-Clipboard`` and is pasted with Ctrl+V.
 from __future__ import annotations
 
 import base64
+import re
 import struct
 import warnings
 from dataclasses import dataclass
@@ -69,6 +70,8 @@ SCREENSHOT_RETRY_DELAY_S = 2.0
 SCROLL_PIXELS_PER_NOTCH = 100
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_SESSION_ID_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
 @dataclass(frozen=True)
@@ -434,6 +437,37 @@ class WindowsBackend:
             or receipt.outcome_verified is not False
         ):
             raise RuntimeError("typed input returned a mismatched delivery receipt")
+
+    # -- live execution-context identity -----------------------------------
+
+    def _execution_context(self) -> Optional[dict]:
+        """Read one bounded live context snapshot from the typed agent."""
+
+        typed = self._post_typed_read("/context/identity", {})
+        return typed.payload if typed.available else None
+
+    def application_identity(self) -> Optional[str]:
+        """Return the live foreground process id, never its window title."""
+
+        payload = self._execution_context()
+        value = payload.get("application") if payload is not None else None
+        if not isinstance(value, str) or not _CONTEXT_ID_RE.fullmatch(value):
+            return None
+        return value
+
+    def session_identity(self) -> Optional[str]:
+        """Return the agent's live Windows logon-session digest."""
+
+        payload = self._execution_context()
+        value = payload.get("session") if payload is not None else None
+        if not isinstance(value, str) or not _SESSION_ID_RE.fullmatch(value):
+            return None
+        return value
+
+    def workflow_state_identity(self) -> Optional[str]:
+        """Workflow state requires an explicitly qualified UIA marker."""
+
+        return None
 
     # -- structured-text identity (openadapt_flow.backend.IdentityBackend) --
 

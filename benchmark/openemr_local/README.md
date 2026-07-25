@@ -1,10 +1,16 @@
 # Matched local OpenEMR benchmark (synthetic and pinned)
 
 Status: **local model-free initial engineering matrix complete; not publication
-evidence**. On 2026-07-16, the compiled and direct-API arms each completed three
+evidence**. On 2026-07-25, the compiled and direct-API arms each completed three
 trials under the pinned baseline and three under `ui_cosmetic_v1`: 12/12 rows
 were `correct`, with zero silent incorrect successes, zero over-halts, zero
-model calls, and $0 model cost.
+model calls, and $0 model cost. The compiled arm replayed all 41 demonstrated
+actions and independently verified the exact patient plus the full database
+delta contract in every trial. The accepted recording uses the clearly
+fictional identity `Jordan Example`. Raw app-only recording/replay video and
+Types 0.4.0 canonical, media-hash-bound control-overlay timelines were retained
+for the accepted run. The aggregate `results.json` SHA-256 is
+`c46a52fb782167d281d03eefe979273826280f94d378b5a8490c1ae6a34ee333`.
 
 On 2026-07-21 the **paid computer-use agent arm was run** (it is no longer
 omitted). On a separately provisioned synthetic baseline, the
@@ -36,10 +42,10 @@ generic cost-capped agent mechanism remains in
 `openadapt_flow/benchmark/agent_baseline.py`. See the
 [aggregate report](../agent_arm_verticals/README.md).
 
-The accepted run used baseline SHA-256
-`8d2901490a0a6a6044e94b6a8a1663436b7dacedda4f2fe1fb8c48405165011d`.
+The refreshed accepted run used baseline SHA-256
+`f0ddb4e18ef86ae34dc3b9ed9677666c9b068a511451cfa84d7ce83f638cb69c`.
 Protected raw evidence remains in the ignored local directory
-`results-model-free-corrected5-20260716/`; it is not a committed or public
+`out/evidence-matrix-jordan-20260725-v1/`; it is not a committed or public
 reliability claim. Earlier failed/refused runs remain preserved rather than
 being overwritten. The pinned stack ran through a disposable, loopback-only
 Podman VM because Docker Desktop's existing backing image remains preserved and
@@ -247,7 +253,8 @@ PYTHONPATH="$PWD" .venv/bin/python scripts/openemr_local_demo.py bootstrap
 PYTHONPATH="$PWD" .venv/bin/python scripts/openemr_local_demo.py snapshot
 
 PYTHONPATH="$PWD" .venv/bin/python scripts/openemr_local_demo.py record \
-  --out benchmark/openemr_local/out/recording --headed
+  --out benchmark/openemr_local/out/recording \
+  --record-video-dir benchmark/openemr_local/out/media/raw/recording
 PYTHONPATH="$PWD" .venv/bin/python scripts/openemr_local_demo.py compile \
   --recording benchmark/openemr_local/out/recording \
   --bundle benchmark/openemr_local/out/bundle
@@ -266,8 +273,32 @@ PYTHONPATH="$PWD" .venv/bin/python scripts/openemr_local_demo.py plan \
 PYTHONPATH="$PWD" .venv/bin/python scripts/openemr_local_demo.py run \
   --profile initial --model-free \
   --bundle benchmark/openemr_local/out/bundle \
-  --out benchmark/openemr_local/out/model-free-initial-YYYYMMDD
+  --out benchmark/openemr_local/out/model-free-initial-YYYYMMDD \
+  --record-video-dir benchmark/openemr_local/out/media/raw/replay
 ```
+
+When video capture is enabled, recording and compiled-run directories contain
+`runtime-timeline.json`: the shared privacy-safe control-overlay frame contract,
+bound to the exact raw-media SHA-256 and suitable for a viewer or presentation
+compositor. It retains only canonical runtime state, progress, and presentation
+labels; the raw video remains app-only. To create
+a separate presentation derivative without decoding to staged PNG frames or
+touching the OpenEMR DOM, use a separately provisioned FFmpeg executable:
+
+```bash
+python scripts/compose_runtime_overlay.py \
+  --video benchmark/openemr_local/out/media/raw/replay/compiled-baseline-1/*.webm \
+  --timeline benchmark/openemr_local/out/model-free-initial-YYYYMMDD/runs/compiled-baseline-1/runtime-timeline.json \
+  --out benchmark/openemr_local/out/media/presentation/replay \
+  --application OpenEMR \
+  --application-version 8.0.0.3
+```
+
+The compositor accepts only a shared-contract `synthetic` or
+`sanitized_public` timeline whose media hash matches the exact source video. It
+retains the unchanged source and writes application/version metadata, hashes,
+and FFmpeg provenance beside the MP4/WebM derivatives. FFmpeg is invoked across
+a process boundary and is not bundled in OpenAdapt packages or installers.
 
 `--model-free` rejects paid-agent flags and makes no model call. Its 12 initial
 rows are compiled-versus-API engineering evidence only. Results explicitly

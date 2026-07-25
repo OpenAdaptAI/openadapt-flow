@@ -348,8 +348,8 @@ def test_oracle_filters_reserved_identity_through_read_only_record_shape() -> No
     state = oracle.capture()
     assert state.reachable
     assert state.records == [exact_record()]
-    assert "LoanParity" in session.urls[0]
-    assert "openadapt.loan-parity%40example.invalid" in session.urls[0]
+    assert "Example" in session.urls[0]
+    assert "jordan.example%40example.invalid" in session.urls[0]
 
 
 def test_rest_uuid_and_sql_hex_uuid_canonicalize_identically() -> None:
@@ -485,11 +485,20 @@ def test_disagreement_collateral_indeterminate_and_over_halt_are_distinct() -> N
 
 def test_exact_arm_delta_contract_catches_duplicates_and_collateral() -> None:
     compiled = EXPECTED_TABLE_DELTAS["compiled"]
+    recording = EXPECTED_TABLE_DELTAS["record"]
     assert compiled["patient_data"] == 1
     assert compiled["history_data"] == 1
     assert compiled["api_log"] == 13
     assert compiled["log"] == 311
     assert compiled["uuid_registry"] == 14
+    assert recording["api_log"] == 1
+    assert recording["log"] == 229
+    assert recording["patient_data"] == 1
+    assert recording != compiled
+    # Both are browser writers with one post-write oracle read.  Keeping the
+    # authoring contract named separately prevents a later agent-only change
+    # from silently changing recording admission.
+    assert recording == EXPECTED_TABLE_DELTAS["agent"]
     assert EXPECTED_TABLE_DELTAS["agent"]["api_log"] == 1
     assert EXPECTED_TABLE_DELTAS["agent"]["log"] == 229
     assert EXPECTED_TABLE_DELTAS["api"] == {
@@ -655,6 +664,14 @@ def test_openemr_adapter_binds_unique_control_to_exact_form_context() -> None:
             # Playwright reports frame-locator boxes in main-frame coordinates.
             return {"x": 120, "y": 70, "width": 20, "height": 20}
 
+        @staticmethod
+        def evaluate(_script: str, _arg: object = None) -> object:
+            return {
+                "point": [130, 80],
+                "region": [120, 70, 20, 20],
+                "identity": "",
+            }
+
     class Frame:
         url = "http://openemr/interface/new/new_comprehensive.php"
 
@@ -709,6 +726,8 @@ def test_openemr_adapter_binds_unique_control_to_exact_form_context() -> None:
     assert locator == StructuralLocator(selector="#form_state", role="combobox")
     handle = backend.locate_structural(locator)
     assert handle is not None and handle.point == (130, 80)
+    assert handle.target_fingerprint is not None
+    assert handle.supported_operations == ["dom_click", "dom_double_click"]
     assert json.loads(backend.structured_text_at(130, 80) or "") == {
         "form_path": "/interface/new/new_comprehensive.php",
         "target_kind": "field",
@@ -731,8 +750,14 @@ def test_openemr_adapter_resolves_confirmation_inside_unique_modal_frame() -> No
             return {"x": 200, "y": 180, "width": 40, "height": 20}
 
         @staticmethod
-        def evaluate(_script: str) -> bool:
-            return True
+        def evaluate(_script: str, _arg: object = None) -> object:
+            if _arg is None:
+                return True
+            return {
+                "point": [220, 190],
+                "region": [200, 180, 40, 20],
+                "identity": "",
+            }
 
     class Frame:
         @staticmethod
@@ -768,6 +793,8 @@ def test_openemr_adapter_resolves_confirmation_inside_unique_modal_frame() -> No
     )
     handle = backend.locate_structural(locator)
     assert handle is not None and handle.point == (220, 190)
+    assert handle.target_fingerprint is not None
+    assert handle.supported_operations == ["dom_click", "dom_double_click"]
     assert json.loads(backend.structured_text_at(210, 185) or "")["target_id"] == (
         "confirm_create"
     )

@@ -64,6 +64,23 @@ EXPECTED_TABLE_DELTAS: Mapping[str, Mapping[str, int]] = {
         "uuid_mapping": 12,
         "uuid_registry": 14,
     },
+    # Authoring performs the real browser write plus one independent REST
+    # readback before it emits the save-event marker.  It does not execute the
+    # replayer's pre-effect, per-effect, and post-run reads, so it needs its
+    # own exact contract instead of borrowing the compiled-run cardinalities.
+    "record": {
+        "api_log": 1,
+        "clinical_rules_log": 1,
+        "contact": 1,
+        "history_data": 1,
+        "log": 229,
+        "log_comment_encrypt": 229,
+        "patient_data": 1,
+        "recent_patients": 1,
+        "user_settings": 2,
+        "uuid_mapping": 12,
+        "uuid_registry": 14,
+    },
     "agent": {
         "api_log": 1,
         "clinical_rules_log": 1,
@@ -578,7 +595,7 @@ class OpenEMRFixture:
 
         existing = self._db_lines(
             "SELECT COUNT(*) FROM openemr.patient_data "
-            "WHERE lname='LoanParity' OR email='openadapt.loan-parity@example.invalid'"
+            "WHERE lname='Example' OR email='jordan.example@example.invalid'"
         )
         if existing != ["0"]:
             raise FixtureError("synthetic target already exists before baseline")
@@ -775,8 +792,8 @@ class OpenEMRFixture:
         )
         output = self._db(
             "SELECT " + ",".join(fields) + " FROM openemr.patient_data "
-            "WHERE lname='LoanParity' AND "
-            "email='openadapt.loan-parity@example.invalid' ORDER BY id"
+            "WHERE lname='Example' AND "
+            "email='jordan.example@example.invalid' ORDER BY id"
         ).decode()
         names = (
             "id",
@@ -829,8 +846,8 @@ class OpenEMRFixture:
             "--no-create-info",
             "--skip-extended-insert",
             "--order-by-primary",
-            "--where=NOT (lname <=> 'LoanParity' AND "
-            "email <=> 'openadapt.loan-parity@example.invalid')",
+            "--where=NOT (lname <=> 'Example' AND "
+            "email <=> 'jordan.example@example.invalid')",
             self.lock["database"],
             "patient_data",
             timeout_s=120.0,

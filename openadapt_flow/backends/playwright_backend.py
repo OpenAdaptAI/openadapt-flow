@@ -9,9 +9,11 @@ deviceScaleFactor=1 so CSS pixels equal screenshot pixels.
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:  # pragma: no cover
     from playwright.sync_api import Page
@@ -56,6 +58,23 @@ _NAMED_KEYS = {
 }
 
 _TOKEN_ATTRIBUTE_PREFIX = "data-openadapt-actuation-"
+
+# Explicit application-owned DOM contracts for live context identity. These
+# markers belong in ``<head>`` so the backend never derives a workflow or
+# session identity from arbitrary body text that may contain customer data:
+#
+#   <meta name="openadapt-session-identity" content="<64 lowercase hex>">
+#   <meta name="openadapt-workflow-state" content="eligibility.review">
+#
+# The session marker is an opaque digest. The workflow marker is a bounded,
+# lowercase machine token that the application author promises is PHI-free
+# (state names such as ``eligibility.review``, never record values).
+_SESSION_IDENTITY_META = "openadapt-session-identity"
+_WORKFLOW_STATE_IDENTITY_META = "openadapt-workflow-state"
+_SESSION_IDENTITY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_WORKFLOW_STATE_IDENTITY_PATTERN = re.compile(
+    r"^[a-z0-9](?:[a-z0-9._:-]{0,126}[a-z0-9])?$"
+)
 
 # The descriptor stays inside the page-local guard store. It binds the exact
 # actionable node, its ancestry, and the enclosing record row while excluding
@@ -387,6 +406,89 @@ class PlaywrightBackend:
             return len(self.page.context.pages)
         except Exception:
             return None
+
+    # -- live execution-context identity -------------------------------
+
+    def application_identity(self) -> Optional[str]:
+        """Return the live browser origin as a bounded application identity.
+
+        Only the current page's HTTP(S) origin is observed. User information,
+        path, query, and fragment are never included, so record identifiers and
+        other sensitive navigation state cannot enter identity evidence.
+        Default ports are omitted and non-web or malformed URLs return
+        ``None``.
+        """
+
+        try:
+            current_url = self.page.url
+            parts = urlsplit(current_url)
+            scheme = parts.scheme.lower()
+            hostname = parts.hostname
+            port = parts.port
+        except (AttributeError, TypeError, ValueError):
+            return None
+        except Exception:
+            return None
+
+        if scheme not in {"http", "https"} or not hostname:
+            return None
+        hostname = hostname.lower().rstrip(".")
+        if not hostname or len(hostname) > 253:
+            return None
+        rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+        origin = f"{scheme}://{rendered_host}"
+        if port is not None and not (
+            (scheme == "http" and port == 80)
+            or (scheme == "https" and port == 443)
+        ):
+            origin += f":{port}"
+        return origin if len(origin) <= 320 else None
+
+    def _context_meta_content(self, name: str) -> Optional[str]:
+        """Read one unambiguous live ``<head>`` context marker."""
+
+        try:
+            locator = self.page.locator(f'head > meta[name="{name}"]')
+            if locator.count() != 1:
+                return None
+            content = locator.get_attribute("content")
+        except Exception:
+            return None
+        return content if isinstance(content, str) else None
+
+    def session_identity(self) -> Optional[str]:
+        """Return the live opaque session digest declared by the page.
+
+        The contract is exactly one direct ``<head>`` meta named
+        ``openadapt-session-identity`` with a 64-character lowercase
+        hexadecimal ``content`` value. Missing, duplicate, malformed, or
+        unreadable markers return ``None``.
+        """
+
+        value = self._context_meta_content(_SESSION_IDENTITY_META)
+        return (
+            value
+            if value is not None and _SESSION_IDENTITY_PATTERN.fullmatch(value)
+            else None
+        )
+
+    def workflow_state_identity(self) -> Optional[str]:
+        """Return the live, application-declared PHI-free workflow-state token.
+
+        The contract is exactly one direct ``<head>`` meta named
+        ``openadapt-workflow-state``. Its ``content`` must be a 1-128 character
+        lowercase machine token containing only letters, digits, ``.``, ``_``,
+        ``:``, and ``-``. Missing, duplicate, malformed, or unreadable markers
+        return ``None``.
+        """
+
+        value = self._context_meta_content(_WORKFLOW_STATE_IDENTITY_META)
+        return (
+            value
+            if value is not None
+            and _WORKFLOW_STATE_IDENTITY_PATTERN.fullmatch(value)
+            else None
+        )
 
     # -- structured-text identity (openadapt_flow.backend.IdentityBackend) --
 

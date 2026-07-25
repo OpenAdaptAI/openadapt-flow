@@ -379,6 +379,22 @@ class RemoteActuationBackend(Protocol):
 
 
 @runtime_checkable
+class PreparedPointerActuationBackend(Protocol):
+    """Optional pointer pre-positioning for opaque remote-display clients.
+
+    Moving a remote cursor can legitimately repaint hover, caret, or remote
+    cursor pixels.  A backend implementing this seam positions the pointer
+    *before* the runtime acquires its final consequential actuation frame.  The
+    runtime then re-resolves the target and identity on that post-hover frame;
+    delivery must use the same prepared point without another pointer move.
+    """
+
+    def prepare_pointer_actuation(self, x: int, y: int) -> None:
+        """Position the pointer without pressing a button or claiming success."""
+        ...
+
+
+@runtime_checkable
 class Backend(Protocol):
     @property
     def viewport(self) -> tuple[int, int]:

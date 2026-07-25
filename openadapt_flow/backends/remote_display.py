@@ -452,6 +452,12 @@ class RemoteDisplayBackend:
         activate_before_input: When True (default) raise the target app frontmost
             before each input burst so keystrokes route to it.
         settle_s: Seconds to pause after activating / between click edges.
+        pointer_settle_stable_frames: Consecutive exact post-pointer frames
+            required before the runtime may acquire its final consequential
+            actuation frame. Remote clients can acknowledge pointer/hover paint
+            asynchronously, so a fixed delay is not a sufficient boundary.
+        pointer_settle_timeout_s: Maximum time to wait for those exact frames.
+            A surface that keeps repainting halts before target re-resolution.
         max_frame_age_s: Maximum age of the captured frame whose pixel geometry
             an input may use. Older coordinates are refused and must be
             re-captured/re-resolved.
@@ -488,6 +494,8 @@ class RemoteDisplayBackend:
         require_input_trust: bool = True,
         activate_before_input: bool = True,
         settle_s: float = 0.03,
+        pointer_settle_stable_frames: int = 4,
+        pointer_settle_timeout_s: float = 2.0,
         max_frame_age_s: float = 10.0,
         readiness_probe: Optional[Callable[[bytes], bool]] = None,
         application_marker: Optional[str] = None,
@@ -504,6 +512,12 @@ class RemoteDisplayBackend:
         self._require_input_trust = require_input_trust
         self._activate_before_input = activate_before_input
         self._settle_s = settle_s
+        self._pointer_settle_stable_frames = int(pointer_settle_stable_frames)
+        self._pointer_settle_timeout_s = float(pointer_settle_timeout_s)
+        if self._pointer_settle_stable_frames < 2:
+            raise ValueError("pointer_settle_stable_frames must be at least 2")
+        if self._pointer_settle_timeout_s <= 0:
+            raise ValueError("pointer_settle_timeout_s must be positive")
         self._max_frame_age_s = float(max_frame_age_s)
         if self._max_frame_age_s <= 0:
             raise ValueError("max_frame_age_s must be positive")
@@ -542,6 +556,7 @@ class RemoteDisplayBackend:
         self._last_frame_digest: Optional[bytes] = None
         self._last_session_identity: Optional[str] = None
         self._actuation_lease_state = _LEASE_NONE
+        self._prepared_pointer_point: Optional[tuple[int, int]] = None
         # Serialize capture/geometry validation with the entire input gesture;
         # otherwise another thread can replace the frame lease between mouse
         # down and up or between a key's down/up edges.
@@ -772,28 +787,58 @@ class RemoteDisplayBackend:
                 return None
             return observed
 
-    def click(self, x: int, y: int, *, double: bool = False) -> None:
-        """Click (or double-click) at captured-pixel coordinates (x, y)."""
+    def prepare_pointer_actuation(self, x: int, y: int) -> None:
+        """Position the pointer before the runtime's final resolve/identity pass.
+
+        Remote cursor and hover paint are expected consequences of positioning,
+        so they must occur before ``acquire_actuation_frame`` establishes the
+        exact-content lease.  This method emits no button edge.  The subsequent
+        armed click must use this exact point without moving again.
+        """
+
         with self._input_lock:
             point = (int(x), int(y))
-            # Keep a consequential exact-content lease armed while positioning
-            # the pointer. Hover handlers and remote rendering can change the
-            # target during that move/settle interval; consuming the lease
-            # before the move would let the changed pixels receive the click.
-            self._ensure_input_ready(
-                point=point,
-                consume_actuation_lease=False,
-            )
-            sx, sy = self._to_screen(int(x), int(y))
+            # If a prior final lease exists (a bounded re-prepare), validate and
+            # consume it before intentionally moving the pointer.  With an
+            # ordinary observation this still validates focus, geometry, trust,
+            # frame age, bounds, and occlusion.
+            self._ensure_input_ready(point=point)
+            sx, sy = self._to_screen(*point)
             self._assert_click_target(sx, sy)
             self._assert_frame_fresh()
             self._client.mouse_move(sx, sy)
             time.sleep(self._settle_s)
-            # Re-capture and consume the one-shot lease only at the delivery
-            # edge. No input is emitted if hover, latency, session identity,
-            # focus, geometry, or pixels changed after resolution.
-            self._ensure_input_ready(point=point)
+            self._wait_for_pointer_settle()
+            self._prepared_pointer_point = point
+
+    def click(self, x: int, y: int, *, double: bool = False) -> None:
+        """Click (or double-click) at captured-pixel coordinates (x, y)."""
+        with self._input_lock:
+            point = (int(x), int(y))
+            if self._actuation_lease_state == _LEASE_ARMED:
+                if self._prepared_pointer_point != point:
+                    self._actuation_lease_state = _LEASE_INVALIDATED
+                    self._prepared_pointer_point = None
+                    raise RemoteDisplayError(
+                        "consequential remote click was not pre-positioned at "
+                        "the freshly resolved target; refusing pointer delivery"
+                    )
+                # Exact post-hover frame/context validation happens immediately
+                # before the first button edge.  No cursor move occurs after
+                # this check.
+                self._ensure_input_ready(point=point)
+            else:
+                # Reversible/direct callers retain the ordinary path.  They do
+                # not carry a consequential content lease, but still validate
+                # trust, focus, geometry, bounds, occlusion, and freshness.
+                self._ensure_input_ready(point=point)
+                sx, sy = self._to_screen(*point)
+                self._assert_click_target(sx, sy)
+                self._client.mouse_move(sx, sy)
+                time.sleep(self._settle_s)
+                self._ensure_input_ready(point=point)
             sx, sy = self._to_screen(int(x), int(y))
+            self._prepared_pointer_point = None
             counts = 2 if double else 1
             for i in range(counts):
                 # Activation/focus and the move/settle call above can block.
@@ -850,6 +895,37 @@ class RemoteDisplayBackend:
             self._client.scroll(int(dx), int(dy))
 
     # -- internals -----------------------------------------------------------
+
+    def _wait_for_pointer_settle(self) -> None:
+        """Require exact consecutive frames after remote pointer positioning.
+
+        RDP/Citrix/noVNC clients can return from a host pointer move before its
+        hover/cursor update reaches the remote framebuffer.  Sampling one frame
+        after a fixed sleep can therefore arm a lease on the old pixels and
+        invalidate it moments later.  This gate waits for consecutive,
+        byte-decoded RGB-identical frames; it never masks cursor regions or
+        weakens the exact post-resolution digest used at the delivery edge.
+        """
+
+        deadline = time.monotonic() + self._pointer_settle_timeout_s
+        previous_digest: Optional[bytes] = None
+        stable_frames = 0
+        poll_s = max(0.01, self._settle_s)
+        while time.monotonic() < deadline:
+            self.screenshot()
+            digest = self._last_frame_digest
+            if digest is not None and digest == previous_digest:
+                stable_frames += 1
+            else:
+                previous_digest = digest
+                stable_frames = 1
+            if stable_frames >= self._pointer_settle_stable_frames:
+                return
+            time.sleep(poll_s)
+        raise RemoteDisplayError(
+            "remote-display pixels did not settle after pointer positioning; "
+            "refusing to acquire a consequential actuation frame"
+        )
 
     def _ensure_input_ready(
         self,

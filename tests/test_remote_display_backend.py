@@ -23,6 +23,7 @@ from openadapt_flow.backend import (
     Backend,
     ExecutionContextIdentityBackend,
     IdentityBackend,
+    PreparedPointerActuationBackend,
     StructuralActionBackend,
     StructuralBackend,
 )
@@ -133,6 +134,7 @@ def test_exposes_pixel_targeting_plus_context_identity_protocol() -> None:
     backend, _ = _backend()
     assert isinstance(backend, Backend)
     assert isinstance(backend, ExecutionContextIdentityBackend)
+    assert isinstance(backend, PreparedPointerActuationBackend)
     assert not isinstance(backend, StructuralActionBackend)
     assert not isinstance(backend, IdentityBackend)
     assert not isinstance(backend, StructuralBackend)
@@ -170,6 +172,8 @@ def test_live_context_markers_preserve_an_unchanged_actuation_lease() -> None:
         session_marker="clinic-session-7",
         session_marker_probe=expected_frame,
     )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
 
     application = backend.application_identity()
@@ -198,6 +202,8 @@ def test_absent_application_marker_returns_none_and_invalidates_lease() -> None:
         application_marker="Accuro",
         application_marker_probe=lambda _png: False,
     )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
 
     assert backend.application_identity() is None
@@ -214,6 +220,8 @@ def test_context_observation_refuses_mutated_frame_before_input() -> None:
         workflow_state_marker="Ready to submit",
         workflow_state_marker_probe=lambda _png: True,
     )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
     client.frame_color = (11, 22, 34)
 
@@ -223,7 +231,7 @@ def test_context_observation_refuses_mutated_frame_before_input() -> None:
     assert not any(call[0] == "mouse" for call in client.calls)
 
 
-def test_hover_content_swap_refuses_before_pointer_down() -> None:
+def test_hover_content_change_is_included_in_final_actuation_frame() -> None:
     class HoverChangingClient(FakeClient):
         def mouse_move(self, x, y):
             super().mouse_move(x, y)
@@ -236,13 +244,58 @@ def test_hover_content_swap_refuses_before_pointer_down() -> None:
         application_marker="Accuro",
         application_marker_probe=lambda _png: True,
     )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
     assert backend.application_identity() == "Accuro"
 
-    with pytest.raises(RemoteDisplayError, match="frame content changed"):
-        backend.click(100, 100)
+    backend.click(100, 100)
 
-    assert not any(call[0] == "mouse" for call in client.calls)
+    assert [call[0] for call in client.calls].count("move") == 1
+    assert [call[0] for call in client.calls].count("mouse") == 2
+
+
+def test_delayed_remote_hover_paint_settles_before_final_frame() -> None:
+    class DelayedHoverClient(FakeClient):
+        captures_after_move = 0
+
+        def mouse_move(self, x, y):
+            super().mouse_move(x, y)
+            self.captures_after_move = 0
+
+        def capture(self, window_id):
+            if any(call[0] == "move" for call in self.calls):
+                self.captures_after_move += 1
+                # A, B, B, C, C, C, C: two identical intermediate frames are
+                # not enough to prove the asynchronously painted hover settled.
+                if self.captures_after_move == 2:
+                    self.frame_color = (22, 33, 11)
+                elif self.captures_after_move == 4:
+                    self.frame_color = (33, 22, 11)
+            return super().capture(window_id)
+
+    window = WindowInfo(
+        window_id=1,
+        owner="Parallels Desktop",
+        title="Windows 11",
+        pid=99,
+        bounds=(0.0, 0.0, 200.0, 100.0),
+        on_screen=True,
+    )
+    client = DelayedHoverClient(window=window, px=(200, 100))
+    backend = RemoteDisplayBackend(
+        client=client,
+        settle_s=0.0,
+        pointer_settle_stable_frames=4,
+    )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 50)
+    backend.acquire_actuation_frame()
+    backend.click(100, 50)
+
+    assert client.captures_after_move >= 7
+    assert [call[0] for call in client.calls].count("move") == 1
+    assert [call[0] for call in client.calls].count("mouse") == 2
 
 
 def test_live_session_digest_change_invalidates_before_input() -> None:
@@ -253,6 +306,8 @@ def test_live_session_digest_change_invalidates_before_input() -> None:
         settle_s=0.0,
         session_identity_observer=lambda: live["digest"],
     )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
     assert backend.session_identity() == "a" * 64
 
@@ -391,6 +446,8 @@ def test_bound_actuation_refuses_same_window_content_change_before_input() -> No
         settle_s=0.0,
         readiness_probe=lambda _png: True,
     )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
     # PID, window id, bounds, dimensions, focus, and readiness all remain
     # valid. Only the remote pixels changed after resolution.
@@ -410,6 +467,8 @@ def test_bound_actuation_accepts_same_pixels_with_different_png_encoding() -> No
         settle_s=0.0,
         readiness_probe=lambda _png: True,
     )
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
     # Container bytes differ, while decoded dimensions and RGB pixels do not.
     client.png_kwargs = {"compress_level": 9}
@@ -422,6 +481,8 @@ def test_bound_actuation_accepts_same_pixels_with_different_png_encoding() -> No
 def test_observation_invalidates_bound_actuation_before_input() -> None:
     client = FakeClient()
     backend = RemoteDisplayBackend(client=client, settle_s=0.0)
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
     backend.acquire_actuation_frame()
     backend.screenshot()
 
@@ -429,6 +490,17 @@ def test_observation_invalidates_bound_actuation_before_input() -> None:
         backend.click(100, 100)
 
     assert not any(call[0] == "mouse" for call in client.calls)
+
+
+def test_armed_click_without_prepositioned_pointer_refuses_before_input() -> None:
+    client = FakeClient()
+    backend = RemoteDisplayBackend(client=client, settle_s=0.0)
+    backend.acquire_actuation_frame()
+
+    with pytest.raises(RemoteDisplayError, match="not pre-positioned"):
+        backend.click(100, 100)
+
+    assert not any(call[0] in {"move", "mouse"} for call in client.calls)
 
 
 def test_coordinate_click_requires_prior_frame_lease() -> None:

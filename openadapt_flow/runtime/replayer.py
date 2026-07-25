@@ -50,6 +50,7 @@ from openadapt_flow.backend import (
     FocusedElementActuationLeaseBackend,
     GuardedCoordinateActionBackend,
     GuardedKeyboardActionBackend,
+    PreparedPointerActuationBackend,
     RemoteActuationBackend,
     StructuralResolutionRefused,
 )
@@ -3905,6 +3906,36 @@ class Replayer:
             )
             if callable(cancel_stale_structural):
                 cancel_stale_structural()
+
+        prepared_pointer: Optional[Point] = None
+        pointer_edge_pending = step.action in (
+            ActionKind.CLICK,
+            ActionKind.DOUBLE_CLICK,
+        ) or (
+            step.action is ActionKind.TYPE
+            and resolution is not None
+            and not arm_keyboard
+        )
+        if (
+            pointer_edge_pending
+            and resolution is not None
+            and isinstance(self.backend, RemoteActuationBackend)
+            and isinstance(self.backend, PreparedPointerActuationBackend)
+        ):
+            prepared_pointer = resolution.point
+            try:
+                self.backend.prepare_pointer_actuation(*prepared_pointer)
+            except Exception as exc:  # noqa: BLE001 - backend boundary must halt
+                if self.governed_authorization is not None:
+                    result.safety_halt = True
+                detail = _scrub_phi(str(exc)) or type(exc).__name__
+                return (
+                    resolution,
+                    matched_region,
+                    before_png,
+                    "Pointer preflight HALTED before final target resolution for "
+                    f"step '{step.id}' ({step.intent}): {detail}",
+                )
         try:
             fresh_png = (
                 self.backend.acquire_actuation_frame()
@@ -3936,6 +3967,22 @@ class Replayer:
             if self.governed_authorization is not None:
                 result.safety_halt = True
             return fresh_resolution, fresh_region, fresh_png, error
+        if (
+            prepared_pointer is not None
+            and fresh_resolution is not None
+            and fresh_resolution.point != prepared_pointer
+        ):
+            result.safety_halt = True
+            result.failure_category = "safety_halt"
+            return (
+                fresh_resolution,
+                fresh_region,
+                fresh_png,
+                f"Step '{step.id}' ({step.intent}) resolved to "
+                f"{fresh_resolution.point!r} after remote pointer hover, not "
+                f"the prepared point {prepared_pointer!r}; refusing a click "
+                "whose target moved before actuation",
+            )
         identity_required = (
             self.governed_authorization is not None
             and self.governed_authorization.requires_verified_identity(step.id)

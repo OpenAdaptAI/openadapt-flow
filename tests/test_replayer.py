@@ -280,6 +280,10 @@ class RemoteLeaseBackend(FakeBackend):
         self.click_attempts = 0
         self.raise_after_click = False
         self.focused_element_points = []
+        self.prepared_pointer_points = []
+
+    def prepare_pointer_actuation(self, x, y):
+        self.prepared_pointer_points.append((int(x), int(y)))
 
     def acquire_actuation_frame(self) -> bytes:
         self.acquire_count += 1
@@ -396,7 +400,7 @@ def test_consequential_remote_click_re_resolves_on_fresh_frame(bundle, run_dir):
     vision = FakeVision()
     vision.template_results = [
         Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95),
-        Match(point=(170, 125), region=(160, 120, 50, 20), confidence=0.95),
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95),
     ]
 
     report = Replayer(backend, vision=vision).run(
@@ -408,9 +412,35 @@ def test_consequential_remote_click_re_resolves_on_fresh_frame(bundle, run_dir):
     )
 
     assert report.success is True
+    assert backend.prepared_pointer_points == [(110, 105)]
     assert backend.acquire_count == 1
-    assert backend.actions == [("click", 170, 125, False)]
-    assert report.results[0].resolution.point == (170, 125)
+    assert backend.actions == [("click", 110, 105, False)]
+    assert report.results[0].resolution.point == (110, 105)
+
+
+def test_consequential_remote_hover_target_movement_halts_before_input(bundle, run_dir):
+    backend = RemoteLeaseBackend(
+        initial_frame=make_png(color=(240, 240, 240)),
+        fresh_frame=make_png(color=(239, 240, 240)),
+    )
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95),
+        Match(point=(170, 125), region=(160, 120, 50, 20), confidence=0.95),
+    ]
+
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[click_step(risk="reversible")]),
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is False
+    assert backend.prepared_pointer_points == [(110, 105)]
+    assert backend.acquire_count == 1
+    assert backend.actions == []
+    assert report.results[0].safety_halt is True
+    assert "target moved before actuation" in report.results[0].error
 
 
 def test_consequential_remote_anchored_type_reacquires_after_focus_click(
@@ -440,6 +470,7 @@ def test_consequential_remote_anchored_type_reacquires_after_focus_click(
     )
 
     assert report.success is True
+    assert backend.prepared_pointer_points == [(110, 105)]
     assert backend.acquire_count == 2
     assert backend.focused_element_points == [(110, 105)]
     assert backend.actions == [

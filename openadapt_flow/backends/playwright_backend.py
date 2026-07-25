@@ -978,6 +978,26 @@ class PlaywrightBackend:
             scope = child
         return scope
 
+    def _frame_chain_matches(
+        self,
+        scope: Any,
+        frame_path: tuple[str, ...],
+        box: dict[str, Any],
+    ) -> bool:
+        """Re-prove the exact hit-tested frame chain at a target box center."""
+
+        try:
+            x = int(round(float(box["x"]) + float(box["width"]) / 2))
+            y = int(round(float(box["y"]) + float(box["height"]) / 2))
+        except (KeyError, TypeError, ValueError):
+            return False
+        point = self._frame_point(x, y)
+        return bool(
+            point is not None
+            and point.scope == scope
+            and point.frame_path == frame_path
+        )
+
     def _locator_with_scope(self, locator: StructuralLocator) -> tuple[Any, Any] | None:
         frame_path = tuple(locator.frame_path or ())
         scope = self._resolve_scope(frame_path)
@@ -1042,6 +1062,16 @@ class PlaywrightBackend:
                 raise StructuralResolutionRefused(
                     f"DOM locator is ambiguous: candidate_count={candidate_count}"
                 )
+            box = loc.bounding_box()
+            if (
+                not isinstance(box, dict)
+                or float(box["width"]) <= 0
+                or float(box["height"]) <= 0
+                or not self._frame_chain_matches(
+                    scope, tuple(locator.frame_path or ()), box
+                )
+            ):
+                return None
             token = uuid.uuid4().hex
             try:
                 observed = loc.evaluate(
@@ -1054,7 +1084,13 @@ class PlaywrightBackend:
                     },
                 )
                 box = loc.bounding_box()
-                if not isinstance(observed, dict) or not isinstance(box, dict):
+                if (
+                    not isinstance(observed, dict)
+                    or not isinstance(box, dict)
+                    or not self._frame_chain_matches(
+                        scope, tuple(locator.frame_path or ()), box
+                    )
+                ):
                     self._cleanup_guard(token, scope)
                     return None
                 if float(box["width"]) <= 0 or float(box["height"]) <= 0:
@@ -1208,6 +1244,13 @@ class PlaywrightBackend:
             if not self._context_guard_is_current(guard):
                 raise StructuralResolutionRefused(
                     "guarded DOM execution context changed before delivery"
+                )
+            box = loc.bounding_box()
+            if not isinstance(box, dict) or not self._frame_chain_matches(
+                scope, guard.frame_path, box
+            ):
+                raise StructuralResolutionRefused(
+                    "guarded DOM frame chain changed before delivery"
                 )
             if loc.count() != 1 or not self._guard_is_current(loc, guard.token):
                 raise StructuralResolutionRefused(

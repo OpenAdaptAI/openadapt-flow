@@ -230,6 +230,50 @@ def test_scaled_bordered_nested_frames_map_the_hit_target() -> None:
         browser.close()
 
 
+def _mutate_ancestor_frame(page, mutation: str) -> None:
+    if mutation == "covered":
+        page.locator("body").evaluate(
+            "body => body.insertAdjacentHTML('beforeend', "
+            "'<div id=cover style=\"position:fixed;inset:0;z-index:99\"></div>')"
+        )
+    elif mutation == "pointer-disabled":
+        page.locator("#shell").evaluate("el => el.style.pointerEvents = 'none'")
+    elif mutation == "rotated":
+        page.locator("#shell").evaluate("el => el.style.transform = 'rotate(2deg)'")
+    else:  # pragma: no cover - closed test vocabulary
+        raise AssertionError(mutation)
+
+
+@pytest.mark.parametrize("mutation", ["covered", "pointer-disabled", "rotated"])
+def test_ancestor_frame_change_before_locate_refuses_handle(
+    framed_backend, mutation: str
+) -> None:
+    backend, page, frame = framed_backend
+    locator, _box = _target_locator(backend, frame)
+
+    _mutate_ancestor_frame(page, mutation)
+
+    assert backend.locate_structural(locator) is None
+    assert not _has_guard_attribute(frame)
+
+
+@pytest.mark.parametrize("mutation", ["covered", "pointer-disabled", "rotated"])
+def test_ancestor_frame_change_before_act_refuses_delivery(
+    framed_backend, mutation: str
+) -> None:
+    backend, page, frame = framed_backend
+    locator, _box = _target_locator(backend, frame)
+    handle = backend.locate_structural(locator)
+    assert handle is not None
+
+    _mutate_ancestor_frame(page, mutation)
+
+    with pytest.raises(StructuralResolutionRefused, match="frame chain changed"):
+        backend.act_structural(locator, handle)
+    assert frame.evaluate("window.clicks") == 0
+    assert not _has_guard_attribute(frame)
+
+
 @pytest.mark.parametrize(
     "transform",
     ["rotate(2deg)", "skewX(3deg)", "scaleX(-1)", "translateZ(1px)"],

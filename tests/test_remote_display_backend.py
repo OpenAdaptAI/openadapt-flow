@@ -220,6 +220,28 @@ def test_context_observation_refuses_mutated_frame_before_input() -> None:
     assert not any(call[0] == "mouse" for call in client.calls)
 
 
+def test_hover_content_swap_refuses_before_pointer_down() -> None:
+    class HoverChangingClient(FakeClient):
+        def mouse_move(self, x, y):
+            super().mouse_move(x, y)
+            self.frame_color = (33, 22, 11)
+
+    client = HoverChangingClient()
+    backend = RemoteDisplayBackend(
+        client=client,
+        settle_s=0.0,
+        application_marker="Accuro",
+        application_marker_probe=lambda _png: True,
+    )
+    backend.acquire_actuation_frame()
+    assert backend.application_identity() == "Accuro"
+
+    with pytest.raises(RemoteDisplayError, match="frame content changed"):
+        backend.click(100, 100)
+
+    assert not any(call[0] == "mouse" for call in client.calls)
+
+
 def test_live_session_digest_change_invalidates_before_input() -> None:
     client = FakeClient()
     live = {"digest": "a" * 64}

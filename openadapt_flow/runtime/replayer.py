@@ -3548,6 +3548,12 @@ class Replayer:
         result: StepResult,
     ) -> Optional[str]:
         """Run the target-identity contract on one exact observed frame."""
+        qualification = workflow.qualification
+        qualified_policy = (
+            qualification.identity_policies.get(step.id)
+            if qualification is not None
+            else None
+        )
         if (
             step.action
             not in (
@@ -3557,11 +3563,14 @@ class Replayer:
                 ActionKind.KEY,
             )
             or step.anchor is None
-            or not (
-                step.anchor.context_text
-                or step.anchor.structured_identity
-                or step.anchor.identity_template
-                or step.anchor.identifier_crop
+            or (
+                qualified_policy is None
+                and not (
+                    step.anchor.context_text
+                    or step.anchor.structured_identity
+                    or step.anchor.identity_template
+                    or step.anchor.identifier_crop
+                )
             )
         ):
             return None

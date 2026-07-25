@@ -776,12 +776,25 @@ class RemoteDisplayBackend:
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at captured-pixel coordinates (x, y)."""
         with self._input_lock:
-            self._ensure_input_ready(point=(int(x), int(y)))
+            point = (int(x), int(y))
+            # Keep a consequential exact-content lease armed while positioning
+            # the pointer. Hover handlers and remote rendering can change the
+            # target during that move/settle interval; consuming the lease
+            # before the move would let the changed pixels receive the click.
+            self._ensure_input_ready(
+                point=point,
+                consume_actuation_lease=False,
+            )
             sx, sy = self._to_screen(int(x), int(y))
             self._assert_click_target(sx, sy)
             self._assert_frame_fresh()
             self._client.mouse_move(sx, sy)
             time.sleep(self._settle_s)
+            # Re-capture and consume the one-shot lease only at the delivery
+            # edge. No input is emitted if hover, latency, session identity,
+            # focus, geometry, or pixels changed after resolution.
+            self._ensure_input_ready(point=point)
+            sx, sy = self._to_screen(int(x), int(y))
             counts = 2 if double else 1
             for i in range(counts):
                 # Activation/focus and the move/settle call above can block.
@@ -839,7 +852,12 @@ class RemoteDisplayBackend:
 
     # -- internals -----------------------------------------------------------
 
-    def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
+    def _ensure_input_ready(
+        self,
+        *,
+        point: Optional[tuple[int, int]] = None,
+        consume_actuation_lease: bool = True,
+    ) -> None:
         """Fail LOUD if input can't actually be delivered; else focus the app.
 
         A silently-dropped synthetic event (Accessibility not granted) would let
@@ -951,7 +969,8 @@ class RemoteDisplayBackend:
                         "identity resolution; refusing input and requiring a "
                         "fresh actuation lease"
                     )
-                self._actuation_lease_state = _LEASE_NONE
+                if consume_actuation_lease:
+                    self._actuation_lease_state = _LEASE_NONE
         # Activation, window resolution, capture and readiness/OCR may all
         # block. Re-resolve the exact window/key identity and age again at the
         # last common point before input.

@@ -777,8 +777,14 @@ class MacOSBackend(RemoteDisplayBackend):
                 "then restart it. Refusing to emit input."
             )
 
-    def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
+    def _ensure_input_ready(
+        self,
+        *,
+        point: Optional[tuple[int, int]] = None,
+        consume_actuation_lease: bool = True,
+    ) -> None:
         """Gate physical/global input on both active app and exact window."""
+        del consume_actuation_lease  # Native AX/CG delivery uses its own binding.
         if point is not None:
             # The base remote-display hook receives captured-pixel coordinates,
             # while native macOS must bind and convert the exact screen point in

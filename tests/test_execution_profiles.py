@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from openadapt_flow.connector.executor import status_from_report
 from openadapt_flow.console.attention import attention_item
 from openadapt_flow.deployment import DeploymentConfig, PolicySection, RuntimeSection
@@ -15,6 +17,8 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     EffectVerificationEvidence,
+    ExecutionOutcomeEnvelope,
+    OutcomeContractCounts,
     Postcondition,
     PostconditionKind,
     ProgramGraph,
@@ -27,6 +31,7 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.qualification import EnvironmentBoundary, QualificationProject
+from openadapt_flow.report import render_run_report
 from openadapt_flow.run_gate import (
     GATE_APPROVAL,
     GATE_ENCRYPTION,
@@ -426,6 +431,8 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
         results=[StepResult(step_id="save", intent="save", ok=True)],
     )
     verified = unverified.model_copy(deep=True)
+    verified.governed_authorization_id = "authorization-1"
+    verified.governed_runtime_inputs_digest = "a" * 64
     verified.results[0].effect_verified = True
     effect_hash = _effect().contract_hash()
     verified.results[0].effect_contract_hashes = [effect_hash]
@@ -492,6 +499,144 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
+
+
+def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():
+    workflow = _workflow()
+    workflow.qualification = QualificationProject(
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="fixture",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.22.0",
+        ),
+        minimum_effect_tier=VerificationTier.INDEPENDENT_SYSTEM,
+    )
+    effect_hash = _effect().contract_hash()
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-25T00:00:00Z",
+        success=True,
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="b" * 64,
+        results=[
+            StepResult(
+                step_id="save",
+                intent="save",
+                ok=True,
+                effect_verified=True,
+                effect_contract_hashes=[effect_hash],
+                effect_evidence=[
+                    EffectVerificationEvidence(
+                        effect_contract_hash=effect_hash,
+                        substrate="persisted-state",
+                        verification_tier=(
+                            VerificationTier.PERSISTED_STATE_REACQUISITION
+                        ),
+                        initial_verdict="confirmed",
+                        final_verdict="confirmed",
+                    )
+                ],
+            )
+        ],
+    )
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == "COMPLETED_UNVERIFIED"
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.passed_contracts.effect == 0
+    assert "effect_tier_3" in report.outcome_envelope.evidence_classes
+
+
+def test_verified_envelope_requires_production_profile_eligibility_and_authorization():
+    complete = OutcomeContractCounts(authorization=1)
+    base = {
+        "outcome": "VERIFIED",
+        "profile": "standard",
+        "production_eligible": True,
+        "execution_completed": True,
+        "required_contracts": complete,
+        "passed_contracts": complete,
+        "evidence_classes": ["authorization"],
+    }
+    for invalid in (
+        {**base, "profile": "demo"},
+        {**base, "production_eligible": False},
+        {
+            **base,
+            "required_contracts": OutcomeContractCounts(),
+            "passed_contracts": OutcomeContractCounts(),
+            "evidence_classes": [],
+        },
+    ):
+        with pytest.raises(ValueError):
+            ExecutionOutcomeEnvelope(**invalid)
+
+
+def test_native_run_network_state_remains_unknown_without_instrumentation():
+    workflow = Workflow(name="native-read", steps=[])
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-25T00:00:00Z",
+        success=True,
+        execution_target_kind="windows",
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="d" * 64,
+    )
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == "VERIFIED"
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.external_network_calls == "unknown"
+
+
+def test_completed_compensation_produces_non_success_rolled_back_outcome(tmp_path):
+    workflow = _workflow()
+    effect_hash = _effect().contract_hash()
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-25T00:00:00Z",
+        success=True,
+        execution_completed=True,
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="c" * 64,
+        results=[
+            StepResult(
+                step_id="save",
+                intent="save",
+                ok=True,
+                effect_verified=True,
+                effect_contract_hashes=[effect_hash],
+                effect_evidence=[
+                    EffectVerificationEvidence(
+                        effect_contract_hash=effect_hash,
+                        substrate="independent-system",
+                        verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
+                        initial_verdict="refuted",
+                        final_verdict="confirmed",
+                        reconciliation_completed=True,
+                        reconciliation_actions=1,
+                    )
+                ],
+            )
+        ],
+    )
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+    run_dir = tmp_path / "rolled-back"
+    report.save(run_dir)
+    rendered = render_run_report(run_dir).read_text(encoding="utf-8")
+
+    assert report.execution_outcome == "ROLLED_BACK"
+    assert report.success is False
+    assert report.production_eligible is False
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.compensation_actions == 1
+    assert "compensation" in report.outcome_envelope.evidence_classes
+    assert "remains a non-success outcome" in rendered
 
 
 def test_missing_linear_step_result_never_verifies():

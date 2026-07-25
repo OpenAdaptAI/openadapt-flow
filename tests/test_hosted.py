@@ -1268,7 +1268,8 @@ def _outcome_envelope(
     completed: bool,
     production_eligible: bool = False,
 ) -> ExecutionOutcomeEnvelope:
-    counts = OutcomeContractCounts()
+    authorization = 1 if outcome == "VERIFIED" else 0
+    counts = OutcomeContractCounts(authorization=authorization)
     return ExecutionOutcomeEnvelope(
         outcome=outcome,
         profile=profile,
@@ -1276,6 +1277,7 @@ def _outcome_envelope(
         production_eligible=production_eligible,
         required_contracts=counts,
         passed_contracts=counts,
+        evidence_classes=["authorization"] if authorization else [],
         external_network_calls="unknown",
     )
 

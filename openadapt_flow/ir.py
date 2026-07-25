@@ -2031,17 +2031,36 @@ class ExecutionOutcomeEnvelope(BaseModel):
             raise ValueError(
                 f"{self.outcome} requires evidence that execution completed"
             )
-        if self.outcome == "VERIFIED" and passed != required:
-            raise ValueError("VERIFIED requires every declared contract to pass")
-        if self.outcome == "ROLLED_BACK" and self.compensation_actions < 1:
-            raise ValueError(
-                "ROLLED_BACK requires evidence of a completed compensating action"
-            )
-        if self.production_eligible and (
-            self.outcome != "VERIFIED" or self.profile not in {"standard", "regulated"}
-        ):
+        if len(self.evidence_classes) != len(set(self.evidence_classes)):
+            raise ValueError("evidence classes must be unique")
+        if self.outcome == "VERIFIED":
+            if passed != required:
+                raise ValueError("VERIFIED requires every declared contract to pass")
+            if self.profile not in {"standard", "regulated"}:
+                raise ValueError("VERIFIED requires a Standard or Regulated profile")
+            if not self.production_eligible:
+                raise ValueError("VERIFIED must be production eligible")
+            if required["authorization"] < 1 or passed["authorization"] < 1:
+                raise ValueError(
+                    "VERIFIED requires a passed governed authorization contract"
+                )
+        elif self.production_eligible:
             raise ValueError(
                 "only VERIFIED Standard or Regulated runs are production eligible"
+            )
+        has_compensation = "compensation" in self.evidence_classes
+        if has_compensation != (self.compensation_actions > 0):
+            raise ValueError(
+                "compensation evidence and completed action count are inconsistent"
+            )
+        if self.outcome == "ROLLED_BACK":
+            if self.compensation_actions < 1:
+                raise ValueError(
+                    "ROLLED_BACK requires evidence of a completed compensating action"
+                )
+        elif self.compensation_actions:
+            raise ValueError(
+                "completed compensating actions require the ROLLED_BACK outcome"
             )
         return self
 

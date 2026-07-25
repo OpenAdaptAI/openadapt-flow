@@ -174,6 +174,8 @@ def classify_execution_outcome(
         if report.execution_completed is not None
         else report.success
     )
+    if _completed_compensation_actions(report) > 0:
+        return ExecutionOutcome.ROLLED_BACK
     if not execution_completed:
         refusal_step_ids = {"<authorization>", "<params>", "<profile>"}
         governed_halt = (
@@ -188,6 +190,8 @@ def classify_execution_outcome(
         return ExecutionOutcome.HALTED if governed_halt else ExecutionOutcome.FAILED
 
     if resolved is ExecutionProfile.DEMO:
+        return ExecutionOutcome.COMPLETED_UNVERIFIED
+    if not (report.governed_authorization_id and report.governed_runtime_inputs_digest):
         return ExecutionOutcome.COMPLETED_UNVERIFIED
 
     # Import lazily: run_gate imports this module for the profile contract.
@@ -246,8 +250,21 @@ def stamp_execution_outcome(
     )
     if execution_profile_contract(resolved).production:
         report.success = outcome is ExecutionOutcome.VERIFIED
+    elif outcome is ExecutionOutcome.ROLLED_BACK:
+        report.success = False
     report.outcome_envelope = build_outcome_envelope(report, workflow)
     return outcome
+
+
+def _completed_compensation_actions(report: RunReport) -> int:
+    """Count only compensations that completed and were re-verified."""
+
+    return sum(
+        evidence.reconciliation_actions
+        for result in report.results
+        for evidence in result.effect_evidence
+        if evidence.reconciliation_completed and evidence.reconciliation_actions > 0
+    )
 
 
 def build_outcome_envelope(report: RunReport, workflow: Workflow):
@@ -305,7 +322,12 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
         3: "effect_tier_3",
         4: "effect_tier_4",
     }
-    compensation_actions = 0
+    minimum_effect_tier = (
+        required_effect_tier(workflow, report.execution_profile)
+        if report.execution_profile is not None
+        else None
+    )
+    compensation_actions = _completed_compensation_actions(report)
     for result in report.results:
         if result.skipped:
             continue
@@ -320,12 +342,22 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
             )
             required_effects += len(effects)
         if result.effect_verified is True:
-            passed_effects += len(
-                {
-                    evidence.effect_contract_hash
-                    for evidence in result.effect_evidence
-                    if evidence.final_verdict == "confirmed"
-                }
+            sufficient_evidence = Counter(
+                evidence.effect_contract_hash
+                for evidence in result.effect_evidence
+                if evidence.final_verdict == "confirmed"
+                and (
+                    minimum_effect_tier is None
+                    or (
+                        evidence.verification_tier is not None
+                        and VerificationTier(evidence.verification_tier).satisfies(
+                            minimum_effect_tier
+                        )
+                    )
+                )
+            )
+            passed_effects += sum(
+                (sufficient_evidence & Counter(result.effect_contract_hashes)).values()
             )
         if result.identity is not None and result.identity.status == "verified":
             evidence_classes.add("identity")
@@ -339,10 +371,11 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
                 evidence_class = effect_class_by_tier.get(evidence.verification_tier)
                 if evidence_class is not None:
                     evidence_classes.add(evidence_class)
-            if evidence.reconciliation_completed:
-                compensation_actions += evidence.reconciliation_actions
-                if evidence.reconciliation_actions:
-                    evidence_classes.add("compensation")
+            if (
+                evidence.reconciliation_completed
+                and evidence.reconciliation_actions > 0
+            ):
+                evidence_classes.add("compensation")
 
     required = OutcomeContractCounts(
         authorization=required_authorization,
@@ -404,6 +437,7 @@ def _external_network_call_state(
                 return "observed"
             if substrate not in local_substrates:
                 return "unknown"
-    if report.execution_target_kind in {"windows", "macos", "linux"}:
-        return "none"
+    # A native target says where input was delivered, not whether this process
+    # or one of its integrations opened a socket. Until an explicit network
+    # observer proves the negative, absence of an observed call remains unknown.
     return "unknown"

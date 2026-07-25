@@ -278,6 +278,12 @@ def render_run_report(run_dir: Path | str) -> Path:
         lines.append(
             f"- **External network calls:** `{envelope.external_network_calls}`"
         )
+        if envelope.outcome == "ROLLED_BACK":
+            lines.append(
+                "- **Rollback:** "
+                f"{envelope.compensation_actions} compensating action(s) completed; "
+                "the run remains a non-success outcome"
+            )
     lines.append(f"- **Steps:** {ok_count}/{len(report.results)} ok")
     lines.append(f"- **Heals:** {report.heal_count}")
     # Egress transparency (PHI audit REM-3): make it unmistakable whether a

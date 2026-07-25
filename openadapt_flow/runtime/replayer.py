@@ -524,6 +524,7 @@ class Replayer:
         execution_target_kind: Optional[ExecutionTargetKind] = None,
         execution_origin: Optional[str] = None,
         execution_entry_url: Optional[str] = None,
+        prior_screenshots_may_leave_box: bool = False,
     ) -> RunReport:
         """Execute the workflow and write a run directory.
 
@@ -579,6 +580,9 @@ class Replayer:
             execution_entry_url: Browser URL requested before replay. Hosted
                 validation binds this to the runner's entry URL so workflows
                 that start below `/` retain their required path.
+            prior_screenshots_may_leave_box: Durable-resume audit carry. True
+                when an earlier leg of the same logical run was configured with
+                an egress-capable screenshot consumer.
 
         Returns:
             The RunReport (also saved as ``run_dir/report.json``). A linear run
@@ -648,7 +652,9 @@ class Replayer:
             ),
             parameter_schema_sha256=(compute_parameter_schema_digest(workflow)),
             params=params,
-            screenshots_may_leave_box=self._screenshots_may_leave_box,
+            screenshots_may_leave_box=(
+                self._screenshots_may_leave_box or prior_screenshots_may_leave_box
+            ),
         )
         if self.governed_authorization is not None:
             profile_refusal = self._profile_runtime_refusal(workflow)
@@ -772,15 +778,19 @@ class Replayer:
                 save_healed_to=save_healed_to,
                 key=self.checkpoint_key,
                 governed_authorization=self.governed_authorization,
+                screenshots_may_leave_box=(
+                    self._screenshots_may_leave_box or prior_screenshots_may_leave_box
+                ),
             )
         if resume_from:
             from openadapt_flow.runtime.durable import resumed_step_results
 
-            report.results.extend(
-                resumed_step_results(
-                    run_dir, workflow, resume_from, key=self.checkpoint_key
-                )
+            resumed_results = resumed_step_results(
+                run_dir, workflow, resume_from, key=self.checkpoint_key
             )
+            report.results.extend(resumed_results)
+            for result in resumed_results:
+                self._account_result(report, result)
             if durable_run is not None:
                 durable_run.store.clear_pending()
 
@@ -1095,6 +1105,13 @@ class Replayer:
                 store.completed_unverified_effect_keys()
             )
             self._bundle_version = _bundle_version(bundle_dir)
+            if resume_checkpoint is not None:
+                resumed_results = self._resumed_program_results(
+                    store.program_checkpoints(), workflow
+                )
+                report.results.extend(resumed_results)
+                for result in resumed_results:
+                    self._account_result(report, result)
         else:
             self._program_seq = 0
             self._completed_effect_keys = []
@@ -1583,10 +1600,16 @@ class Replayer:
         ):
             return False
         step = state.step
-        if step is None or not step.effects:
+        effects = (
+            step.effects
+            or (step.api_binding.effects if step.api_binding is not None else [])
+            if step is not None
+            else []
+        )
+        if step is None or not effects:
             return False
         try:
-            resolved = self._resolve_effects(step.effects, params)
+            resolved = self._resolve_effects(effects, params)
             keys = [e.contract_hash() for e in resolved]
         except Exception:
             return False
@@ -1622,6 +1645,51 @@ class Replayer:
         report.results.append(result)
         self._account_result(report, result)
         return True
+
+    @staticmethod
+    def _resumed_program_results(
+        checkpoints: list[ProgramCheckpoint],
+        workflow: Workflow,
+    ) -> list[StepResult]:
+        """Reconstruct the verified pre-resume leg without re-actuating it."""
+
+        steps = {
+            step.id: step
+            for graph in [
+                workflow.program,
+                *workflow.subflows.values(),
+            ]
+            if graph is not None
+            for state in graph.states.values()
+            if state.step is not None
+            for step in [state.step]
+        }
+        results: list[StepResult] = []
+        for checkpoint in checkpoints:
+            step_id = checkpoint.step_id or checkpoint.verified_state_id
+            step = steps.get(step_id)
+            verified_keys = list(checkpoint.new_effect_keys)
+            unverified_keys = list(checkpoint.new_unverified_effect_keys)
+            results.append(
+                StepResult(
+                    step_id=step_id,
+                    intent=checkpoint.intent
+                    or (step.intent if step is not None else ""),
+                    ok=True,
+                    skipped=checkpoint.skipped,
+                    effect_verified=True if verified_keys else None,
+                    effect_approved_unverified=bool(unverified_keys),
+                    effect_contract_hashes=verified_keys or unverified_keys,
+                    effect_evidence=list(checkpoint.new_effect_evidence),
+                    identity=checkpoint.identity,
+                    postconditions_ok=checkpoint.postconditions_ok,
+                    actuation=checkpoint.actuation,
+                    resolution=checkpoint.resolution,
+                    drift_oracle_calls=checkpoint.drift_oracle_calls,
+                    heal=checkpoint.heal,
+                )
+            )
+        return results
 
     def _evidence_for_completed_effects(
         self, effect_keys: list[str]
@@ -1666,12 +1734,18 @@ class Replayer:
             if result.effect_approved_unverified
             else []
         )
+        declared_effects = (
+            step.effects
+            or (step.api_binding.effects if step.api_binding is not None else [])
+            if step is not None
+            else []
+        )
         resolved_effects = (
             [
                 e.model_dump(mode="json")
-                for e in self._resolve_effects(step.effects, params)
+                for e in self._resolve_effects(declared_effects, params)
             ]
-            if step is not None and step.effects
+            if declared_effects
             else []
         )
         # Extend the live ledger so a later state in the SAME leg (and the next
@@ -1702,6 +1776,14 @@ class Replayer:
             new_effect_evidence=(list(result.effect_evidence) if new_keys else []),
             new_unverified_effect_keys=new_unverified_keys,
             new_unverified_effects=(resolved_effects if new_unverified_keys else []),
+            step_id=step.id if step is not None else state.id,
+            identity=result.identity,
+            postconditions_ok=result.postconditions_ok,
+            skipped=result.skipped,
+            actuation=result.actuation,
+            resolution=result.resolution,
+            drift_oracle_calls=result.drift_oracle_calls,
+            heal=result.heal,
             governed_authorization_id=(
                 self.governed_authorization.authorization_id
                 if self.governed_authorization is not None

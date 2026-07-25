@@ -201,6 +201,7 @@ def classify_execution_outcome(
     consequential = {
         step.id for step in iter_workflow_steps(workflow) if is_consequential(step)
     }
+    steps_by_id = {step.id: step for step in iter_workflow_steps(workflow)}
     if workflow.program is None:
         expected_results = Counter(step.id for step in workflow.steps)
         observed_results = Counter(
@@ -214,15 +215,33 @@ def classify_execution_outcome(
     if any(
         result.identity is None or result.identity.status != "verified"
         for result in report.results
-        if not result.skipped and result.step_id in required_identity_ids
+        if (
+            not result.skipped
+            and not result.exception_handled
+            and result.step_id in required_identity_ids
+        )
     ):
         return ExecutionOutcome.COMPLETED_UNVERIFIED
     minimum = required_effect_tier(workflow, resolved)
     assert minimum is not None
     for result in report.results:
-        if result.skipped or result.step_id not in consequential:
+        if result.skipped or result.exception_handled:
+            continue
+        step = steps_by_id.get(result.step_id)
+        if step is None:
+            continue
+        if not result.ok:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if step.expect and result.postconditions_ok is not True:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if result.step_id not in consequential:
             continue
         if result.effect_approved_unverified or result.effect_verified is not True:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        effects = step.effects or (
+            step.api_binding.effects if step.api_binding is not None else []
+        )
+        if len(result.effect_contract_hashes) != len(effects):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         evidence_hashes = Counter(
             item.effect_contract_hash
@@ -270,7 +289,11 @@ def _completed_compensation_actions(report: RunReport) -> int:
         evidence.reconciliation_actions
         for result in report.results
         for evidence in result.effect_evidence
-        if evidence.reconciliation_completed and evidence.reconciliation_actions > 0
+        if (
+            evidence.reconciliation_completed
+            and evidence.reconciliation_actions > 0
+            and evidence.final_verdict == "confirmed"
+        )
     )
 
 
@@ -308,7 +331,11 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
     identity_results = [
         result
         for result in report.results
-        if not result.skipped and result.step_id in required_identity_ids
+        if (
+            not result.skipped
+            and not result.exception_handled
+            and result.step_id in required_identity_ids
+        )
     ]
     required_identity = len(identity_results)
     passed_identity = sum(
@@ -334,7 +361,7 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
     )
     compensation_actions = _completed_compensation_actions(report)
     for result in report.results:
-        if result.skipped:
+        if result.skipped or result.exception_handled:
             continue
         step = steps_by_id.get(result.step_id)
         if step is not None:
@@ -379,6 +406,7 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
             if (
                 evidence.reconciliation_completed
                 and evidence.reconciliation_actions > 0
+                and evidence.final_verdict == "confirmed"
             ):
                 evidence_classes.add("compensation")
 

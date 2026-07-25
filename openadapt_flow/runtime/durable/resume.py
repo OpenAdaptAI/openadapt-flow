@@ -198,6 +198,9 @@ def resume(
         resume_from=start_index,
         run_id=(manifest.run_id if manifest is not None else None),
         execution_target_kind=execution_target_kind,
+        prior_screenshots_may_leave_box=(
+            manifest.screenshots_may_leave_box if manifest is not None else False
+        ),
     )
 
 
@@ -276,4 +279,7 @@ def _resume_program(
         resume_program=checkpoint,
         run_id=run_id,
         execution_target_kind=execution_target_kind,
+        prior_screenshots_may_leave_box=(
+            manifest.screenshots_may_leave_box if manifest is not None else False
+        ),
     )

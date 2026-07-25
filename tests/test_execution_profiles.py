@@ -17,12 +17,16 @@ from openadapt_flow.execution_profiles import (
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    ApiBinding,
     EffectVerificationEvidence,
     ExecutionOutcomeEnvelope,
+    LoopSpec,
     OutcomeContractCounts,
     Postcondition,
     PostconditionKind,
     ProgramGraph,
+    Relation,
+    Resolution,
     RunReport,
     State,
     StateKind,
@@ -45,11 +49,13 @@ from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     runtime_inputs_digest,
 )
+from openadapt_flow.runtime.durable import CheckpointStore, resume
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
     EffectState,
     EffectVerdict,
+    ValueExpr,
     Verdict,
 )
 from openadapt_flow.runtime.effects.effect import ReadbackNav, ReadbackSpec
@@ -57,6 +63,7 @@ from openadapt_flow.runtime.effects.onscreen import OnScreenReadbackVerifier
 from openadapt_flow.runtime.replayer import Replayer
 from openadapt_flow.verification import VerificationTier
 from openadapt_flow.vision.ocr import OcrLine
+from tests.test_durable_runtime import FakeSoRVerifier, _approval
 from tests.test_replayer import FakeBackend, FakeVision, make_png
 
 _KEY = "profile-test-key"
@@ -434,6 +441,7 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
     verified = unverified.model_copy(deep=True)
     verified.governed_authorization_id = "authorization-1"
     verified.governed_runtime_inputs_digest = "a" * 64
+    verified.results[0].postconditions_ok = True
     verified.results[0].effect_verified = True
     effect_hash = _effect().contract_hash()
     verified.results[0].effect_contract_hashes = [effect_hash]
@@ -551,6 +559,46 @@ def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():
     assert "effect_tier_3" in report.outcome_envelope.evidence_classes
 
 
+def test_missing_declared_postcondition_is_completed_unverified_not_an_envelope_crash():
+    workflow = _workflow()
+    effect_hash = _effect().contract_hash()
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-25T00:00:00Z",
+        success=True,
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="c" * 64,
+        required_identity_step_ids=["save"],
+        results=[
+            StepResult(
+                step_id="save",
+                intent="save",
+                ok=True,
+                identity={"status": "verified"},
+                effect_verified=True,
+                effect_contract_hashes=[effect_hash],
+                effect_evidence=[
+                    EffectVerificationEvidence(
+                        effect_contract_hash=effect_hash,
+                        substrate="independent-system",
+                        verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
+                        initial_verdict="confirmed",
+                        final_verdict="confirmed",
+                    )
+                ],
+            )
+        ],
+    )
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
+    assert report.success is False
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.required_contracts.postcondition == 1
+    assert report.outcome_envelope.passed_contracts.postcondition == 0
+
+
 def test_verified_envelope_requires_production_profile_eligibility_and_authorization():
     complete = OutcomeContractCounts(authorization=1)
     base = {
@@ -642,6 +690,47 @@ def test_completed_compensation_produces_non_success_rolled_back_outcome(tmp_pat
     assert attention is not None
     assert attention.category == "operator_review"
     assert attention.status == "rolled_back"
+
+
+def test_unconfirmed_compensation_attempt_is_not_reported_as_rolled_back():
+    workflow = _workflow()
+    effect_hash = _effect().contract_hash()
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-25T00:00:00Z",
+        success=True,
+        execution_completed=True,
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="e" * 64,
+        results=[
+            StepResult(
+                step_id="save",
+                intent="save",
+                ok=True,
+                postconditions_ok=True,
+                effect_verified=False,
+                effect_contract_hashes=[effect_hash],
+                effect_evidence=[
+                    EffectVerificationEvidence(
+                        effect_contract_hash=effect_hash,
+                        substrate="independent-system",
+                        verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
+                        initial_verdict="refuted",
+                        final_verdict="refuted",
+                        reconciliation_completed=True,
+                        reconciliation_actions=1,
+                    )
+                ],
+            )
+        ],
+    )
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.compensation_actions == 0
+    assert "compensation" not in report.outcome_envelope.evidence_classes
 
 
 def test_missing_linear_step_result_never_verifies():
@@ -948,6 +1037,190 @@ def test_standard_resume_from_legacy_checkpoint_is_unverified(tmp_path):
     assert backend.actions == actions_before_resume
     assert resumed.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
     assert resumed.success is False
+
+
+def _governed_loop_workflow() -> Workflow:
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"patient": ValueExpr(param="patient")},
+        expected_count=1,
+        risk="irreversible",
+    )
+    body = ProgramGraph(
+        entry="write",
+        states={
+            "write": State(
+                id="write",
+                kind=StateKind.ACTION,
+                step=Step(
+                    id="write",
+                    intent="write current patient",
+                    action=ActionKind.KEY,
+                    key="Enter",
+                    anchor=Anchor(
+                        template="templates/write.png",
+                        region=(0, 0, 10, 10),
+                        click_point=(5, 5),
+                        ocr_text="Submit target",
+                        context_text="Synthetic record",
+                    ),
+                    identity_armed=True,
+                    effects=[effect],
+                ),
+                transitions=[Transition(target="row-done")],
+            ),
+            "row-done": State(
+                id="row-done",
+                kind=StateKind.TERMINAL,
+                outcome="success",
+            ),
+        },
+    )
+    return Workflow(
+        name="governed-loop-resume",
+        program=ProgramGraph(
+            entry="loop",
+            states={
+                "loop": State(
+                    id="loop",
+                    kind=StateKind.LOOP,
+                    loop=LoopSpec(relation="patients", body="body", var="patient"),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+        subflows={"body": body},
+        data_sources={
+            "patients": Relation(
+                name="patients",
+                rows=[
+                    {"patient": "Alice"},
+                    {"patient": "Bob"},
+                    {"patient": "Cara"},
+                ],
+            )
+        },
+    )
+
+
+def test_standard_program_resume_preserves_exact_loop_contracts_without_reactuation(
+    tmp_path,
+):
+    workflow = _governed_loop_workflow()
+    bundle = tmp_path / "bundle"
+    workflow.save(bundle)
+    (bundle / "templates" / "write.png").write_bytes(make_png((10, 10)))
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    assert workflow.manifest is not None
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+        admitted_policy_name="permissive",
+        execution_profile="standard",
+        minimum_effect_tier=int(VerificationTier.PERSISTED_STATE_REACQUISITION),
+        required_identity_step_ids=("write",),
+    )
+    verifier = FakeSoRVerifier()
+    verifier.verification_tier = VerificationTier.INDEPENDENT_SYSTEM
+    verifier.refute.add((("patient", "Bob"),))
+    run_dir = tmp_path / "run"
+    initial = Replayer(
+        FakeBackend(),
+        vision=_ReadyVision(),
+        effect_verifier=verifier,
+        governed_authorization=authorization,
+        durable=True,
+        require_settled=True,
+    ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+    assert initial.execution_outcome == ExecutionOutcome.HALTED.value
+    assert len(CheckpointStore(run_dir).program_checkpoints()) == 1, (
+        initial.model_dump_json(indent=2)
+    )
+    store = CheckpointStore(run_dir)
+    checkpoint = store.program_checkpoints()[0]
+    checkpoint.resolution = Resolution(
+        rung="grounder", point=(5, 5), confidence=0.9, elapsed_ms=1.0
+    )
+    checkpoint.drift_oracle_calls = 1
+    store.write_program_checkpoint(checkpoint)
+    manifest = store.read_manifest()
+    assert manifest is not None
+    manifest.screenshots_may_leave_box = True
+    store.write_manifest(manifest)
+    verifier.refute.clear()
+    resumed_backend = FakeBackend()
+    resumed = resume(
+        run_dir,
+        Replayer(
+            resumed_backend,
+            vision=_ReadyVision(),
+            effect_verifier=verifier,
+            require_settled=True,
+        ),
+        approval=_approval(bundle),
+    )
+
+    assert resumed.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert resumed.success is True
+    assert resumed_backend.actions == [("press", "Enter"), ("press", "Enter")]
+    assert len(resumed.results) == 3
+    assert all(
+        result.identity is not None and result.identity.status == "verified"
+        for result in resumed.results
+    )
+    assert resumed.outcome_envelope is not None
+    assert resumed.outcome_envelope.required_contracts.identity == 3
+    assert resumed.outcome_envelope.passed_contracts.identity == 3
+    assert resumed.outcome_envelope.required_contracts.effect == 3
+    assert resumed.outcome_envelope.passed_contracts.effect == 3
+    assert resumed.model_calls == 2
+    assert resumed.rung_counts["grounder"] == 1
+    assert resumed.screenshots_may_leave_box is True
+
+
+def test_program_resume_idempotency_includes_self_contained_api_effects():
+    effect = _effect()
+    effect_hash = effect.contract_hash()
+    state = State(
+        id="api-write",
+        kind=StateKind.ACTION,
+        step=Step(
+            id="api-write",
+            intent="write through API",
+            action=ActionKind.KEY,
+            key="Enter",
+            api_binding=ApiBinding(
+                url_template="/records",
+                effects=[effect],
+            ),
+        ),
+    )
+    replayer = Replayer(FakeBackend(), vision=FakeVision())
+    replayer._completed_effect_keys = [effect_hash]
+    replayer._completed_unverified_effect_keys = []
+    replayer._completed_effect_evidence = [
+        EffectVerificationEvidence(
+            effect_contract_hash=effect_hash,
+            substrate="independent-system",
+            verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
+            initial_verdict="confirmed",
+            final_verdict="confirmed",
+        )
+    ]
+    report = RunReport(
+        workflow_name="api-program-resume",
+        started_at="2026-07-25T00:00:00Z",
+    )
+
+    skipped = replayer._skip_completed_effect_state(state, {}, report)
+
+    assert skipped is True
+    assert len(report.results) == 1
+    assert report.results[0].effect_verified is True
+    assert report.results[0].effect_contract_hashes == [effect_hash]
 
 
 def test_standard_program_routes_ordinary_failure_to_authored_handler(tmp_path):

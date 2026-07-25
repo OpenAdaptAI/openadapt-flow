@@ -44,7 +44,12 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from openadapt_flow.ir import EffectVerificationEvidence, IdentityCheck
+from openadapt_flow.ir import (
+    EffectVerificationEvidence,
+    HealEvent,
+    IdentityCheck,
+    Resolution,
+)
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import ApprovalRecord
 from openadapt_flow.runtime.durable.program_checkpoint import (
@@ -91,6 +96,10 @@ class RunManifest(BaseModel):
     params: dict[str, str] = Field(default_factory=dict)
     worklists: dict[str, list[dict[str, str]]] = Field(default_factory=dict)
     governed_authorization: Optional[GovernedRunAuthorization] = None
+    #: Sticky audit posture for the whole logical run.  A resumed leg may use a
+    #: local-only replayer, but that must not erase that an earlier leg was
+    #: configured with an egress-capable screenshot consumer.
+    screenshots_may_leave_box: bool = False
     #: Optional healed-bundle output path, mirrored from the original run.
     save_healed_to: Optional[str] = None
     created_at: str = Field(default_factory=_now)
@@ -134,6 +143,11 @@ class RunCheckpoint(BaseModel):
     postconditions_ok: Optional[bool] = None
     skipped: bool = False
     actuation: Optional[str] = None
+    #: Resolution/model/heal evidence is retained so a resumed report accounts
+    #: for the whole logical run rather than only the final leg.
+    resolution: Optional[Resolution] = None
+    drift_oracle_calls: int = Field(default=0, ge=0)
+    heal: Optional[HealEvent] = None
     created_at: str = Field(default_factory=_now)
 
 

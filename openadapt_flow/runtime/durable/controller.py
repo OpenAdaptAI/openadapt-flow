@@ -239,6 +239,7 @@ class DurableRun:
         save_healed_to: Optional[Path | str] = None,
         key: Optional[str] = None,
         governed_authorization: Optional[GovernedRunAuthorization] = None,
+        screenshots_may_leave_box: bool = False,
     ) -> None:
         # ``key`` (None by default) opts the durable artifacts into AES-256-GCM
         # encryption-at-rest; unset => plaintext, exactly as before.
@@ -255,6 +256,7 @@ class DurableRun:
                 params=dict(params),
                 worklists=worklists,
                 governed_authorization=governed_authorization,
+                screenshots_may_leave_box=screenshots_may_leave_box,
                 save_healed_to=(str(save_healed_to) if save_healed_to else None),
             )
         )
@@ -303,6 +305,9 @@ class DurableRun:
                     postconditions_ok=result.postconditions_ok,
                     skipped=result.skipped,
                     actuation=result.actuation,
+                    resolution=result.resolution,
+                    drift_oracle_calls=result.drift_oracle_calls,
+                    heal=result.heal,
                 )
             )
             return
@@ -458,6 +463,11 @@ def resumed_step_results(
                     checkpoint.postconditions_ok if checkpoint is not None else None
                 ),
                 actuation=checkpoint.actuation if checkpoint is not None else None,
+                resolution=checkpoint.resolution if checkpoint is not None else None,
+                drift_oracle_calls=(
+                    checkpoint.drift_oracle_calls if checkpoint is not None else 0
+                ),
+                heal=checkpoint.heal if checkpoint is not None else None,
                 error=None,
             )
         )

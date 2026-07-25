@@ -1267,6 +1267,7 @@ def _outcome_envelope(
     profile: str,
     completed: bool,
     production_eligible: bool = False,
+    model_calls: int = 0,
 ) -> ExecutionOutcomeEnvelope:
     authorization = 1 if outcome == "VERIFIED" else 0
     counts = OutcomeContractCounts(authorization=authorization)
@@ -1278,6 +1279,7 @@ def _outcome_envelope(
         required_contracts=counts,
         passed_contracts=counts,
         evidence_classes=["authorization"] if authorization else [],
+        model_calls=model_calls,
         external_network_calls="unknown",
     )
 
@@ -1632,6 +1634,7 @@ def test_report_run_verified_success(tmp_path, monkeypatch):
             profile="standard",
             completed=True,
             production_eligible=True,
+            model_calls=2,
         ),
     )
     recorder: dict = {}

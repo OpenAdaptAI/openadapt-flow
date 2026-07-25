@@ -2192,6 +2192,46 @@ class RunReport(BaseModel):
     # (Replayer(allow_model_grounding=True) / CLI --allow-model-grounding).
     screenshots_may_leave_box: bool = False
 
+    @model_validator(mode="after")
+    def _validate_outcome_envelope_binding(self) -> "RunReport":
+        """Keep the transported envelope bound to this exact report.
+
+        The envelope is the PHI-free projection accepted by hosted consumers.
+        When it is present, its top-level fields must not be independently
+        mutable from the local report that produced it.
+        """
+
+        envelope = self.outcome_envelope
+        if envelope is None:
+            return self
+        if self.execution_outcome != envelope.outcome:
+            raise ValueError("execution outcome does not match its evidence envelope")
+        if self.execution_profile != envelope.profile:
+            raise ValueError("execution profile does not match its evidence envelope")
+        if self.production_eligible != envelope.production_eligible:
+            raise ValueError(
+                "production eligibility does not match its evidence envelope"
+            )
+        if self.execution_completed is None or (
+            self.execution_completed != envelope.execution_completed
+        ):
+            raise ValueError(
+                "execution completion does not match its evidence envelope"
+            )
+        if self.model_calls != envelope.model_calls:
+            raise ValueError("model-call count does not match its evidence envelope")
+        if envelope.outcome == "VERIFIED" and not self.success:
+            raise ValueError("VERIFIED evidence cannot accompany a non-success report")
+        if envelope.profile in {"standard", "regulated"} and self.success != (
+            envelope.outcome == "VERIFIED"
+        ):
+            raise ValueError(
+                "production report success must mean the exact VERIFIED outcome"
+            )
+        if envelope.outcome == "ROLLED_BACK" and self.success:
+            raise ValueError("ROLLED_BACK is a non-success outcome")
+        return self
+
     def save(self, run_dir: Path | str) -> Path:
         run = Path(run_dir)
         run.mkdir(parents=True, exist_ok=True)

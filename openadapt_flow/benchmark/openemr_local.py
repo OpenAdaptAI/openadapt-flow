@@ -48,8 +48,8 @@ class SyntheticPatientSpec:
     """
 
     title: str = "Ms."
-    fname: str = "OpenAdapt"
-    lname: str = "LoanParity"
+    fname: str = "Jordan"
+    lname: str = "Example"
     dob: str = "1985-02-03"
     sex: str = "Female"
     # The pinned demographics form canonicalizes these fields to uppercase on
@@ -63,7 +63,7 @@ class SyntheticPatientSpec:
     state_label: str = "Massachusetts"
     postal_code: str = "02139"
     phone_home: str = "555-0107"
-    email: str = "openadapt.loan-parity@example.invalid"
+    email: str = "jordan.example@example.invalid"
     country_code: str = "USA"
 
     def params(self) -> dict[str, str]:

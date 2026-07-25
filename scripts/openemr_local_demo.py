@@ -20,9 +20,12 @@ import json
 import math
 import os
 import platform
+import shutil
 import stat
+import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +38,12 @@ from benchmark.openemr_local.fixture import (  # noqa: E402
     FixtureError,
     OpenEMRFixture,
     audit_table_deltas,
+)
+from openadapt_flow.backend import StructuralResolutionRefused  # noqa: E402
+from openadapt_flow.backends.playwright_backend import (  # noqa: E402
+    _BIND_CONTEXT_IDENTITY_JS,
+    _BIND_STRUCTURAL_TARGET_JS,
+    _CLEAN_GUARD_JS,
 )
 from openadapt_flow.backends.playwright_backend import (  # noqa: E402
     PlaywrightBackend as _BasePlaywrightBackend,
@@ -55,8 +64,11 @@ from openadapt_flow.benchmark.openemr_local import (  # noqa: E402
     publication_gate,
 )
 from openadapt_flow.ir import (  # noqa: E402
+    ActionDeliveryReceipt,
     Postcondition,
     PostconditionKind,
+    Predicate,
+    PredicateKind,
     StructuralHandle,
     StructuralLocator,
 )
@@ -186,6 +198,17 @@ DRIFT_CSS = """
 body { background: #f5f3ff !important; }
 .navbar, .oe-header { background: #ede9fe !important; }
 """
+_IFRAME_GUARD_STATUS_JS = """(el, args) => {
+    const tokenMap = window[args.storeKey];
+    const entry = tokenMap instanceof Map ? tokenMap.get(args.token) : null;
+    return {
+        store: tokenMap instanceof Map,
+        entry: Boolean(entry),
+        same_element: Boolean(entry && entry.el === el),
+        token_attribute: el.getAttribute(args.tokenAttribute) === args.token,
+        connected: el.isConnected,
+    };
+}"""
 
 
 class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
@@ -231,6 +254,77 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         };
     }"""
     _CONFIRM_SELECTOR = "openemr://confirm-create"
+
+    @property
+    def _iframe_guards(self) -> dict[str, tuple[str, Any]]:
+        """One-shot DOM guards whose target lives in an OpenEMR iframe."""
+
+        guards = getattr(self, "_openemr_iframe_guards", None)
+        if guards is None:
+            guards = {}
+            self._openemr_iframe_guards = guards
+        return guards
+
+    def _unique_visible_confirm(self) -> tuple[Any, Any]:
+        matches: list[tuple[Any, Any]] = []
+        for frame in self.page.frames:
+            locator = frame.locator("#confirmCreate")
+            if locator.count() == 1 and locator.is_visible():
+                matches.append((frame, locator))
+        if len(matches) != 1:
+            raise FixtureError(
+                "expected exactly one visible OpenEMR confirmation control"
+            )
+        return matches[0]
+
+    def _iframe_target(self, locator: StructuralLocator) -> tuple[Any, Any] | None:
+        selector = locator.selector or ""
+        if selector == self._CONFIRM_SELECTOR:
+            return self._unique_visible_confirm()
+        if selector.startswith("#form_") or selector == "#create":
+            frame = _form_frame(self.page, timeout_s=1.0)
+            return frame, frame.locator(selector)
+        return None
+
+    def _cleanup_iframe_guard(self, token: str, frame: Any) -> None:
+        try:
+            frame.evaluate(
+                _CLEAN_GUARD_JS,
+                {
+                    "storeKey": self._structural_store_key,
+                    "tokenAttribute": self._token_attribute(token),
+                    "token": token,
+                },
+            )
+        except Exception:
+            # Closing or navigating the iframe destroys the page-local guard.
+            pass
+
+    def _bind_context_identity(self, kind: str, value: str) -> bool:
+        if not super()._bind_context_identity(kind, value):
+            return False
+        valid = True
+        seen: set[int] = set()
+        for _token, frame in self._iframe_guards.values():
+            frame_key = id(frame)
+            if frame_key in seen:
+                continue
+            seen.add(frame_key)
+            try:
+                current = bool(
+                    frame.evaluate(
+                        _BIND_CONTEXT_IDENTITY_JS,
+                        {
+                            "storeKey": self._structural_store_key,
+                            "kind": kind,
+                            "value": value,
+                        },
+                    )
+                )
+            except Exception:
+                current = False
+            valid = current and valid
+        return valid
 
     def _confirm_target(self, x: int, y: int) -> dict[str, str] | None:
         """Return the unique visible duplicate-confirm button under a point."""
@@ -294,54 +388,20 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
             name=target.get("name"),
         )
 
-    def locate_structural(
-        self, locator: StructuralLocator
-    ) -> StructuralHandle | None:
-        selector = locator.selector or ""
-        if selector == self._CONFIRM_SELECTOR:
-            try:
-                target = self._unique_visible_confirm_locator()
-                box = target.bounding_box()
-                if box is None or box["width"] <= 0 or box["height"] <= 0:
-                    return None
-                cx = int(round(box["x"] + box["width"] / 2))
-                cy = int(round(box["y"] + box["height"] / 2))
-                vw, vh = self.viewport
-                if not (0 <= cx < vw and 0 <= cy < vh):
-                    return None
-                topmost = target.evaluate(
-                    """el => {
-                        const box = el.getBoundingClientRect();
-                        const node = el.ownerDocument.elementFromPoint(
-                            box.x + box.width / 2, box.y + box.height / 2
-                        );
-                        return !!node && (node === el || el.contains(node));
-                    }"""
-                )
-                if not topmost:
-                    return None
-                modal = self.page.locator("#modalframe")
-                if modal.count() != 1:
-                    return None
-                modal_topmost = modal.evaluate(
-                    """(el, pt) => {
-                        const node = document.elementFromPoint(pt[0], pt[1]);
-                        return !!node && (node === el || el.contains(node));
-                    }""",
-                    [cx, cy],
-                )
-                if not modal_topmost:
-                    return None
-                return StructuralHandle(point=(cx, cy))
-            except Exception:
-                return None
-        if not (selector.startswith("#form_") or selector == "#create"):
+    def locate_structural(self, locator: StructuralLocator) -> StructuralHandle | None:
+        target = self._iframe_target(locator)
+        if target is None:
             return super().locate_structural(locator)
         try:
-            frame = _form_frame(self.page, timeout_s=1.0)
-            loc = frame.locator(selector)
-            if loc.count() != 1:
+            frame, loc = target
+            candidate_count = loc.count()
+            if candidate_count == 0:
                 return None
+            if candidate_count != 1:
+                raise StructuralResolutionRefused(
+                    "OpenEMR iframe locator is ambiguous: "
+                    f"candidate_count={candidate_count}"
+                )
             box = loc.bounding_box()
             if box is None or box["width"] <= 0 or box["height"] <= 0:
                 return None
@@ -350,12 +410,130 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
             vw, vh = self.viewport
             if not (0 <= cx < vw and 0 <= cy < vh):
                 return None
-            target = self._form_target(cx, cy)
-            if target is None or target.get("selector") != selector:
+            selector = locator.selector or ""
+            observed_target = (
+                self._confirm_target(cx, cy)
+                if selector == self._CONFIRM_SELECTOR
+                else self._form_target(cx, cy)
+            )
+            if observed_target is None or observed_target.get("selector") != selector:
                 return None
-            return StructuralHandle(point=(cx, cy))
+            token = uuid.uuid4().hex
+            observed = loc.evaluate(
+                _BIND_STRUCTURAL_TARGET_JS,
+                {
+                    "storeKey": self._structural_store_key,
+                    "tokenAttribute": self._token_attribute(token),
+                    "token": token,
+                    "requireRowIdentity": False,
+                },
+            )
+            if not isinstance(observed, dict):
+                self._cleanup_iframe_guard(token, frame)
+                return None
+            region = observed.get("region")
+            if (
+                not isinstance(region, list)
+                or len(region) != 4
+                or not all(isinstance(value, int) for value in region)
+            ):
+                self._cleanup_iframe_guard(token, frame)
+                return None
+            fingerprint = hashlib.sha256(token.encode("ascii")).hexdigest()
+            if len(self._iframe_guards) >= 128:
+                _old_fingerprint, (old_token, old_frame) = next(
+                    iter(self._iframe_guards.items())
+                )
+                self._iframe_guards.pop(_old_fingerprint)
+                self._cleanup_iframe_guard(old_token, old_frame)
+            self._iframe_guards[fingerprint] = (token, frame)
+            return StructuralHandle(
+                point=(cx, cy),
+                region=(
+                    int(round(box["x"])),
+                    int(round(box["y"])),
+                    int(round(box["width"])),
+                    int(round(box["height"])),
+                ),
+                target_fingerprint=fingerprint,
+                supported_operations=["dom_click", "dom_double_click"],
+            )
+        except StructuralResolutionRefused:
+            raise
         except Exception:
             return None
+
+    def act_structural(
+        self,
+        locator: StructuralLocator,
+        handle: StructuralHandle,
+        *,
+        double: bool = False,
+    ) -> ActionDeliveryReceipt:
+        target = self._iframe_target(locator)
+        if target is None:
+            return super().act_structural(locator, handle, double=double)
+        fingerprint = handle.target_fingerprint
+        if not fingerprint:
+            raise StructuralResolutionRefused(
+                "guarded OpenEMR iframe actuation requires a target fingerprint"
+            )
+        pending = self._iframe_guards.pop(fingerprint, None)
+        if pending is None:
+            raise StructuralResolutionRefused(
+                "OpenEMR iframe actuation token is missing, stale, or consumed"
+            )
+        token, armed_frame = pending
+        current_frame, loc = target
+        try:
+            if current_frame != armed_frame or loc.count() != 1:
+                raise StructuralResolutionRefused(
+                    "OpenEMR iframe target context changed before delivery"
+                )
+            if not self._guard_is_current(loc, token):
+                status = loc.evaluate(
+                    _IFRAME_GUARD_STATUS_JS,
+                    {
+                        "storeKey": self._structural_store_key,
+                        "tokenAttribute": self._token_attribute(token),
+                        "token": token,
+                    },
+                )
+                raise StructuralResolutionRefused(
+                    "OpenEMR iframe target identity changed before delivery "
+                    f"(guard_status={status!r})"
+                )
+            token_locator = current_frame.locator(f"[{self._token_attribute(token)}]")
+            if token_locator.count() != 1:
+                raise StructuralResolutionRefused(
+                    "OpenEMR iframe guard token is missing or ambiguous"
+                )
+            if double:
+                token_locator.dblclick(timeout=1000)
+            else:
+                token_locator.click(timeout=1000)
+        except StructuralResolutionRefused:
+            raise
+        except Exception as exc:
+            raise StructuralResolutionRefused(
+                "OpenEMR iframe target changed or became unactionable"
+            ) from exc
+        finally:
+            self._cleanup_iframe_guard(token, armed_frame)
+        return ActionDeliveryReceipt(
+            receipt_id=f"playwright-openemr-{uuid.uuid4().hex}",
+            operation="dom_double_click" if double else "dom_click",
+            native=False,
+            target_fingerprint=fingerprint,
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def cancel_pending_structural_guards(self) -> None:
+        super().cancel_pending_structural_guards()
+        pending = list(self._iframe_guards.values())
+        self._iframe_guards.clear()
+        for token, frame in pending:
+            self._cleanup_iframe_guard(token, frame)
 
     def structured_text_at(self, x: int, y: int) -> str | None:
         target = self._confirm_target(x, y) or self._form_target(x, y)
@@ -372,16 +550,7 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         )
 
     def _unique_visible_confirm_locator(self) -> Any:
-        matches: list[Any] = []
-        for frame in self.page.frames:
-            locator = frame.locator("#confirmCreate")
-            if locator.count() == 1 and locator.is_visible():
-                matches.append(locator)
-        if len(matches) != 1:
-            raise FixtureError(
-                "expected exactly one visible OpenEMR confirmation control"
-            )
-        return matches[0]
+        return self._unique_visible_confirm()[1]
 
 
 def _center(locator: Any) -> tuple[int, int]:
@@ -420,9 +589,7 @@ def _preauthenticate_browser(backend: Any, fixture: OpenEMRFixture) -> None:
     page.locator(f'iframe[name="{FORM_FRAME_NAME}"]').wait_for(
         state="visible", timeout=60_000
     )
-    _form_frame(page).locator("#form_fname").wait_for(
-        state="visible", timeout=60_000
-    )
+    _form_frame(page).locator("#form_fname").wait_for(state="visible", timeout=60_000)
     # The pinned image displays an installation-registration dialog in the top
     # shell for every fresh browser profile. It intercepts all child-frame
     # pointer input. Dismiss it in unmeasured setup through the explicit
@@ -435,9 +602,7 @@ def _preauthenticate_browser(backend: Any, fixture: OpenEMRFixture) -> None:
             telemetry.uncheck()
         if telemetry.count() and telemetry.is_checked():
             raise FixtureError("OpenEMR anonymous telemetry could not be disabled")
-        registration.get_by_role(
-            "button", name="Ask again later", exact=True
-        ).click()
+        registration.get_by_role("button", name="Ask again later", exact=True).click()
         registration.wait_for(state="hidden", timeout=30_000)
 
 
@@ -527,6 +692,221 @@ def _wait_for_patient_write(
     raise FixtureError("confirmed patient save produced no durable SQL row")
 
 
+_OVERLAY_STATUS = {
+    "idle": "Ready",
+    "observing": "Observing the application",
+    "recording": "Watching your demonstration",
+    "executing": "Executing with verification gates",
+    "verified": "Outcome verified",
+    "halted": "Halted instead of guessing",
+    "failed": "Execution failed",
+}
+_OVERLAY_LABEL = {
+    "demonstration": "Workflow demonstration",
+    "governed": "Governed workflow",
+}
+
+
+def _finalized_video(video_dir: Path) -> Path:
+    videos = [path for path in video_dir.glob("*.webm") if path.is_file()]
+    if len(videos) != 1:
+        raise FixtureError("video capture did not produce exactly one WebM")
+    return videos[0]
+
+
+def _video_duration_ms(video: Path) -> int:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        raise FixtureError(
+            "video timeline export requires separately installed ffprobe"
+        )
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    try:
+        duration_ms = int(round(float(result.stdout.strip()) * 1000))
+    except ValueError as exc:
+        raise FixtureError("ffprobe returned no usable video duration") from exc
+    if result.returncode or duration_ms <= 0:
+        raise FixtureError("ffprobe could not inspect the finalized video")
+    return duration_ms
+
+
+def _overlay_frame(
+    *,
+    sequence: int,
+    at_ms: int,
+    capture_unix_ms: int,
+    phase: str,
+    mode: str,
+    current_step: int | None,
+    total_steps: int | None,
+) -> dict[str, Any]:
+    current = str(current_step) if current_step is not None else "no-step"
+    total = str(total_steps) if total_steps is not None else "no-total"
+    return {
+        "schema_version": "openadapt.control-overlay-frame/v1",
+        "state_id": ":".join(
+            (
+                "visible",
+                phase,
+                mode,
+                "demo",
+                current,
+                total,
+                "no-pause",
+                "no-resume",
+                "no-stop",
+            )
+        ),
+        "event_sequence": sequence,
+        "observed_at_unix_ms": capture_unix_ms + at_ms,
+        "observed_at_monotonic_ms": float(at_ms),
+        "visible": True,
+        "phase": phase,
+        "workflow_label": _OVERLAY_LABEL[mode],
+        "mode": mode,
+        "profile": "demo",
+        "step": {"current": current_step, "total": total_steps},
+        "controls": {"pause": False, "resume": False, "stop": False},
+        "status": _OVERLAY_STATUS[phase],
+        "presentation": True,
+    }
+
+
+def _write_overlay_timeline(
+    output_path: Path,
+    *,
+    evidence_pack_id: str,
+    video: Path,
+    capture_unix_ms: int,
+    frames: list[tuple[int, str, str, int | None, int | None]],
+) -> None:
+    duration_ms = _video_duration_ms(video)
+    timeline_events = []
+    previous = -1
+    for sequence, (at_ms, phase, mode, current, total) in enumerate(frames):
+        bounded = min(max(at_ms, previous + 1), duration_ms)
+        if bounded <= previous:
+            raise FixtureError("overlay frames exceed the finalized video duration")
+        timeline_events.append(
+            {
+                "at_ms": bounded,
+                "frame": _overlay_frame(
+                    sequence=sequence,
+                    at_ms=bounded,
+                    capture_unix_ms=capture_unix_ms,
+                    phase=phase,
+                    mode=mode,
+                    current_step=current,
+                    total_steps=total,
+                ),
+            }
+        )
+        previous = bounded
+    payload = {
+        "schema_version": "openadapt.control-overlay-timeline/v1",
+        "data_classification": "synthetic",
+        "evidence_pack_id": evidence_pack_id,
+        "media_sha256": _artifact_sha256(video),
+        "duration_ms": duration_ms,
+        "events": timeline_events,
+    }
+    try:
+        from openadapt_types import ControlOverlayTimelineV1
+    except ImportError:
+        pass
+    else:
+        ControlOverlayTimelineV1.model_validate(payload)
+    _write_private_exclusive(
+        output_path,
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+    )
+
+
+def _write_recording_timeline(
+    recording_dir: Path,
+    events: list[dict[str, Any]],
+    *,
+    video: Path,
+    capture_unix_ms: int,
+    task_started_offset_ms: float,
+    task_finished_offset_ms: float,
+) -> None:
+    total = len(events)
+    frames: list[tuple[int, str, str, int | None, int | None]] = [
+        (0, "recording", "demonstration", None, None)
+    ]
+    for current, event in enumerate(events, start=1):
+        event_time = event.get("t")
+        if not isinstance(event_time, (int, float)):
+            raise FixtureError("recording event lacks a monotonic timestamp")
+        frames.append(
+            (
+                int(round(task_started_offset_ms + event_time * 1000)),
+                "recording",
+                "demonstration",
+                current,
+                total,
+            )
+        )
+    frames.append(
+        (int(round(task_finished_offset_ms)), "idle", "demonstration", None, None)
+    )
+    _write_overlay_timeline(
+        recording_dir / "runtime-timeline.json",
+        evidence_pack_id="openemr-8.0.0.3-recording-jordan-example-v1",
+        video=video,
+        capture_unix_ms=capture_unix_ms,
+        frames=frames,
+    )
+
+
+def _write_replay_timeline(
+    run_dir: Path,
+    report: Any,
+    *,
+    video: Path,
+    evidence_pack_id: str,
+    capture_unix_ms: int,
+    task_started_offset_ms: float,
+) -> None:
+    total = len(report.results)
+    frames: list[tuple[int, str, str, int | None, int | None]] = [
+        (0, "observing", "governed", None, None)
+    ]
+    cursor_ms = task_started_offset_ms
+    for current, result in enumerate(report.results, start=1):
+        frames.append((int(round(cursor_ms)), "executing", "governed", current, total))
+        cursor_ms += max(0.0, float(result.elapsed_ms))
+    if report.success:
+        terminal = "verified"
+    elif report.results and report.results[-1].failure_category == "runtime_failure":
+        terminal = "failed"
+    else:
+        terminal = "halted"
+    frames.append((int(round(cursor_ms)), terminal, "governed", None, None))
+    _write_overlay_timeline(
+        run_dir / "runtime-timeline.json",
+        evidence_pack_id=evidence_pack_id,
+        video=video,
+        capture_unix_ms=capture_unix_ms,
+        frames=frames,
+    )
+
+
 def _stable_pre_trial_counts(fixture: OpenEMRFixture) -> dict[str, int]:
     """Wait for unmeasured setup/audit subscribers to reach quiescence.
 
@@ -560,15 +940,29 @@ def _reset_recording_state(fixture: OpenEMRFixture) -> OpenEMRPatientOracle:
     return OpenEMRPatientOracle(fixture.api_base_url, reader)
 
 
-def record(fixture: OpenEMRFixture, out_dir: Path, *, headed: bool) -> Path:
+def record(
+    fixture: OpenEMRFixture,
+    out_dir: Path,
+    *,
+    headed: bool,
+    record_video_dir: Path | None = None,
+) -> Path:
     """Record the patient-registration UI task after unmeasured login/setup."""
     from openadapt_flow.recorder import Recorder
 
     if out_dir.exists():
         raise FixtureError(f"recording path exists; refusing overwrite: {out_dir}")
     oracle = _reset_recording_state(fixture)
+    capture_unix_ms = int(time.time() * 1000)
+    capture_origin = time.monotonic()
+    recording: Path | None = None
+    events: list[dict[str, Any]] = []
+    task_started_offset_ms = 0.0
+    task_finished_offset_ms = 0.0
     backend, close = OpenEMRPlaywrightBackend.launch(
-        fixture.ui_base_url, headless=not headed
+        fixture.ui_base_url,
+        headless=not headed,
+        record_video_dir=str(record_video_dir) if record_video_dir else None,
     )
     try:
         _preauthenticate_browser(backend, fixture)
@@ -577,6 +971,7 @@ def record(fixture: OpenEMRFixture, out_dir: Path, *, headed: bool) -> Path:
         before_counts = _stable_pre_trial_counts(fixture)
         before_patient_digest = fixture.non_target_patient_data_sha256()
         before_history_digest = fixture.history_data_sha256()
+        task_started_offset_ms = (time.monotonic() - capture_origin) * 1000
         recorder = Recorder(
             backend,
             out_dir,
@@ -629,6 +1024,7 @@ def record(fixture: OpenEMRFixture, out_dir: Path, *, headed: bool) -> Path:
         # the real POST.  This second click is the governed write step.
         recorder.click(*_center(_confirm_create_locator(page)))
         recording = recorder.finish()
+        task_finished_offset_ms = (time.monotonic() - capture_origin) * 1000
         events = [
             json.loads(line)
             for line in (recording / "events.jsonl").read_text().splitlines()
@@ -648,7 +1044,7 @@ def record(fixture: OpenEMRFixture, out_dir: Path, *, headed: bool) -> Path:
             before_counts=before_counts,
             before_non_target_patient_sha256=before_patient_digest,
             before_history_data_sha256=before_history_digest,
-            arm="compiled",
+            arm="record",
         )
         verdict = classify_patient_trial(
             actor_reported_success=True,
@@ -682,9 +1078,20 @@ def record(fixture: OpenEMRFixture, out_dir: Path, *, headed: bool) -> Path:
                 + "\n"
             ).encode(),
         )
-        return recording
     finally:
         close()
+    if recording is None:
+        raise FixtureError("recording did not finalize")
+    if record_video_dir is not None:
+        _write_recording_timeline(
+            recording,
+            events,
+            video=_finalized_video(record_video_dir),
+            capture_unix_ms=capture_unix_ms,
+            task_started_offset_ms=task_started_offset_ms,
+            task_finished_offset_ms=task_finished_offset_ms,
+        )
+    return recording
 
 
 def _marked_save_step_id(recording_dir: Path) -> str:
@@ -749,6 +1156,17 @@ def compile_recording(recording_dir: Path, bundle_dir: Path) -> None:
     # Generic recorder mining can emit a flaky region-stable expectation for
     # this transition. Bind the semantic state we actually require instead.
     open_step.expect = [_duplicate_dialog_postcondition()]
+    scroll_steps = [step for step in workflow.steps if step.action.value == "scroll"]
+    scroll_predicates = _openemr_scroll_predicates()
+    if len(scroll_steps) != len(scroll_predicates):
+        raise FixtureError(
+            "recording did not retain the two demonstrated OpenEMR scrolls"
+        )
+    for step, predicate in zip(scroll_steps, scroll_predicates, strict=True):
+        # These labels are stable, application-owned readiness evidence. They
+        # keep a reversible scroll closed-loop without asking a still-offscreen
+        # field's OCR fallback to disambiguate the next actuation target.
+        step.wait_until = predicate
     save_steps[0].effects = patient_effects()
     save_steps[0].risk = "reversible"
     expected_params = set(SyntheticPatientSpec().params())
@@ -805,6 +1223,23 @@ def _duplicate_dialog_postcondition() -> Postcondition:
     )
 
 
+def _openemr_scroll_predicates() -> list[Predicate]:
+    return [
+        Predicate(
+            kind=PredicateKind.TEXT_PRESENT,
+            text="Address:",
+            intent="OpenEMR contact fields are visible",
+            timeout_s=10.0,
+        ),
+        Predicate(
+            kind=PredicateKind.TEXT_PRESENT,
+            text="Create New Patient",
+            intent="OpenEMR create control is visible",
+            timeout_s=10.0,
+        ),
+    ]
+
+
 def _validate_benchmark_bundle(bundle_dir: Path) -> Any:
     """Load and verify the exact OpenEMR benchmark contract before paid work."""
     from openadapt_flow.ir import Workflow
@@ -828,6 +1263,7 @@ def _validate_benchmark_bundle(bundle_dir: Path) -> Any:
         and step.anchor.structural is not None
         and step.anchor.structural.selector == "#create"
     ]
+    scroll_steps = [step for step in workflow.steps if step.action.value == "scroll"]
     if (
         workflow.name != "openemr-create-synthetic-patient"
         or set(workflow.params) != expected_params
@@ -840,6 +1276,7 @@ def _validate_benchmark_bundle(bundle_dir: Path) -> Any:
         != effects_payload
         or len(dialog_steps) != 1
         or dialog_steps[0].expect != [_duplicate_dialog_postcondition()]
+        or [step.wait_until for step in scroll_steps] != _openemr_scroll_predicates()
         or workflow.steps.index(dialog_steps[0]) + 1
         != workflow.steps.index(effect_steps[0])
     ):
@@ -1314,6 +1751,7 @@ def run_compiled_trial(
     headed: bool,
     evidence_dir: Path,
     environment_identity: dict[str, Any],
+    record_video_dir: Path | None = None,
 ) -> TrialRow:
     from openadapt_flow.ir import Workflow
     from openadapt_flow.runtime import Replayer
@@ -1325,13 +1763,18 @@ def run_compiled_trial(
     baseline_hash = fixture.reset()
     reader = fixture.token_session("oracle")
     oracle = OpenEMRPatientOracle(fixture.api_base_url, reader)
+    capture_unix_ms = int(time.time() * 1000)
+    capture_origin = time.monotonic()
     backend, close = OpenEMRPlaywrightBackend.launch(
-        fixture.ui_base_url, headless=not headed
+        fixture.ui_base_url,
+        headless=not headed,
+        record_video_dir=str(record_video_dir) if record_video_dir else None,
     )
     report = None
     error = None
     actuation_wall_s = 0.0
     start = 0.0
+    task_started_offset_ms = 0.0
     before_counts = None
     before_patient_digest = None
     before_history_digest = None
@@ -1341,9 +1784,11 @@ def run_compiled_trial(
         before_counts = _stable_pre_trial_counts(fixture)
         before_patient_digest = fixture.non_target_patient_data_sha256()
         before_history_digest = fixture.history_data_sha256()
+        workflow = Workflow.load(bundle_dir)
         start = time.monotonic()
+        task_started_offset_ms = (start - capture_origin) * 1000
         report = Replayer(backend, effect_verifier=oracle.verifier).run(
-            Workflow.load(bundle_dir),
+            workflow,
             params=SyntheticPatientSpec().params(),
             bundle_dir=bundle_dir,
             run_dir=run_dir,
@@ -1368,6 +1813,17 @@ def run_compiled_trial(
     except Exception as exc:  # noqa: BLE001
         if error is None:
             error = f"browser teardown: {type(exc).__name__}: {exc}"
+    if report is not None and record_video_dir is not None:
+        _write_replay_timeline(
+            run_dir,
+            report,
+            video=_finalized_video(record_video_dir),
+            evidence_pack_id=(
+                f"openemr-8.0.0.3-replay-{condition.replace('_', '-')}-trial-{trial}-v1"
+            ),
+            capture_unix_ms=capture_unix_ms,
+            task_started_offset_ms=task_started_offset_ms,
+        )
     artifact_metadata = _persist_evidence(
         evidence_dir,
         evidence=evidence,
@@ -1541,6 +1997,7 @@ def run_matrix(
     max_total_agent_cost_usd: float | None,
     headed: bool,
     model_free: bool = False,
+    record_video_dir: Path | None = None,
 ) -> list[TrialRow]:
     """Run a full matrix or explicit non-publication model-free subset."""
     selected_arms = MODEL_FREE_ARMS if model_free else FULL_ARMS
@@ -1632,6 +2089,11 @@ def run_matrix(
                     headed=headed,
                     evidence_dir=out_dir / "evidence" / f"compiled-{trial_label}",
                     environment_identity=environment_identity,
+                    record_video_dir=(
+                        record_video_dir / f"compiled-{trial_label}"
+                        if record_video_dir
+                        else None
+                    ),
                 )
             )
             persist(
@@ -1794,6 +2256,7 @@ def main(argv: list[str] | None = None) -> int:
     record_parser = sub.add_parser("record")
     record_parser.add_argument("--out", type=Path, required=True)
     record_parser.add_argument("--headed", action="store_true")
+    record_parser.add_argument("--record-video-dir", type=Path)
     compile_parser = sub.add_parser("compile")
     compile_parser.add_argument("--recording", type=Path, required=True)
     compile_parser.add_argument("--bundle", type=Path, required=True)
@@ -1808,6 +2271,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--max-cost-per-run-usd", type=float, default=1.50)
     run_parser.add_argument("--max-total-agent-cost-usd", type=float)
     run_parser.add_argument("--headed", action="store_true")
+    run_parser.add_argument("--record-video-dir", type=Path)
     args = parser.parse_args(argv)
     fixture = OpenEMRFixture(args.state)
 
@@ -1836,7 +2300,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(_plan(n, model_free=args.model_free), indent=2))
         elif args.command == "record":
             fixture.up()
-            record(fixture, args.out, headed=args.headed)
+            record(
+                fixture,
+                args.out,
+                headed=args.headed,
+                record_video_dir=args.record_video_dir,
+            )
         elif args.command == "compile":
             compile_recording(args.recording, args.bundle)
         elif args.command == "run":
@@ -1855,6 +2324,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_total_agent_cost_usd=args.max_total_agent_cost_usd,
                 headed=args.headed,
                 model_free=args.model_free,
+                record_video_dir=args.record_video_dir,
             )
     except FixtureError as exc:
         print(f"openemr-local benchmark refused: {exc}", file=sys.stderr)

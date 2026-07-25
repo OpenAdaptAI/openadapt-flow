@@ -172,6 +172,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 case_id=case.id,
                 project_id=project.project_id,
                 project_revision=project.revision,
+                project_contract_sha256=project.contract_sha256(),
                 workflow_contract_sha256=workflow_contract_sha256(workflow),
                 environment_contract_sha256=project.environment.contract_sha256(),
                 environment_digest=project.environment.environment_digest,
@@ -303,6 +304,46 @@ def test_irreversible_action_cannot_be_down_classified() -> None:
         )
 
 
+def test_deserialized_risk_down_classification_cannot_bypass_coverage() -> None:
+    workflow = _workflow()
+    init_project(workflow, environment=_environment(), minimum_effect_tier=4)
+    project = workflow.qualification
+    assert project is not None
+    project.action_classifications["save"] = ActionRiskClassification(
+        step_id="save",
+        classification="state_changing",
+        explanation="Tampered weaker classification",
+        operator_confirmed=True,
+    )
+    report = evaluate_qualification(workflow)
+    codes = {refusal.code for refusal in report.refusals}
+    assert QualificationRefusalCode.ACTION_CLASSIFICATION_CONFLICT in codes
+    assert QualificationRefusalCode.STEP_IDENTITY_UNARMED not in codes
+    assert QualificationRefusalCode.IDENTITY_POLICY_MISSING in codes
+    assert report.consequential_action_count == 1
+
+
+def test_effect_bearing_action_cannot_be_deserialized_as_read_only() -> None:
+    workflow = _workflow()
+    workflow.steps[0].risk = "reversible"
+    workflow.steps[0].effects[0].risk = "reversible"
+    init_project(workflow, environment=_environment(), minimum_effect_tier=4)
+    project = workflow.qualification
+    assert project is not None
+    project.action_classifications["save"] = ActionRiskClassification(
+        step_id="save",
+        classification="read_only",
+        explanation="Tampered weaker classification",
+        operator_confirmed=True,
+    )
+    report = evaluate_qualification(workflow)
+    assert QualificationRefusalCode.ACTION_CLASSIFICATION_CONFLICT in {
+        refusal.code for refusal in report.refusals
+    }
+    assert report.state_changing_action_count == 1
+    assert report.effect_required_action_count == 1
+
+
 def test_effect_policy_is_bound_to_exact_contract_hash() -> None:
     workflow = _workflow()
     _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
@@ -426,6 +467,22 @@ def test_environment_change_invalidates_signed_case_results(tmp_path: Path) -> N
     }
 
 
+def test_project_contract_change_invalidates_signed_case_results(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    project.minimum_effect_tier = VerificationTier.IMMEDIATE_SCREEN
+    report = evaluate_qualification(workflow, evidence_root=evidence_root)
+    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
+        refusal.code for refusal in report.refusals
+    }
+
+
 @pytest.mark.parametrize("mutation", ["tampered", "missing"])
 def test_tampered_or_missing_evidence_cannot_certify(
     tmp_path: Path,
@@ -466,6 +523,7 @@ def test_fabricated_attestation_cannot_be_recorded(tmp_path: Path) -> None:
         case_id=case.id,
         project_id=project.project_id,
         project_revision=project.revision,
+        project_contract_sha256=project.contract_sha256(),
         workflow_contract_sha256=workflow_contract_sha256(workflow),
         environment_contract_sha256=project.environment.contract_sha256(),
         environment_digest=project.environment.environment_digest,

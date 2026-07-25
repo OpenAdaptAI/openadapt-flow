@@ -247,6 +247,7 @@ class QualificationCaseResult(BaseModel):
     case_id: str
     project_id: str
     project_revision: int = Field(ge=1)
+    project_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     workflow_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     environment_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     environment_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -361,6 +362,7 @@ class QualificationCertification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_revision: int
+    project_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     workflow_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     environment_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     policy_name: str
@@ -451,10 +453,22 @@ class QualificationProject(BaseModel):
         return self
 
     def revision_digest(self) -> str:
+        return self.contract_sha256()
+
+    def contract_sha256(self) -> str:
+        """Digest the exact qualification contract, without result self-reference."""
+
         payload = self.model_dump(
             mode="json",
-            exclude={"previous_revision_sha256", "last_certification"},
+            exclude={
+                "previous_revision_sha256",
+                "created_at",
+                "updated_at",
+                "last_certification",
+            },
         )
+        for case in payload["cases"]:
+            case["results"] = []
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -463,6 +477,7 @@ class QualificationRefusalCode(str, Enum):
     PROJECT_MISSING = "project_missing"
     ACTION_CLASSIFICATION_MISSING = "action_classification_missing"
     ACTION_CLASSIFICATION_UNCONFIRMED = "action_classification_unconfirmed"
+    ACTION_CLASSIFICATION_CONFLICT = "action_classification_conflict"
     STEP_IDENTITY_UNARMED = "step_identity_unarmed"
     IDENTITY_POLICY_MISSING = "identity_policy_missing"
     IDENTITY_POLICY_UNENFORCED = "identity_policy_unenforced"
@@ -614,6 +629,18 @@ def _inferred_action_classification(step: "Step") -> ActionRiskClassification:
     )
 
 
+def _executable_risk_floor(step: "Step") -> Optional[ActionRiskClass]:
+    """Return the least-permissive class required by executable contracts."""
+
+    if step.risk == "irreversible" or any(
+        effect.risk.strip().lower() == "irreversible" for effect in step.effects
+    ):
+        return ActionRiskClass.IRREVERSIBLE
+    if step.effects:
+        return ActionRiskClass.STATE_CHANGING
+    return None
+
+
 def available_identity_sources(step: "Step") -> set[IdentityEvidenceSource]:
     anchor = step.anchor
     if anchor is None:
@@ -730,7 +757,7 @@ def set_action_classification(
     if not classification.operator_confirmed:
         raise QualificationError("an operator classification must be confirmed")
     if (
-        step.risk == "irreversible"
+        _executable_risk_floor(step) is ActionRiskClass.IRREVERSIBLE
         and classification.classification is not ActionRiskClass.IRREVERSIBLE
     ):
         raise QualificationError(
@@ -911,6 +938,11 @@ def _case_result_integrity_error(
         return (
             QualificationRefusalCode.CASE_CAPABILITY_MISSING,
             "runner lacks required capabilities: " + ", ".join(missing_capabilities),
+        )
+    if result.project_contract_sha256 != project.contract_sha256():
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case result is bound to a different qualification contract",
         )
     public_key_base64 = project.trusted_runner_keys.get(result.attestation_key_id)
     if public_key_base64 is None or not result.attestation_signature:
@@ -1118,6 +1150,7 @@ def evaluate_qualification(
     consequential_steps: list[Step] = []
     for step in steps:
         classification = project.action_classifications.get(step.id)
+        executable_floor = _executable_risk_floor(step)
         if classification is None:
             refusals.append(
                 QualificationRefusal(
@@ -1127,8 +1160,8 @@ def evaluate_qualification(
                     message="action has no reviewed business-risk classification",
                 )
             )
-            continue
-        if (
+            effective_classification = executable_floor
+        elif (
             not classification.operator_confirmed
             or classification.classification is ActionRiskClass.UNKNOWN
         ):
@@ -1140,10 +1173,45 @@ def evaluate_qualification(
                     message="action risk is unknown or has not been operator-confirmed",
                 )
             )
-            continue
-        if classification.classification is ActionRiskClass.STATE_CHANGING:
+            effective_classification = executable_floor
+        else:
+            effective_classification = classification.classification
+            if (
+                executable_floor is ActionRiskClass.IRREVERSIBLE
+                and effective_classification is not ActionRiskClass.IRREVERSIBLE
+            ):
+                refusals.append(
+                    QualificationRefusal(
+                        code=QualificationRefusalCode.ACTION_CLASSIFICATION_CONFLICT,
+                        path=f"qualification.action_classifications.{step.id}",
+                        step_id=step.id,
+                        message=(
+                            "operator classification is weaker than the executable "
+                            "irreversible action/effect contract"
+                        ),
+                    )
+                )
+                effective_classification = ActionRiskClass.IRREVERSIBLE
+            elif (
+                executable_floor is ActionRiskClass.STATE_CHANGING
+                and effective_classification is ActionRiskClass.READ_ONLY
+            ):
+                refusals.append(
+                    QualificationRefusal(
+                        code=QualificationRefusalCode.ACTION_CLASSIFICATION_CONFLICT,
+                        path=f"qualification.action_classifications.{step.id}",
+                        step_id=step.id,
+                        message=(
+                            "an action with a declared business effect cannot be "
+                            "classified read-only"
+                        ),
+                    )
+                )
+                effective_classification = ActionRiskClass.STATE_CHANGING
+
+        if effective_classification is ActionRiskClass.STATE_CHANGING:
             state_changing_steps.append(step)
-        elif classification.classification in {
+        elif effective_classification in {
             ActionRiskClass.CONSEQUENTIAL,
             ActionRiskClass.IRREVERSIBLE,
         }:
@@ -1418,6 +1486,7 @@ def certify_project(
     if project is not None:
         project.last_certification = QualificationCertification(
             project_revision=project.revision,
+            project_contract_sha256=project.contract_sha256(),
             workflow_contract_sha256=report.workflow_contract_sha256,
             environment_contract_sha256=project.environment.contract_sha256(),
             policy_name=policy.name,
@@ -1445,6 +1514,7 @@ def save_qualified_workflow(
     if project is not None and certification is not None:
         if (
             certification.project_revision != project.revision
+            or certification.project_contract_sha256 != project.contract_sha256()
             or certification.workflow_contract_sha256
             != workflow_contract_sha256(workflow)
             or certification.environment_contract_sha256

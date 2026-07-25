@@ -19,8 +19,9 @@ The v1 contract records:
 - The minimum acceptable effect tier.
 - Representative cases and deterministic ambiguity, wrong/stale identity, and
   weak/missing effect cases.
-- Trusted-runner attestations bound to the exact project revision, executable
-  workflow, environment, runtime, capabilities, and on-disk evidence hashes.
+- Trusted-runner attestations bound to the exact project contract and revision,
+  executable workflow, environment, runtime, capabilities, and on-disk evidence
+  hashes.
 - Machine-readable certification refusals.
 - Semantic revisions and requalification conditions.
 

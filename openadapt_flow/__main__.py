@@ -1258,6 +1258,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     execution_outcome = getattr(report, "execution_outcome", None)
     outcome = execution_outcome or ("success" if report.success else "FAILED")
     print(f"Resume {outcome}: {report_md}")
+    _maybe_report_break(run_dir, report)
     _maybe_report_run(
         run_dir,
         report,
@@ -2209,7 +2210,16 @@ def _maybe_report_break(run_dir: Path, report) -> None:
     import os
 
     workflow_id = os.environ.get("OPENADAPT_FLOW_HOSTED_WORKFLOW_ID")
-    if not workflow_id or getattr(report, "halt", None) is None:
+    attention_outcomes = {
+        "COMPLETED_UNVERIFIED",
+        "HALTED",
+        "FAILED",
+        "ROLLED_BACK",
+    }
+    if not workflow_id or (
+        getattr(report, "halt", None) is None
+        and getattr(report, "execution_outcome", None) not in attention_outcomes
+    ):
         return
     try:
         from openadapt_flow.hosted import report_break
@@ -2233,7 +2243,7 @@ def _maybe_report_run(
     *,
     backend_kind: Optional[str] = None,
 ) -> None:
-    """Opt-in post-run hook: emit a PHI-free SUCCESS summary (the L0 rail).
+    """Opt-in post-run hook: emit a PHI-free VERIFIED summary (the L0 rail).
 
     NEVER auto-uploads: it fires only when the operator explicitly opted in —
     ``run --report`` on this invocation, or ``OPENADAPT_FLOW_REPORT_RUN=1``

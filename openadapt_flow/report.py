@@ -253,6 +253,31 @@ def render_run_report(run_dir: Path | str) -> Path:
         lines.append(
             f"- **Execution profile:** `{report.execution_profile}` ({production})"
         )
+    if report.outcome_envelope is not None:
+        envelope = report.outcome_envelope
+        required = envelope.required_contracts.model_dump()
+        passed = envelope.passed_contracts.model_dump()
+        contract_parts = [
+            f"{name} {passed[name]}/{required[name]}"
+            for name in required
+            if required[name] > 0
+        ]
+        lines.append(
+            "- **Required contracts passed:** "
+            + (", ".join(contract_parts) if contract_parts else "none declared")
+        )
+        lines.append(
+            "- **Evidence classes:** "
+            + (
+                ", ".join(f"`{item}`" for item in envelope.evidence_classes)
+                if envelope.evidence_classes
+                else "none"
+            )
+        )
+        lines.append(f"- **Model calls:** {envelope.model_calls}")
+        lines.append(
+            f"- **External network calls:** `{envelope.external_network_calls}`"
+        )
     lines.append(f"- **Steps:** {ok_count}/{len(report.results)} ok")
     lines.append(f"- **Heals:** {report.heal_count}")
     # Egress transparency (PHI audit REM-3): make it unmistakable whether a

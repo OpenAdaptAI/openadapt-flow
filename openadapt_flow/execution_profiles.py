@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from openadapt_flow.verification import VerificationTier
 
@@ -37,6 +37,7 @@ class ExecutionOutcome(str, Enum):
     COMPLETED_UNVERIFIED = "COMPLETED_UNVERIFIED"
     HALTED = "HALTED"
     FAILED = "FAILED"
+    ROLLED_BACK = "ROLLED_BACK"
 
 
 @dataclass(frozen=True)
@@ -245,4 +246,164 @@ def stamp_execution_outcome(
     )
     if execution_profile_contract(resolved).production:
         report.success = outcome is ExecutionOutcome.VERIFIED
+    report.outcome_envelope = build_outcome_envelope(report, workflow)
     return outcome
+
+
+def build_outcome_envelope(report: RunReport, workflow: Workflow):
+    """Build the versioned PHI-free evidence summary for ``report``.
+
+    Counts are derived from typed workflow/report fields only.  Free-text
+    intents, parameters, identifiers, effect hashes, and observed values never
+    enter the envelope.
+    """
+
+    from openadapt_flow.ir import (
+        ExecutionOutcomeEnvelope,
+        OutcomeContractCounts,
+        OutcomeEvidenceClass,
+    )
+    from openadapt_flow.traversal import iter_workflow_steps
+
+    if report.execution_outcome is None:
+        raise ValueError("execution outcome must be classified before enveloping")
+
+    steps_by_id = {step.id: step for step in iter_workflow_steps(workflow)}
+    production = report.execution_profile in {"standard", "regulated"}
+
+    required_authorization = 1 if production else 0
+    passed_authorization = int(
+        bool(
+            required_authorization
+            and report.governed_authorization_id
+            and report.governed_runtime_inputs_digest
+        )
+    )
+
+    required_identity_ids = set(report.required_identity_step_ids)
+    required_identity = len(required_identity_ids)
+    passed_identity = sum(
+        1
+        for step_id in required_identity_ids
+        if any(
+            result.step_id == step_id
+            and not result.skipped
+            and result.identity is not None
+            and result.identity.status == "verified"
+            for result in report.results
+        )
+    )
+
+    required_postconditions = 0
+    passed_postconditions = 0
+    required_effects = 0
+    passed_effects = 0
+    evidence_classes: set[OutcomeEvidenceClass] = set()
+    effect_class_by_tier: dict[int, OutcomeEvidenceClass] = {
+        1: "effect_tier_1",
+        2: "effect_tier_2",
+        3: "effect_tier_3",
+        4: "effect_tier_4",
+    }
+    compensation_actions = 0
+    for result in report.results:
+        if result.skipped:
+            continue
+        step = steps_by_id.get(result.step_id)
+        if step is not None:
+            postcondition_count = len(step.expect)
+            required_postconditions += postcondition_count
+            if result.postconditions_ok is True:
+                passed_postconditions += postcondition_count
+            effects = step.effects or (
+                step.api_binding.effects if step.api_binding is not None else []
+            )
+            required_effects += len(effects)
+        if result.effect_verified is True:
+            passed_effects += len(
+                {
+                    evidence.effect_contract_hash
+                    for evidence in result.effect_evidence
+                    if evidence.final_verdict == "confirmed"
+                }
+            )
+        if result.identity is not None and result.identity.status == "verified":
+            evidence_classes.add("identity")
+        if result.postconditions_ok is True and step is not None and step.expect:
+            evidence_classes.add("postcondition")
+        for evidence in result.effect_evidence:
+            if (
+                evidence.final_verdict == "confirmed"
+                and evidence.verification_tier is not None
+            ):
+                evidence_class = effect_class_by_tier.get(evidence.verification_tier)
+                if evidence_class is not None:
+                    evidence_classes.add(evidence_class)
+            if evidence.reconciliation_completed:
+                compensation_actions += evidence.reconciliation_actions
+                if evidence.reconciliation_actions:
+                    evidence_classes.add("compensation")
+
+    required = OutcomeContractCounts(
+        authorization=required_authorization,
+        identity=required_identity,
+        postcondition=required_postconditions,
+        effect=required_effects,
+    )
+    passed = OutcomeContractCounts(
+        authorization=passed_authorization,
+        identity=min(passed_identity, required_identity),
+        postcondition=min(passed_postconditions, required_postconditions),
+        effect=min(passed_effects, required_effects),
+    )
+    if passed.authorization:
+        evidence_classes.add("authorization")
+    if report.model_calls:
+        evidence_classes.add("model")
+
+    return ExecutionOutcomeEnvelope(
+        outcome=report.execution_outcome,
+        profile=report.execution_profile,
+        production_eligible=report.production_eligible,
+        execution_completed=bool(report.execution_completed),
+        required_contracts=required,
+        passed_contracts=passed,
+        evidence_classes=sorted(evidence_classes),
+        model_calls=report.model_calls,
+        external_network_calls=_external_network_call_state(report),
+        compensation_actions=compensation_actions,
+    )
+
+
+def _external_network_call_state(
+    report: RunReport,
+) -> Literal["none", "observed", "unknown"]:
+    """Report observed egress without turning absence of instrumentation into 0."""
+
+    if report.model_calls > 0:
+        return "observed"
+    if report.execution_origin or report.execution_entry_url:
+        return "observed"
+    if report.execution_target_kind in {"web", "rdp", "citrix"}:
+        return "observed"
+
+    local_substrates = {
+        "onscreen",
+        "file",
+        "document_hash",
+        "snapshot",
+        "test",
+        "fake",
+    }
+    for result in report.results:
+        if result.actuation == "api":
+            return "observed"
+        for evidence in result.effect_evidence:
+            substrate = evidence.substrate.strip().lower()
+            if substrate in {"rest", "fhir", "sftp", "http", "https"}:
+                return "observed"
+            if substrate not in local_substrates:
+                return "unknown"
+    if report.execution_target_kind in {"windows", "macos", "linux"}:
+        return "none"
+    return "unknown"

@@ -1965,6 +1965,87 @@ class HaltObservation(BaseModel):
     completed_intents: list[str] = Field(default_factory=list)
 
 
+class OutcomeContractCounts(BaseModel):
+    """PHI-free counts of the contracts required and passed by one run."""
+
+    authorization: int = Field(default=0, ge=0)
+    identity: int = Field(default=0, ge=0)
+    postcondition: int = Field(default=0, ge=0)
+    effect: int = Field(default=0, ge=0)
+
+
+OutcomeEvidenceClass = Literal[
+    "authorization",
+    "identity",
+    "postcondition",
+    "effect_tier_1",
+    "effect_tier_2",
+    "effect_tier_3",
+    "effect_tier_4",
+    "model",
+    "compensation",
+]
+
+
+class ExecutionOutcomeEnvelope(BaseModel):
+    """Versioned, PHI-free execution result shared with control planes.
+
+    The coarse ``success``/``halt``/``failed`` lifecycle remains available for
+    old consumers.  This envelope states what the evidence actually proves.
+    """
+
+    version: Literal["openadapt.execution-outcome/v1"] = (
+        "openadapt.execution-outcome/v1"
+    )
+    outcome: Literal[
+        "VERIFIED",
+        "COMPLETED_UNVERIFIED",
+        "HALTED",
+        "FAILED",
+        "ROLLED_BACK",
+    ]
+    profile: Optional[Literal["demo", "standard", "regulated"]] = None
+    production_eligible: bool = False
+    execution_completed: bool = False
+    required_contracts: OutcomeContractCounts = Field(
+        default_factory=OutcomeContractCounts
+    )
+    passed_contracts: OutcomeContractCounts = Field(
+        default_factory=OutcomeContractCounts
+    )
+    evidence_classes: list[OutcomeEvidenceClass] = Field(default_factory=list)
+    model_calls: int = Field(default=0, ge=0)
+    external_network_calls: Literal["none", "observed", "unknown"] = "unknown"
+    compensation_actions: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_evidence_contract(self) -> "ExecutionOutcomeEnvelope":
+        required = self.required_contracts.model_dump()
+        passed = self.passed_contracts.model_dump()
+        if any(passed[key] > required[key] for key in required):
+            raise ValueError("passed contract counts cannot exceed required counts")
+        if (
+            self.outcome in {"VERIFIED", "COMPLETED_UNVERIFIED"}
+            and not self.execution_completed
+        ):
+            raise ValueError(
+                f"{self.outcome} requires evidence that execution completed"
+            )
+        if self.outcome == "VERIFIED" and passed != required:
+            raise ValueError("VERIFIED requires every declared contract to pass")
+        if self.outcome == "ROLLED_BACK" and self.compensation_actions < 1:
+            raise ValueError(
+                "ROLLED_BACK requires evidence of a completed compensating action"
+            )
+        if self.production_eligible and (
+            self.outcome != "VERIFIED" or self.profile not in {"standard", "regulated"}
+        ):
+            raise ValueError(
+                "only VERIFIED Standard or Regulated runs are production eligible"
+            )
+        return self
+
+
 class RunReport(BaseModel):
     workflow_name: str
     started_at: str
@@ -1981,6 +2062,7 @@ class RunReport(BaseModel):
             "COMPLETED_UNVERIFIED",
             "HALTED",
             "FAILED",
+            "ROLLED_BACK",
         ]
     ] = Field(
         default=None,
@@ -2001,6 +2083,13 @@ class RunReport(BaseModel):
         description=(
             "Whether execution reached a completed terminal state, independent "
             "of whether the evidence contract permitted reporting success."
+        ),
+    )
+    outcome_envelope: Optional[ExecutionOutcomeEnvelope] = Field(
+        default=None,
+        description=(
+            "Versioned PHI-free outcome, contract coverage, evidence classes, "
+            "model calls, and external-network-call observability."
         ),
     )
     execution_target_kind: Optional[ExecutionTargetKind] = Field(

@@ -677,6 +677,22 @@ def test_standard_verified_run_records_tiered_effect_evidence(tmp_path):
     assert report.execution_outcome == ExecutionOutcome.VERIFIED.value
     assert report.success is True
     assert report.results[0].effect_evidence[0].verification_tier == 1
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.required_contracts.model_dump() == {
+        "authorization": 1,
+        "identity": 0,
+        "postcondition": 0,
+        "effect": 1,
+    }
+    assert (
+        report.outcome_envelope.passed_contracts
+        == report.outcome_envelope.required_contracts
+    )
+    assert report.outcome_envelope.evidence_classes == [
+        "authorization",
+        "effect_tier_1",
+    ]
+    assert report.outcome_envelope.model_calls == 0
 
 
 def test_standard_resume_retains_structured_effect_evidence(tmp_path):
@@ -856,6 +872,10 @@ def test_production_unverified_completion_is_not_legacy_success_or_suppressed(
 
     assert report.execution_completed is True
     assert report.success is False
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.outcome == "COMPLETED_UNVERIFIED"
+    assert report.outcome_envelope.passed_contracts.effect == 0
+    assert report.outcome_envelope.required_contracts.effect == 1
     assert status_from_report(0, report.model_dump(mode="json")) == "failed"
     assert summary_status(report) == "failed"
     assert attention_item(tmp_path, run_dir) is not None

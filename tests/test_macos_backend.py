@@ -168,9 +168,7 @@ def test_execution_context_identity_is_live_and_title_free(
     assert title not in target.application_identity()
     assert target.workflow_state_identity() is None
 
-    client.windows = [
-        WindowInfo(42, "Unrelated App", title, 9002, (10, 20, 400, 300))
-    ]
+    client.windows = [WindowInfo(42, "Unrelated App", title, 9002, (10, 20, 400, 300))]
     assert target.application_identity() is None
     assert target.session_identity() is None
 

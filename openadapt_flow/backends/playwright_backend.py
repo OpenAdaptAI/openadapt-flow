@@ -542,8 +542,7 @@ class PlaywrightBackend:
         rendered_host = f"[{hostname}]" if ":" in hostname else hostname
         origin = f"{scheme}://{rendered_host}"
         if port is not None and not (
-            (scheme == "http" and port == 80)
-            or (scheme == "https" and port == 443)
+            (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
         ):
             origin += f":{port}"
         if len(origin) > 320:
@@ -579,11 +578,7 @@ class PlaywrightBackend:
         )
         if observed is None:
             return None
-        return (
-            observed
-            if self._bind_context_identity("session", observed)
-            else None
-        )
+        return observed if self._bind_context_identity("session", observed) else None
 
     def workflow_state_identity(self) -> Optional[str]:
         """Return the live, application-declared PHI-free workflow-state token.
@@ -598,8 +593,7 @@ class PlaywrightBackend:
         value = self._context_meta_content(_WORKFLOW_STATE_IDENTITY_META)
         observed = (
             value
-            if value is not None
-            and _WORKFLOW_STATE_IDENTITY_PATTERN.fullmatch(value)
+            if value is not None and _WORKFLOW_STATE_IDENTITY_PATTERN.fullmatch(value)
             else None
         )
         if observed is None:

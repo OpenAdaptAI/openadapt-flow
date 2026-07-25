@@ -522,17 +522,14 @@ class RemoteDisplayBackend:
             self._workflow_state_marker,
             workflow_state_marker_probe,
         )
-        self._session_marker = _clean_marker(
-            session_marker, name="session_marker"
-        )
+        self._session_marker = _clean_marker(session_marker, name="session_marker")
         self._session_marker_probe = _marker_probe(
             self._session_marker,
             session_marker_probe,
         )
         if self._session_marker is not None and session_identity_observer is not None:
             raise ValueError(
-                "configure either session_marker or session_identity_observer, "
-                "not both"
+                "configure either session_marker or session_identity_observer, not both"
             )
         self._session_identity_observer = session_identity_observer
         self._window: Optional[WindowInfo] = None
@@ -725,7 +722,10 @@ class RemoteDisplayBackend:
                     "remote-display readiness probe rejected the fresh actuation "
                     "frame (locked, disconnected, or unexpected session)"
                 )
-            if self._session_identity_configured and self._last_session_identity is None:
+            if (
+                self._session_identity_configured
+                and self._last_session_identity is None
+            ):
                 self._actuation_lease_state = _LEASE_INVALIDATED
                 raise RemoteDisplayError(
                     "configured remote session identity is unavailable on the "

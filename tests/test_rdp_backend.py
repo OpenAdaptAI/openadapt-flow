@@ -322,9 +322,12 @@ def test_live_context_markers_preserve_unchanged_actuation_lease() -> None:
 
     assert application == "Accuro"
     assert workflow_state == "Eligibility ready"
-    assert session == hashlib.sha256(
-        b"openadapt.remote-session-marker.v1\x00clinic-rdp-session-4"
-    ).hexdigest()
+    assert (
+        session
+        == hashlib.sha256(
+            b"openadapt.remote-session-marker.v1\x00clinic-rdp-session-4"
+        ).hexdigest()
+    )
     assert NOTE_VALUE not in repr((application, workflow_state, session))
 
     backend.click(*BUTTON_CENTER)

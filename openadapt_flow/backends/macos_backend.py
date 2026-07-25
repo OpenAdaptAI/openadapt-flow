@@ -636,9 +636,7 @@ class MacOSBackend(RemoteDisplayBackend):
         session_id = _mac_audit_session_id()
         if application is None or session_id is None:
             return None
-        material = (
-            f"macos-session-v1\0{os.getuid()}\0{session_id}\0{application}"
-        )
+        material = f"macos-session-v1\0{os.getuid()}\0{session_id}\0{application}"
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def workflow_state_identity(self) -> Optional[str]:

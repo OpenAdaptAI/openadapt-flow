@@ -185,12 +185,10 @@ def _linux_session_facts() -> Optional[tuple[str, int, int]]:
     if not sys.platform.startswith("linux"):
         return None
     try:
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
-            encoding="ascii"
-        ).strip()
-        session_text = Path("/proc/self/sessionid").read_text(
-            encoding="ascii"
-        ).strip()
+        boot_id = (
+            Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        )
+        session_text = Path("/proc/self/sessionid").read_text(encoding="ascii").strip()
         if not re.fullmatch(
             r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
             r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
@@ -404,9 +402,7 @@ class LinuxBackend:
         if application is None or facts is None:
             return None
         boot_id, session_id, uid = facts
-        material = (
-            f"linux-session-v1\0{boot_id}\0{session_id}\0{uid}\0{application}"
-        )
+        material = f"linux-session-v1\0{boot_id}\0{session_id}\0{uid}\0{application}"
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def workflow_state_identity(self) -> Optional[str]:

@@ -178,9 +178,12 @@ def test_live_context_markers_preserve_an_unchanged_actuation_lease() -> None:
 
     assert application == "Accuro"
     assert workflow_state == "Appointment entry"
-    assert session == hashlib.sha256(
-        b"openadapt.remote-session-marker.v1\x00clinic-session-7"
-    ).hexdigest()
+    assert (
+        session
+        == hashlib.sha256(
+            b"openadapt.remote-session-marker.v1\x00clinic-session-7"
+        ).hexdigest()
+    )
     assert sensitive_title not in repr((application, workflow_state, session))
 
     backend.click(100, 100)

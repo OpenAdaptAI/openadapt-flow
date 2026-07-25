@@ -764,9 +764,7 @@ def _bounded_application_identifier(name: str) -> Optional[str]:
 
     stem = os.path.splitext(os.path.basename(name))[0]
     ascii_name = (
-        unicodedata.normalize("NFKD", stem)
-        .encode("ascii", "ignore")
-        .decode("ascii")
+        unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
     )
     identifier = "".join(
         char.casefold()
@@ -821,7 +819,10 @@ def _foreground_application_identity() -> Optional[str]:
         if not hwnd:
             return None
         pid = wintypes.DWORD()
-        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or not pid.value:
+        if (
+            not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            or not pid.value
+        ):
             return None
         process = kernel32.OpenProcess(0x1000, False, pid.value)
         if not process:

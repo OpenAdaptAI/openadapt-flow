@@ -46,7 +46,9 @@ def test_playwright_backend_exposes_execution_context_identity() -> None:
     assert isinstance(_backend(_Page()), ExecutionContextIdentityBackend)
 
 
-def test_application_identity_observes_live_origin_without_sensitive_url_parts() -> None:
+def test_application_identity_observes_live_origin_without_sensitive_url_parts() -> (
+    None
+):
     page = _Page()
     backend = _backend(page)
 
@@ -79,8 +81,7 @@ def test_application_identity_refuses_non_web_malformed_and_unreadable_urls() ->
             raise RuntimeError("page closed")
 
     assert (
-        PlaywrightBackend(cast(Any, _UnreadablePage())).application_identity()
-        is None
+        PlaywrightBackend(cast(Any, _UnreadablePage())).application_identity() is None
     )
 
 
@@ -101,7 +102,9 @@ def test_session_identity_observes_current_exact_digest_on_every_call() -> None:
     ]
 
 
-def test_session_identity_returns_none_for_missing_duplicate_or_malformed_marker() -> None:
+def test_session_identity_returns_none_for_missing_duplicate_or_malformed_marker() -> (
+    None
+):
     page = _Page()
     backend = _backend(page)
 

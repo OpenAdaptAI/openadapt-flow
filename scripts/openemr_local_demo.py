@@ -224,6 +224,19 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         const el = document.elementFromPoint(px, py);
         if (!el) return null;
         const actionable = el.closest('input, select, textarea, button, a') || el;
+        if (actionable.tagName.toLowerCase() === 'button'
+                && actionable.textContent.trim() === 'Contact') {
+            const matches = Array.from(document.querySelectorAll('button'))
+                .filter(candidate => candidate.textContent.trim() === 'Contact');
+            if (matches.length !== 1 || matches[0] !== actionable) return null;
+            return {
+                selector: 'openemr://section-contact',
+                role: 'button',
+                name: 'Contact',
+                target_kind: 'section',
+                target_id: 'contact',
+            };
+        }
         const id = actionable.id;
         if (!id) return null;
         if (id === 'create') {
@@ -254,6 +267,7 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         };
     }"""
     _CONFIRM_SELECTOR = "openemr://confirm-create"
+    _CONTACT_SELECTOR = "openemr://section-contact"
 
     @property
     def _iframe_guards(self) -> dict[str, tuple[str, Any]]:
@@ -281,6 +295,9 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         selector = locator.selector or ""
         if selector == self._CONFIRM_SELECTOR:
             return self._unique_visible_confirm()
+        if selector == self._CONTACT_SELECTOR:
+            frame = _form_frame(self.page, timeout_s=1.0)
+            return frame, frame.get_by_role("button", name="Contact", exact=True)
         if selector.startswith("#form_") or selector == "#create":
             frame = _form_frame(self.page, timeout_s=1.0)
             return frame, frame.locator(selector)
@@ -539,9 +556,28 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         target = self._confirm_target(x, y) or self._form_target(x, y)
         if target is None:
             return super().structured_text_at(x, y)
+        patient_identity = None
+        if target.get("selector") == self._CONFIRM_SELECTOR:
+            try:
+                frame = _form_frame(self.page, timeout_s=1.0)
+                values = {
+                    field: frame.locator(f"#form_{field}").input_value()
+                    for field in ("fname", "lname", "DOB")
+                }
+                if all(isinstance(value, str) and value for value in values.values()):
+                    patient_identity = (
+                        f"{values['fname']} {values['lname']}|{values['DOB']}"
+                    )
+            except Exception:
+                patient_identity = None
         return json.dumps(
             {
                 "form_path": FORM_PATH,
+                **(
+                    {"patient_identity": patient_identity}
+                    if patient_identity is not None
+                    else {}
+                ),
                 "target_kind": target["target_kind"],
                 "target_id": target["target_id"],
             },

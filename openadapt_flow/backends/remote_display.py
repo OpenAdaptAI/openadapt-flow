@@ -25,13 +25,13 @@ Faithful pixel-only property (the whole point):
   the remote display, nothing else.
 * input is injected at the **host OS level** (``CGEvent`` mouse / keyboard /
   wheel) into that window, mapped from screenshot-pixel space to screen points.
-* the backend deliberately implements **only** the base
-  :class:`openadapt_flow.backend.Backend` protocol — NOT ``StructuralBackend``,
+* the backend deliberately does NOT implement ``StructuralBackend``,
   ``IdentityBackend`` or ``StructuralActionBackend``. So the resolver's
-  ``structural`` (UIA) rung is **unavailable** and resolution runs on the visual
-  floor (template / OCR / geometry / grounder); identity falls back to the OCR
-  name+DOB tier — exactly the Citrix constraint (``backend.py`` protocol notes,
-  ``docs/desktop/LIMITS.md``).
+  ``structural`` (UIA) rung is **unavailable** and record identity still uses
+  qualified pixel/OCR regions. It may implement the separate
+  ``ExecutionContextIdentityBackend`` contract when explicitly configured with
+  PHI-free on-screen application/workflow/session markers or a live session
+  digest observer. Those observers never expose captured text.
 
 Permission reality (macOS, and the honest failure mode): window capture needs
 **Screen Recording** permission and input injection needs **Accessibility**
@@ -59,6 +59,7 @@ import struct
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, runtime_checkable
 
@@ -68,6 +69,7 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _LEASE_NONE = 0
 _LEASE_ARMED = 1
 _LEASE_INVALIDATED = 2
+_SESSION_DIGEST_HEX_LENGTH = 64
 
 
 class RemoteDisplayError(RuntimeError):
@@ -244,8 +246,66 @@ def _canonical_rgb_digest(png: bytes) -> bytes:
         rgb = image.convert("RGB")
         digest = hashlib.sha256()
         digest.update(struct.pack(">II", *rgb.size))
-        digest.update(rgb.tobytes())
-        return digest.digest()
+    digest.update(rgb.tobytes())
+    return digest.digest()
+
+
+def _clean_marker(marker: Optional[str], *, name: str) -> Optional[str]:
+    """Normalize an explicitly PHI-free marker without observing screen text."""
+
+    if marker is None:
+        return None
+    cleaned = unicodedata.normalize("NFKC", marker).strip()
+    if not cleaned:
+        raise ValueError(f"{name} must be non-empty when configured")
+    if len(cleaned.encode("utf-8")) > 128 or not all(
+        character.isprintable() for character in cleaned
+    ):
+        raise ValueError(
+            f"{name} must be one printable PHI-free token of at most 128 bytes"
+        )
+    return cleaned
+
+
+def _marker_probe(
+    marker: Optional[str],
+    probe: Optional[Callable[[bytes], bool]],
+) -> Optional[Callable[[bytes], bool]]:
+    """Return a boolean frame probe; callbacks never return observed text."""
+
+    if marker is None:
+        if probe is not None:
+            raise ValueError("a marker probe requires its PHI-free marker")
+        return None
+    if probe is not None:
+        return probe
+
+    def _ocr_probe(png: bytes) -> bool:
+        from openadapt_flow import vision
+
+        return vision.find_text(png, marker, min_ratio=1.0) is not None
+
+    return _ocr_probe
+
+
+def _session_marker_digest(marker: str) -> str:
+    """Opaque digest for a verified, PHI-free, session-unique visual marker."""
+
+    payload = b"openadapt.remote-session-marker.v1\x00" + marker.encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _valid_session_digest(value: object) -> Optional[str]:
+    """Accept only a transport-supplied SHA-256-shaped digest."""
+
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if len(candidate) != _SESSION_DIGEST_HEX_LENGTH:
+        return None
+    if any(ch not in "0123456789abcdef" for ch in candidate):
+        return None
+    return candidate
 
 
 def _split_chord(key: str) -> tuple[list[str], str]:
@@ -399,6 +459,24 @@ class RemoteDisplayBackend:
             before every input. Return False on a lock/login/disconnect or
             unexpected application screen to fail closed. Generic client-window
             capture cannot identify a remote session lock state portably.
+        application_marker: Optional PHI-free label whose presence in a fresh
+            bounded client-window frame proves the current application. The
+            verified marker itself is returned; arbitrary OCR text is never
+            returned.
+        application_marker_probe: Optional custom predicate for
+            ``application_marker``. When omitted, the marker is found with the
+            existing OCR text resolver.
+        workflow_state_marker: Optional PHI-free state label, verified and
+            returned under the same contract as ``application_marker``.
+        workflow_state_marker_probe: Optional custom predicate for
+            ``workflow_state_marker``.
+        session_marker: Optional PHI-free, session-unique on-screen marker. Its
+            verified value is returned only as a namespaced SHA-256 digest.
+        session_marker_probe: Optional custom predicate for ``session_marker``.
+        session_identity_observer: Optional passive callback returning a live
+            64-hex transport/session digest. Raw usernames, titles, patient
+            text, and other identifiers are rejected. It is mutually exclusive
+            with ``session_marker``.
     """
 
     def __init__(
@@ -412,6 +490,13 @@ class RemoteDisplayBackend:
         settle_s: float = 0.03,
         max_frame_age_s: float = 10.0,
         readiness_probe: Optional[Callable[[bytes], bool]] = None,
+        application_marker: Optional[str] = None,
+        application_marker_probe: Optional[Callable[[bytes], bool]] = None,
+        workflow_state_marker: Optional[str] = None,
+        workflow_state_marker_probe: Optional[Callable[[bytes], bool]] = None,
+        session_marker: Optional[str] = None,
+        session_marker_probe: Optional[Callable[[bytes], bool]] = None,
+        session_identity_observer: Optional[Callable[[], Optional[str]]] = None,
     ) -> None:
         self._client = client if client is not None else _default_window_client()
         self._owner_substr = owner_substr
@@ -423,6 +508,33 @@ class RemoteDisplayBackend:
         if self._max_frame_age_s <= 0:
             raise ValueError("max_frame_age_s must be positive")
         self._readiness_probe = readiness_probe
+        self._application_marker = _clean_marker(
+            application_marker, name="application_marker"
+        )
+        self._application_marker_probe = _marker_probe(
+            self._application_marker,
+            application_marker_probe,
+        )
+        self._workflow_state_marker = _clean_marker(
+            workflow_state_marker, name="workflow_state_marker"
+        )
+        self._workflow_state_marker_probe = _marker_probe(
+            self._workflow_state_marker,
+            workflow_state_marker_probe,
+        )
+        self._session_marker = _clean_marker(
+            session_marker, name="session_marker"
+        )
+        self._session_marker_probe = _marker_probe(
+            self._session_marker,
+            session_marker_probe,
+        )
+        if self._session_marker is not None and session_identity_observer is not None:
+            raise ValueError(
+                "configure either session_marker or session_identity_observer, "
+                "not both"
+            )
+        self._session_identity_observer = session_identity_observer
         self._window: Optional[WindowInfo] = None
         self._viewport: Optional[tuple[int, int]] = None
         self._scale: float = 1.0
@@ -431,6 +543,7 @@ class RemoteDisplayBackend:
         self._frame_window: Optional[WindowInfo] = None
         self._last_frame_monotonic: Optional[float] = None
         self._last_frame_digest: Optional[bytes] = None
+        self._last_session_identity: Optional[str] = None
         self._actuation_lease_state = _LEASE_NONE
         # Serialize capture/geometry validation with the entire input gesture;
         # otherwise another thread can replace the frame lease between mouse
@@ -552,6 +665,7 @@ class RemoteDisplayBackend:
             self._frame_window = win
             self._last_frame_monotonic = time.monotonic()
             self._last_frame_digest = _canonical_rgb_digest(png)
+            self._last_session_identity = self._session_identity_from_frame(png)
             # An ordinary observation is not permission to perform a
             # consequential remote action.  Only acquire_actuation_frame arms
             # the one-shot content lease after focus/readiness are established.
@@ -611,8 +725,53 @@ class RemoteDisplayBackend:
                     "remote-display readiness probe rejected the fresh actuation "
                     "frame (locked, disconnected, or unexpected session)"
                 )
+            if self._session_identity_configured and self._last_session_identity is None:
+                self._actuation_lease_state = _LEASE_INVALIDATED
+                raise RemoteDisplayError(
+                    "configured remote session identity is unavailable on the "
+                    "fresh actuation frame"
+                )
             self._actuation_lease_state = _LEASE_ARMED
             return png
+
+    # -- Optional ExecutionContextIdentityBackend --------------------------
+
+    def application_identity(self) -> Optional[str]:
+        """Return a PHI-free application marker verified on a fresh frame."""
+
+        return self._verified_marker_identity(
+            self._application_marker,
+            self._application_marker_probe,
+        )
+
+    def workflow_state_identity(self) -> Optional[str]:
+        """Return a PHI-free workflow-state marker verified on a fresh frame."""
+
+        return self._verified_marker_identity(
+            self._workflow_state_marker,
+            self._workflow_state_marker_probe,
+        )
+
+    def session_identity(self) -> Optional[str]:
+        """Return only a live, verified 64-hex remote-session digest."""
+
+        if not self._session_identity_configured:
+            return None
+        with self._input_lock:
+            png = self._fresh_identity_frame()
+            if png is None:
+                return None
+            observed = self._session_identity_from_frame(png)
+            if self._session_identity_configured and observed is None:
+                self._invalidate_actuation_lease()
+                return None
+            if (
+                self._actuation_lease_state == _LEASE_ARMED
+                and observed != self._last_session_identity
+            ):
+                self._invalidate_actuation_lease()
+                return None
+            return observed
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at captured-pixel coordinates (x, y)."""
@@ -749,8 +908,10 @@ class RemoteDisplayBackend:
                 "remote-display actuation lease was invalidated by another "
                 "observation; refusing input and requiring a fresh lease"
             )
-        if self._readiness_probe is not None or (
-            self._actuation_lease_state == _LEASE_ARMED
+        if (
+            self._readiness_probe is not None
+            or self._actuation_lease_state == _LEASE_ARMED
+            or self._session_identity_configured
         ):
             # Check current pixels without replacing the resolver's coordinate
             # lease. This detects a lock/disconnect or content change after the
@@ -767,6 +928,16 @@ class RemoteDisplayBackend:
                 raise RemoteDisplayError(
                     "remote-display readiness probe rejected the current frame "
                     "(locked, disconnected, or unexpected session); refusing input"
+                )
+            current_session_identity = self._session_identity_from_frame(png)
+            if self._session_identity_configured and (
+                current_session_identity is None
+                or current_session_identity != self._last_session_identity
+            ):
+                self._invalidate_actuation_lease()
+                raise RemoteDisplayError(
+                    "remote session identity changed or became unverifiable "
+                    "after capture; refusing input"
                 )
             if self._actuation_lease_state == _LEASE_ARMED:
                 # Consume once before the first input edge.  A double click or
@@ -798,6 +969,94 @@ class RemoteDisplayBackend:
                 "changed during readiness validation; refusing input"
             )
         self._assert_frame_fresh()
+
+    @property
+    def _session_identity_configured(self) -> bool:
+        return (
+            self._session_marker is not None
+            or self._session_identity_observer is not None
+        )
+
+    def _invalidate_actuation_lease(self) -> None:
+        if self._actuation_lease_state == _LEASE_ARMED:
+            self._actuation_lease_state = _LEASE_INVALIDATED
+
+    def _fresh_identity_frame(self) -> Optional[bytes]:
+        """Passively capture one bounded frame without replacing a valid lease.
+
+        Context-identity checks run after the runtime has acquired the exact
+        pre-actuation frame. A normal ``screenshot()`` would invalidate that
+        lease even when the pixels are unchanged. This observer instead
+        captures the same exact window under the shared lock, preserves an
+        armed lease only when window identity, geometry, dimensions, readiness,
+        and canonical pixels still match, and otherwise invalidates it.
+        """
+
+        if self._actuation_lease_state == _LEASE_INVALIDATED:
+            return None
+        try:
+            current = self._resolve_window(refresh=True)
+            png, px_w, px_h = self._client.capture(current.window_id)
+            size = _png_size(png)
+            if size != (int(px_w), int(px_h)):
+                self._invalidate_actuation_lease()
+                return None
+            if self._readiness_probe is not None and not self._readiness_probe(png):
+                self._invalidate_actuation_lease()
+                return None
+            if self._actuation_lease_state == _LEASE_ARMED:
+                lease = self._frame_window
+                if (
+                    lease is None
+                    or current.window_id != lease.window_id
+                    or current.pid != lease.pid
+                    or current.bounds != lease.bounds
+                    or not current.on_screen
+                    or self._viewport != size
+                    or self._last_frame_digest is None
+                    or _canonical_rgb_digest(png) != self._last_frame_digest
+                ):
+                    self._invalidate_actuation_lease()
+                    return None
+            return png
+        except Exception:  # noqa: BLE001 - observer failure is unverifiable
+            self._invalidate_actuation_lease()
+            return None
+
+    def _verified_marker_identity(
+        self,
+        marker: Optional[str],
+        probe: Optional[Callable[[bytes], bool]],
+    ) -> Optional[str]:
+        if marker is None or probe is None:
+            return None
+        with self._input_lock:
+            png = self._fresh_identity_frame()
+            if png is None:
+                return None
+            try:
+                verified = bool(probe(png))
+            except Exception:  # noqa: BLE001 - observer failure is unverifiable
+                verified = False
+            if not verified:
+                self._invalidate_actuation_lease()
+                return None
+            return marker
+
+    def _session_identity_from_frame(self, png: bytes) -> Optional[str]:
+        if self._session_identity_observer is not None:
+            try:
+                return _valid_session_digest(self._session_identity_observer())
+            except Exception:  # noqa: BLE001 - observer failure is unverifiable
+                return None
+        if self._session_marker is None or self._session_marker_probe is None:
+            return None
+        try:
+            if not self._session_marker_probe(png):
+                return None
+        except Exception:  # noqa: BLE001 - observer failure is unverifiable
+            return None
+        return _session_marker_digest(self._session_marker)
 
     def _assert_frame_fresh(self) -> None:
         if self._last_frame_monotonic is None:

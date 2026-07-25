@@ -2175,6 +2175,7 @@ class RunReport(BaseModel):
     rung_counts: dict[str, int] = Field(default_factory=dict)
     heal_count: int = 0
     model_calls: int = 0
+    external_network_calls: Literal["none", "observed", "unknown"] = "unknown"
     est_model_cost_usd: float = 0.0
     total_ms: float = 0.0
     # Identity-protection coverage of the WHOLE workflow (computed at run
@@ -2220,6 +2221,15 @@ class RunReport(BaseModel):
             )
         if self.model_calls != envelope.model_calls:
             raise ValueError("model-call count does not match its evidence envelope")
+        if "external_network_calls" not in self.model_fields_set:
+            # Reports produced before this top-level binding existed carried
+            # the observation only inside the envelope. Preserve read
+            # compatibility while normalizing them on the next save.
+            self.external_network_calls = envelope.external_network_calls
+        elif self.external_network_calls != envelope.external_network_calls:
+            raise ValueError(
+                "external-network observation does not match its evidence envelope"
+            )
         if envelope.outcome == "VERIFIED" and not self.success:
             raise ValueError("VERIFIED evidence cannot accompany a non-success report")
         if envelope.profile in {"standard", "regulated"} and self.success != (

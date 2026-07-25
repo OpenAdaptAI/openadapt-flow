@@ -290,13 +290,12 @@ def render_run_report(run_dir: Path | str) -> Path:
     # screenshot could have left the box on this run.
     if report.screenshots_may_leave_box:
         lines.append(
-            "- **Data egress:** ⚠️ a model-grounding component was wired — "
+            "- **Screenshot egress:** ⚠️ a model-grounding component was wired — "
             "screenshots COULD have left the box this run"
         )
     else:
         lines.append(
-            "- **Data egress:** none — fully local replay (zero screenshots "
-            "left the box)"
+            "- **Screenshot egress:** none observed (zero screenshots left the box)"
         )
     if report.governed_authorization_id:
         lines.append(

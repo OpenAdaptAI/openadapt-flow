@@ -100,6 +100,13 @@ class RunManifest(BaseModel):
     #: local-only replayer, but that must not erase that an earlier leg was
     #: configured with an egress-capable screenshot consumer.
     screenshots_may_leave_box: bool = False
+    #: Cumulative calls made across every executed leg of this logical run.
+    #: Checkpoint reconstruction must not erase calls made by a step that
+    #: halted before it could produce a verified checkpoint.
+    model_calls: int = Field(default=0, ge=0)
+    #: Sticky whole-run network observation. ``observed`` must survive resume;
+    #: ``unknown`` remains conservative when no observer proves absence.
+    external_network_calls: Literal["none", "observed", "unknown"] = "unknown"
     #: Optional healed-bundle output path, mirrored from the original run.
     save_healed_to: Optional[str] = None
     created_at: str = Field(default_factory=_now)

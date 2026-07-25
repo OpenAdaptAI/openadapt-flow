@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from openadapt_flow.ir import Step, StepResult, Workflow
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
@@ -240,6 +240,8 @@ class DurableRun:
         key: Optional[str] = None,
         governed_authorization: Optional[GovernedRunAuthorization] = None,
         screenshots_may_leave_box: bool = False,
+        model_calls: int = 0,
+        external_network_calls: Literal["none", "observed", "unknown"] = "unknown",
     ) -> None:
         # ``key`` (None by default) opts the durable artifacts into AES-256-GCM
         # encryption-at-rest; unset => plaintext, exactly as before.
@@ -257,7 +259,29 @@ class DurableRun:
                 worklists=worklists,
                 governed_authorization=governed_authorization,
                 screenshots_may_leave_box=screenshots_may_leave_box,
+                model_calls=model_calls,
+                external_network_calls=external_network_calls,
                 save_healed_to=(str(save_healed_to) if save_healed_to else None),
+            )
+        )
+
+    def update_audit_evidence(
+        self,
+        *,
+        model_calls: int,
+        external_network_calls: Literal["none", "observed", "unknown"],
+    ) -> None:
+        """Persist cumulative evidence shared by every leg of one run."""
+
+        manifest = self.store.read_manifest()
+        if manifest is None:
+            raise RuntimeError("durable run manifest disappeared during execution")
+        self.store.write_manifest(
+            manifest.model_copy(
+                update={
+                    "model_calls": model_calls,
+                    "external_network_calls": external_network_calls,
+                }
             )
         )
 

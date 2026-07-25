@@ -147,6 +147,17 @@ class _ReadyVision(FakeVision):
         return SimpleNamespace(png=backend.screenshot(), settled=True)
 
 
+class _CountingStateVerifier:
+    def __init__(self, *, holds: bool) -> None:
+        self.result = holds
+        self.calls = 0
+
+    def holds(self, screenshot, expected_state) -> bool:
+        del screenshot, expected_state
+        self.calls += 1
+        return self.result
+
+
 def _effect() -> Effect:
     return Effect(
         kind=EffectKind.RECORD_WRITTEN,
@@ -642,6 +653,46 @@ def test_native_run_network_state_remains_unknown_without_instrumentation():
     assert report.outcome_envelope.external_network_calls == "unknown"
 
 
+def test_report_separates_network_observation_from_screenshot_egress(tmp_path):
+    workflow = Workflow(name="browser-read", steps=[])
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-25T00:00:00Z",
+        success=True,
+        execution_target_kind="web",
+        screenshots_may_leave_box=False,
+    )
+    stamp_execution_outcome(report, workflow, ExecutionProfile.DEMO)
+    report.save(tmp_path)
+
+    markdown = render_run_report(tmp_path).read_text(encoding="utf-8")
+
+    assert "- **External network calls:** `observed`" in markdown
+    assert "- **Screenshot egress:** none observed" in markdown
+    assert "fully local replay" not in markdown
+
+
+def test_legacy_report_adopts_network_observation_from_its_envelope():
+    report = RunReport.model_validate(
+        {
+            "workflow_name": "legacy",
+            "started_at": "2026-07-25T00:00:00Z",
+            "execution_profile": "demo",
+            "execution_outcome": "COMPLETED_UNVERIFIED",
+            "execution_completed": True,
+            "success": True,
+            "outcome_envelope": {
+                "outcome": "COMPLETED_UNVERIFIED",
+                "profile": "demo",
+                "execution_completed": True,
+                "external_network_calls": "observed",
+            },
+        }
+    )
+
+    assert report.external_network_calls == "observed"
+
+
 def test_completed_compensation_produces_non_success_rolled_back_outcome(tmp_path):
     workflow = _workflow()
     effect_hash = _effect().contract_hash()
@@ -985,6 +1036,83 @@ def test_standard_resume_retains_structured_effect_evidence(tmp_path):
     assert resumed.results[0].effect_evidence[0].verification_tier == 1
     assert resumed.results[0].identity is not None
     assert resumed.results[0].identity.status == "verified"
+
+
+def test_resume_preserves_failed_leg_model_and_network_evidence(tmp_path):
+    workflow, bundle = _sealed(
+        tmp_path,
+        Workflow(
+            name="whole-run-evidence",
+            steps=[
+                Step(
+                    id="wait-for-saved",
+                    intent="wait for saved state",
+                    action=ActionKind.WAIT,
+                    expect=[
+                        Postcondition(
+                            kind=PostconditionKind.TEXT_PRESENT,
+                            text="Saved",
+                            timeout_s=0.0,
+                        )
+                    ],
+                )
+            ],
+        ),
+        encrypted=False,
+    )
+    gate = _gate(
+        workflow,
+        bundle,
+        ExecutionProfile.STANDARD,
+        verifier=None,
+        durable=True,
+    )
+    authorization = build_runtime_authorization(workflow, gate)
+    run_dir = tmp_path / "whole-run-evidence"
+    verifier = _CountingStateVerifier(holds=False)
+
+    initial = Replayer(
+        FakeBackend(),
+        vision=_ReadyVision(),
+        state_verifier=verifier,
+        governed_authorization=authorization,
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+    assert initial.execution_outcome == ExecutionOutcome.HALTED.value
+    assert initial.model_calls == 1
+    assert verifier.calls == 1
+    manifest = CheckpointStore(run_dir).read_manifest()
+    assert manifest is not None
+    assert manifest.model_calls == 1
+    assert manifest.external_network_calls == "observed"
+
+    resumed_vision = _ReadyVision()
+    resumed_vision.text_results["Saved"] = SimpleNamespace(
+        point=(5, 5),
+        region=(0, 0, 10, 10),
+        confidence=0.99,
+    )
+    resumed = resume(
+        run_dir,
+        Replayer(
+            FakeBackend(),
+            vision=resumed_vision,
+            require_settled=True,
+            poll_interval_s=0.0,
+        ),
+        approval=_approval(bundle),
+    )
+
+    assert resumed.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert resumed.success is True
+    assert resumed.model_calls == 1
+    assert resumed.external_network_calls == "observed"
+    assert resumed.outcome_envelope is not None
+    assert resumed.outcome_envelope.model_calls == 1
+    assert resumed.outcome_envelope.external_network_calls == "observed"
 
 
 def test_standard_resume_from_legacy_checkpoint_is_unverified(tmp_path):

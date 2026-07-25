@@ -265,6 +265,7 @@ def stamp_execution_outcome(
     """Write the profile and precise outcome into ``report``."""
 
     resolved = resolve_execution_profile(profile)
+    report.external_network_calls = _external_network_call_state(report)
     if report.execution_completed is None:
         report.execution_completed = report.success
     outcome = classify_execution_outcome(report, workflow, resolved)
@@ -436,7 +437,7 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
         passed_contracts=passed,
         evidence_classes=sorted(evidence_classes),
         model_calls=report.model_calls,
-        external_network_calls=_external_network_call_state(report),
+        external_network_calls=report.external_network_calls,
         compensation_actions=compensation_actions,
     )
 
@@ -446,7 +447,7 @@ def _external_network_call_state(
 ) -> Literal["none", "observed", "unknown"]:
     """Report observed egress without turning absence of instrumentation into 0."""
 
-    if report.model_calls > 0:
+    if report.external_network_calls == "observed" or report.model_calls > 0:
         return "observed"
     if report.execution_origin or report.execution_entry_url:
         return "observed"
@@ -473,4 +474,4 @@ def _external_network_call_state(
     # A native target says where input was delivered, not whether this process
     # or one of its integrations opened a socket. Until an explicit network
     # observer proves the negative, absence of an observed call remains unknown.
-    return "unknown"
+    return report.external_network_calls

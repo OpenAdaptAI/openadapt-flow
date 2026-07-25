@@ -525,6 +525,10 @@ class Replayer:
         execution_origin: Optional[str] = None,
         execution_entry_url: Optional[str] = None,
         prior_screenshots_may_leave_box: bool = False,
+        prior_model_calls: int = 0,
+        prior_external_network_calls: Literal[
+            "none", "observed", "unknown"
+        ] = "unknown",
     ) -> RunReport:
         """Execute the workflow and write a run directory.
 
@@ -583,6 +587,10 @@ class Replayer:
             prior_screenshots_may_leave_box: Durable-resume audit carry. True
                 when an earlier leg of the same logical run was configured with
                 an egress-capable screenshot consumer.
+            prior_model_calls: Cumulative model calls made by earlier legs of
+                the same logical run.
+            prior_external_network_calls: Sticky network observation from
+                earlier legs of the same logical run.
 
         Returns:
             The RunReport (also saved as ``run_dir/report.json``). A linear run
@@ -652,6 +660,8 @@ class Replayer:
             ),
             parameter_schema_sha256=(compute_parameter_schema_digest(workflow)),
             params=params,
+            model_calls=prior_model_calls,
+            external_network_calls=prior_external_network_calls,
             screenshots_may_leave_box=(
                 self._screenshots_may_leave_box or prior_screenshots_may_leave_box
             ),
@@ -781,6 +791,8 @@ class Replayer:
                 screenshots_may_leave_box=(
                     self._screenshots_may_leave_box or prior_screenshots_may_leave_box
                 ),
+                model_calls=prior_model_calls,
+                external_network_calls=prior_external_network_calls,
             )
         if resume_from:
             from openadapt_flow.runtime.durable import resumed_step_results
@@ -790,7 +802,11 @@ class Replayer:
             )
             report.results.extend(resumed_results)
             for result in resumed_results:
-                self._account_result(report, result)
+                self._account_result(report, result, account_model_calls=False)
+            report.model_calls = max(
+                report.model_calls,
+                sum(self._result_model_calls(result) for result in resumed_results),
+            )
             if durable_run is not None:
                 durable_run.store.clear_pending()
 
@@ -827,7 +843,9 @@ class Replayer:
                     new_crops=new_crops,
                 )
                 report.results.append(result)
+                self._account_result(report, result)
                 if durable_run is not None:
+                    self._sync_durable_audit(durable_run, report)
                     # Tier-3: verified step -> checkpoint; halt -> pending
                     # escalation (resumable from the last checkpoint).
                     durable_run.record(
@@ -842,7 +860,6 @@ class Replayer:
                             else None
                         ),
                     )
-                self._account_result(report, result)
                 if not result.ok:
                     break
 
@@ -1023,7 +1040,12 @@ class Replayer:
         return out
 
     @staticmethod
-    def _account_result(report: RunReport, result: StepResult) -> None:
+    def _account_result(
+        report: RunReport,
+        result: StepResult,
+        *,
+        account_model_calls: bool = True,
+    ) -> None:
         """Fold one StepResult's rung / model-call / heal counts into the
         report. Shared by the linear loop and the program interpreter so both
         account a step identically (a rescued or grounded run is never counted
@@ -1031,8 +1053,6 @@ class Replayer:
         if result.ok and result.resolution is not None:
             rung = result.resolution.rung
             report.rung_counts[rung] = report.rung_counts.get(rung, 0) + 1
-            if rung == "grounder":
-                report.model_calls += 1
         elif result.ok and result.actuation == "api":
             # API-tier actuation has no visual resolution rung; count it under
             # "api" so the report shows the deterministic top of the ladder in
@@ -1040,9 +1060,37 @@ class Replayer:
             report.rung_counts["api"] = report.rung_counts.get("api", 0) + 1
         # Drift-oracle state-verifier calls are model calls too (honest
         # accounting).
-        report.model_calls += result.drift_oracle_calls
+        if account_model_calls:
+            report.model_calls += Replayer._result_model_calls(result)
         if result.heal is not None:
             report.heal_count += 1
+
+    @staticmethod
+    def _result_model_calls(result: StepResult) -> int:
+        return int(
+            result.drift_oracle_calls
+            + (
+                1
+                if (
+                    result.ok
+                    and result.resolution is not None
+                    and result.resolution.rung == "grounder"
+                )
+                else 0
+            )
+        )
+
+    @staticmethod
+    def _sync_durable_audit(durable_run: Any, report: RunReport) -> None:
+        """Persist whole-run counters before a leg can durably pause."""
+
+        from openadapt_flow.execution_profiles import _external_network_call_state
+
+        report.external_network_calls = _external_network_call_state(report)
+        durable_run.update_audit_evidence(
+            model_calls=report.model_calls,
+            external_network_calls=report.external_network_calls,
+        )
 
     # -- Workflow-program IR, Phase 2: the state-machine interpreter -----------
     #
@@ -1111,7 +1159,11 @@ class Replayer:
                 )
                 report.results.extend(resumed_results)
                 for result in resumed_results:
-                    self._account_result(report, result)
+                    self._account_result(report, result, account_model_calls=False)
+                report.model_calls = max(
+                    report.model_calls,
+                    sum(self._result_model_calls(result) for result in resumed_results),
+                )
         else:
             self._program_seq = 0
             self._completed_effect_keys = []
@@ -1413,6 +1465,8 @@ class Replayer:
         )
         report.results.append(result)
         self._account_result(report, result)
+        if self._program_durable is not None:
+            self._sync_durable_audit(self._program_durable, report)
         # Track the previously EXECUTED action for the next TYPE step's
         # click-to-focus heuristic. A SKIPPED step (guard on_unmet="skip") did
         # not act, so it leaves the previous action / click point untouched.

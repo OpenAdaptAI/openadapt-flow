@@ -201,6 +201,10 @@ def resume(
         prior_screenshots_may_leave_box=(
             manifest.screenshots_may_leave_box if manifest is not None else False
         ),
+        prior_model_calls=(manifest.model_calls if manifest is not None else 0),
+        prior_external_network_calls=(
+            manifest.external_network_calls if manifest is not None else "unknown"
+        ),
     )
 
 
@@ -281,5 +285,9 @@ def _resume_program(
         execution_target_kind=execution_target_kind,
         prior_screenshots_may_leave_box=(
             manifest.screenshots_may_leave_box if manifest is not None else False
+        ),
+        prior_model_calls=(manifest.model_calls if manifest is not None else 0),
+        prior_external_network_calls=(
+            manifest.external_network_calls if manifest is not None else "unknown"
         ),
     )

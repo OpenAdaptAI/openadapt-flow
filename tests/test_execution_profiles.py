@@ -637,6 +637,10 @@ def test_completed_compensation_produces_non_success_rolled_back_outcome(tmp_pat
     assert report.outcome_envelope.compensation_actions == 1
     assert "compensation" in report.outcome_envelope.evidence_classes
     assert "remains a non-success outcome" in rendered
+    attention = attention_item(tmp_path, run_dir)
+    assert attention is not None
+    assert attention.category == "operator_review"
+    assert attention.status == "rolled_back"
 
 
 def test_missing_linear_step_result_never_verifies():

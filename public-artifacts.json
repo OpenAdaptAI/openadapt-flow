@@ -117,7 +117,7 @@
     },
     {
       "path": "benchmark/ap_invoice/results.json",
-      "sha256": "1ebea538a2b9d4d9acb0ed0e899cc66f31ac74ef54e42943ff7b4f034668fe30"
+      "sha256": "ec98b17a7300dbdcc7ea7264aef094653724eaa0e2927b022d7c6f215944fc2b"
     },
     {
       "path": "benchmark/appliance_validation/results.json",
@@ -316,8 +316,12 @@
       "sha256": "19c62cd4b1a8ba55001925cc129af80d22cec94cf6d5c7d9f56c2b5d71c79075"
     },
     {
+      "path": "benchmark/multiapp-standard.yaml",
+      "sha256": "ea619f8ef670812c80d805f9a8076a25990ed806f63966a60c0fc970d752d2b7"
+    },
+    {
       "path": "benchmark/o2c_recon/results.json",
-      "sha256": "bd7f0a1177863a3f8368aed7c145a7424046b073c2fc9a2096627d4234a834fb"
+      "sha256": "cd72b3df633f04ad3e269b4fcbd01250991aa801b04e12a56987a9dd370ff757"
     },
     {
       "path": "benchmark/openemr/latency_cost.png",

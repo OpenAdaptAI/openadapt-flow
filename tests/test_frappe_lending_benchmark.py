@@ -628,6 +628,73 @@ def test_build_engine_is_allow_listed(tmp_path: Path) -> None:
         FrappeFixture(tmp_path, build_engine="shell-string")
 
 
+def test_podman_connection_is_used_for_runtime_compose(tmp_path: Path) -> None:
+    fixture = FrappeFixture(
+        tmp_path,
+        build_engine="podman",
+        podman_connection="openadapt-benchmark",
+    )
+    fixture.runtime_env.write_text("EXAMPLE=value\n")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"ok", stderr=b"")
+
+    fixture.runner = runner
+    assert fixture._compose("ps") == b"ok"
+    assert calls[0][0] == [
+        "podman",
+        "--connection",
+        "openadapt-benchmark",
+        "compose",
+        "--project-name",
+        "openadapt-frappe-lending",
+        "--env-file",
+        str(fixture.runtime_env),
+        "--file",
+        str(
+            Path(__file__).resolve().parents[1] / "benchmark/frappe_lending/compose.yml"
+        ),
+        "ps",
+    ]
+    env = calls[0][1]["env"]
+    assert isinstance(env, dict)
+    assert env["BENCHMARK_IMAGE"] == (
+        "localhost/openadapt/frappe-lending-benchmark:20260716"
+    )
+
+
+def test_podman_image_identity_uses_engine_local_reference(tmp_path: Path) -> None:
+    fixture = FrappeFixture(
+        tmp_path,
+        build_engine="podman",
+        podman_connection="openadapt-benchmark",
+    )
+    observed: list[str] = []
+
+    def runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        del kwargs
+        observed.extend(argv)
+        labels = {
+            label: fixture.lock["upstreams"][name]["commit"]
+            for name, label in SOURCE_LABELS.items()
+        }
+        payload = json.dumps([{"Id": "sha256:image", "Config": {"Labels": labels}}])
+        return subprocess.CompletedProcess(argv, 0, stdout=payload.encode(), stderr=b"")
+
+    fixture.runner = runner
+    fixture.image_identity()
+    assert observed == [
+        "podman",
+        "--connection",
+        "openadapt-benchmark",
+        "image",
+        "inspect",
+        "localhost/openadapt/frappe-lending-benchmark:20260716",
+    ]
+
+
 @pytest.mark.parametrize("existing", ("baseline.sql", "baseline.sql.sha256"))
 def test_snapshot_refuses_to_overwrite_any_existing_baseline_state(
     tmp_path: Path, existing: str
@@ -710,8 +777,12 @@ def test_typed_effects_and_api_binding_share_all_task_fields() -> None:
     assert effects[0].expected_count == 1
     assert effects[0].match["applicant"].literal == spec.applicant
     assert effects[0].match["applicant"].param is None
+    assert effects[0].idempotency_key is not None
+    assert effects[0].idempotency_key.param == "applicant_email_address"
+    assert effects[0].key_field == "applicant_email_address"
     resolved = [effect.resolve(spec.params()) for effect in effects]
     assert str(resolved[0].match["applicant"]) == spec.applicant
+    assert str(resolved[0].idempotency_key) == spec.applicant_email_address
     fields = {effect.field for effect in effects[1:]}
     assert fields == set(spec.fields) - {"applicant", "loan_product"}
     fixed_effects = {effect.field: effect for effect in effects[1:]}

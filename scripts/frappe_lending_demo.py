@@ -327,7 +327,15 @@ def _login_session(base_url: str, user: str, password: str) -> Any:
     return session
 
 
-def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
+def record(
+    fixture: FrappeFixture,
+    out_dir: Path,
+    *,
+    headed: bool,
+    raw_media_path: Path | None = None,
+    presentation_dir: Path | None = None,
+    presentation_pack_id: str = "frappe-lending-synthetic",
+) -> Path:
     """Record the synthetic form task; authentication is excluded from it."""
     from openadapt_flow.recorder import Recorder
 
@@ -340,16 +348,35 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
     baseline_hash = fixture.reset()
     reader = _login_session(fixture.base_url, ORACLE_USER, ORACLE_PASSWORD)
     oracle = FrappeLoanApplicationOracle(fixture.base_url, reader)
+    video_dir = None
+    if raw_media_path is not None:
+        if raw_media_path.exists():
+            raise FixtureError(
+                f"raw recording media path exists; refusing overwrite: {raw_media_path}"
+            )
+        video_dir = raw_media_path.parent / f".{raw_media_path.name}.playwright"
+        if video_dir.exists():
+            raise FixtureError(
+                f"raw recording staging path exists; refusing overwrite: {video_dir}"
+            )
+        video_dir.mkdir(parents=True)
     backend, close = FrappePlaywrightBackend.launch(
-        fixture.base_url, headless=not headed
+        fixture.base_url,
+        headless=not headed,
+        record_video_dir=str(video_dir) if video_dir is not None else None,
     )
+    presentation = None
+    recording_path: Path | None = None
+    if presentation_dir is not None:
+        from scripts.export_public_demo_evidence import _PresentationCapture
+
+        presentation = _PresentationCapture(mode="demonstration")
+        presentation.emitter.begin(profile="demo")
     try:
         _preauthenticate_browser(backend, fixture)
         page = backend.page
         before_counts = fixture.table_counts()
-        before_non_target_loan_sha256 = (
-            fixture.non_target_loan_applications_sha256()
-        )
+        before_non_target_loan_sha256 = fixture.non_target_loan_applications_sha256()
         recorder = Recorder(
             backend,
             out_dir,
@@ -358,11 +385,25 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
         )
         spec = LoanApplicationSpec()
 
+        def retain_demonstration_frame() -> None:
+            if presentation is not None:
+                presentation.emitter.emit_phase(
+                    "recording", observation_png=backend.screenshot()
+                )
+
+        retain_demonstration_frame()
+
         def type_field(field: str, value: str, *, param: str) -> None:
             locator = _control(page, field)
+            observed = locator.input_value()
+            if observed:
+                raise FixtureError(
+                    f"recording baseline field {field!r} is not blank: {observed!r}"
+                )
             recorder.click(*_center(locator))
-            recorder.press("Control+a")
+            retain_demonstration_frame()
             recorder.type_text(value, param=param)
+            retain_demonstration_frame()
 
         def commit_field(field: str, expected: str) -> None:
             recorder.press("Tab")
@@ -372,6 +413,7 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
                 arg=[field, expected],
                 timeout=30_000,
             )
+            retain_demonstration_frame()
 
         def link_field(field: str, value: str, *, param: str) -> None:
             type_field(field, value, param=param)
@@ -393,6 +435,7 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
                 arg=[field, value],
                 timeout=30_000,
             )
+            retain_demonstration_frame()
 
         type_field(
             "applicant_email_address",
@@ -409,6 +452,7 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
         # this wheel action in the recording immediately after the last top
         # field so replay never relies on locator-induced hidden scrolling.
         recorder.scroll(0, 600)
+        retain_demonstration_frame()
         link_field("loan_product", spec.loan_product, param="loan_product")
         type_field("loan_amount", spec.loan_amount, param="loan_amount")
         # The repayment control remains below the viewport after the first
@@ -416,6 +460,7 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
         # cannot type into the previously focused amount field and then report
         # a save refusal as an unexplained timeout.
         recorder.scroll(0, 500)
+        retain_demonstration_frame()
         type_field(
             "repayment_periods", spec.repayment_periods, param="repayment_periods"
         )
@@ -424,6 +469,7 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
         page.locator(".indicator-pill", has_text="Not Saved").wait_for(
             state="hidden", timeout=60_000
         )
+        retain_demonstration_frame()
         recording_path = recorder.finish()
         evidence = _capture_post_evidence(
             oracle,
@@ -451,9 +497,7 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
             "primary_outcome": verdict.primary_outcome.value,
             "rest_records_sha256": _safe_records_sha256(evidence.rest_records),
             "db_records_sha256": _safe_records_sha256(evidence.db_records),
-            "before_non_target_loan_sha256": (
-                evidence.before_non_target_loan_sha256
-            ),
+            "before_non_target_loan_sha256": (evidence.before_non_target_loan_sha256),
             "after_non_target_loan_sha256": evidence.after_non_target_loan_sha256,
             "all_table_deltas": evidence.all_table_deltas,
             "delta_violations": evidence.delta_violations,
@@ -472,9 +516,24 @@ def record(fixture: FrappeFixture, out_dir: Path, *, headed: bool) -> Path:
             recording_path / RECORDING_READY_MARKER,
             (json.dumps(marker, sort_keys=True) + "\n").encode(),
         )
-        return recording_path
     finally:
         close()
+    if recording_path is None:
+        raise FixtureError("recording did not produce a completed artifact")
+    if video_dir is not None and raw_media_path is not None:
+        from scripts.export_public_demo_evidence import _finish_video
+
+        _finish_video(video_dir, raw_media_path)
+    if presentation is not None and presentation_dir is not None:
+        from scripts.export_public_demo_evidence import _write_presentation_clip
+
+        _write_presentation_clip(
+            capture=presentation,
+            pack_id=presentation_pack_id,
+            clip_id="demonstration",
+            presentation_dir=presentation_dir,
+        )
+    return recording_path
 
 
 def compile_recording(recording_dir: Path, bundle_dir: Path) -> None:
@@ -492,6 +551,9 @@ def compile_recording(recording_dir: Path, bundle_dir: Path) -> None:
     if not workflow.steps:
         raise FixtureError("compiler produced no steps")
     workflow.steps[-1].effects = loan_application_effects()
+    # Frappe can reverse this record creation, but it is still consequential.
+    # The effect itself makes the run gate require identity/effect coverage;
+    # qualification persists the reviewed business classification separately.
     workflow.steps[-1].risk = "reversible"
     workflow.save(bundle_dir)
     _validate_bundle_contract(bundle_dir)
@@ -585,9 +647,7 @@ def _capture_post_evidence(
         errors.append("pre-write non-target Loan Application digest unavailable")
     else:
         try:
-            after_non_target_loan_sha256 = (
-                fixture.non_target_loan_applications_sha256()
-            )
+            after_non_target_loan_sha256 = fixture.non_target_loan_applications_sha256()
             if after_non_target_loan_sha256 != before_non_target_loan_sha256:
                 violations.append("tabLoan Application:non-target-content-changed")
         except Exception as exc:  # noqa: BLE001 - unreadable is not clean
@@ -826,9 +886,7 @@ def _persist_evidence(
             "before_table_counts": evidence.before_table_counts,
             "after_table_counts": evidence.after_table_counts,
             "all_table_deltas": evidence.all_table_deltas,
-            "before_non_target_loan_sha256": (
-                evidence.before_non_target_loan_sha256
-            ),
+            "before_non_target_loan_sha256": (evidence.before_non_target_loan_sha256),
             "after_non_target_loan_sha256": evidence.after_non_target_loan_sha256,
             "delta_violations": evidence.delta_violations,
             "oracle_errors": evidence.errors,
@@ -1064,9 +1122,7 @@ def run_compiled_trial(
         # Authentication/form navigation are declared unmeasured setup; take
         # the collateral-delta baseline only after they finish.
         before_counts = fixture.table_counts()
-        before_non_target_loan_sha256 = (
-            fixture.non_target_loan_applications_sha256()
-        )
+        before_non_target_loan_sha256 = fixture.non_target_loan_applications_sha256()
         start = time.monotonic()
         report = Replayer(backend, effect_verifier=oracle.verifier).run(
             Workflow.load(bundle_dir),
@@ -1155,9 +1211,7 @@ def run_agent_trial(
         _preauthenticate_browser(backend, fixture)
         _apply_condition(backend, condition)
         before_counts = fixture.table_counts()
-        before_non_target_loan_sha256 = (
-            fixture.non_target_loan_applications_sha256()
-        )
+        before_non_target_loan_sha256 = fixture.non_target_loan_applications_sha256()
         start = time.monotonic()
         result = agent_baseline.run_agent(
             backend,
@@ -1547,6 +1601,11 @@ def main(argv: list[str] | None = None) -> int:
     record_parser = sub.add_parser("record")
     record_parser.add_argument("--out", type=Path, required=True)
     record_parser.add_argument("--headed", action="store_true")
+    record_parser.add_argument("--raw-media", type=Path)
+    record_parser.add_argument("--presentation-dir", type=Path)
+    record_parser.add_argument(
+        "--presentation-pack-id", default="frappe-lending-synthetic"
+    )
     compile_parser = sub.add_parser("compile")
     compile_parser.add_argument("--recording", type=Path, required=True)
     compile_parser.add_argument("--bundle", type=Path, required=True)
@@ -1594,7 +1653,14 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(_plan(n, model_free=args.model_free), indent=2))
         elif args.command == "record":
             fixture.up()
-            record(fixture, args.out, headed=args.headed)
+            record(
+                fixture,
+                args.out,
+                headed=args.headed,
+                raw_media_path=args.raw_media,
+                presentation_dir=args.presentation_dir,
+                presentation_pack_id=args.presentation_pack_id,
+            )
         elif args.command == "compile":
             compile_recording(args.recording, args.bundle)
         elif args.command == "run":

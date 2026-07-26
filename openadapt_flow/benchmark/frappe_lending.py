@@ -132,9 +132,14 @@ def loan_application_effects(
             kind=EffectKind.RECORD_WRITTEN,
             match=selector,
             expected_count=1,
+            idempotency_key=ValueExpr(param="applicant_email_address"),
+            key_field="applicant_email_address",
             forbid_collateral_loss=True,
             risk="reversible",
-            probe="exactly one synthetic Loan Application exists",
+            probe=(
+                "exactly one synthetic Loan Application exists for the "
+                "run-bound applicant email"
+            ),
             timeout_s=5.0,
         )
     ]

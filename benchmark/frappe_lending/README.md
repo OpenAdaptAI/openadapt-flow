@@ -239,6 +239,28 @@ The driver subtracts the one-call reserve from the agent loop's post-response
 stop threshold, preventing either hard cap from being crossed by one final
 response. Obtain explicit spend approval first.
 
+## Governed presentation pack
+
+`export_frappe_lending_evidence.py` builds the real-app evidence pack used by
+the Guided/Raw product viewer. It records and compiles a fresh demonstration,
+runs three Standard-profile trials under both pinned baseline and cosmetic
+drift, exercises ambiguity, wrong-identity, stale-identity, weak-effect, and
+missing-effect refusals, then freezes a hash-inventoried synthetic derivative:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/export_frappe_lending_evidence.py \
+  --work /secure/local/frappe-campaign \
+  --out /secure/local/public-packs
+```
+
+The replay MP4 remains unmodified evidence imagery. Its Guided overlay is
+rendered from the accompanying exact decoded-frame timeline, PTS inventory,
+media binding, and privacy-safe contexts. The source recording is deliberately
+unbound and makes no verified-outcome claim. REST, direct SQL, non-target-state,
+qualification, and refusal evidence remain private; the public manifest carries
+their hashes and aggregate results. The exporter never copies the upstream
+Frappe/Lending fixture into the pack or a Python distribution.
+
 An explicit model-free engineering run is available before spend approval. It
 runs exactly the compiled and direct-API arms with the same baseline and drift
 conditions, trial count, reset, timing boundary, oracle, and evidence retention:

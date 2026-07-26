@@ -217,7 +217,7 @@ class FrappeFixture:
         if not self.runtime_env.exists():
             raise FixtureError("runtime.env is absent; run prepare first")
         argv = [
-            "docker",
+            *self._engine_prefix(self.build_engine),
             "compose",
             "--project-name",
             "openadapt-frappe-lending",
@@ -227,7 +227,26 @@ class FrappeFixture:
             str(COMPOSE_PATH),
             *args,
         ]
-        return self._run(argv, input_bytes=input_bytes).stdout or b""
+        compose_env = None
+        if self.build_engine == "podman":
+            # Podman stores a locally-built unqualified image below the
+            # ``localhost/`` registry.  Its Docker-compatible API does not
+            # apply short-name expansion when docker-compose inspects that
+            # image during start/up, so pass the equivalent fully-qualified
+            # reference without weakening the pinned runtime.env contract.
+            compose_env = {"BENCHMARK_IMAGE": self._runtime_image_reference()}
+        return self._run(argv, input_bytes=input_bytes, env=compose_env).stdout or b""
+
+    def _runtime_image_reference(self) -> str:
+        """Return the engine-local spelling of the pinned custom image."""
+        reference = str(self.lock["image"])
+        if (
+            self.build_engine == "podman"
+            and "/" in reference
+            and not reference.startswith("localhost/")
+        ):
+            return f"localhost/{reference}"
+        return reference
 
     def _validate_tools(self, *, engine: str | None = None) -> None:
         selected = engine or "docker"
@@ -482,7 +501,14 @@ class FrappeFixture:
 
     def image_identity(self) -> dict[str, Any]:
         """Verify source labels and return the exact custom image identity."""
-        raw = self._run(["docker", "image", "inspect", self.lock["image"]]).stdout
+        raw = self._run(
+            [
+                *self._engine_prefix(self.build_engine),
+                "image",
+                "inspect",
+                self._runtime_image_reference(),
+            ]
+        ).stdout
         item = json.loads(raw)[0]
         labels = (item.get("Config") or {}).get("Labels") or {}
         source_labels: dict[str, str] = {}
@@ -523,11 +549,14 @@ class FrappeFixture:
             "console",
             input_bytes=script,
         )
-        if re.search(
-            rb"(?:^|In \[\d+\]: )OPENADAPT_FRAPPE_FIXTURE_READY\r?$",
-            output,
-            re.MULTILINE,
-        ) is None:
+        if (
+            re.search(
+                rb"(?:^|In \[\d+\]: )OPENADAPT_FRAPPE_FIXTURE_READY\r?$",
+                output,
+                re.MULTILINE,
+            )
+            is None
+        ):
             raise FixtureError("fixture bootstrap did not emit its readiness sentinel")
 
     def _site_db_name(self) -> str:

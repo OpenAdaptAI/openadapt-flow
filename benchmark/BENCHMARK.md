@@ -117,13 +117,17 @@ perception; see each README).
 | **`o2c_recon`** (new) | **26** | **2** (billing + ledger) | CSV worklist in, CSV results write-back (re-read), REST API, UI gateway, 2 SQLite systems of record | 3-way branch (match / adjust / missing) | 4: missing record (explicit halt terminal), ambiguous duplicate, stale snapshot (optimistic concurrency), phantom file write |
 
 Both new benchmarks run every consequential write through the real
-`Replayer`'s api actuation tier under a sealed-bundle, standard-profile
-governed authorization, verify every write out-of-band per surface (read-only
-SQL, REST oracles, a maildir read, a CSV re-read), and are judged by an
-independent direct-file-access ground truth. Zero model calls; healthy-path
+`Replayer`'s api actuation tier after the real Standard-profile run gate admits
+the sealed bundle and binds a single-use authorization to its exact inputs.
+Every write is verified through a separate persisted-state read (read-only SQL,
+REST oracles, a maildir read, or a CSV re-read) and judged by a direct-file
+adjudicator whose expectations come from immutable source fixtures rather than
+the prepared worklist. This is not an independent service/failure domain. Zero
+model calls; healthy-path
 governed runs classify `VERIFIED` under the Section-3 transaction taxonomy.
-Measured headline over both benchmarks (n=3 per cell): governed
-silent-incorrect-success 0/30 runs, over-halts 0/30; naive banner-oracle
+Measured headline over both benchmarks (n=3 per cell; 60 base runs): governed
+silent-incorrect-success 0/30 governed runs and healthy-path over-halts 0/6;
+naive banner-oracle
 silent-incorrect-success 6/30 (the collateral overwrite and the phantom
 write-back classes). Deterministic coverage
 matrix, not a sampled incidence rate. See `benchmark/ap_invoice/README.md`

@@ -8,12 +8,13 @@ sheet written back and re-read), under two arms:
 
 - ``naive``    -- demo profile; effect contracts read only the applications'
   own painted acknowledgement banners.
-- ``governed`` -- sealed bundle + single-use standard-profile authorization,
-  exact API identity contracts, out-of-band verification per surface
+- ``governed`` -- sealed bundle admitted by the real Standard-profile gate,
+  a single-use exact-input authorization, exact API identity contracts, and
+  separate persisted-state verification per surface
   (read-only SQL over the ledger file, and the results CSV re-read from
   disk).
 
-Every run is judged by the INDEPENDENT ground truth
+Every run is judged by the direct persisted-state adjudicator
 (:mod:`benchmark.o2c_recon.ground_truth`).
 
 Zero model calls; localhost only; all data synthetic.
@@ -56,7 +57,6 @@ from benchmark.o2c_recon.fixtures import (
 from benchmark.o2c_recon.workflow import (
     build_workflow,
     build_worklist,
-    required_identity_step_ids,
     scenario_faults,
     scenario_orders,
 )
@@ -161,19 +161,23 @@ def run_one(scenario: str, arm: str, index: int, work_root: Path) -> dict[str, A
         workflow_src.save(bundle_dir)
         workflow = Workflow.load(bundle_dir)
 
+        verifier = _build_verifier(arm, billing, ledger)
+        api_actuator = ApiActuator(ledger.base_url, timeout_s=5.0)
         authorization = None
         if arm == "governed":
             authorization = standard_authorization(
                 workflow,
+                bundle_dir=bundle_dir,
+                effect_verifier=verifier,
+                api_actuator=api_actuator,
                 params=None,
                 worklists=worklists,
-                required_identity_step_ids=required_identity_step_ids(workflow),
             )
         replayer = Replayer(
             NullBackend(),
             vision=NullVision(),
-            effect_verifier=_build_verifier(arm, billing, ledger),
-            api_actuator=ApiActuator(ledger.base_url, timeout_s=5.0),
+            effect_verifier=verifier,
+            api_actuator=api_actuator,
             governed_authorization=authorization,
             durable=(arm == "governed"),
             require_settled=(arm == "governed"),
@@ -193,7 +197,6 @@ def run_one(scenario: str, arm: str, index: int, work_root: Path) -> dict[str, A
         )
         verdict = ground_truth.judge(
             scenario,
-            rows,
             before,
             after,
             completed=bool(report.success or report.execution_completed),
@@ -212,6 +215,13 @@ def run_one(scenario: str, arm: str, index: int, work_root: Path) -> dict[str, A
             "actuation_kinds": sorted({str(r.actuation) for r in executed}),
             "reported_success": reported_success,
             "halted": halted,
+            "execution_profile": report.execution_profile,
+            "governed_policy_name": (
+                Path(report.governed_policy_name).name
+                if report.governed_policy_name
+                else None
+            ),
+            "governed_approval_source": report.governed_approval_source,
             "execution_outcome": report.execution_outcome,
             "transaction_outcome": report.transaction_outcome,
             "transaction_billable": report.transaction_billable,

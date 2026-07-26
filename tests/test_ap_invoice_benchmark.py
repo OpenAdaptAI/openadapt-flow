@@ -16,13 +16,19 @@ regress:
 - the payment-confirmation outage routes to ``RECONCILIATION_REQUIRED`` and a
   retry under the same idempotency key is SUPPRESSED (``REJECTED_POLICY``),
   never double-paid;
-- the independent ground truth (direct SQLite + maildir reads) agrees.
+- the direct persisted-state adjudicator (SQLite + maildir reads) agrees.
 """
 
 from __future__ import annotations
 
+import json
+from collections import Counter
+from copy import deepcopy
+from pathlib import Path
+
 import pytest
 
+from benchmark.ap_invoice import ground_truth
 from benchmark.ap_invoice.run import ARMS, SCENARIOS, run_benchmark
 
 
@@ -62,6 +68,9 @@ def test_healthy_path_is_long_branching_and_multi_row(results):
 
 def test_governed_healthy_run_is_verified_and_billable(results):
     row = _rows(results, "governed", "healthy")[0]
+    assert row["execution_profile"] == "standard"
+    assert row["governed_policy_name"].endswith("multiapp-standard.yaml")
+    assert row["governed_approval_source"] == "benchmark-standard-run-gate"
     assert row["transaction_outcome"] == "VERIFIED"
     assert row["transaction_billable"] is True
     assert row["execution_outcome"] == "VERIFIED"
@@ -110,3 +119,56 @@ def test_headline_silent_wrong_counts(results):
     assert per_arm["governed"]["silent_wrong"] == 0
     assert per_arm["governed"]["over_halts"] == 0
     assert per_arm["naive"]["silent_wrong"] >= 1
+
+
+def test_direct_state_oracle_catches_unrelated_record_insert(tmp_path):
+    before = ground_truth.Snapshot(
+        tables={
+            "vendors": [{"vendor_id": "V-100", "name": "Acme Supply Co"}],
+            "invoices": [
+                {
+                    "id": 1,
+                    "invoice_id": "INV-2090",
+                    "vendor_id": "V-100",
+                    "po_number": "PO-506",
+                    "amount": "450.00",
+                    "doc_sha256": "",
+                    "status": "draft",
+                    "discount_applied": "none",
+                    "amount_payable": "",
+                }
+            ],
+        },
+        outbox={},
+    )
+    after = deepcopy(before)
+    after.tables["vendors"].append({"vendor_id": "V-999", "name": "Unrelated Vendor"})
+    verdict = ground_truth.judge(
+        "missing_po", before, after, outbox_dir=tmp_path, completed=False
+    )
+    assert "unexpected_record_change:vendors:V-999" in verdict.violations
+
+
+def test_committed_n3_evidence_shape_and_headline():
+    evidence = json.loads(
+        (Path(__file__).parents[1] / "benchmark/ap_invoice/results.json").read_text()
+    )
+    assert evidence["n_per_scenario"] == 3
+    cells = Counter((row["arm"], row["scenario"]) for row in evidence["runs"])
+    assert cells == Counter(
+        {(arm, scenario): 3 for arm in ARMS for scenario in SCENARIOS}
+    )
+    assert len(evidence["runs"]) == 30
+    assert (
+        sum(row["retry_transaction_outcome"] is not None for row in evidence["runs"])
+        == 6
+    )
+    assert evidence["headline"] == {
+        "governed_verified": 3,
+        "governed_silent_wrong": 0,
+        "governed_over_halts": 0,
+        "governed_reconciliation_required": 6,
+        "governed_suppressed_retries": 3,
+        "naive_silent_wrong": 3,
+        "model_calls_total": 0,
+    }

@@ -15,13 +15,19 @@ calls) and pins the qualitative claims the committed
 - a phantom results-sheet write (acknowledged but never persisted) is CAUGHT
   by the governed arm re-reading the file and silently accepted by the
   banner-oracle arm;
-- the independent ground truth (direct SQLite + CSV reads) agrees.
+- the direct persisted-state adjudicator (SQLite + CSV reads) agrees.
 """
 
 from __future__ import annotations
 
+import json
+from collections import Counter
+from copy import deepcopy
+from pathlib import Path
+
 import pytest
 
+from benchmark.o2c_recon import ground_truth
 from benchmark.o2c_recon.run import ARMS, SCENARIOS, run_benchmark
 
 
@@ -61,6 +67,9 @@ def test_healthy_path_shape(results):
 
 def test_governed_healthy_run_is_verified(results):
     row = _rows(results, "governed", "healthy")[0]
+    assert row["execution_profile"] == "standard"
+    assert row["governed_policy_name"].endswith("multiapp-standard.yaml")
+    assert row["governed_approval_source"] == "benchmark-standard-run-gate"
     assert row["transaction_outcome"] == "VERIFIED"
     assert row["transaction_billable"] is True
 
@@ -100,3 +109,57 @@ def test_headline_silent_wrong_counts(results):
     assert per_arm["governed"]["silent_wrong"] == 0
     assert per_arm["governed"]["over_halts"] == 0
     assert per_arm["naive"]["silent_wrong"] >= 1
+
+
+def test_direct_state_oracle_catches_unrelated_in_place_mutation():
+    before = ground_truth.Snapshot(
+        billing_tables={
+            "billed_orders": [
+                {
+                    "order_id": "ORD-9301",
+                    "customer": "Atlas Manufacturing",
+                    "amount_billed": "520.00",
+                    "period": "2026-06",
+                }
+            ]
+        },
+        ledger_tables={
+            "ledger_entries": [
+                {
+                    "id": 1,
+                    "order_id": "ORD-9301",
+                    "customer": "Atlas Manufacturing",
+                    "amount_posted": "500.00",
+                    "status": "open",
+                }
+            ],
+            "adjustments": [],
+        },
+        results_rows=[],
+        export_sha256="fixture",
+    )
+    after = deepcopy(before)
+    after.billing_tables["billed_orders"][0]["amount_billed"] = "999.00"
+    verdict = ground_truth.judge("stale_snapshot", before, after, completed=False)
+    assert (
+        "unexpected_record_change:billing.billed_orders:ORD-9301" in verdict.violations
+    )
+
+
+def test_committed_n3_evidence_shape_and_headline():
+    evidence = json.loads(
+        (Path(__file__).parents[1] / "benchmark/o2c_recon/results.json").read_text()
+    )
+    assert evidence["n_per_scenario"] == 3
+    cells = Counter((row["arm"], row["scenario"]) for row in evidence["runs"])
+    assert cells == Counter(
+        {(arm, scenario): 3 for arm in ARMS for scenario in SCENARIOS}
+    )
+    assert len(evidence["runs"]) == 30
+    assert evidence["headline"] == {
+        "governed_verified": 3,
+        "governed_silent_wrong": 0,
+        "governed_over_halts": 0,
+        "naive_silent_wrong": 3,
+        "model_calls_total": 0,
+    }

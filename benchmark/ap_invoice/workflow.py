@@ -12,7 +12,7 @@ The workflow itself is a Phase-2 workflow-program graph: a LOOP over the
 invoice worklist whose body BRANCHES on the match route (post vs. hold) and on
 discount eligibility, with every consequential write carried by an
 ``ApiBinding`` (the api tier), an exact API identity contract, and typed
-system-of-record effect contracts routed to per-surface out-of-band oracles.
+system-of-record effect contracts routed to per-surface persisted-state reads.
 """
 
 from __future__ import annotations
@@ -23,10 +23,14 @@ from typing import Optional
 
 import requests
 
+from benchmark.ap_invoice.fixtures import (
+    INVOICE_SOURCE_SEEDS,
+    SCENARIO_INVOICE_IDS,
+    invoice_source_pdf,
+)
 from benchmark.multiapp_common import (
     build_request_email,
     extract_pdf_lines,
-    make_pdf,
     parse_email,
     parse_kv_lines,
     read_maildir_messages,
@@ -51,44 +55,19 @@ from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
 EFFECT_TIMEOUT_S = 0.25
 BATCH_ID = "BATCH-2026-07"
 
+
 #: invoice_id -> (vendor_id, vendor_name, po_number, amount, terms)
 #: ``2/10 NET 30`` terms are discount-eligible at batch time; ``NET 30`` is
 #: expired. INV-1003's amount deliberately disagrees with PO-503 (the price
 #: mismatch routed to the exception queue). INV-1101 references a PO that does
 #: not exist; INV-1201 re-presents an already-posted invoice number.
-INVOICE_SEEDS: dict[str, tuple[str, str, str, str, str]] = {
-    "INV-1001": ("V-100", "Acme Supply Co", "PO-501", "1200.00", "2/10 NET 30"),
-    "INV-1002": ("V-200", "Beta Industrial", "PO-502", "860.00", "NET 30"),
-    "INV-1003": ("V-300", "Gamma Logistics", "PO-503", "415.25", "NET 30"),
-    "INV-1004": ("V-100", "Acme Supply Co", "PO-504", "99.90", "2/10 NET 30"),
-    "INV-1005": ("V-200", "Beta Industrial", "PO-505", "729.00", "NET 30"),
-    "INV-1101": ("V-100", "Acme Supply Co", "PO-599", "55.00", "NET 30"),
-    "INV-1201": ("V-200", "Beta Industrial", "PO-505", "729.00", "NET 30"),
-    "INV-1301": ("V-100", "Acme Supply Co", "PO-506", "320.00", "NET 30"),
-    "INV-1401": ("V-300", "Gamma Logistics", "PO-507", "212.75", "NET 30"),
-}
-
-
-def invoice_pdf(invoice_id: str) -> bytes:
-    vendor_id, vendor_name, po_number, amount, terms = INVOICE_SEEDS[invoice_id]
-    return make_pdf(
-        [
-            f"INVOICE: {invoice_id}",
-            f"VENDOR: {vendor_id}",
-            f"VENDOR-NAME: {vendor_name}",
-            f"PO: {po_number}",
-            f"AMOUNT: {amount}",
-            f"TERMS: {terms}",
-            "CURRENCY: USD",
-        ]
-    )
-
-
 def seed_inbox(inbox: Path, invoice_ids: list[str]) -> None:
     """Deliver one deterministic vendor request email per invoice."""
     for invoice_id in invoice_ids:
-        vendor_id, vendor_name, po_number, amount, _terms = INVOICE_SEEDS[invoice_id]
-        pdf = invoice_pdf(invoice_id)
+        vendor_id, vendor_name, po_number, amount, _terms = INVOICE_SOURCE_SEEDS[
+            invoice_id
+        ]
+        pdf = invoice_source_pdf(invoice_id)
         message = build_request_email(
             from_addr=f"billing@{vendor_id.lower()}.example.test",
             to_addr="ap@example-corp.test",
@@ -213,7 +192,7 @@ def _inv_match() -> dict[str, ValueExpr]:
 def _steps(arm: str, mailer_base: str, adjacent_invoice: str) -> dict[str, Step]:
     """The ten hardened action leaves, keyed by step id.
 
-    ``arm`` selects the effect contracts: ``governed`` carries out-of-band
+    ``arm`` selects the effect contracts: ``governed`` carries persisted-state
     system-of-record contracts (SQL / REST / maildir surfaces, plus the
     adjacent-record collateral guard); ``naive`` carries only the app-painted
     banner acknowledgement (what a screen-echo automation trusts).
@@ -400,6 +379,7 @@ def _steps(arm: str, mailer_base: str, adjacent_invoice: str) -> dict[str, Step]
             action=ActionKind.KEY,
             key="Enter",
             risk="irreversible",
+            identity_armed=governed,
             effects=effects(step_id),
             api_binding=binding,
         )
@@ -715,13 +695,7 @@ def required_identity_step_ids(workflow: Workflow) -> tuple[str, ...]:
 
 def scenario_invoices(scenario: str) -> list[str]:
     """Which seeded request emails a scenario's inbox carries."""
-    return {
-        "healthy": ["INV-1001", "INV-1002", "INV-1003", "INV-1004", "INV-1005"],
-        "missing_po": ["INV-1101"],
-        "duplicate_invoice": ["INV-1201"],
-        "collateral_approve": ["INV-1301"],
-        "payment_confirm_outage": ["INV-1401"],
-    }[scenario]
+    return list(SCENARIO_INVOICE_IDS[scenario])
 
 
 def scenario_faults(scenario: str) -> list[str]:

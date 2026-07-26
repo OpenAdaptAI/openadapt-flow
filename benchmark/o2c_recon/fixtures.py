@@ -58,6 +58,14 @@ ORDER_SEEDS: tuple[tuple[str, str, str, Optional[str], str], ...] = (
     ("ORD-9401", "Northwind Retail", "212.00", "212.00", "2026-06"),
 )
 
+SCENARIO_ORDER_IDS: dict[str, tuple[str, ...]] = {
+    "healthy": tuple(f"ORD-90{i:02d}" for i in range(1, 11)),
+    "missing_in_ledger": ("ORD-9001", "ORD-9101"),
+    "ambiguous_duplicate": ("ORD-9201",),
+    "stale_snapshot": ("ORD-9301",),
+    "phantom_writeback": ("ORD-9401",),
+}
+
 STALE_ORDER = "ORD-9301"
 STALE_REPORTED_AMOUNT = "480.00"
 DUPLICATE_ORDER = "ORD-9201"

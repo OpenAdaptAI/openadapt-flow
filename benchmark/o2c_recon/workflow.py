@@ -24,6 +24,7 @@ from pathlib import Path
 
 import requests
 
+from benchmark.o2c_recon.fixtures import SCENARIO_ORDER_IDS
 from openadapt_flow.ir import (
     ActionKind,
     ApiBinding,
@@ -45,13 +46,7 @@ SUMMARY_ID = "SUMMARY"
 
 
 def scenario_orders(scenario: str) -> list[str]:
-    return {
-        "healthy": [f"ORD-90{i:02d}" for i in range(1, 11)],
-        "missing_in_ledger": ["ORD-9001", "ORD-9101"],
-        "ambiguous_duplicate": ["ORD-9201"],
-        "stale_snapshot": ["ORD-9301"],
-        "phantom_writeback": ["ORD-9401"],
-    }[scenario]
+    return list(SCENARIO_ORDER_IDS[scenario])
 
 
 def scenario_faults(scenario: str) -> dict[str, list[str]]:
@@ -245,6 +240,7 @@ def _steps(arm: str, billing_base: str) -> dict[str, Step]:
             action=ActionKind.KEY,
             key="Enter",
             risk="irreversible",
+            identity_armed=governed,
             effects=effects("enter_adjustment"),
             api_binding=ApiBinding(
                 method="POST",
@@ -267,6 +263,7 @@ def _steps(arm: str, billing_base: str) -> dict[str, Step]:
             action=ActionKind.KEY,
             key="Enter",
             risk="irreversible",
+            identity_armed=governed,
             effects=effects("mark_reconciled"),
             api_binding=ApiBinding(
                 method="POST",
@@ -286,6 +283,7 @@ def _steps(arm: str, billing_base: str) -> dict[str, Step]:
             action=ActionKind.KEY,
             key="Enter",
             risk="irreversible",
+            identity_armed=governed,
             effects=effects("writeback_row"),
             api_binding=ApiBinding(
                 method="POST",
@@ -306,6 +304,7 @@ def _steps(arm: str, billing_base: str) -> dict[str, Step]:
             action=ActionKind.KEY,
             key="Enter",
             risk="irreversible",
+            identity_armed=governed,
             effects=effects("writeback_summary"),
             api_binding=ApiBinding(
                 method="POST",

@@ -5,7 +5,7 @@ is deterministic, synthetic, and localhost-only: null backend/vision fakes for
 the API-tier replay path (the same pattern ``benchmark/effect_e2e`` uses), a
 surface-routing composite effect verifier, a CSV row oracle for spreadsheet
 write-back verification, deterministic RFC822 email + minimal PDF fixtures,
-and the governed standard-profile authorization helper.
+and the governed Standard-profile admission helper.
 
 No model calls, no network beyond 127.0.0.1, no PHI (all names are synthetic
 company/worker placeholders).
@@ -14,6 +14,7 @@ company/worker placeholders).
 from __future__ import annotations
 
 import csv
+import json
 import struct
 import time
 import zlib
@@ -24,11 +25,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
 
+from openadapt_flow.deployment import DeploymentConfig, PolicySection
+from openadapt_flow.execution_profiles import execution_profile_contract
 from openadapt_flow.ir import Workflow
-from openadapt_flow.runtime.authorization import (
-    GovernedRunAuthorization,
-    runtime_inputs_digest,
-)
+from openadapt_flow.run_gate import build_runtime_authorization, evaluate_run_gate
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.effects._common import judge_records
 from openadapt_flow.runtime.effects.effect import (
     Effect,
@@ -142,7 +143,7 @@ def surface_of(effect: Effect, default: str) -> str:
 
 
 class SurfaceRoutedVerifier:
-    """Route each typed effect to the out-of-band verifier for its surface.
+    """Route each typed effect to the separate verifier for its surface.
 
     Generalizes ``benchmark.effect_e2e.verifiers.CompositeSqlVerifier`` to a
     heterogeneous verifier map (read-only SQL, REST record oracle, file/maildir
@@ -406,28 +407,111 @@ def parse_kv_lines(lines: list[str]) -> dict[str, str]:
     return out
 
 
+# -- direct persisted-state adjudication ------------------------------------
+
+
+def unexpected_record_change_violations(
+    before: dict[str, list[dict[str, Any]]],
+    after: dict[str, list[dict[str, Any]]],
+    *,
+    key_fields: dict[str, str],
+    allowed_keys: dict[str, set[str]],
+    excluded_tables: frozenset[str] = frozenset(),
+    prefix: str = "",
+) -> list[str]:
+    """Return changes outside an explicit table/key transition allowlist.
+
+    Every non-excluded table is covered.  Known business tables are grouped by
+    their stable record key so inserts, deletes, and in-place edits to an
+    unrelated record are caught.  An unrecognized table is fail-closed: its
+    complete canonical row set must remain byte-for-byte equivalent.
+
+    Values for allowed records are still checked by each benchmark's separate
+    business-state oracle; this helper ensures that *nothing else* changed.
+    """
+
+    def canonical(rows: list[dict[str, Any]]) -> list[str]:
+        return sorted(
+            json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+            for row in rows
+        )
+
+    def grouped(
+        rows: list[dict[str, Any]], key_field: str
+    ) -> dict[str, list[dict[str, Any]]]:
+        result: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            result.setdefault(str(row.get(key_field)), []).append(row)
+        return result
+
+    violations: list[str] = []
+    for table in sorted(set(before) | set(after)):
+        if table in excluded_tables:
+            continue
+        label = f"{prefix}.{table}" if prefix else table
+        before_rows = before.get(table, [])
+        after_rows = after.get(table, [])
+        key_field = key_fields.get(table)
+        if key_field is None:
+            if canonical(before_rows) != canonical(after_rows):
+                violations.append(f"unexpected_table_change:{label}")
+            continue
+        before_by_key = grouped(before_rows, key_field)
+        after_by_key = grouped(after_rows, key_field)
+        permitted = allowed_keys.get(table, set())
+        for key in sorted(set(before_by_key) | set(after_by_key)):
+            if key in permitted:
+                continue
+            if canonical(before_by_key.get(key, [])) != canonical(
+                after_by_key.get(key, [])
+            ):
+                violations.append(f"unexpected_record_change:{label}:{key}")
+    return violations
+
+
 # -- governed authorization helper -------------------------------------------
 
 
 def standard_authorization(
     workflow: Workflow,
     *,
+    bundle_dir: Path,
+    effect_verifier: object,
+    api_actuator: object,
     params: Optional[dict[str, str]],
     worklists: Optional[dict[str, list[dict[str, str]]]],
-    required_identity_step_ids: tuple[str, ...],
-    policy_name: str = "benchmark-multiapp-standard",
 ) -> GovernedRunAuthorization:
-    """A single-use standard-profile authorization bound to this exact run.
+    """Admit and bind one run through the real Standard-profile gate.
 
-    The bundle must be sealed (``Workflow.save`` + ``Workflow.load``) before
-    calling. The digest binds the exact params and worklists supplied to
-    ``Replayer.run``; any drift refuses execution.
+    The benchmark policy is intentionally scoped to deterministic API-tier
+    fixtures: every consequential write must carry an exact API identity
+    binding and a declared system-effect contract.  ``evaluate_run_gate`` then
+    applies the named Standard profile (certification, identity/effect
+    coverage, verifier tier, durability, settling, and manifest integrity).
+    ``build_runtime_authorization`` binds that admission to the exact sealed
+    bundle and runtime inputs; any later drift is refused by the replayer.
     """
     assert workflow.manifest is not None, "seal the bundle before authorizing"
-    return GovernedRunAuthorization(
-        bundle_content_digest=workflow.manifest.content_digest,
-        runtime_inputs_digest=runtime_inputs_digest(workflow, params, worklists),
-        admitted_policy_name=policy_name,
-        execution_profile="standard",
-        required_identity_step_ids=required_identity_step_ids,
+    policy = Path(__file__).with_name("multiapp-standard.yaml")
+    gate = evaluate_run_gate(
+        workflow,
+        bundle_dir=bundle_dir,
+        deployment=DeploymentConfig(
+            policy=PolicySection(policy=str(policy)),
+        ),
+        effect_verifier=effect_verifier,
+        api_actuator=api_actuator,
+        policy_source=str(policy),
+        profile_contract=execution_profile_contract("standard"),
+        effective_durable=True,
+        effective_require_settled=True,
+    )
+    if not gate.passed:
+        raise RuntimeError(gate.render())
+    return build_runtime_authorization(
+        workflow,
+        gate,
+        approval_source="benchmark-standard-run-gate",
+        params=params,
+        worklists=worklists,
     )

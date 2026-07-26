@@ -37,9 +37,10 @@ scenarios.
 - `naive`: demo profile; every write is "verified" only against the
   application's own painted acknowledgement banner (what a screen-echo
   automation trusts).
-- `governed`: sealed bundle, single-use standard-profile authorization, an
-  exact API identity contract on every consequential write, out-of-band
-  effect verification routed per record surface (read-only SQL over the ERP
+- `governed`: sealed bundle admitted by the real Standard-profile run gate,
+  with the resulting single-use authorization bound to the exact inputs; an
+  exact API identity contract on every consequential write; effect
+  verification routed per record surface (read-only SQL over the ERP
   SQLite file, a REST payments oracle, and the OUTBOX **maildir read from
   disk** for every sent email), a collateral guard on the adjacent grid row,
   and an at-most-once idempotency ledger.
@@ -48,18 +49,21 @@ scenarios.
 
 | scenario | naive (banner oracle) | governed |
 |---|---|---|
-| `healthy` | completes; `COMPLETED_UNVERIFIED` (never billable) | **`VERIFIED`** (all effects confirmed out-of-band; billable) |
+| `healthy` | completes; `COMPLETED_UNVERIFIED` (never billable) | **`VERIFIED`** (all effects confirmed through separate persisted-state reads; billable) |
 | `missing_po` | safe halt at entry | safe halt; `HALTED_BEFORE_EFFECT`; nothing persisted |
 | `duplicate_invoice` | safe halt at entry | safe halt; `HALTED_BEFORE_EFFECT`; still exactly one invoice |
 | `collateral_approve` | **SILENT WRONG** (adjacent invoice corrupted, banner says success) | **caught**: collateral guard refutes; `RECONCILIATION_REQUIRED` |
 | `payment_confirm_outage` | completes (cannot know the write landed) | `RECONCILIATION_REQUIRED`; retry under the same idempotency key SUPPRESSED (`REJECTED_POLICY`); ground truth: exactly one payment |
 
-Headline (30 runs + 10 retry runs): governed silent-incorrect-success **0**,
-over-halts on the healthy path **0**, model calls **0**; naive
+Headline (30 base runs: 15 per arm, plus 6 duplicate-attempt checks): governed
+silent-incorrect-success **0/15**, healthy-path over-halts **0/3**, model calls
+**0**; naive
 silent-incorrect-success **3/3** on the collateral scenario. Every run is
-judged by an independent ground truth that opens the SQLite file and the
-maildir directly (no HTTP, no banner, no verifier verdict reaches it) and
-audits every table's delta.
+judged through a direct persisted-state read path that opens the SQLite file
+and maildir (no HTTP, banner, or verifier verdict reaches it), derives
+expectations from immutable source-fixture bytes, and enforces the allowed
+record transitions across every non-echo table. This is not a separate service
+or failure domain.
 
 Reproduce: `python -m benchmark.ap_invoice.run --n 3` (localhost only, $0).
 Pinned in CI by `tests/test_ap_invoice_benchmark.py`.
@@ -71,7 +75,7 @@ Proves (within a synthetic closed world):
 - the engine's Phase-2 workflow-program machinery (loop + guarded branches +
   explicit exception routing) executes a 30+ step, two-application,
   email/PDF/spreadsheet-era back-office flow deterministically at $0;
-- the governed contract stack (identity bindings, per-surface out-of-band
+- the governed contract stack (identity bindings, per-surface persisted-state
   effect verification including a maildir file oracle, collateral guards,
   idempotency, the Section-3 transaction taxonomy) yields zero
   silent-incorrect-successes across the designed fault classes while a

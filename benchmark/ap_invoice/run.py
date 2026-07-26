@@ -7,13 +7,14 @@ two arms:
 - ``naive``    -- demo profile, no governed authorization, and effect
   contracts that read only the applications' OWN painted acknowledgement
   banners (what a screen-echo automation trusts).
-- ``governed`` -- sealed bundle + single-use standard-profile authorization,
-  exact API identity contracts on every consequential write, and out-of-band
+- ``governed`` -- sealed bundle admitted by the real Standard-profile gate,
+  a single-use exact-input authorization, exact API identity contracts on
+  every consequential write, and separate persisted-state
   effect verification routed per record surface (read-only SQL over the ERP
   file, the payments REST oracle, and the OUTBOX maildir file oracle), plus
   the adjacent-record collateral guard and at-most-once idempotency.
 
-Every run is judged by the INDEPENDENT ground truth
+Every run is judged by the direct persisted-state adjudicator
 (:mod:`benchmark.ap_invoice.ground_truth`): direct SQLite file reads plus a
 direct maildir read, with its own invariant logic and per-table delta audit.
 
@@ -51,7 +52,6 @@ from benchmark.ap_invoice.fixtures import (
 from benchmark.ap_invoice.workflow import (
     build_workflow,
     build_worklist,
-    required_identity_step_ids,
     scenario_faults,
     scenario_invoices,
     scenario_seed_duplicate,
@@ -164,19 +164,23 @@ def _one_replay(
     workflow_src.save(bundle_dir)
     workflow = Workflow.load(bundle_dir)
 
+    verifier = _build_verifier(arm, erp, mailer)
+    api_actuator = ApiActuator(erp.base_url, timeout_s=5.0)
     authorization = None
     if arm == "governed":
         authorization = standard_authorization(
             workflow,
+            bundle_dir=bundle_dir,
+            effect_verifier=verifier,
+            api_actuator=api_actuator,
             params=None,
             worklists=worklists,
-            required_identity_step_ids=required_identity_step_ids(workflow),
         )
     replayer = Replayer(
         NullBackend(),
         vision=NullVision(),
-        effect_verifier=_build_verifier(arm, erp, mailer),
-        api_actuator=ApiActuator(erp.base_url, timeout_s=5.0),
+        effect_verifier=verifier,
+        api_actuator=api_actuator,
         governed_authorization=authorization,
         durable=(arm == "governed"),
         require_settled=(arm == "governed"),
@@ -258,7 +262,6 @@ def run_one(scenario: str, arm: str, index: int, work_root: Path) -> dict[str, A
         after = ground_truth.capture(erp.db_path, mailer.outbox)
         verdict = ground_truth.judge(
             scenario,
-            rows,
             before,
             after,
             outbox_dir=mailer.outbox,
@@ -279,6 +282,13 @@ def run_one(scenario: str, arm: str, index: int, work_root: Path) -> dict[str, A
             "actuation_kinds": sorted({str(r.actuation) for r in executed}),
             "reported_success": reported_success,
             "halted": halted,
+            "execution_profile": report.execution_profile,
+            "governed_policy_name": (
+                Path(report.governed_policy_name).name
+                if report.governed_policy_name
+                else None
+            ),
+            "governed_approval_source": report.governed_approval_source,
             "execution_outcome": report.execution_outcome,
             "transaction_outcome": report.transaction_outcome,
             "transaction_billable": report.transaction_billable,

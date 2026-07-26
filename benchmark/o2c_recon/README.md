@@ -37,9 +37,10 @@ plus 4 designed exception scenarios.
 
 - `naive`: demo profile; every write "verified" only against the
   applications' own painted acknowledgement banners.
-- `governed`: sealed bundle, single-use standard-profile authorization, exact
-  API identity contracts (order id plus customer name quorum on the
-  adjustment write), out-of-band verification per surface (read-only SQL
+- `governed`: sealed bundle admitted by the real Standard-profile run gate,
+  with the resulting single-use authorization bound to the exact inputs;
+  exact API identity contracts (order id plus customer name quorum on the
+  adjustment write); persisted-state verification per surface (read-only SQL
   over the ledger SQLite file; the results CSV re-read from disk).
 
 ## Scenarios and measured outcomes (n=3 per cell, deterministic)
@@ -52,11 +53,14 @@ plus 4 designed exception scenarios.
 | `stale_snapshot` | safe halt (optimistic-concurrency 409) | safe halt; `HALTED_BEFORE_EFFECT`; amount unchanged |
 | `phantom_writeback` | **SILENT WRONG** (row acknowledged, never written to the sheet) | **caught** by re-reading the file; halts |
 
-Headline (30 runs): governed silent-incorrect-success **0**, over-halts on
-the healthy path **0**, model calls **0**; naive silent-incorrect-success
+Headline (30 base runs: 15 per arm): governed silent-incorrect-success
+**0/15**, healthy-path over-halts **0/3**, model calls **0**; naive
+silent-incorrect-success
 **3/3** on the phantom write-back. Ground truth opens both SQLite files and
-both CSV files directly and re-derives the intended state from the seed
-table; it also verifies the exported spreadsheet was never mutated.
+both CSV files through a separate read path, derives expectations from the
+immutable source seeds rather than the compare worklist, enforces allowed
+record transitions across every non-echo table, and verifies the export was
+never mutated. It is not a separate service or failure domain.
 
 The compare pre-pass is deliberately NAIVE (first ledger entry wins, snapshot
 trusted): the measured property is that the ENGINE still refuses at act time
@@ -71,7 +75,7 @@ Proves (within a synthetic closed world):
 
 - a genuinely multi-application flow: one workflow program driving two
   separate fixture applications and two file surfaces, with per-surface
-  out-of-band verification including a spreadsheet re-read oracle;
+  persisted-state verification including a spreadsheet re-read oracle;
 - conflict and duplicate handling refuse BEFORE any write (optimistic
   concurrency, ambiguity, missing record), and the phantom-file-write class
   is caught only by an oracle that actually re-reads the file;

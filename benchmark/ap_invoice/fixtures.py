@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
-from benchmark.multiapp_common import init_maildir, write_maildir_message
+from benchmark.multiapp_common import init_maildir, make_pdf, write_maildir_message
 
 #: The seeded ADJACENT record every scenario carries: a draft invoice sitting
 #: one row away from the target in the AP grid. The collateral fault corrupts
@@ -50,6 +50,46 @@ ADJACENT_AMOUNT = "450.00"
 
 #: The pre-existing posted invoice the ambiguous-duplicate scenario re-presents.
 DUPLICATE_INVOICE = "INV-1201"
+
+# Immutable source fixtures.  The workflow intake parser and the direct
+# persisted-state adjudicator consume these independently; the adjudicator
+# never trusts the worklist produced by the system under test.
+INVOICE_SOURCE_SEEDS: dict[str, tuple[str, str, str, str, str]] = {
+    "INV-1001": ("V-100", "Acme Supply Co", "PO-501", "1200.00", "2/10 NET 30"),
+    "INV-1002": ("V-200", "Beta Industrial", "PO-502", "860.00", "NET 30"),
+    "INV-1003": ("V-300", "Gamma Logistics", "PO-503", "415.25", "NET 30"),
+    "INV-1004": ("V-100", "Acme Supply Co", "PO-504", "99.90", "2/10 NET 30"),
+    "INV-1005": ("V-200", "Beta Industrial", "PO-505", "729.00", "NET 30"),
+    "INV-1101": ("V-100", "Acme Supply Co", "PO-599", "55.00", "NET 30"),
+    "INV-1201": ("V-200", "Beta Industrial", "PO-505", "729.00", "NET 30"),
+    "INV-1301": ("V-100", "Acme Supply Co", "PO-506", "320.00", "NET 30"),
+    "INV-1401": ("V-300", "Gamma Logistics", "PO-507", "212.75", "NET 30"),
+}
+
+SCENARIO_INVOICE_IDS: dict[str, tuple[str, ...]] = {
+    "healthy": ("INV-1001", "INV-1002", "INV-1003", "INV-1004", "INV-1005"),
+    "missing_po": ("INV-1101",),
+    "duplicate_invoice": ("INV-1201",),
+    "collateral_approve": ("INV-1301",),
+    "payment_confirm_outage": ("INV-1401",),
+}
+
+
+def invoice_source_pdf(invoice_id: str) -> bytes:
+    """The immutable PDF bytes delivered to the intake pipeline."""
+    vendor_id, vendor_name, po_number, amount, terms = INVOICE_SOURCE_SEEDS[invoice_id]
+    return make_pdf(
+        [
+            f"INVOICE: {invoice_id}",
+            f"VENDOR: {vendor_id}",
+            f"VENDOR-NAME: {vendor_name}",
+            f"PO: {po_number}",
+            f"AMOUNT: {amount}",
+            f"TERMS: {terms}",
+            "CURRENCY: USD",
+        ]
+    )
+
 
 VENDORS = (
     ("V-100", "Acme Supply Co"),

@@ -173,7 +173,18 @@ def test_browser_target_is_run_scoped_and_media_rebinds_exact_frame() -> None:
 
     assert isinstance(target.binding, ControlOverlayObservationBindingV2)
     assert target.binding.observation_hmac_sha256 != raw_sha256
-    assert frame.tracking_for_observation(emitter.observation_hmac_sha256(observation))
+    assert frame.tracking_for_observation(
+        emitter.observation_hmac_sha256(
+            observation,
+            event_sequence=frame.event_sequence,
+        )
+    )
+    assert (
+        frame.tracking_for_observation(
+            emitter.observation_hmac_sha256(observation, event_sequence=99)
+        )
+        is None
+    )
     assert frame.tracking_for_observation("0" * 64) is None
     assert target.rect.model_dump() == {
         "x": 0.1,
@@ -208,9 +219,15 @@ def test_each_begin_rotates_private_observation_binding() -> None:
         observation_key_factory=lambda: next(keys),
     )
     emitter.begin(profile="demo")
-    first = emitter.observation_hmac_sha256(b"same-private-frame")
+    first = emitter.observation_hmac_sha256(
+        b"same-private-frame",
+        event_sequence=0,
+    )
     emitter.begin(profile="demo")
-    second = emitter.observation_hmac_sha256(b"same-private-frame")
+    second = emitter.observation_hmac_sha256(
+        b"same-private-frame",
+        event_sequence=0,
+    )
     assert first != second
 
 

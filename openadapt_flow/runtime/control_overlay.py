@@ -167,7 +167,12 @@ class RuntimeControlOverlayEmitter:
             terminal=True,
         )
 
-    def observation_hmac_sha256(self, observation_png: bytes) -> str:
+    def observation_hmac_sha256(
+        self,
+        observation_png: bytes,
+        *,
+        event_sequence: int,
+    ) -> str:
         """Return the run-scoped opaque binding for one exact private frame.
 
         A sibling viewer that owns the private stream can ask the producer for
@@ -177,7 +182,15 @@ class RuntimeControlOverlayEmitter:
 
         if self._observation_hmac_key is None:
             raise RuntimeError("control-overlay run has not begun")
-        private_observation_id = hashlib.sha256(observation_png).digest()
+        if (
+            isinstance(event_sequence, bool)
+            or not isinstance(event_sequence, int)
+            or event_sequence < 0
+        ):
+            raise ValueError("overlay observation event_sequence must be non-negative")
+        private_observation_id = (
+            event_sequence.to_bytes(8, "big") + hashlib.sha256(observation_png).digest()
+        )
         return hmac.new(
             self._observation_hmac_key,
             _OBSERVATION_BINDING_DOMAIN + private_observation_id,
@@ -226,7 +239,10 @@ class RuntimeControlOverlayEmitter:
                 device_pixel_ratio=float(dpr),
             ),
             binding=ControlOverlayObservationBindingV2(
-                observation_hmac_sha256=self.observation_hmac_sha256(observation_png)
+                observation_hmac_sha256=self.observation_hmac_sha256(
+                    observation_png,
+                    event_sequence=self._next_sequence,
+                )
             ),
             action_kind=canonical_action,
         )

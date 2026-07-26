@@ -117,7 +117,7 @@
     },
     {
       "path": "benchmark/ap_invoice/results.json",
-      "sha256": "ec98b17a7300dbdcc7ea7264aef094653724eaa0e2927b022d7c6f215944fc2b"
+      "sha256": "538e4974d12416834dbc83bbcf515802053488ac1bb60077e4278ba2d878d739"
     },
     {
       "path": "benchmark/appliance_validation/results.json",
@@ -321,7 +321,7 @@
     },
     {
       "path": "benchmark/o2c_recon/results.json",
-      "sha256": "cd72b3df633f04ad3e269b4fcbd01250991aa801b04e12a56987a9dd370ff757"
+      "sha256": "adaa3473d3abd808ad6c54f029c39a4b8e529b50f55a4d33404be317465a65aa"
     },
     {
       "path": "benchmark/openemr/latency_cost.png",

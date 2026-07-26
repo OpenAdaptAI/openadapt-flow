@@ -1,7 +1,7 @@
 {
   "benchmark": "o2c_recon",
   "instrument": "order-to-cash billing reconciliation across two systems: exported spreadsheet -> compare -> ledger adjustments (UI-only gateway) -> reconcile marks (API) -> results spreadsheet write-back, end-to-end through the real replayer's api tier",
-  "generated_at": "2026-07-26T21:20:47.085371+00:00",
+  "generated_at": "2026-07-26T22:18:11.781318+00:00",
   "platform": "macOS-15.7.3-arm64-arm-64bit",
   "n_per_scenario": 3,
   "arms": [

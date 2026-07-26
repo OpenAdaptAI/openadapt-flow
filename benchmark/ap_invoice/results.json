@@ -1,7 +1,7 @@
 {
   "benchmark": "ap_invoice",
   "instrument": "multi-application AP invoice intake: email + PDF + ERP 3-way match + payments + exception queue, end-to-end through the real replayer's api tier",
-  "generated_at": "2026-07-26T21:20:56.982709+00:00",
+  "generated_at": "2026-07-26T22:18:19.890975+00:00",
   "platform": "macOS-15.7.3-arm64-arm-64bit",
   "n_per_scenario": 3,
   "arms": [

@@ -480,6 +480,35 @@ def context_from_lines(
     return joined
 
 
+def identifier_text_from_lines(
+    lines: Iterable[Any],
+    *,
+    min_confidence: float = 0.5,
+    reference_date: Optional[date] = None,
+) -> Optional[str]:
+    """Extract identity text from an already-scoped identifier region.
+
+    Unlike :func:`context_from_lines`, this helper does not apply another
+    target-row band or exclusion: the caller has already cropped the exact
+    record-identifying region.  Compilation and replay both use this function
+    so the identity template is built from the same OCR scope that later
+    verifies it.  That avoids false halts where full-frame OCR and cropped OCR
+    segment or recognize the same pixels differently.
+    """
+    kept: list[tuple[int, int, str]] = []
+    for line in lines:
+        text = (getattr(line, "text", "") or "").strip()
+        if not text or getattr(line, "confidence", 0.0) < min_confidence:
+            continue
+        if is_volatile_line(text, reference_date=reference_date):
+            continue
+        x, y, _, _ = line.region
+        kept.append((int(y), int(x), text))
+    kept.sort()
+    joined = " ".join(text for _, _, text in kept)
+    return joined if len(squash(joined)) >= MIN_CONTEXT_CHARS else None
+
+
 def _kept_context_lines(
     lines: Iterable[Any],
     *,

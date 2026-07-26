@@ -6171,6 +6171,15 @@ class Replayer:
             )
         )
         anchor = step.anchor
+        identifier_region: Optional[Region] = None
+        if anchor.identifier_region is not None:
+            rx, ry, rw, rh = anchor.identifier_region
+            identifier_region = (
+                resolution.point[0] + (rx - anchor.click_point[0]),
+                resolution.point[1] + (ry - anchor.click_point[1]),
+                rw,
+                rh,
+            )
         band = identity_mod.band_region(
             resolution.point, anchor.region[3], self.backend.viewport
         )
@@ -6198,16 +6207,30 @@ class Replayer:
             region: Optional[Region],
             point_y: int,
             exclude_region: Region,
+            *,
+            scoped_identifier: bool = False,
         ) -> IdentityCheck:
-            lines = [
-                line
-                for line in self.vision.ocr(png, region=region)
-                if line.text.strip()
-                and not identity_mod.regions_intersect(line.region, exclude_region)
-                and not identity_mod.is_volatile_line(line.text, reference_date=today)
-            ]
-            lines = identity_mod.lines_near_point(lines, point_y)
-            observed = " ".join(line.text.strip() for line in lines)
+            lines = self.vision.ocr(png, region=region)
+            if scoped_identifier:
+                observed = (
+                    identity_mod.identifier_text_from_lines(
+                        lines,
+                        reference_date=today,
+                    )
+                    or ""
+                )
+            else:
+                lines = [
+                    line
+                    for line in lines
+                    if line.text.strip()
+                    and not identity_mod.regions_intersect(line.region, exclude_region)
+                    and not identity_mod.is_volatile_line(
+                        line.text, reference_date=today
+                    )
+                ]
+                lines = identity_mod.lines_near_point(lines, point_y)
+                observed = " ".join(line.text.strip() for line in lines)
             if anchor.identity_template is not None and anchor.identity_template.tokens:
                 # PHI-free path: verify against the salted-hash template (audit
                 # REM-2). Same three-way verdict, no plaintext band stored.
@@ -6230,10 +6253,17 @@ class Replayer:
                 param_examples=workflow.params,
             )
 
-        check = attempt(before_png, band, resolution.point[1], exclude)
+        live_region = identifier_region or band
+        check = attempt(
+            before_png,
+            live_region,
+            resolution.point[1],
+            exclude,
+            scoped_identifier=identifier_region is not None,
+        )
         if check.status == "verified":
             return check
-        upscaled = identity_mod.upscale_crop(before_png, band)
+        upscaled = identity_mod.upscale_crop(before_png, live_region)
         if upscaled is None:
             return check
         # In the upscaled crop's coordinate space the point's y is its
@@ -6242,13 +6272,14 @@ class Replayer:
         retry = attempt(
             upscaled,
             None,
-            (resolution.point[1] - band[1]) * 2,
+            (resolution.point[1] - live_region[1]) * 2,
             (
-                (exclude[0] - band[0]) * 2,
-                (exclude[1] - band[1]) * 2,
+                (exclude[0] - live_region[0]) * 2,
+                (exclude[1] - live_region[1]) * 2,
                 exclude[2] * 2,
                 exclude[3] * 2,
             ),
+            scoped_identifier=identifier_region is not None,
         )
         # verified beats everything; between the two "cannot certify"
         # outcomes an AFFIRMATIVE mismatch outranks an abstain, and abstain

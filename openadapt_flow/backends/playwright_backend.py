@@ -9,6 +9,7 @@ deviceScaleFactor=1 so CSS pixels equal screenshot pixels.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import math
 import re
 import uuid
@@ -1645,6 +1646,7 @@ class PlaywrightBackend:
         *,
         expected_frame_sha256: str,
         double: bool = False,
+        button: str = "left",
     ) -> ActionDeliveryReceipt:
         """Consume the target binding armed before the fresh identity read.
 
@@ -1663,8 +1665,24 @@ class PlaywrightBackend:
             raise StructuralResolutionRefused(
                 "visual DOM actuation has no pre-identity target binding"
             )
+        if button not in {"left", "right"}:
+            self._cleanup_guard(pending.token, pending.scope)
+            raise StructuralResolutionRefused(
+                f"unsupported guarded pointer button {button!r}"
+            )
+        if double and button != "left":
+            self._cleanup_guard(pending.token, pending.scope)
+            raise StructuralResolutionRefused(
+                "guarded right-button double click is not supported"
+            )
         operation = (
-            "guarded_coordinate_double_click" if double else "guarded_coordinate_click"
+            "guarded_coordinate_double_click"
+            if double
+            else (
+                "guarded_coordinate_right_click"
+                if button == "right"
+                else "guarded_coordinate_click"
+            )
         )
         try:
             if pending.point != point:
@@ -1697,6 +1715,7 @@ class PlaywrightBackend:
                         position=position,
                         timeout=1000,
                         trial=True,
+                        button=button,
                     )
             except Exception as exc:
                 raise StructuralResolutionRefused(
@@ -1715,7 +1734,11 @@ class PlaywrightBackend:
                 if double:
                     token_locator.dblclick(position=position, timeout=1000)
                 else:
-                    token_locator.click(position=position, timeout=1000)
+                    token_locator.click(
+                        position=position,
+                        timeout=1000,
+                        button=button,
+                    )
             except Exception as exc:
                 raise ActionDeliveryUncertain(
                     operation=operation,
@@ -1932,6 +1955,92 @@ class PlaywrightBackend:
             self.page.mouse.dblclick(x, y)
         else:
             self.page.mouse.click(x, y)
+
+    def right_click(self, x: int, y: int) -> None:
+        """Open the context menu at a resolved point."""
+
+        self.page.mouse.click(x, y, button="right")
+
+    def drag(self, x: int, y: int, end_x: int, end_y: int) -> None:
+        """Drag between two independently resolved points."""
+
+        self.page.mouse.move(x, y)
+        self.page.mouse.down(button="left")
+        try:
+            self.page.mouse.move(end_x, end_y)
+        finally:
+            self.page.mouse.up(button="left")
+
+    def drag_guarded(
+        self,
+        x: int,
+        y: int,
+        end_x: int,
+        end_y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        """Bind a fresh source lease and exact-frame destination to one drag."""
+
+        point = (int(x), int(y))
+        pending = self._guarded_coordinate
+        self._guarded_coordinate = None
+        if pending is None:
+            raise StructuralResolutionRefused(
+                "visual DOM drag has no pre-identity source binding"
+            )
+        try:
+            if pending.point != point:
+                raise StructuralResolutionRefused(
+                    "visual DOM drag source changed after target binding"
+                )
+            token_locator = self._token_locator(pending.token, pending.scope)
+            if not self._point_guard_is_current(pending, token_locator):
+                raise StructuralResolutionRefused(
+                    "visual drag source, record, or context changed before delivery"
+                )
+            current_sha256 = hashlib.sha256(self.screenshot()).hexdigest()
+            if not hmac.compare_digest(current_sha256, expected_frame_sha256):
+                raise StructuralResolutionRefused(
+                    "visual drag frame changed after both endpoints were resolved"
+                )
+            down_sent = False
+            try:
+                self.page.mouse.move(*point)
+                self.page.mouse.down(button="left")
+                down_sent = True
+                self.page.mouse.move(int(end_x), int(end_y))
+            except Exception as exc:
+                if down_sent:
+                    raise ActionDeliveryUncertain(
+                        operation="guarded_coordinate_drag",
+                        native=False,
+                        target_fingerprint=pending.fingerprint,
+                        cause_type=type(exc).__name__,
+                    ) from exc
+                raise StructuralResolutionRefused(
+                    "identity-bound drag became unactionable before delivery"
+                ) from exc
+            finally:
+                if down_sent:
+                    try:
+                        self.page.mouse.up(button="left")
+                    except Exception as exc:
+                        raise ActionDeliveryUncertain(
+                            operation="guarded_coordinate_drag",
+                            native=False,
+                            target_fingerprint=pending.fingerprint,
+                            cause_type=type(exc).__name__,
+                        ) from exc
+        finally:
+            self._cleanup_guard(pending.token, pending.scope)
+        return ActionDeliveryReceipt(
+            receipt_id=f"playwright-coordinate-{uuid.uuid4().hex}",
+            operation="guarded_coordinate_drag",
+            native=False,
+            target_fingerprint=pending.fingerprint,
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def type_text(self, text: str) -> None:
         """Type text into the currently focused element."""

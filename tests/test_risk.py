@@ -48,6 +48,9 @@ class TestHeuristic:
             "Approve",
             "Pay now",
             "Sign up",
+            "Next",
+            "Continue",
+            "Cancel",
         ],
     )
     def test_write_shaped_true(self, text: str) -> None:
@@ -62,9 +65,7 @@ class TestHeuristic:
             "Belford, Phil",
             "Address book",  # 'add' must not trip inside 'address'
             "Postal code",  # 'post' must not trip inside 'postal'
-            "Next",
             "Open chart",
-            "Cancel",
             "",
         ],
     )
@@ -84,23 +85,30 @@ class TestHeuristic:
             == "reversible"
         )
 
-    def test_only_clicks_can_be_irreversible(self) -> None:
-        # A TYPE step's text is write-shaped, but typing is reversible: only
-        # CLICK/DOUBLE_CLICK actuators can classify irreversible.
+    def test_keyboard_and_drag_risks_are_explicit(self) -> None:
         typing = Step(id="s", intent="type 'save the world'", action=ActionKind.TYPE)
         assert classify_step_risk(typing) == "reversible"
         key = Step(id="s", intent="press Enter", action=ActionKind.KEY, key="Enter")
-        assert classify_step_risk(key) == "reversible"
+        assert classify_step_risk(key) == "irreversible"
+        hotkey = Step(
+            id="s",
+            intent="press Control+s",
+            action=ActionKind.HOTKEY,
+            key="s",
+            modifiers=["Control"],
+        )
+        assert classify_step_risk(hotkey) == "irreversible"
+        drag = Step(id="s", intent="drag item", action=ActionKind.DRAG)
+        assert classify_step_risk(drag) == "irreversible"
 
-    def test_unlabelled_coordinate_click_is_reversible(self) -> None:
-        # No signal -> stays reversible (we do not fabricate risk).
+    def test_unlabelled_coordinate_click_requires_review(self) -> None:
         step = Step(
             id="s",
             intent="click at (10, 12)",
             action=ActionKind.CLICK,
             anchor=Anchor(template="t.png", region=(0, 0, 1, 1), click_point=(10, 12)),
         )
-        assert classify_step_risk(step) == "reversible"
+        assert classify_step_risk(step) == "irreversible"
 
 
 # --- end-to-end through the compiler ---------------------------------------

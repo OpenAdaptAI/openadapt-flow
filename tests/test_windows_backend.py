@@ -381,6 +381,22 @@ def test_double_click_command(
     assert fake.calls == [("doubleClick", (10, 20), {})]
 
 
+def test_rich_pointer_commands(
+    waa: MockWaa, backend: WindowsBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend.right_click(10, 20)
+    assert exec_last_command(waa, monkeypatch).calls == [
+        ("click", (10, 20), {"button": "right"})
+    ]
+    backend.drag(10, 20, 30, 40)
+    assert [call[0] for call in exec_last_command(waa, monkeypatch).calls] == [
+        "moveTo",
+        "mouseDown",
+        "moveTo",
+        "mouseUp",
+    ]
+
+
 def test_execute_error_raises(waa: MockWaa) -> None:
     backend = WindowsBackend(
         waa.url + "/missing",

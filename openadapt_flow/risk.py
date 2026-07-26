@@ -19,13 +19,13 @@ a step either way).
 
 Heuristic
 ---------
-Only actuating CLICK / DOUBLE_CLICK steps can classify irreversible (they are
-the actuators that commit a write; typing into a field and scrolling are
-reversible, and a bare key press is not a reliable write signal). The step's
-``intent`` and its anchor's ``ocr_text`` (the button label) are scanned for a
-consequential-write verb — create / update / delete / submit / save / confirm
-and their siblings — matched on WORD boundaries so ``address`` does not trip
-``add`` and ``postal`` does not trip ``post``.
+Pointer submissions, Enter/Delete, hotkeys, and drags can classify irreversible.
+The step's ``intent`` and its anchor's ``ocr_text`` (the button label) are
+scanned for a consequential-write verb — create / update / delete / submit /
+save / confirm and their siblings — matched on WORD boundaries so ``address``
+does not trip ``add`` and ``postal`` does not trip ``post``. Unlabelled pointer
+controls, hotkeys, and drags are ambiguous by construction and therefore take
+the conservative classification until qualification overrides them.
 
 False-positive posture
 ----------------------
@@ -34,11 +34,9 @@ irreversible costs AVAILABILITY (an over-strict refusal, or a ``certify``
 failure a human must clear); a false reversible costs SAFETY (a wrong,
 unguarded write reported as success). We take the cheap error. Concretely,
 labels like "Apply filter" or "Add to favourites" classify irreversible even
-though they are cheap to undo — the safe direction. Known under-classifications
-we accept (leaning benign): bare "Cancel" (usually a dialog abort, occasionally
-"cancel subscription"), "Next"/"Continue" wizard steps (the final one may
-submit), and a submitting Enter key press. Mark those with ``risk_overrides``
-when they matter.
+though they are cheap to undo — the safe direction. Qualification can override
+these classifications with a recorded explanation; compilation does not infer
+that an ambiguous actuator is harmless.
 """
 
 from __future__ import annotations
@@ -61,6 +59,9 @@ _WRITE_STEMS: tuple[str, ...] = (
     r"sav(?:e|es|ing)",
     r"submit(?:s|ted|ting)?",
     r"confirm(?:s|ed|ing)?",
+    r"continue(?:s|d|ing)?",
+    r"next",
+    r"cancel(?:s|ed|ing)?",
     r"creat(?:e|es|ing)",
     r"delet(?:e|es|ing)",
     r"remov(?:e|es|ing)",
@@ -115,12 +116,21 @@ def step_text(step: Step) -> str:
 def classify_step_risk(step: Step) -> Literal["reversible", "irreversible"]:
     """Infer ``"irreversible"`` or ``"reversible"`` for a step.
 
-    Only CLICK / DOUBLE_CLICK steps can classify irreversible (they are the
-    actuators that commit a write); every other action kind is reversible. A
-    write-shaped label/intent yields ``"irreversible"``; anything else —
-    including an unlabelled coordinate click, which carries no signal — stays
-    ``"reversible"``.
+    Ambiguous drags/hotkeys, submitting key presses, icon-only primary clicks,
+    and write-shaped labelled clicks classify irreversible. Qualification may
+    explicitly override a false positive; compilation never assumes an
+    ambiguous actuator is harmless.
     """
+    if step.action in (ActionKind.DRAG, ActionKind.HOTKEY):
+        return "irreversible"
+    if step.action is ActionKind.KEY:
+        return (
+            "irreversible"
+            if (step.key or "").lower() in {"enter", "return", "delete"}
+            else "reversible"
+        )
     if step.action not in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK):
         return "reversible"
+    if step.anchor is None or not (step.anchor.ocr_text or "").strip():
+        return "irreversible"
     return "irreversible" if is_write_shaped(step_text(step)) else "reversible"

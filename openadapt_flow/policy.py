@@ -37,18 +37,28 @@ from openadapt_flow.traversal import iter_workflow_steps
 _IDENTITY_ACTIONS = (
     ActionKind.CLICK,
     ActionKind.DOUBLE_CLICK,
+    ActionKind.RIGHT_CLICK,
+    ActionKind.DRAG,
     ActionKind.TYPE,
     ActionKind.KEY,
+    ActionKind.HOTKEY,
 )
-_CLICK_ACTIONS = (ActionKind.CLICK, ActionKind.DOUBLE_CLICK)
+_CLICK_ACTIONS = (
+    ActionKind.CLICK,
+    ActionKind.DOUBLE_CLICK,
+    ActionKind.RIGHT_CLICK,
+)
 # Kinds expected to produce an observable effect worth asserting. SCROLL is
 # excluded by design (the compiler mines no postconditions for it — its effect
 # is verified by the next step's resolution); WAIT asserts nothing either.
 _EFFECT_ACTIONS = (
     ActionKind.CLICK,
     ActionKind.DOUBLE_CLICK,
+    ActionKind.RIGHT_CLICK,
+    ActionKind.DRAG,
     ActionKind.TYPE,
     ActionKind.KEY,
+    ActionKind.HOTKEY,
 )
 
 
@@ -199,11 +209,13 @@ def step_tags(step: Step) -> set[str]:
     tags: set[str] = set()
     act = step.action
     if act in _CLICK_ACTIONS:
-        tags.add("click")
+        tags.update(("click", act.value))
+    elif act is ActionKind.DRAG:
+        tags.add("drag")
     elif act is ActionKind.TYPE:
         tags.add("type")
-    elif act is ActionKind.KEY:
-        tags.add("key")
+    elif act in (ActionKind.KEY, ActionKind.HOTKEY):
+        tags.update(("key", act.value))
     elif act is ActionKind.SCROLL:
         tags.add("scroll")
     if step.risk == "irreversible":

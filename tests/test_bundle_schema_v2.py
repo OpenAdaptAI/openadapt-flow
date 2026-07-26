@@ -7,6 +7,7 @@ Playwright, OCR, or model deps) and exercises save/load on ``tmp_path``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -23,6 +24,7 @@ from openadapt_flow.ir import (
     State,
     StateKind,
     Step,
+    StructuralLocator,
     Transition,
     Workflow,
 )
@@ -163,6 +165,58 @@ def test_v2_round_trips_with_stable_digest(tmp_path):
     loaded.save(b)
     reloaded = Workflow.load(b)
     assert reloaded.manifest.content_digest == dig
+
+
+def test_empty_frame_path_preserves_pre_field_sealed_v2_digest(tmp_path):
+    """An additive top-level-frame default must not invalidate old v2 seals."""
+    b = _write_bundle_dir(tmp_path)
+    wf = _good_program_workflow()
+    assert wf.program is not None
+    anchor = wf.program.states["s1"].step.anchor
+    assert anchor is not None
+    anchor.structural = StructuralLocator(selector="#save")
+
+    file_hashes = bv.compute_file_hashes(wf, b)
+    legacy_content = wf.model_dump(mode="json", exclude={"manifest"})
+    legacy_content.pop("interstitials", None)
+
+    def strip_new_default(value):
+        if isinstance(value, list):
+            return [strip_new_default(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: strip_new_default(item)
+                for key, item in value.items()
+                if not (key == "frame_path" and not item)
+            }
+        return value
+
+    legacy_payload = {
+        "workflow": strip_new_default(legacy_content),
+        "files": dict(sorted(file_hashes.items())),
+    }
+    legacy_digest = hashlib.sha256(
+        json.dumps(
+            legacy_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    wf.manifest = bv.build_manifest(wf, b)
+    wf.manifest.content_digest = legacy_digest
+    (b / "workflow.json").write_text(wf.model_dump_json(indent=2))
+
+    loaded = Workflow.load(b)
+    assert loaded.manifest is not None
+    assert loaded.manifest.content_digest == legacy_digest
+
+    loaded_anchor = loaded.program.states["s1"].step.anchor
+    assert loaded_anchor is not None
+    assert loaded_anchor.structural is not None
+    loaded_anchor.structural.frame_path = ["#shell"]
+    assert bv.compute_content_digest(loaded, file_hashes) != legacy_digest
 
 
 def test_digest_changes_when_content_changes(tmp_path):

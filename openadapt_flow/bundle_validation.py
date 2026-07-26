@@ -182,6 +182,25 @@ def _workflow_content(workflow: "Workflow") -> dict:
     # changing one still fails integrity verification.
     if not content.get("interstitials"):
         content.pop("interstitials", None)
+
+    # ``StructuralLocator.frame_path`` was added additively while sealed v2
+    # bundles were already in circulation. An absent or empty frame path means
+    # the top-level document and has the same runtime semantics as the
+    # pre-field representation. Drop only that empty default recursively so
+    # existing seals remain verifiable; every non-empty nested-frame path stays
+    # covered by the content digest.
+    def omit_empty_frame_paths(value):
+        if isinstance(value, list):
+            return [omit_empty_frame_paths(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: omit_empty_frame_paths(item)
+                for key, item in value.items()
+                if not (key == "frame_path" and not item)
+            }
+        return value
+
+    content = omit_empty_frame_paths(content)
     return content
 
 

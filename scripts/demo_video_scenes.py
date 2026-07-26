@@ -1434,6 +1434,17 @@ def scene_verified(
     rows = print_sql_proof(tr, fx, pid=pid, phone=REPLAY_PHONE)
     right = [r for r in rows if r["pid"] == pid and r["phone_home"] == REPLAY_PHONE]
     wrong = [r for r in rows if r["pid"] != pid and r["phone_home"] == REPLAY_PHONE]
+    oracle_rows = oracle_reader(fx, fx.token_session("oracle"))()
+    oracle_right = [
+        r
+        for r in oracle_rows or []
+        if str(r.get("pid")) == pid and r.get("phone_home") == REPLAY_PHONE
+    ]
+    oracle_wrong = [
+        r
+        for r in oracle_rows or []
+        if str(r.get("pid")) != pid and r.get("phone_home") == REPLAY_PHONE
+    ]
     tr.say("")
     tr.say(
         "RESULT: exactly one write, on the intended chart, with the run's"
@@ -1450,12 +1461,19 @@ def scene_verified(
             "model_calls": report.model_calls,
             "replay_phone_param": REPLAY_PHONE,
             "intended_pid": pid,
+            "oracle_after": oracle_rows,
             "db_after": rows,
         },
     )
     tr.close()
     restore_demo_baseline(fx)
-    if report.execution_outcome != "VERIFIED" or len(right) != 1 or wrong:
+    if (
+        report.execution_outcome != "VERIFIED"
+        or len(right) != 1
+        or wrong
+        or len(oracle_right) != 1
+        or oracle_wrong
+    ):
         raise RuntimeError("verified scene did not reproduce VERIFIED outcome")
 
 

@@ -233,10 +233,10 @@ def test_meta_marked_region_applies_to_pixel_recording(tmp_path: Path) -> None:
     assert anchor.identifier_crop is not None
 
 
-def test_identity_template_uses_same_scoped_crop_ocr_as_replay(
+def test_identity_template_filters_full_frame_ocr_to_identifier_region(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Full-frame OCR disagreement must not poison a scoped identity crop."""
+    """The template uses the same full-frame OCR scope replay will use."""
     marked = [60, ROW_Y - 24, 560, 40]
     correct = "MARIA GARCIA RECORD ZX24683"
     full_frame_misread = "MARIA GARCIA RECORD ZX24689"
@@ -278,7 +278,11 @@ def test_identity_template_uses_same_scoped_crop_ocr_as_replay(
 
     assert anchor is not None and anchor.identity_template is not None
     assert (
-        verify_template_identity(anchor.identity_template, correct).status == "verified"
+        verify_template_identity(anchor.identity_template, full_frame_misread).status
+        == "verified"
+    )
+    assert (
+        verify_template_identity(anchor.identity_template, correct).status != "verified"
     )
 
 

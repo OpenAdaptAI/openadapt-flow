@@ -6204,17 +6204,19 @@ class Replayer:
 
         def attempt(
             png: bytes,
-            region: Optional[Region],
+            ocr_region: Optional[Region],
             point_y: int,
             exclude_region: Region,
             *,
             scoped_identifier: bool = False,
+            identifier_filter: Optional[Region] = None,
         ) -> IdentityCheck:
-            lines = self.vision.ocr(png, region=region)
+            lines = self.vision.ocr(png, region=ocr_region)
             if scoped_identifier:
                 observed = (
                     identity_mod.identifier_text_from_lines(
                         lines,
+                        region=identifier_filter,
                         reference_date=today,
                     )
                     or ""
@@ -6256,10 +6258,14 @@ class Replayer:
         live_region = identifier_region or band
         check = attempt(
             before_png,
-            live_region,
+            # Match compilation: OCR the full frame, then retain only the
+            # translated identifier region. OCRing the crop itself can change
+            # segmentation/glyph recognition and false-halt a healthy screen.
+            None if identifier_region is not None else live_region,
             resolution.point[1],
             exclude,
             scoped_identifier=identifier_region is not None,
+            identifier_filter=identifier_region,
         )
         if check.status == "verified":
             return check

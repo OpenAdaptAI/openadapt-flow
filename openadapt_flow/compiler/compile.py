@@ -1406,15 +1406,16 @@ def compile_recording(
                     reference_date=reference_date,
                 )
             )
-            # The OCR fallback must compare like-for-like evidence.  Once an
-            # exact identifier region exists, derive the persisted identity
-            # template from OCR scoped to that region rather than from the
-            # earlier full-frame pass.  Full-frame and cropped OCR can segment
-            # or recognize identical pixels differently (notably l/1 and O/0),
-            # which otherwise makes an unchanged healthy replay false-halt.
+            # The OCR fallback must compare like-for-like evidence. Derive the
+            # persisted identity template from the original full-frame OCR
+            # lines filtered to the exact identifier region. Re-OCRing a crop
+            # can segment or recognize identical pixels differently (notably
+            # l/1 and O/0), while replacing the original row context can drop
+            # names/DOBs on some OCR builds.
             if identifier_region is not None:
                 cropped_context = identifier_text_from_lines(
-                    ocr(before_png, region=identifier_region),
+                    frame_lines,
+                    region=identifier_region,
                     min_confidence=MIN_OCR_CONFIDENCE,
                     reference_date=reference_date,
                 )

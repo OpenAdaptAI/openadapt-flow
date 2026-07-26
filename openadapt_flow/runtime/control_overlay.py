@@ -13,7 +13,10 @@ ordinary Flow replay does not require it.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
+import secrets
 import time
 from collections.abc import Callable, Sequence
 from types import MappingProxyType
@@ -21,14 +24,22 @@ from typing import Literal, TypeAlias
 
 from openadapt_types import (
     ControlOverlayDataClassification,
-    ControlOverlayFrameV1,
+    ControlOverlayFrameV2,
+    ControlOverlayMediaFrameBindingV2,
     ControlOverlayMode,
+    ControlOverlayNormalizedRectV2,
+    ControlOverlayObservationBindingV2,
     ControlOverlayPhase,
     ControlOverlayProfile,
-    ControlOverlayTimelineEventV1,
-    ControlOverlayTimelineV1,
-    build_control_overlay_timeline,
+    ControlOverlaySourceViewportV2,
+    ControlOverlayTargetActionKind,
+    ControlOverlayTargetTrackingV2,
+    ControlOverlayTimelineEventV2,
+    ControlOverlayTimelineV2,
+    build_control_overlay_timeline_v2,
 )
+
+from openadapt_flow.ir import Region
 
 ExecutionOutcome: TypeAlias = Literal[
     "VERIFIED",
@@ -37,8 +48,11 @@ ExecutionOutcome: TypeAlias = Literal[
     "FAILED",
     "ROLLED_BACK",
 ]
-OverlayFrameSink: TypeAlias = Callable[[ControlOverlayFrameV1], None]
+OverlayFrameSink: TypeAlias = Callable[[ControlOverlayFrameV2], None]
 MillisecondsClock: TypeAlias = Callable[[], int | float]
+ObservationKeyFactory: TypeAlias = Callable[[], bytes]
+
+_OBSERVATION_BINDING_DOMAIN = b"openadapt.control-overlay-observation/v2\x00"
 
 _TERMINAL_PHASE_BY_OUTCOME = MappingProxyType(
     {
@@ -69,11 +83,16 @@ class RuntimeControlOverlayEmitter:
         mode: ControlOverlayMode = ControlOverlayMode.REPLAY,
         unix_ms_clock: MillisecondsClock = _unix_ms,
         monotonic_ms_clock: MillisecondsClock = _monotonic_ms,
+        observation_key_factory: ObservationKeyFactory = lambda: secrets.token_bytes(
+            32
+        ),
     ) -> None:
         self._sink = sink
         self._mode = ControlOverlayMode(mode)
         self._unix_ms_clock = unix_ms_clock
         self._monotonic_ms_clock = monotonic_ms_clock
+        self._observation_key_factory = observation_key_factory
+        self._observation_hmac_key: bytes | None = None
         self._profile: ControlOverlayProfile | None = None
         self._next_sequence = 0
         self._last_monotonic_ms: float | None = None
@@ -86,7 +105,11 @@ class RuntimeControlOverlayEmitter:
     def begin(self, *, profile: ControlOverlayProfile | str) -> None:
         """Begin a fresh run and bind its exact named execution profile."""
 
+        key = self._observation_key_factory()
+        if not isinstance(key, bytes) or len(key) < 32:
+            raise ValueError("overlay observation key must be at least 32 bytes")
         self._profile = ControlOverlayProfile(profile)
+        self._observation_hmac_key = key
         self._next_sequence = 0
         self._last_monotonic_ms = None
         self._terminal = False
@@ -97,7 +120,8 @@ class RuntimeControlOverlayEmitter:
         *,
         current_step: int | None = None,
         total_steps: int | None = None,
-    ) -> ControlOverlayFrameV1:
+        target_tracking: ControlOverlayTargetTrackingV2 | None = None,
+    ) -> ControlOverlayFrameV2:
         """Emit an exact runtime phase; all presentation strings are canonical."""
 
         if self._profile is None:
@@ -118,10 +142,11 @@ class RuntimeControlOverlayEmitter:
             canonical_phase,
             current_step=current_step,
             total_steps=total_steps,
+            target_tracking=target_tracking,
             terminal=False,
         )
 
-    def emit_terminal(self, outcome: ExecutionOutcome | str) -> ControlOverlayFrameV1:
+    def emit_terminal(self, outcome: ExecutionOutcome | str) -> ControlOverlayFrameV2:
         """Emit only an exact evidence-qualified ``RunReport.execution_outcome``.
 
         Generic success booleans and legacy strings such as ``SUCCESS`` are
@@ -138,7 +163,72 @@ class RuntimeControlOverlayEmitter:
             phase,
             current_step=None,
             total_steps=None,
+            target_tracking=None,
             terminal=True,
+        )
+
+    def observation_hmac_sha256(self, observation_png: bytes) -> str:
+        """Return the run-scoped opaque binding for one exact private frame.
+
+        A sibling viewer that owns the private stream can ask the producer for
+        this binding and compare it with the public presentation event.  The
+        raw frame digest and the run-scoped key never enter the event contract.
+        """
+
+        if self._observation_hmac_key is None:
+            raise RuntimeError("control-overlay run has not begun")
+        private_observation_id = hashlib.sha256(observation_png).digest()
+        return hmac.new(
+            self._observation_hmac_key,
+            _OBSERVATION_BINDING_DOMAIN + private_observation_id,
+            hashlib.sha256,
+        ).hexdigest()
+
+    def browser_target_tracking(
+        self,
+        *,
+        observation_png: bytes,
+        region_css_px: Region,
+        viewport: tuple[int, int, float],
+        action_kind: ControlOverlayTargetActionKind | str | None,
+    ) -> ControlOverlayTargetTrackingV2:
+        """Build exactly bound browser geometry for an external renderer.
+
+        ``region_css_px`` must be the final region used by replay in the
+        top-level CSS viewport.  This helper never resolves or reconstructs a
+        target, and callers must omit tracking when that exact region is not
+        available.
+        """
+
+        width, height, dpr = viewport
+        if width <= 0 or height <= 0 or not math.isfinite(dpr) or dpr <= 0:
+            raise ValueError("browser presentation viewport is invalid")
+        x, y, region_width, region_height = region_css_px
+        if region_width <= 0 or region_height <= 0:
+            raise ValueError("browser presentation target is empty")
+        if x < 0 or y < 0 or x + region_width > width or y + region_height > height:
+            raise ValueError("browser presentation target exceeds viewport")
+        canonical_action = (
+            ControlOverlayTargetActionKind(action_kind)
+            if action_kind is not None
+            else None
+        )
+        return ControlOverlayTargetTrackingV2(
+            rect=ControlOverlayNormalizedRectV2(
+                x=float(x / width),
+                y=float(y / height),
+                width=float(region_width / width),
+                height=float(region_height / height),
+            ),
+            source_viewport=ControlOverlaySourceViewportV2(
+                width_css_px=width,
+                height_css_px=height,
+                device_pixel_ratio=float(dpr),
+            ),
+            binding=ControlOverlayObservationBindingV2(
+                observation_hmac_sha256=self.observation_hmac_sha256(observation_png)
+            ),
+            action_kind=canonical_action,
         )
 
     def _emit(
@@ -147,8 +237,9 @@ class RuntimeControlOverlayEmitter:
         *,
         current_step: int | None,
         total_steps: int | None,
+        target_tracking: ControlOverlayTargetTrackingV2 | None,
         terminal: bool,
-    ) -> ControlOverlayFrameV1:
+    ) -> ControlOverlayFrameV2:
         if self._profile is None:
             raise RuntimeError("control-overlay run has not begun")
         if self._terminal:
@@ -163,7 +254,7 @@ class RuntimeControlOverlayEmitter:
         ):
             raise ValueError("control-overlay monotonic clock moved backwards")
 
-        frame = ControlOverlayFrameV1.build(
+        frame = ControlOverlayFrameV2.build(
             event_sequence=self._next_sequence,
             observed_at_unix_ms=observed_at_unix_ms,
             observed_at_monotonic_ms=observed_at_monotonic_ms,
@@ -176,6 +267,7 @@ class RuntimeControlOverlayEmitter:
             pause=False,
             resume=False,
             stop=False,
+            target_tracking=target_tracking,
         )
         # Advance before delivery: a sink that receives the frame and then
         # raises cannot cause a sequence number or terminal event to be reused.
@@ -187,26 +279,29 @@ class RuntimeControlOverlayEmitter:
         return frame
 
 
-def build_runtime_control_overlay_timeline_v1(
-    frames: Sequence[ControlOverlayFrameV1],
+def build_runtime_control_overlay_timeline_v2(
+    frames: Sequence[ControlOverlayFrameV2],
     *,
     data_classification: ControlOverlayDataClassification,
     evidence_pack_id: str,
     media_sha256: str,
+    media_frame_count: int,
+    media_frame_indexes: Sequence[int],
     duration_ms: int,
     media_started_monotonic_ms: float,
-) -> ControlOverlayTimelineV1:
+) -> ControlOverlayTimelineV2:
     """Bind retained runtime frames to exact immutable-media timing.
 
-    The caller must retain the media start on the same monotonic clock as the
-    frames.  Offsets are the exact monotonic deltas rounded half-up to the
-    nearest millisecond.  The first frame must coincide with media start;
-    duplicate rounded offsets, reconstruction from elapsed duration, and
-    out-of-clip events are refused rather than adjusted.
+    The caller supplies the exact decoded frame index associated with every
+    runtime frame; this function never estimates it from elapsed time.  Runtime
+    observation bindings are replaced by bindings to the exact immutable media
+    digest and decoded frame.  Geometry is never interpolated between events.
     """
 
     if not frames:
         raise ValueError("control-overlay timeline requires at least one frame")
+    if len(media_frame_indexes) != len(frames):
+        raise ValueError("each overlay event requires an exact media frame index")
     if not math.isfinite(media_started_monotonic_ms) or (
         media_started_monotonic_ms < 0
     ):
@@ -214,9 +309,9 @@ def build_runtime_control_overlay_timeline_v1(
     if frames[0].observed_at_monotonic_ms != media_started_monotonic_ms:
         raise ValueError("first overlay frame must exactly match media start")
 
-    events: list[ControlOverlayTimelineEventV1] = []
+    events: list[ControlOverlayTimelineEventV2] = []
     previous_offset = -1
-    for frame in frames:
+    for frame, media_frame_index in zip(frames, media_frame_indexes, strict=True):
         delta = frame.observed_at_monotonic_ms - media_started_monotonic_ms
         if delta < 0 or not math.isfinite(delta):
             raise ValueError("overlay frame precedes media start")
@@ -225,13 +320,47 @@ def build_runtime_control_overlay_timeline_v1(
             raise ValueError("overlay media offsets must be strictly increasing")
         if offset > duration_ms:
             raise ValueError("overlay frame falls outside media duration")
-        events.append(ControlOverlayTimelineEventV1(at_ms=offset, frame=frame))
+        target = frame.target_tracking
+        if target is not None:
+            if not isinstance(target.binding, ControlOverlayObservationBindingV2):
+                raise ValueError("runtime target must use an observation binding")
+            target = target.model_copy(
+                update={
+                    "binding": ControlOverlayMediaFrameBindingV2(
+                        media_sha256=media_sha256,
+                        frame_index=media_frame_index,
+                    )
+                }
+            )
+        media_frame = ControlOverlayFrameV2.build(
+            event_sequence=frame.event_sequence,
+            observed_at_unix_ms=frame.observed_at_unix_ms,
+            observed_at_monotonic_ms=frame.observed_at_monotonic_ms,
+            visible=frame.visible,
+            phase=frame.phase,
+            mode=frame.mode,
+            profile=frame.profile,
+            current_step=frame.step.current,
+            total_steps=frame.step.total,
+            pause=frame.controls.pause,
+            resume=frame.controls.resume,
+            stop=frame.controls.stop,
+            target_tracking=target,
+        )
+        events.append(
+            ControlOverlayTimelineEventV2(
+                at_ms=offset,
+                media_frame_index=media_frame_index,
+                frame=media_frame,
+            )
+        )
         previous_offset = offset
 
-    return build_control_overlay_timeline(
+    return build_control_overlay_timeline_v2(
         data_classification=data_classification,
         evidence_pack_id=evidence_pack_id,
         media_sha256=media_sha256,
+        media_frame_count=media_frame_count,
         duration_ms=duration_ms,
         events=events,
     )

@@ -48,6 +48,7 @@ from urllib.parse import urlsplit
 from openadapt_flow.backend import (
     ActionDeliveryUncertain,
     Backend,
+    BrowserPresentationGeometryBackend,
     FocusedElementActuationLeaseBackend,
     GuardedCoordinateActionBackend,
     GuardedKeyboardActionBackend,
@@ -916,6 +917,12 @@ class Replayer:
             if profile is None:
                 raise ValueError("run report has no execution profile")
             self.control_overlay.begin(profile=profile)
+            # Prime browser-only presentation metadata at the run boundary,
+            # never between final target revalidation and one-shot delivery.
+            # Subsequent reads are cache-only and fail closed if viewport
+            # dimensions changed.
+            if isinstance(self.backend, BrowserPresentationGeometryBackend):
+                self.backend.browser_presentation_viewport()
         except Exception as exc:
             self.control_overlay_error = type(exc).__name__
             self._control_overlay_disabled = True
@@ -926,6 +933,7 @@ class Replayer:
         *,
         current_step: Optional[int] = None,
         total_steps: Optional[int] = None,
+        target_tracking: Optional[Any] = None,
     ) -> None:
         if self.control_overlay is None or self._control_overlay_disabled:
             return
@@ -934,10 +942,69 @@ class Replayer:
                 phase,
                 current_step=current_step,
                 total_steps=total_steps,
+                target_tracking=target_tracking,
             )
         except Exception as exc:
             self.control_overlay_error = type(exc).__name__
             self._control_overlay_disabled = True
+
+    def _control_overlay_browser_target(
+        self,
+        step: Step,
+        resolution: Optional[Resolution],
+        matched_region: Optional[Region],
+        observation_png: bytes,
+    ) -> Optional[Any]:
+        """Build presentation-only geometry from the final resolved target.
+
+        Only a backend that explicitly advertises top-level browser CSS
+        geometry can produce this V2 target.  Missing/invalid presentation
+        metadata omits the rectangle without disabling the status rail or
+        influencing execution.
+        """
+
+        if (
+            self.control_overlay is None
+            or self._control_overlay_disabled
+            or resolution is None
+            or not isinstance(self.backend, BrowserPresentationGeometryBackend)
+        ):
+            return None
+        viewport = self.backend.browser_presentation_viewport()
+        if viewport is None:
+            return None
+        # Visual ladder regions are screenshot-pixel coordinates.  The
+        # reference browser runner records CSS-scale screenshots (DPR 1); for
+        # any other DPR, omit visual tracking until an exact pixel-to-CSS
+        # projection is retained.  Structural handle regions are already CSS
+        # viewport coordinates and remain exact at any DPR.
+        if resolution.structural_handle is None and viewport[2] != 1.0:
+            return None
+        region = (
+            resolution.structural_handle.region
+            if resolution.structural_handle is not None
+            and resolution.structural_handle.region is not None
+            else matched_region
+        )
+        if region is None:
+            return None
+        action_kind = {
+            ActionKind.CLICK: "click",
+            ActionKind.DOUBLE_CLICK: "double_click",
+            ActionKind.TYPE: "type",
+            ActionKind.SCROLL: "scroll",
+        }.get(step.action)
+        if action_kind is None:
+            return None
+        try:
+            return self.control_overlay.browser_target_tracking(
+                observation_png=observation_png,
+                region_css_px=region,
+                viewport=viewport,
+                action_kind=action_kind,
+            )
+        except Exception:
+            return None
 
     def _emit_control_overlay_terminal(self, outcome: Optional[str]) -> None:
         if self.control_overlay is None or self._control_overlay_disabled:
@@ -2960,10 +3027,17 @@ class Replayer:
                 # the workflow action as URL_CHANGED, TITLE_CHANGED, or
                 # NEW_TAB_OPENED.
                 start_state = self._structural_state()
+                overlay_target = self._control_overlay_browser_target(
+                    step,
+                    resolution,
+                    matched_region,
+                    before_png,
+                )
                 self._emit_control_overlay_phase(
                     "executing",
                     current_step=overlay_current,
                     total_steps=overlay_total,
+                    target_tracking=overlay_target,
                 )
                 try:
                     error = self._act(

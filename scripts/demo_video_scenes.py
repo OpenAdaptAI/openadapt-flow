@@ -88,11 +88,14 @@ for _p in (str(REPO_ROOT), str(BENCHMARK_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from openadapt_flow.types import StructuralHandle, StructuralLocator  # noqa: E402
 from openemr_local.fixture import OpenEMRFixture  # noqa: E402
 
 from openadapt_flow.backend import StructuralResolutionRefused  # noqa: E402
-from openadapt_flow.ir import ActionDeliveryReceipt  # noqa: E402
+from openadapt_flow.ir import (  # noqa: E402
+    ActionDeliveryReceipt,
+    StructuralHandle,
+    StructuralLocator,
+)
 from scripts.openemr_local_demo import (  # noqa: E402
     _BIND_STRUCTURAL_TARGET_JS,
     OpenEMRPlaywrightBackend,
@@ -427,6 +430,14 @@ def oracle_reader(fx: OpenEMRFixture, session: Any):
 
 
 FINDER_URL_FRAGMENT = "main/finder/dynamic_finder.php"
+DASHBOARD_URL_FRAGMENT = "/demographics.php"
+DASHBOARD_EDIT_SELECTOR = "openemr://demographics-edit"
+DEMOGRAPHICS_EDITOR_URL_FRAGMENT = "demographics_full.php"
+DEMOGRAPHICS_EDITOR_SELECTORS = {
+    "#header_tab_Contact",
+    "#form_phone_home",
+    "#submit_btn",
+}
 _FINDER_CELL_JS = """([px, py]) => {
     const hit = document.elementFromPoint(px, py);
     if (!hit) return null;
@@ -517,14 +528,111 @@ class DemoOpenEMRBackend(OpenEMRPlaywrightBackend):
             f"> td:nth-child({cell_index + 1})"
         )
 
+    def _dashboard_edit_target(self, x: int, y: int) -> dict[str, Any] | None:
+        """Recognize the unique demographics-card edit link under a point."""
+        try:
+            matches: list[tuple[Any, Any, Any]] = []
+            for element in self.page.query_selector_all("iframe"):
+                frame = element.content_frame()
+                if frame is None or DASHBOARD_URL_FRAGMENT not in frame.url:
+                    continue
+                locator = frame.locator("a[href*='demographics_full']")
+                if locator.count() == 1 and locator.is_visible():
+                    matches.append((element, frame, locator))
+            if len(matches) != 1:
+                return None
+            element, _frame, locator = matches[0]
+            iframe_box = element.bounding_box()
+            target_box = locator.bounding_box()
+            if iframe_box is None or target_box is None:
+                return None
+            if not (
+                target_box["x"] <= x < target_box["x"] + target_box["width"]
+                and target_box["y"] <= y < target_box["y"] + target_box["height"]
+            ):
+                return None
+            if not element.evaluate(
+                "(el, pt) => document.elementFromPoint(pt[0], pt[1]) === el",
+                [int(x), int(y)],
+            ):
+                return None
+        except Exception:
+            return None
+        return {
+            "selector": DASHBOARD_EDIT_SELECTOR,
+            "role": "link",
+            "name": "Edit demographics",
+        }
+
+    def _dashboard_edit_locator(self) -> tuple[Any, Any] | None:
+        matches: list[tuple[Any, Any]] = []
+        for element in self.page.query_selector_all("iframe"):
+            frame = element.content_frame()
+            if frame is None or DASHBOARD_URL_FRAGMENT not in frame.url:
+                continue
+            locator = frame.locator("a[href*='demographics_full']")
+            if locator.count() == 1 and locator.is_visible():
+                matches.append((frame, locator))
+        return matches[0] if len(matches) == 1 else None
+
+    def _demographics_editor_locator(self, selector: str) -> tuple[Any, Any] | None:
+        """Resolve one visible control in the active demographics editor."""
+        matches: list[tuple[Any, Any]] = []
+        for frame in self.page.frames:
+            if DEMOGRAPHICS_EDITOR_URL_FRAGMENT not in frame.url:
+                continue
+            locator = frame.locator(selector)
+            if locator.count() == 1 and locator.is_visible():
+                matches.append((frame, locator))
+        return matches[0] if len(matches) == 1 else None
+
+    def _demographics_editor_target(self, x: int, y: int) -> dict[str, Any] | None:
+        """Recognize one qualified editor control under the exact point."""
+        for selector in sorted(DEMOGRAPHICS_EDITOR_SELECTORS):
+            target = self._demographics_editor_locator(selector)
+            if target is None:
+                continue
+            _frame, locator = target
+            box = locator.bounding_box()
+            if box is None or not (
+                box["x"] <= x < box["x"] + box["width"]
+                and box["y"] <= y < box["y"] + box["height"]
+            ):
+                continue
+            return {
+                "selector": selector,
+                "role": {
+                    "#header_tab_Contact": "link",
+                    "#form_phone_home": "textbox",
+                    "#submit_btn": "button",
+                }[selector],
+                "name": {
+                    "#header_tab_Contact": "Contact",
+                    "#form_phone_home": None,
+                    "#submit_btn": "Save",
+                }[selector],
+            }
+        return None
+
+    def _custom_target(self, x: int, y: int) -> dict[str, Any] | None:
+        return (
+            self._finder_target(x, y)
+            or self._dashboard_edit_target(x, y)
+            or self._demographics_editor_target(x, y)
+        )
+
     def _iframe_target(self, locator: StructuralLocator) -> tuple[Any, Any] | None:
         selector = locator.selector or ""
         if selector.startswith(self._FINDER_PREFIX):
             return self._finder_locator(selector)
+        if selector == DASHBOARD_EDIT_SELECTOR:
+            return self._dashboard_edit_locator()
+        if selector in DEMOGRAPHICS_EDITOR_SELECTORS:
+            return self._demographics_editor_locator(selector)
         return super()._iframe_target(locator)
 
     def structural_locator_at(self, x: int, y: int) -> StructuralLocator | None:
-        target = self._finder_target(x, y)
+        target = self._custom_target(x, y)
         if target is None:
             return super().structural_locator_at(x, y)
         return StructuralLocator(
@@ -536,6 +644,26 @@ class DemoOpenEMRBackend(OpenEMRPlaywrightBackend):
     def structured_text_at(self, x: int, y: int) -> str | None:
         target = self._finder_target(x, y)
         if target is None:
+            dashboard_target = self._dashboard_edit_target(x, y)
+            if dashboard_target is not None:
+                return json.dumps(
+                    {
+                        "surface": "openemr-patient-dashboard",
+                        "action": "edit-demographics",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            editor_target = self._demographics_editor_target(x, y)
+            if editor_target is not None:
+                return json.dumps(
+                    {
+                        "surface": "openemr-demographics-editor",
+                        "selector": editor_target["selector"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
             return super().structured_text_at(x, y)
         return json.dumps(
             {
@@ -547,9 +675,37 @@ class DemoOpenEMRBackend(OpenEMRPlaywrightBackend):
             separators=(",", ":"),
         )
 
+    def text_value_at(self, x: int, y: int) -> str | None:
+        target = self._demographics_editor_target(x, y)
+        if target is not None and target["selector"] == "#form_phone_home":
+            resolved = self._demographics_editor_locator("#form_phone_home")
+            if resolved is None:
+                return None
+            _frame, locator = resolved
+            try:
+                return locator.input_value()
+            except Exception:
+                return None
+        return super().text_value_at(x, y)
+
+    def focused_text_value(self) -> str | None:
+        resolved = self._demographics_editor_locator("#form_phone_home")
+        if resolved is not None:
+            _frame, locator = resolved
+            try:
+                if locator.evaluate("el => el === document.activeElement"):
+                    return locator.input_value()
+            except Exception:
+                return None
+        return super().focused_text_value()
+
     def locate_structural(self, locator: StructuralLocator) -> StructuralHandle | None:
         selector = locator.selector or ""
-        if not selector.startswith(self._FINDER_PREFIX):
+        if not (
+            selector.startswith(self._FINDER_PREFIX)
+            or selector == DASHBOARD_EDIT_SELECTOR
+            or selector in DEMOGRAPHICS_EDITOR_SELECTORS
+        ):
             return super().locate_structural(locator)
         target = self._iframe_target(locator)
         if target is None:
@@ -572,7 +728,7 @@ class DemoOpenEMRBackend(OpenEMRPlaywrightBackend):
             vw, vh = self.viewport
             if not (0 <= cx < vw and 0 <= cy < vh):
                 return None
-            observed = self._finder_target(cx, cy)
+            observed = self._custom_target(cx, cy)
             if observed is None or observed.get("selector") != selector:
                 return None
             token = uuid.uuid4().hex
@@ -582,7 +738,7 @@ class DemoOpenEMRBackend(OpenEMRPlaywrightBackend):
                     "storeKey": self._structural_store_key,
                     "tokenAttribute": self._token_attribute(token),
                     "token": token,
-                    "requireRowIdentity": True,
+                    "requireRowIdentity": selector.startswith(self._FINDER_PREFIX),
                 },
             )
             if not isinstance(bound, dict):
@@ -622,7 +778,11 @@ class DemoOpenEMRBackend(OpenEMRPlaywrightBackend):
         double: bool = False,
     ) -> ActionDeliveryReceipt:
         selector = locator.selector or ""
-        if not selector.startswith(self._FINDER_PREFIX):
+        if not (
+            selector.startswith(self._FINDER_PREFIX)
+            or selector == DASHBOARD_EDIT_SELECTOR
+            or selector in DEMOGRAPHICS_EDITOR_SELECTORS
+        ):
             return super().act_structural(locator, handle, double=double)
         fingerprint = handle.target_fingerprint
         if not fingerprint:
@@ -1011,6 +1171,7 @@ def scene_record(fx: OpenEMRFixture, out: Path, work: Path, *, headed: bool) -> 
         page.wait_for_timeout(700)
         rclick(field, "click the callback-number field")
         recorder.press("Meta+a")
+        recorder.press("Backspace")
         tr.say(f"[record] type number (captured as parameter 'phone'): {DEMO_PHONE!r}")
         tl.mark("type", text=DEMO_PHONE)
         recorder.type_text(DEMO_PHONE, param="phone")

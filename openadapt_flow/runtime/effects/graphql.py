@@ -26,7 +26,6 @@ return with HTTP 200), or a records path that does not land on a list reads as
 
 from __future__ import annotations
 
-import re
 from typing import Any, Optional
 
 from openadapt_flow.runtime.effects.adapter import (
@@ -45,11 +44,66 @@ from openadapt_flow.runtime.effects.effect import (
 )
 from openadapt_flow.verification import VerificationTier
 
-#: Leading operation keywords that mark a NON-read GraphQL document. The
-#: read-only check is defense in depth (like the SQL statement filter): the
-#: REAL enforcement is a read-only API credential; this catches config
-#: mistakes at construction.
-_FORBIDDEN_OPERATIONS = re.compile(r"^\s*(mutation|subscription)\b", re.IGNORECASE)
+
+def _root_definition_names(document: str) -> list[str]:
+    """Return GraphQL definition-leading names, ignoring comments/strings.
+
+    A document may contain several operations and fragments, so checking only
+    its first word is insufficient: ``query { ... } mutation { ... }`` must
+    still refuse. Names inside variable declarations or selection sets are not
+    definition leaders and therefore do not create false positives.
+    """
+    names: list[str] = []
+    index = 0
+    depth = 0
+    at_definition_start = True
+    length = len(document)
+    while index < length:
+        char = document[index]
+        if char in " \t\r\n,":
+            index += 1
+            continue
+        if char == "#":
+            newline = document.find("\n", index + 1)
+            index = length if newline < 0 else newline + 1
+            continue
+        if document.startswith('"""', index):
+            end = document.find('"""', index + 3)
+            index = length if end < 0 else end + 3
+            continue
+        if char == '"':
+            index += 1
+            while index < length:
+                if document[index] == "\\":
+                    index += 2
+                elif document[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            continue
+        if char == "{":
+            depth += 1
+            at_definition_start = False
+            index += 1
+            continue
+        if char == "}":
+            depth = max(0, depth - 1)
+            if depth == 0:
+                at_definition_start = True
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index + 1
+            while end < length and (document[end].isalnum() or document[end] == "_"):
+                end += 1
+            if depth == 0 and at_definition_start:
+                names.append(document[index:end].lower())
+                at_definition_start = False
+            index = end
+            continue
+        index += 1
+    return names
 
 
 def assert_read_only_graphql(query: str) -> str:
@@ -61,7 +115,9 @@ def assert_read_only_graphql(query: str) -> str:
     """
     if not query or not query.strip():
         raise ValueError("GraphQL effect verifier requires a non-empty query")
-    if _FORBIDDEN_OPERATIONS.match(query):
+    if any(
+        name in {"mutation", "subscription"} for name in _root_definition_names(query)
+    ):
         raise ValueError(
             "GraphQL effect verifier accepts READ-ONLY query operations only "
             "(got a mutation/subscription document) -- a verifier must never "

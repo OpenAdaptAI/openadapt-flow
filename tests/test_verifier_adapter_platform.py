@@ -12,11 +12,11 @@ through both registration paths.
 from __future__ import annotations
 
 import importlib.metadata
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from openadapt_flow.deployment import EffectsConfig, build_effect_verifier
-from openadapt_flow.runtime.effects import adapter as adapter_mod
 from openadapt_flow.runtime.effects import (
     AdapterResult,
     ConnectionProbe,
@@ -48,6 +48,7 @@ from openadapt_flow.runtime.effects import (
     register_verifier_factory,
     transaction_outcome_for,
 )
+from openadapt_flow.runtime.effects import adapter as adapter_mod
 from openadapt_flow.runtime.effects.adapter import parse_timestamp
 from openadapt_flow.runtime.effects.onscreen import OnScreenReadbackVerifier
 from openadapt_flow.transaction import TransactionOutcome
@@ -331,6 +332,16 @@ class TestSettlementAndFreshness:
         verdict = enforce_freshness(confirmed, freshness_field="ts", window_s=60.0)
         assert verdict.stale is True
 
+    def test_enforce_freshness_rejects_far_future_timestamp(self):
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        confirmed = EffectVerdict(
+            verdict=Verdict.CONFIRMED,
+            kind=EffectKind.RECORD_WRITTEN,
+            matched_records=[{"ts": future}],
+        )
+        verdict = enforce_freshness(confirmed, freshness_field="ts", window_s=60.0)
+        assert verdict.stale is True
+
     def test_enforce_freshness_never_rescues_a_failure(self):
         refuted = EffectVerdict(verdict=Verdict.REFUTED, kind=EffectKind.RECORD_WRITTEN)
         assert enforce_freshness(refuted, freshness_field="ts", window_s=1.0) is refuted
@@ -397,7 +408,7 @@ class TestRedaction:
         verdict = redact_verdict(self._confirmed(), policy, field="ssn")
         record = verdict.matched_records[0]
         assert "123-45-6789" not in str(record["ssn"])
-        assert str(record["ssn"]).startswith("[redacted sha256:")
+        assert record["ssn"] == "[redacted]"
         assert record["status"] == "final"  # untouched
         assert "123-45-6789" not in str(verdict.observed_value)
         assert "123-45-6789" not in str(verdict.expected_value)

@@ -246,7 +246,11 @@ class RedactionPolicy(BaseModel):
 
     redact_fields: list[str] = Field(default_factory=list)
     keep_fields: Optional[list[str]] = None
-    hash_redacted: bool = True
+    # A plain digest is reversible for low-entropy values such as dates of
+    # birth, postal codes, and short identifiers. Keep evidence opaque by
+    # default. Deployments that deliberately need equality correlation may
+    # opt into hashing after reviewing that disclosure risk.
+    hash_redacted: bool = False
 
     def is_redacted(self, field: str) -> bool:
         if self.keep_fields is not None and field not in self.keep_fields:
@@ -367,7 +371,10 @@ def enforce_freshness(
     stale = 0
     for record in verdict.matched_records:
         ts = parse_timestamp(record.get(freshness_field))
-        if ts is None or (now_dt - ts).total_seconds() > window_s:
+        age_s = (now_dt - ts).total_seconds() if ts is not None else None
+        # Reject evidence too far in the future as well as too old. A bounded
+        # amount of clock skew (the configured window) remains acceptable.
+        if ts is None or age_s is None or age_s > window_s or age_s < -window_s:
             stale += 1
     if stale == 0:
         return verdict

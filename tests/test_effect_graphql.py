@@ -80,6 +80,23 @@ class TestReadOnlyGuard:
         with pytest.raises(ValueError, match="READ-ONLY"):
             GraphQLRecordVerifier("http://x", query="subscription { claims { id } }")
 
+    @pytest.mark.parametrize(
+        "document",
+        [
+            "# harmless comment\nmutation { createClaim { id } }",
+            "query Read { claims { id } } mutation Write { createClaim { id } }",
+            "fragment Fields on Claim { id } subscription { claims { id } }",
+        ],
+    )
+    def test_non_read_operation_anywhere_refuses(self, document):
+        with pytest.raises(ValueError, match="READ-ONLY"):
+            assert_read_only_graphql(document)
+
+    def test_forbidden_word_inside_selection_or_string_is_not_an_operation(self):
+        assert_read_only_graphql(
+            'query Read($mutation: String) { mutation(value: "subscription") }'
+        )
+
     def test_empty_query_refuses(self):
         with pytest.raises(ValueError, match="non-empty"):
             GraphQLRecordVerifier("http://x", query="  ")

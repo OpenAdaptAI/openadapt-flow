@@ -66,6 +66,10 @@ from openadapt_flow.verification import VerificationTier
 
 #: How many body bytes the optional content probe inspects.
 BODY_PROBE_LIMIT = 1 << 20  # 1 MiB
+#: Maximum RFC-822 message size accepted by this verifier. The cap is applied
+#: while reading, so a malicious or accidental giant message cannot exhaust
+#: runner memory before the verifier refuses it as unreadable.
+MESSAGE_READ_LIMIT = 8 << 20  # 8 MiB
 
 
 def _body_text(message: Message) -> str:
@@ -147,7 +151,10 @@ class MaildirDeliveryVerifier(VerifierAdapterBase):
     def _flatten(self, path: Path) -> Optional[dict[str, Any]]:
         """One message file -> one judgeable record; ``None`` when unreadable."""
         try:
-            raw = path.read_bytes()
+            with path.open("rb") as stream:
+                raw = stream.read(MESSAGE_READ_LIMIT + 1)
+            if len(raw) > MESSAGE_READ_LIMIT:
+                return None
             mtime = path.stat().st_mtime
         except OSError:
             return None

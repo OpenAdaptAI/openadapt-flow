@@ -168,10 +168,13 @@ class DocumentArrivalVerifier(VerifierAdapterBase):
             if not path.is_file():
                 continue
             try:
-                raw = path.read_bytes()[:DOCUMENT_READ_LIMIT]
+                with path.open("rb") as stream:
+                    raw = stream.read(DOCUMENT_READ_LIMIT + 1)
                 stat = path.stat()
             except OSError:
                 return None  # a vanished/unreadable candidate is unreadable
+            if len(raw) > DOCUMENT_READ_LIMIT:
+                return None
             fresh = True
             if self.mtime_window_s is not None:
                 fresh = (float(self._clock()) - stat.st_mtime) <= self.mtime_window_s

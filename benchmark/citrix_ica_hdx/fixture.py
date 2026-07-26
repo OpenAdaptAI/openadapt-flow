@@ -47,25 +47,25 @@ WINDOW_ID: int = 4101
 WINDOW_PID: int = 9200
 
 # Target rungs (pixel coordinates on the captured frame).
-ROSTER_ROW: tuple[int, int] = (150, 96)     # "Ada Lovelace  MRN A1001"
-NOTE_FIELD: tuple[int, int] = (170, 300)    # clinical-note entry box
-SAVE_BUTTON: tuple[int, int] = (470, 300)   # "Save Note" (irreversible write)
+ROSTER_ROW: tuple[int, int] = (150, 96)  # "Ada Lovelace  MRN A1001"
+NOTE_FIELD: tuple[int, int] = (170, 300)  # clinical-note entry box
+SAVE_BUTTON: tuple[int, int] = (470, 300)  # "Save Note" (irreversible write)
 
 EXPECTED_MRN: str = "A1001"
 NOTE_VALUE: str = "followup in two weeks"
 
 # On-frame marker swatches (deterministic pixel probes stand in for OCR markers;
 # the real backend accepts an injected pixel predicate exactly this way).
-_READY_SWATCH = (8, 8, 40, 24)          # green when in-app, red when locked
-_APP_SWATCH = (48, 8, 80, 24)           # application-identity swatch
-_STATE_SWATCH = (88, 8, 120, 24)        # workflow-state swatch
-_CLOCK_REGION = (520, 4, 596, 26)       # VOLATILE remote chrome (a clock)
+_READY_SWATCH = (8, 8, 40, 24)  # green when in-app, red when locked
+_APP_SWATCH = (48, 8, 80, 24)  # application-identity swatch
+_STATE_SWATCH = (88, 8, 120, 24)  # workflow-state swatch
+_CLOCK_REGION = (520, 4, 596, 26)  # VOLATILE remote chrome (a clock)
 
 _READY_GREEN = (0, 170, 0)
 _LOCK_RED = (185, 0, 0)
 _APP_BLUE = (0, 70, 190)
 _STATE_TEAL = (0, 150, 150)
-_TOL = 42                                # per-channel mean tolerance for probes
+_TOL = 42  # per-channel mean tolerance for probes
 
 
 # -- out-of-band effect oracle -------------------------------------------------
@@ -117,17 +117,17 @@ def workflow_state_marker_probe(png: bytes) -> bool:
 class AppState:
     """Mutable synthetic-app + session state the renderer and client read."""
 
-    ready: bool = True            # in-app (True) vs lock/login/spinner (False)
+    ready: bool = True  # in-app (True) vs lock/login/spinner (False)
     selected_mrn: Optional[str] = None
     note_buffer: str = ""
     note_focused: bool = False
     committed: bool = False
-    overlay: bool = False         # an unexpected dialog/overlay is painted
-    clock: int = 0                # volatile chrome value (only ticks on demand)
-    degrade: float = 0.0          # 0.0 none .. 1.0 severe codec/compression
+    overlay: bool = False  # an unexpected dialog/overlay is painted
+    clock: int = 0  # volatile chrome value (only ticks on demand)
+    degrade: float = 0.0  # 0.0 none .. 1.0 severe codec/compression
     theme_invert: bool = False
     identity_broken: bool = False  # application-identity marker unverifiable
-    write_rejected: bool = False   # system of record rejects the Save (banner lies)
+    write_rejected: bool = False  # system of record rejects the Save (banner lies)
 
 
 def render_frame(state: AppState) -> bytes:
@@ -141,7 +141,9 @@ def render_frame(state: AppState) -> bytes:
     d.rectangle(_READY_SWATCH, fill=_READY_GREEN if state.ready else _LOCK_RED)
     d.rectangle(
         _APP_SWATCH,
-        fill=_APP_BLUE if (state.ready and not state.identity_broken) else (120, 120, 120),
+        fill=_APP_BLUE
+        if (state.ready and not state.identity_broken)
+        else (120, 120, 120),
     )
     d.rectangle(
         _STATE_SWATCH,
@@ -153,7 +155,9 @@ def render_frame(state: AppState) -> bytes:
 
     if state.ready:
         # roster row
-        row_fill = (210, 232, 255) if state.selected_mrn == EXPECTED_MRN else (255, 255, 255)
+        row_fill = (
+            (210, 232, 255) if state.selected_mrn == EXPECTED_MRN else (255, 255, 255)
+        )
         d.rectangle((40, 78, 560, 116), fill=row_fill, outline=(80, 80, 80))
         d.text((52, 90), f"Ada Lovelace   MRN {EXPECTED_MRN}", fill=(0, 0, 0))
         # note field
@@ -227,10 +231,10 @@ class SyntheticIcaWindowClient:
         self.windows = [self.window]
         self.key_window_override: Optional[int] = None
         self.hit_window_override: Optional[int] = None
-        self.paste_blocked = False        # Citrix clipboard restriction
+        self.paste_blocked = False  # Citrix clipboard restriction
         self.unmapped_keys: set[str] = set()
-        self.aniso = False                # uncalibrated anisotropic DPI
-        self.hover_unsettle_frames = 0    # delayed remote hover-paint frames
+        self.aniso = False  # uncalibrated anisotropic DPI
+        self.hover_unsettle_frames = 0  # delayed remote hover-paint frames
         self._settle_countdown = 0
         self.calls: list[tuple] = []
 

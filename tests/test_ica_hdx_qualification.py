@@ -119,9 +119,9 @@ def test_no_silent_write_on_any_refusal(evidence: dict) -> None:
 def test_optimistic_banner_is_not_confirmed_by_screen(evidence: dict) -> None:
     by_id = {t["id"]: t for t in evidence["trials"]}
     row = by_id["optimistic_banner_effect_refused"]
-    assert row["banner_shown"] is True          # the screen claims "Saved"
+    assert row["banner_shown"] is True  # the screen claims "Saved"
     assert row["independent_record_present"] is False  # the oracle disagrees
-    assert row["passed"] is True                # verification withholds success
+    assert row["passed"] is True  # verification withholds success
 
 
 def test_honesty_invariants_not_real_ica_hdx(evidence: dict) -> None:

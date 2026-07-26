@@ -99,12 +99,12 @@ def _drive_workflow(
     irreversible Save through the two-phase one-shot actuation lease (mirroring
     the governed runtime's consequential-actuation handshake)."""
     backend.screenshot()
-    backend.click(*fx.ROSTER_ROW)         # select patient (reversible)
-    backend.click(*fx.NOTE_FIELD)         # focus note (reversible)
-    backend.type_text(fx.NOTE_VALUE)      # type note
+    backend.click(*fx.ROSTER_ROW)  # select patient (reversible)
+    backend.click(*fx.NOTE_FIELD)  # focus note (reversible)
+    backend.type_text(fx.NOTE_VALUE)  # type note
     backend.screenshot()
     backend.prepare_pointer_actuation(*fx.SAVE_BUTTON)
-    backend.acquire_actuation_frame()     # arm one-shot lease
+    backend.acquire_actuation_frame()  # arm one-shot lease
     identity = {
         "application": backend.application_identity(),
         "workflow_state": backend.workflow_state_identity(),
@@ -113,8 +113,8 @@ def _drive_workflow(
     if after_acquire is not None:
         after_acquire(client, backend)
     if invalidate_before_click:
-        backend.screenshot()              # diagnostic observation invalidates lease
-    backend.click(*fx.SAVE_BUTTON)        # consequential write; lease consumed
+        backend.screenshot()  # diagnostic observation invalidates lease
+    backend.click(*fx.SAVE_BUTTON)  # consequential write; lease consumed
     return identity
 
 

@@ -116,6 +116,10 @@
       "sha256": "04943b58d3a224798940c2c2012dcecd4d0c781ba0111caa3aa46ec53aa444c9"
     },
     {
+      "path": "benchmark/ap_invoice/results.json",
+      "sha256": "1ebea538a2b9d4d9acb0ed0e899cc66f31ac74ef54e42943ff7b4f034668fe30"
+    },
+    {
       "path": "benchmark/appliance_validation/results.json",
       "sha256": "fa577ba19af713317a914734bc621b78de48c24a90f5ef0b8a9e2ffd0ff040cb"
     },
@@ -310,6 +314,10 @@
     {
       "path": "benchmark/macos_native/textedit_counted_3plus1_b1b61a5_20260717.json",
       "sha256": "19c62cd4b1a8ba55001925cc129af80d22cec94cf6d5c7d9f56c2b5d71c79075"
+    },
+    {
+      "path": "benchmark/o2c_recon/results.json",
+      "sha256": "bd7f0a1177863a3f8368aed7c145a7424046b073c2fc9a2096627d4234a834fb"
     },
     {
       "path": "benchmark/openemr/latency_cost.png",

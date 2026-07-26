@@ -150,7 +150,16 @@ _INIT_JS = r"""
       }
       const wrapping = el.closest('label');
       if (wrapping) {
-        const t = clean(wrapping.textContent);
+        // Label TEXT only: a control nested inside the label (e.g. a
+        // <textarea>) contributes its typed VALUE to textContent -- strip
+        // embedded controls so the captured label is never the value.
+        const cloned = wrapping.cloneNode(true);
+        for (const child of cloned.querySelectorAll(
+            'input, textarea, select, [contenteditable=""],' +
+            ' [contenteditable="true"], [role="textbox"]')) {
+          child.remove();
+        }
+        const t = clean(cloned.textContent);
         if (t) return t;
       }
       const aria = clean(el.getAttribute('aria-label'));

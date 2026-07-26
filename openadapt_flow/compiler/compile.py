@@ -715,7 +715,8 @@ def _text_preview(text: str, limit: int = 24) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-# Nearby-OCR field-label fallback (see _field_label_for): a form label sits
+# Nearby-OCR field-label fallback (used by the pass-1 TYPE branch when the
+# event carries a field_rect but no recorded field_label): a form label sits
 # LEFT of or ABOVE its field, close by. Bounds keep the fallback conservative
 # (a distant heading must not become a parameter name).
 LABEL_OCR_MAX_LEFT_GAP_PX = 220

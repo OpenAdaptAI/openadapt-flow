@@ -496,6 +496,51 @@ class TestConfirmPass:
         assert (bundle / pc.PROPOSALS_FILENAME).is_file()
 
 
+# -- record-time capture (real browser: PlaywrightBackend seam) ---------------
+
+
+class TestPlaywrightFocusedFieldLabel:
+    def test_label_ladder_and_value_exclusion(self, tmp_path: Path) -> None:
+        """The DOM label ladder resolves best-first, and a control nested
+        inside a wrapping <label> never leaks its typed VALUE into the
+        captured label."""
+        from playwright.sync_api import sync_playwright
+
+        from openadapt_flow._browser_setup import ensure_chromium_installed
+        from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+
+        ensure_chromium_installed()
+        html = (
+            "<label for='a'>Insurance No.</label><input id='a'>"
+            "<label>Ward<textarea id='w'></textarea></label>"
+            "<input id='p' placeholder='Policy #'>"
+            "<input id='n' name='member_id'>"
+        )
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.set_content(html)
+                backend = PlaywrightBackend(page)
+
+                page.click("#a")
+                assert backend.focused_field_label() == "Insurance No."
+
+                page.click("#w")
+                page.keyboard.type("WARD-VALUE-NEVER-A-LABEL")
+                label = backend.focused_field_label()
+                assert label == "Ward"
+                assert "WARD-VALUE" not in (label or "")
+
+                page.click("#p")
+                assert backend.focused_field_label() == "Policy #"
+
+                page.click("#n")
+                assert backend.focused_field_label() == "member_id"
+            finally:
+                browser.close()
+
+
 # -- record-time capture (driven Recorder, fake backend) ----------------------
 
 

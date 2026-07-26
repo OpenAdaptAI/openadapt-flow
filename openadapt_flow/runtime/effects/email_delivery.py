@@ -165,7 +165,8 @@ class MaildirDeliveryVerifier(VerifierAdapterBase):
         body = _body_text(message)[:BODY_PROBE_LIMIT]
         fresh = True
         if self.mtime_window_s is not None:
-            fresh = (float(self._clock()) - mtime) <= self.mtime_window_s
+            age_s = float(self._clock()) - mtime
+            fresh = -self.mtime_window_s <= age_s <= self.mtime_window_s
         content_match = True
         if self.content_probe is not None:
             content_match = self.content_probe.search(body) is not None

@@ -20,10 +20,8 @@ Public surface:
   :class:`SqlRecordVerifier` (read-only SQL, enforced whitelist),
   :class:`FileArrivalVerifier` (file / SFTP arrival),
   :class:`MaildirDeliveryVerifier` (maildir / SMTP-capture email delivery),
-  :class:`DocumentArrivalVerifier` (report arrival + parseable content),
-  :class:`DocumentHashVerifier` (filesystem document store); stubbed seats
-  (:class:`SftpArrivalVerifier`, :class:`AuditFeedVerifier`,
-  :class:`ReadOnlySessionVerifier`) refuse loudly at construction.
+  :class:`DocumentArrivalVerifier` (report arrival + parseable content), and
+  :class:`DocumentHashVerifier` (filesystem document store).
 - The adapter platform (:mod:`openadapt_flow.runtime.effects.adapter`):
   :class:`VerifierAdapter` / :class:`VerifierAdapterBase` (lifecycle:
   configure -> test-connection -> capture-before -> capture-after ->
@@ -124,12 +122,6 @@ from openadapt_flow.runtime.effects.sql import (  # noqa: F401
     audit_table_deltas,
     capture_table_counts,
 )
-from openadapt_flow.runtime.effects.stubs import (  # noqa: F401
-    AuditFeedVerifier,
-    ReadOnlySessionVerifier,
-    SftpArrivalVerifier,
-    StubAdapterError,
-)
 
 __all__ = [
     # adapter platform
@@ -153,15 +145,11 @@ __all__ = [
     "registered_kinds",
     "resolve_verifier_factory",
     "transaction_outcome_for",
-    # adapters (new) + stubs
+    # adapters
     "GraphQLRecordVerifier",
     "assert_read_only_graphql",
     "MaildirDeliveryVerifier",
     "DocumentArrivalVerifier",
-    "AuditFeedVerifier",
-    "ReadOnlySessionVerifier",
-    "SftpArrivalVerifier",
-    "StubAdapterError",
     "Effect",
     "EffectKind",
     "EffectState",

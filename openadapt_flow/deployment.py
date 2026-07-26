@@ -160,9 +160,8 @@ class EffectsConfig(BaseModel):
     """
 
     #: ``none`` | ``onscreen`` | ``rest`` | ``graphql`` | ``fhir`` | ``sql`` |
-    #: ``file`` | ``email`` | ``document`` | ``document-hash``, a STUBBED kind
-    #: (``sftp`` | ``audit-feed`` | ``readonly-session`` -- refuses loudly at
-    #: build), or a PLUGIN kind registered under the
+    #: ``file`` | ``email`` | ``document`` | ``document-hash``, or a PLUGIN
+    #: kind registered under the
     #: ``openadapt_flow.effect_verifiers`` entry-point group (the customer
     #: adapter SDK seam -- see docs/EFFECT_KIT.md). ``onscreen`` is the no-API
     #: screen read-back oracle (the auto-derived default for GUI-only
@@ -224,10 +223,10 @@ class EffectsConfig(BaseModel):
     document_text_pattern: Optional[str] = None
 
     # -- evidence minimization (any kind) ------------------------------------
-    #: Record fields whose values must be redacted (one-way hashed) in every
-    #: emitted verdict's evidence -- matched records and, when it names the
-    #: effect's read-back field, observed/expected values. The verdict itself
-    #: is never altered (redaction cannot soften a failure).
+    #: Record fields whose values must be replaced by an opaque redaction
+    #: marker in every emitted verdict's evidence -- matched records and, when
+    #: it names the effect's read-back field, observed/expected values. The
+    #: verdict itself is never altered (redaction cannot soften a failure).
     evidence_redact_fields: list[str] = Field(default_factory=list)
     #: Allowlist variant: when set, every evidence field NOT named is redacted.
     evidence_keep_fields: Optional[list[str]] = None
@@ -821,8 +820,7 @@ def build_effect_verifier(
             so the verifier probes the record THIS run writes. A config with
             no references ignores ``params`` entirely (fully back-compatible).
 
-    Resolution order for ``kind``: built-in adapters, then the STUBBED kinds
-    (which refuse loudly), then plugin factories registered under the
+    Resolution order for ``kind``: built-in adapters, then plugin factories registered under the
     ``openadapt_flow.effect_verifiers`` entry-point group or via
     ``register_verifier_factory`` (the customer adapter SDK seam). When the
     config sets ``evidence_redact_fields`` / ``evidence_keep_fields``, the
@@ -832,9 +830,6 @@ def build_effect_verifier(
         ValueError: on an unknown ``kind``, a missing required field, an
             unresolved ``{param: ...}`` reference, or a missing secret env var
             (fail loud rather than wire a broken verifier).
-        NotImplementedError: on a STUBBED kind (``sftp`` / ``audit-feed`` /
-            ``readonly-session``) -- planned, documented, deliberately not
-            silently accepted.
     """
     verifier = _build_effect_verifier_unredacted(cfg, params)
     if verifier is None:
@@ -1052,12 +1047,6 @@ def _build_effect_verifier_unredacted(
             poll_interval_s=cfg.poll_interval_s,
         )
 
-    # Stubbed kinds: named seats in the adapter matrix that deliberately
-    # refuse (loudly, at build) until implemented -- never a silent pass.
-    from openadapt_flow.runtime.effects.stubs import construct_stub
-
-    construct_stub(kind)  # raises StubAdapterError for a stubbed kind
-
     # Plugin seam: a customer adapter registered programmatically or under the
     # 'openadapt_flow.effect_verifiers' entry-point group serves its own kind.
     from openadapt_flow.runtime.effects.adapter import resolve_verifier_factory
@@ -1069,8 +1058,7 @@ def _build_effect_verifier_unredacted(
     raise ValueError(
         f"unknown effects.kind {cfg.kind!r} "
         "(expected: none | onscreen | rest | graphql | fhir | sql | file | "
-        "email | document | document-hash, a stubbed kind, or a registered "
-        "plugin kind)"
+        "email | document | document-hash, or a registered plugin kind)"
     )
 
 

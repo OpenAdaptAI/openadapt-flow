@@ -34,7 +34,6 @@ from openadapt_flow.runtime.effects import (
     RedactionPolicy,
     RestRecordVerifier,
     SqlRecordVerifier,
-    StubAdapterError,
     Verdict,
     VerifierAdapter,
     VerifierAdapterBase,
@@ -455,25 +454,6 @@ class TestRedaction:
         assert str(verdict.matched_records[0]["ssn"]).startswith("[redacted")
         assert verdict.matched_records[0]["claim_id"] == "c-9"
         assert verifier.test_connection().ok is True
-
-
-# -- stubbed kinds ------------------------------------------------------------
-
-
-class TestStubbedKinds:
-    @pytest.mark.parametrize("kind", ["sftp", "audit-feed", "readonly-session"])
-    def test_stub_kind_refuses_loudly_at_build(self, kind):
-        with pytest.raises(StubAdapterError, match="PLANNED"):
-            build_effect_verifier(EffectsConfig(kind=kind))
-
-    def test_stub_error_is_never_a_verifier(self):
-        # A stub can never be constructed, so no code path can ever hold a
-        # silently-passing placeholder verifier.
-        from openadapt_flow.runtime.effects.stubs import STUB_KINDS
-
-        for cls in set(STUB_KINDS.values()):
-            with pytest.raises(StubAdapterError):
-                cls()
 
 
 # -- plugin SDK seam ----------------------------------------------------------

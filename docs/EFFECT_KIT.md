@@ -188,7 +188,7 @@ profiles gate on the tier, never on prose:
 | Tier | Label | What it proves | Adapters |
 |---|---|---|---|
 | 1 | `independent-system` | a read through the SoR's own API/DB/store -- independent proof | `rest`, `graphql`, `fhir`, `sql`, `file`, `email`, `document`, `document-hash` |
-| 2 | `independent-session` | same app, separately authenticated read-only session | (planned: `readonly-session`) |
+| 2 | `independent-session` | same app, separately authenticated read-only session | customer adapter through the plugin interface |
 | 3 | `reacquired-state` | the app's own UI re-navigated to re-fetch persisted state | `onscreen` with a different-path read-back |
 | 4 | `screen-consistency` | the same surface the write drove still shows the value | `onscreen` same-surface |
 
@@ -198,7 +198,7 @@ success while nothing persisted. The onscreen adapter declares
 `independent_system_of_record = False` in code, and `docs/LIMITS.md` carries
 the measured false-CONFIRM evidence behind the demotion.
 
-### Adapter matrix (supported / stubbed / planned)
+### Adapter matrix
 
 | Adapter | Status | Notes |
 |---|---|---|
@@ -211,23 +211,16 @@ the measured false-CONFIRM evidence behind the demotion.
 | document / report arrival + parse | **supported** | `document` |
 | document store (exact bytes) | **supported** | `document-hash` |
 | on-screen read-back | **supported (demoted)** | `onscreen`; tiers 3-4, consistency only |
-| declarative SFTP | **stubbed** | `sftp` -- refuses loudly at build; interface documented in `runtime/effects/stubs.py` |
-| audit / event feed | **stubbed** | `audit-feed` -- refuses loudly; strongest duplicate oracle where read APIs hide versions |
-| separately-authenticated read-only session | **stubbed** | `readonly-session` -- refuses loudly; the planned tier-2 adapter |
 | customer plugin | **supported (SDK seam)** | any kind via the entry-point group below |
-
-A STUBBED kind fails at `build_effect_verifier` with guidance -- a planned
-capability can never be mistaken for a working one.
 
 ### Evidence minimization (field-level redaction)
 
 Any kind accepts `evidence_redact_fields` (denylist) or
 `evidence_keep_fields` (allowlist): the named record fields in every emitted
 verdict's evidence (matched records; observed/expected values when the
-effect's read-back field is named) are replaced with one-way SHA-256 digests,
-so an audit can still compare two runs' evidence for equality without the
-underlying value (a patient identifier, an SSN) leaving the verifier. The
-verdict itself is never altered -- redaction minimizes evidence, it cannot
+effect's read-back field is named) are replaced with opaque markers. This
+avoids making low-entropy identifiers recoverable through a digest dictionary.
+The verdict itself is never altered -- redaction minimizes evidence, it cannot
 soften a failure into a pass.
 
 ### Shipping your own adapter (plugin SDK)
@@ -255,8 +248,7 @@ platform obligation), qualified in `tests/test_verifier_adapter_platform.py`.
    (or programmatically: `register_verifier_factory("csv-ledger", factory)`).
 4. Deploy with `effects: {kind: csv-ledger, ...}` -- `build_effect_verifier`
    resolves built-ins first (a plugin can never shadow a built-in kind), then
-   stubs, then the registry; a plugin that fails to import fails the build
-   loudly.
+   the registry; a plugin that fails to import fails the build loudly.
 5. Qualify it with the platform's adversarial fixture set (stale data, wrong
    entity, duplicate rows, settlement timeout, credential failure ->
    UNAVAILABLE) -- copy the per-adapter test modules as the template.

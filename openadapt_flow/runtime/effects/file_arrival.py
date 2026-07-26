@@ -208,10 +208,11 @@ class FileArrivalVerifier(VerifierAdapterBase):
         content_match: bool,
     ) -> dict[str, Any]:
         size_ok = size >= self.min_size
+        age_s = now - mtime
         fresh = (
             True
             if self.mtime_window_s is None
-            else (now - mtime) <= self.mtime_window_s
+            else -self.mtime_window_s <= age_s <= self.mtime_window_s
         )
         return {
             # Identity includes size+mtime so an in-place rewrite counts as a

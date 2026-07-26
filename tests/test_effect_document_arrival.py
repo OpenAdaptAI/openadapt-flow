@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -98,6 +99,17 @@ class TestJsonReports:
         )
         verdict = verifier.verify(effect, before)
         assert verdict.should_halt is True
+
+    def test_far_future_report_fails_fresh_contract(self, tmp_path):
+        write_report(tmp_path, "r1.json")
+        future = time.time() + 3600
+        os.utime(tmp_path / "r1.json", (future, future))
+        verifier = make_verifier(tmp_path, mtime_window_s=60.0)
+        before = verifier.capture_pre_state().model_copy(update={"records": []})
+        effect = report_effect(
+            match={"parseable": "True", "claim_id": "c-77", "fresh": "True"}
+        )
+        assert verifier.verify(effect, before).should_halt is True
 
     def test_field_equals_readback(self, tmp_path):
         write_report(tmp_path, "r1.json")

@@ -177,7 +177,8 @@ class DocumentArrivalVerifier(VerifierAdapterBase):
                 return None
             fresh = True
             if self.mtime_window_s is not None:
-                fresh = (float(self._clock()) - stat.st_mtime) <= self.mtime_window_s
+                age_s = float(self._clock()) - stat.st_mtime
+                fresh = -self.mtime_window_s <= age_s <= self.mtime_window_s
             record: dict[str, Any] = {
                 "id": str(path.relative_to(self.root)),
                 "name": path.name,

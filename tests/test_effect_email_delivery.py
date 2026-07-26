@@ -10,6 +10,7 @@ hook catches mail leaking to unexpected recipients.
 from __future__ import annotations
 
 import os
+import time
 
 from openadapt_flow.deployment import EffectsConfig, build_effect_verifier
 from openadapt_flow.runtime.effects import (
@@ -125,6 +126,21 @@ class TestDelivery:
         )
         verdict = verifier.verify(effect, before)
         assert verdict.should_halt is True
+
+    def test_far_future_delivery_does_not_satisfy_fresh(self, tmp_path):
+        path = write_eml(tmp_path, "m1.eml")
+        future = time.time() + 3600
+        os.utime(path, (future, future))
+        verifier = make_verifier(tmp_path, mtime_window_s=60.0)
+        before = verifier.capture_pre_state().model_copy(update={"records": []})
+        effect = delivery_effect(
+            match={
+                "to": "alice@example.test",
+                "content_match": "True",
+                "fresh": "True",
+            }
+        )
+        assert verifier.verify(effect, before).should_halt is True
 
     def test_maildir_layout_cur_and_new_are_scanned(self, tmp_path):
         (tmp_path / "cur").mkdir()

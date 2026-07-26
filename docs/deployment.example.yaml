@@ -37,7 +37,7 @@ actuation:
 
 # -- effects: the system of record consequential writes are verified against -
 # kind: none | rest | graphql | fhir | sql | file | email | document |
-#       document-hash | a stubbed kind | a registered plugin kind
+#       document-hash | a registered plugin kind
 #   none          -> no verifier (Standard/Regulated refuse consequential
 #                    writes; Demo may use an exact explicit approval, recorded
 #                    as approved-unverified; direct API writes still refuse)
@@ -53,8 +53,6 @@ actuation:
 #   document      -> report arrival + PARSEABLE-content assertion (JSON path
 #                    or named-regex extraction judged like record fields)
 #   document-hash -> a filesystem document store (exact SHA-256 content)
-#   sftp | audit-feed | readonly-session -> STUBBED (refuse loudly at build;
-#                    see the adapter matrix in docs/EFFECT_KIT.md)
 #   <plugin>      -> any kind registered under the
 #                    openadapt_flow.effect_verifiers entry-point group
 #
@@ -142,8 +140,8 @@ effects:
   # glob: "**/*.pdf"
 
   # evidence minimization (any kind): field-level redaction of emitted
-  # evidence (matched records + observed/expected values). One-way hashed so
-  # audits can still compare runs; the VERDICT itself is never altered.
+  # evidence (matched records + observed/expected values). Values are replaced
+  # by opaque markers; the VERDICT itself is never altered.
   # evidence_redact_fields: [ssn, dob]
   # evidence_keep_fields: [id, status]     # allowlist variant
 

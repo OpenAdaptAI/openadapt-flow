@@ -89,7 +89,16 @@ class TestHeuristic:
         typing = Step(id="s", intent="type 'save the world'", action=ActionKind.TYPE)
         assert classify_step_risk(typing) == "reversible"
         key = Step(id="s", intent="press Enter", action=ActionKind.KEY, key="Enter")
-        assert classify_step_risk(key) == "irreversible"
+        key_inference = infer_step_risk(key)
+        assert key_inference.risk == "reversible"
+        assert key_inference.requires_review is True
+        submit_key = Step(
+            id="s",
+            intent="press Enter to submit",
+            action=ActionKind.KEY,
+            key="Enter",
+        )
+        assert classify_step_risk(submit_key) == "irreversible"
         hotkey = Step(
             id="s",
             intent="press Control+s",
@@ -98,8 +107,26 @@ class TestHeuristic:
             modifiers=["Control"],
         )
         assert classify_step_risk(hotkey) == "irreversible"
+        select_all = Step(
+            id="s",
+            intent="press Control+a",
+            action=ActionKind.HOTKEY,
+            key="a",
+            modifiers=["Control"],
+        )
+        select_inference = infer_step_risk(select_all)
+        assert select_inference.risk == "reversible"
+        assert select_inference.requires_review is True
         drag = Step(id="s", intent="drag item", action=ActionKind.DRAG)
-        assert classify_step_risk(drag) == "irreversible"
+        drag_inference = infer_step_risk(drag)
+        assert drag_inference.risk == "reversible"
+        assert drag_inference.requires_review is True
+        destructive_drag = Step(
+            id="s",
+            intent="drag item to Delete",
+            action=ActionKind.DRAG,
+        )
+        assert classify_step_risk(destructive_drag) == "irreversible"
 
     def test_unlabelled_coordinate_click_requires_review(self) -> None:
         step = Step(

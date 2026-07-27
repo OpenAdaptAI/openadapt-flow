@@ -26,8 +26,11 @@ save / confirm and their siblings — matched on WORD boundaries so ``address``
 does not trip ``add`` and ``postal`` does not trip ``post``. Unlabelled pointer
 controls are recorded as provisionally reversible so tutorials can replay, but
 carry ``risk_review_required`` and cannot be certified until qualification
-applies an explicit override. Hotkeys and drags take the conservative
-irreversible classification until qualification overrides them.
+applies an explicit override. The same rule applies to an Enter/Delete key,
+hotkey, or drag whose retained context does not prove a write: demo replay
+remains usable, while Standard/Regulated certification requires an operator to
+classify the business effect. Known submit/save/delete context remains
+irreversible immediately.
 
 False-positive posture
 ----------------------
@@ -130,22 +133,60 @@ def infer_step_risk(step: Step) -> RiskInference:
     """Infer risk while retaining why qualification must review ambiguity."""
 
     if step.action is ActionKind.DRAG:
+        if is_write_shaped(step_text(step)):
+            return RiskInference(
+                "irreversible",
+                "drag context names a consequential state change",
+            )
         return RiskInference(
-            "irreversible", "drag can directly mutate application state"
+            "reversible",
+            "drag may select, move, reorder, or mutate application state",
+            requires_review=True,
         )
     if step.action is ActionKind.HOTKEY:
+        key = (step.key or "").lower()
+        modifiers = {value.lower() for value in step.modifiers}
+        write_chord = (
+            (
+                key in {"enter", "return"}
+                and bool(modifiers & {"control", "ctrl", "meta", "command", "cmd"})
+            )
+            or (
+                key == "s"
+                and bool(modifiers & {"control", "ctrl", "meta", "command", "cmd"})
+            )
+            or (key in {"delete", "backspace"} and "shift" in modifiers)
+        )
+        if write_chord or is_write_shaped(step_text(step)):
+            return RiskInference(
+                "irreversible",
+                "hotkey chord or retained context names a consequential write",
+            )
         return RiskInference(
-            "irreversible", "hotkey can submit or mutate application state"
+            "reversible",
+            "hotkey may navigate, select, edit, submit, or mutate application state",
+            requires_review=True,
         )
     if step.action is ActionKind.KEY:
-        consequential = (step.key or "").lower() in {"enter", "return", "delete"}
+        ambiguous = (step.key or "").lower() in {
+            "enter",
+            "return",
+            "delete",
+            "backspace",
+        }
+        consequential = ambiguous and is_write_shaped(step_text(step))
         return RiskInference(
             "irreversible" if consequential else "reversible",
             (
-                "submission/deletion key can mutate application state"
+                "submission/deletion key has retained consequential-write context"
                 if consequential
-                else "key is not a known submission or deletion key"
+                else (
+                    "submission/deletion key may edit locally or commit application state"
+                    if ambiguous
+                    else "key is not a known submission or deletion key"
+                )
             ),
+            requires_review=ambiguous and not consequential,
         )
     if step.action not in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK):
         return RiskInference("reversible", "action is not a pointer submission")
@@ -171,8 +212,9 @@ def infer_step_risk(step: Step) -> RiskInference:
 def classify_step_risk(step: Step) -> Literal["reversible", "irreversible"]:
     """Return the inferred risk; use :func:`infer_step_risk` for rationale.
 
-    Drags/hotkeys, submitting key presses, and write-shaped labelled clicks
-    classify irreversible. Icon-only primary clicks remain provisionally
-    reversible but require explicit qualification review before certification.
+    Proven write-shaped drags/hotkeys/key presses and write-shaped labelled
+    clicks classify irreversible. Ambiguous rich actions and icon-only primary
+    clicks remain provisionally reversible but require explicit qualification
+    review before certification.
     """
     return infer_step_risk(step).risk

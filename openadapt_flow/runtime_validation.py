@@ -42,11 +42,10 @@ from openadapt_flow.hosted import (
 from openadapt_flow.ir import RunReport, Workflow
 from openadapt_flow.policy import (
     Policy,
-    effective_step_risk,
     evaluate_policy,
-    has_system_effect,
     lint_workflow,
     load_policy,
+    project_step_safety,
 )
 from openadapt_flow.sanitized_artifact import (
     SanitizationError,
@@ -89,14 +88,12 @@ def workflow_risk_class(
     return (
         "consequential"
         if any(
-            effective_step_risk(
+            project_step_safety(
                 step,
                 workflow,
                 require_current_certification=True,
                 certifying_policy=certifying_policy,
-            )
-            == "irreversible"
-            or has_system_effect(step)
+            ).consequential
             for step in iter_workflow_steps(workflow)
         )
         else "low"

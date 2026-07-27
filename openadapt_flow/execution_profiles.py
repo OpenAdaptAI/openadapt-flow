@@ -201,7 +201,11 @@ def classify_execution_outcome(
     consequential = {
         step.id
         for step in iter_workflow_steps(workflow)
-        if is_consequential(step, workflow)
+        if is_consequential(
+            step,
+            workflow,
+            certifying_policy_sha256=report.governed_policy_contract_sha256,
+        )
     }
     steps_by_id = {step.id: step for step in iter_workflow_steps(workflow)}
     if workflow.program is None:

@@ -779,6 +779,9 @@ class Replayer:
             report.governed_policy_name = (
                 self.governed_authorization.admitted_policy_name
             )
+            report.governed_policy_contract_sha256 = (
+                self.governed_authorization.admitted_policy_contract_sha256
+            )
             report.governed_minimum_effect_tier = (
                 self.governed_authorization.minimum_effect_tier
             )

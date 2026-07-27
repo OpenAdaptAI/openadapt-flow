@@ -33,6 +33,7 @@ from openadapt_flow.ir import (
     StructuralLocator,
     Workflow,
 )
+from openadapt_flow.policy import load_policy, policy_contract_sha256
 from openadapt_flow.qualification import (
     ActionRiskClassification,
     EnvironmentBoundary,
@@ -225,6 +226,13 @@ def test_fully_covered_bundle_is_admitted(tmp_path):
     assert report.refusals == []
     # Every gate individually passed.
     assert all(g.passed for g in report.gates)
+    assert report.policy_contract_sha256 == policy_contract_sha256(
+        load_policy("clinical-write")
+    )
+    authorization = build_runtime_authorization(wf, report)
+    assert authorization.admitted_policy_contract_sha256 == (
+        report.policy_contract_sha256
+    )
 
 
 def _runtime_interstitial(name: str = "survey") -> Interstitial:

@@ -22,6 +22,7 @@ what happens once a certified bundle runs).
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Literal, Optional
 
@@ -157,6 +158,30 @@ def has_system_effect(step: Step) -> bool:
 EffectPath = Literal["gui", "api"]
 
 
+@dataclass(frozen=True)
+class StepSafetyProjection:
+    """Canonical effective-risk and path-effect view of one executable step.
+
+    Safety callers must not independently combine ``step.risk``, GUI effects,
+    and API-binding effects: doing so previously made lint, program-mode hosted
+    admission, and replay outcome classification disagree. This projection is
+    the one shared interpretation of those load-bearing facts.
+    """
+
+    effective_risk: Literal["reversible", "irreversible"]
+    effect_paths: tuple[tuple[EffectPath, tuple["Effect", ...]], ...]
+
+    @property
+    def consequential(self) -> bool:
+        return self.effective_risk == "irreversible" or any(
+            effects for _path, effects in self.effect_paths
+        )
+
+    @property
+    def missing_effect_paths(self) -> tuple[EffectPath, ...]:
+        return tuple(path for path, effects in self.effect_paths if not effects)
+
+
 def iter_effect_paths(step: Step) -> Iterable[tuple[EffectPath, list["Effect"]]]:
     """Yield every executable actuation path and its own effect contracts.
 
@@ -206,12 +231,37 @@ def policy_contract_sha256(policy: "Policy") -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def project_step_safety(
+    step: Step,
+    workflow: Optional[Workflow] = None,
+    *,
+    require_current_certification: bool = False,
+    certifying_policy: Optional["Policy"] = None,
+    certifying_policy_sha256: Optional[str] = None,
+) -> StepSafetyProjection:
+    """Return the shared effective-risk and path-effect safety projection."""
+
+    return StepSafetyProjection(
+        effective_risk=effective_step_risk(
+            step,
+            workflow,
+            require_current_certification=require_current_certification,
+            certifying_policy=certifying_policy,
+            certifying_policy_sha256=certifying_policy_sha256,
+        ),
+        effect_paths=tuple(
+            (path, tuple(effects)) for path, effects in iter_effect_paths(step)
+        ),
+    )
+
+
 def has_operator_risk_override(
     step: Step,
     workflow: Optional[Workflow] = None,
     *,
     require_current_certification: bool = False,
     certifying_policy: Optional["Policy"] = None,
+    certifying_policy_sha256: Optional[str] = None,
 ) -> bool:
     """Whether typed qualification state owns this executable risk decision.
 
@@ -251,6 +301,7 @@ def has_operator_risk_override(
     return current_certification_matches(
         workflow,
         policy=certifying_policy,
+        policy_contract_digest=certifying_policy_sha256,
     )
 
 
@@ -260,7 +311,8 @@ def effective_step_risk(
     *,
     require_current_certification: bool = False,
     certifying_policy: Optional["Policy"] = None,
-) -> str:
+    certifying_policy_sha256: Optional[str] = None,
+) -> Literal["reversible", "irreversible"]:
     """Return the conservative executable risk after a qualified override."""
 
     inferred = classify_step_risk(step)
@@ -272,6 +324,7 @@ def effective_step_risk(
             workflow,
             require_current_certification=require_current_certification,
             certifying_policy=certifying_policy,
+            certifying_policy_sha256=certifying_policy_sha256,
         )
     ):
         return "irreversible"
@@ -618,6 +671,12 @@ def evaluate_policy(
     steps = list(iter_workflow_steps(workflow))
 
     for step in steps:
+        projection = project_step_safety(
+            step,
+            workflow,
+            require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
+        )
         override_bound = has_operator_risk_override(
             step,
             workflow,
@@ -630,12 +689,7 @@ def evaluate_policy(
             and risk_explanation.startswith("operator-qualified override:")
             and not override_bound
         )
-        effective_risk = effective_step_risk(
-            step,
-            workflow,
-            require_current_certification=require_current_risk_certification,
-            certifying_policy=policy,
-        )
+        effective_risk = projection.effective_risk
         if step.risk_review_required or unbound_claimed_override:
             violations.append(
                 Violation(
@@ -760,7 +814,7 @@ def evaluate_policy(
             require_current_certification=require_current_risk_certification,
             certifying_policy=policy,
         ):
-            missing_paths = missing_effect_paths(step)
+            missing_paths = list(projection.missing_effect_paths)
             if missing_paths:
                 violations.append(
                     Violation(
@@ -781,7 +835,7 @@ def evaluate_policy(
         if (
             policy.require_effects_for_irreversible
             and effective_risk == "irreversible"
-            and missing_effect_paths(step)
+            and projection.missing_effect_paths
         ):
             violations.append(
                 Violation(
@@ -1043,13 +1097,14 @@ def lint_workflow(
     # graph/subflow action states, not just its (often empty) linear steps.
     steps = list(iter_workflow_steps(workflow))
     for step in steps:
-        effective_risk = effective_step_risk(
+        projection = project_step_safety(
             step,
             workflow,
             require_current_certification=require_current_risk_certification,
             certifying_policy=certifying_policy,
         )
-        irreversible = effective_risk == "irreversible" or has_system_effect(step)
+        effective_risk = projection.effective_risk
+        irreversible = projection.consequential
 
         if step.risk_review_required:
             findings.append(
@@ -1071,7 +1126,7 @@ def lint_workflow(
 
         if irreversible:
             consequential += 1
-            missing_paths = missing_effect_paths(step)
+            missing_paths = list(projection.missing_effect_paths)
             if not missing_paths:
                 effect_covered += 1
             else:

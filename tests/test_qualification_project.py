@@ -24,7 +24,12 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
-from openadapt_flow.policy import Policy, effective_step_risk, load_policy
+from openadapt_flow.policy import (
+    Policy,
+    effective_step_risk,
+    load_policy,
+    policy_contract_sha256,
+)
 from openadapt_flow.qualification import (
     ActionRiskClass,
     ActionRiskClassification,
@@ -54,6 +59,10 @@ from openadapt_flow.qualification import (
     set_trusted_runner_key,
     sign_case_result,
     workflow_contract_sha256,
+)
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    runtime_inputs_digest,
 )
 from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
 
@@ -747,6 +756,29 @@ def test_full_campaign_certifies_through_existing_policy_and_round_trips(
     assert loaded.qualification.last_certification.workflow_contract_sha256 == (
         workflow_contract_sha256(loaded)
     )
+    assert loaded.manifest is not None
+    policy = load_policy("clinical-write")
+    policy_digest = policy_contract_sha256(policy)
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=loaded.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(loaded, None, None),
+        admitted_policy_name=policy.name,
+        admitted_policy_contract_sha256=policy_digest,
+        execution_profile="standard",
+    )
+    assert authorization.validate_workflow(loaded) is None
+    assert "no exact policy digest" in (
+        authorization.model_copy(
+            update={"admitted_policy_contract_sha256": None}
+        ).validate_workflow(loaded)
+        or ""
+    )
+    assert "policy digest does not match" in (
+        authorization.model_copy(
+            update={"admitted_policy_contract_sha256": "0" * 64}
+        ).validate_workflow(loaded)
+        or ""
+    )
 
 
 def test_persisted_certification_is_recomputed_and_policy_digest_bound(
@@ -759,7 +791,17 @@ def test_persisted_certification_is_recomputed_and_policy_digest_bound(
     policy = load_policy("clinical-write")
     report = certify_project(workflow, policy=policy, evidence_root=evidence_root)
     assert report.passed
+    policy_digest = policy_contract_sha256(policy)
     assert current_certification_matches(workflow, policy=policy)
+    assert current_certification_matches(
+        workflow,
+        policy_contract_digest=policy_digest,
+    )
+    assert not current_certification_matches(
+        workflow,
+        policy_contract_digest="0" * 64,
+    )
+    assert not current_certification_matches(workflow)
 
     project = workflow.qualification
     assert project is not None and project.last_certification is not None
@@ -776,6 +818,44 @@ def test_persisted_certification_is_recomputed_and_policy_digest_bound(
     same_name_mutation.prohibit_unarmed_clicks = not policy.prohibit_unarmed_clicks
     assert same_name_mutation.name == policy.name
     assert not current_certification_matches(workflow, policy=same_name_mutation)
+
+    # Even a self-consistent rewrite of the mutable bundle-local policy and
+    # certification hashes cannot appoint itself as production authority.
+    forged_policy = Policy.model_validate(policy.model_dump(mode="json"))
+    forged_policy.description += " (mutated bundle-local policy)"
+    forged_report = evaluate_qualification(
+        workflow,
+        policy=forged_policy,
+        evidence_root=evidence_root,
+    )
+    assert forged_report.passed
+    project.last_certification = original.model_copy(deep=True)
+    project.last_certification.policy_contract = forged_policy.model_dump(mode="json")
+    project.last_certification.policy_contract_sha256 = policy_contract_sha256(
+        forged_policy
+    )
+    project.last_certification.report_sha256 = forged_report.report_sha256()
+    assert not current_certification_matches(workflow)
+    assert not current_certification_matches(workflow, policy=policy)
+
+
+def test_forged_passed_bit_cannot_turn_a_failed_campaign_into_certification(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow()
+    workflow.steps[0].expect = []
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    policy = load_policy("clinical-write")
+
+    report = certify_project(workflow, policy=policy, evidence_root=evidence_root)
+    assert not report.passed
+    project = workflow.qualification
+    assert project is not None and project.last_certification is not None
+    project.last_certification.passed = True
+
+    assert not current_certification_matches(workflow, policy=policy)
 
 
 def test_valid_certification_authorizes_only_its_exact_reviewed_risk_policy(

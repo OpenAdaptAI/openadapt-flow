@@ -63,7 +63,6 @@ from openadapt_flow.ir import ActionKind, Interstitial, Step, Workflow
 from openadapt_flow.policy import (
     Policy,
     all_effect_paths_covered,
-    effective_step_risk,
     has_screen_postcondition,
     has_system_effect,
     has_unconfirmed_effect_binding,
@@ -71,6 +70,8 @@ from openadapt_flow.policy import (
     is_identity_armed,
     iter_effect_paths,
     missing_effect_paths,
+    policy_contract_sha256,
+    project_step_safety,
     step_tags,
 )
 from openadapt_flow.runtime.authorization import (
@@ -130,6 +131,7 @@ def is_consequential(
     *,
     require_current_risk_certification: bool = True,
     certifying_policy: Optional[Policy] = None,
+    certifying_policy_sha256: Optional[str] = None,
 ) -> bool:
     """Whether ``step`` commits a consequential (irreversible) write.
 
@@ -144,16 +146,13 @@ def is_consequential(
     qualification gates instead bind the typed project decision through their
     live policy decision and exact sealed manifest.
     """
-    classified_write = (
-        effective_step_risk(
-            step,
-            workflow,
-            require_current_certification=require_current_risk_certification,
-            certifying_policy=certifying_policy,
-        )
-        == "irreversible"
-    )
-    return classified_write or has_system_effect(step)
+    return project_step_safety(
+        step,
+        workflow,
+        require_current_certification=require_current_risk_certification,
+        certifying_policy=certifying_policy,
+        certifying_policy_sha256=certifying_policy_sha256,
+    ).consequential
 
 
 def must_be_identity_armed(
@@ -238,6 +237,9 @@ class RunGateReport(BaseModel):
 
     workflow_name: str
     policy_name: str
+    policy_contract_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
     execution_profile: Optional[Literal["demo", "standard", "regulated"]] = None
     gates: list[GateResult] = Field(default_factory=list)
     bundle_content_digest: Optional[str] = Field(default=None, pattern="^[a-f0-9]{64}$")
@@ -366,6 +368,11 @@ def evaluate_run_gate(
         certifying_policy = load_policy(policy_name)
     except (FileNotFoundError, ValueError):
         certifying_policy = None
+    certifying_policy_digest = (
+        policy_contract_sha256(certifying_policy)
+        if certifying_policy is not None
+        else None
+    )
 
     approval_gate = _gate_approval(
         workflow,
@@ -474,6 +481,7 @@ def evaluate_run_gate(
     return RunGateReport(
         workflow_name=workflow.name,
         policy_name=policy_name,
+        policy_contract_sha256=certifying_policy_digest,
         execution_profile=(
             profile_contract.profile.value if profile_contract is not None else None
         ),
@@ -941,6 +949,8 @@ def build_runtime_authorization(
         raise ValueError("cannot authorize an unsealed workflow")
     if report.bundle_content_digest != workflow.manifest.content_digest:
         raise ValueError("run gate report belongs to a different workflow")
+    if report.policy_contract_sha256 is None:
+        raise ValueError("run gate report has no exact admitted policy digest")
 
     from openadapt_flow.bundle_validation import compute_content_digest
 
@@ -978,6 +988,7 @@ def build_runtime_authorization(
                 step,
                 workflow,
                 require_current_risk_certification=require_current_risk_cert,
+                certifying_policy_sha256=report.policy_contract_sha256,
             )
             and has_system_effect(step)
         ]
@@ -991,6 +1002,7 @@ def build_runtime_authorization(
             interstitials=interstitials,
         ),
         admitted_policy_name=report.policy_name,
+        admitted_policy_contract_sha256=report.policy_contract_sha256,
         execution_profile=report.execution_profile,
         minimum_effect_tier=report.minimum_effect_tier,
         required_identity_step_ids=tuple(report.required_identity_step_ids),

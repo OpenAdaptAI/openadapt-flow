@@ -1974,6 +1974,7 @@ def current_certification_matches(
     workflow: "Workflow",
     *,
     policy: Optional["Policy"] = None,
+    policy_contract_digest: Optional[str] = None,
 ) -> bool:
     """Independently recompute the persisted production qualification.
 
@@ -1999,15 +2000,26 @@ def current_certification_matches(
         )
     except ValueError:
         return False
-    effective_policy = policy or embedded_policy
-    if effective_policy is None or embedded_policy is None:
+    if embedded_policy is None:
         return False
-    digest = policy_contract_sha256(effective_policy)
+    embedded_digest = policy_contract_sha256(embedded_policy)
+    if policy is not None:
+        effective_policy = policy
+        digest = policy_contract_sha256(policy)
+        if policy_contract_digest is not None and policy_contract_digest != digest:
+            return False
+    elif policy_contract_digest is not None:
+        effective_policy = embedded_policy
+        digest = policy_contract_digest
+    else:
+        # The bundle-local copy is evidence of what was evaluated, not an
+        # authority that can bootstrap its own production policy decision.
+        return False
     if (
         certification.policy_name != effective_policy.name
         or certification.policy_name != embedded_policy.name
         or certification.policy_contract_sha256 != digest
-        or policy_contract_sha256(embedded_policy) != digest
+        or embedded_digest != digest
     ):
         return False
 
@@ -2046,11 +2058,21 @@ def save_qualified_workflow(
             raise QualificationError(
                 "workflow, environment, or project changed after certification"
             )
-        if certification.passed and not current_certification_matches(workflow):
-            _invalidate_certification(workflow)
-            raise QualificationError(
-                "persisted certification cannot be independently reproduced"
-            )
+        if certification.passed:
+            from openadapt_flow.policy import Policy
+
+            try:
+                embedded_policy = Policy.model_validate(certification.policy_contract)
+            except ValueError:
+                _invalidate_certification(workflow)
+                raise QualificationError(
+                    "persisted certification policy contract is invalid"
+                ) from None
+            if not current_certification_matches(workflow, policy=embedded_policy):
+                _invalidate_certification(workflow)
+                raise QualificationError(
+                    "persisted certification cannot be independently reproduced"
+                )
     if workflow.encrypted:
         path = workflow.save(bundle_dir, encrypt=True, key=key)
     else:

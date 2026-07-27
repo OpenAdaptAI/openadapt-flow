@@ -660,8 +660,7 @@ def test_qualification_binds_extracted_signal_without_retaining_plaintext() -> N
     template = build_identity_template(
         None,
         structured_identity=(
-            '{"patient_identity":"Alice Example|1970-02-03",'
-            '"surface":"openemr"}'
+            '{"patient_identity":"Alice Example|1970-02-03","surface":"openemr"}'
         ),
         param_examples={"name": recorded_name, "dob": recorded_dob},
         salt_hex="ef" * 16,
@@ -734,9 +733,7 @@ def test_qualification_binds_extracted_signal_without_retaining_plaintext() -> N
     )
 
     changed_extractor = signal.model_copy(
-        update={
-            "extract_pattern": r'"patient_identity"\s*:\s*"(?P<value>[^"]+)"'
-        }
+        update={"extract_pattern": r'"patient_identity"\s*:\s*"(?P<value>[^"]+)"'}
     )
     assert (
         verify_signal_template(

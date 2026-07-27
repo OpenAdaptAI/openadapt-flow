@@ -24,6 +24,8 @@ from openadapt_flow.console.human_decisions import (
 from openadapt_flow.deployment import DeploymentConfig
 from openadapt_flow.ir import (
     ActionKind,
+    Anchor,
+    ApiBinding,
     Guard,
     HaltObservation,
     LoopSpec,
@@ -41,6 +43,13 @@ from openadapt_flow.ir import (
     Transition,
     Workflow,
 )
+from openadapt_flow.qualification import (
+    ActionRiskClassification,
+    EnvironmentBoundary,
+    init_project,
+    set_action_classification,
+)
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import ApprovalRecord
 from openadapt_flow.runtime.durable.attended import (
     AttendedActionRefused,
@@ -1500,6 +1509,208 @@ def test_continue_confirms_absolute_effect_from_current_record_readback(tmp_path
     assert decision.status == "completed"
     assert store.checkpoints()[0].effect_verified is True
     assert not backend.actions
+
+
+def test_attended_skip_uses_canonical_qualified_risk(tmp_path, monkeypatch):
+    environment = EnvironmentBoundary(
+        target_kind="web",
+        application="Reference",
+        application_version="1",
+        environment_digest="a" * 64,
+        runtime_version="1.24.0",
+    )
+    cases = (
+        (
+            Step(
+                id="continue",
+                intent="Continue to the review screen",
+                action=ActionKind.CLICK,
+                anchor=Anchor(
+                    template="templates/continue.png",
+                    region=(10, 10, 40, 20),
+                    click_point=(30, 20),
+                    ocr_text="Continue",
+                ),
+                risk="irreversible",
+                risk_explanation="control label contains a consequential-write verb",
+                risk_review_required=True,
+                guard=Guard(
+                    predicate=Predicate(
+                        kind=PredicateKind.TEXT_PRESENT,
+                        text="Optional section",
+                    ),
+                    on_unmet="skip",
+                ),
+            ),
+            "read_only",
+        ),
+        (
+            Step(
+                id="confirm",
+                intent="Open review details",
+                action=ActionKind.CLICK,
+                risk="reversible",
+                guard=Guard(
+                    predicate=Predicate(
+                        kind=PredicateKind.TEXT_PRESENT,
+                        text="Optional section",
+                    ),
+                    on_unmet="skip",
+                ),
+            ),
+            "consequential",
+        ),
+    )
+    for index, (step, classification) in enumerate(cases):
+        workflow = Workflow(name=f"qualified-risk-{index}", steps=[step])
+        init_project(workflow, environment=environment)
+        set_action_classification(
+            workflow,
+            ActionRiskClassification(
+                step_id=step.id,
+                classification=classification,
+                explanation="Reviewed operator classification",
+                operator_confirmed=True,
+            ),
+        )
+        _workflow, _bundle, _run, store, capability = _paused(
+            tmp_path / str(index), workflow=workflow
+        )
+        assert "skip" not in capability.allowed_actions
+        if classification == "read_only":
+            policy_digest = "c" * 64
+            manifest = store.read_manifest()
+            pending = store.read_pending()
+            assert manifest is not None and pending is not None
+            store.write_manifest(
+                manifest.model_copy(
+                    update={
+                        "governed_authorization": GovernedRunAuthorization(
+                            bundle_content_digest="a" * 64,
+                            runtime_inputs_digest="b" * 64,
+                            admitted_policy_name="clinical-write",
+                            admitted_policy_contract_sha256=policy_digest,
+                        )
+                    }
+                )
+            )
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    "openadapt_flow.qualification.current_certification_matches",
+                    lambda _workflow, *, policy=None, policy_contract_digest=None: (
+                        policy is None and policy_contract_digest == policy_digest
+                    ),
+                )
+                admitted = issue_attended_capability(
+                    _run,
+                    store=store,
+                    pending=pending,
+                    workflow=workflow,
+                    result=StepResult(
+                        step_id=step.id,
+                        intent=step.intent,
+                        ok=False,
+                        error="Please verify you are human",
+                    ),
+                )
+            assert admitted.pause_id != capability.pause_id
+            assert "skip" in admitted.allowed_actions
+
+
+def test_api_effect_cannot_make_human_gui_path_skippable(tmp_path):
+    api_effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"id": "api-row"},
+        risk="irreversible",
+    )
+    workflow = Workflow(
+        name="api-effect-split",
+        steps=[
+            Step(
+                id="write",
+                intent="Open the optional record",
+                action=ActionKind.CLICK,
+                risk="reversible",
+                guard=Guard(
+                    predicate=Predicate(
+                        kind=PredicateKind.TEXT_PRESENT,
+                        text="Optional section",
+                    ),
+                    on_unmet="skip",
+                ),
+                api_binding=ApiBinding(
+                    url_template="/records",
+                    effects=[api_effect],
+                ),
+            )
+        ],
+    )
+    _workflow, _bundle, _run, _store, capability = _paused(tmp_path, workflow=workflow)
+    assert "skip" not in capability.allowed_actions
+    assert "continue" not in capability.allowed_actions
+
+
+def test_attended_completion_verifies_only_the_human_gui_effect_path(tmp_path):
+    gui_effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"id": "gui-row"},
+        risk="irreversible",
+        forbid_collateral_loss=False,
+    )
+    api_effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"id": "api-row"},
+        risk="irreversible",
+        forbid_collateral_loss=False,
+    )
+    workflow = Workflow(
+        name="attended-effect-path",
+        steps=[
+            Step(
+                id="human",
+                intent="human save",
+                action=ActionKind.KEY,
+                key="A",
+                effects=[gui_effect],
+                api_binding=ApiBinding(
+                    url_template="/records",
+                    effects=[api_effect],
+                ),
+            )
+        ],
+    )
+    _workflow, _bundle, run, store, capability = _paused(tmp_path, workflow=workflow)
+
+    class CurrentRecords:
+        substrate = "fake"
+
+        def capture_pre_state(self, context=None):
+            return EffectState(
+                substrate="fake",
+                reachable=True,
+                records=[{"id": "gui-row"}],
+            )
+
+        def verify(self, expected, before, context=None):
+            raise AssertionError("attended readback must not reuse delivery verify")
+
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="request-key-gui-effect-path"),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                FakeBackend(),
+                vision=FakeVision(),
+                effect_verifier=CurrentRecords(),
+                poll_interval_s=0.0,
+            )
+        ),
+    )
+    checkpoint = store.checkpoints()[0]
+    assert decision.status == "completed"
+    assert checkpoint.effect_contract_hashes == [gui_effect.contract_hash()]
+    assert api_effect.contract_hash() not in checkpoint.effect_contract_hashes
 
 
 def test_skip_requires_declared_nonconsequential_skip_semantics(tmp_path):

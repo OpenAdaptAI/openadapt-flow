@@ -107,9 +107,9 @@ exactly-once and idempotency hazards studied in transactional systems
 \cite{gray1981transaction}. These
 principles motivate \system{}'s separation between screen postconditions and
 system-of-record effects: a rendered success banner cannot independently
-establish that a transaction was persisted correctly. Unlike a general
-formal-verification claim, the guarantees here remain scoped to armed steps,
-declared effects, configured verifiers, and named policies.
+establish that a transaction was persisted correctly. We claim nothing like a
+general formal-verification result; Section~\ref{sec:governance} states exactly
+what the guarantee is scoped to.
 
 \begin{table}[t]
 \centering

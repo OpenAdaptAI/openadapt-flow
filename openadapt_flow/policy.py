@@ -566,9 +566,10 @@ def evaluate_policy(
             workflow,
             require_current_certification=require_current_risk_certification,
         )
+        risk_explanation = step.risk_explanation
         unbound_claimed_override = (
-            bool(step.risk_explanation)
-            and step.risk_explanation.startswith("operator-qualified override:")
+            risk_explanation is not None
+            and risk_explanation.startswith("operator-qualified override:")
             and not override_bound
         )
         effective_risk = effective_step_risk(

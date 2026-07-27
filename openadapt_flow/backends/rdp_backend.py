@@ -29,7 +29,10 @@ and the RDP library stays replaceable):
 ``press`` additionally detects an optional ``supports_physical_key`` /
 ``physical_key`` transport seam. Aardwolf implements it with layout-bound
 scancodes because Unicode text events cannot participate in physical Windows
-shortcuts; ``type_text`` deliberately stays on the Unicode ``key`` path.
+shortcuts. ``type_text`` detects an optional ``supports_bulk_text`` /
+``bulk_type_text`` seam for transports that can deliver one bounded text
+gesture without per-character process or network startup latency. The legacy
+Unicode ``key`` path remains the fallback.
 
 Coordinate space: the backend works entirely in **framebuffer pixels** — the
 same pixels the resolver emits and the same pixels :meth:`screenshot` encodes,
@@ -549,19 +552,42 @@ class FreeRDPBackend:
                         ) from exc
 
     def type_text(self, text: str) -> None:
-        """Type text into the focused control, one key down/up per character.
+        """Type text through a capability-gated bulk or per-character path.
 
-        Every character's key-up is sent in a ``finally`` so a transport
-        failure between down and up can never leave a key latched down: a real
-        RDP ``key()`` can time out mid-character, and a stuck key silently
-        corrupts every subsequent input (auto-repeat, or the held key acting as
-        a modifier). Releasing a key that never actually registered is a
-        harmless no-op on the target, so the guarantee costs nothing.
+        The optional bulk seam is important for native selects and other
+        type-ahead controls whose search buffer expires between characters:
+        starting a new helper process or network round-trip per character can
+        turn one demonstrated option selection into unrelated single-key
+        searches. The backend restores only the outer transport surface's
+        focus, then re-runs frame/session readiness before one bulk dispatch.
+        A bulk error is delivery-uncertain and is never retried through the
+        legacy path.
+
+        Without that explicit capability, every character's key-up is sent in
+        a ``finally`` so a transport failure between down and up can never
+        leave a key latched down.
         """
         if not text:
             return
         with self._input_lock:
+            self._focus_input_surface()
             self._ensure_input_ready()
+            supports_bulk = getattr(self._transport, "supports_bulk_text", None)
+            bulk_type = getattr(self._transport, "bulk_type_text", None)
+            if (
+                callable(supports_bulk)
+                and callable(bulk_type)
+                and bool(supports_bulk(text))
+            ):
+                try:
+                    bulk_type(text)
+                except Exception as exc:
+                    raise ActionDeliveryUncertain(
+                        operation="rdp_bulk_type_text",
+                        native=False,
+                        cause_type=type(exc).__name__,
+                    ) from exc
+                return
             for ch in text:
                 try:
                     self._transport.key(ch, True)
@@ -607,6 +633,7 @@ class FreeRDPBackend:
                 sender = physical_key
             else:
                 sender = self._transport.key
+            self._focus_input_surface()
             self._ensure_input_ready()
             pressed: list[str] = []
             try:
@@ -653,6 +680,21 @@ class FreeRDPBackend:
             self._transport.disconnect()
 
     # -- internals -----------------------------------------------------------
+
+    def _focus_input_surface(self) -> None:
+        """Restore only the outer client focus before final frame validation.
+
+        Windowed FreeRDP transports can lose local focus while the remote
+        control remains the intended active field. The optional hook must not
+        click or otherwise change the remote application. Calling it before
+        :meth:`_ensure_input_ready` means any focus-related repaint or session
+        change is observed by the final freshness/readiness checks and can
+        refuse input.
+        """
+
+        focus = getattr(self._transport, "focus_input_surface", None)
+        if callable(focus):
+            focus()
 
     def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
         """Validate the frame lease, dimensions, bounds and readiness hook.

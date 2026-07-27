@@ -24,6 +24,7 @@ import pytest
 from PIL import Image
 
 from openadapt_flow.backend import (
+    ActionDeliveryUncertain,
     Backend,
     ExecutionContextIdentityBackend,
     IdentityBackend,
@@ -665,6 +666,114 @@ def test_type_text_preserves_case_and_symbols(
         ("B", True),
         ("B", False),
     ]
+
+
+class _BulkTextTransport(FakeRDPTransport):
+    """Transport with an explicit one-dispatch text capability."""
+
+    def __init__(self, *, raise_bulk: bool = False) -> None:
+        super().__init__(app_screens())
+        self.raise_bulk = raise_bulk
+        self.focus_calls = 0
+        self.bulk_calls: list[str] = []
+        self.events: list[str] = []
+        self.change_frame_on_focus = False
+
+    def focus_input_surface(self) -> None:
+        self.events.append("focus")
+        self.focus_calls += 1
+        if self.change_frame_on_focus:
+            self.state = 1
+
+    @staticmethod
+    def supports_bulk_text(text: str) -> bool:
+        return "\x00" not in text
+
+    def bulk_type_text(self, text: str) -> None:
+        self.events.append("bulk")
+        self.bulk_calls.append(text)
+        if self.raise_bulk:
+            raise TransportError("bulk transport failed after dispatch")
+
+
+def test_type_text_prefers_one_bulk_dispatch_after_outer_focus() -> None:
+    transport = _BulkTextTransport()
+    backend = FreeRDPBackend(transport)
+
+    backend.type_text("Massachusetts")
+
+    assert transport.focus_calls == 1
+    assert transport.bulk_calls == ["Massachusetts"]
+    assert transport.key_events == []
+    assert transport.events == ["focus", "bulk"]
+
+
+def test_type_text_legacy_transport_keeps_balanced_per_character_fallback() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+
+    backend.type_text("ab")
+
+    assert transport.key_events == [
+        ("a", True),
+        ("a", False),
+        ("b", True),
+        ("b", False),
+    ]
+
+
+def test_bulk_text_failure_is_uncertain_and_never_falls_back() -> None:
+    transport = _BulkTextTransport(raise_bulk=True)
+    backend = FreeRDPBackend(transport)
+
+    with pytest.raises(ActionDeliveryUncertain) as raised:
+        backend.type_text("Massachusetts")
+
+    assert raised.value.operation == "rdp_bulk_type_text"
+    assert raised.value.cause_type == "TransportError"
+    assert transport.bulk_calls == ["Massachusetts"]
+    assert transport.key_events == []
+
+
+def test_bulk_text_revalidates_frame_after_restoring_outer_focus() -> None:
+    transport = _BulkTextTransport()
+    backend = FreeRDPBackend(transport, readiness_probe=lambda _png: True)
+    backend.acquire_actuation_frame()
+    transport.change_frame_on_focus = True
+
+    with pytest.raises(RuntimeError, match="frame content changed"):
+        backend.type_text("Massachusetts")
+
+    assert transport.focus_calls == 1
+    assert transport.bulk_calls == []
+    assert transport.key_events == []
+
+
+def test_bulk_text_preserves_native_select_typeahead_until_enter() -> None:
+    class _TimedSelectTransport(_BulkTextTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.highlighted: str | None = None
+            self.selected = "Unassigned"
+
+        def bulk_type_text(self, text: str) -> None:
+            super().bulk_type_text(text)
+            self.highlighted = text
+
+        def key(self, keysym_or_char: str, down: bool) -> None:
+            super().key(keysym_or_char, down)
+            if down and keysym_or_char == "enter" and self.highlighted is not None:
+                self.selected = self.highlighted
+
+    transport = _TimedSelectTransport()
+    backend = FreeRDPBackend(transport)
+
+    backend.type_text("Massachusetts")
+    backend.press("Enter")
+
+    assert transport.bulk_calls == ["Massachusetts"]
+    assert transport.selected == "Massachusetts"
+    assert transport.focus_calls == 2
 
 
 # -- press ---------------------------------------------------------------------

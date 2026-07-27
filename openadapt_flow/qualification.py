@@ -767,10 +767,14 @@ def _steps_by_id(workflow: "Workflow") -> dict[str, "Step"]:
 def _inferred_action_classification(step: "Step") -> ActionRiskClassification:
     from openadapt_flow.ir import ActionKind
 
-    if step.risk == "irreversible":
+    effects = _declared_effects(step)
+    if step.risk_review_required:
+        classification = ActionRiskClass.UNKNOWN
+        explanation = step.risk_explanation or "compiled Flow risk requires review"
+    elif step.risk == "irreversible":
         classification = ActionRiskClass.IRREVERSIBLE
-        explanation = "compiled Flow risk is irreversible"
-    elif step.effects:
+        explanation = step.risk_explanation or "compiled Flow risk is irreversible"
+    elif effects:
         classification = ActionRiskClass.STATE_CHANGING
         explanation = "step declares a business-effect contract"
     elif step.action in {ActionKind.WAIT, ActionKind.SCROLL}:
@@ -787,16 +791,39 @@ def _inferred_action_classification(step: "Step") -> ActionRiskClassification:
     )
 
 
+def _declared_effects(step: "Step") -> list[Any]:
+    """Return effects across every declared alternative actuation path.
+
+    Runtime path selection may give a native API binding precedence over GUI
+    actuation; qualification examines the union only to establish a
+    conservative risk floor.  It does not imply that both paths execute or
+    that one path's evidence can satisfy the other's production contract.
+    """
+
+    effects = list(step.effects)
+    if step.api_binding is not None:
+        effects.extend(step.api_binding.effects)
+    return effects
+
+
+def _effect_risk_floor(step: "Step") -> Optional[ActionRiskClass]:
+    """Return the hard floor independently proved by declared effects."""
+
+    effects = _declared_effects(step)
+    if any(effect.risk.strip().lower() == "irreversible" for effect in effects):
+        return ActionRiskClass.IRREVERSIBLE
+    if effects:
+        return ActionRiskClass.STATE_CHANGING
+    return None
+
+
 def _executable_risk_floor(step: "Step") -> Optional[ActionRiskClass]:
     """Return the least-permissive class required by executable contracts."""
 
-    if step.risk == "irreversible" or any(
-        effect.risk.strip().lower() == "irreversible" for effect in step.effects
-    ):
+    effect_floor = _effect_risk_floor(step)
+    if step.risk == "irreversible" or effect_floor is ActionRiskClass.IRREVERSIBLE:
         return ActionRiskClass.IRREVERSIBLE
-    if step.effects:
-        return ActionRiskClass.STATE_CHANGING
-    return None
+    return effect_floor
 
 
 def available_identity_sources(step: "Step") -> set[IdentityEvidenceSource]:
@@ -1094,20 +1121,40 @@ def set_action_classification(
         raise QualificationError(f"unknown step id {classification.step_id!r}")
     if not classification.operator_confirmed:
         raise QualificationError("an operator classification must be confirmed")
+    effect_floor = _effect_risk_floor(step)
     if (
-        _executable_risk_floor(step) is ActionRiskClass.IRREVERSIBLE
+        effect_floor is ActionRiskClass.IRREVERSIBLE
         and classification.classification is not ActionRiskClass.IRREVERSIBLE
     ):
         raise QualificationError(
-            "an executable irreversible action cannot be down-classified"
+            "an action with an irreversible effect contract cannot be down-classified"
         )
-    if step.effects and classification.classification is ActionRiskClass.READ_ONLY:
+    if (
+        effect_floor is ActionRiskClass.STATE_CHANGING
+        and classification.classification is ActionRiskClass.READ_ONLY
+    ):
         raise QualificationError(
             "an action with a declared business effect cannot be read-only"
         )
-    if project.action_classifications.get(classification.step_id) == classification:
+    runtime_risk: Literal["reversible", "irreversible"] = (
+        "irreversible"
+        if classification.classification
+        in {ActionRiskClass.CONSEQUENTIAL, ActionRiskClass.IRREVERSIBLE}
+        else "reversible"
+    )
+    runtime_explanation = f"operator-qualified override: {runtime_risk}"
+    unchanged = (
+        project.action_classifications.get(classification.step_id) == classification
+        and step.risk == runtime_risk
+        and step.risk_explanation == runtime_explanation
+        and not step.risk_review_required
+    )
+    if unchanged:
         return project
     previous = project.revision_digest()
+    step.risk = runtime_risk
+    step.risk_explanation = runtime_explanation
+    step.risk_review_required = False
     project.action_classifications[classification.step_id] = classification
     _touch(project, previous)
     _invalidate_certification(workflow)

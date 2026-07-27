@@ -18,6 +18,7 @@ from openadapt_flow.__main__ import main
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    ApiBinding,
     Postcondition,
     PostconditionKind,
     Step,
@@ -302,6 +303,73 @@ def test_irreversible_action_cannot_be_down_classified() -> None:
                 step_id="save",
                 classification="read_only",
                 explanation="Unsafe attempted override",
+                operator_confirmed=True,
+            ),
+        )
+
+
+def test_operator_can_override_inferred_risk_without_declared_effect() -> None:
+    workflow = Workflow(
+        name="reviewed-navigation",
+        steps=[
+            Step(
+                id="continue",
+                intent="Continue to the review screen",
+                action=ActionKind.CLICK,
+                anchor=Anchor(
+                    template="templates/continue.png",
+                    region=(10, 10, 40, 20),
+                    click_point=(30, 20),
+                    ocr_text="Continue",
+                ),
+                risk="irreversible",
+                risk_explanation="control label contains a consequential-write verb",
+                risk_review_required=True,
+            )
+        ],
+    )
+    init_project(workflow, environment=_environment())
+    before_contract = workflow_contract_sha256(workflow)
+
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id="continue",
+            classification="read_only",
+            explanation="This control only opens the review screen",
+            operator_confirmed=True,
+        ),
+    )
+
+    step = workflow.steps[0]
+    assert step.risk == "reversible"
+    assert step.risk_review_required is False
+    assert step.risk_explanation == "operator-qualified override: reversible"
+    assert workflow_contract_sha256(workflow) != before_contract
+
+
+def test_api_effect_cannot_hide_behind_weaker_step_effect() -> None:
+    workflow = _workflow()
+    workflow.steps[0].effects[0].risk = "reversible"
+    workflow.steps[0].api_binding = ApiBinding(
+        url_template="/api/records",
+        effects=[
+            Effect(
+                kind=EffectKind.RECORD_WRITTEN,
+                match={"id": ValueExpr(param="record_id")},
+                risk="irreversible",
+            )
+        ],
+    )
+    init_project(workflow, environment=_environment())
+
+    with pytest.raises(ValueError, match="cannot be down-classified"):
+        set_action_classification(
+            workflow,
+            ActionRiskClassification(
+                step_id="save",
+                classification="state_changing",
+                explanation="Attempt to ignore the API write contract",
                 operator_confirmed=True,
             ),
         )

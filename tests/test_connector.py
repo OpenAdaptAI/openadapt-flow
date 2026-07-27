@@ -192,17 +192,21 @@ def test_customer_controlled_failure_signal_is_closed_and_optional(monkeypatch):
         "execution_outcome": "HALTED",
         "external_network_calls": "none",
         "model_calls": 0,
-        "results": [{
-            "step_id": "patient-Jane-Doe",
-            "ok": False,
-            "error": "ambiguous patient Jane Doe MRN 12345",
-            "resolution": {"rung": "ocr", "point": {"x": 1, "y": 2}},
-        }],
+        "results": [
+            {
+                "step_id": "patient-Jane-Doe",
+                "ok": False,
+                "error": "ambiguous patient Jane Doe MRN 12345",
+                "resolution": {"rung": "ocr", "point": {"x": 1, "y": 2}},
+            }
+        ],
     }
     signal = automation_failure_signal(report, "halt", "citrix")
     body = phi_free_callback_body(
         job,
-        ExecutionResult("halt", {}, {"reason": "Jane Doe"}, job.report_ref(), failure_signal=signal),
+        ExecutionResult(
+            "halt", {}, {"reason": "Jane Doe"}, job.report_ref(), failure_signal=signal
+        ),
     )
     serialized = json.dumps(body)
     assert body["failure_signal"]["failure_kind"] == "resolution_ambiguous"

@@ -150,7 +150,11 @@ def automation_failure_signal(
     if network not in {"none", "observed", "unknown"}:
         network = "unknown"
     model_calls = report.get("model_calls")
-    if isinstance(model_calls, bool) or not isinstance(model_calls, int) or model_calls < 0:
+    if (
+        isinstance(model_calls, bool)
+        or not isinstance(model_calls, int)
+        or model_calls < 0
+    ):
         model_calls = 0
     known_substrates = {"web", "windows", "macos", "linux", "rdp", "citrix", "mixed"}
     runtime_version = __version__ if _VERSION.fullmatch(__version__) else "unknown"

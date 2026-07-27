@@ -28,9 +28,9 @@ import openadapt_flow._browser_setup as bs
 
 
 def test_playwright_is_browser_extra_not_base_dependency():
-    project = tomllib.loads(
-        (Path(__file__).parents[1] / "pyproject.toml").read_text()
-    )["project"]
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())[
+        "project"
+    ]
     assert not any(item.startswith("playwright") for item in project["dependencies"])
     assert project["optional-dependencies"]["browser"] == ["playwright>=1.44"]
 

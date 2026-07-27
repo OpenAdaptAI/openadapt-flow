@@ -2031,6 +2031,43 @@ def test_type_verification_passes_with_exact_field_readback(bundle, run_dir):
     assert vision.pixels_changed_calls == []
 
 
+def test_visual_click_crop_does_not_narrow_following_type_verification(bundle, run_dir):
+    """A visual anchor crop is not the editable field's live bounds.
+
+    Opaque-remote recordings commonly locate a field from a compact label or
+    border fragment.  The resolver can return the correct click point while
+    the matched template lies elsewhere.  A following unanchored TYPE must
+    observe the point-centred field window, not the template crop.
+    """
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(210, 150), region=(20, 20, 12, 8), confidence=0.95)
+    ]
+    vision.pixels_changed_results = [True]
+    backend = FakeBackend(text_value_supported=False)
+    workflow = Workflow(
+        name="wf",
+        steps=[
+            click_step(),
+            Step(id="t1", intent="type state", action=ActionKind.TYPE, text="MA"),
+        ],
+    )
+
+    report = Replayer(backend, vision=vision).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is True
+    assert report.results[1].input_verified is True
+    # The 300x200 fixture is smaller than the standard point-centred field
+    # window, so the correct observation region is the complete viewport.
+    # Treating the visual template crop as field bounds would produce
+    # (4, 4, 44, 40) here and hide the typed value.
+    assert vision.pixels_changed_calls == [(0, 0, 300, 200)]
+
+
 def test_type_verification_prefers_exact_structural_field_region() -> None:
     """Wide native text fields must be observed across their full UIA bounds.
 

@@ -3234,7 +3234,6 @@ class Replayer:
                         step_index=step_index,
                         bundle_dir=bundle_dir,
                         before_png=before_png,
-                        matched_region=matched_region,
                         result=result,
                         graph_ctx=graph_ctx,
                     )
@@ -4835,7 +4834,6 @@ class Replayer:
         step_index: int,
         bundle_dir: Path,
         before_png: bytes,
-        matched_region: Optional[Region],
         result: StepResult,
         graph_ctx: Optional["_GraphStepContext"] = None,
     ) -> Optional[str]:
@@ -4915,11 +4913,16 @@ class Replayer:
                         double=step.action is ActionKind.DOUBLE_CLICK,
                     )
             self._last_click_point = (x, y)
+            # Only a STRUCTURAL handle reports the element's own bounds. A
+            # visual rung's ``matched_region`` is where the anchor TEMPLATE
+            # matched, which is not the field: narrowing a following TYPE's
+            # verification window to it hides the typed value and false-halts
+            # a healthy run.
             self._last_click_region = (
                 resolution.structural_handle.region
                 if resolution.rung == "structural"
                 and resolution.structural_handle is not None
-                else matched_region
+                else None
             )
             return None
 
@@ -5181,11 +5184,15 @@ class Replayer:
                         result.delivery_attempted = True
                         self.backend.click(x, y)
                 field_point = (x, y)
+                # See ``_last_click_region``: a visual rung's matched region is
+                # the anchor template's live position, not the field's bounds.
+                # SELECT_OPTION does not need it here — it always revalidates
+                # below and consumes that pass's fresh matched region.
                 field_region = (
                     resolution.structural_handle.region
                     if resolution.rung == "structural"
                     and resolution.structural_handle is not None
-                    else matched_region
+                    else None
                 )
                 # Fresh baseline AFTER the focusing click so its own focus ring
                 # never counts as "input landed". A consequential remote TYPE

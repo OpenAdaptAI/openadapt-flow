@@ -94,6 +94,106 @@ _SUBSTRATE_MAP = {
     "citrix": "citrix",
 }
 
+#: Engine decision status -> (portable receipt state, closed reason code).
+#: ``prepared``/``delivery_started`` are journal states that were reached
+#: without a terminal receipt, so both project as "may have been sent".
+_RECEIPT_STATE: dict[str, tuple[str, str]] = {
+    "prepared": ("accepted_pending_runner", "pending_runner"),
+    "delivery_started": ("delivery_uncertain", "delivery_uncertain"),
+    "delivery_uncertain": ("delivery_uncertain", "delivery_uncertain"),
+    "completed": ("completed", "verified_and_resumed"),
+    "refused": ("refused", "revalidation_refused"),
+    "halted": ("halted", "continuation_halted"),
+    "needs_demonstration": ("demonstration_requested", "demonstration_requested"),
+    "escalated": ("escalated", "escalation_recorded"),
+}
+
+
+class HumanDecisionReceipt(BaseModel):
+    """Closed, PHI-free terminal receipt for one attended decision.
+
+    This is the only decision outcome that may cross to a phone, a tray, or
+    an authenticated remote relay. Protected content is structurally
+    unrepresentable rather than stripped on send: there is no free-text field,
+    no operator identity, no workflow label, no parameter, and no path. The
+    consumer renders deterministic copy from the closed ``reason_code``.
+
+    ``action`` uses the portable ``openadapt-types`` vocabulary
+    (``verify_and_resume``), never the engine's internal ``continue``, so a
+    consumer compares it directly against the task's ``allowed_actions``.
+
+    NOTE: this is Flow's half of the shared ``HumanDecisionReceiptV1``
+    contract. It is proposed for ``openadapt-types`` so Cloud can validate the
+    same closed shape; the field set here is derived from Flow's real terminal
+    decision states rather than invented.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["openadapt.human-decision-receipt/v1"] = (
+        "openadapt.human-decision-receipt/v1"
+    )
+    task_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+    task_revision: int = Field(default=1, ge=1)
+    pause_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+    capability_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    decision_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    transition_receipt_digest: Optional[str] = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    action: Literal["verify_and_resume", "skip", "teach", "escalate"]
+    state: Literal[
+        "accepted_pending_runner",
+        "completed",
+        "refused",
+        "halted",
+        "expired",
+        "delivery_uncertain",
+        "demonstration_requested",
+        "escalated",
+    ]
+    reason_code: Literal[
+        "pending_runner",
+        "verified_and_resumed",
+        "skipped_and_resumed",
+        "continuation_halted",
+        "revalidation_refused",
+        "expired",
+        "delivery_uncertain",
+        "demonstration_requested",
+        "escalation_recorded",
+    ]
+    report_success: Optional[bool] = None
+    decided_at: str = Field(min_length=20, max_length=40)
+
+
+def decision_receipt(decision: AttendedDecision) -> HumanDecisionReceipt:
+    """Project one engine decision into the closed, PHI-free receipt.
+
+    ``AttendedDecision`` is the durable audit record: it carries a free-text
+    message and the operator principal on purpose. Neither may leave the
+    runner, so this projection *rebuilds* a closed value instead of redacting
+    the audit record field by field.
+    """
+    state, reason_code = _RECEIPT_STATE[decision.status]
+    if decision.status == "completed" and decision.action == "skip":
+        reason_code = "skipped_and_resumed"
+    portable = _ACTION_MAP[decision.action]
+    return HumanDecisionReceipt(
+        task_id=f"task_{decision.pause_id}",
+        pause_id=decision.pause_id,
+        capability_digest=decision.capability_digest,
+        request_digest=decision.request_digest,
+        decision_digest=_sha256(decision.model_dump(mode="json")),
+        transition_receipt_digest=decision.transition_receipt_digest,
+        action=portable,  # type: ignore[arg-type]
+        state=state,  # type: ignore[arg-type]
+        reason_code=reason_code,  # type: ignore[arg-type]
+        report_success=decision.report_success,
+        decided_at=decision.created_at,
+    )
+
 
 class ConsoleAttendedActionRequest(AttendedActionRequest):
     """Browser request bound to both current task and engine capability."""
@@ -280,11 +380,25 @@ def _task_and_presentation(
         "before_artifact_id": item.before_artifact_id,
         "after_artifact_id": item.after_artifact_id,
     }
-    if capability is None:
+    # A decision task is a projection of an OPEN pause. The signed capability
+    # file survives a completed resume, so a run that already continued would
+    # otherwise keep offering an answerable question the engine must refuse.
+    if capability is None or not item.durably_paused:
         return None, None, presentation
 
     task_kind, question_template, _ = question
-    if capability.delivery_state == "unknown":
+    # "May have been sent" must never collapse into "Not sent" or "Sent". The
+    # capability records what the engine knew when it paused; a later attended
+    # request for this same pause can have crossed the delivery boundary
+    # without returning a terminal receipt. The pause-wide journal is the
+    # authority on that, so re-read it every time the task is projected.
+    delivery_state = capability.delivery_state
+    if (
+        AttendedActionStore(run_dir).unresolved_delivery(capability.pause_id)
+        is not None
+    ):
+        delivery_state = "unknown"
+    if delivery_state == "unknown":
         task_kind = "delivery_uncertain"
         question_template = "review_uncertain_delivery"
         presentation["question"] = (
@@ -308,7 +422,7 @@ def _task_and_presentation(
         "capability_digest": capability.digest,
         "bundle_digest": capability.bundle_version,
         "task_kind": task_kind,
-        "delivery_state": capability.delivery_state,
+        "delivery_state": delivery_state,
         "risk_class": _risk_class(failed, effect_required),
         "substrate": substrate,
         "question": {

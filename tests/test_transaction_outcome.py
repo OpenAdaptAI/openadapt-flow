@@ -9,17 +9,26 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from openadapt_flow.execution_profiles import ExecutionProfile, stamp_execution_outcome
 from openadapt_flow.ir import (
     ActionKind,
+    ApiBinding,
     EffectVerificationEvidence,
     RunReport,
     Step,
     StepResult,
     Workflow,
 )
+from openadapt_flow.runtime.actuators import ActuationStatus, ApiActuationResult
 from openadapt_flow.runtime.effects import Verdict
-from openadapt_flow.runtime.effects.effect import EffectKind, EffectVerdict
+from openadapt_flow.runtime.effects.effect import (
+    Effect,
+    EffectKind,
+    EffectState,
+    EffectVerdict,
+)
 from openadapt_flow.runtime.replayer import Replayer
 from openadapt_flow.transaction import (
     IdempotencyLedger,
@@ -31,6 +40,7 @@ from tests.test_replayer import FakeBackend, FakeVision, Match, click_step, make
 from tests.test_uncertain_delivery import _run
 
 _HASH = "sha256:" + "a" * 64
+_OTHER_HASH = "sha256:" + "b" * 64
 
 
 def _report(coarse: str, results, *, canceled: bool = False) -> RunReport:
@@ -44,9 +54,11 @@ def _report(coarse: str, results, *, canceled: bool = False) -> RunReport:
     return report
 
 
-def _refuted_evidence(observed_effect: str) -> EffectVerificationEvidence:
+def _refuted_evidence(
+    observed_effect: str, effect_hash: str = _HASH
+) -> EffectVerificationEvidence:
     return EffectVerificationEvidence(
-        effect_contract_hash=_HASH,
+        effect_contract_hash=effect_hash,
         substrate="test",
         initial_verdict="refuted",
         final_verdict="refuted",
@@ -294,6 +306,7 @@ def test_halt_before_actuation_remains_halted_before_effect():
             _consequential(
                 safety_halt=True,
                 failure_category="safety_halt",
+                delivery_attempted=False,
                 error="Structural safety refusal — no action was admitted",
             )
         ],
@@ -337,13 +350,41 @@ def test_skipped_consequential_step_does_not_block_an_absence_claim():
     )
 
 
-def test_confirmed_earlier_write_is_settled_and_does_not_force_reconciliation():
-    # Scope boundary, pinned deliberately: this guard fires on an UNKNOWN
-    # effect, not on a KNOWN one. An earlier write the verifier CONFIRMED is
-    # settled and journaled -- there is nothing to reconcile -- so it does not
-    # by itself turn a later governed halt into RECONCILIATION_REQUIRED.
-    # (Whether a partially-completed run deserves its own label is a separate
-    # taxonomy question, not an absence-of-evidence defect.)
+@pytest.mark.parametrize(
+    ("coarse", "canceled", "tail"),
+    [
+        (
+            "HALTED",
+            False,
+            _consequential(
+                step_id="approve",
+                safety_halt=True,
+                failure_category="safety_halt",
+                delivery_attempted=False,
+                error="refused before delivery",
+            ),
+        ),
+        (
+            "HALTED",
+            False,
+            StepResult(
+                step_id="<authorization>",
+                intent="authorize",
+                ok=False,
+                failure_category="governed_refusal",
+            ),
+        ),
+        ("FAILED", True, StepResult(step_id="cancel", intent="cancel", ok=False)),
+        ("FAILED", False, StepResult(step_id="platform", intent="fail", ok=False)),
+    ],
+    ids=["halted", "rejected-policy", "canceled", "failed-platform"],
+)
+def test_confirmed_earlier_write_never_yields_an_absence_outcome(
+    coarse, canceled, tail
+):
+    # A known-present write is partial completion, not "before effect". Until
+    # the taxonomy has a dedicated partial-completion outcome, every coarse
+    # failure bucket must route it to reconciliation.
     confirmed = EffectVerificationEvidence(
         effect_contract_hash=_HASH,
         substrate="test",
@@ -352,7 +393,7 @@ def test_confirmed_earlier_write_is_settled_and_does_not_force_reconciliation():
         observed_effect="present",
     )
     report = _report(
-        "HALTED",
+        coarse,
         [
             _consequential(
                 step_id="write_ledger",
@@ -361,12 +402,60 @@ def test_confirmed_earlier_write_is_settled_and_does_not_force_reconciliation():
                 effect_contract_hashes=[_HASH],
                 effect_evidence=[confirmed],
             ),
+            tail,
+        ],
+        canceled=canceled,
+    )
+    assert (
+        classify_transaction_outcome(report)
+        is TransactionOutcome.RECONCILIATION_REQUIRED
+    )
+
+
+@pytest.mark.parametrize(
+    ("declared", "evidence"),
+    [
+        ([_HASH, _OTHER_HASH], [_refuted_evidence("absent")]),
+        ([_OTHER_HASH], [_refuted_evidence("absent")]),
+        ([_HASH, _HASH], [_refuted_evidence("absent")]),
+        (
+            [_HASH],
+            [_refuted_evidence("absent"), _refuted_evidence("absent")],
+        ),
+    ],
+    ids=["missing", "mismatched", "missing-duplicate", "extra-duplicate"],
+)
+def test_effect_absence_requires_exact_declared_hash_multiset(declared, evidence):
+    report = _report(
+        "HALTED",
+        [
             _consequential(
-                step_id="approve",
-                safety_halt=True,
-                failure_category="safety_halt",
-                error="refused before delivery",
-            ),
+                delivery_attempted=True,
+                effect_verified=False,
+                effect_contract_hashes=declared,
+                effect_evidence=evidence,
+            )
+        ],
+    )
+    assert (
+        classify_transaction_outcome(report)
+        is TransactionOutcome.RECONCILIATION_REQUIRED
+    )
+
+
+def test_duplicate_declared_hashes_require_duplicate_absence_evidence():
+    report = _report(
+        "HALTED",
+        [
+            _consequential(
+                delivery_attempted=True,
+                effect_verified=False,
+                effect_contract_hashes=[_HASH, _HASH],
+                effect_evidence=[
+                    _refuted_evidence("absent"),
+                    _refuted_evidence("absent"),
+                ],
+            )
         ],
     )
     assert (
@@ -383,6 +472,7 @@ def test_api_actuation_halt_is_reconciliation_required():
         [
             _consequential(
                 actuation="api",
+                delivery_attempted=True,
                 effect_verified=False,
                 failure_category="safety_halt",
                 error="API actuation HALTED step -- run aborted",
@@ -497,6 +587,26 @@ def test_delivered_write_with_no_recorded_outcome_is_delivery_uncertain():
     entry = build_effect_journal(report, workflow)[0]
     assert entry.attempt_state == "delivery_uncertain"
     assert entry.verification_performed is False
+
+
+def test_safety_halt_category_alone_is_not_pre_delivery_proof():
+    result = _consequential(
+        safety_halt=True,
+        failure_category="safety_halt",
+        error="heal policy rejected after action",
+    )
+    report = _report("HALTED", [result])
+    assert (
+        classify_transaction_outcome(report)
+        is TransactionOutcome.RECONCILIATION_REQUIRED
+    )
+    workflow = Workflow(
+        name="wf",
+        steps=[Step(id="save", intent="save", action=ActionKind.CLICK)],
+    )
+    assert (
+        build_effect_journal(report, workflow)[0].attempt_state == "delivery_uncertain"
+    )
 
 
 # -- billing / success flags -------------------------------------------------
@@ -662,8 +772,96 @@ def test_real_run_that_halts_before_actuation_stays_halted_before_effect(tmp_pat
     )
 
     assert backend.actions == []  # independent proof nothing was delivered
+    assert report.results[0].delivery_attempted is False
     assert report.success is False
     assert report.transaction_outcome == "HALTED_BEFORE_EFFECT"
+
+
+class _PathVerifier:
+    substrate = "path-test"
+
+    def capture_pre_state(self):
+        return EffectState(substrate=self.substrate, reachable=True)
+
+    def verify(self, effect, before):
+        del before
+        return EffectVerdict(
+            verdict=Verdict.CONFIRMED,
+            kind=effect.kind,
+            substrate=self.substrate,
+        )
+
+
+class _PathActuator:
+    def __init__(self, status: ActuationStatus) -> None:
+        self.status = status
+
+    def actuate(self, binding, params):
+        del binding, params
+        return ApiActuationResult(status=self.status, reason=self.status.value)
+
+
+def _path_effect(name: str) -> Effect:
+    return Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"path": name},
+        risk="irreversible",
+    )
+
+
+def _api_or_gui_workflow() -> tuple[Workflow, Effect, Effect]:
+    gui_effect = _path_effect("gui")
+    api_effect = _path_effect("api")
+    workflow = Workflow(
+        name="path-ledger",
+        steps=[
+            Step(
+                id="save",
+                intent="save",
+                action=ActionKind.KEY,
+                key="Enter",
+                effects=[gui_effect],
+                api_binding=ApiBinding(
+                    method="POST",
+                    url_template="/save",
+                    effects=[api_effect],
+                ),
+            )
+        ],
+    )
+    return workflow, gui_effect, api_effect
+
+
+@pytest.mark.parametrize(
+    ("status", "responsible_path", "actions"),
+    [
+        (ActuationStatus.ACTUATED, "api", []),
+        (ActuationStatus.UNAVAILABLE, "gui", [("press", "Enter")]),
+    ],
+)
+def test_effect_hashes_track_only_the_responsible_actuation_path(
+    tmp_path, status, responsible_path, actions
+):
+    workflow, gui_effect, api_effect = _api_or_gui_workflow()
+    effects = {"gui": gui_effect, "api": api_effect}
+    responsible = effects[responsible_path]
+    abandoned = effects["api" if responsible_path == "gui" else "gui"]
+    backend = FakeBackend()
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+        api_actuator=_PathActuator(status),
+    ).run(workflow, bundle_dir=tmp_path / "bundle", run_dir=tmp_path / "run")
+
+    result = report.results[0]
+    assert result.effect_contract_hashes == [responsible.contract_hash()]
+    assert {e.effect_contract_hash for e in result.effect_evidence} == {
+        responsible.contract_hash()
+    }
+    assert abandoned.contract_hash() not in result.effect_contract_hashes
+    assert result.delivery_attempted is True
+    assert backend.actions == actions
 
 
 # -- idempotency: duplicate suppression, no re-actuation ---------------------

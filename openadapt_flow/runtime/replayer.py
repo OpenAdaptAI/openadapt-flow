@@ -2913,6 +2913,7 @@ class Replayer:
             risk=step.risk,
             risk_explanation=step.risk_explanation,
             risk_review_required=step.risk_review_required,
+            delivery_attempted=False,
         )
         overlay_current, overlay_total = self._control_overlay_progress(
             workflow, step_index, graph_ctx
@@ -3111,6 +3112,9 @@ class Replayer:
                     # pre-state snapshot (P0-3): match/value/idempotency_key must
                     # describe the record THIS run writes, not the demo's.
                     resolved_effects = self._resolve_effects(step.effects, params)
+                    result.effect_contract_hashes.extend(
+                        effect.contract_hash() for effect in resolved_effects
+                    )
                     error = self._profile_effect_tier_refusal(
                         workflow,
                         resolved_effects,
@@ -3692,6 +3696,10 @@ class Replayer:
         # or an API write for patient "Susan" would be confirmed against the
         # demonstration's patient "Phil".
         effects = self._resolve_effects(effects, params)
+        api_hash_start = len(result.effect_contract_hashes)
+        result.effect_contract_hashes.extend(
+            effect.contract_hash() for effect in effects
+        )
         refusal = self._profile_effect_tier_refusal(
             workflow,
             effects,
@@ -3729,6 +3737,10 @@ class Replayer:
             current_step=overlay_current,
             total_steps=overlay_total,
         )
+        # This transition is the explicit delivery boundary. Set it BEFORE the
+        # call because an exception/timeout may occur after the request left the
+        # process but before the actuator can return a receipt-like outcome.
+        result.delivery_attempted = True
         outcome = self.api_actuator.actuate(binding, params)
 
         from openadapt_flow.runtime.actuators import ActuationStatus
@@ -3736,7 +3748,11 @@ class Replayer:
         if outcome.status == ActuationStatus.UNAVAILABLE:
             # The request was NEVER sent -- nothing was written. Fall through to
             # the GUI ladder for this step (no double-write risk). The GUI path
-            # populates the result; leave only an audit breadcrumb here.
+            # populates the result. Remove the unused API-path contracts before
+            # that path binds its own effects: the result must describe exactly
+            # the path responsible for delivery, never both alternatives.
+            result.delivery_attempted = False
+            del result.effect_contract_hashes[api_hash_start:]
             result.effect_results.append(f"[api] {outcome.reason}")
             return False
 
@@ -3884,10 +3900,6 @@ class Replayer:
         if effects is None:
             effects = step.effects
         for effect in effects:
-            # Audit trail (P0-3): persist a NON-secret digest of the RESOLVED
-            # contract this run actually verified against, before any verdict —
-            # so a halted/placeholder effect is recorded too.
-            result.effect_contract_hashes.append(effect.contract_hash())
             # A compiler-mined PLACEHOLDER effect (binding not derivable from
             # the demonstration — see compiler.effect_mining) carries a
             # sentinel selector, NOT a real one. Never verify it against the
@@ -4700,6 +4712,7 @@ class Replayer:
                         "fresh actuation fingerprint — refusing raw coordinate "
                         "delivery; run aborted"
                     )
+                result.delivery_attempted = True
                 delivery_receipt = native_act(
                     step.anchor.structural,
                     resolution.structural_handle,
@@ -4710,12 +4723,14 @@ class Replayer:
             else:
                 if requires_atomic_identity:
                     if isinstance(self.backend, RemoteActuationBackend):
+                        result.delivery_attempted = True
                         self.backend.click(
                             x,
                             y,
                             double=step.action is ActionKind.DOUBLE_CLICK,
                         )
                     elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                        result.delivery_attempted = True
                         result.delivery_receipt = self.backend.act_guarded_coordinate(
                             x,
                             y,
@@ -4735,6 +4750,7 @@ class Replayer:
                             "— refusing raw coordinate delivery; run aborted"
                         )
                 else:
+                    result.delivery_attempted = True
                     self.backend.click(
                         x,
                         y,
@@ -4763,8 +4779,10 @@ class Replayer:
                             "click, but this backend has no bounded right-click "
                             "operation"
                         )
+                    result.delivery_attempted = True
                     self.backend.right_click(x, y)
                 elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                    result.delivery_attempted = True
                     result.delivery_receipt = self.backend.act_guarded_coordinate(
                         x,
                         y,
@@ -4781,6 +4799,7 @@ class Replayer:
                         "identity verification to delivery; run aborted"
                     )
             elif isinstance(self.backend, RichPointerActionBackend):
+                result.delivery_attempted = True
                 self.backend.right_click(x, y)
             else:
                 return (
@@ -4819,6 +4838,7 @@ class Replayer:
                 and step.drag_end_anchor.structural is not None
                 and callable(structural_drag)
             ):
+                result.delivery_attempted = True
                 result.delivery_receipt = structural_drag(
                     step.anchor.structural,
                     resolution.structural_handle,
@@ -4868,6 +4888,7 @@ class Replayer:
                         f"Step '{step.id}' ({step.intent}) could not bind its "
                         f"freshly resolved drag source: {detail}; run aborted"
                     )
+                result.delivery_attempted = True
                 result.delivery_receipt = self.backend.drag_guarded(
                     x,
                     y,
@@ -4877,6 +4898,7 @@ class Replayer:
                 )
                 result.actuation = "guarded_coordinate"
             elif isinstance(self.backend, RichPointerActionBackend):
+                result.delivery_attempted = True
                 self.backend.drag(x, y, end_x, end_y)
             else:
                 return (
@@ -4956,6 +4978,7 @@ class Replayer:
                     and step.anchor.structural is not None
                     and callable(native_act)
                 ):
+                    result.delivery_attempted = True
                     result.delivery_receipt = native_act(
                         step.anchor.structural,
                         resolution.structural_handle,
@@ -4967,6 +4990,7 @@ class Replayer:
                         and not isinstance(self.backend, RemoteActuationBackend)
                         and isinstance(self.backend, GuardedCoordinateActionBackend)
                     ):
+                        result.delivery_attempted = True
                         result.delivery_receipt = self.backend.act_guarded_coordinate(
                             x,
                             y,
@@ -4988,6 +5012,7 @@ class Replayer:
                             "delivery; run aborted"
                         )
                     else:
+                        result.delivery_attempted = True
                         self.backend.click(x, y)
                 field_point = (x, y)
                 field_region = (
@@ -5039,6 +5064,7 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_type:
+                result.delivery_attempted = True
                 result.delivery_receipt = cast(
                     GuardedKeyboardActionBackend, self.backend
                 ).type_text_guarded(
@@ -5057,6 +5083,7 @@ class Replayer:
                     "run aborted"
                 )
             else:
+                result.delivery_attempted = True
                 self.backend.type_text(text)
             if not text:
                 return None  # nothing typed, nothing to verify
@@ -5092,6 +5119,7 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_key:
+                result.delivery_attempted = True
                 result.delivery_receipt = cast(
                     GuardedKeyboardActionBackend, self.backend
                 ).press_guarded(
@@ -5110,6 +5138,7 @@ class Replayer:
                     "run aborted"
                 )
             else:
+                result.delivery_attempted = True
                 self.backend.press(key)
             return None
 
@@ -5125,6 +5154,7 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 before_png=before_png,
                 params=params,
+                result=result,
                 graph_ctx=graph_ctx,
             )
 
@@ -6895,6 +6925,7 @@ class Replayer:
         bundle_dir: Path,
         before_png: bytes,
         params: dict[str, str],
+        result: StepResult,
         graph_ctx: Optional["_GraphStepContext"] = None,
     ) -> Optional[str]:
         """Execute a SCROLL step as a closed loop on a wait_until predicate.
@@ -6945,6 +6976,7 @@ class Replayer:
                 intent=next_step.intent,
             )
         if stop_pred is None or (dx == 0 and dy == 0):
+            result.delivery_attempted = True
             self.backend.scroll(dx, dy)
             return None
 
@@ -6976,6 +7008,7 @@ class Replayer:
         budget = SCROLL_BUDGET_FACTOR * increment
         scrolled = 0.0
         while scrolled + increment <= budget:
+            result.delivery_attempted = True
             self.backend.scroll(dx, dy)
             scrolled += increment
             frame = self.vision.wait_settled(self.backend)

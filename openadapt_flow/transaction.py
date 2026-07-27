@@ -49,12 +49,12 @@ class TransactionOutcome(str, Enum):
     #: Every declared effect (and collateral-effect check) passed at/above the
     #: required tier under a production profile.  The only production success.
     VERIFIED = "VERIFIED"
-    #: The run stopped and NO consequential effect is unaccounted for: every
-    #: consequential step was either settled by the effect verifier (observed
-    #: ``absent``, or ``confirmed`` and journaled) or recorded as having stopped
-    #: BEFORE delivery was attempted.  A consequential step that reached
-    #: actuation and was never verified does NOT qualify -- absence of evidence
-    #: is not evidence of absence, and that case is ``RECONCILIATION_REQUIRED``.
+    #: The run stopped before any consequential effect: every consequential
+    #: step was either proven absent by exact effect-verifier coverage or
+    #: explicitly recorded as having stopped BEFORE delivery was attempted. A
+    #: confirmed earlier write is partial completion, not a before-effect halt,
+    #: and is therefore ``RECONCILIATION_REQUIRED`` until a dedicated
+    #: partial-completion outcome exists.
     HALTED_BEFORE_EFFECT = "HALTED_BEFORE_EFFECT"
     #: Delivery or persistence is uncertain, conflicting, or temporarily
     #: unverifiable.  The runtime must NOT blind-retry the consequential write;
@@ -125,7 +125,7 @@ def _has_unresolved_uncertainty(report: RunReport) -> bool:
     step with NO evidence: an empty ``effect_evidence`` means verification never
     ran, which is UNKNOWN rather than settled.  Never read a ``False`` here as
     "no effect occurred" -- that case is caught by
-    :func:`_claims_unaccounted_effect`.
+    :func:`_lacks_effect_absence_proof`.
     """
 
     for result in report.results:
@@ -170,16 +170,16 @@ def _is_consequential_result(result: StepResult) -> bool:
     )
 
 
-def _effect_accounted_for(result: StepResult) -> bool:
-    """True only when this step's business effect is KNOWN, not merely unstated.
+def _effect_absence_proven(result: StepResult) -> bool:
+    """True only when this step is positively proven to have caused no effect.
 
     Exactly two things account for an effect, and both are POSITIVE claims:
 
     1. the runtime recorded that the step stopped BEFORE delivery was attempted
        (:func:`_attempt_state` -> ``not_actuated``, itself fail-closed); or
-    2. a verifier read the system of record and settled EVERY declared effect --
-       ``confirmed`` (the write is present and correct, recorded in the effect
-       journal) or observed ``absent`` (the write provably never landed).
+    2. a verifier read the system of record and established ``absent`` for
+       EVERY declared effect, with an exact one-to-one hash match between the
+       declared contracts and retained evidence.
 
     An EMPTY ``effect_evidence`` list is neither.  A consequential step that
     reached actuation and was never verified is UNKNOWN, not absent: the system
@@ -193,38 +193,43 @@ def _effect_accounted_for(result: StepResult) -> bool:
     happened, and it can never license an absence claim.
     """
 
-    if _attempt_state(result) == "not_actuated":
-        return True
     if result.effect_evidence:
-        # A non-settled reading is already forced to RECONCILIATION_REQUIRED by
-        # _has_unresolved_uncertainty; restate the condition here rather than
-        # depend on that ordering for a safety property.
+        # Exact MULTISET coverage matters: a single evidence record must not
+        # settle two declared contracts, and duplicate evidence must not hide a
+        # missing contract. Any retained known-present/conflicting reading
+        # dominates a contradictory non-delivery flag.
+        from collections import Counter
+
+        declared = Counter(result.effect_contract_hashes)
+        observed = Counter(
+            evidence.effect_contract_hash for evidence in result.effect_evidence
+        )
+        if not declared or declared != observed:
+            return False
         return all(
-            evidence.final_verdict == "confirmed"
-            or evidence.observed_effect == "absent"
+            evidence.final_verdict == "refuted" and evidence.observed_effect == "absent"
             for evidence in result.effect_evidence
         )
-    return False
+    return _attempt_state(result) == "not_actuated"
 
 
-def _claims_unaccounted_effect(report: RunReport) -> bool:
-    """True when some consequential step's business effect is UNKNOWN.
+def _lacks_effect_absence_proof(report: RunReport) -> bool:
+    """True when any consequential step is not positively proven effect-free.
 
     Guards every terminal outcome that asserts an absence
     (``HALTED_BEFORE_EFFECT``, ``REJECTED_POLICY``, ``CANCELED``,
     ``FAILED_PLATFORM``).  A single consequential step whose effect is
-    unaccounted for is enough: the customer would otherwise be told to reconcile
-    nothing while an unreconciled mutation sits in their system of record.
+    A single consequential step without absence proof is enough: the customer
+    would otherwise be told to reconcile nothing despite a confirmed, possible,
+    or incompletely covered mutation in their system of record.
 
-    Scope note: this enforces that no outcome asserts absence while an effect is
-    UNKNOWN.  It deliberately does not decide what a run should be called when
-    an earlier consequential write was CONFIRMED and a later step then halted --
-    that write is settled, journaled, and needs no reconciliation.  Naming that
-    partial-completion case is a separate taxonomy question.
+    A confirmed earlier write is also not absence. Until the public taxonomy
+    gains a dedicated partial-completion state, such a run is conservatively a
+    reconciliation task rather than an absence-asserting terminal outcome.
     """
 
     return any(
-        _is_consequential_result(result) and not _effect_accounted_for(result)
+        _is_consequential_result(result) and not _effect_absence_proven(result)
         for result in report.results
     )
 
@@ -236,8 +241,8 @@ def _policy_rejected(report: RunReport) -> bool:
     that did not verify, stopped the run BEFORE any business effect.  (The
     uncertain-delivery path also carries ``failure_category='governed_refusal'``
     but is handled earlier by :func:`_has_unresolved_uncertainty` and
-    :func:`_claims_unaccounted_effect`, so reaching here means every
-    consequential effect is already accounted for.)
+    :func:`_lacks_effect_absence_proof`, so reaching here means every
+    consequential step is positively proven effect-free.)
     """
 
     for result in report.results:
@@ -259,9 +264,8 @@ def classify_transaction_outcome(report: RunReport) -> TransactionOutcome:
     evidence.  Precedence is deliberate: a settled success/rollback first, then
     any unresolved uncertainty (never claim "no effect", never blind-retry),
     then a completed-but-unverified Demo, then -- only once every
-    consequential effect is POSITIVELY accounted for -- the reason a run stopped
-    before any effect (policy rejection, cancellation, governed halt, platform
-    fault).
+    consequential step is POSITIVELY proven effect-free -- the reason the run
+    stopped (policy rejection, cancellation, governed halt, platform fault).
     """
 
     coarse = report.execution_outcome
@@ -285,18 +289,17 @@ def classify_transaction_outcome(report: RunReport) -> TransactionOutcome:
     # verifier settling what happened may have left a write in the system of
     # record.  Absence of evidence is not evidence of absence -- fail toward
     # RECONCILIATION_REQUIRED, never toward a false clean bill of health.
-    if _claims_unaccounted_effect(report):
+    if _lacks_effect_absence_proof(report):
         return TransactionOutcome.RECONCILIATION_REQUIRED
 
-    # Remaining: every consequential step's effect is accounted for.
+    # Remaining: every consequential step is positively proven effect-free.
     if _policy_rejected(report):
         return TransactionOutcome.REJECTED_POLICY
     if report.canceled:
         return TransactionOutcome.CANCELED
     if coarse == "HALTED":
         # A governed halt where every consequential step either never reached
-        # delivery or was SETTLED by the verifier (observed absent, or confirmed
-        # and journaled). No effect is left unaccounted for.
+        # delivery or exact verifier coverage established absence.
         return TransactionOutcome.HALTED_BEFORE_EFFECT
     # coarse == "FAILED": a platform failure before any possible effect.
     return TransactionOutcome.FAILED_PLATFORM
@@ -324,34 +327,6 @@ def _reached_delivery(result: StepResult) -> bool:
     )
 
 
-def _refused_before_delivery(result: StepResult) -> bool:
-    """True when the runtime recorded a typed refusal at a PRE-delivery gate.
-
-    Only a governed refusal counts: a pre-execution policy/authorization gate, a
-    pre-click identity check that did not verify, or a typed
-    ``safety_halt`` / ``governed_refusal`` (OCR and structural resolution
-    refusals, identity-binding refusals, unmet halt guards) -- every one of
-    which the runtime raises at a gate it reaches before the action is
-    dispatched, and each of which explicitly records that no action was
-    admitted.  An unstructured ``runtime_failure`` (the defensive
-    ``except Exception`` wrapped around the action) proves nothing: the action
-    may already have reached the application with the client never seeing the
-    response.
-    """
-
-    if (
-        not result.ok
-        and result.identity is not None
-        and result.identity.status != "verified"
-    ):
-        # Mirrors _policy_rejected: only a FAILED step whose pre-click identity
-        # check did not verify was refused. An abstaining check on a step that
-        # still succeeded proceeded flagged and did actuate (and is already
-        # caught by _reached_delivery above).
-        return True
-    return result.failure_category in ("governed_refusal", "safety_halt")
-
-
 def _attempt_state(
     result: StepResult,
 ) -> Literal["not_actuated", "delivered", "actuated_api", "delivery_uncertain"]:
@@ -368,6 +343,11 @@ def _attempt_state(
     # ran, and a gate pseudo-step exists only because the runtime refused first.
     if result.skipped or result.step_id in _POLICY_GATE_STEP_IDS:
         return "not_actuated"
+    # The live replayer owns this state transition. A failure category is not
+    # proof: safety_halt can be stamped after a click when governed healing
+    # rejects a repair. Legacy/synthesized None remains unknown, fail-closed.
+    if result.delivery_attempted is False:
+        return "not_actuated"
     if result.delivery_uncertainty is not None:
         return "delivery_uncertain"
     if result.actuation == "api":
@@ -376,7 +356,18 @@ def _attempt_state(
         # Includes a write actuated through the GUI ladder, which carries no
         # native delivery receipt.
         return "delivered"
-    if _refused_before_delivery(result):
+    if result.delivery_attempted is True:
+        # The boundary was crossed but no receipt/post-action evidence was
+        # retained. Never convert that absence of a receipt into non-delivery.
+        return "delivery_uncertain"
+    if (
+        not result.ok
+        and result.identity is not None
+        and result.identity.status != "verified"
+    ):
+        # Backward-compatible typed proof for legacy reports: identity checks
+        # occur at the pre-delivery gate by contract. New live reports also
+        # carry ``delivery_attempted=False`` above.
         return "not_actuated"
     # Nothing recorded either way: unknown, so fail toward reconciliation.
     return "delivery_uncertain"

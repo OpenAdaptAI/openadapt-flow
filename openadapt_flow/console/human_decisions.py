@@ -4,6 +4,19 @@ The portable task contains only opaque identifiers, closed enums, counts,
 digests, and expiry. Protected screenshots remain separate authenticated local
 artifacts. A signed task is presentation integrity, not execution authority;
 the runtime's exact pause capability and fresh revalidation remain mandatory.
+
+Two projections come out of one pause, and they are not the same thing:
+
+* ``task`` -- the signed, Cloud-safe :class:`HumanDecisionTaskV1`. It is what
+  :func:`portable_remote_decision_task` relays to an authenticated remote
+  surface, so nothing may be added to it that could carry protected content.
+* ``presentation`` -- **local only**. It is returned by :func:`decision_detail`
+  to the loopback console and, through the customer-controlled runner-local
+  portal, to a paired phone on the customer's own network. This is the boundary
+  that already serves protected screenshot crops, and it is where
+  :mod:`openadapt_flow.console.halt_detail` puts the closed-vocabulary "what
+  broke / what gets re-checked" detail an operator needs to answer at all.
+  :func:`portable_remote_decision_task` discards it.
 """
 
 from __future__ import annotations
@@ -20,6 +33,7 @@ from openadapt_types import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from openadapt_flow.console import data
+from openadapt_flow.console import halt_detail as halt_detail_mod
 from openadapt_flow.console.attention import AttentionItem, _last_failed_result
 from openadapt_flow.deployment import DeploymentConfig
 from openadapt_flow.runtime.durable.attended import (
@@ -327,7 +341,7 @@ def _task_and_presentation(
         for evidence in (failed.effect_evidence if failed is not None else [])
         if evidence.verification_tier is not None
     ]
-    presentation = {
+    presentation: dict[str, Any] = {
         "question": question[2],
         "explanation": item.headline,
         "next_action": item.next_action,
@@ -368,6 +382,20 @@ def _task_and_presentation(
         )
     surface = report.execution_target_kind if report is not None else None
     substrate = _SUBSTRATE_MAP.get(surface, "unknown") if surface else "unknown"
+    # LOCAL-ONLY. `presentation` never crosses the Cloud lane: the remote
+    # projection below returns a `RemoteDecisionProjection` built from `task`
+    # alone and discards this block. Keeping the enrichment here rather than in
+    # the signed task is what lets the phone say what broke without widening a
+    # contract whose `safe_slots` are null by design.
+    presentation["halt"] = halt_detail_mod.halt_detail(
+        run_dir,
+        category=item.category,
+        report=report,
+        failed=failed,
+        substrate=substrate,
+        delivery_state=delivery_state,
+        identity_required=identity_required,
+    )
     remote, tenant_id, runner_id = _remote_scope(deployment)
     unsigned: dict[str, Any] = {
         "schema_version": HUMAN_DECISION_TASK_SCHEMA,

@@ -146,7 +146,27 @@ def has_system_effect(step: Step) -> bool:
     (``step.effects``) — a typed contract verified against the real system of
     record (an API/DB read), NOT the screen. This is the oracle the ``expect``
     postconditions are blind to (the "5 of 7 silent" transactional faults)."""
-    return bool(step.effects)
+    return bool(
+        step.effects
+        or (step.api_binding is not None and step.api_binding.effects)
+    )
+
+
+def has_operator_risk_override(step: Step) -> bool:
+    """Whether qualification owns the current executable risk decision.
+
+    The current additive IR uses an exact marker because it has no separate
+    typed provenance enum yet.  The marker is not trusted in isolation: risk,
+    marker, and review state must agree exactly, and production admission still
+    requires certification whose workflow hash plus the sealed bundle digest
+    bind all three fields.  Editing any one invalidates certification; loose or
+    legacy text fails closed to heuristic classification.
+    """
+
+    return bool(
+        not step.risk_review_required
+        and step.risk_explanation == f"operator-qualified override: {step.risk}"
+    )
 
 
 def effect_has_idempotency_key(step: Step) -> bool:
@@ -154,7 +174,14 @@ def effect_has_idempotency_key(step: Step) -> bool:
     non-empty idempotency / at-most-once key — the guard that collapses a
     retried or double-delivered submission to a single record instead of a
     silent duplicate write."""
-    return any(getattr(e, "idempotency_key", None) for e in step.effects)
+    paths = [list(step.effects)]
+    if step.api_binding is not None:
+        paths.append(list(step.api_binding.effects))
+    declared_paths = [effects for effects in paths if effects]
+    return bool(declared_paths) and all(
+        any(getattr(effect, "idempotency_key", None) for effect in effects)
+        for effects in declared_paths
+    )
 
 
 def has_unconfirmed_effect_binding(step: Step) -> bool:
@@ -163,7 +190,10 @@ def has_unconfirmed_effect_binding(step: Step) -> bool:
     (``Effect.needs_operator_confirmation``). Such an effect names a write the
     compiler refused to invent an endpoint for; certifying it would bless a
     fabricated/unconfirmed binding (the replayer HALTs on it at run time)."""
-    return any(getattr(e, "needs_operator_confirmation", False) for e in step.effects)
+    effects = list(step.effects)
+    if step.api_binding is not None:
+        effects.extend(step.api_binding.effects)
+    return any(getattr(e, "needs_operator_confirmation", False) for e in effects)
 
 
 def step_confidence(step: Step) -> float:

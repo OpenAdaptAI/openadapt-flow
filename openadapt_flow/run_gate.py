@@ -61,6 +61,7 @@ from openadapt_flow.execution_profiles import (
 )
 from openadapt_flow.ir import ActionKind, Interstitial, Step, Workflow
 from openadapt_flow.policy import (
+    has_operator_risk_override,
     has_screen_postcondition,
     has_system_effect,
     has_unconfirmed_effect_binding,
@@ -129,11 +130,12 @@ def is_consequential(step: Step) -> bool:
     declared system-of-record effect. A step any of these flag is treated as a
     write for coverage purposes.
     """
-    return (
-        step.risk == "irreversible"
-        or classify_step_risk(step) == "irreversible"
-        or has_system_effect(step)
+    inferred_write = (
+        False
+        if has_operator_risk_override(step)
+        else classify_step_risk(step) == "irreversible"
     )
+    return step.risk == "irreversible" or inferred_write or has_system_effect(step)
 
 
 def must_be_identity_armed(step: Step) -> bool:

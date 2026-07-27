@@ -43,11 +43,35 @@ from openadapt_flow.run_gate import (
     GATE_MANIFEST,
     build_runtime_authorization,
     evaluate_run_gate,
+    is_consequential,
 )
 from openadapt_flow.runtime.effects import Effect, EffectKind
 
 _KEY = "correct horse battery staple"
 _PC = [Postcondition(kind=PostconditionKind.TEXT_PRESENT, text="Saved OK")]
+
+
+def test_qualified_risk_override_is_authoritative_until_effect_proves_write():
+    step = _click(
+        "continue",
+        "Continue to the review screen",
+        ocr="Continue",
+        risk="reversible",
+    )
+    step.risk_explanation = "operator-qualified override: reversible"
+    step.risk_review_required = False
+
+    assert is_consequential(step) is False
+
+    step.api_binding = ApiBinding(
+        url_template="/api/records",
+        effects=[Effect(kind=EffectKind.RECORD_WRITTEN, risk="irreversible")],
+    )
+    assert is_consequential(step) is True
+
+    step.api_binding = None
+    step.risk_explanation = "operator-qualified override: reversible; tampered"
+    assert is_consequential(step) is True
 
 
 def _click(

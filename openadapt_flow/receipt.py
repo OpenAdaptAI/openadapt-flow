@@ -46,7 +46,7 @@ from openadapt_flow.ir import RunReport
 from openadapt_flow.verification import VerificationTier
 
 #: Schema identifier carried by every emitted receipt.
-RECEIPT_SCHEMA = "openadapt.run-receipt/v1"
+RECEIPT_SCHEMA = "openadapt.run-receipt/v2"
 
 #: Terminal execution outcomes a receipt may state.
 ReceiptOutcome = Literal["VERIFIED"]
@@ -106,6 +106,16 @@ ReceiptProfile = Literal["standard", "regulated"]
 ReceiptNetworkObservation = Literal["none", "observed"]
 ReceiptCount = Annotated[int, Field(ge=0)]
 
+_EVIDENCE_CLASS_BY_SOURCE = {
+    "structured": "application_structured_text",
+    "identifier_region": "recorded_and_live_region",
+    "captured_context": "captured_context_ocr",
+    "application": "application_identity",
+    "session": "session_identity",
+    "workflow_state": "workflow_state_identity",
+    "api_parameter": "api_request_effect_binding",
+}
+
 _FLOW_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-(?:a|b|rc)[0-9]+)?$")
 _HOUR_UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:00:00Z$")
 
@@ -124,7 +134,7 @@ class RunReceipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["openadapt.run-receipt/v1"] = "openadapt.run-receipt/v1"
+    schema_version: Literal["openadapt.run-receipt/v2"] = "openadapt.run-receipt/v2"
 
     #: This is the success receipt. Halts remain in the private run evidence.
     outcome: ReceiptOutcome
@@ -163,7 +173,7 @@ class RunReceipt(BaseModel):
 
     substrate: ReceiptSubstrate
     provenance: ReceiptProvenance
-    flow_version: str = Field(pattern=_FLOW_VERSION_RE.pattern)
+    receipt_builder_version: str = Field(pattern=_FLOW_VERSION_RE.pattern)
     external_network_calls: ReceiptNetworkObservation
 
     #: Exact content digest of the bundle that ran.  This is what makes the
@@ -200,8 +210,10 @@ class RunReceipt(BaseModel):
                     f"VERIFIED receipt requires complete {name} coverage: "
                     f"{confirmed}/{required}"
                 )
-        if self.authorization_required < 1:
-            raise ValueError("VERIFIED receipt requires governed authorization")
+        if self.authorization_required != 1:
+            raise ValueError(
+                "VERIFIED receipt requires exactly one governed authorization"
+            )
         if self.postconditions_required < 1:
             raise ValueError("VERIFIED receipt requires postcondition evidence")
         if self.identity_armed != self.identity_applicable:
@@ -406,6 +418,10 @@ def _build_receipt(
     evidence_classes = sorted(envelope.evidence_classes)
     required = envelope.required_contracts
     passed = envelope.passed_contracts
+    if int(required.authorization) != 1 or int(passed.authorization) != 1:
+        raise ReceiptError(
+            "VERIFIED receipt requires exactly one passed authorization contract"
+        )
 
     # Approved-unverified writes are useful in Demo, but no representation of
     # that approval may coexist with a shareable VERIFIED receipt.  Check every
@@ -439,10 +455,11 @@ def _build_receipt(
         raise ReceiptError(
             "VERIFIED receipt requires exact retained identity evidence coverage"
         )
-    unarmed_ids = {item.step_id for item in getattr(report, "identity_unarmed", [])}
-    if required_identity_ids & unarmed_ids:
-        raise ReceiptError("a required identity step is recorded as unarmed")
-    if int(report.identity_armed_steps) != int(report.identity_applicable_steps):
+    if report.identity_unarmed:
+        raise ReceiptError("VERIFIED receipt cannot retain an unarmed identity step")
+    if int(report.identity_armed_steps) != int(report.identity_applicable_steps) or int(
+        report.identity_applicable_steps
+    ) < len(required_identity_ids):
         raise ReceiptError(
             "VERIFIED receipt requires complete workflow identity arming"
         )
@@ -451,14 +468,28 @@ def _build_receipt(
         identity = result.identity
         assert identity is not None  # guarded by the complete-coverage check
         if identity.mode != "signal_quorum":
+            if (
+                identity.coverage <= 0
+                or not identity.expected.strip()
+                or not identity.observed.strip()
+            ):
+                raise ReceiptError(
+                    "VERIFIED receipt found empty retained identity evidence"
+                )
             continue
         signals = [item.signal for item in identity.signal_evidence]
+        sources = [item.source for item in identity.signal_evidence]
         verified_signals = sum(
             item.verdict == "verified" for item in identity.signal_evidence
         )
         if (
             not signals
             or len(signals) != len(set(signals))
+            or len(sources) != len(set(sources))
+            or any(
+                item.evidence_class != _EVIDENCE_CLASS_BY_SOURCE[item.source]
+                for item in identity.signal_evidence
+            )
             or any(item.verdict == "conflict" for item in identity.signal_evidence)
             or identity.quorum_required is None
             or identity.quorum_verified is None
@@ -499,7 +530,9 @@ def _build_receipt(
                 "VERIFIED receipt requires effect_verified=true for every "
                 "declared effect"
             )
-        declared_effects.update(result.effect_contract_hashes)
+        result_declared_effects = Counter(result.effect_contract_hashes)
+        result_confirmed_effects: Counter[str] = Counter()
+        declared_effects.update(result_declared_effects)
         for evidence in result.effect_evidence:
             if not (
                 evidence.initial_verdict == "confirmed"
@@ -532,7 +565,12 @@ def _build_receipt(
                     "governed authorization minimum"
                 )
             confirmed_effects[evidence.effect_contract_hash] += 1
+            result_confirmed_effects[evidence.effect_contract_hash] += 1
             observed_effect_classes.add(f"effect_tier_{int(tier)}")
+        if result_declared_effects != result_confirmed_effects:
+            raise ReceiptError(
+                "VERIFIED receipt requires exact per-step effect-hash coverage"
+            )
     if not declared_effects or declared_effects != confirmed_effects:
         raise ReceiptError(
             "VERIFIED receipt requires exact declared/evidence effect-hash coverage"
@@ -553,24 +591,44 @@ def _build_receipt(
             "VERIFIED receipt cannot retain compensation or reconciliation evidence"
         )
 
-    effect_results = [
-        result
-        for result in report.results
+    from openadapt_flow.transaction import _attempt_state, _is_consequential_result
+
+    effect_result_positions = [
+        index
+        for index, result in enumerate(report.results)
         if result.effect_contract_hashes or result.effect_evidence
     ]
+    transaction_result_positions = [
+        index
+        for index, result in enumerate(report.results)
+        if not result.skipped and _is_consequential_result(result)
+    ]
+    if transaction_result_positions != effect_result_positions:
+        raise ReceiptError(
+            "VERIFIED receipt requires declared effects for every "
+            "transaction-consequential result"
+        )
+    effect_results = [report.results[index] for index in effect_result_positions]
+    transaction_results = [
+        report.results[index] for index in transaction_result_positions
+    ]
     journal = list(getattr(report, "effect_journal", []))
-    if len(journal) != len(effect_results):
+    if len(journal) != len(transaction_results):
         raise ReceiptError(
             "VERIFIED receipt requires one retained transaction journal entry "
-            "per effect-bearing step"
+            "per transaction-consequential step"
         )
-    if any(result.step_id not in required_identity_ids for result in effect_results):
+    if any(
+        result.step_id not in required_identity_ids
+        or result.postconditions_ok is not True
+        for result in effect_results
+    ):
         raise ReceiptError(
-            "VERIFIED receipt requires identity coverage for every effect-bearing step"
+            "VERIFIED receipt requires identity and postcondition coverage for "
+            "every effect-bearing step"
         )
-    from openadapt_flow.transaction import _attempt_state
 
-    for result, entry in zip(effect_results, journal):
+    for result, entry in zip(transaction_results, journal):
         expected_attempt = _attempt_state(result)
         if expected_attempt == "not_actuated":
             raise ReceiptError(
@@ -650,7 +708,7 @@ def _build_receipt(
             over_halt_count=0,
             substrate=cast(ReceiptSubstrate, substrate),
             provenance=provenance,
-            flow_version=_flow_version(),
+            receipt_builder_version=_receipt_builder_version(),
             external_network_calls=envelope.external_network_calls,
             bundle_digest=bundle_digest,
             generated_at=_hour_utc(getattr(report, "started_at", None)),
@@ -668,7 +726,7 @@ def _build_receipt(
         raise ReceiptError(f"run cannot produce a VERIFIED receipt: {exc}") from exc
 
 
-def _flow_version() -> str:
+def _receipt_builder_version() -> str:
     from openadapt_flow import __version__
 
     return __version__
@@ -710,7 +768,7 @@ def render_receipt_markdown(receipt: RunReceipt) -> str:
         f"| resolution ladder | {ladder} |",
         f"| substrate | `{receipt.substrate}` |",
         f"| provenance | `{receipt.provenance}` |",
-        f"| flow version | {receipt.flow_version} |",
+        f"| receipt builder version | {receipt.receipt_builder_version} |",
         f"| external network calls | `{receipt.external_network_calls}` |",
     ]
     lines += [
@@ -764,7 +822,7 @@ def _receipt_rows(receipt: RunReceipt) -> list[tuple[str, str]]:
         ("ladder", ladder),
         ("substrate", str(receipt.substrate)),
         ("provenance", receipt.provenance),
-        ("flow", receipt.flow_version),
+        ("receipt builder", receipt.receipt_builder_version),
     ]
     rows += [
         ("bundle digest", (receipt.bundle_digest or "")[:16] or "unbound"),

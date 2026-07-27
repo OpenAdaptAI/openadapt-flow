@@ -28,6 +28,7 @@ from openadapt_flow.ir import (
     OutcomeContractCounts,
     RunReport,
     StepResult,
+    UnarmedStep,
 )
 from openadapt_flow.receipt import (
     RECEIPT_SCHEMA,
@@ -68,7 +69,7 @@ ALLOWED_FIELDS = {
     "over_halt_count",
     "substrate",
     "provenance",
-    "flow_version",
+    "receipt_builder_version",
     "external_network_calls",
     "bundle_digest",
     "receipt_digest",
@@ -113,7 +114,13 @@ def _report(**overrides: object) -> RunReport:
                 step_id="step_000",
                 intent="click 'SECRET-BUTTON-LABEL'",
                 ok=True,
-                identity=IdentityCheck(status="verified"),
+                identity=IdentityCheck(
+                    status="verified",
+                    mode="structured",
+                    coverage=1.0,
+                    expected="SECRET-MRN",
+                    observed="SECRET-MRN",
+                ),
                 postconditions_ok=True,
                 effect_verified=True,
                 effect_contract_hashes=["sha256:" + "b" * 64],
@@ -285,7 +292,13 @@ def test_verified_receipt_refuses_a_retained_over_halt() -> None:
                         ok=False,
                         safety_halt=True,
                         failure_category="safety_halt",
-                        identity=IdentityCheck(status="verified"),
+                        identity=IdentityCheck(
+                            status="verified",
+                            mode="structured",
+                            coverage=1.0,
+                            expected="SECRET-MRN",
+                            observed="SECRET-MRN",
+                        ),
                         postconditions_ok=True,
                         effect_verified=True,
                         effect_contract_hashes=["sha256:" + "b" * 64],
@@ -322,6 +335,19 @@ def test_receipt_refuses_incomplete_verified_contract(
         build_receipt(
             _report(**override),
         )
+
+
+def test_receipt_requires_exactly_one_authorization_contract() -> None:
+    doubled = OutcomeContractCounts(
+        authorization=2, identity=1, postcondition=1, effect=1
+    )
+    envelope = _report().outcome_envelope
+    assert envelope is not None
+    envelope = envelope.model_copy(
+        update={"required_contracts": doubled, "passed_contracts": doubled}
+    )
+    with pytest.raises(ReceiptError, match="exactly one passed authorization"):
+        build_receipt(_report(outcome_envelope=envelope))
 
 
 def test_receipt_revalidates_the_complete_run_report_from_json() -> None:
@@ -364,6 +390,22 @@ def test_receipt_requires_identity_on_every_effect_bearing_step() -> None:
         build_receipt(_report(required_identity_step_ids=[], outcome_envelope=envelope))
 
 
+def test_receipt_binds_required_identity_to_workflow_coverage() -> None:
+    with pytest.raises(ReceiptError, match="complete workflow identity arming"):
+        build_receipt(_report(identity_applicable_steps=0, identity_armed_steps=0))
+
+
+def test_receipt_refuses_any_retained_unarmed_identity_step() -> None:
+    with pytest.raises(ReceiptError, match="unarmed identity step"):
+        build_receipt(
+            _report(
+                identity_unarmed=[
+                    UnarmedStep(step_id="outside-required", reason="not armed")
+                ]
+            )
+        )
+
+
 def _signal_quorum_identity() -> IdentityCheck:
     evidence = [
         IdentitySignalEvidence(
@@ -397,14 +439,35 @@ def test_receipt_accepts_consistent_signal_quorum_identity() -> None:
     assert build_receipt(_report(results=[result])).outcome == "VERIFIED"
 
 
-@pytest.mark.parametrize("fault", ["duplicate", "conflict", "count", "quorum"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "duplicate_signal",
+        "duplicate_source",
+        "evidence_class",
+        "conflict",
+        "count",
+        "quorum",
+    ],
+)
 def test_receipt_refuses_inconsistent_signal_quorum_identity(fault: str) -> None:
     identity = _signal_quorum_identity()
-    if fault == "duplicate":
+    if fault == "duplicate_signal":
         duplicate = identity.signal_evidence[0].model_copy(
             update={"source": "identifier_region"}
         )
         identity.signal_evidence[1] = duplicate
+    elif fault == "duplicate_source":
+        identity.signal_evidence[1] = identity.signal_evidence[1].model_copy(
+            update={
+                "source": "structured",
+                "evidence_class": "application_structured_text",
+            }
+        )
+    elif fault == "evidence_class":
+        identity.signal_evidence[0] = identity.signal_evidence[0].model_copy(
+            update={"evidence_class": "recorded_and_live_region"}
+        )
     elif fault == "conflict":
         identity.signal_evidence[1].verdict = "conflict"
     elif fault == "count":
@@ -413,6 +476,16 @@ def test_receipt_refuses_inconsistent_signal_quorum_identity(fault: str) -> None
         identity.quorum_required = 3
     result = _report().results[0].model_copy(update={"identity": identity})
     with pytest.raises(ReceiptError, match="signal-quorum"):
+        build_receipt(_report(results=[result]))
+
+
+def test_receipt_refuses_an_empty_verified_identity_record() -> None:
+    result = (
+        _report()
+        .results[0]
+        .model_copy(update={"identity": IdentityCheck(status="verified")})
+    )
+    with pytest.raises(ReceiptError, match="empty retained identity"):
         build_receipt(_report(results=[result]))
 
 
@@ -426,10 +499,76 @@ def test_receipt_refuses_partial_effect_hash_coverage() -> None:
         build_receipt(_report(results=[result]))
 
 
+def test_receipt_refuses_effect_evidence_swapped_between_steps() -> None:
+    first = _report().results[0]
+    first_evidence = first.effect_evidence[0]
+    first_hash = "sha256:" + "b" * 64
+    second_hash = "sha256:" + "e" * 64
+    first = first.model_copy(
+        update={
+            "effect_contract_hashes": [first_hash],
+            "effect_evidence": [
+                first_evidence.model_copy(update={"effect_contract_hash": second_hash})
+            ],
+        }
+    )
+    second = first.model_copy(
+        update={
+            "step_id": "step_001",
+            "effect_contract_hashes": [second_hash],
+            "effect_evidence": [
+                first_evidence.model_copy(update={"effect_contract_hash": first_hash})
+            ],
+        }
+    )
+    complete = OutcomeContractCounts(
+        authorization=1, identity=2, postcondition=2, effect=2
+    )
+    envelope = _report().outcome_envelope
+    assert envelope is not None
+    envelope = envelope.model_copy(
+        update={"required_contracts": complete, "passed_contracts": complete}
+    )
+    journal = [
+        _report().effect_journal[0],
+        _report()
+        .effect_journal[0]
+        .model_copy(
+            update={
+                "step_id": "step_001",
+                "intended_effect_contract_hashes": [second_hash],
+            }
+        ),
+    ]
+    with pytest.raises(ReceiptError, match="per-step effect-hash"):
+        build_receipt(
+            _report(
+                results=[first, second],
+                effect_journal=journal,
+                required_identity_step_ids=["step_000", "step_001"],
+                identity_applicable_steps=2,
+                identity_armed_steps=2,
+                outcome_envelope=envelope,
+            )
+        )
+
+
 def test_receipt_refuses_missing_retained_postcondition_evidence() -> None:
     result = _report().results[0].model_copy(update={"postconditions_ok": None})
     with pytest.raises(ReceiptError, match="retained postcondition evidence"):
         build_receipt(_report(results=[result]))
+
+
+def test_receipt_requires_postcondition_on_the_effect_step_not_a_decoy() -> None:
+    effect = _report().results[0].model_copy(update={"postconditions_ok": None})
+    decoy = StepResult(
+        step_id="decoy",
+        intent="read-only decoy",
+        ok=True,
+        postconditions_ok=True,
+    )
+    with pytest.raises(ReceiptError, match="postcondition coverage"):
+        build_receipt(_report(results=[effect, decoy]))
 
 
 def test_receipt_refuses_effect_verified_false() -> None:
@@ -556,6 +695,70 @@ def test_receipt_refuses_non_actuated_effect_result() -> None:
     ]
     with pytest.raises(ReceiptError, match="non-actuated"):
         build_receipt(_report(results=[result], effect_journal=journal))
+
+
+@pytest.mark.parametrize("kind", ["irreversible", "uncertain"])
+def test_receipt_accounts_for_every_transaction_consequential_result(
+    kind: str,
+) -> None:
+    if kind == "irreversible":
+        extra = StepResult(
+            step_id="extra-write",
+            intent="unaccounted write",
+            ok=True,
+            risk="irreversible",
+            delivery_attempted=True,
+        )
+    else:
+        extra = StepResult(
+            step_id="extra-uncertain",
+            intent="unaccounted uncertain delivery",
+            ok=True,
+            delivery_uncertainty=ActionDeliveryUncertainty(
+                operation="click",
+                native=False,
+                observed_at="2026-07-27T15:34:57+00:00",
+                cause_type="ActionDeliveryUncertain",
+                verification_attempted=True,
+                postconditions_confirmed=True,
+                effects_confirmed=True,
+                resolved_by_contract=True,
+            ),
+        )
+    with pytest.raises(ReceiptError, match="transaction-consequential"):
+        build_receipt(_report(results=[*_report().results, extra]))
+
+
+def test_receipt_refuses_equal_length_transaction_effect_result_swap() -> None:
+    skipped_effect = _report().results[0].model_copy(update={"skipped": True})
+    unaccounted_write = StepResult(
+        step_id="unaccounted-write",
+        intent="unaccounted write",
+        ok=True,
+        risk="irreversible",
+        delivery_attempted=True,
+        identity=_report().results[0].identity,
+    )
+    misleading_journal = [
+        _report()
+        .effect_journal[0]
+        .model_copy(
+            update={
+                "step_id": unaccounted_write.step_id,
+                "intent": unaccounted_write.intent,
+                "intended_effect_contract_hashes": [],
+            }
+        )
+    ]
+
+    with pytest.raises(ReceiptError, match="transaction-consequential"):
+        build_receipt(
+            _report(
+                results=[skipped_effect, unaccounted_write],
+                effect_journal=misleading_journal,
+                required_identity_step_ids=[unaccounted_write.step_id],
+            )
+        )
 
 
 def test_receipt_refuses_uncertain_delivery_with_wrong_observation_time() -> None:

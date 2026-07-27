@@ -90,6 +90,7 @@ def automation_failure_signal(
 
     identity = failed.get("identity")
     identity_status = identity.get("status") if isinstance(identity, dict) else None
+    identity_status_key = identity_status if isinstance(identity_status, str) else ""
     identity_state = {
         "verified": "verified",
         "mismatch": "refuted",
@@ -97,10 +98,11 @@ def automation_failure_signal(
         "abstain": "unverifiable",
         "unreadable": "unverifiable",
         "unverifiable": "unverifiable",
-    }.get(identity_status, "unknown")
+    }.get(identity_status_key, "unknown")
 
     resolution = failed.get("resolution")
     rung = resolution.get("rung") if isinstance(resolution, dict) else None
+    rung_key = rung if isinstance(rung, str) else ""
     resolution_rung = {
         "structural": "structural",
         "template": "template",
@@ -108,7 +110,9 @@ def automation_failure_signal(
         "ocr": "ocr",
         "geometry": "geometry",
         "grounder": "grounder",
-    }.get(rung, "none" if failed and not isinstance(resolution, dict) else "unknown")
+    }.get(
+        rung_key, "none" if failed and not isinstance(resolution, dict) else "unknown"
+    )
 
     uncertainty = failed.get("delivery_uncertainty")
     delivery_state = (

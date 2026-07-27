@@ -12,7 +12,11 @@ import hashlib
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from openadapt_types import HUMAN_DECISION_TASK_SCHEMA, HumanDecisionTaskV1
+from openadapt_types import (
+    HUMAN_DECISION_TASK_SCHEMA,
+    HumanDecisionReceiptV1,
+    HumanDecisionTaskV1,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from openadapt_flow.console import data
@@ -109,85 +113,39 @@ _RECEIPT_STATE: dict[str, tuple[str, str]] = {
 }
 
 
-class HumanDecisionReceipt(BaseModel):
-    """Closed, PHI-free terminal receipt for one attended decision.
-
-    This is the only decision outcome that may cross to a phone, a tray, or
-    an authenticated remote relay. Protected content is structurally
-    unrepresentable rather than stripped on send: there is no free-text field,
-    no operator identity, no workflow label, no parameter, and no path. The
-    consumer renders deterministic copy from the closed ``reason_code``.
-
-    ``action`` uses the portable ``openadapt-types`` vocabulary
-    (``verify_and_resume``), never the engine's internal ``continue``, so a
-    consumer compares it directly against the task's ``allowed_actions``.
-
-    NOTE: this is Flow's half of the shared ``HumanDecisionReceiptV1``
-    contract. It is proposed for ``openadapt-types`` so Cloud can validate the
-    same closed shape; the field set here is derived from Flow's real terminal
-    decision states rather than invented.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal["openadapt.human-decision-receipt/v1"] = (
-        "openadapt.human-decision-receipt/v1"
-    )
-    task_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
-    task_revision: int = Field(default=1, ge=1)
-    pause_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
-    capability_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    decision_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    transition_receipt_digest: Optional[str] = Field(
-        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
-    )
-    action: Literal["verify_and_resume", "skip", "teach", "escalate"]
-    state: Literal[
-        "accepted_pending_runner",
-        "completed",
-        "refused",
-        "halted",
-        "expired",
-        "delivery_uncertain",
-        "demonstration_requested",
-        "escalated",
-    ]
-    reason_code: Literal[
-        "pending_runner",
-        "verified_and_resumed",
-        "skipped_and_resumed",
-        "continuation_halted",
-        "revalidation_refused",
-        "expired",
-        "delivery_uncertain",
-        "demonstration_requested",
-        "escalation_recorded",
-    ]
-    report_success: Optional[bool] = None
-    decided_at: str = Field(min_length=20, max_length=40)
-
-
-def decision_receipt(decision: AttendedDecision) -> HumanDecisionReceipt:
-    """Project one engine decision into the closed, PHI-free receipt.
+def decision_receipt(decision: AttendedDecision) -> HumanDecisionReceiptV1:
+    """Project one engine decision into the closed, PHI-free shared receipt.
 
     ``AttendedDecision`` is the durable audit record: it carries a free-text
     message and the operator principal on purpose. Neither may leave the
     runner, so this projection *rebuilds* a closed value instead of redacting
     the audit record field by field.
+
+    The shape is the shared ``openadapt-types`` contract rather than a
+    Flow-local model, so protected content stays structurally unrepresentable
+    on both sides of the wire: every field is an opaque id, a digest, a closed
+    enum, or a pattern-checked RFC 3339 timestamp. The shared type also pins
+    the permitted ``state``/``reason_code`` pairs and forbids
+    ``report_success`` outside ``completed``, which a Flow-local model could
+    not enforce for a remote consumer.
+
+    ``action`` uses the portable vocabulary (``verify_and_resume``), never the
+    engine's internal ``continue``, so a consumer compares it directly against
+    the task's ``allowed_actions``. The receipt is unsigned: the console
+    returns it over loopback, and an unsigned receipt never verifies, so a
+    remote consumer that requires a signature is not weakened by its absence.
     """
     state, reason_code = _RECEIPT_STATE[decision.status]
     if decision.status == "completed" and decision.action == "skip":
         reason_code = "skipped_and_resumed"
-    portable = _ACTION_MAP[decision.action]
-    return HumanDecisionReceipt(
+    return HumanDecisionReceiptV1(
         task_id=f"task_{decision.pause_id}",
         pause_id=decision.pause_id,
         capability_digest=decision.capability_digest,
         request_digest=decision.request_digest,
         decision_digest=_sha256(decision.model_dump(mode="json")),
         transition_receipt_digest=decision.transition_receipt_digest,
-        action=portable,  # type: ignore[arg-type]
+        action=_ACTION_MAP[decision.action],  # type: ignore[arg-type]
         state=state,  # type: ignore[arg-type]
         reason_code=reason_code,  # type: ignore[arg-type]
         report_success=decision.report_success,
@@ -487,10 +445,19 @@ def decision_detail(run_dir: Path, item: AttentionItem) -> dict[str, Any]:
 
 
 def _sha256(payload: dict[str, Any]) -> str:
+    """Digest one payload under the normative cross-language canonical form.
+
+    ``ensure_ascii=True`` matches ``openadapt-types``' canonicalization. The
+    remote-projection digests this also feeds are computed over
+    pattern-constrained ASCII values only, so aligning cannot move them (see
+    ``test_remote_binding_digests_are_ascii_canonicalization_invariant``); the
+    receipt's ``decision_digest`` covers the engine's free-text message, which
+    can be non-ASCII, so only that digest is made reproducible by the change.
+    """
     import json
 
     canonical = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 

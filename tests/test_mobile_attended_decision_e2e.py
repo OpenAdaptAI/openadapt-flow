@@ -29,11 +29,12 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from openadapt_types import HumanDecisionReceiptV1
+
 from openadapt_flow.console import data, human_decisions
 from openadapt_flow.console.app import create_app
 from openadapt_flow.console.attention import attention_item
 from openadapt_flow.console.human_decisions import (
-    HumanDecisionReceipt,
     RemoteAttendedActionRequest,
     RemoteDecisionPrincipal,
     RemoteDecisionProjection,
@@ -243,7 +244,7 @@ def test_halt_to_mobile_task_to_verified_continue_returns_a_terminal_receipt(
     # -- the operator completes the fixture, then decides ------------------
     response = _post(client, item, _decision(detail))
     assert response.status_code == 200
-    receipt = HumanDecisionReceipt.model_validate(response.json())
+    receipt = HumanDecisionReceiptV1.model_validate(response.json())
     assert receipt.state == "completed"
     assert receipt.reason_code == "verified_and_resumed"
     assert receipt.action == "verify_and_resume"
@@ -564,7 +565,7 @@ def test_live_state_changing_after_the_displayed_frame_refuses(tmp_path, monkeyp
 
     response = _post(client, item, _decision(detail, key="stale-frame-key-0001"))
     assert response.status_code == 200
-    receipt = HumanDecisionReceipt.model_validate(response.json())
+    receipt = HumanDecisionReceiptV1.model_validate(response.json())
     assert receipt.state == "refused"
     assert receipt.report_success is False
     assert not backend.actions
@@ -596,7 +597,7 @@ def test_uncertain_delivery_is_reported_as_uncertain_and_survives_a_fresh_key(
     # Never a success, never an opaque 500, and never "refused" -- the phone
     # must be told the action may already have happened.
     assert response.status_code == 202
-    receipt = HumanDecisionReceipt.model_validate(response.json())
+    receipt = HumanDecisionReceiptV1.model_validate(response.json())
     assert receipt.state == "delivery_uncertain"
     assert receipt.reason_code == "delivery_uncertain"
     assert receipt.report_success is None
@@ -746,7 +747,7 @@ def test_cloud_safe_schema_rejects_evidence_free_text_and_unknown_fields(
 
     # Every closed envelope on the phone boundary forbids unknown fields.
     for model in (
-        HumanDecisionReceipt,
+        HumanDecisionReceiptV1,
         RemoteDecisionProjection,
         RemoteAttendedActionRequest,
         RemoteDecisionPrincipal,
@@ -770,7 +771,9 @@ def test_the_terminal_receipt_cannot_represent_protected_content(tmp_path):
         report_success=True,
     )
     receipt = decision_receipt(decision)
-    assert set(HumanDecisionReceipt.model_fields) == {
+    # Every exported field is an opaque id, a digest, a closed enum, or a
+    # pattern-checked timestamp. There is no field a free string can ride in.
+    assert set(HumanDecisionReceiptV1.model_fields) == {
         "schema_version",
         "task_id",
         "task_revision",
@@ -784,12 +787,120 @@ def test_the_terminal_receipt_cannot_represent_protected_content(tmp_path):
         "reason_code",
         "report_success",
         "decided_at",
+        "signature_algorithm",
+        "signature",
     }
     body = receipt.model_dump_json()
     _assert_phi_free(body, extra=(str(tmp_path),))
     assert "message" not in body and "operator" not in body
     # The audit record itself is unchanged and still carries the full evidence.
     assert decision.operator == "front-desk"
+
+
+def test_no_receipt_field_can_carry_free_text():
+    """A timestamp-shaped field must not accept 40 characters of prose.
+
+    This is the exact hole a length-only bound leaves open: a contract whose
+    purpose is that protected content is unrepresentable is defeated if any
+    field accepts arbitrary text, whatever it is named.
+    """
+    valid = {
+        "task_id": "task_" + "a" * 32,
+        "pause_id": "a" * 32,
+        "capability_digest": "sha256:" + "b" * 64,
+        "request_digest": "sha256:" + "c" * 64,
+        "decision_digest": "sha256:" + "d" * 64,
+        "action": "verify_and_resume",
+        "state": "completed",
+        "reason_code": "verified_and_resumed",
+        "report_success": True,
+        "decided_at": "2026-07-27T12:00:00+00:00",
+    }
+    assert HumanDecisionReceiptV1.model_validate(valid).decided_at.endswith("+00:00")
+    for smuggled in (
+        "Jane Roe MRN-0001 coverage",
+        "2026-07-27T12:00:00+00:00 Jane",
+        "                    ",
+        HUMAN_INTENT[:40],
+    ):
+        with pytest.raises(ValidationError):
+            HumanDecisionReceiptV1.model_validate({**valid, "decided_at": smuggled})
+    # State and reason are not independent, and only a completed run succeeded.
+    with pytest.raises(ValidationError):
+        HumanDecisionReceiptV1.model_validate({**valid, "reason_code": "expired"})
+    with pytest.raises(ValidationError):
+        HumanDecisionReceiptV1.model_validate(
+            {**valid, "state": "refused", "reason_code": "revalidation_refused"}
+        )
+
+
+def test_every_engine_terminal_state_projects_to_a_permitted_receipt_pair():
+    """Flow's status map must stay inside the shared contract's pair table."""
+    from openadapt_types import HUMAN_DECISION_RECEIPT_REASONS
+
+    from openadapt_flow.runtime.durable.attended import AttendedDecision
+
+    for status, (state, reason) in human_decisions._RECEIPT_STATE.items():
+        assert reason in HUMAN_DECISION_RECEIPT_REASONS[state], status
+        decision = AttendedDecision(
+            pause_id="a" * 32,
+            capability_digest="sha256:" + "b" * 64,
+            request_digest="sha256:" + "c" * 64,
+            idempotency_key="pair-table-key-0001",
+            action="continue",
+            operator="front-desk",
+            status=status,
+            message="engine text that must not be exported",
+            report_success=True if state == "completed" else None,
+        )
+        receipt = decision_receipt(decision)
+        assert receipt.state.value == state
+        assert receipt.reason_code.value == reason
+    # The skip cause is distinguished from the verify cause under one state.
+    skipped = AttendedDecision(
+        pause_id="a" * 32,
+        capability_digest="sha256:" + "b" * 64,
+        request_digest="sha256:" + "c" * 64,
+        idempotency_key="pair-table-key-0002",
+        action="skip",
+        operator="front-desk",
+        status="completed",
+        message="skipped",
+        report_success=True,
+    )
+    assert decision_receipt(skipped).reason_code.value == "skipped_and_resumed"
+
+
+def test_remote_binding_digests_are_ascii_canonicalization_invariant(tmp_path):
+    """Aligning canonicalization must not move the Cloud-verified digests.
+
+    ``_sha256`` now uses the normative ``ensure_ascii=True``. The remote
+    projection's binding and idempotency-scope digests are cross-language
+    contract fields, so prove they are computed over pattern-constrained ASCII
+    only and therefore cannot have shifted.
+    """
+    import json
+
+    _wf, _bundles, runs_root, _bundle, run, _capability = _halt(tmp_path)
+    item = attention_item(runs_root, run)
+    assert item is not None
+    deployment = DeploymentConfig.model_validate(
+        {
+            "human_decisions": {
+                "remote": {
+                    "enabled": True,
+                    "tenant_id": "tenant_exact_001",
+                    "runner_id": "runner_exact_001",
+                }
+            }
+        }
+    )
+    projection = portable_remote_decision_task(run, item, deployment=deployment)
+    exported = projection.model_dump(mode="json")
+    serialized = json.dumps(exported, ensure_ascii=False)
+    assert serialized.isascii(), "a non-ASCII value would make the digests diverge"
+    assert projection.binding_digest.startswith("sha256:")
+    assert projection.idempotency_scope_digest.startswith("sha256:")
 
 
 def test_protected_evidence_is_authorization_scoped_no_store_and_bounded(
@@ -860,7 +971,7 @@ def test_verified_is_impossible_without_the_complete_contract(tmp_path, monkeypa
             client, item, _decision(detail, action=action, key=f"contract-{action}-01")
         )
         assert response.status_code == 200, action
-        receipt = HumanDecisionReceipt.model_validate(response.json())
+        receipt = HumanDecisionReceiptV1.model_validate(response.json())
         assert receipt.state == expected, action
         assert receipt.report_success is not True, action
 

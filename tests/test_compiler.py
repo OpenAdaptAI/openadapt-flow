@@ -1093,7 +1093,10 @@ class TestRiskOverrides:
 
     def test_default_compile_infers_consequential_gestures(self, compiled):
         by_id = {s.id: s for s in compiled["workflow"].steps}
-        assert by_id["step_002"].risk == "irreversible"  # Enter submits
+        # A bare Enter can edit locally or submit, so qualification must review it
+        # instead of the compiler silently choosing either business meaning.
+        assert by_id["step_002"].risk == "reversible"
+        assert by_id["step_002"].risk_review_required is True
         assert by_id["step_003"].risk == "reversible"  # labelled Menu navigation
 
     def test_override_can_lower_inferred_risk(self, compiled, tmp_path):

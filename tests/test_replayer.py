@@ -2207,7 +2207,7 @@ def _coverage_workflow() -> Workflow:
     )
     legacy_unarmed = click_step("s_legacy")  # pre-metric bundle: fields None
     keyboard = Step(
-        id="s_key", intent="press Enter", action=ActionKind.KEY, key="Enter"
+        id="s_key", intent="submit with Enter", action=ActionKind.KEY, key="Enter"
     )
     return Workflow(name="coverage", steps=[armed, unarmed, legacy_unarmed, keyboard])
 

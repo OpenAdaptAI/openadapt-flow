@@ -329,6 +329,7 @@ class FreeRDPBackend:
         self._last_frame_monotonic: Optional[float] = None
         self._last_frame_digest: Optional[bytes] = None
         self._last_session_identity: Optional[str] = None
+        self._actuation_frame_png: Optional[bytes] = None
         self._actuation_lease_state = _LEASE_NONE
         # Keep capture/geometry validation and a complete input gesture in one
         # critical section. A concurrent screenshot may otherwise replace the
@@ -370,7 +371,7 @@ class FreeRDPBackend:
             self._last_frame_digest = self._canonical_frame_digest(img)
             self._last_session_identity = self._session_identity_from_frame(png)
             if self._actuation_lease_state == _LEASE_ARMED:
-                self._actuation_lease_state = _LEASE_INVALIDATED
+                self._invalidate_actuation_lease()
             return png
 
     def acquire_actuation_frame(self) -> bytes:
@@ -384,7 +385,7 @@ class FreeRDPBackend:
         with self._input_lock:
             png = self.screenshot()
             if self._readiness_probe is not None and not self._readiness_probe(png):
-                self._actuation_lease_state = _LEASE_INVALIDATED
+                self._invalidate_actuation_lease()
                 raise RuntimeError(
                     "RDP readiness probe rejected the fresh actuation frame "
                     "(locked, disconnected, or unexpected session)"
@@ -393,11 +394,12 @@ class FreeRDPBackend:
                 self._session_identity_configured
                 and self._last_session_identity is None
             ):
-                self._actuation_lease_state = _LEASE_INVALIDATED
+                self._invalidate_actuation_lease()
                 raise RuntimeError(
                     "configured RDP session identity is unavailable on the "
                     "fresh actuation frame"
                 )
+            self._actuation_frame_png = png
             self._actuation_lease_state = _LEASE_ARMED
             return png
 
@@ -428,7 +430,11 @@ class FreeRDPBackend:
             png = self._fresh_identity_frame()
             if png is None:
                 return None
-            observed = self._session_identity_from_frame(png)
+            observed = (
+                self._last_session_identity
+                if self._actuation_lease_state == _LEASE_ARMED
+                else self._session_identity_from_frame(png)
+            )
             if observed is None:
                 self._invalidate_actuation_lease()
                 return None
@@ -642,7 +648,9 @@ class FreeRDPBackend:
 
     def close(self) -> None:
         """Disconnect the underlying transport (idempotent)."""
-        self._transport.disconnect()
+        with self._input_lock:
+            self._invalidate_actuation_lease()
+            self._transport.disconnect()
 
     # -- internals -----------------------------------------------------------
 
@@ -698,7 +706,7 @@ class FreeRDPBackend:
             if self._readiness_probe is not None and not self._readiness_probe(
                 current_png
             ):
-                self._actuation_lease_state = _LEASE_INVALIDATED
+                self._invalidate_actuation_lease()
                 raise RuntimeError(
                     "RDP readiness probe rejected the current frame "
                     "(locked, disconnected, or unexpected session); refusing input"
@@ -716,13 +724,14 @@ class FreeRDPBackend:
             if self._actuation_lease_state == _LEASE_ARMED:
                 digest = self._canonical_frame_digest(current_img)
                 if self._last_frame_digest is None or digest != self._last_frame_digest:
-                    self._actuation_lease_state = _LEASE_INVALIDATED
+                    self._invalidate_actuation_lease()
                     raise RuntimeError(
                         "RDP frame content changed after target and identity "
                         "resolution; refusing input and requiring a fresh "
                         "actuation lease"
                     )
                 self._actuation_lease_state = _LEASE_NONE
+                self._actuation_frame_png = None
         # framebuffer/readiness work can block on the network; recheck at the
         # last common point before an input edge.
         self._assert_frame_fresh()
@@ -737,12 +746,18 @@ class FreeRDPBackend:
     def _invalidate_actuation_lease(self) -> None:
         if self._actuation_lease_state == _LEASE_ARMED:
             self._actuation_lease_state = _LEASE_INVALIDATED
+        self._actuation_frame_png = None
 
     def _fresh_identity_frame(self) -> Optional[bytes]:
         """Passively capture a fresh framebuffer without replacing a valid lease."""
 
         if self._actuation_lease_state == _LEASE_INVALIDATED:
             return None
+        if self._actuation_lease_state == _LEASE_ARMED:
+            if self._actuation_frame_png is None:
+                self._invalidate_actuation_lease()
+                return None
+            return self._actuation_frame_png
         try:
             frame, w, h = self._transport.framebuffer()
             current = (int(w), int(h))

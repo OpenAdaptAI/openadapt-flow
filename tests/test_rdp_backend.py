@@ -133,6 +133,7 @@ class FakeRDPTransport:
         self.state = 0
         self.connected = False
         self.disconnects = 0
+        self.framebuffer_calls = 0
         self.pointer_events: list[tuple[int, int, str, bool]] = []
         self.key_events: list[tuple[str, bool]] = []
         self.wheel_events: list[tuple[int, int]] = []
@@ -147,6 +148,7 @@ class FakeRDPTransport:
         self.disconnects += 1
 
     def framebuffer(self):
+        self.framebuffer_calls += 1
         img = self.screens[self.state]
         if self.as_raw_bytes:
             return img.tobytes(), img.width, img.height
@@ -344,8 +346,13 @@ def test_live_context_markers_preserve_unchanged_actuation_lease() -> None:
         ).hexdigest()
     )
     assert NOTE_VALUE not in repr((application, workflow_state, session))
+    # All identity votes are bound to the exact frame acquired for target
+    # resolution. They must not recapture independently and invalidate the
+    # lease on harmless remote rendering between sequential observers.
+    assert transport.framebuffer_calls == 1
 
     backend.click(*BUTTON_CENTER)
+    assert transport.framebuffer_calls == 2
     assert transport.pointer_events
 
 
@@ -364,7 +371,7 @@ def test_absent_rdp_application_marker_invalidates_actuation_lease() -> None:
     assert transport.pointer_events == []
 
 
-def test_rdp_context_observation_refuses_mutated_frame_before_input() -> None:
+def test_rdp_context_observation_is_bound_to_frame_then_refuses_mutated_input() -> None:
     transport = FakeRDPTransport(app_screens())
     backend = FreeRDPBackend(
         transport,
@@ -376,8 +383,8 @@ def test_rdp_context_observation_refuses_mutated_frame_before_input() -> None:
     changed.putpixel((0, 0), (244, 245, 245))
     transport.screens[0] = changed
 
-    assert backend.workflow_state_identity() is None
-    with pytest.raises(RuntimeError, match="invalidated"):
+    assert backend.workflow_state_identity() == "Ready to submit"
+    with pytest.raises(RuntimeError, match="frame content changed"):
         backend.click(*BUTTON_CENTER)
     assert transport.pointer_events == []
 
@@ -393,7 +400,27 @@ def test_rdp_live_session_digest_change_invalidates_before_input() -> None:
     assert backend.session_identity() == "a" * 64
 
     live["digest"] = "b" * 64
-    assert backend.session_identity() is None
+    # The identity vote remains bound to the acquired frame. The independent
+    # last-common-point check observes the changed live session and refuses
+    # before emitting input.
+    assert backend.session_identity() == "a" * 64
+    with pytest.raises(RuntimeError, match="session identity changed"):
+        backend.click(*BUTTON_CENTER)
+    assert transport.pointer_events == []
+
+
+def test_close_invalidates_retained_actuation_identity_frame() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(
+        transport,
+        application_marker="Accuro",
+        application_marker_probe=lambda _png: True,
+    )
+    backend.acquire_actuation_frame()
+
+    backend.close()
+
+    assert backend.application_identity() is None
     with pytest.raises(RuntimeError, match="invalidated"):
         backend.click(*BUTTON_CENTER)
     assert transport.pointer_events == []

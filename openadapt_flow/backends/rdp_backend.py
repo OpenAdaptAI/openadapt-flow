@@ -572,27 +572,7 @@ class FreeRDPBackend:
         with self._input_lock:
             self._focus_input_surface()
             self._ensure_input_ready()
-            supports_bulk = getattr(self._transport, "supports_bulk_text", None)
-            bulk_type = getattr(self._transport, "bulk_type_text", None)
-            if (
-                callable(supports_bulk)
-                and callable(bulk_type)
-                and bool(supports_bulk(text))
-            ):
-                try:
-                    bulk_type(text)
-                except Exception as exc:
-                    raise ActionDeliveryUncertain(
-                        operation="rdp_bulk_type_text",
-                        native=False,
-                        cause_type=type(exc).__name__,
-                    ) from exc
-                return
-            for ch in text:
-                try:
-                    self._transport.key(ch, True)
-                finally:
-                    self._release_keys((ch,))
+            self._dispatch_text_locked(text)
 
     def press(self, key: str) -> None:
         """Press a key or chord, e.g. ``'Enter'`` or ``'ControlOrMeta+a'``.
@@ -612,47 +592,116 @@ class FreeRDPBackend:
         """
         parts = normalize_chord(key)
         with self._input_lock:
-            # Printable characters sent through Aardwolf's Unicode path cannot
-            # participate in physical shortcuts (Win+R, Ctrl+A, and similar).
-            # A transport may therefore expose a separate physical-key seam
-            # for press/chord only. Plain transports retain the original key()
-            # behavior, and type_text() always remains on key()/Unicode.
-            physical_key = getattr(self._transport, "physical_key", None)
-            supports_physical_key = getattr(
-                self._transport, "supports_physical_key", None
-            )
-            if callable(physical_key) and callable(supports_physical_key):
-                unsupported = [
-                    part for part in parts if not supports_physical_key(part)
-                ]
-                if unsupported:
-                    raise ValueError(
-                        "RDP transport cannot safely emit physical chord keys: "
-                        f"{unsupported!r}"
-                    )
-                sender = physical_key
-            else:
-                sender = self._transport.key
             self._focus_input_surface()
             self._ensure_input_ready()
-            pressed: list[str] = []
-            try:
-                for part in parts:
-                    pressed.append(part)
-                    sender(part, True)
-            finally:
-                self._release_keys(reversed(pressed), sender=sender)
+            self._dispatch_key_locked(parts)
 
-    def _release_keys(self, parts, *, sender=None) -> None:
+    def select_option(self, text: str, commit_key: str) -> None:
+        """Type and commit one demonstrated option under a single input lock.
+
+        This is delivery, not verification. The runtime maps the qualified
+        readback band onto a freshly re-resolved live field after this method
+        returns. Once text dispatch begins, any error is delivery-uncertain:
+        retrying could choose or commit a different option.
+        """
+
+        if not text:
+            raise ValueError("RDP option text must be non-empty")
+        if commit_key not in {"Enter", "Tab"}:
+            raise ValueError("RDP option commit key must be Enter or Tab")
+        parts = normalize_chord(commit_key)
+        with self._input_lock:
+            self._focus_input_surface()
+            self._ensure_input_ready()
+            try:
+                self._dispatch_text_locked(text, strict_release=True)
+                self._dispatch_key_locked(parts, strict_release=True)
+            except ActionDeliveryUncertain:
+                raise
+            except Exception as exc:
+                raise ActionDeliveryUncertain(
+                    operation="rdp_select_option",
+                    native=False,
+                    cause_type=type(exc).__name__,
+                ) from exc
+
+    def _dispatch_text_locked(self, text: str, *, strict_release: bool = False) -> None:
+        """Dispatch text while ``_input_lock`` and readiness are held."""
+
+        supports_bulk = getattr(self._transport, "supports_bulk_text", None)
+        bulk_type = getattr(self._transport, "bulk_type_text", None)
+        if (
+            callable(supports_bulk)
+            and callable(bulk_type)
+            and bool(supports_bulk(text))
+        ):
+            try:
+                bulk_type(text)
+            except Exception as exc:
+                raise ActionDeliveryUncertain(
+                    operation="rdp_bulk_type_text",
+                    native=False,
+                    cause_type=type(exc).__name__,
+                ) from exc
+            return
+        for ch in text:
+            dispatch_error: Optional[Exception] = None
+            try:
+                self._transport.key(ch, True)
+            except Exception as exc:  # noqa: BLE001 - transport boundary
+                dispatch_error = exc
+            release_error = self._release_keys((ch,))
+            if dispatch_error is not None:
+                raise dispatch_error
+            if strict_release and release_error is not None:
+                raise release_error
+
+    def _dispatch_key_locked(
+        self, parts: list[str], *, strict_release: bool = False
+    ) -> None:
+        """Dispatch a normalized key/chord while the input lock is held."""
+
+        # Printable characters sent through Aardwolf's Unicode path cannot
+        # participate in physical shortcuts (Win+R, Ctrl+A, and similar).
+        physical_key = getattr(self._transport, "physical_key", None)
+        supports_physical_key = getattr(self._transport, "supports_physical_key", None)
+        if callable(physical_key) and callable(supports_physical_key):
+            unsupported = [part for part in parts if not supports_physical_key(part)]
+            if unsupported:
+                raise ValueError(
+                    "RDP transport cannot safely emit physical chord keys: "
+                    f"{unsupported!r}"
+                )
+            sender = physical_key
+        else:
+            sender = self._transport.key
+        pressed: list[str] = []
+        dispatch_error: Optional[Exception] = None
+        try:
+            for part in parts:
+                pressed.append(part)
+                sender(part, True)
+        except Exception as exc:  # noqa: BLE001 - transport boundary
+            dispatch_error = exc
+        release_error = self._release_keys(reversed(pressed), sender=sender)
+        if dispatch_error is not None:
+            raise dispatch_error
+        if strict_release and release_error is not None:
+            raise release_error
+
+    def _release_keys(self, parts, *, sender=None) -> Optional[Exception]:
         """Release each key token, best-effort: one failing release never
         blocks the others and never masks an in-flight exception."""
         if sender is None:
             sender = self._transport.key
+        first_error: Optional[Exception] = None
         for part in parts:
             try:
                 sender(part, False)
-            except Exception:  # noqa: BLE001 - release is best-effort teardown
-                pass
+            except Exception as exc:  # noqa: BLE001 - release boundary
+                if first_error is None:
+                    first_error = exc
+        return first_error
 
     def scroll(self, dx: int, dy: int) -> None:
         """Dispatch a wheel gesture by ``(dx, dy)`` pixels.

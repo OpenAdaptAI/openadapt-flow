@@ -776,6 +776,104 @@ def test_bulk_text_preserves_native_select_typeahead_until_enter() -> None:
     assert transport.focus_calls == 2
 
 
+def test_select_option_holds_one_focus_and_input_lease_through_commit() -> None:
+    class _TimedSelectTransport(_BulkTextTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.highlighted: str | None = None
+            self.selected = "Unassigned"
+
+        def bulk_type_text(self, text: str) -> None:
+            super().bulk_type_text(text)
+            self.highlighted = text
+
+        def key(self, keysym_or_char: str, down: bool) -> None:
+            super().key(keysym_or_char, down)
+            if down and keysym_or_char == "enter" and self.highlighted is not None:
+                self.selected = self.highlighted
+
+    transport = _TimedSelectTransport()
+    backend = FreeRDPBackend(transport)
+
+    backend.select_option("Massachusetts", "Enter")
+
+    assert transport.selected == "Massachusetts"
+    assert transport.focus_calls == 1
+    assert transport.events == ["focus", "bulk"]
+    assert transport.key_events == [("enter", True), ("enter", False)]
+
+
+def test_select_option_failure_after_text_is_uncertain_and_never_retries() -> None:
+    class _CommitFailureTransport(_BulkTextTransport):
+        def key(self, keysym_or_char: str, down: bool) -> None:
+            super().key(keysym_or_char, down)
+            if down and keysym_or_char == "enter":
+                raise TransportError("commit failed after dispatch")
+
+    transport = _CommitFailureTransport()
+    backend = FreeRDPBackend(transport)
+
+    with pytest.raises(ActionDeliveryUncertain) as raised:
+        backend.select_option("Massachusetts", "Enter")
+
+    assert raised.value.operation == "rdp_select_option"
+    assert transport.bulk_calls == ["Massachusetts"]
+    assert transport.focus_calls == 1
+    # The best-effort release is allowed; a second down edge is not.
+    assert transport.key_events.count(("enter", True)) == 1
+
+
+def test_select_option_revalidates_frame_after_restoring_outer_focus() -> None:
+    transport = _BulkTextTransport()
+    backend = FreeRDPBackend(transport, readiness_probe=lambda _png: True)
+    backend.acquire_actuation_frame()
+    transport.change_frame_on_focus = True
+
+    with pytest.raises(RuntimeError, match="frame content changed"):
+        backend.select_option("Massachusetts", "Enter")
+
+    assert transport.focus_calls == 1
+    assert transport.bulk_calls == []
+    assert transport.key_events == []
+
+
+def test_select_option_commit_key_up_failure_is_delivery_uncertain() -> None:
+    class _CommitReleaseFailureTransport(_BulkTextTransport):
+        def key(self, keysym_or_char: str, down: bool) -> None:
+            super().key(keysym_or_char, down)
+            if not down and keysym_or_char == "enter":
+                raise TransportError("commit key-up failed")
+
+    transport = _CommitReleaseFailureTransport()
+    backend = FreeRDPBackend(transport)
+
+    with pytest.raises(ActionDeliveryUncertain) as raised:
+        backend.select_option("Massachusetts", "Enter")
+
+    assert raised.value.operation == "rdp_select_option"
+    assert transport.key_events.count(("enter", True)) == 1
+    assert transport.key_events.count(("enter", False)) == 1
+
+
+def test_select_option_text_key_up_failure_is_delivery_uncertain() -> None:
+    class _TextReleaseFailureTransport(FakeRDPTransport):
+        def key(self, keysym_or_char: str, down: bool) -> None:
+            super().key(keysym_or_char, down)
+            if not down and keysym_or_char == "M":
+                raise TransportError("text key-up failed")
+
+    transport = _TextReleaseFailureTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+
+    with pytest.raises(ActionDeliveryUncertain) as raised:
+        backend.select_option("Massachusetts", "Enter")
+
+    assert raised.value.operation == "rdp_select_option"
+    assert transport.key_events.count(("M", True)) == 1
+    assert transport.key_events.count(("M", False)) == 1
+    assert ("enter", True) not in transport.key_events
+
+
 # -- press ---------------------------------------------------------------------
 
 

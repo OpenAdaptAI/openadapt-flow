@@ -226,9 +226,11 @@ def fault_fixture(
 @pytest.mark.parametrize(
     ("fault", "expected_transaction"),
     [
-        # The server rejects a write the UI already painted as saved. Nothing
-        # persisted, and the verifier establishes that absence.
-        ("optimistic", "HALTED_BEFORE_EFFECT"),
+        # The server rejects a write the UI already painted as saved. The test's
+        # external DB oracle can see that nothing persisted, but the runtime did
+        # not retain a verifier-established absence after dispatch. It therefore
+        # requires reconciliation rather than asserting no business effect.
+        ("optimistic", "RECONCILIATION_REQUIRED"),
         # The row persists but the note field is dropped. Something landed, so
         # absence may NOT be claimed: this needs reconciliation.
         ("partial", "RECONCILIATION_REQUIRED"),

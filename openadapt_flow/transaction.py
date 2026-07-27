@@ -152,22 +152,36 @@ def _is_consequential_result(result: StepResult) -> bool:
     :func:`openadapt_flow.run_gate.is_consequential`.  ``classify_transaction_outcome``
     deliberately takes only a ``RunReport`` (it is a leaf and its signature is
     public), so consequentiality is derived from typed fields the runtime
-    already stamped on the result: the compiled ``risk`` label (the replayer
-    copies ``step.risk`` onto every ``StepResult``, so ``irreversible`` here is
-    the same verdict the run gate uses) plus any declared, approved, or
-    attempted system-of-record effect.  A reversible step that declared no
-    effect cannot leave an unreconciled write, so it never blocks an absence
-    claim.
+    already stamped on the result: the compiled ``risk`` label, an unresolved
+    risk-review requirement (the action may be consequential until reviewed),
+    plus any declared, approved, or attempted system-of-record effect. A
+    reviewed reversible step that declared no effect cannot leave an
+    unreconciled write, so it never blocks an absence claim.
     """
 
     return (
         result.risk == "irreversible"
+        or result.risk_review_required
         or bool(result.effect_contract_hashes)
         or bool(result.effect_evidence)
         or result.effect_verified is not None
         or result.effect_approved_unverified
         or result.delivery_uncertainty is not None
     )
+
+
+def _effect_evidence_has_exact_coverage(result: StepResult) -> bool:
+    """Whether retained evidence accounts for every declared effect exactly once."""
+
+    if not result.effect_evidence:
+        return False
+    from collections import Counter
+
+    declared = Counter(result.effect_contract_hashes)
+    observed = Counter(
+        evidence.effect_contract_hash for evidence in result.effect_evidence
+    )
+    return bool(declared) and declared == observed
 
 
 def _effect_absence_proven(result: StepResult) -> bool:
@@ -198,13 +212,7 @@ def _effect_absence_proven(result: StepResult) -> bool:
         # settle two declared contracts, and duplicate evidence must not hide a
         # missing contract. Any retained known-present/conflicting reading
         # dominates a contradictory non-delivery flag.
-        from collections import Counter
-
-        declared = Counter(result.effect_contract_hashes)
-        observed = Counter(
-            evidence.effect_contract_hash for evidence in result.effect_evidence
-        )
-        if not declared or declared != observed:
+        if not _effect_evidence_has_exact_coverage(result):
             return False
         return all(
             evidence.final_verdict == "refuted" and evidence.observed_effect == "absent"
@@ -213,13 +221,54 @@ def _effect_absence_proven(result: StepResult) -> bool:
     return _attempt_state(result) == "not_actuated"
 
 
+def _effect_state_fully_accounted(result: StepResult) -> bool:
+    """Whether a stopped step has exact, settled effect-state evidence.
+
+    This is broader than absence: a completed compensation may leave the
+    intended effect present while removing only a duplicate/collateral write.
+    ``ROLLED_BACK`` is therefore valid with exact CONFIRMED evidence, but never
+    when one declared effect is missing from the retained evidence multiset.
+    """
+
+    if _effect_absence_proven(result):
+        return True
+    if not _effect_evidence_has_exact_coverage(result):
+        return False
+    return all(
+        evidence.final_verdict == "confirmed"
+        or (
+            evidence.final_verdict == "refuted" and evidence.observed_effect == "absent"
+        )
+        for evidence in result.effect_evidence
+    )
+
+
+def _rolled_back_effects_fully_accounted(report: RunReport) -> bool:
+    """Require exact settled coverage before accepting a rollback projection."""
+
+    has_completed_compensation = any(
+        evidence.reconciliation_completed and evidence.reconciliation_actions > 0
+        for result in report.results
+        for evidence in result.effect_evidence
+    )
+    if not has_completed_compensation:
+        # Preserve read compatibility for legacy reports whose coarse outcome
+        # predates structured compensation evidence. They carry no contradictory
+        # typed state to overrule; new reports always retain the evidence.
+        return not any(_is_consequential_result(result) for result in report.results)
+    return all(
+        not _is_consequential_result(result) or _effect_state_fully_accounted(result)
+        for result in report.results
+    )
+
+
 def _lacks_effect_absence_proof(report: RunReport) -> bool:
     """True when any consequential step is not positively proven effect-free.
 
     Guards every terminal outcome that asserts an absence
     (``HALTED_BEFORE_EFFECT``, ``REJECTED_POLICY``, ``CANCELED``,
-    ``FAILED_PLATFORM``).  A single consequential step whose effect is
-    A single consequential step without absence proof is enough: the customer
+    ``FAILED_PLATFORM``). A single consequential step without absence proof is
+    enough: the customer
     would otherwise be told to reconcile nothing despite a confirmed, possible,
     or incompletely covered mutation in their system of record.
 
@@ -271,14 +320,19 @@ def classify_transaction_outcome(report: RunReport) -> TransactionOutcome:
     coarse = report.execution_outcome
     if coarse == "VERIFIED":
         return TransactionOutcome.VERIFIED
-    if coarse == "ROLLED_BACK":
-        return TransactionOutcome.ROLLED_BACK
 
     # Uncertain / conflicting delivery or persistence dominates every remaining
     # coarse bucket. This is where #250's no-blind-retry behavior surfaces as a
     # first-class terminal outcome.
     if _has_unresolved_uncertainty(report):
         return TransactionOutcome.RECONCILIATION_REQUIRED
+
+    if coarse == "ROLLED_BACK":
+        return (
+            TransactionOutcome.ROLLED_BACK
+            if _rolled_back_effects_fully_accounted(report)
+            else TransactionOutcome.RECONCILIATION_REQUIRED
+        )
 
     if coarse == "COMPLETED_UNVERIFIED":
         return TransactionOutcome.COMPLETED_UNVERIFIED

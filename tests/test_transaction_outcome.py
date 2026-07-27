@@ -79,6 +79,32 @@ def test_rolled_back_maps_to_rolled_back():
     assert classify_transaction_outcome(report) is TransactionOutcome.ROLLED_BACK
 
 
+def test_rolled_back_requires_exact_settled_effect_coverage():
+    compensated = EffectVerificationEvidence(
+        effect_contract_hash=_HASH,
+        substrate="test",
+        initial_verdict="refuted",
+        final_verdict="confirmed",
+        observed_effect="present",
+        reconciliation_completed=True,
+        reconciliation_actions=1,
+    )
+    report = _report(
+        "ROLLED_BACK",
+        [
+            _consequential(
+                delivery_attempted=True,
+                effect_contract_hashes=[_HASH, _OTHER_HASH],
+                effect_evidence=[compensated],
+            )
+        ],
+    )
+    assert (
+        classify_transaction_outcome(report)
+        is TransactionOutcome.RECONCILIATION_REQUIRED
+    )
+
+
 def test_halted_before_effect_requires_verifier_established_absence():
     # A governed halt where the verifier proved NO record was written.
     result = StepResult(
@@ -505,6 +531,26 @@ def test_reversible_step_never_blocks_an_absence_claim():
     )
 
 
+def test_delivered_ambiguous_risk_never_claims_effect_absence():
+    report = _report(
+        "HALTED",
+        [
+            StepResult(
+                step_id="drag",
+                intent="move item",
+                ok=True,
+                risk_review_required=True,
+                delivery_attempted=True,
+            ),
+            StepResult(step_id="tail", intent="halt", ok=False),
+        ],
+    )
+    assert (
+        classify_transaction_outcome(report)
+        is TransactionOutcome.RECONCILIATION_REQUIRED
+    )
+
+
 def test_unproven_absence_also_blocks_rejected_policy():
     # REJECTED_POLICY asserts "refused before any business effect" too. A later
     # policy refusal cannot retroactively unwrite an earlier delivered step.
@@ -801,6 +847,27 @@ class _PathActuator:
         return ApiActuationResult(status=self.status, reason=self.status.value)
 
 
+class _FailingPathVerifier(_PathVerifier):
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+
+    def capture_pre_state(self):
+        if self.stage == "pre_state":
+            raise RuntimeError("pre-state connector failed")
+        return super().capture_pre_state()
+
+    def verify(self, effect, before):
+        if self.stage == "verify":
+            raise RuntimeError("verification connector failed")
+        return super().verify(effect, before)
+
+
+class _RaisingPathActuator:
+    def actuate(self, binding, params):
+        del binding, params
+        raise RuntimeError("actuator failed")
+
+
 def _path_effect(name: str) -> Effect:
     return Effect(
         kind=EffectKind.RECORD_WRITTEN,
@@ -862,6 +929,38 @@ def test_effect_hashes_track_only_the_responsible_actuation_path(
     assert abandoned.contract_hash() not in result.effect_contract_hashes
     assert result.delivery_attempted is True
     assert backend.actions == actions
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_attempted", "expected_outcome"),
+    [
+        ("pre_state", False, "HALTED_BEFORE_EFFECT"),
+        ("actuate", True, "RECONCILIATION_REQUIRED"),
+        ("verify", True, "RECONCILIATION_REQUIRED"),
+    ],
+)
+def test_api_boundary_exceptions_produce_a_fail_closed_report(
+    tmp_path, stage, expected_attempted, expected_outcome
+):
+    workflow, _gui_effect, _api_effect = _api_or_gui_workflow()
+    verifier = _FailingPathVerifier(stage)
+    actuator = (
+        _RaisingPathActuator()
+        if stage == "actuate"
+        else _PathActuator(ActuationStatus.ACTUATED)
+    )
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=verifier,
+        api_actuator=actuator,
+    ).run(workflow, bundle_dir=tmp_path / "bundle", run_dir=tmp_path / "run")
+
+    assert backend.actions == []
+    assert report.results[0].delivery_attempted is expected_attempted
+    assert report.transaction_outcome == expected_outcome
 
 
 # -- idempotency: duplicate suppression, no re-actuation ---------------------

@@ -2022,6 +2022,13 @@ class Replayer:
                     or (step.intent if step is not None else ""),
                     ok=True,
                     skipped=checkpoint.skipped,
+                    risk=step.risk if step is not None else "reversible",
+                    risk_explanation=(
+                        step.risk_explanation if step is not None else None
+                    ),
+                    risk_review_required=(
+                        step.risk_review_required if step is not None else False
+                    ),
                     effect_verified=True if verified_keys else None,
                     effect_approved_unverified=bool(unverified_keys),
                     effect_contract_hashes=verified_keys or unverified_keys,
@@ -3716,7 +3723,21 @@ class Replayer:
         # Snapshot the system of record BEFORE the write so the verifier counts
         # only what THIS actuation wrote (delta / at-most-once / collateral
         # loss), then actuate exactly once.
-        before = self.effect_verifier.capture_pre_state()
+        try:
+            before = self.effect_verifier.capture_pre_state()
+        except Exception as exc:  # noqa: BLE001 - deployment verifier boundary
+            result.effect_verified = False
+            result.effect_results.append(
+                "[api] effect pre-state capture failed before request delivery "
+                f"({type(exc).__name__}); API actuation was not attempted"
+            )
+            result.ok = False
+            result.error = (
+                f"Step '{step.id}' ({step.intent}) could not capture the "
+                "system-of-record pre-state before API actuation; refusing to "
+                "send the request — run aborted"
+            )
+            return True
         refusal = self._profile_effect_tier_refusal(
             workflow,
             effects,
@@ -3741,7 +3762,26 @@ class Replayer:
         # call because an exception/timeout may occur after the request left the
         # process but before the actuator can return a receipt-like outcome.
         result.delivery_attempted = True
-        outcome = self.api_actuator.actuate(binding, params)
+        try:
+            outcome = self.api_actuator.actuate(binding, params)
+        except Exception as exc:  # noqa: BLE001 - external actuator boundary
+            # The actuator contract is no-throw, but a deployment adapter can
+            # still violate it. The delivery boundary was crossed immediately
+            # before the call, so fail toward an attempted/unknown write and
+            # never fall through to the GUI.
+            result.actuation = "api"
+            result.effect_verified = False
+            result.effect_results.append(
+                "[api] actuator raised after delivery may have begun "
+                f"({type(exc).__name__}); outcome requires reconciliation"
+            )
+            result.ok = False
+            result.error = (
+                f"API actuation for step '{step.id}' ({step.intent}) raised "
+                f"{type(exc).__name__} after delivery may have begun; refusing "
+                "GUI fallback or blind retry — run aborted"
+            )
+            return True
 
         from openadapt_flow.runtime.actuators import ActuationStatus
 
@@ -3780,7 +3820,19 @@ class Replayer:
             current_step=overlay_current,
             total_steps=overlay_total,
         )
-        error = self._verify_effects(step, before, result, effects=effects)
+        try:
+            error = self._verify_effects(step, before, result, effects=effects)
+        except Exception as exc:  # noqa: BLE001 - deployment verifier boundary
+            result.effect_verified = False
+            result.effect_results.append(
+                "[api] effect verification raised after API delivery "
+                f"({type(exc).__name__}); outcome requires reconciliation"
+            )
+            error = (
+                f"System-of-record verification for API step '{step.id}' "
+                f"({step.intent}) raised {type(exc).__name__} after delivery; "
+                "the write may have landed — run aborted"
+            )
         result.ok = error is None
         result.error = error
         return True

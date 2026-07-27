@@ -1904,8 +1904,9 @@ def compile_recording(
                     else None
                 )
                 demonstrated = step.text
+                previous_anchor = previous.anchor
                 target_region = (
-                    previous.anchor.region if previous.anchor is not None else None
+                    previous_anchor.region if previous_anchor is not None else None
                 )
                 selection_region = (
                     _selection_readback_region(key_after, target_region)
@@ -1914,6 +1915,7 @@ def compile_recording(
                 )
                 if (
                     previous.action is ActionKind.CLICK
+                    and previous_anchor is not None
                     and step.action is ActionKind.TYPE
                     and not step.secret
                     and key_step.action is ActionKind.KEY
@@ -1956,7 +1958,7 @@ def compile_recording(
                             ),
                             "selection_commit_key": commit,
                             "selection_region": selection_region,
-                            "anchor": previous.anchor.model_copy(deep=True),
+                            "anchor": previous_anchor.model_copy(deep=True),
                             "identity_armed": previous.identity_armed,
                             "identity_unarmed_reason": (
                                 previous.identity_unarmed_reason

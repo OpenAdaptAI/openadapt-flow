@@ -375,6 +375,22 @@ def test_api_effect_cannot_hide_behind_weaker_step_effect() -> None:
         )
 
 
+def test_binding_only_effect_cannot_cover_gui_fallback() -> None:
+    workflow = _workflow()
+    effect = workflow.steps[0].effects.pop()
+    workflow.steps[0].api_binding = ApiBinding(
+        url_template="/api/records",
+        effects=[effect],
+    )
+    init_project(workflow, environment=_environment())
+
+    report = evaluate_qualification(workflow)
+
+    assert QualificationRefusalCode.EFFECT_CONTRACT_MISSING in {
+        refusal.code for refusal in report.refusals
+    }
+
+
 def test_deserialized_risk_down_classification_cannot_bypass_coverage() -> None:
     workflow = _workflow()
     init_project(workflow, environment=_environment(), minimum_effect_tier=4)

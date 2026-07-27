@@ -1196,7 +1196,7 @@ class Replayer:
             anchorless_submission = step.action in (
                 ActionKind.KEY,
                 ActionKind.HOTKEY,
-            ) and is_consequential(step)
+            ) and is_consequential(step, workflow)
             if step.anchor is None and not anchorless_submission:
                 continue
             report.identity_applicable_steps += 1
@@ -4103,9 +4103,9 @@ class Replayer:
             result.safety_halt = True
         return error
 
-    def _step_is_consequential(self, step: Step) -> bool:
+    def _step_is_consequential(self, step: Step, workflow: Workflow) -> bool:
         authorization = self.governed_authorization
-        return is_consequential(step) or (
+        return is_consequential(step, workflow) or (
             authorization is not None
             and authorization.requires_verified_identity(step.id)
         )
@@ -4137,7 +4137,7 @@ class Replayer:
         consequential action. Browser/native surfaces use the same pre-delivery
         refresh when identity is part of the action contract.
         """
-        return self._step_is_consequential(step) and (
+        return self._step_is_consequential(step, workflow) and (
             isinstance(self.backend, RemoteActuationBackend)
             or self._step_has_identity_contract(step, workflow)
         )
@@ -4160,7 +4160,7 @@ class Replayer:
                 ActionKind.DRAG,
                 ActionKind.TYPE,
             )
-            and self._step_is_consequential(step)
+            and self._step_is_consequential(step, workflow)
             and self._step_has_identity_contract(step, workflow)
         )
 
@@ -4171,7 +4171,7 @@ class Replayer:
 
         return (
             step.action in (ActionKind.KEY, ActionKind.HOTKEY, ActionKind.TYPE)
-            and self._step_is_consequential(step)
+            and self._step_is_consequential(step, workflow)
             and self._step_has_identity_contract(step, workflow)
         )
 
@@ -4327,7 +4327,7 @@ class Replayer:
         )
         focused_element_backend = (
             arm_keyboard
-            and self._step_is_consequential(step)
+            and self._step_is_consequential(step, workflow)
             and isinstance(self.backend, RemoteActuationBackend)
             and isinstance(self.backend, FocusedElementActuationLeaseBackend)
         )

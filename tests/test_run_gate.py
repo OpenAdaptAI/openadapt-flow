@@ -33,6 +33,14 @@ from openadapt_flow.ir import (
     StructuralLocator,
     Workflow,
 )
+from openadapt_flow.qualification import (
+    ActionRiskClassification,
+    EnvironmentBoundary,
+    QualificationCertification,
+    init_project,
+    set_action_classification,
+    workflow_contract_sha256,
+)
 from openadapt_flow.run_gate import (
     GATE_APPROVAL,
     GATE_CERTIFICATION,
@@ -51,27 +59,56 @@ _KEY = "correct horse battery staple"
 _PC = [Postcondition(kind=PostconditionKind.TEXT_PRESENT, text="Saved OK")]
 
 
-def test_qualified_risk_override_is_authoritative_until_effect_proves_write():
+def test_risk_override_requires_current_hash_bound_qualification():
     step = _click(
         "continue",
         "Continue to the review screen",
         ocr="Continue",
         risk="reversible",
     )
+    workflow = Workflow(name="reviewed-navigation", steps=[step])
+
+    # A matching prose marker alone has no authority.
     step.risk_explanation = "operator-qualified override: reversible"
     step.risk_review_required = False
+    assert is_consequential(step, workflow) is True
 
-    assert is_consequential(step) is False
-
-    step.api_binding = ApiBinding(
-        url_template="/api/records",
-        effects=[Effect(kind=EffectKind.RECORD_WRITTEN, risk="irreversible")],
+    init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="Reference",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.24.0",
+        ),
     )
-    assert is_consequential(step) is True
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id=step.id,
+            classification="read_only",
+            explanation="Only opens the review screen",
+            operator_confirmed=True,
+        ),
+    )
+    project = workflow.qualification
+    assert project is not None
+    assert is_consequential(step, workflow) is True  # not certified yet
 
-    step.api_binding = None
-    step.risk_explanation = "operator-qualified override: reversible; tampered"
-    assert is_consequential(step) is True
+    project.last_certification = QualificationCertification(
+        project_revision=project.revision,
+        project_contract_sha256=project.contract_sha256(),
+        workflow_contract_sha256=workflow_contract_sha256(workflow),
+        environment_contract_sha256=project.environment.contract_sha256(),
+        policy_name="clinical-write",
+        passed=True,
+        report_sha256="b" * 64,
+    )
+    assert is_consequential(step, workflow) is False
+
+    project.revision += 1
+    assert is_consequential(step, workflow) is True
 
 
 def _click(
@@ -458,6 +495,23 @@ def test_direct_api_write_cannot_use_unverified_approval(tmp_path):
     gate = report.gate(GATE_APPROVAL)
     assert gate is not None and not gate.passed
     assert "direct API write" in gate.detail
+
+
+def test_binding_only_effect_cannot_cover_gui_fallback_at_admission(tmp_path):
+    wf = _good_workflow("api_binding_only")
+    write = wf.steps[1]
+    write.api_binding = ApiBinding(
+        url_template="/api/encounter",
+        effects=list(write.effects),
+    )
+    write.effects = []
+    wf, bundle = _seal(wf, tmp_path)
+
+    report = _run(wf, bundle, verifier=True)
+
+    gate = report.gate(GATE_EFFECT)
+    assert gate is not None and not gate.passed
+    assert "GUI" in gate.detail
 
 
 # ---------------------------------------------------------------------------

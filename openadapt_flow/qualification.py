@@ -1698,7 +1698,10 @@ def evaluate_qualification(
                     code=QualificationRefusalCode.EFFECT_CONTRACT_MISSING,
                     path=f"steps.{step.id}.effects",
                     step_id=step.id,
-                    message="state-changing action declares no effect contract",
+                    message=(
+                        "state-changing GUI fallback declares no step.effects "
+                        "contract; an optional API binding cannot cover it"
+                    ),
                 )
             )
             continue

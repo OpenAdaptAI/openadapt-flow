@@ -61,7 +61,7 @@ from openadapt_flow.execution_profiles import (
 )
 from openadapt_flow.ir import ActionKind, Interstitial, Step, Workflow
 from openadapt_flow.policy import (
-    has_operator_risk_override,
+    effective_step_risk,
     has_screen_postcondition,
     has_system_effect,
     has_unconfirmed_effect_binding,
@@ -69,7 +69,6 @@ from openadapt_flow.policy import (
     is_identity_armed,
     step_tags,
 )
-from openadapt_flow.risk import classify_step_risk
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     UnverifiedWriteApproval,
@@ -121,7 +120,7 @@ _GATE_TITLES = {
 # ---------------------------------------------------------------------------
 
 
-def is_consequential(step: Step) -> bool:
+def is_consequential(step: Step, workflow: Optional[Workflow] = None) -> bool:
     """Whether ``step`` commits a consequential (irreversible) write.
 
     Fail-closed union of every signal the codebase already carries: the
@@ -130,15 +129,18 @@ def is_consequential(step: Step) -> bool:
     declared system-of-record effect. A step any of these flag is treated as a
     write for coverage purposes.
     """
-    inferred_write = (
-        False
-        if has_operator_risk_override(step)
-        else classify_step_risk(step) == "irreversible"
+    classified_write = (
+        effective_step_risk(
+            step,
+            workflow,
+            require_current_certification=True,
+        )
+        == "irreversible"
     )
-    return step.risk == "irreversible" or inferred_write or has_system_effect(step)
+    return classified_write or has_system_effect(step)
 
 
-def must_be_identity_armed(step: Step) -> bool:
+def must_be_identity_armed(step: Step, workflow: Optional[Workflow] = None) -> bool:
     """Whether the pre-click identity check MUST be armed on ``step``.
 
     The entity-sensitive / consequential surface: an identity-applicable step
@@ -146,13 +148,19 @@ def must_be_identity_armed(step: Step) -> bool:
     on a specific on-screen entity (the wrong-entity surface). These are the
     steps that must never act without a verified target identity.
     """
-    if step.action in (ActionKind.KEY, ActionKind.HOTKEY) and is_consequential(step):
+    if step.action in (ActionKind.KEY, ActionKind.HOTKEY) and is_consequential(
+        step, workflow
+    ):
         # A consequential keyboard submission with no retained anchor is an
         # identity-coverage defect, not a reason to exempt the action.
         return True
     if not is_identity_applicable(step):
         return False
-    return is_consequential(step) or "entity_navigation" in step_tags(step)
+    return is_consequential(step, workflow) or "entity_navigation" in step_tags(
+        step,
+        workflow,
+        require_current_certification=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +325,7 @@ def evaluate_run_gate(
     )
 
     approval_gate = _gate_approval(
+        workflow,
         steps,
         effect_verifier,
         api_actuator,
@@ -353,13 +362,13 @@ def evaluate_run_gate(
                 )
             ),
             (
-                _gate_identity(steps)
+                _gate_identity(workflow, steps)
                 if profile_contract is None
                 or profile_contract.require_identity_coverage
                 else _not_required(GATE_IDENTITY, "not required by the Demo profile")
             ),
             (
-                _gate_effect(steps)
+                _gate_effect(workflow, steps)
                 if profile_contract is None or profile_contract.require_effect_contracts
                 else _not_required(
                     GATE_EFFECT,
@@ -389,7 +398,7 @@ def evaluate_run_gate(
         ]
     )
     required_identity = (
-        [step.id for step in steps if must_be_identity_armed(step)]
+        [step.id for step in steps if must_be_identity_armed(step, workflow)]
         if profile_contract is None or profile_contract.require_identity_coverage
         else []
     )
@@ -418,7 +427,8 @@ def evaluate_run_gate(
             )
             and approval_gate.passed
             and any(
-                is_consequential(step) and has_system_effect(step) for step in steps
+                is_consequential(step, workflow) and has_system_effect(step)
+                for step in steps
             )
         ),
         admitted_interstitials_digest=(
@@ -495,7 +505,11 @@ def _gate_certification(workflow: Workflow, policy_name: str) -> GateResult:
             False,
             f"certifying policy {policy_name!r} could not be loaded: {e}",
         )
-    report = evaluate_policy(workflow, policy)
+    report = evaluate_policy(
+        workflow,
+        policy,
+        require_current_risk_certification=True,
+    )
     if report.passed:
         return _result(
             GATE_CERTIFICATION,
@@ -513,9 +527,9 @@ def _gate_certification(workflow: Workflow, policy_name: str) -> GateResult:
     )
 
 
-def _gate_identity(steps: list[Step]) -> GateResult:
+def _gate_identity(workflow: Workflow, steps: list[Step]) -> GateResult:
     """Gate 2: every entity-sensitive / consequential action is identity-armed."""
-    must_arm = [s for s in steps if must_be_identity_armed(s)]
+    must_arm = [s for s in steps if must_be_identity_armed(s, workflow)]
     unarmed = [s for s in must_arm if not is_identity_armed(s)]
     total = len(must_arm)
     if not unarmed:
@@ -533,7 +547,7 @@ def _gate_identity(steps: list[Step]) -> GateResult:
     )
 
 
-def _gate_effect(steps: list[Step]) -> GateResult:
+def _gate_effect(workflow: Workflow, steps: list[Step]) -> GateResult:
     """Gate 3: every consequential write DECLARES a (confirmed) effect contract.
 
     A write with no declared system-of-record effect would be verified by the
@@ -542,8 +556,11 @@ def _gate_effect(steps: list[Step]) -> GateResult:
     Both are bundle-level defects and refuse here (they cannot be waived by
     deployment approval -- gate 4 only covers a verifier that is missing).
     """
-    writes = [s for s in steps if is_consequential(s)]
-    screen_only = [s for s in writes if not has_system_effect(s)]
+    writes = [s for s in steps if is_consequential(s, workflow)]
+    # ApiBinding is an optional top rung: an unavailable pre-dispatch API call
+    # falls through to GUI actuation.  Binding-local effects therefore cannot
+    # cover the GUI path; the canonical step effects must cover that fallback.
+    screen_only = [s for s in writes if not s.effects]
     unconfirmed = [s for s in writes if has_unconfirmed_effect_binding(s)]
     offenders = sorted({s.id for s in screen_only} | {s.id for s in unconfirmed})
     total = len(writes)
@@ -557,8 +574,8 @@ def _gate_effect(steps: list[Step]) -> GateResult:
     parts = []
     if screen_only:
         parts.append(
-            f"{len(screen_only)} would be verified by SCREEN only "
-            "(no declared system-of-record effect)"
+            f"{len(screen_only)} GUI fallback path(s) would be verified by "
+            "SCREEN only (no step.effects contract)"
         )
     if unconfirmed:
         parts.append(
@@ -575,6 +592,7 @@ def _gate_effect(steps: list[Step]) -> GateResult:
 
 
 def _gate_approval(
+    workflow: Workflow,
     steps: list[Step],
     effect_verifier: object | None,
     api_actuator: object | None,
@@ -591,13 +609,20 @@ def _gate_approval(
     unchecked). It is admitted ONLY under explicit operator approval; otherwise
     the run halts. Writes that DO have a verifier need nothing here.
     """
-    writes = [s for s in steps if is_consequential(s) and has_system_effect(s)]
+    writes = [
+        step
+        for step in steps
+        if is_consequential(step, workflow) and has_system_effect(step)
+    ]
     if effect_verifier is not None:
         weak: list[str] = []
         untyped: list[str] = []
         observed: list[VerificationTier] = []
         for step in writes:
-            for effect in step.effects:
+            effects = step.effects or (
+                step.api_binding.effects if step.api_binding is not None else []
+            )
+            for effect in effects:
                 tier = verifier_effect_tier(effect_verifier, effect)
                 if tier is None:
                     untyped.append(step.id)
@@ -820,7 +845,7 @@ def build_runtime_authorization(
                 ),
             )
             for step in steps
-            if is_consequential(step) and has_system_effect(step)
+            if is_consequential(step, workflow) and has_system_effect(step)
         ]
 
     return GovernedRunAuthorization(

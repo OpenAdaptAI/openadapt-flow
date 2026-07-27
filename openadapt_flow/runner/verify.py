@@ -287,7 +287,7 @@ def verify_dispatch(
     from openadapt_flow.traversal import iter_workflow_steps
 
     steps = list(iter_workflow_steps(workflow))
-    consequential = [step for step in steps if is_consequential(step)]
+    consequential = [step for step in steps if is_consequential(step, workflow)]
     effect_covered = [step for step in consequential if has_system_effect(step)]
 
     return VerifiedDispatch(

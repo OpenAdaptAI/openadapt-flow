@@ -271,6 +271,26 @@ class TestPolicyLoading:
         report = evaluate_policy(_gappy_workflow(), load_policy("clinical-write"))
         assert not report.passed
 
+    def test_string_marker_cannot_suppress_inferred_write(self):
+        step = _click(
+            "continue",
+            "Click Continue",
+            ocr="Continue",
+            risk="reversible",
+        )
+        step.risk_explanation = "operator-qualified override: reversible"
+        step.risk_review_required = False
+
+        report = evaluate_policy(
+            Workflow(name="forged-override", steps=[step]),
+            load_policy("clinical-write"),
+        )
+
+        assert any(
+            violation.rule == "require_reviewed_action_risk"
+            for violation in report.violations
+        )
+
     def test_each_declared_actuation_path_needs_its_own_idempotency_key(self):
         step = _click(
             "step_000",

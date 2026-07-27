@@ -151,21 +151,79 @@ def has_system_effect(step: Step) -> bool:
     )
 
 
-def has_operator_risk_override(step: Step) -> bool:
-    """Whether qualification owns the current executable risk decision.
+def has_operator_risk_override(
+    step: Step,
+    workflow: Optional[Workflow] = None,
+    *,
+    require_current_certification: bool = False,
+) -> bool:
+    """Whether typed qualification state owns this executable risk decision.
 
-    The current additive IR uses an exact marker because it has no separate
-    typed provenance enum yet.  The marker is not trusted in isolation: risk,
-    marker, and review state must agree exactly, and production admission still
-    requires certification whose workflow hash plus the sealed bundle digest
-    bind all three fields.  Editing any one invalidates certification; loose or
-    legacy text fails closed to heuristic classification.
+    A prose marker is never authority by itself.  It is only a redundant
+    serialization check over an operator-confirmed classification in the
+    workflow's qualification project.  Production callers additionally require
+    the last passing decision to bind the current project revision, workflow,
+    and environment digests.  Missing, stale, or tampered state therefore falls
+    back to the conservative risk heuristic.
     """
 
-    return bool(
-        not step.risk_review_required
-        and step.risk_explanation == f"operator-qualified override: {step.risk}"
+    if workflow is None or workflow.qualification is None:
+        return False
+    project = workflow.qualification
+    classification = project.action_classifications.get(step.id)
+    if classification is None or not classification.operator_confirmed:
+        return False
+    classification_name = classification.classification.value
+    if classification_name == "unknown":
+        return False
+    runtime_risk = (
+        "irreversible"
+        if classification_name in {"consequential", "irreversible"}
+        else "reversible"
     )
+    if (
+        step.risk != runtime_risk
+        or step.risk_review_required
+        or step.risk_explanation != f"operator-qualified override: {runtime_risk}"
+    ):
+        return False
+    if not require_current_certification:
+        return True
+
+    certification = project.last_certification
+    if certification is None or not certification.passed:
+        return False
+    from openadapt_flow.qualification import workflow_contract_sha256
+
+    return bool(
+        certification.project_revision == project.revision
+        and certification.project_contract_sha256 == project.contract_sha256()
+        and certification.workflow_contract_sha256 == workflow_contract_sha256(workflow)
+        and certification.environment_contract_sha256
+        == project.environment.contract_sha256()
+    )
+
+
+def effective_step_risk(
+    step: Step,
+    workflow: Optional[Workflow] = None,
+    *,
+    require_current_certification: bool = False,
+) -> str:
+    """Return the conservative executable risk after a qualified override."""
+
+    inferred = classify_step_risk(step)
+    if (
+        inferred == "irreversible"
+        and step.risk != "irreversible"
+        and not has_operator_risk_override(
+            step,
+            workflow,
+            require_current_certification=require_current_certification,
+        )
+    ):
+        return "irreversible"
+    return step.risk
 
 
 def effect_has_idempotency_key(step: Step) -> bool:
@@ -222,7 +280,12 @@ def step_confidence(step: Step) -> float:
     return min(1.0, score)
 
 
-def step_tags(step: Step) -> set[str]:
+def step_tags(
+    step: Step,
+    workflow: Optional[Workflow] = None,
+    *,
+    require_current_certification: bool = False,
+) -> set[str]:
     """Semantic tags a policy's ``require_*`` lists can match against (as an
     alternative to raw keywords).
 
@@ -247,26 +310,41 @@ def step_tags(step: Step) -> set[str]:
         tags.update(("key", act.value))
     elif act is ActionKind.SCROLL:
         tags.add("scroll")
-    if step.risk == "irreversible":
+    effective_risk = effective_step_risk(
+        step,
+        workflow,
+        require_current_certification=require_current_certification,
+    )
+    if effective_risk == "irreversible":
         tags.update(("irreversible", "write"))
     else:
         tags.add("reversible")
     if is_identity_applicable(step):
         tags.add("identity_applicable")
-    if act in _CLICK_ACTIONS and step.risk == "reversible":
+    if act in _CLICK_ACTIONS and effective_risk == "reversible":
         tags.add("navigation")
         if is_identity_applicable(step):
             tags.add("entity_navigation")
     return tags
 
 
-def _matches_token(step: Step, token: str) -> bool:
+def _matches_token(
+    step: Step,
+    token: str,
+    workflow: Optional[Workflow] = None,
+    *,
+    require_current_certification: bool = False,
+) -> bool:
     """True if ``token`` matches ``step`` — either as a semantic tag
     (:func:`step_tags`) or as a word-boundary keyword in the step's text."""
     token = token.strip()
     if not token:
         return False
-    if token.lower() in step_tags(step):
+    if token.lower() in step_tags(
+        step,
+        workflow,
+        require_current_certification=require_current_certification,
+    ):
         return True
     return (
         re.search(rf"\b{re.escape(token)}\b", step_text(step), re.IGNORECASE)
@@ -274,8 +352,22 @@ def _matches_token(step: Step, token: str) -> bool:
     )
 
 
-def step_matches_any(step: Step, tokens: list[str]) -> bool:
-    return any(_matches_token(step, t) for t in tokens)
+def step_matches_any(
+    step: Step,
+    tokens: list[str],
+    workflow: Optional[Workflow] = None,
+    *,
+    require_current_certification: bool = False,
+) -> bool:
+    return any(
+        _matches_token(
+            step,
+            token,
+            workflow,
+            require_current_certification=require_current_certification,
+        )
+        for token in tokens
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +538,12 @@ class CertifyReport(BaseModel):
         return "\n".join(lines)
 
 
-def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
+def evaluate_policy(
+    workflow: Workflow,
+    policy: Policy,
+    *,
+    require_current_risk_certification: bool = False,
+) -> CertifyReport:
     """Certify ``workflow`` against ``policy`` → a structured pass/fail report.
 
     Pure function of the compiled bundle and the policy; runs nothing. A report
@@ -464,14 +561,30 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
     steps = list(iter_workflow_steps(workflow))
 
     for step in steps:
-        if step.risk_review_required:
+        override_bound = has_operator_risk_override(
+            step,
+            workflow,
+            require_current_certification=require_current_risk_certification,
+        )
+        unbound_claimed_override = (
+            bool(step.risk_explanation)
+            and step.risk_explanation.startswith("operator-qualified override:")
+            and not override_bound
+        )
+        effective_risk = effective_step_risk(
+            step,
+            workflow,
+            require_current_certification=require_current_risk_certification,
+        )
+        if step.risk_review_required or unbound_claimed_override:
             violations.append(
                 Violation(
                     rule="require_reviewed_action_risk",
                     step_id=step.id,
                     reason=(
-                        "action risk is ambiguous and has not been reviewed — "
-                        "qualification must apply an explicit risk override"
+                        "write-shaped action risk has no current, bound operator "
+                        "classification — qualification must apply and certify "
+                        "an explicit risk override"
                         + (
                             f" ({step.risk_explanation})"
                             if step.risk_explanation
@@ -512,7 +625,10 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
             )
 
         if policy.require_identity_for and step_matches_any(
-            step, policy.require_identity_for
+            step,
+            policy.require_identity_for,
+            workflow,
+            require_current_certification=require_current_risk_certification,
         ):
             if not (is_identity_applicable(step) and is_identity_armed(step)):
                 violations.append(
@@ -532,7 +648,10 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
         # for this same check (it never inspected the system of record); it is
         # honoured as an alias so old policies keep working.
         if policy.require_screen_postconditions_for and step_matches_any(
-            step, policy.require_screen_postconditions_for
+            step,
+            policy.require_screen_postconditions_for,
+            workflow,
+            require_current_certification=require_current_risk_certification,
         ):
             if not has_screen_postcondition(step):
                 violations.append(
@@ -548,7 +667,10 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
                 )
 
         if policy.require_effect_verification_for and step_matches_any(
-            step, policy.require_effect_verification_for
+            step,
+            policy.require_effect_verification_for,
+            workflow,
+            require_current_certification=require_current_risk_certification,
         ):
             if not has_screen_postcondition(step):
                 violations.append(
@@ -569,18 +691,21 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
         # consequential write needs. A screen postcondition alone cannot see a
         # partial / phantom / duplicate / lost-update write (P0-2).
         if policy.require_system_effects_for and step_matches_any(
-            step, policy.require_system_effects_for
+            step,
+            policy.require_system_effects_for,
+            workflow,
+            require_current_certification=require_current_risk_certification,
         ):
-            if not has_system_effect(step):
+            if not step.effects:
                 violations.append(
                     Violation(
                         rule="require_system_effects_for",
                         step_id=step.id,
                         reason=(
                             "step matches require_system_effects_for but "
-                            "declares no system-of-record effect (step.effects) "
-                            "— a screen postcondition cannot verify the write "
-                            "actually landed in the system of record"
+                            "declares no GUI-path system-of-record effect "
+                            "(step.effects) — an optional API binding cannot "
+                            "cover its GUI fallback"
                         ),
                     )
                 )
@@ -590,8 +715,8 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
         # escalation of the linter's missing_effect_contract "warn".
         if (
             policy.require_effects_for_irreversible
-            and step.risk == "irreversible"
-            and not has_system_effect(step)
+            and effective_risk == "irreversible"
+            and not step.effects
         ):
             violations.append(
                 Violation(
@@ -609,7 +734,10 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
             )
 
         if policy.require_idempotency_key_for and step_matches_any(
-            step, policy.require_idempotency_key_for
+            step,
+            policy.require_idempotency_key_for,
+            workflow,
+            require_current_certification=require_current_risk_certification,
         ):
             if not effect_has_idempotency_key(step):
                 violations.append(

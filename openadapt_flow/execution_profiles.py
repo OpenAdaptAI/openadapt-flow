@@ -199,7 +199,9 @@ def classify_execution_outcome(
     from openadapt_flow.traversal import iter_workflow_steps
 
     consequential = {
-        step.id for step in iter_workflow_steps(workflow) if is_consequential(step)
+        step.id
+        for step in iter_workflow_steps(workflow)
+        if is_consequential(step, workflow)
     }
     steps_by_id = {step.id: step for step in iter_workflow_steps(workflow)}
     if workflow.program is None:

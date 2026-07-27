@@ -14,6 +14,13 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from openadapt_flow.console.app import create_app
+from openadapt_flow.console.attention import attention_item
+from openadapt_flow.console.human_decisions import (
+    RemoteAttendedActionRequest,
+    RemoteDecisionPrincipal,
+    execute_remote_attended_action,
+    portable_remote_decision_task,
+)
 from openadapt_flow.deployment import DeploymentConfig
 from openadapt_flow.ir import (
     ActionKind,
@@ -54,7 +61,14 @@ from openadapt_flow.runtime.durable.checkpoint import (
 from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
 from openadapt_flow.runtime.effects import Effect, EffectKind, EffectState
 from openadapt_flow.runtime.replayer import Replayer
-from tests.test_replayer import FakeBackend, FakeVision, Match
+from tests.test_replayer import (
+    FakeBackend,
+    FakeVision,
+    Match,
+    RemoteLeaseBackend,
+    click_step,
+    make_png,
+)
 
 
 def _step(step_id: str, key: str, *, expect: str | None = None) -> Step:
@@ -155,6 +169,46 @@ def _request(capability, action="continue", key="request-key-0001"):
         disposition=(
             "completed_by_operator" if action == "continue" else "not_applicable"
         ),
+    )
+
+
+def _remote_deployment() -> DeploymentConfig:
+    return DeploymentConfig.model_validate(
+        {
+            "human_decisions": {
+                "remote": {
+                    "enabled": True,
+                    "tenant_id": "tenant_exact_01",
+                    "runner_id": "runner_exact_01",
+                }
+            }
+        }
+    )
+
+
+def _remote_request(projection, capability, *, key="remote-request-key-01"):
+    return RemoteAttendedActionRequest(
+        capability_digest=capability.digest,
+        idempotency_key=key,
+        action="continue",
+        disposition="completed_by_operator",
+        task_digest=projection.task_digest,
+        task_signature=projection.task.signature,
+        tenant_id="tenant_exact_01",
+        runner_id="runner_exact_01",
+        phase=projection.phase,
+        event_sequence=projection.event_sequence,
+        idempotency_scope_digest=projection.idempotency_scope_digest,
+        binding_digest=projection.binding_digest,
+    )
+
+
+def _remote_principal() -> RemoteDecisionPrincipal:
+    return RemoteDecisionPrincipal(
+        subject="operator_subject_01",
+        tenant_id="tenant_exact_01",
+        runner_id="runner_exact_01",
+        assurance="aal2",
     )
 
 
@@ -1023,6 +1077,7 @@ def test_repeated_halt_on_same_step_gets_a_new_exact_pause_capability(tmp_path):
     )
     assert second.pause_id != first.pause_id
     assert second.pause_digest != first.pause_digest
+    assert (first.event_sequence, second.event_sequence) == (1, 2)
     history = json.loads((run / "attended_capability_history.json").read_text())
     assert [item["pause_id"] for item in history] == [first.pause_id]
     with pytest.raises(AttendedActionRefused, match="stale"):
@@ -1685,6 +1740,125 @@ def test_attended_http_action_requires_auth_csrf_and_exact_capability(
         json={**payload, "idempotency_key": "request-key-http2"},
     )
     assert wrong_path.status_code == 400
+
+
+def test_remote_projection_is_explicit_aal2_phi_free_and_exactly_bound(tmp_path):
+    _workflow, _bundle, run, _store, capability = _paused(tmp_path)
+    item = attention_item(run.parent, run)
+    assert item is not None
+
+    with pytest.raises(AttendedActionRefused, match="not explicitly enabled"):
+        portable_remote_decision_task(run, item, deployment=DeploymentConfig())
+
+    projection = portable_remote_decision_task(
+        run, item, deployment=_remote_deployment()
+    )
+    task = projection.task
+    assert task.required_authn.value == "aal2"
+    assert task.tenant_id == "tenant_exact_01"
+    assert task.runner_id == "runner_exact_01"
+    assert task.capability_digest == capability.digest
+    assert projection.expected_transition_digest == (
+        capability.expected_transition_digest
+    )
+    assert projection.event_sequence == capability.event_sequence == 1
+    serialized = projection.model_dump_json()
+    for protected in (
+        "Please verify you are human",
+        "press A",
+        str(run),
+        str(run.parent / "bundle"),
+    ):
+        assert protected not in serialized
+
+
+def test_remote_response_refuses_scope_or_binding_drift(tmp_path):
+    _workflow, _bundle, run, _store, capability = _paused(tmp_path)
+    item = attention_item(run.parent, run)
+    assert item is not None
+    deployment = _remote_deployment()
+    projection = portable_remote_decision_task(run, item, deployment=deployment)
+    request = _remote_request(projection, capability)
+    principal = _remote_principal()
+
+    # Exercise representative dimensions of the one signed binding without
+    # proliferating one source-text test per field.
+    mutations = (
+        {"tenant_id": "tenant_other_01"},
+        {"runner_id": "runner_other_01"},
+        {"event_sequence": projection.event_sequence + 1},
+        {"binding_digest": "sha256:" + ("0" * 64)},
+    )
+    for update in mutations:
+        with pytest.raises(AttendedActionRefused):
+            execute_remote_attended_action(
+                run,
+                item,
+                request.model_copy(update=update),
+                deployment=deployment,
+                principal=principal,
+                executor=_ResultExecutor(),
+            )
+
+
+def test_remote_decision_is_idempotent_and_resumes_through_fresh_remote_actuation(
+    tmp_path,
+):
+    workflow = Workflow(
+        name="remote-attended",
+        steps=[
+            _step("human", "A", expect="DONE"),
+            click_step("save", risk="irreversible", ocr_text="Save"),
+        ],
+    )
+    _workflow, bundle, run, _store, capability = _paused(tmp_path, workflow=workflow)
+    template = bundle / "templates" / "btn.png"
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_bytes(make_png())
+    item = attention_item(run.parent, run)
+    assert item is not None
+    deployment = _remote_deployment()
+    projection = portable_remote_decision_task(run, item, deployment=deployment)
+    request = _remote_request(projection, capability)
+
+    frame = make_png()
+    backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+    vision = FakeVision()
+    vision.text_results = {
+        "DONE": Match(point=(10, 10), region=(0, 0, 20, 20), confidence=1.0)
+    }
+    # Prove the successor at attended revalidation, resolve again during
+    # resume, then re-resolve after the remote backend reacquires focus/frame.
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99),
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99),
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99),
+    ]
+    executor = BoundAttendedExecutor(
+        lambda _manifest: Replayer(backend, vision=vision, poll_interval_s=0.0)
+    )
+    first = execute_remote_attended_action(
+        run,
+        item,
+        request,
+        deployment=deployment,
+        principal=_remote_principal(),
+        executor=executor,
+    )
+    second = execute_remote_attended_action(
+        run,
+        item,
+        request,
+        deployment=deployment,
+        principal=_remote_principal(),
+        executor=executor,
+    )
+
+    assert first == second
+    assert first.status == "completed"
+    assert backend.acquire_count == 1
+    assert ("press", "A") not in backend.actions
+    assert backend.actions == [("click", 110, 105, False)]
 
 
 def test_public_attended_service_executes_exact_request_on_owner(tmp_path, monkeypatch):

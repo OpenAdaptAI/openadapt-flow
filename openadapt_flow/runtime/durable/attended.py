@@ -141,6 +141,10 @@ class AttendedPauseCapability(BaseModel):
     """Exact authority the engine grants for one durable pause."""
 
     schema_version: int = 1
+    #: Monotonic within one run's replaced pause-capability history. This is a
+    #: presentation/event-order binding, not a substitute for the random pause
+    #: id, signed pause digest, or exact durable-state validation.
+    event_sequence: int = Field(default=1, ge=1)
     pause_id: str
     run_id: str
     workflow_name: str
@@ -167,7 +171,13 @@ class AttendedPauseCapability(BaseModel):
     signature: str = ""
 
     def unsigned(self) -> dict[str, Any]:
-        return self.model_dump(exclude={"signature"}, mode="json")
+        exclude = {"signature"}
+        # Capabilities issued before event ordering was added used schema v1.
+        # Preserve their exact signing payload so an in-flight durable pause
+        # remains resumable across the package upgrade.
+        if self.schema_version < 2:
+            exclude.add("event_sequence")
+        return self.model_dump(exclude=exclude, mode="json")
 
     @property
     def digest(self) -> str:
@@ -621,6 +631,7 @@ class AttendedActionStore:
         # baseline and capability signature one stable per-run trust root.
         self._key(create=True)
         baseline = self._transition_baseline(transition_observation)
+        event_sequence = 1
         if self.capability_path.is_file():
             existing = self.read()
             if (
@@ -658,6 +669,7 @@ class AttendedActionStore:
                 self.capability_history_path,
                 json.dumps(history, indent=2, sort_keys=True).encode("utf-8"),
             )
+            event_sequence = existing.event_sequence + 1
         now = _now()
         transition = _transition_payload(
             run_id=manifest.run_id,
@@ -667,6 +679,8 @@ class AttendedActionStore:
             expected_next_transition=expected,
         )
         capability = AttendedPauseCapability(
+            schema_version=2,
+            event_sequence=event_sequence,
             pause_id=secrets.token_hex(16),
             run_id=manifest.run_id,
             workflow_name=pending.workflow_name,

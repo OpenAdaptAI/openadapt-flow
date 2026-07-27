@@ -27,7 +27,6 @@ from openadapt_flow.ir import (
     StepResult,
 )
 from openadapt_flow.receipt import (
-    MAX_LABEL_CHARS,
     RECEIPT_SCHEMA,
     ReceiptError,
     RunReceipt,
@@ -41,9 +40,9 @@ from openadapt_flow.receipt import (
 ALLOWED_FIELDS = {
     "schema_version",
     "outcome",
-    "halt_class",
-    "billable",
-    "label",
+    "transaction_outcome",
+    "profile",
+    "production_eligible",
     "steps_total",
     "steps_ok",
     "heals",
@@ -53,6 +52,12 @@ ALLOWED_FIELDS = {
     "rung_histogram",
     "evidence_classes",
     "effect_tier_reached",
+    "authorization_required",
+    "authorization_confirmed",
+    "identity_required",
+    "identity_confirmed",
+    "postconditions_required",
+    "postconditions_confirmed",
     "effects_required",
     "effects_confirmed",
     "identity_armed",
@@ -61,7 +66,7 @@ ALLOWED_FIELDS = {
     "substrate",
     "provenance",
     "flow_version",
-    "launcher_version",
+    "external_network_calls",
     "bundle_digest",
     "receipt_digest",
     "generated_at",
@@ -78,12 +83,18 @@ def _report(**overrides: object) -> RunReport:
         "execution_outcome": "VERIFIED",
         "transaction_outcome": "VERIFIED",
         "transaction_billable": True,
+        "transaction_platform_fault": False,
         "production_eligible": True,
         "execution_completed": True,
         "execution_target_kind": "web",
         "execution_origin": "http://records.example.internal",
         "execution_entry_url": "http://records.example.internal/?patient=SECRET-MRN",
         "bundle_content_digest": "a" * 64,
+        "governed_authorization_id": "authorization-1",
+        "governed_approval_source": "openadapt-flow-tutorial",
+        "governed_runtime_inputs_digest": "c" * 64,
+        "governed_policy_contract_sha256": "d" * 64,
+        "required_identity_step_ids": ["step_000"],
         "params": {"note": "SECRET-NOTE-VALUE"},
         "success": True,
         "rung_counts": {"structural": 4},
@@ -91,14 +102,17 @@ def _report(**overrides: object) -> RunReport:
         "model_calls": 0,
         "est_model_cost_usd": 0.0,
         "total_ms": 4321.6,
-        "identity_applicable_steps": 4,
-        "identity_armed_steps": 4,
+        "identity_applicable_steps": 1,
+        "identity_armed_steps": 1,
         "results": [
             StepResult(
                 step_id="step_000",
                 intent="click 'SECRET-BUTTON-LABEL'",
                 ok=True,
                 identity=IdentityCheck(status="verified"),
+                postconditions_ok=True,
+                effect_verified=True,
+                effect_contract_hashes=["sha256:" + "b" * 64],
                 before_png="steps/step_000_before.png",
                 after_png="steps/step_000_after.png",
                 effect_evidence=[
@@ -119,12 +133,17 @@ def _report(**overrides: object) -> RunReport:
             production_eligible=True,
             execution_completed=True,
             required_contracts=OutcomeContractCounts(
-                authorization=1, identity=1, postcondition=2, effect=2
+                authorization=1, identity=1, postcondition=1, effect=1
             ),
             passed_contracts=OutcomeContractCounts(
-                authorization=1, identity=1, postcondition=2, effect=2
+                authorization=1, identity=1, postcondition=1, effect=1
             ),
-            evidence_classes=["authorization", "effect_tier_1", "identity"],
+            evidence_classes=[
+                "authorization",
+                "effect_tier_1",
+                "identity",
+                "postcondition",
+            ],
             model_calls=0,
             external_network_calls="observed",
         ),
@@ -179,13 +198,15 @@ def test_receipt_reports_the_evidence_it_claims() -> None:
     receipt = build_receipt(_report(), provenance="synthetic-tutorial")
     assert receipt.schema_version == RECEIPT_SCHEMA
     assert receipt.outcome == "VERIFIED"
-    assert receipt.halt_class == "VERIFIED"
-    assert receipt.billable is True
+    assert receipt.transaction_outcome == "VERIFIED"
+    assert receipt.profile == "standard"
+    assert receipt.production_eligible is True
     assert receipt.effect_tier_reached == "independent_system"
-    assert receipt.effects_required == 2
-    assert receipt.effects_confirmed == 2
-    assert receipt.identity_armed == 4
-    assert receipt.identity_applicable == 4
+    assert receipt.authorization_confirmed == receipt.authorization_required == 1
+    assert receipt.identity_confirmed == receipt.identity_required == 1
+    assert receipt.postconditions_confirmed == receipt.postconditions_required == 1
+    assert receipt.effects_confirmed == receipt.effects_required == 1
+    assert receipt.identity_armed == receipt.identity_applicable == 1
     assert receipt.model_calls == 0
     assert receipt.duration_ms == 4322
     assert receipt.rung_histogram == {"structural": 4}
@@ -204,63 +225,142 @@ def test_receipt_digest_binds_every_other_field() -> None:
     receipt = build_receipt(_report(), provenance="synthetic-tutorial")
     assert receipt.receipt_digest
     other = build_receipt(
-        _report(model_calls=3, est_model_cost_usd=0.02),
+        _report(
+            model_calls=3,
+            est_model_cost_usd=0.02,
+            outcome_envelope=_report().outcome_envelope.model_copy(
+                update={
+                    "model_calls": 3,
+                    "evidence_classes": [
+                        "authorization",
+                        "effect_tier_1",
+                        "identity",
+                        "model",
+                        "postcondition",
+                    ],
+                }
+            ),
+        ),
         provenance="synthetic-tutorial",
     )
     assert other.receipt_digest != receipt.receipt_digest
 
 
-def test_label_is_operator_typed_and_bounded() -> None:
-    receipt = build_receipt(
-        _report(), provenance="synthetic-tutorial", label="  My first run  "
-    )
-    assert receipt.label == "My first run"
+@pytest.mark.parametrize("field", ["label", "launcher_version", "halt_class"])
+def test_arbitrary_or_legacy_receipt_fields_are_refused(field: str) -> None:
+    receipt = build_receipt(_report(), provenance="synthetic-tutorial")
     with pytest.raises(ValidationError):
         RunReceipt.model_validate(
-            {
-                **json.loads(receipt.canonical_json()),
-                "label": "x" * (MAX_LABEL_CHARS + 1),
-            }
-        )
-    with pytest.raises(ValidationError):
-        RunReceipt.model_validate(
-            {**json.loads(receipt.canonical_json()), "label": "two\nlines"}
+            {**json.loads(receipt.canonical_json()), field: "SECRET FREE TEXT"}
         )
 
 
-def test_over_halt_count_is_always_present_and_counts_refused_confirmed_effects() -> (
-    None
-):
-    """The counter-metric is not optional, and it is computed, not asserted."""
+def test_verified_receipt_refuses_a_retained_over_halt() -> None:
+    """A success receipt cannot coexist with a halted retained step."""
 
     clean = build_receipt(_report(), provenance="synthetic-tutorial")
     assert clean.over_halt_count == 0
 
-    over_halted = build_receipt(
-        _report(
-            results=[
-                StepResult(
-                    step_id="step_000",
-                    intent="click",
-                    ok=False,
-                    safety_halt=True,
-                    failure_category="safety_halt",
-                    effect_evidence=[
-                        EffectVerificationEvidence(
-                            substrate="rest",
-                            initial_verdict="confirmed",
-                            final_verdict="confirmed",
-                            observed_effect="present",
-                            verification_tier=1,
-                            effect_contract_hash="sha256:" + "c" * 64,
-                        )
-                    ],
-                )
-            ]
-        ),
-        provenance="synthetic-tutorial",
+    with pytest.raises(ReceiptError, match="failed, halted, or refuted"):
+        build_receipt(
+            _report(
+                results=[
+                    StepResult(
+                        step_id="step_000",
+                        intent="click",
+                        ok=False,
+                        safety_halt=True,
+                        failure_category="safety_halt",
+                        identity=IdentityCheck(status="verified"),
+                        postconditions_ok=True,
+                        effect_verified=True,
+                        effect_contract_hashes=["sha256:" + "b" * 64],
+                        effect_evidence=[
+                            EffectVerificationEvidence(
+                                substrate="rest",
+                                initial_verdict="confirmed",
+                                final_verdict="confirmed",
+                                observed_effect="present",
+                                verification_tier=1,
+                                effect_contract_hash="sha256:" + "b" * 64,
+                            )
+                        ],
+                    )
+                ]
+            ),
+            provenance="synthetic-tutorial",
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"transaction_platform_fault": None}, "complete governed VERIFIED"),
+        ({"governed_runtime_inputs_digest": None}, "complete governed VERIFIED"),
+        ({"governed_policy_contract_sha256": None}, "complete governed VERIFIED"),
+        ({"bundle_content_digest": None}, "complete governed VERIFIED"),
+        ({"identity_armed_steps": 0}, "complete workflow identity arming"),
+    ],
+)
+def test_receipt_refuses_incomplete_verified_contract(
+    override: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ReceiptError, match=message):
+        build_receipt(
+            _report(**override),
+            provenance="synthetic-tutorial",
+        )
+
+
+def test_receipt_refuses_partial_effect_hash_coverage() -> None:
+    result = (
+        _report()
+        .results[0]
+        .model_copy(update={"effect_contract_hashes": ["sha256:" + "e" * 64]})
     )
-    assert over_halted.over_halt_count == 1
+    with pytest.raises(ReceiptError, match="effect-hash coverage"):
+        build_receipt(_report(results=[result]), provenance="synthetic-tutorial")
+
+
+def test_receipt_refuses_screen_only_effect_evidence() -> None:
+    evidence = (
+        _report()
+        .results[0]
+        .effect_evidence[0]
+        .model_copy(update={"verification_tier": 4})
+    )
+    result = _report().results[0].model_copy(update={"effect_evidence": [evidence]})
+    envelope = _report().outcome_envelope.model_copy(
+        update={
+            "evidence_classes": [
+                "authorization",
+                "effect_tier_4",
+                "identity",
+                "postcondition",
+            ]
+        }
+    )
+    with pytest.raises(ReceiptError, match="independent verification floor"):
+        build_receipt(
+            _report(results=[result], outcome_envelope=envelope),
+            provenance="synthetic-tutorial",
+        )
+
+
+def test_synthetic_provenance_requires_retained_tutorial_source() -> None:
+    with pytest.raises(ReceiptError, match="tutorial authorization source"):
+        build_receipt(
+            _report(governed_approval_source="custom-cli"),
+            provenance="synthetic-tutorial",
+        )
+
+
+def test_receipt_digest_is_revalidated_on_parse() -> None:
+    receipt = build_receipt(_report(), provenance="synthetic-tutorial")
+    payload = json.loads(receipt.canonical_json())
+    payload["duration_ms"] += 1
+    with pytest.raises(ValidationError, match="digest does not match"):
+        RunReceipt.model_validate(payload)
 
 
 def test_receipt_refuses_a_report_with_no_classified_outcome() -> None:

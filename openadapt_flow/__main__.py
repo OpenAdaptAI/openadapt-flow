@@ -910,8 +910,6 @@ def _cmd_tutorial(args: argparse.Namespace) -> int:
             headed=args.headed,
             name=args.name or TUTORIAL_WORKFLOW_NAME,
             emit_receipt=not args.no_receipt,
-            label=args.label,
-            launcher_version=args.launcher_version,
             echo=print,
         )
     except TutorialError as e:
@@ -2533,9 +2531,8 @@ def _cmd_report_run(args: argparse.Namespace) -> int:
 def _emit_local_receipt(args: argparse.Namespace) -> int:
     """Write a LOCAL, allow-listed run receipt. No network, ever.
 
-    The success rail's evidence contract is unchanged: only a VERIFIED run
-    (or a legacy unclassified success) may claim the success rail, so a
-    ``COMPLETED_UNVERIFIED`` run still emits nothing. What changed is that the
+    Only a complete governed VERIFIED run may claim the success rail, so a
+    legacy unclassified or ``COMPLETED_UNVERIFIED`` run emits nothing. The
     free tutorial can now REACH VERIFIED with real effect evidence, so the
     artifact this gate protects is finally producible without a hosted account.
 
@@ -2557,24 +2554,35 @@ def _emit_local_receipt(args: argparse.Namespace) -> int:
         print("report-run failed: report.json is unreadable or invalid")
         return 1
 
-    success_rail_eligible = report.success and report.execution_outcome in (
-        None,
-        "VERIFIED",
-    )
+    success_rail_eligible = report.success and report.execution_outcome == "VERIFIED"
     if not success_rail_eligible:
         print(
-            "Nothing emitted: run is not VERIFIED; only VERIFIED (or legacy "
-            "unclassified) successes may use the success rail"
+            "Nothing emitted: run is not VERIFIED; only complete governed "
+            "VERIFIED successes may use the success rail"
         )
         return 0
 
-    provenance = "production" if args.production else "synthetic-tutorial"
+    if args.production:
+        provenance = "production"
+    elif args.synthetic_tutorial:
+        if report.governed_approval_source != "openadapt-flow-tutorial":
+            print(
+                "report-run REFUSED: --synthetic-tutorial is valid only for a "
+                "run produced by `openadapt-flow tutorial`"
+            )
+            return 2
+        provenance = "synthetic-tutorial"
+    else:
+        print(
+            "report-run REFUSED: receipt provenance is required. Pass "
+            "--production for a real run or --synthetic-tutorial for a run "
+            "produced by `openadapt-flow tutorial`."
+        )
+        return 2
     try:
         receipt = build_receipt(
             report,
             provenance=provenance,
-            label=args.label,
-            launcher_version=args.launcher_version,
         )
     except ReceiptError as e:
         print(f"report-run failed: {e}")
@@ -3128,19 +3136,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workflow name for the compiled bundle (default: local-quickstart)",
     )
     p.add_argument("--headed", action="store_true", help="Run the browser headed")
-    p.add_argument(
-        "--label",
-        default=None,
-        help=(
-            "Optional title you type for the receipt. Never derived from the "
-            "recording, and never required"
-        ),
-    )
-    p.add_argument(
-        "--launcher-version",
-        default=None,
-        help="Launcher version to record on the receipt, when a launcher drove this run",
-    )
     p.add_argument(
         "--no-receipt",
         action="store_true",
@@ -4666,26 +4661,22 @@ def build_parser() -> argparse.ArgumentParser:
             "value, parameter, URL, hostname, coordinate, or free-form text"
         ),
     )
-    p.add_argument(
-        "--label",
-        default=None,
-        help=(
-            "--receipt only: an optional title YOU type. Never derived from "
-            "the recording"
-        ),
-    )
-    p.add_argument(
-        "--launcher-version",
-        default=None,
-        help="--receipt only: launcher version to record on the receipt",
-    )
-    p.add_argument(
+    provenance = p.add_mutually_exclusive_group()
+    provenance.add_argument(
         "--production",
         action="store_true",
         help=(
-            "--receipt only: mark the receipt's provenance as `production` "
-            "rather than `synthetic-tutorial`. A production receipt must go "
+            "--receipt only: explicitly mark this as a real production run. "
+            "A production receipt must go "
             "through sanitize/approve before it leaves your trust boundary"
+        ),
+    )
+    provenance.add_argument(
+        "--synthetic-tutorial",
+        action="store_true",
+        help=(
+            "--receipt only: mark a run produced by `openadapt-flow tutorial` "
+            "as the bundled synthetic fixture; other runs are refused"
         ),
     )
     p.set_defaults(func=_cmd_report_run)

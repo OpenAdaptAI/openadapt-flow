@@ -302,8 +302,6 @@ def run_tutorial(
     headed: bool = False,
     name: str = TUTORIAL_WORKFLOW_NAME,
     emit_receipt: bool = True,
-    label: Optional[str] = None,
-    launcher_version: Optional[str] = None,
     echo: Optional[Callable[[str], None]] = None,
 ) -> TutorialResult:
     """Run the complete free path and return its evidence.
@@ -414,8 +412,6 @@ def run_tutorial(
             receipt = build_receipt(
                 report,
                 provenance="synthetic-tutorial",
-                label=label,
-                launcher_version=launcher_version,
             )
             result.receipt_paths = write_receipt(receipt, run_dir)
     return result

@@ -67,7 +67,7 @@ documented defaults with a warning rather than crashing.
 Usage:
     python scripts/check_release_health.py                    # live check
     python scripts/check_release_health.py --self-test        # offline, no network
-    python scripts/check_release_health.py --state-file s.json --offline
+    python scripts/check_release_health.py --state-file s.json
     python scripts/check_release_health.py --dump-state s.json
 """
 
@@ -100,8 +100,16 @@ HTTP_TIMEOUT_SECONDS = 30
 # read. Kept explicit so a degraded run states what it assumed.
 FALLBACK_PARSER_OPTIONS = {
     "allowed_tags": [
-        "build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor",
-        "style", "test",
+        "build",
+        "chore",
+        "ci",
+        "docs",
+        "feat",
+        "fix",
+        "perf",
+        "refactor",
+        "style",
+        "test",
     ],
     "minor_tags": ["feat"],
     "patch_tags": ["fix", "perf"],
@@ -115,9 +123,6 @@ COMMIT_SUBJECT = re.compile(
 BREAKING_FOOTER = re.compile(r"^BREAKING[ -]CHANGE:", re.MULTILINE)
 
 ACTIVE_RUN_STATES = {"queued", "in_progress", "waiting", "pending", "requested"}
-NON_SUCCESS_CONCLUSIONS = {
-    "failure", "cancelled", "skipped", "timed_out", "action_required", "stale",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +137,7 @@ class Report:
         self.alerts: list[dict[str, str]] = []
         self.warnings: list[str] = []
         self.notes: list[str] = []
+        self.safe_to_close = True
 
     def alert(self, detector: str, lane: str, headline: str, detail: str) -> None:
         self.alerts.append(
@@ -143,6 +149,10 @@ class Report:
 
     def note(self, message: str) -> None:
         self.notes.append(message)
+
+    def hold_open(self) -> None:
+        """Keep an existing alert open while a required signal is unresolved."""
+        self.safe_to_close = False
 
     @property
     def ok(self) -> bool:
@@ -267,13 +277,20 @@ def evaluate(state: dict[str, Any], report: Report) -> Report:
     assert now is not None, "state['now'] must be an ISO-8601 timestamp"
     repository = state["repository"]
     parser_options = state["parser_options"]
+    release_run_failed = bool(state.get("release_run_failed"))
 
     for lane in state["lanes"]:
         lane_id = lane["id"]
         grace_unreleased = timedelta(hours=float(lane.get("unreleased_grace_hours", 4)))
-        grace_tag = timedelta(hours=float(lane.get("tag_without_release_grace_hours", 3)))
+        grace_tag = timedelta(
+            hours=float(lane.get("tag_without_release_grace_hours", 3))
+        )
         grace_pypi = timedelta(minutes=float(lane.get("pypi_lag_grace_minutes", 30)))
-        remediation = lane.get("remediation", "")
+        unreleased_remediation = lane.get("unreleased_remediation", "")
+        tag_remediation = lane.get("tag_without_release_remediation", "")
+        pypi_remediation = lane.get("pypi_remediation", "").format(
+            tag=lane.get("latest_tag", "")
+        )
 
         active_runs = [
             run
@@ -281,6 +298,7 @@ def evaluate(state: dict[str, Any], report: Report) -> Report:
             if run.get("status") in ACTIVE_RUN_STATES
         ]
         if active_runs:
+            report.hold_open()
             report.note(
                 f"[{lane_id}] a release run is in flight "
                 f"({', '.join(str(run['id']) for run in active_runs)}); gap detectors "
@@ -290,17 +308,31 @@ def evaluate(state: dict[str, Any], report: Report) -> Report:
         # -- unreleased-work ------------------------------------------------
         if lane.get("tracks_main"):
             _check_unreleased_work(
-                report, lane, repository, parser_options, now,
-                grace_unreleased, bool(active_runs), remediation,
+                report,
+                lane,
+                repository,
+                parser_options,
+                now,
+                grace_unreleased,
+                bool(active_runs),
+                unreleased_remediation,
+                release_run_failed,
             )
 
         # -- tag-without-release --------------------------------------------
         _check_tags_without_release(
-            report, lane, repository, now, grace_tag, bool(active_runs), remediation,
+            report,
+            lane,
+            repository,
+            now,
+            grace_tag,
+            bool(active_runs),
+            tag_remediation,
+            release_run_failed,
         )
 
         # -- unpublished-release --------------------------------------------
-        _check_pypi(report, lane, now, grace_pypi, remediation)
+        _check_pypi(report, lane, now, grace_pypi, pypi_remediation)
 
     return report
 
@@ -314,6 +346,7 @@ def _check_unreleased_work(
     grace: timedelta,
     runs_in_flight: bool,
     remediation: str,
+    release_run_failed: bool,
 ) -> None:
     lane_id = lane["id"]
     commits = lane.get("commits_since_tag") or []
@@ -339,6 +372,7 @@ def _check_unreleased_work(
 
     ci = lane.get("main_ci_state", "unknown")
     if ci != "success":
+        report.hold_open()
         # Never tell anyone to release a branch that is not green. But say so
         # loudly once the work is past its grace window, because this is the
         # one path that can silence the detector indefinitely: a main whose CI
@@ -355,7 +389,7 @@ def _check_unreleased_work(
             report.note(message)
         return
 
-    if age < grace:
+    if age < grace and not release_run_failed:
         report.note(
             f"[{lane_id}] {len(releasable)} releasable commit(s) since "
             f"{lane.get('latest_tag')}, oldest {humanize(age)} old; inside the "
@@ -363,8 +397,10 @@ def _check_unreleased_work(
         )
         return
 
-    highest = "major" if any(c["level"] == "major" for c in releasable) else (
-        "minor" if any(c["level"] == "minor" for c in releasable) else "patch"
+    highest = (
+        "major"
+        if any(c["level"] == "major" for c in releasable)
+        else ("minor" if any(c["level"] == "minor" for c in releasable) else "patch")
     )
     lines = [
         f"`main` has been carrying **{len(releasable)} releasable commit(s)** for "
@@ -417,16 +453,13 @@ def _check_tags_without_release(
     grace: timedelta,
     runs_in_flight: bool,
     remediation: str,
+    release_run_failed: bool,
 ) -> None:
     lane_id = lane["id"]
     orphans = lane.get("tags_without_release") or []
     if not orphans:
         return
     acknowledged = lane.get("acknowledged_tags") or {}
-    pypi = lane.get("pypi") or {}
-    published_versions = set(pypi.get("versions") or []) if pypi.get("reachable") else None
-    pattern = re.compile(lane.get("tag_pattern", "")) if lane.get("tag_pattern") else None
-
     reportable = []
     for tag in orphans:
         if tag["name"] in acknowledged:
@@ -435,22 +468,9 @@ def _check_tags_without_release(
                 f"{acknowledged[tag['name']]}"
             )
             continue
-        # What matters is whether the artifact is installable, not whether a
-        # GitHub release object exists. A tag whose version is already on PyPI
-        # shipped; a missing release page is cosmetic and permanently
-        # unactionable, and alerting on it forever is how a guard stops being
-        # read. Say it once as a warning instead.
-        if published_versions is not None and pattern is not None:
-            match = pattern.match(tag["name"])
-            if match and match.group(1) in published_versions:
-                report.warn(
-                    f"[{lane_id}] tag {tag['name']} has no GitHub release object, but "
-                    f"{lane.get('pypi_package')} {match.group(1)} is installable from "
-                    "PyPI; the artifact shipped and only the release page is absent."
-                )
-                continue
         created = parse_time(tag.get("date"))
-        if created is not None and now - created < grace:
+        if created is not None and now - created < grace and not release_run_failed:
+            report.hold_open()
             report.note(
                 f"[{lane_id}] tag {tag['name']} has no release yet but is only "
                 f"{humanize(now - created)} old; inside the {humanize(grace)} "
@@ -479,8 +499,9 @@ def _check_tags_without_release(
 
     lines = [
         f"**{len(reportable)} tag(s) in the `{lane_id}` lane exist with no GitHub "
-        "release object.** The tag is immutable and public; the artifacts it "
-        "promises were never published.",
+        "release object.** The tag is immutable and public, so the repository's "
+        "PyPI + GitHub Release publication contract is incomplete even when a "
+        "package artifact reached PyPI.",
         "",
         "| tag | age | release run | outcome |",
         "| --- | --- | --- | --- |",
@@ -527,6 +548,7 @@ def _check_pypi(
         return
     pypi = lane.get("pypi") or {}
     if not pypi.get("reachable", False):
+        report.hold_open()
         report.warn(
             f"[{lane_id}] could not query PyPI for {package} "
             f"({pypi.get('error', 'unknown error')}); skipping the publication "
@@ -542,6 +564,7 @@ def _check_pypi(
         return
     tagged_at = parse_time(lane.get("latest_tag_date"))
     if tagged_at is not None and now - tagged_at < grace:
+        report.hold_open()
         report.note(
             f"[{lane_id}] {package} {tag_version} is not on PyPI yet but the tag is "
             f"only {humanize(now - tagged_at)} old; inside the {humanize(grace)} "
@@ -637,7 +660,9 @@ def collect_state(config: dict[str, Any], report: Report) -> dict[str, Any]:
     parser_options = load_parser_options(ROOT / "pyproject.toml", report)
 
     releases = github_paginate(f"/repos/{repository}/releases")
-    released_tags = {release["tag_name"] for release in releases}
+    released_tags = {
+        release["tag_name"] for release in releases if not release.get("draft", False)
+    }
     refs = github_paginate(f"/repos/{repository}/git/matching-refs/tags/")
     tag_names = sorted({ref["ref"].removeprefix("refs/tags/") for ref in refs})
 
@@ -672,7 +697,11 @@ def collect_state(config: dict[str, Any], report: Report) -> dict[str, Any]:
                 "tag_without_release_grace_hours", 3
             ),
             "pypi_lag_grace_minutes": lane_config.get("pypi_lag_grace_minutes", 30),
-            "remediation": lane_config.get("remediation", ""),
+            "unreleased_remediation": lane_config.get("unreleased_remediation", ""),
+            "tag_without_release_remediation": lane_config.get(
+                "tag_without_release_remediation", ""
+            ),
+            "pypi_remediation": lane_config.get("pypi_remediation", ""),
             "pypi_package": lane_config.get("pypi_package"),
             "tags_without_release": orphans,
             "runs": runs[:10],
@@ -772,26 +801,40 @@ def _describe_orphan_tag(
 
 
 def _tag_date(repository: str, name: str) -> str | None:
-    try:
-        commit = github_get(f"/repos/{repository}/commits/{name}")
-    except GitHubUnavailable:
-        return None
+    commit = github_get(f"/repos/{repository}/commits/{name}")
     committer = (commit.get("commit") or {}).get("committer") or {}
     return committer.get("date")
 
 
 def _commits_since(repository: str, base: str, head: str) -> list[dict[str, Any]]:
-    payload = github_get(f"/repos/{repository}/compare/{base}...{head}")
-    commits = []
-    for commit in payload.get("commits") or []:
-        message = (commit.get("commit") or {}).get("message") or ""
-        committer = (commit.get("commit") or {}).get("committer") or {}
-        commits.append(
-            {
-                "sha": commit["sha"],
-                "message": message,
-                "date": committer.get("date"),
-            }
+    commits: list[dict[str, Any]] = []
+    expected_total: int | None = None
+    page = 1
+    while True:
+        payload = github_get(
+            f"/repos/{repository}/compare/{base}...{head}",
+            {"per_page": 100, "page": page},
+        )
+        if expected_total is None:
+            expected_total = int(payload.get("total_commits") or 0)
+        batch = payload.get("commits") or []
+        for commit in batch:
+            message = (commit.get("commit") or {}).get("message") or ""
+            committer = (commit.get("commit") or {}).get("committer") or {}
+            commits.append(
+                {
+                    "sha": commit["sha"],
+                    "message": message,
+                    "date": committer.get("date"),
+                }
+            )
+        if len(batch) < 100:
+            break
+        page += 1
+    if expected_total is not None and len(commits) < expected_total:
+        raise GitHubUnavailable(
+            f"compare {base}...{head} returned {len(commits)} of "
+            f"{expected_total} commits"
         )
     return commits
 
@@ -807,7 +850,8 @@ def render_markdown(state: dict[str, Any], report: Report, run_url: str | None) 
         "every run and **closed automatically** once every gap below is closed; "
         "it is never duplicated.",
         "",
-        f"Last evaluated: `{state['now']}`" + (f" ([run]({run_url}))" if run_url else ""),
+        f"Last evaluated: `{state['now']}`"
+        + (f" ([run]({run_url}))" if run_url else ""),
         "",
     ]
     for alert in report.alerts:
@@ -903,31 +947,38 @@ def self_test() -> int:
     )
     # Five hours later, still unreleased.
     capture_miss["now"] = "2026-07-27T19:35:42+00:00"
-    check("unreleased fix: commit, green main, past grace -> alert",
-          "unreleased-work" in _detectors(capture_miss))
+    check(
+        "unreleased fix: commit, green main, past grace -> alert",
+        "unreleased-work" in _detectors(capture_miss),
+    )
 
     breaking = _state(
         lane={
             "commits_since_tag": [
-                {"sha": "a" * 40, "message": "refactor!: drop the hosted recognizer",
-                 "date": "2026-07-20T00:00:00+00:00"}
+                {
+                    "sha": "a" * 40,
+                    "message": "refactor!: drop the hosted recognizer",
+                    "date": "2026-07-20T00:00:00+00:00",
+                }
             ]
         }
     )
-    check("`type!:` breaking change -> alert",
-          "unreleased-work" in _detectors(breaking))
+    check(
+        "`type!:` breaking change -> alert", "unreleased-work" in _detectors(breaking)
+    )
 
     footer = _state(
         lane={
             "commits_since_tag": [
-                {"sha": "b" * 40,
-                 "message": "refactor: rework storage\n\nBREAKING CHANGE: paths moved",
-                 "date": "2026-07-20T00:00:00+00:00"}
+                {
+                    "sha": "b" * 40,
+                    "message": "refactor: rework storage\n\nBREAKING CHANGE: paths moved",
+                    "date": "2026-07-20T00:00:00+00:00",
+                }
             ]
         }
     )
-    check("`BREAKING CHANGE:` footer -> alert",
-          "unreleased-work" in _detectors(footer))
+    check("`BREAKING CHANGE:` footer -> alert", "unreleased-work" in _detectors(footer))
 
     # The exact openadapt-desktop misses: cancelled at the approval gate, a
     # failed matrix leg, and a workflow that never started.
@@ -938,18 +989,28 @@ def self_test() -> int:
             "pypi_package": None,
             "pypi": {},
             "tags_without_release": [
-                {"name": "desktop-v0.8.0", "date": "2026-07-21T03:43:31+00:00",
-                 "run_id": 29799291231, "run_status": "completed",
-                 "run_conclusion": "cancelled"},
-                {"name": "desktop-v0.12.0", "date": "2026-07-25T18:35:18+00:00",
-                 "run_id": 30169968004, "run_status": "completed",
-                 "run_conclusion": "failure"},
+                {
+                    "name": "desktop-v0.8.0",
+                    "date": "2026-07-21T03:43:31+00:00",
+                    "run_id": 29799291231,
+                    "run_status": "completed",
+                    "run_conclusion": "cancelled",
+                },
+                {
+                    "name": "desktop-v0.12.0",
+                    "date": "2026-07-25T18:35:18+00:00",
+                    "run_id": 30169968004,
+                    "run_status": "completed",
+                    "run_conclusion": "failure",
+                },
                 {"name": "desktop-v0.1.0", "date": "2026-07-10T00:00:00+00:00"},
             ],
         }
     )
-    check("tag with a cancelled/failed/never-started publish -> alert",
-          "tag-without-release" in _detectors(desktop_miss))
+    check(
+        "tag with a cancelled/failed/never-started publish -> alert",
+        "tag-without-release" in _detectors(desktop_miss),
+    )
 
     skipped = _state(
         lane={
@@ -958,27 +1019,38 @@ def self_test() -> int:
             "pypi_package": None,
             "pypi": {},
             "tags_without_release": [
-                {"name": "desktop-v0.7.0", "date": "2026-07-20T04:43:42+00:00",
-                 "run_id": 29756479649, "run_status": "completed",
-                 "run_conclusion": "skipped"},
+                {
+                    "name": "desktop-v0.7.0",
+                    "date": "2026-07-20T04:43:42+00:00",
+                    "run_id": 29756479649,
+                    "run_status": "completed",
+                    "run_conclusion": "skipped",
+                },
             ],
         }
     )
-    check("conclusion `skipped` (invisible to `if: failure()`) -> alert",
-          "tag-without-release" in _detectors(skipped))
+    check(
+        "conclusion `skipped` (invisible to `if: failure()`) -> alert",
+        "tag-without-release" in _detectors(skipped),
+    )
 
     unpublished = _state(
         lane={
             "latest_tag": "v1.2.1",
             "latest_tag_version": "1.2.1",
             "latest_tag_date": "2026-07-27T15:17:40+00:00",
-            "pypi": {"reachable": True, "latest": "1.2.0",
-                     "versions": ["1.1.0", "1.2.0"]},
+            "pypi": {
+                "reachable": True,
+                "latest": "1.2.0",
+                "versions": ["1.1.0", "1.2.0"],
+            },
         }
     )
     unpublished["now"] = "2026-07-27T23:17:40+00:00"
-    check("tag exists but PyPI never got the version -> alert",
-          "unpublished-release" in _detectors(unpublished))
+    check(
+        "tag exists but PyPI never got the version -> alert",
+        "unpublished-release" in _detectors(unpublished),
+    )
 
     print("B. It stays QUIET on every transient this repository actually produces")
 
@@ -989,18 +1061,28 @@ def self_test() -> int:
             "latest_tag": "v1.2.1",
             "latest_tag_version": "1.2.1",
             "commits_since_tag": [
-                {"sha": "c" * 40, "message": "chore: release 1.2.1",
-                 "date": "2026-07-27T15:17:00+00:00"},
-                {"sha": "d" * 40,
-                 "message": "chore(release): reconcile platform manifest",
-                 "date": "2026-07-27T15:18:30+00:00"},
+                {
+                    "sha": "c" * 40,
+                    "message": "chore: release 1.2.1",
+                    "date": "2026-07-27T15:17:00+00:00",
+                },
+                {
+                    "sha": "d" * 40,
+                    "message": "chore(release): reconcile platform manifest",
+                    "date": "2026-07-27T15:18:30+00:00",
+                },
             ],
-            "pypi": {"reachable": True, "latest": "1.2.1",
-                     "versions": ["1.2.0", "1.2.1"]},
+            "pypi": {
+                "reachable": True,
+                "latest": "1.2.1",
+                "versions": ["1.2.0", "1.2.1"],
+            },
         }
     )
-    check("semantic-release + reconcile commits are `chore` -> quiet",
-          _detectors(release_window) == set())
+    check(
+        "semantic-release + reconcile commits are `chore` -> quiet",
+        _detectors(release_window) == set(),
+    )
 
     # The launcher's own release commit subject is a bare version string.
     bare_version = _state(
@@ -1008,90 +1090,120 @@ def self_test() -> int:
             "latest_tag": "v1.10.0",
             "latest_tag_version": "1.10.0",
             "commits_since_tag": [
-                {"sha": "e" * 40,
-                 "message": "1.10.0\n\nAutomatically generated by python-semantic-release",
-                 "date": "2026-07-20T00:00:00+00:00"}
+                {
+                    "sha": "e" * 40,
+                    "message": "1.10.0\n\nAutomatically generated by python-semantic-release",
+                    "date": "2026-07-20T00:00:00+00:00",
+                }
             ],
             "pypi": {"reachable": True, "latest": "1.10.0", "versions": ["1.10.0"]},
         }
     )
-    check("launcher's bare `1.10.0` release commit is not a bump -> quiet",
-          _detectors(bare_version) == set())
+    check(
+        "launcher's bare `1.10.0` release commit is not a bump -> quiet",
+        _detectors(bare_version) == set(),
+    )
 
     # Documentation and CI merges are allowed_tags but bump nothing.
     non_bumping = _state(
         lane={
             "commits_since_tag": [
-                {"sha": "f" * 40, "message": "docs: clarify the capture boundary",
-                 "date": "2026-07-20T00:00:00+00:00"},
-                {"sha": "0" * 40, "message": "ci: reduce launcher PR matrix cost (#1061)",
-                 "date": "2026-07-20T00:00:00+00:00"},
-                {"sha": "1" * 40, "message": "chore(deps): update release actions (#56)",
-                 "date": "2026-07-20T00:00:00+00:00"},
+                {
+                    "sha": "f" * 40,
+                    "message": "docs: clarify the capture boundary",
+                    "date": "2026-07-20T00:00:00+00:00",
+                },
+                {
+                    "sha": "0" * 40,
+                    "message": "ci: reduce launcher PR matrix cost (#1061)",
+                    "date": "2026-07-20T00:00:00+00:00",
+                },
+                {
+                    "sha": "1" * 40,
+                    "message": "chore(deps): update release actions (#56)",
+                    "date": "2026-07-20T00:00:00+00:00",
+                },
             ]
         }
     )
-    check("docs/ci/chore(deps) merges -> quiet",
-          _detectors(non_bumping) == set())
+    check("docs/ci/chore(deps) merges -> quiet", _detectors(non_bumping) == set())
 
     fresh = _state(
         lane={
             "commits_since_tag": [
-                {"sha": "2" * 40, "message": "fix: correct a boundary check",
-                 "date": "2026-07-27T19:00:00+00:00"}
+                {
+                    "sha": "2" * 40,
+                    "message": "fix: correct a boundary check",
+                    "date": "2026-07-27T19:00:00+00:00",
+                }
             ]
         }
     )
-    check("a fix merged 1h ago is inside the 4h grace -> quiet",
-          _detectors(fresh) == set())
+    check(
+        "a fix merged 1h ago is inside the 4h grace -> quiet",
+        _detectors(fresh) == set(),
+    )
 
     in_flight = _state(
         lane={
             "commits_since_tag": [
-                {"sha": "3" * 40, "message": "fix: correct a boundary check",
-                 "date": "2026-07-20T00:00:00+00:00"}
+                {
+                    "sha": "3" * 40,
+                    "message": "fix: correct a boundary check",
+                    "date": "2026-07-20T00:00:00+00:00",
+                }
             ],
             "runs": [{"id": 1, "status": "in_progress", "conclusion": None}],
         }
     )
-    check("a release run is in flight -> quiet",
-          _detectors(in_flight) == set())
+    check("a release run is in flight -> quiet", _detectors(in_flight) == set())
 
     red_main = _state(
         lane={
             "commits_since_tag": [
-                {"sha": "4" * 40, "message": "fix: correct a boundary check",
-                 "date": "2026-07-20T00:00:00+00:00"}
+                {
+                    "sha": "4" * 40,
+                    "message": "fix: correct a boundary check",
+                    "date": "2026-07-20T00:00:00+00:00",
+                }
             ],
             "main_ci_state": "failure",
         }
     )
-    check("main is red -> quiet (a red main is its own signal)",
-          _detectors(red_main) == set())
+    check(
+        "main is red -> quiet (a red main is its own signal)",
+        _detectors(red_main) == set(),
+    )
 
     pending_main = _state(
         lane={
             "commits_since_tag": [
-                {"sha": "5" * 40, "message": "fix: correct a boundary check",
-                 "date": "2026-07-20T00:00:00+00:00"}
+                {
+                    "sha": "5" * 40,
+                    "message": "fix: correct a boundary check",
+                    "date": "2026-07-20T00:00:00+00:00",
+                }
             ],
             "main_ci_state": "pending",
         }
     )
-    check("main CI still running -> quiet",
-          _detectors(pending_main) == set())
+    check("main CI still running -> quiet", _detectors(pending_main) == set())
 
     cdn_lag = _state(
         lane={
             "latest_tag": "v1.2.1",
             "latest_tag_version": "1.2.1",
             "latest_tag_date": "2026-07-27T19:50:00+00:00",
-            "pypi": {"reachable": True, "latest": "1.2.0",
-                     "versions": ["1.1.0", "1.2.0"]},
+            "pypi": {
+                "reachable": True,
+                "latest": "1.2.0",
+                "versions": ["1.1.0", "1.2.0"],
+            },
         }
     )
-    check("PyPI CDN has not propagated yet (10m) -> quiet",
-          _detectors(cdn_lag) == set())
+    check(
+        "PyPI CDN has not propagated yet (10m) -> quiet", _detectors(cdn_lag) == set()
+    )
 
     pypi_down = _state(
         lane={
@@ -1102,8 +1214,12 @@ def self_test() -> int:
         }
     )
     down_report = evaluate(pypi_down, Report())
-    check("PyPI unreachable -> warning, never an alert",
-          down_report.ok and len(down_report.warnings) == 1)
+    check(
+        "PyPI unreachable -> warning, never an alert",
+        down_report.ok
+        and not down_report.safe_to_close
+        and len(down_report.warnings) == 1,
+    )
 
     approval_gate = _state(
         lane={
@@ -1112,13 +1228,20 @@ def self_test() -> int:
             "pypi_package": None,
             "pypi": {},
             "tags_without_release": [
-                {"name": "desktop-v0.15.0", "date": "2026-07-20T00:00:00+00:00",
-                 "run_id": 999, "run_status": "waiting", "run_conclusion": None},
+                {
+                    "name": "desktop-v0.15.0",
+                    "date": "2026-07-20T00:00:00+00:00",
+                    "run_id": 999,
+                    "run_status": "waiting",
+                    "run_conclusion": None,
+                },
             ],
         }
     )
-    check("tag awaiting a human `native-release` approval -> quiet",
-          _detectors(approval_gate) == set())
+    check(
+        "tag awaiting a human `native-release` approval -> quiet",
+        _detectors(approval_gate) == set(),
+    )
 
     building = _state(
         lane={
@@ -1131,24 +1254,29 @@ def self_test() -> int:
             ],
         }
     )
-    check("tag pushed 90m ago, installers still building -> quiet",
-          _detectors(building) == set())
+    check(
+        "tag pushed 90m ago, installers still building -> quiet",
+        _detectors(building) == set(),
+    )
 
-    # openadapt-capture v0.1.0: the very first, hand-made release. The wheel is
-    # on PyPI; only the GitHub release page was never created. Permanently
-    # unactionable, so it must never be an alert.
+    # PyPI is only half of this repository's release contract. A missing GitHub
+    # Release remains actionable even when the wheel shipped.
     cosmetic = _state(
         lane={
             "tags_without_release": [
                 {"name": "v0.1.0", "date": "2025-12-13T02:42:01+00:00"}
             ],
-            "pypi": {"reachable": True, "latest": "1.2.0",
-                     "versions": ["0.1.0", "1.1.0", "1.2.0"]},
+            "pypi": {
+                "reachable": True,
+                "latest": "1.2.0",
+                "versions": ["0.1.0", "1.1.0", "1.2.0"],
+            },
         }
     )
-    cosmetic_report = evaluate(cosmetic, Report())
-    check("tag whose artifact IS on PyPI -> warning, never an alert",
-          cosmetic_report.ok and len(cosmetic_report.warnings) == 1)
+    check(
+        "tag whose artifact is on PyPI but lacks a GitHub Release -> alert",
+        "tag-without-release" in _detectors(cosmetic),
+    )
 
     ack = _state(
         lane={
@@ -1158,8 +1286,43 @@ def self_test() -> int:
             ],
         }
     )
-    check("explicitly acknowledged historical tag -> quiet",
-          _detectors(ack) == set())
+    check("explicitly acknowledged historical tag -> quiet", _detectors(ack) == set())
+
+    immediate_failure = _state(
+        release_run_failed=True,
+        lane={
+            "tags_without_release": [
+                {
+                    "name": "v1.2.1",
+                    "date": "2026-07-27T19:59:00+00:00",
+                    "run_id": 123,
+                    "run_status": "completed",
+                    "run_conclusion": "failure",
+                },
+            ],
+        },
+    )
+    check(
+        "failed release event bypasses tag propagation grace -> alert",
+        "tag-without-release" in _detectors(immediate_failure),
+    )
+
+    immediate_unreleased = _state(
+        release_run_failed=True,
+        lane={
+            "commits_since_tag": [
+                {
+                    "sha": "6" * 40,
+                    "message": "fix: close the release boundary",
+                    "date": "2026-07-27T19:59:00+00:00",
+                }
+            ],
+        },
+    )
+    check(
+        "failed release event bypasses unreleased-work grace -> alert",
+        "unreleased-work" in _detectors(immediate_unreleased),
+    )
 
     superseded_cancel = _state(
         lane={
@@ -1179,24 +1342,39 @@ def self_test() -> int:
         "(the exact runs 30275153205/30276970325)",
         _detectors(superseded_cancel) == set(),
     )
+    check(
+        "fully clear state may close a prior issue",
+        evaluate(_state(), Report()).safe_to_close,
+    )
 
     print("C. Commit parsing honours THIS repository's configured tags")
-    options = {"allowed_tags": ["feat", "fix", "chore"], "minor_tags": ["feat"],
-               "patch_tags": ["fix"]}
-    check("`perf:` bumps only when patch_tags says so",
-          bump_level("perf: speed up capture", options) is None
-          and bump_level("perf: speed up capture", FALLBACK_PARSER_OPTIONS) == "patch")
-    check("`feat(scope): ...` -> minor",
-          bump_level("feat(cli): add a flag", options) == "minor")
-    check("Merge commits and free text -> no bump",
-          bump_level("Merge pull request #1 from x", options) is None)
+    options = {
+        "allowed_tags": ["feat", "fix", "chore"],
+        "minor_tags": ["feat"],
+        "patch_tags": ["fix"],
+    }
+    check(
+        "`perf:` bumps only when patch_tags says so",
+        bump_level("perf: speed up capture", options) is None
+        and bump_level("perf: speed up capture", FALLBACK_PARSER_OPTIONS) == "patch",
+    )
+    check(
+        "`feat(scope): ...` -> minor",
+        bump_level("feat(cli): add a flag", options) == "minor",
+    )
+    check(
+        "Merge commits and free text -> no bump",
+        bump_level("Merge pull request #1 from x", options) is None,
+    )
 
     print()
     if failures:
         print(f"SELF-TEST FAILED: {len(failures)} scenario(s): {failures}")
         return 1
-    print("SELF-TEST PASSED: every detector fires on its evidence case and stays "
-          "quiet on every enumerated transient.")
+    print(
+        "SELF-TEST PASSED: every detector fires on its evidence case and stays "
+        "quiet on every enumerated transient."
+    )
     return 0
 
 
@@ -1208,20 +1386,39 @@ def self_test() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--self-test", action="store_true",
-                        help="Run the offline detector scenarios and exit.")
-    parser.add_argument("--state-file", type=Path,
-                        help="Evaluate a recorded state instead of querying GitHub.")
-    parser.add_argument("--dump-state", type=Path,
-                        help="Write the collected live state to this path.")
-    parser.add_argument("--markdown", type=Path,
-                        help="Write the issue body to this path.")
-    parser.add_argument("--github-output", type=Path,
-                        help="Append alert=true|false for the workflow to read.")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run the offline detector scenarios and exit.",
+    )
+    parser.add_argument(
+        "--state-file",
+        type=Path,
+        help="Evaluate a recorded state instead of querying GitHub.",
+    )
+    parser.add_argument(
+        "--dump-state", type=Path, help="Write the collected live state to this path."
+    )
+    parser.add_argument(
+        "--markdown", type=Path, help="Write the issue body to this path."
+    )
+    parser.add_argument(
+        "--github-output",
+        type=Path,
+        help="Append alert and safe-to-close outputs for the workflow to read.",
+    )
     parser.add_argument("--run-url", help="URL of the run producing this report.")
-    parser.add_argument("--fail-on-alert", action="store_true",
-                        help="Exit non-zero when an alert fires (default: exit 0 and "
-                             "let the workflow file the issue).")
+    parser.add_argument(
+        "--release-run-failed",
+        action="store_true",
+        help="Bypass publication grace after a known non-successful release run.",
+    )
+    parser.add_argument(
+        "--fail-on-alert",
+        action="store_true",
+        help="Exit non-zero when an alert fires (default: exit 0 and "
+        "let the workflow file the issue).",
+    )
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -1238,12 +1435,18 @@ def main(argv: list[str] | None = None) -> int:
             state = collect_state(config, report)
         except GitHubUnavailable as exc:
             # An unreachable API is not evidence of a missing release.
-            print(f"WARNING: {exc}; skipping this release-health evaluation.",
-                  file=sys.stderr)
+            print(
+                f"WARNING: {exc}; skipping this release-health evaluation.",
+                file=sys.stderr,
+            )
             if args.github_output:
                 with args.github_output.open("a", encoding="utf-8") as handle:
                     handle.write("alert=false\n")
+                    handle.write("clear=false\n")
             return 0
+
+    if args.release_run_failed:
+        state["release_run_failed"] = True
 
     if args.dump_state:
         args.dump_state.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -1255,8 +1458,10 @@ def main(argv: list[str] | None = None) -> int:
     for note in report.notes:
         print(f"ok: {note}")
     for alert in report.alerts:
-        print(f"ALERT [{alert['detector']}/{alert['lane']}] {alert['headline']}",
-              file=sys.stderr)
+        print(
+            f"ALERT [{alert['detector']}/{alert['lane']}] {alert['headline']}",
+            file=sys.stderr,
+        )
 
     if args.markdown:
         args.markdown.write_text(
@@ -1265,10 +1470,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.github_output:
         with args.github_output.open("a", encoding="utf-8") as handle:
             handle.write(f"alert={'true' if report.alerts else 'false'}\n")
+            clear = not report.alerts and report.safe_to_close
+            handle.write(f"clear={'true' if clear else 'false'}\n")
 
     if report.alerts:
         print(f"\n{len(report.alerts)} release-health alert(s).")
         return 1 if args.fail_on_alert else 0
+    if not report.safe_to_close:
+        print("\nNo new release-health alert; a required signal is still unresolved.")
+        return 0
     print("\nNo release-health alerts: every release lane is published and current.")
     return 0
 

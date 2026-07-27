@@ -22,8 +22,9 @@ name: Release health
 # `failure`.
 #
 # Three triggers, one script:
-#   schedule      -- the actual detector. Bounds "how long can a releasable fix
-#                    sit unnoticed" to ~7h instead of "until someone looks".
+#   schedule      -- the backstop detector. Bounds "how long can a releasable
+#                    fix sit unnoticed" without spending eight runner starts a
+#                    day on a deliberately human-authorized release lane.
 #   workflow_run  -- fires when a release run COMPLETES NON-SUCCESSFULLY, which
 #                    includes `cancelled` and `skipped`. `if: failure()` steps
 #                    inside a release workflow cannot see either, and a run
@@ -34,10 +35,10 @@ name: Release health
 
 on:
   schedule:
-    # Every 3 hours. One stdlib step, no dependency install, no cache, so this
-    # costs seconds a day rather than a matrix. With the 4h grace window below,
-    # a releasable commit is surfaced within ~7h at worst.
-    - cron: '53 */3 * * *'
+    # Twice daily. Failed/cancelled/skipped release runs still trigger the check
+    # immediately through workflow_run below; this schedule only finds work for
+    # which nobody started a release at all.
+    - cron: '53 5,17 * * *'
   workflow_dispatch:
   workflow_run:
     workflows: ["Release and PyPI Publish"]
@@ -80,6 +81,7 @@ jobs:
        github.event.workflow_run.conclusion != 'success')
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       issues: write
     steps:
@@ -93,10 +95,17 @@ jobs:
         id: evaluate
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_RUN_FAILED: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success' && 'true' || 'false' }}
         run: |
+          set -euo pipefail
+          extra_args=()
+          if [ "${RELEASE_RUN_FAILED}" = "true" ]; then
+            extra_args+=(--release-run-failed)
+          fi
           python scripts/check_release_health.py \
             --markdown release-health.md \
             --github-output "${GITHUB_OUTPUT}" \
+            "${extra_args[@]}" \
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       # One issue per repository, rewritten in place. A new issue every day is
@@ -124,7 +133,7 @@ jobs:
           fi
 
       - name: Close the issue once every gap is closed
-        if: steps.evaluate.outputs.alert != 'true'
+        if: steps.evaluate.outputs.clear == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TITLE: "Release health - unreleased work or an incomplete publish"

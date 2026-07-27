@@ -6961,6 +6961,20 @@ class Replayer:
         if resolved is None:
             return False
         resolution, _matched_region = resolved
+        # Geometry estimates a point from surrounding landmarks; it does not
+        # prove that the target itself is visible. In particular, a fixed
+        # header can project the recorded point while the form row is still
+        # off-screen, turning the preceding scroll into a false no-op. Scroll
+        # readiness therefore requires direct deterministic target evidence.
+        # Model grounding is disabled above and future weaker rungs must opt in
+        # deliberately rather than silently acquiring readiness authority.
+        if resolution.rung not in {
+            "structural",
+            "template",
+            "template_global",
+            "ocr",
+        }:
+            return False
         if not step.identity_armed:
             return True
         check = self._verify_identity(

@@ -1183,6 +1183,36 @@ def test_closed_loop_scroll_requires_armed_target_identity(
     ]
 
 
+def test_closed_loop_scroll_does_not_accept_geometry_as_target_visibility(
+    bundle, run_dir
+):
+    """A fixed landmark cannot prove an off-screen form target is visible."""
+
+    vision = FakeVision()
+    vision.text_results["Fixed header"] = Match(
+        point=(150, 20), region=(100, 10, 100, 20), confidence=0.99
+    )
+    target = click_step(
+        ocr_text=None,
+        landmarks=[
+            Landmark(
+                relation="below",
+                ocr_text="Fixed header",
+                distance_px=100,
+            )
+        ],
+    )
+    workflow = Workflow(name="wf", steps=[scroll_step(), target])
+
+    report = Replayer(backend := FakeBackend(), vision=vision).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert "target never came into view" in report.results[0].error
+    assert backend.actions == [("scroll", 0, 400), ("scroll", 0, 400)]
+
+
 def test_closed_loop_scroll_budget_exhaustion_fails_loudly(bundle, run_dir):
     """When the anchor never resolves and no further SCROLL step follows,
     the loop stops at ~2.5x the recorded distance and fails the run,

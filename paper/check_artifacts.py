@@ -223,6 +223,33 @@ def main() -> None:
         0,
         "effect-e2e complete-read-path silent wrong",
     )
+    # The per-scenario decomposition table (tab:e2eclasses) and the prose
+    # sentence "six of the ten scenarios differentiate..." are a coverage matrix
+    # claim, not an aggregate. Bind the slip SETS, not just the counts, so a
+    # future edit cannot reassign which class slips in which arm.
+    require_equal(
+        sorted(e2e["screen"]["silent_wrong_scenarios"]),
+        [
+            "collateral_unaudited",
+            "duplicate",
+            "no_persist",
+            "partial",
+            "stale",
+            "wrong_record",
+        ],
+        "effect-e2e screen slip classes",
+    )
+    require_equal(
+        e2e["effect_full"]["silent_wrong_scenarios"],
+        [],
+        "effect-e2e complete-read-path slip classes",
+    )
+    e2e_screen_slip_classes = len(e2e["screen"]["silent_wrong_scenarios"])
+    require_equal(len(effect_e2e["scenarios"]), 10, "effect-e2e scenario count")
+    for arm in ("screen", "effect_rest", "effect_full"):
+        require_equal(
+            e2e[arm]["false_abort_count"], 9, f"effect-e2e {arm} false aborts"
+        )
     e2e_screen = e2e["screen"]["silent_wrong_count"]
     e2e_rest = e2e["effect_rest"]["silent_wrong_count"]
     e2e_full = e2e["effect_full"]["silent_wrong_count"]
@@ -283,7 +310,9 @@ def main() -> None:
     for name, artifact in multiapp.items():
         require_equal(artifact["n_per_scenario"], 3, f"{name} runs per cell")
         require_equal(artifact["arms"], ["naive", "governed"], f"{name} arms")
-        require_equal(artifact["headline"]["model_calls_total"], 0, f"{name} model calls")
+        require_equal(
+            artifact["headline"]["model_calls_total"], 0, f"{name} model calls"
+        )
         per_arm = artifact["metrics"]["per_arm"]
         multiapp_governed_runs += per_arm["governed"]["n_runs"]
         multiapp_naive_runs += per_arm["naive"]["n_runs"]
@@ -360,9 +389,10 @@ def main() -> None:
             "HALTED_BEFORE_EFFECT",
         ),
     }
-    for (name, scenario), (naive_outcome, governed_outcome) in (
-        expected_multiapp_outcomes.items()
-    ):
+    for (name, scenario), (
+        naive_outcome,
+        governed_outcome,
+    ) in expected_multiapp_outcomes.items():
         per_arm = multiapp[name]["metrics"]["per_arm"]
         require_equal(
             per_arm["naive"]["per_scenario"][scenario]["transaction_outcomes"],
@@ -400,7 +430,9 @@ def main() -> None:
     # can promote it into a real ICA/HDX result.
     citrix = load("benchmark/citrix_ica_hdx/results.json")
     citrix_status = load("benchmark/citrix_ica_hdx/status_manifest.json")
-    require_equal(citrix["is_real_ica_hdx"], False, "Citrix stand-in is not real ICA/HDX")
+    require_equal(
+        citrix["is_real_ica_hdx"], False, "Citrix stand-in is not real ICA/HDX"
+    )
     require_equal(citrix["ica_hdx_accepted"], False, "Citrix ICA/HDX not accepted")
     require_equal(
         citrix["evidence_scope"],
@@ -504,6 +536,20 @@ def main() -> None:
     reproducibility_tex = load_text("paper/sections/07_reproducibility.tex")
     paper_readme = load_text("paper/README.md")
 
+    number_words = {
+        0: "zero",
+        1: "one",
+        2: "two",
+        3: "three",
+        4: "four",
+        5: "five",
+        6: "six",
+        7: "seven",
+        8: "eight",
+        9: "nine",
+        10: "ten",
+    }
+
     # The public/private evaluation boundary is part of the evidence contract.
     # Prevent future paper edits from claiming that every raw row or target
     # recipe is released merely because each headline constant is checked.
@@ -580,6 +626,21 @@ def main() -> None:
         f"The residual {e2e_rest} of 90 is the honest mechanism",
         "results e2e residual honesty",
     )
+    # Bind the coverage-matrix sentence in both the report and the workshop to
+    # the artifact's own slip sets, so "six of the ten" cannot drift.
+    for label, text in (
+        ("results", results_tex),
+        ("workshop", load_text("paper/workshop/main.tex")),
+    ):
+        require_contains(
+            text,
+            (
+                f"{number_words[e2e_screen_slip_classes].capitalize()} of the "
+                f"{number_words[len(effect_e2e['scenarios'])]} scenarios "
+                "differentiate the screen from an"
+            ),
+            f"{label} e2e differentiating-class count",
+        )
     # The fig:oracle caption in Governance is the exact place the retired
     # circular 50/0 framing survived a previous reconciliation. Bind all three
     # rungs of the caption positively, so it cannot silently regress again.
@@ -891,19 +952,6 @@ def main() -> None:
     silently_mishandled = sum(
         result["silently_mishandled_count"] > 0 for result in injected_faults
     )
-    number_words = {
-        0: "zero",
-        1: "one",
-        2: "two",
-        3: "three",
-        4: "four",
-        5: "five",
-        6: "six",
-        7: "seven",
-        8: "eight",
-        9: "nine",
-        10: "ten",
-    }
     require_contains(
         results_tex,
         (

@@ -485,9 +485,9 @@ demo (fake patients only, resets daily). We ran an 18-step add-patient-note
 workflow both ways (log in, find a patient, scroll a dense dashboard, add
 a note) with a distinct note value each run and the same OCR success
 check on both arms: 20 compiled replays against 10 runs of a
-claude-sonnet-5 computer-use agent, measured on 2026-07-08 on
-openadapt-flow 0.1.0 (a pre-v0.2.0 source build at commit `cbec44c2`;
-v0.2.0 is the first release tag containing it). Compiled went 20/20 at 39.2s (p50)
+claude-sonnet-5 computer-use agent, measured on 2026-07-08 from a
+pre-v0.2.0 source checkout declaring openadapt-flow 0.1.0. Compiled went
+20/20 at 39.2s (p50)
 with zero model calls; the agent went 10/10 at 70.4s (p50), about $0.55
 per run at list price ($5.52 total for the 10 runs, with prompt caching
 and hard cost caps enforced in the harness). It is a shared public demo

@@ -329,7 +329,7 @@
     },
     {
       "path": "benchmark/openemr/results.json",
-      "sha256": "b14b6751c248f958093c60dc86c31f50000a0a2b6e7d8446346028636015f661"
+      "sha256": "16e02e4ad045c3cb1e4bc2755268bebb2d5e1a8832c5da9e2b03019e9b96fb0c"
     },
     {
       "path": "benchmark/openemr_live/docker-compose.yml",
@@ -421,7 +421,7 @@
     },
     {
       "path": "benchmark/results.json",
-      "sha256": "3112ba3d2e93193c4dce3d1a1a8d9af8b4aae01c440f7a75ca47d003bb66680c"
+      "sha256": "daf6f840f441ad32c1c88716ed41e2c1dec766a2f03762adda00f30f7588d8cc"
     },
     {
       "path": "benchmark/run_player/player.html",
@@ -581,7 +581,7 @@
     },
     {
       "path": "claims.yaml",
-      "sha256": "776ae3d16bcea5dcc086cc145f5d86bf16118a46cac60aa136dddd63861b8ec1"
+      "sha256": "c62ac4d9a816e367f044dba4a9250cc0db2f310b61d80669433c78ee7aa545f9"
     },
     {
       "path": "deploy/on-prem/docker-compose.yml",
@@ -1789,7 +1789,7 @@
     },
     {
       "path": "docs/verification.json",
-      "sha256": "05990600f5932ee6514f65c742e03a7fc7a7fb111779ca1dfd9bbcff02354c8e"
+      "sha256": "c962bd5e9e302307209ec7d2c276348787e59840c28b631d5833adc703537b0b"
     },
     {
       "path": "openadapt_flow/console/static/console.css",

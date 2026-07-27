@@ -155,7 +155,7 @@
 
 **Caveats (honest limits):**
 
-- The published latency/cost figures come from a dated run artifact measured on Flow 0.1.0 (pre-v0.2.0 source build, commit `cbec44c2`) on 2026-07-08; the app is intentionally simple, so success rate (100/100 vs 20/20) is not the story — the standing cost/latency delta is. Agent cost is a list-price estimate.
+- The published latency/cost figures come from a dated run artifact measured on Flow 0.1.0 (pre-v0.2.0 source checkout; exact runtime HEAD not retained) on 2026-07-08; the app is intentionally simple, so success rate (100/100 vs 20/20) is not the story — the standing cost/latency delta is. Agent cost is a list-price estimate.
 
 ### `windows-desktop-validating` — validating — opt-in / infra-gated or field test
 

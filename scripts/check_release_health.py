@@ -277,7 +277,7 @@ def evaluate(state: dict[str, Any], report: Report) -> Report:
     assert now is not None, "state['now'] must be an ISO-8601 timestamp"
     repository = state["repository"]
     parser_options = state["parser_options"]
-    release_run_failed = bool(state.get("release_run_failed"))
+    failed_release_run = state.get("failed_release_run") or {}
 
     for lane in state["lanes"]:
         lane_id = lane["id"]
@@ -316,7 +316,7 @@ def evaluate(state: dict[str, Any], report: Report) -> Report:
                 grace_unreleased,
                 bool(active_runs),
                 unreleased_remediation,
-                release_run_failed,
+                failed_release_run,
             )
 
         # -- tag-without-release --------------------------------------------
@@ -328,7 +328,7 @@ def evaluate(state: dict[str, Any], report: Report) -> Report:
             grace_tag,
             bool(active_runs),
             tag_remediation,
-            release_run_failed,
+            failed_release_run,
         )
 
         # -- unpublished-release --------------------------------------------
@@ -346,7 +346,7 @@ def _check_unreleased_work(
     grace: timedelta,
     runs_in_flight: bool,
     remediation: str,
-    release_run_failed: bool,
+    failed_release_run: dict[str, Any],
 ) -> None:
     lane_id = lane["id"]
     commits = lane.get("commits_since_tag") or []
@@ -389,7 +389,8 @@ def _check_unreleased_work(
             report.note(message)
         return
 
-    if age < grace and not release_run_failed:
+    failed_run_matches = _failed_run_matches_unreleased(lane, failed_release_run)
+    if age < grace and not failed_run_matches:
         report.note(
             f"[{lane_id}] {len(releasable)} releasable commit(s) since "
             f"{lane.get('latest_tag')}, oldest {humanize(age)} old; inside the "
@@ -453,7 +454,7 @@ def _check_tags_without_release(
     grace: timedelta,
     runs_in_flight: bool,
     remediation: str,
-    release_run_failed: bool,
+    failed_release_run: dict[str, Any],
 ) -> None:
     lane_id = lane["id"]
     orphans = lane.get("tags_without_release") or []
@@ -469,7 +470,8 @@ def _check_tags_without_release(
             )
             continue
         created = parse_time(tag.get("date"))
-        if created is not None and now - created < grace and not release_run_failed:
+        failed_run_matches = _failed_run_matches_tag(tag, failed_release_run)
+        if created is not None and now - created < grace and not failed_run_matches:
             report.hold_open()
             report.note(
                 f"[{lane_id}] tag {tag['name']} has no release yet but is only "
@@ -558,6 +560,14 @@ def _check_pypi(
     tag_version = lane.get("latest_tag_version")
     if not tag_version:
         return
+    uncertain_versions = set(pypi.get("uncertain_versions") or [])
+    if tag_version in uncertain_versions:
+        report.hold_open()
+        report.warn(
+            f"[{lane_id}] PyPI returned incomplete distribution metadata for "
+            f"{package} {tag_version}; refusing to call it installable or missing."
+        )
+        return
     published = set(pypi.get("versions") or [])
     if tag_version in published:
         report.note(f"[{lane_id}] {package} {tag_version} is on PyPI.")
@@ -600,6 +610,29 @@ class GitHubUnavailable(Exception):
     pass
 
 
+def _failed_run_matches_unreleased(
+    lane: dict[str, Any], failed_release_run: dict[str, Any]
+) -> bool:
+    """Return true only when the event run attempted this exact unreleased state."""
+    run_id = failed_release_run.get("id")
+    head_sha = failed_release_run.get("head_sha")
+    if run_id is None or not head_sha:
+        return False
+    belongs_to_lane = any(run.get("id") == run_id for run in lane.get("runs") or [])
+    attempted_head_is_unreleased = any(
+        commit.get("sha") == head_sha for commit in lane.get("commits_since_tag") or []
+    )
+    return belongs_to_lane and attempted_head_is_unreleased
+
+
+def _failed_run_matches_tag(
+    tag: dict[str, Any], failed_release_run: dict[str, Any]
+) -> bool:
+    """Return true only when the workflow event is attributed to this exact tag."""
+    run_id = failed_release_run.get("id")
+    return run_id is not None and tag.get("run_id") == run_id
+
+
 def github_get(path: str, params: dict[str, Any] | None = None) -> Any:
     url = f"{GITHUB_API}{path}"
     if params:
@@ -621,22 +654,93 @@ def github_paginate(path: str, params: dict[str, Any] | None = None) -> list[Any
     collected: list[Any] = []
     previous: list[Any] | None = None
     page = 1
-    while page <= 10:
+    while True:
+        if page > 100:
+            raise GitHubUnavailable(f"GET {path}: pagination exceeded 100 pages")
         payload = github_get(path, {**(params or {}), "per_page": 100, "page": page})
-        if not isinstance(payload, list) or not payload:
+        if not isinstance(payload, list):
+            raise GitHubUnavailable(
+                f"GET {path}: expected a list on page {page}, got "
+                f"{type(payload).__name__}"
+            )
+        if not payload:
             break
         # /git/matching-refs/ ignores page and returns the complete set every
         # time. Following the naive loop there yields ten identical copies and
         # reports the same orphaned tag ten times -- a guard that inflates its
         # own findings is the first step to being ignored.
         if payload == previous:
-            break
+            if "/git/matching-refs/" in path:
+                break
+            raise GitHubUnavailable(
+                f"GET {path}: page {page} repeated the preceding page"
+            )
         collected.extend(payload)
         if len(payload) < 100:
             break
         previous = payload
         page += 1
     return collected
+
+
+def github_paginate_key(
+    path: str, key: str, params: dict[str, Any] | None = None
+) -> list[Any]:
+    """Collect a list nested in a GitHub response, rejecting incomplete shapes."""
+    collected: list[Any] = []
+    page = 1
+    while True:
+        if page > 100:
+            raise GitHubUnavailable(f"GET {path}: pagination exceeded 100 pages")
+        payload = github_get(path, {**(params or {}), "per_page": 100, "page": page})
+        if not isinstance(payload, dict) or not isinstance(payload.get(key), list):
+            raise GitHubUnavailable(
+                f"GET {path}: expected object containing list {key!r} on page {page}"
+            )
+        batch = payload[key]
+        collected.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return collected
+
+
+def _pypi_state_from_document(document: Any) -> dict[str, Any]:
+    """Preserve PyPI's file-level yank state instead of trusting version keys."""
+    if not isinstance(document, dict):
+        raise ValueError("PyPI response was not an object")
+    releases = document.get("releases")
+    info = document.get("info")
+    if not isinstance(releases, dict) or not isinstance(info, dict):
+        raise ValueError("PyPI response omitted info or releases")
+
+    installable: list[str] = []
+    uncertain: list[str] = []
+    for version, files in releases.items():
+        if not isinstance(version, str):
+            continue
+        if not isinstance(files, list) or not files:
+            uncertain.append(version)
+            continue
+        well_formed = [item for item in files if isinstance(item, dict)]
+        valid_yank_states = [
+            item["yanked"]
+            for item in well_formed
+            if "yanked" in item and isinstance(item["yanked"], bool)
+        ]
+        if any(not yanked for yanked in valid_yank_states):
+            installable.append(version)
+            continue
+        if len(well_formed) != len(files) or len(valid_yank_states) != len(files):
+            uncertain.append(version)
+
+    latest = info.get("version")
+    return {
+        "reachable": True,
+        "latest": latest if isinstance(latest, str) else None,
+        "versions": sorted(installable, key=version_key),
+        "uncertain_versions": sorted(uncertain, key=version_key),
+    }
 
 
 def fetch_pypi(package: str) -> dict[str, Any]:
@@ -647,11 +751,10 @@ def fetch_pypi(package: str) -> dict[str, Any]:
             document = json.loads(response.read())
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         return {"reachable": False, "error": str(exc)}
-    return {
-        "reachable": True,
-        "latest": document["info"]["version"],
-        "versions": sorted(document.get("releases", {}).keys()),
-    }
+    try:
+        return _pypi_state_from_document(document)
+    except (TypeError, ValueError) as exc:
+        return {"reachable": False, "error": str(exc)}
 
 
 def collect_state(config: dict[str, Any], report: Report) -> dict[str, Any]:
@@ -768,10 +871,11 @@ def _main_ci_state(repository: str, branch: str, workflows: Iterable[str]) -> st
 def _lane_runs(repository: str, workflows: Iterable[str]) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for workflow in workflows:
-        payload = github_get(
-            f"/repos/{repository}/actions/workflows/{workflow}/runs", {"per_page": 50}
+        workflow_runs = github_paginate_key(
+            f"/repos/{repository}/actions/workflows/{workflow}/runs",
+            "workflow_runs",
         )
-        for run in payload.get("workflow_runs") or []:
+        for run in workflow_runs:
             runs.append(
                 {
                     "id": run["id"],
@@ -1289,7 +1393,11 @@ def self_test() -> int:
     check("explicitly acknowledged historical tag -> quiet", _detectors(ack) == set())
 
     immediate_failure = _state(
-        release_run_failed=True,
+        failed_release_run={
+            "id": 123,
+            "head_sha": "6" * 40,
+            "head_branch": "v1.2.1",
+        },
         lane={
             "tags_without_release": [
                 {
@@ -1300,6 +1408,15 @@ def self_test() -> int:
                     "run_conclusion": "failure",
                 },
             ],
+            "runs": [
+                {
+                    "id": 123,
+                    "head_sha": "6" * 40,
+                    "head_branch": "v1.2.1",
+                    "status": "completed",
+                    "conclusion": "failure",
+                }
+            ],
         },
     )
     check(
@@ -1308,7 +1425,11 @@ def self_test() -> int:
     )
 
     immediate_unreleased = _state(
-        release_run_failed=True,
+        failed_release_run={
+            "id": 124,
+            "head_sha": "6" * 40,
+            "head_branch": "main",
+        },
         lane={
             "commits_since_tag": [
                 {
@@ -1317,11 +1438,94 @@ def self_test() -> int:
                     "date": "2026-07-27T19:59:00+00:00",
                 }
             ],
+            "runs": [
+                {
+                    "id": 124,
+                    "head_sha": "6" * 40,
+                    "head_branch": "main",
+                    "status": "completed",
+                    "conclusion": "failure",
+                }
+            ],
         },
     )
     check(
         "failed release event bypasses unreleased-work grace -> alert",
         "unreleased-work" in _detectors(immediate_unreleased),
+    )
+
+    unrelated_failure = _state(
+        failed_release_run={
+            "id": 125,
+            "head_sha": "7" * 40,
+            "head_branch": "main",
+        },
+        lane={
+            "commits_since_tag": [
+                {
+                    "sha": "8" * 40,
+                    "message": "fix: one-minute-old unrelated work",
+                    "date": "2026-07-27T19:59:00+00:00",
+                }
+            ],
+            "runs": [
+                {
+                    "id": 125,
+                    "head_sha": "7" * 40,
+                    "head_branch": "main",
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                }
+            ],
+        },
+    )
+    check(
+        "unrelated failed release does not bypass a fresh fix's grace",
+        _detectors(unrelated_failure) == set(),
+    )
+
+    all_yanked = _pypi_state_from_document(
+        {
+            "info": {"version": "1.24.0"},
+            "releases": {
+                "1.23.0": [{"yanked": False}],
+                "1.24.0": [{"yanked": True}, {"yanked": True}],
+            },
+        }
+    )
+    yanked_state = _state(
+        lane={
+            "latest_tag": "v1.24.0",
+            "latest_tag_version": "1.24.0",
+            "latest_tag_date": "2026-07-20T00:00:00+00:00",
+            "pypi": all_yanked,
+        }
+    )
+    check(
+        "an all-yanked PyPI version is not installable -> alert",
+        "unpublished-release" in _detectors(yanked_state),
+    )
+
+    incomplete_pypi = _pypi_state_from_document(
+        {
+            "info": {"version": "1.24.0"},
+            "releases": {"1.24.0": []},
+        }
+    )
+    incomplete_state = _state(
+        lane={
+            "latest_tag": "v1.24.0",
+            "latest_tag_version": "1.24.0",
+            "latest_tag_date": "2026-07-20T00:00:00+00:00",
+            "pypi": incomplete_pypi,
+        }
+    )
+    incomplete_report = evaluate(incomplete_state, Report())
+    check(
+        "incomplete PyPI file metadata holds an issue open without false alert",
+        incomplete_report.ok
+        and not incomplete_report.safe_to_close
+        and len(incomplete_report.warnings) == 1,
     )
 
     superseded_cancel = _state(
@@ -1409,9 +1613,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--run-url", help="URL of the run producing this report.")
     parser.add_argument(
-        "--release-run-failed",
-        action="store_true",
-        help="Bypass publication grace after a known non-successful release run.",
+        "--failed-release-run-id",
+        type=int,
+        help="ID of the non-successful release run that triggered this check.",
+    )
+    parser.add_argument(
+        "--failed-release-head-sha",
+        help="Head SHA of the non-successful release run that triggered this check.",
+    )
+    parser.add_argument(
+        "--failed-release-head-branch",
+        help="Head branch or tag of the non-successful release run.",
     )
     parser.add_argument(
         "--fail-on-alert",
@@ -1445,8 +1657,12 @@ def main(argv: list[str] | None = None) -> int:
                     handle.write("clear=false\n")
             return 0
 
-    if args.release_run_failed:
-        state["release_run_failed"] = True
+    if args.failed_release_run_id is not None:
+        state["failed_release_run"] = {
+            "id": args.failed_release_run_id,
+            "head_sha": args.failed_release_head_sha,
+            "head_branch": args.failed_release_head_branch,
+        }
 
     if args.dump_state:
         args.dump_state.write_text(json.dumps(state, indent=2), encoding="utf-8")

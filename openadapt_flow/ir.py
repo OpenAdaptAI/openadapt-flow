@@ -930,6 +930,21 @@ class Step(BaseModel):
     # configured also falls through to the GUI (the API tier's safe fallback).
     api_binding: Optional[ApiBinding] = None
     risk: Literal["reversible", "irreversible"] = "reversible"
+    risk_explanation: Optional[str] = Field(
+        default=None,
+        max_length=512,
+        description=(
+            "Why the compiler or qualifying operator assigned this risk. "
+            "This is provenance, not runtime evidence."
+        ),
+    )
+    risk_review_required: bool = Field(
+        default=False,
+        description=(
+            "True when risk is ambiguous and certification must refuse until "
+            "an operator supplies an explicit reviewed override"
+        ),
+    )
     # Workflow-program IR, Phase 1 (RFC §6) -- both OPTIONAL and additive; a
     # step with neither replays EXACTLY as a v0 step. Orthogonal to effects /
     # risk / identity above.
@@ -955,6 +970,7 @@ class Step(BaseModel):
         elif self.modifiers:
             raise ValueError("modifiers are valid only for HOTKEY steps")
         return self
+
     timeout_s: float = 10.0
     # Identity-protection audit trail (clicks and anchored TYPE steps):
     # whether this step's click is guarded by the pre-click identity check
@@ -1987,6 +2003,9 @@ class StepResult(BaseModel):
     step_id: str
     intent: str
     ok: bool
+    risk: Literal["reversible", "irreversible"] = "reversible"
+    risk_explanation: Optional[str] = None
+    risk_review_required: bool = False
     # Workflow-program IR, Phase 1: True when a step was SKIPPED because its
     # ``guard`` was unmet with ``on_unmet="skip"`` (a no-op success -- the
     # step did not act). False for every executed step; additive.

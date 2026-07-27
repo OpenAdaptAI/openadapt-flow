@@ -435,6 +435,23 @@ def evaluate_policy(workflow: Workflow, policy: Policy) -> CertifyReport:
     steps = list(iter_workflow_steps(workflow))
 
     for step in steps:
+        if step.risk_review_required:
+            violations.append(
+                Violation(
+                    rule="require_reviewed_action_risk",
+                    step_id=step.id,
+                    reason=(
+                        "action risk is ambiguous and has not been reviewed — "
+                        "qualification must apply an explicit risk override"
+                        + (
+                            f" ({step.risk_explanation})"
+                            if step.risk_explanation
+                            else ""
+                        )
+                    ),
+                )
+            )
+
         if policy.prohibit_unarmed_clicks and is_identity_applicable(step):
             if not is_identity_armed(step):
                 violations.append(
@@ -763,6 +780,9 @@ def lint_workflow(workflow: Workflow) -> LintReport:
     - ``under_classified_risk`` — a step whose text looks write-shaped but that
       compiled ``reversible`` (typically a bundle predating auto risk-
       classification; recompile or set ``risk_overrides``). Always ``warn``.
+    - ``risk_review_required`` — an ambiguous icon-only/unlabelled action whose
+      classification has not been explicitly reviewed. Always ``error``;
+      certification also refuses it under every policy.
     - ``missing_effect_contract`` — a CONSEQUENTIAL (irreversible) step that
       declares no system-of-record effect (``step.effects``): the runtime then
       falls back to screen evidence for that write. Always ``warn`` here
@@ -795,6 +815,24 @@ def lint_workflow(workflow: Workflow) -> LintReport:
     steps = list(iter_workflow_steps(workflow))
     for step in steps:
         irreversible = step.risk == "irreversible"
+
+        if step.risk_review_required:
+            findings.append(
+                Finding(
+                    severity="error",
+                    code="risk_review_required",
+                    step_id=step.id,
+                    message=(
+                        "ambiguous action risk requires an explicit qualification "
+                        "override before certification"
+                        + (
+                            f" ({step.risk_explanation})"
+                            if step.risk_explanation
+                            else ""
+                        )
+                    ),
+                )
+            )
 
         if irreversible:
             consequential += 1

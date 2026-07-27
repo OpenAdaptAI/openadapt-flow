@@ -877,8 +877,14 @@ class RemoteDisplayBackend:
             self._prepared_pointer_point = None
             self._assert_click_target(sx, sy)
             self._assert_frame_fresh()
-            self._client.mouse(sx, sy, button="right", down=True, click_count=1)
             try:
+                self._client.mouse(
+                    sx,
+                    sy,
+                    button="right",
+                    down=True,
+                    click_count=1,
+                )
                 self._client.mouse(
                     sx,
                     sy,
@@ -887,6 +893,16 @@ class RemoteDisplayBackend:
                     click_count=1,
                 )
             except Exception as exc:
+                try:
+                    self._client.mouse(
+                        sx,
+                        sy,
+                        button="right",
+                        down=False,
+                        click_count=1,
+                    )
+                except Exception:
+                    pass
                 raise ActionDeliveryUncertain(
                     operation="remote_right_click",
                     native=False,
@@ -917,7 +933,9 @@ class RemoteDisplayBackend:
                 time.sleep(self._settle_s)
                 self._ensure_input_ready(point=start)
             assert self._viewport is not None
-            if not (0 <= end[0] < self._viewport[0] and 0 <= end[1] < self._viewport[1]):
+            if not (
+                0 <= end[0] < self._viewport[0] and 0 <= end[1] < self._viewport[1]
+            ):
                 raise RemoteDisplayError(
                     f"drag destination {end!r} is outside captured frame "
                     f"{self._viewport!r}"
@@ -928,8 +946,9 @@ class RemoteDisplayBackend:
             self._assert_click_target(end_sx, end_sy)
             self._assert_frame_fresh()
             self._prepared_pointer_point = None
-            down_sent = False
+            down_attempted = False
             try:
+                down_attempted = True
                 self._client.mouse(
                     start_sx,
                     start_sy,
@@ -937,18 +956,16 @@ class RemoteDisplayBackend:
                     down=True,
                     click_count=1,
                 )
-                down_sent = True
                 self._client.mouse_move(end_sx, end_sy)
             except Exception as exc:
-                if down_sent:
+                if down_attempted:
                     raise ActionDeliveryUncertain(
                         operation="remote_drag",
                         native=False,
                         cause_type=type(exc).__name__,
                     ) from exc
-                raise
             finally:
-                if down_sent:
+                if down_attempted:
                     try:
                         self._client.mouse(
                             end_sx,

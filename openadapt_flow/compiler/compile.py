@@ -44,7 +44,7 @@ from openadapt_flow.ir import (
     StructuralLocator,
     Workflow,
 )
-from openadapt_flow.risk import classify_step_risk
+from openadapt_flow.risk import infer_step_risk
 from openadapt_flow.runtime.identity import (
     band_region,
     context_from_lines,
@@ -1491,7 +1491,9 @@ def compile_recording(
                 )
             if kind == "drag":
                 destination = drag_end_anchor.ocr_text if drag_end_anchor else None
-                intent = "drag " + (f"'{ocr_text}'" if ocr_text else "recorded visual target")
+                intent = "drag " + (
+                    f"'{ocr_text}'" if ocr_text else "recorded visual target"
+                )
                 intent += " to " + (
                     f"'{destination}'" if destination else "recorded visual destination"
                 )
@@ -1709,7 +1711,10 @@ def compile_recording(
     # passes risk_overrides. Conservative: an unsure write-shaped step leans
     # irreversible (the safe direction). Explicit risk_overrides below win.
     for step in steps:
-        step.risk = classify_step_risk(step)
+        inference = infer_step_risk(step)
+        step.risk = inference.risk
+        step.risk_explanation = inference.explanation
+        step.risk_review_required = inference.requires_review
 
     if risk_overrides:
         by_id = {step.id: step for step in steps}
@@ -1727,6 +1732,8 @@ def compile_recording(
             # Validated against the two legal values just above, so this narrows
             # the free-form ``dict[str, str]`` override value to Step.risk's Literal.
             by_id[step_id].risk = cast(Literal["reversible", "irreversible"], risk)
+            by_id[step_id].risk_explanation = f"operator-qualified override: {risk}"
+            by_id[step_id].risk_review_required = False
 
     # System-of-record effect mining (opt-in). Runs LAST, after risk_overrides,
     # so each step's `risk` (the consequential-write signal) is final. Attaches

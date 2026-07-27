@@ -216,8 +216,7 @@ def step_to_action(step: ir.Step) -> "Action":
             y=float(end_y),
             is_normalized=False,
             description=(
-                step.drag_end_anchor.ocr_text
-                or step.drag_end_anchor.context_text
+                step.drag_end_anchor.ocr_text or step.drag_end_anchor.context_text
             ),
             **drag_target_defaults,
         )

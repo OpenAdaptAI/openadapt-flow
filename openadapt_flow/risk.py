@@ -24,8 +24,10 @@ The step's ``intent`` and its anchor's ``ocr_text`` (the button label) are
 scanned for a consequential-write verb — create / update / delete / submit /
 save / confirm and their siblings — matched on WORD boundaries so ``address``
 does not trip ``add`` and ``postal`` does not trip ``post``. Unlabelled pointer
-controls, hotkeys, and drags are ambiguous by construction and therefore take
-the conservative classification until qualification overrides them.
+controls are recorded as provisionally reversible so tutorials can replay, but
+carry ``risk_review_required`` and cannot be certified until qualification
+applies an explicit override. Hotkeys and drags take the conservative
+irreversible classification until qualification overrides them.
 
 False-positive posture
 ----------------------
@@ -42,9 +44,20 @@ that an ambiguous actuator is harmless.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Literal
 
 from openadapt_flow.ir import ActionKind, Step
+
+
+@dataclass(frozen=True)
+class RiskInference:
+    """Compile-time classification plus its qualification disposition."""
+
+    risk: Literal["reversible", "irreversible"]
+    explanation: str
+    requires_review: bool = False
+
 
 # Consequential-write verb stems. Each is matched case-insensitively on WORD
 # boundaries against the step's combined text, so `add` matches "+Add" and
@@ -113,24 +126,53 @@ def step_text(step: Step) -> str:
     return " ".join(parts)
 
 
-def classify_step_risk(step: Step) -> Literal["reversible", "irreversible"]:
-    """Infer ``"irreversible"`` or ``"reversible"`` for a step.
+def infer_step_risk(step: Step) -> RiskInference:
+    """Infer risk while retaining why qualification must review ambiguity."""
 
-    Ambiguous drags/hotkeys, submitting key presses, icon-only primary clicks,
-    and write-shaped labelled clicks classify irreversible. Qualification may
-    explicitly override a false positive; compilation never assumes an
-    ambiguous actuator is harmless.
-    """
-    if step.action in (ActionKind.DRAG, ActionKind.HOTKEY):
-        return "irreversible"
+    if step.action is ActionKind.DRAG:
+        return RiskInference(
+            "irreversible", "drag can directly mutate application state"
+        )
+    if step.action is ActionKind.HOTKEY:
+        return RiskInference(
+            "irreversible", "hotkey can submit or mutate application state"
+        )
     if step.action is ActionKind.KEY:
-        return (
-            "irreversible"
-            if (step.key or "").lower() in {"enter", "return", "delete"}
-            else "reversible"
+        consequential = (step.key or "").lower() in {"enter", "return", "delete"}
+        return RiskInference(
+            "irreversible" if consequential else "reversible",
+            (
+                "submission/deletion key can mutate application state"
+                if consequential
+                else "key is not a known submission or deletion key"
+            ),
         )
     if step.action not in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK):
-        return "reversible"
+        return RiskInference("reversible", "action is not a pointer submission")
     if step.anchor is None or not (step.anchor.ocr_text or "").strip():
-        return "irreversible"
-    return "irreversible" if is_write_shaped(step_text(step)) else "reversible"
+        # An unlabelled primary click may be a focus/navigation action or an
+        # icon-only write. Demo replay remains usable, but no policy may certify
+        # the unresolved classification until qualification supplies an
+        # explicit override.
+        return RiskInference(
+            "reversible",
+            "unlabelled pointer control may be navigation, focus, or a state change",
+            requires_review=True,
+        )
+    text = step_text(step)
+    if is_write_shaped(text):
+        return RiskInference(
+            "irreversible",
+            "control label contains a consequential-write verb",
+        )
+    return RiskInference("reversible", "control label is not write-shaped")
+
+
+def classify_step_risk(step: Step) -> Literal["reversible", "irreversible"]:
+    """Return the inferred risk; use :func:`infer_step_risk` for rationale.
+
+    Drags/hotkeys, submitting key presses, and write-shaped labelled clicks
+    classify irreversible. Icon-only primary clicks remain provisionally
+    reversible but require explicit qualification review before certification.
+    """
+    return infer_step_risk(step).risk

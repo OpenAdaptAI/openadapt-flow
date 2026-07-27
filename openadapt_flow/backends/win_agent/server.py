@@ -235,9 +235,7 @@ def _perform_input(payload: dict[str, Any]) -> dict[str, Any]:
         return _delivery_receipt(
             "physical_double_click"
             if double
-            else (
-                "physical_right_click" if button == "right" else "physical_click"
-            ),
+            else ("physical_right_click" if button == "right" else "physical_click"),
             native=False,
         )
 

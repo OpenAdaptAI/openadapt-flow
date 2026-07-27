@@ -14,7 +14,7 @@ import pytest
 
 from openadapt_flow.compiler import compile_recording
 from openadapt_flow.ir import ActionKind, Anchor, Step
-from openadapt_flow.risk import classify_step_risk, is_write_shaped
+from openadapt_flow.risk import classify_step_risk, infer_step_risk, is_write_shaped
 
 VIEWPORT = (1280, 800)
 
@@ -108,7 +108,9 @@ class TestHeuristic:
             action=ActionKind.CLICK,
             anchor=Anchor(template="t.png", region=(0, 0, 1, 1), click_point=(10, 12)),
         )
-        assert classify_step_risk(step) == "irreversible"
+        inference = infer_step_risk(step)
+        assert inference.risk == "reversible"
+        assert inference.requires_review is True
 
 
 # --- end-to-end through the compiler ---------------------------------------
@@ -216,3 +218,4 @@ def test_risk_overrides_still_win_both_directions(two_button_bundle, tmp_path):
     # Overrides flip BOTH the auto-reversible and the auto-irreversible step.
     assert by_id["step_000"].risk == "irreversible"
     assert by_id["step_001"].risk == "reversible"
+    assert all(not step.risk_review_required for step in by_id.values())

@@ -143,9 +143,7 @@ class Recorder:
                 "end_x": int(end_x),
                 "end_y": int(end_y),
             },
-            lambda: backend.drag(
-                int(x), int(y), int(end_x), int(end_y)
-            ),
+            lambda: backend.drag(int(x), int(y), int(end_x), int(end_y)),
         )
 
     def type_text(self, text: str, param: Optional[str] = None) -> None:
@@ -290,12 +288,16 @@ class Recorder:
                 is settled and captured now.
         """
         event = dict(event)
-        if event.get("kind") in (
-            "click",
-            "double_click",
-            "right_click",
-            "drag",
-        ) and structured_identity:
+        if (
+            event.get("kind")
+            in (
+                "click",
+                "double_click",
+                "right_click",
+                "drag",
+            )
+            and structured_identity
+        ):
             event["structured_identity"] = structured_identity
         if param is not None:
             event["param"] = param

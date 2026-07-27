@@ -430,9 +430,7 @@ def _reject_out_of_window(
                 raise ValueError(
                     "window-scoped mouse.drag carries a non-finite destination"
                 )
-            points.append(
-                (parsed_x + parsed_dx, parsed_y + parsed_dy, "destination")
-            )
+            points.append((parsed_x + parsed_dx, parsed_y + parsed_dy, "destination"))
         active_size: Optional[tuple[int, int]] = None
         for entry_ts, size in timeline:
             if entry_ts <= ts:
@@ -699,9 +697,7 @@ def _flow_events(
                     f"governed drag (t={ts:.3f})"
                 )
             if None in (action.x, action.y, action.dx, action.dy):
-                raise ValueError(
-                    f"mouse.drag at t={ts:.3f} has incomplete endpoints"
-                )
+                raise ValueError(f"mouse.drag at t={ts:.3f} has incomplete endpoints")
             start_x = float(action.x)
             start_y = float(action.y)
             event = {
@@ -732,7 +728,9 @@ def _flow_events(
             if (
                 not trigger
                 or not modifiers
-                or any(value not in {"ctrl", "alt", "shift", "meta"} for value in modifiers)
+                or any(
+                    value not in {"ctrl", "alt", "shift", "meta"} for value in modifiers
+                )
                 or len(set(modifiers)) != len(modifiers)
             ):
                 raise ValueError(

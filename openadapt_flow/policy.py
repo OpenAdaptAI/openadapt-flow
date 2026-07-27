@@ -147,8 +147,7 @@ def has_system_effect(step: Step) -> bool:
     record (an API/DB read), NOT the screen. This is the oracle the ``expect``
     postconditions are blind to (the "5 of 7 silent" transactional faults)."""
     return bool(
-        step.effects
-        or (step.api_binding is not None and step.api_binding.effects)
+        step.effects or (step.api_binding is not None and step.api_binding.effects)
     )
 
 

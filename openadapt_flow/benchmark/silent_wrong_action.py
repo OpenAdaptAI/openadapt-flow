@@ -509,7 +509,43 @@ def render_markdown(results: dict[str, Any]) -> str:
         )
         body += f"| `{name}` | {gt} | {screen} | {effect} | {silent} |\n"
 
-    return f"""# Silent-wrong-action rate: screen-verify vs effect-verify (measured)
+    return f"""# Silent-wrong-action rate: screen-verify vs effect-verify (DEFINITIONAL FIXTURE)
+
+> [!WARNING]
+> **This is a definitional fixture. Its numbers are circular by construction and
+> must not be cited as an empirical result.**
+>
+> The effect verifier and the ground truth below read the **same in-process
+> object**, and the effect contract restates the ground-truth definition. The
+> effect arm's `0/90` is therefore guaranteed by the setup rather than
+> discovered by it — `benchmark/effect_e2e/EFFECT_E2E.md` says exactly this in
+> writing. The `55.6% (50/90) → 0% (0/90)` figure derived from this file is
+> retired from every public surface.
+>
+> **The measured result lives in
+> [`benchmark/effect_e2e/`](../effect_e2e/EFFECT_E2E.md)**, where every write
+> goes through the real governed replay path (`Replayer` → `ApiActuator` → a
+> real HTTP write) into an on-disk SQLite system of record, the verifier reads
+> back over a *different* HTTP verb, endpoint, and connection than the write,
+> and the ground truth is a direct read-only SQLite connection that bypasses the
+> service entirely and audits every table it discovers from `sqlite_master`.
+> Its measured ladder, 90 runs per arm:
+>
+> | arm | silent-wrong-effect rate | undetected-wrong rate |
+> |---|---|---|
+> | screen-verify (banner) | **60.0%** (54/90) | 75.0% |
+> | effect-verify, one out-of-band REST record oracle | **10.0%** (9/90) | 12.5% |
+> | effect-verify, complete SQL read path | **0.0%** (0/90) | 0.0% |
+>
+> The middle rung is the number a real deployment ships: one out-of-band record
+> oracle cuts undetected wrong effects from 75.0% to 12.5%. All nine residual
+> misses are the single `collateral_unaudited` class — a collateral write to a
+> surface the oracle's read path does not cover.
+>
+> **What this fixture is still good for:** a deterministic, hand-authored
+> regression anchor over the transactional fault taxonomy. It reproduces exactly
+> on every run, which is precisely what makes it a useful regression anchor and
+> equally why it carries no empirical weight.
 
 Date: {date}. This is the [silent wrong-action rate
 instrument](../../docs/validation/SILENT_WRONG_ACTION_RATE.md) reduced to a

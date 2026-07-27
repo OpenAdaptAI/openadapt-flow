@@ -3,10 +3,19 @@
 Three layers:
 
 1. The reference re-expression regression: the new schema + oracle harness
-   reproduce the ``benchmark/fault_model`` headline (5 of 7 transactional fault
-   classes silently mishandled by screen-only; 0 by the effect oracle) and the
-   ``benchmark/silent_wrong_action`` proto-SWER rate (55.6% -> 0.0% over 90
-   runs). This is the load-bearing pin for the whole contract.
+   reproduce the ``benchmark/fault_model`` fixture counts (5 of 7 transactional
+   fault classes silently mishandled by screen-only; 0 by the effect oracle) and
+   the ``benchmark/silent_wrong_action`` proto-SWER counts (50/90 = 55.6% ->
+   0/90 = 0.0%). These are PINNED EXPECTED VALUES OF A DETERMINISTIC SYNTHETIC
+   FIXTURE, not a measured result: that fixture's effect verifier and ground
+   truth read the same in-process object, so its ``0/90`` is circular by
+   construction. They reproduce exactly on every run, which is what makes them
+   the load-bearing regression pin for the whole contract and equally why they
+   carry no empirical weight. The measured end-to-end result is
+   ``benchmark/effect_e2e/`` (real replayer, on-disk SQLite system of record,
+   ground truth read directly from storage): screen-verify 54/90 = 60.0% -> one
+   out-of-band REST record oracle 9/90 = 10.0% -> complete SQL read path
+   0/90 = 0.0%.
 2. Unit tests of the classifier truth table, the substrate-agnostic
    record-snapshot oracle (partial / duplicate / phantom / collateral-loss /
    unreadable), and the metrics (SWER split, over-halt, gap, Wilson, pass^k).
@@ -47,7 +56,7 @@ from openadapt_flow.benchmark.effectbench import (
 from openadapt_flow.benchmark.effectbench.metrics import bootstrap_ci, rate
 
 # ---------------------------------------------------------------------------
-# 1. Reference re-expression regression (the headline result)
+# 1. Reference re-expression regression (the fixture's pinned expected values)
 # ---------------------------------------------------------------------------
 
 
@@ -56,8 +65,14 @@ def episodes() -> list[EpisodeRecord]:
     return build_reference_episodes(repeats=10)
 
 
-def test_screen_only_swer_is_55_6_percent(episodes: list[EpisodeRecord]) -> None:
-    """silent_wrong_action headline: 50/90 = 55.6% wrong by screen."""
+def test_screen_only_swer_matches_pinned_fixture_value(
+    episodes: list[EpisodeRecord],
+) -> None:
+    """Pinned fixture value: 50/90 = 55.6% wrong by screen.
+
+    A fixture invariant, not a measured result. For the measured number see
+    ``benchmark/effect_e2e/`` (screen-verify 54/90 = 60.0%).
+    """
     s = summarize(episodes, arm="screen_only")
     assert s.swer.numerator == 50
     assert s.swer.denominator == 90
@@ -67,8 +82,16 @@ def test_screen_only_swer_is_55_6_percent(episodes: list[EpisodeRecord]) -> None
     assert s.swer_phantom.numerator == 10
 
 
-def test_effect_verify_swer_is_zero(episodes: list[EpisodeRecord]) -> None:
-    """The independent effect oracle drives silent-wrong to 0/90."""
+def test_effect_verify_swer_matches_pinned_fixture_value(
+    episodes: list[EpisodeRecord],
+) -> None:
+    """Pinned fixture value: the effect oracle arm is 0/90.
+
+    Circular by construction on this fixture -- the effect verifier and the
+    ground truth read the same in-process object -- so it is a regression pin,
+    never evidence. Measured, one out-of-band record oracle leaves 9/90
+    (``benchmark/effect_e2e/``).
+    """
     s = summarize(episodes, arm="effect_verify")
     assert s.swer.numerator == 0
     assert s.swer.denominator == 90

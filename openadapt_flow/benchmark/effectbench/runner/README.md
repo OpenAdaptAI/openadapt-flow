@@ -59,17 +59,30 @@ class AgentArm(Protocol):
 | `mock` (`MockArm`) | **live** | deterministic, substrate-free; scripts an `AgentReport` for hermetic CI of the harness/metrics without HTTP. |
 | `claude_cu`, `openai_cua`, `ui_tars`, `skyvern` | **scaffolded** | adapters in `baselines.py` — interface + docstring + TODOs. Every `run` raises `ScaffoldNotWired` (no paid call, no spend) until a funded run supplies credentials + a budget cap. |
 
-## The MockMed dry-run (reference result)
+## The MockMed dry-run (reference fixture's pinned expected values)
 
 `reference_tasks()` turns the bundled MockMed transactional-fault surface into
 nine tasks; `MockMedEnvProvider` serves one fault server and resets it per
 episode (isolation) while the arms write over real HTTP. The dry-run reproduces
-the headline end-to-end:
+these **pinned expected values** end-to-end:
 
 ```
 screen_only SWER : 5/9 = 55.6%  (wrong_write 4, phantom 1)   gap 55.6%
 compiler   SWER : 0/9 =  0.0%   over-halt 0/9                gap  0.0%
 ```
+
+**These are fixture invariants, not a measured result and not a headline.**
+MockMed is a deterministic, hand-authored fixture whose effect verifier and
+ground truth read the same in-process object, so the `0.0%` is circular by
+construction; it reproduces exactly on every run, which is what makes it a
+useful regression anchor and equally why it carries no empirical weight. The
+measured end-to-end result is
+[`benchmark/effect_e2e/`](../../../../benchmark/effect_e2e/EFFECT_E2E.md):
+screen-verify **54/90 (60.0%)** → one out-of-band REST record oracle **9/90
+(10.0%)** → complete SQL read path **0/90**. The middle rung is the number a
+real deployment ships — one out-of-band record oracle cuts undetected wrong
+effects from 75.0% to 12.5%, and all nine residual misses are the single
+`collateral_unaudited` class.
 
 The ablation is silently wrong on partial-save, duplicate, optimistic-then-reject,
 stale-overwrite, and double-delivered writes; the compiler arm's effect gate

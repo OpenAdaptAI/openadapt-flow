@@ -18,12 +18,43 @@ reportable benchmark:
 - `benchmark/fault_model/` — the MockMed-only `GET /api/db` DB-state oracle +
   `classify()` over 7 transactional fault classes (5/7 silently mishandled by
   screen-only verification). **The reusable core.**
-- `benchmark/silent_wrong_action/` — the proto-SWER **rate**: 55.6% wrong by
-  screen → 0.0% by effect over 90 runs. **The measurement template.**
+- `benchmark/silent_wrong_action/` — the proto-SWER **rate**, a *definitional*
+  fixture: `50/90 = 55.6%` wrong by screen → `0/90 = 0.0%` by effect. Its effect
+  verifier and its ground truth read the same in-process object and its effect
+  contract restates the ground-truth definition, so that `0/90` is **circular by
+  construction**. **The measurement template — not a measured result.**
 
-Both results are reproduced end-to-end through this contract by
-`benchmark/effectbench/reference_fault_model.py`, pinned in CI by
-`tests/test_effectbench.py`.
+Both counts are reproduced end-to-end through this contract by
+`benchmark/effectbench/reference_fault_model.py` and pinned in CI by
+`tests/test_effectbench.py`. They are **pinned expected values of a
+deterministic synthetic fixture**, not empirical findings: MockMed is
+hand-authored and deterministic, so they reproduce exactly on every run — which
+is what makes them a good regression anchor and equally why they carry no
+empirical weight. Do not cite them as a result or a published headline.
+
+### Where the measured result lives
+
+OpenAdapt's **measured** silent-wrong-effect result is
+[`benchmark/effect_e2e/`](../../../benchmark/effect_e2e/EFFECT_E2E.md), where
+every write goes through the real governed replay path (`Replayer` →
+`ApiActuator` → a real HTTP write) into an on-disk SQLite system of record, the
+verifier reads back over a different HTTP verb/endpoint/connection, and the
+ground truth is a direct read-only SQLite connection that bypasses the service
+entirely and audits every table it discovers from `sqlite_master`. Its measured
+ladder, 90 runs per arm:
+
+| arm | silent-wrong-effect rate |
+|---|---|
+| screen-verify (success banner) | **60.0%** (54/90) |
+| effect-verify, one out-of-band REST record oracle | **10.0%** (9/90) |
+| effect-verify, complete SQL read path | **0.0%** (0/90) |
+
+The **middle rung is the number a real deployment ships**: one out-of-band
+record oracle cuts undetected wrong effects from 75.0% to 12.5%. All nine
+residual misses are the single `collateral_unaudited` class — a collateral write
+to a surface the oracle's read path does not cover. The `0/90` arm closes that
+gap only by widening the read path to every mutable surface, so it is the best
+case under complete in-database instrumentation, not the expected field result.
 
 Design doc: `.private/benchmark_design_2026_07_20.md`.
 
@@ -234,7 +265,7 @@ halting on everything (over-halt = 100%).
 
 ---
 
-## Reproduce the reference result
+## Reproduce the reference fixture's pinned expected values
 
 ```bash
 python -m benchmark.effectbench.reference_fault_model
@@ -246,8 +277,16 @@ effect_verify SWER: 0/90 = 0.0%
 transactional silently mishandled by screen-only: 5/7
 ```
 
-Pinned in CI by `tests/test_effectbench.py` (including a parity check against the
-original `fault_model.is_silently_mishandled`).
+These are **fixture invariants, not a measured result.** They are pinned in CI
+by `tests/test_effectbench.py` (including a parity check against the original
+`fault_model.is_silently_mishandled`) so that a change to the schema, the
+classifier, the judge, or the metrics fails loudly. Read them as a regression
+anchor and a template for your own integration — never as evidence about a real
+system of record. For the measured end-to-end number see
+[`benchmark/effect_e2e/`](../../../benchmark/effect_e2e/EFFECT_E2E.md):
+screen-verify **54/90 (60.0%)** → one out-of-band REST record oracle **9/90
+(10.0%)** → complete SQL read path **0/90**, with undetected wrong effects
+cut from 75.0% to 12.5% by that single out-of-band oracle.
 
 ---
 

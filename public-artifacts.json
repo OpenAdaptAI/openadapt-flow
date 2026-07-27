@@ -109,7 +109,7 @@
     },
     {
       "path": ".github/workflows/release-health.yml",
-      "sha256": "714e294e7ea8bc0f994f9dbccaa1a2ac501058e5507317bd661309117520d40a"
+      "sha256": "36bbd52aeafa67f83512de6af5d0a608f20885d0c7826abe4e6fe3b772eb2b39"
     },
     {
       "path": ".github/workflows/release.yml",

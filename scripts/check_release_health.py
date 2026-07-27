@@ -316,7 +316,6 @@ def evaluate(state: dict[str, Any], report: Report) -> Report:
                 grace_unreleased,
                 bool(active_runs),
                 unreleased_remediation,
-                failed_release_run,
             )
 
         # -- tag-without-release --------------------------------------------
@@ -346,7 +345,6 @@ def _check_unreleased_work(
     grace: timedelta,
     runs_in_flight: bool,
     remediation: str,
-    failed_release_run: dict[str, Any],
 ) -> None:
     lane_id = lane["id"]
     commits = lane.get("commits_since_tag") or []
@@ -389,8 +387,7 @@ def _check_unreleased_work(
             report.note(message)
         return
 
-    failed_run_matches = _failed_run_matches_unreleased(lane, failed_release_run)
-    if age < grace and not failed_run_matches:
+    if age < grace:
         report.note(
             f"[{lane_id}] {len(releasable)} releasable commit(s) since "
             f"{lane.get('latest_tag')}, oldest {humanize(age)} old; inside the "
@@ -608,21 +605,6 @@ def _check_pypi(
 
 class GitHubUnavailable(Exception):
     pass
-
-
-def _failed_run_matches_unreleased(
-    lane: dict[str, Any], failed_release_run: dict[str, Any]
-) -> bool:
-    """Return true only when the event run attempted this exact unreleased state."""
-    run_id = failed_release_run.get("id")
-    head_sha = failed_release_run.get("head_sha")
-    if run_id is None or not head_sha:
-        return False
-    belongs_to_lane = any(run.get("id") == run_id for run in lane.get("runs") or [])
-    attempted_head_is_unreleased = any(
-        commit.get("sha") == head_sha for commit in lane.get("commits_since_tag") or []
-    )
-    return belongs_to_lane and attempted_head_is_unreleased
 
 
 def _failed_run_matches_tag(
@@ -1424,36 +1406,6 @@ def self_test() -> int:
         "tag-without-release" in _detectors(immediate_failure),
     )
 
-    immediate_unreleased = _state(
-        failed_release_run={
-            "id": 124,
-            "head_sha": "6" * 40,
-            "head_branch": "main",
-        },
-        lane={
-            "commits_since_tag": [
-                {
-                    "sha": "6" * 40,
-                    "message": "fix: close the release boundary",
-                    "date": "2026-07-27T19:59:00+00:00",
-                }
-            ],
-            "runs": [
-                {
-                    "id": 124,
-                    "head_sha": "6" * 40,
-                    "head_branch": "main",
-                    "status": "completed",
-                    "conclusion": "failure",
-                }
-            ],
-        },
-    )
-    check(
-        "failed release event bypasses unreleased-work grace -> alert",
-        "unreleased-work" in _detectors(immediate_unreleased),
-    )
-
     unrelated_failure = _state(
         failed_release_run={
             "id": 125,
@@ -1463,10 +1415,15 @@ def self_test() -> int:
         lane={
             "commits_since_tag": [
                 {
+                    "sha": "7" * 40,
+                    "message": "ci: adjust release plumbing",
+                    "date": "2026-07-27T19:58:00+00:00",
+                },
+                {
                     "sha": "8" * 40,
                     "message": "fix: one-minute-old unrelated work",
                     "date": "2026-07-27T19:59:00+00:00",
-                }
+                },
             ],
             "runs": [
                 {
@@ -1480,7 +1437,7 @@ def self_test() -> int:
         },
     )
     check(
-        "unrelated failed release does not bypass a fresh fix's grace",
+        "failed run at a non-bumping head does not bypass a later fix's grace",
         _detectors(unrelated_failure) == set(),
     )
 

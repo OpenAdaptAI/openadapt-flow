@@ -990,7 +990,10 @@ def build_runtime_authorization(
                 require_current_risk_certification=require_current_risk_cert,
                 certifying_policy_sha256=report.policy_contract_sha256,
             )
-            and has_system_effect(step)
+            # This capability authorizes only an unverifiable GUI write.  API
+            # effects belong to the independently verified API actuation path
+            # and must never create (or be conflated with) a GUI approval.
+            and bool(step.effects)
         ]
 
     return GovernedRunAuthorization(

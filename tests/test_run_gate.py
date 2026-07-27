@@ -508,6 +508,32 @@ def test_direct_api_write_cannot_use_unverified_approval(tmp_path):
     assert "direct API write" in gate.detail
 
 
+def test_api_only_effect_never_creates_gui_unverified_write_approval(tmp_path):
+    wf = _good_workflow("api_only_approval")
+    write = wf.steps[1]
+    write.api_binding = ApiBinding(
+        url_template="/api/encounter",
+        effects=list(write.effects),
+    )
+    write.effects = []
+    wf, bundle = _seal(wf, tmp_path)
+    refused = _run(wf, bundle, verifier=False, approval_available=True)
+
+    # Even if a caller presents a structurally valid all-passing report with
+    # the approval bit set, an API-only effect cannot mint the GUI capability.
+    admitted = refused.model_copy(
+        update={
+            "gates": [
+                gate.model_copy(update={"passed": True}) for gate in refused.gates
+            ],
+            "unverified_write_approval_granted": True,
+        }
+    )
+    authorization = build_runtime_authorization(wf, admitted)
+
+    assert authorization.unverified_write_approvals == ()
+
+
 def test_binding_only_effect_cannot_cover_gui_fallback_at_admission(tmp_path):
     wf = _good_workflow("api_binding_only")
     write = wf.steps[1]

@@ -1,5 +1,13 @@
 {
   "generated_at": "2026-07-08T15:46:40.963053+00:00",
+  "flow": {
+    "flow_version": "0.1.0",
+    "flow_version_qualifier": "pre-v0.2.0 source build",
+    "flow_git_describe": "v0.1.0-24-gcbec44c",
+    "first_release_tag_containing_commit": "v0.2.0",
+    "flow_version_note": "Measured from a source checkout, not a published wheel. pyproject.toml declared version = \"0.1.0\" at this commit; v0.2.0 (2026-07-11) is the first release tag that contains it. Refreshing these numbers means re-running the benchmark, not editing this field.",
+    "flow_commit": "cbec44c2c2f355d5cc04a72ea9267e2d6ea68ac6"
+  },
   "task": "MockMed triage: login, open first referral, create a Triage encounter, enter the note, save",
   "note_text": "Follow-up in 2 weeks; BP recheck.",
   "model": "claude-sonnet-5",

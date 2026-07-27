@@ -1,6 +1,8 @@
 # Benchmark: compiled replay vs. computer-use agent — OpenEMR (real app)
 
-Date: 2026-07-08. Same head-to-head as the [MockMed benchmark](../BENCHMARK.md),
+Date: 2026-07-08. Engine: openadapt-flow 0.1.0, a pre-`v0.2.0` source build
+(`v0.1.0-24-gcbec44c`). Same head-to-head as the
+[MockMed benchmark](../BENCHMARK.md),
 run against a real third-party application: the official OpenEMR public
 demo (`https://demo.openemr.io/openemr/index.php`, fake patients only, instance resets daily).
 One task, two ways to automate it, one success check.
@@ -23,6 +25,8 @@ BOTH arms), save.
 | total model cost | $0 | $5.52 |
 | tokens (uncached in / out, total) | 0 / 0 | 496 / 27,272 |
 | cache tokens (write/read, total) | 0 / 0 | 1,317,803 / 563,928 |
+
+**Measured on Flow 0.1.0, 2026-07-08.** A pre-`v0.2.0` source build: `pyproject.toml` declared `0.1.0` at benchmark commit `cbec44c2` (`v0.1.0-24-gcbec44c`), and `v0.2.0` is the first release tag that contains it. Not re-measured on a later release.
 
 Failed runs, reported honestly:
 

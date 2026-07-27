@@ -5,6 +5,14 @@
     "total": 8.0
   },
   "generated_at": "2026-07-08T22:46:39.730720+00:00",
+  "flow": {
+    "flow_version": "0.1.0",
+    "flow_version_qualifier": "pre-v0.2.0 source build",
+    "flow_git_describe": "v0.1.0-24-gcbec44c",
+    "first_release_tag_containing_commit": "v0.2.0",
+    "flow_version_note": "Measured from a source checkout, not a published wheel. pyproject.toml declared version = \"0.1.0\" at this commit; v0.2.0 (2026-07-11) is the first release tag that contains it. Refreshing these numbers means re-running the benchmark, not editing this field.",
+    "flow_commit": "cbec44c2c2f355d5cc04a72ea9267e2d6ea68ac6"
+  },
   "task": "OpenEMR public demo: log in, search the demo patient, open the chart, scroll the dashboard to the Messages card, open Patient Messages, add a parameterized note, save",
   "target": "https://demo.openemr.io/openemr/index.php",
   "workflow_steps": 18,

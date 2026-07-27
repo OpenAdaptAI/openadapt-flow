@@ -1,6 +1,9 @@
 # Benchmark: compiled replay vs. computer-use agent
 
-Date: 2026-07-08. One task, two ways to automate it, one success check.
+Date: 2026-07-08. Engine: openadapt-flow 0.1.0, a pre-`v0.2.0` source build
+(`v0.1.0-24-gcbec44c`; `v0.2.0` is the first release tag containing the
+benchmark commit `cbec44c2`). One task, two ways to automate it, one
+success check.
 
 **Task** (MockMed, the bundled demo clinic app; fake data only): sign in as
 `nurse.demo`, open the first referral task, create a New Encounter of type
@@ -17,6 +20,8 @@ Triage, enter a note, save.
 | model cost / run | $0 | $0.2716 |
 | total model cost | $0 | $5.43 |
 | tokens (uncached in / out, total) | 0 / 0 | 1,684,942 / 25,085 |
+
+**Measured on Flow 0.1.0, 2026-07-08.** A pre-`v0.2.0` source build: `pyproject.toml` declared `0.1.0` at benchmark commit `cbec44c2` (`v0.1.0-24-gcbec44c`), and `v0.2.0` is the first release tag that contains it. Not re-measured on a later release.
 
 ## Drift (`?drift=theme`, one run per arm)
 

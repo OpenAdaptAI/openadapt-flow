@@ -323,7 +323,21 @@ line-length = 88
 # Generated / non-package trees at the repo root are not part of the lint
 # surface. Anchored with a leading slash so the package's own
 # openadapt_flow/benchmark/ IS still linted (a bare "benchmark" would match it).
-extend-exclude = ["/benchmark", "/docs", "/runs", "/dist"]
+extend-exclude = [
+    "/benchmark",
+    "/docs",
+    "/runs",
+    "/dist",
+    # Ruff 0.16 formats Python code blocks inside Markdown BY DEFAULT. Ruff's
+    # authority here is over source, not documentation: the package READMEs use
+    # condensed Protocol/interface sketches with column-aligned trailing
+    # comments, and reformatting them strips the alignment and pads the sketches
+    # with PEP 8 blank lines — longer, less readable, zero correctness value.
+    # Illustrative snippets are also frequently partial by design. Keep the
+    # formatter on .py/.pyi; prose stays the author's. This is a no-op under
+    # 0.15.x, which never claimed Markdown.
+    "*.md",
+]
 
 [tool.ruff.lint]
 # Start pragmatic: pyflakes (real bugs), the safe pycodestyle subset, warnings,

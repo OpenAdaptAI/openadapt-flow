@@ -95,9 +95,9 @@ def _workflow() -> Workflow:
     )
 
 
-def _halt(tmp_path: Path, *, name: str = "one"):
+def _halt(tmp_path: Path, *, name: str = "one", workflow: Workflow | None = None):
     """Drive a real durable run until the engine halts for a human."""
-    workflow = _workflow()
+    workflow = workflow or _workflow()
     bundle = tmp_path / "bundles" / name
     run = tmp_path / "runs" / name
     workflow.save(bundle)
@@ -981,3 +981,165 @@ def test_verified_is_impossible_without_the_complete_contract(tmp_path, monkeypa
     report, _ = data._load_report(run)
     assert report.execution_outcome != "VERIFIED"
     assert report.success is False
+
+
+# ---------------------------------------------------------------------------
+# 4. The exact wire contract a portal shell must implement
+# ---------------------------------------------------------------------------
+
+
+def _drive(tmp_path, monkeypatch, *, name, workflow, executor, action="continue"):
+    """Drive one decision through the phone-facing route and return the reply."""
+    _wf, bundles, runs, _bundle, run, _cap = _halt(
+        tmp_path, name=name, workflow=workflow
+    )
+    _app, client = _phone(bundles, runs, monkeypatch, service=_Service(executor))
+    item, detail = _open_task(client)
+    response = _post(
+        client, item, _decision(detail, action=action, key=f"contract-{name}-key-01")
+    )
+    return response
+
+
+def test_console_route_emits_exactly_the_documented_receipt_contract(
+    tmp_path, monkeypatch
+):
+    """Pin every (HTTP status, state, reason_code) a phone can observe.
+
+    A portal shell renders these and nothing else. The set is asserted exactly
+    so a future engine outcome cannot reach a phone that has no copy for it --
+    the failure this contract exists to prevent is a real outcome being shown
+    to an operator as some other outcome.
+    """
+
+    class _LosesTheAnswer:
+        def continue_run(self, run_dir, capability, approval):
+            raise RuntimeError("the live session died after the delivery boundary")
+
+        def skip_run(self, run_dir, capability, approval):
+            return self.continue_run(run_dir, capability, approval)
+
+    halting = Workflow(
+        name=WORKFLOW_NAME,
+        steps=[
+            _workflow().steps[0],
+            Step(
+                id="next",
+                intent="record the confirmed coverage",
+                action=ActionKind.KEY,
+                key="B",
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT,
+                        text="NEVER APPEARS",
+                        timeout_s=0.01,
+                    )
+                ],
+            ),
+        ],
+    )
+
+    observed = set()
+
+    # verified continuation
+    ok = _drive(
+        tmp_path,
+        monkeypatch,
+        name="ok",
+        workflow=_workflow(),
+        executor=_completed_live_session()[1],
+    )
+    observed.add((ok.status_code, ok.json()["state"], ok.json()["reason_code"]))
+
+    # the continuation ran and then halted again -- NOT a refusal
+    halted = _drive(
+        tmp_path,
+        monkeypatch,
+        name="halted",
+        workflow=halting,
+        executor=_completed_live_session()[1],
+    )
+    observed.add(
+        (halted.status_code, halted.json()["state"], halted.json()["reason_code"])
+    )
+
+    # live state did not match: nothing was actuated
+    refused = _drive(
+        tmp_path,
+        monkeypatch,
+        name="refused",
+        workflow=_workflow(),
+        executor=_unchanged_live_session()[1],
+    )
+    observed.add(
+        (refused.status_code, refused.json()["state"], refused.json()["reason_code"])
+    )
+
+    for action, name in (("teach", "teach"), ("escalate", "escalate")):
+        reply = _drive(
+            tmp_path,
+            monkeypatch,
+            name=name,
+            workflow=_workflow(),
+            executor=_completed_live_session()[1],
+            action=action,
+        )
+        observed.add(
+            (reply.status_code, reply.json()["state"], reply.json()["reason_code"])
+        )
+
+    # no terminal receipt came back: the action may already have landed
+    uncertain = _drive(
+        tmp_path,
+        monkeypatch,
+        name="uncertain",
+        workflow=_workflow(),
+        executor=_LosesTheAnswer(),
+    )
+    observed.add(
+        (
+            uncertain.status_code,
+            uncertain.json()["state"],
+            uncertain.json()["reason_code"],
+        )
+    )
+
+    assert observed == {
+        (200, "completed", "verified_and_resumed"),
+        (200, "halted", "continuation_halted"),
+        (200, "refused", "revalidation_refused"),
+        (200, "demonstration_requested", "demonstration_requested"),
+        (200, "escalated", "escalation_recorded"),
+        (202, "delivery_uncertain", "delivery_uncertain"),
+    }
+    # A receipt never carries display text; the consumer owns the wording.
+    for reply in (ok, halted, refused, uncertain):
+        assert "message" not in reply.json()
+        assert "status" not in reply.json()
+
+
+def test_a_pre_admission_refusal_is_not_a_receipt(tmp_path, monkeypatch):
+    """Refusals before admission keep the shipped ``{"detail": ...}`` shape.
+
+    A shell must branch on the response shape, not assume every reply is a
+    receipt: a stale or unauthorized decision never reaches the journal, so
+    there is no terminal state to report.
+    """
+    _wf, bundles, runs, _bundle, run, _capability = _halt(tmp_path)
+    backend, executor = _completed_live_session()
+    _app, client = _phone(bundles, runs, monkeypatch, service=_Service(executor))
+    item, detail = _open_task(client)
+
+    stale = _post(
+        client,
+        item,
+        {
+            **_decision(detail, key="pre-admission-key-0001"),
+            "task_signature": "hmac-sha256:" + "0" * 64,
+        },
+    )
+    assert stale.status_code == 409
+    assert set(stale.json()) == {"detail"}
+    assert isinstance(stale.json()["detail"], str)
+    assert "state" not in stale.json() and "reason_code" not in stale.json()
+    assert not backend.actions

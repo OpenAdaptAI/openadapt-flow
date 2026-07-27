@@ -23,13 +23,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Iterable, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from openadapt_flow.ir import ActionKind, Step, Workflow
 from openadapt_flow.risk import classify_step_risk, step_text
 from openadapt_flow.traversal import iter_workflow_steps
+
+if TYPE_CHECKING:
+    from openadapt_flow.runtime.effects import Effect
 
 # Action kinds that a pre-actuation identity check applies to — kept in
 # lockstep with the replayer. An anchored KEY (notably Enter/Return submission)
@@ -151,11 +154,64 @@ def has_system_effect(step: Step) -> bool:
     )
 
 
+EffectPath = Literal["gui", "api"]
+
+
+def iter_effect_paths(step: Step) -> Iterable[tuple[EffectPath, list["Effect"]]]:
+    """Yield every executable actuation path and its own effect contracts.
+
+    An API binding is an optional top rung: ``UNAVAILABLE`` falls through to
+    GUI actuation.  The two paths are therefore independently load-bearing;
+    one path's effects never cover the other path.
+    """
+
+    yield "gui", list(step.effects)
+    if step.api_binding is not None:
+        yield "api", list(step.api_binding.effects)
+
+
+def missing_effect_paths(step: Step) -> list[EffectPath]:
+    """Return executable paths that declare no system-of-record effect."""
+
+    return [path for path, effects in iter_effect_paths(step) if not effects]
+
+
+def all_effect_paths_covered(step: Step) -> bool:
+    """Whether every executable path carries its own effect contract."""
+
+    paths = list(iter_effect_paths(step))
+    return bool(paths) and all(effects for _path, effects in paths)
+
+
+def effects_for_actuation(step: Step, actuation: Optional[str]) -> list["Effect"]:
+    """Return only the effects for the path that actually delivered input."""
+
+    if actuation == "api":
+        return list(step.api_binding.effects) if step.api_binding is not None else []
+    return list(step.effects)
+
+
+def policy_contract_sha256(policy: "Policy") -> str:
+    """Canonical digest of every load-bearing policy field."""
+
+    import hashlib
+    import json
+
+    encoded = json.dumps(
+        policy.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def has_operator_risk_override(
     step: Step,
     workflow: Optional[Workflow] = None,
     *,
     require_current_certification: bool = False,
+    certifying_policy: Optional["Policy"] = None,
 ) -> bool:
     """Whether typed qualification state owns this executable risk decision.
 
@@ -190,17 +246,11 @@ def has_operator_risk_override(
     if not require_current_certification:
         return True
 
-    certification = project.last_certification
-    if certification is None or not certification.passed:
-        return False
-    from openadapt_flow.qualification import workflow_contract_sha256
+    from openadapt_flow.qualification import current_certification_matches
 
-    return bool(
-        certification.project_revision == project.revision
-        and certification.project_contract_sha256 == project.contract_sha256()
-        and certification.workflow_contract_sha256 == workflow_contract_sha256(workflow)
-        and certification.environment_contract_sha256
-        == project.environment.contract_sha256()
+    return current_certification_matches(
+        workflow,
+        policy=certifying_policy,
     )
 
 
@@ -209,6 +259,7 @@ def effective_step_risk(
     workflow: Optional[Workflow] = None,
     *,
     require_current_certification: bool = False,
+    certifying_policy: Optional["Policy"] = None,
 ) -> str:
     """Return the conservative executable risk after a qualified override."""
 
@@ -220,6 +271,7 @@ def effective_step_risk(
             step,
             workflow,
             require_current_certification=require_current_certification,
+            certifying_policy=certifying_policy,
         )
     ):
         return "irreversible"
@@ -231,13 +283,10 @@ def effect_has_idempotency_key(step: Step) -> bool:
     non-empty idempotency / at-most-once key — the guard that collapses a
     retried or double-delivered submission to a single record instead of a
     silent duplicate write."""
-    paths = [list(step.effects)]
-    if step.api_binding is not None:
-        paths.append(list(step.api_binding.effects))
-    declared_paths = [effects for effects in paths if effects]
-    return bool(declared_paths) and all(
+    paths = list(iter_effect_paths(step))
+    return bool(paths) and all(
         any(getattr(effect, "idempotency_key", None) for effect in effects)
-        for effects in declared_paths
+        for _path, effects in paths
     )
 
 
@@ -247,9 +296,11 @@ def has_unconfirmed_effect_binding(step: Step) -> bool:
     (``Effect.needs_operator_confirmation``). Such an effect names a write the
     compiler refused to invent an endpoint for; certifying it would bless a
     fabricated/unconfirmed binding (the replayer HALTs on it at run time)."""
-    effects = list(step.effects)
-    if step.api_binding is not None:
-        effects.extend(step.api_binding.effects)
+    effects = [
+        effect
+        for _path, path_effects in iter_effect_paths(step)
+        for effect in path_effects
+    ]
     return any(getattr(e, "needs_operator_confirmation", False) for e in effects)
 
 
@@ -285,6 +336,7 @@ def step_tags(
     workflow: Optional[Workflow] = None,
     *,
     require_current_certification: bool = False,
+    certifying_policy: Optional["Policy"] = None,
 ) -> set[str]:
     """Semantic tags a policy's ``require_*`` lists can match against (as an
     alternative to raw keywords).
@@ -314,6 +366,7 @@ def step_tags(
         step,
         workflow,
         require_current_certification=require_current_certification,
+        certifying_policy=certifying_policy,
     )
     if effective_risk == "irreversible":
         tags.update(("irreversible", "write"))
@@ -334,6 +387,7 @@ def _matches_token(
     workflow: Optional[Workflow] = None,
     *,
     require_current_certification: bool = False,
+    certifying_policy: Optional["Policy"] = None,
 ) -> bool:
     """True if ``token`` matches ``step`` — either as a semantic tag
     (:func:`step_tags`) or as a word-boundary keyword in the step's text."""
@@ -344,6 +398,7 @@ def _matches_token(
         step,
         workflow,
         require_current_certification=require_current_certification,
+        certifying_policy=certifying_policy,
     ):
         return True
     return (
@@ -358,6 +413,7 @@ def step_matches_any(
     workflow: Optional[Workflow] = None,
     *,
     require_current_certification: bool = False,
+    certifying_policy: Optional["Policy"] = None,
 ) -> bool:
     return any(
         _matches_token(
@@ -365,6 +421,7 @@ def step_matches_any(
             token,
             workflow,
             require_current_certification=require_current_certification,
+            certifying_policy=certifying_policy,
         )
         for token in tokens
     )
@@ -565,6 +622,7 @@ def evaluate_policy(
             step,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
         )
         risk_explanation = step.risk_explanation
         unbound_claimed_override = (
@@ -576,6 +634,7 @@ def evaluate_policy(
             step,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
         )
         if step.risk_review_required or unbound_claimed_override:
             violations.append(
@@ -630,6 +689,7 @@ def evaluate_policy(
             policy.require_identity_for,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
         ):
             if not (is_identity_applicable(step) and is_identity_armed(step)):
                 violations.append(
@@ -653,6 +713,7 @@ def evaluate_policy(
             policy.require_screen_postconditions_for,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
         ):
             if not has_screen_postcondition(step):
                 violations.append(
@@ -672,6 +733,7 @@ def evaluate_policy(
             policy.require_effect_verification_for,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
         ):
             if not has_screen_postcondition(step):
                 violations.append(
@@ -696,17 +758,19 @@ def evaluate_policy(
             policy.require_system_effects_for,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
         ):
-            if not step.effects:
+            missing_paths = missing_effect_paths(step)
+            if missing_paths:
                 violations.append(
                     Violation(
                         rule="require_system_effects_for",
                         step_id=step.id,
                         reason=(
                             "step matches require_system_effects_for but "
-                            "declares no GUI-path system-of-record effect "
-                            "(step.effects) — an optional API binding cannot "
-                            "cover its GUI fallback"
+                            "declares no system-of-record effect for executable "
+                            f"path(s): {', '.join(missing_paths)} — one path's "
+                            "contract cannot cover another"
                         ),
                     )
                 )
@@ -717,7 +781,7 @@ def evaluate_policy(
         if (
             policy.require_effects_for_irreversible
             and effective_risk == "irreversible"
-            and not step.effects
+            and missing_effect_paths(step)
         ):
             violations.append(
                 Violation(
@@ -725,7 +789,8 @@ def evaluate_policy(
                     step_id=step.id,
                     reason=(
                         "step is an IRREVERSIBLE write but declares no "
-                        "system-of-record effect (step.effects) — without a "
+                        "system-of-record effect on every executable path — "
+                        "without a "
                         "declared effect contract and a configured verifier "
                         "the runtime falls back to screen evidence, which "
                         "cannot see a partial / phantom / duplicate / "
@@ -739,6 +804,7 @@ def evaluate_policy(
             policy.require_idempotency_key_for,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=policy,
         ):
             if not effect_has_idempotency_key(step):
                 violations.append(
@@ -925,7 +991,12 @@ class LintReport(BaseModel):
         return "\n".join(lines)
 
 
-def lint_workflow(workflow: Workflow) -> LintReport:
+def lint_workflow(
+    workflow: Workflow,
+    *,
+    require_current_risk_certification: bool = False,
+    certifying_policy: Optional[Policy] = None,
+) -> LintReport:
     """Report a compiled bundle's coverage GAPS with a severity each.
 
     Policy-independent. Findings (severity depends on the step's risk — a gap on
@@ -972,7 +1043,13 @@ def lint_workflow(workflow: Workflow) -> LintReport:
     # graph/subflow action states, not just its (often empty) linear steps.
     steps = list(iter_workflow_steps(workflow))
     for step in steps:
-        irreversible = step.risk == "irreversible"
+        effective_risk = effective_step_risk(
+            step,
+            workflow,
+            require_current_certification=require_current_risk_certification,
+            certifying_policy=certifying_policy,
+        )
+        irreversible = effective_risk == "irreversible" or has_system_effect(step)
 
         if step.risk_review_required:
             findings.append(
@@ -994,7 +1071,8 @@ def lint_workflow(workflow: Workflow) -> LintReport:
 
         if irreversible:
             consequential += 1
-            if has_system_effect(step):
+            missing_paths = missing_effect_paths(step)
+            if not missing_paths:
                 effect_covered += 1
             else:
                 findings.append(
@@ -1004,9 +1082,10 @@ def lint_workflow(workflow: Workflow) -> LintReport:
                         step_id=step.id,
                         message=(
                             f"{step.action.value} is an IRREVERSIBLE write "
-                            "with no declared system-of-record effect "
-                            "(step.effects) — the run will fall back to "
-                            "screen evidence for this write (blind to "
+                            "with no declared system-of-record effect on "
+                            f"executable path(s): {', '.join(missing_paths)} — "
+                            "that path would fall back to screen evidence "
+                            "(blind to "
                             "partial/phantom/duplicate/lost-update faults); "
                             "declare an effect contract, or certify with "
                             "require_effects_for_irreversible to make this a "
@@ -1080,7 +1159,7 @@ def lint_workflow(workflow: Workflow) -> LintReport:
                 )
             )
 
-        if not irreversible and classify_step_risk(step) == "irreversible":
+        if step.risk != "irreversible" and effective_risk == "irreversible":
             findings.append(
                 Finding(
                     severity="warn",

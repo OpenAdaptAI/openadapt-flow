@@ -24,7 +24,7 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
-from openadapt_flow.policy import load_policy
+from openadapt_flow.policy import Policy, effective_step_risk, load_policy
 from openadapt_flow.qualification import (
     ActionRiskClass,
     ActionRiskClassification,
@@ -43,6 +43,7 @@ from openadapt_flow.qualification import (
     add_case,
     add_requalification_condition,
     certify_project,
+    current_certification_matches,
     evaluate_qualification,
     init_project,
     record_case_results,
@@ -746,6 +747,145 @@ def test_full_campaign_certifies_through_existing_policy_and_round_trips(
     assert loaded.qualification.last_certification.workflow_contract_sha256 == (
         workflow_contract_sha256(loaded)
     )
+
+
+def test_persisted_certification_is_recomputed_and_policy_digest_bound(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    policy = load_policy("clinical-write")
+    report = certify_project(workflow, policy=policy, evidence_root=evidence_root)
+    assert report.passed
+    assert current_certification_matches(workflow, policy=policy)
+
+    project = workflow.qualification
+    assert project is not None and project.last_certification is not None
+    original = project.last_certification.model_copy(deep=True)
+
+    project.last_certification.report_sha256 = "f" * 64
+    assert not current_certification_matches(workflow, policy=policy)
+    project.last_certification = original.model_copy(deep=True)
+
+    wrong_policy = load_policy("permissive")
+    assert not current_certification_matches(workflow, policy=wrong_policy)
+
+    same_name_mutation = Policy.model_validate(policy.model_dump(mode="json"))
+    same_name_mutation.prohibit_unarmed_clicks = not policy.prohibit_unarmed_clicks
+    assert same_name_mutation.name == policy.name
+    assert not current_certification_matches(workflow, policy=same_name_mutation)
+
+
+def test_valid_certification_authorizes_only_its_exact_reviewed_risk_policy(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow(
+        name="reviewed-navigation",
+        steps=[
+            Step(
+                id="continue",
+                intent="Continue to the review screen",
+                action=ActionKind.CLICK,
+                anchor=Anchor(
+                    template="templates/continue.png",
+                    region=(10, 10, 40, 20),
+                    click_point=(30, 20),
+                    ocr_text="Continue",
+                    context_text="Synthetic review record",
+                ),
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT,
+                        text="Review",
+                    )
+                ],
+                risk="irreversible",
+                risk_review_required=True,
+            )
+        ],
+    )
+    init_project(workflow, environment=_environment())
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id="continue",
+            classification=ActionRiskClass.READ_ONLY,
+            explanation="Opens review without changing business state",
+            operator_confirmed=True,
+        ),
+    )
+    set_trusted_runner_key(
+        workflow,
+        key_id="test-runner",
+        public_key_base64=_RUNNER_PUBLIC_BASE64,
+    )
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    policy = load_policy("clinical-write")
+    assert certify_project(
+        workflow,
+        policy=policy,
+        evidence_root=evidence_root,
+    ).passed
+
+    step = workflow.steps[0]
+    assert (
+        effective_step_risk(
+            step,
+            workflow,
+            require_current_certification=True,
+            certifying_policy=policy,
+        )
+        == "reversible"
+    )
+    same_name_mutation = Policy.model_validate(policy.model_dump(mode="json"))
+    same_name_mutation.description += " (mutated after certification)"
+    assert (
+        effective_step_risk(
+            step,
+            workflow,
+            require_current_certification=True,
+            certifying_policy=same_name_mutation,
+        )
+        == "irreversible"
+    )
+
+
+def test_api_and_gui_effect_paths_require_independent_qualification() -> None:
+    workflow = _workflow()
+    workflow.steps[0].api_binding = ApiBinding(
+        url_template="/api/records",
+        effects=[workflow.steps[0].effects[0].model_copy(deep=True)],
+    )
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+
+    missing_api = evaluate_qualification(workflow)
+    assert any(
+        refusal.code is QualificationRefusalCode.EFFECT_POLICY_MISSING
+        and ".api." in refusal.path
+        for refusal in missing_api.refusals
+    )
+
+    set_effect_policy(
+        workflow,
+        step_id="save",
+        actuation_path="api",
+        effect_index=0,
+        tier=VerificationTier.INDEPENDENT_SYSTEM,
+    )
+    complete = evaluate_qualification(workflow)
+    assert not any(
+        refusal.code
+        in {
+            QualificationRefusalCode.EFFECT_CONTRACT_MISSING,
+            QualificationRefusalCode.EFFECT_POLICY_MISSING,
+            QualificationRefusalCode.EFFECT_CONTRACT_CHANGED,
+        }
+        for refusal in complete.refusals
+    )
+    assert complete.effect_covered_action_count == 1
 
 
 def test_cli_initializes_project_without_raw_manifest_editing(

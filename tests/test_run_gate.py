@@ -96,6 +96,9 @@ def test_risk_override_requires_current_hash_bound_qualification():
     assert project is not None
     assert is_consequential(step, workflow) is True  # not certified yet
 
+    # A caller cannot make the downgrade authoritative by forging a matching
+    # ``passed`` bit and plausible-looking digests.  The exact policy and
+    # qualification report must independently reproduce.
     project.last_certification = QualificationCertification(
         project_revision=project.revision,
         project_contract_sha256=project.contract_sha256(),
@@ -105,7 +108,7 @@ def test_risk_override_requires_current_hash_bound_qualification():
         passed=True,
         report_sha256="b" * 64,
     )
-    assert is_consequential(step, workflow) is False
+    assert is_consequential(step, workflow) is True
 
     project.revision += 1
     assert is_consequential(step, workflow) is True

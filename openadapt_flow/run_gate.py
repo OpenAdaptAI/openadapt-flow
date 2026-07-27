@@ -61,12 +61,16 @@ from openadapt_flow.execution_profiles import (
 )
 from openadapt_flow.ir import ActionKind, Interstitial, Step, Workflow
 from openadapt_flow.policy import (
+    Policy,
+    all_effect_paths_covered,
     effective_step_risk,
     has_screen_postcondition,
     has_system_effect,
     has_unconfirmed_effect_binding,
     is_identity_applicable,
     is_identity_armed,
+    iter_effect_paths,
+    missing_effect_paths,
     step_tags,
 )
 from openadapt_flow.runtime.authorization import (
@@ -125,6 +129,7 @@ def is_consequential(
     workflow: Optional[Workflow] = None,
     *,
     require_current_risk_certification: bool = True,
+    certifying_policy: Optional[Policy] = None,
 ) -> bool:
     """Whether ``step`` commits a consequential (irreversible) write.
 
@@ -144,6 +149,7 @@ def is_consequential(
             step,
             workflow,
             require_current_certification=require_current_risk_certification,
+            certifying_policy=certifying_policy,
         )
         == "irreversible"
     )
@@ -155,6 +161,7 @@ def must_be_identity_armed(
     workflow: Optional[Workflow] = None,
     *,
     require_current_risk_certification: bool = True,
+    certifying_policy: Optional[Policy] = None,
 ) -> bool:
     """Whether the pre-click identity check MUST be armed on ``step``.
 
@@ -167,6 +174,7 @@ def must_be_identity_armed(
         step,
         workflow,
         require_current_risk_certification=require_current_risk_certification,
+        certifying_policy=certifying_policy,
     ):
         # A consequential keyboard submission with no retained anchor is an
         # identity-coverage defect, not a reason to exempt the action.
@@ -177,10 +185,12 @@ def must_be_identity_armed(
         step,
         workflow,
         require_current_risk_certification=require_current_risk_certification,
+        certifying_policy=certifying_policy,
     ) or "entity_navigation" in step_tags(
         step,
         workflow,
         require_current_certification=require_current_risk_certification,
+        certifying_policy=certifying_policy,
     )
 
 
@@ -350,6 +360,12 @@ def evaluate_run_gate(
     require_current_risk_cert = bool(
         profile_contract is not None and profile_contract.production
     )
+    try:
+        from openadapt_flow.policy import load_policy
+
+        certifying_policy = load_policy(policy_name)
+    except (FileNotFoundError, ValueError):
+        certifying_policy = None
 
     approval_gate = _gate_approval(
         workflow,
@@ -369,6 +385,7 @@ def evaluate_run_gate(
             else True
         ),
         require_current_risk_certification=require_current_risk_cert,
+        certifying_policy=certifying_policy,
     )
     interstitial_gate = _gate_interstitials(workflow, interstitials)
     gates = []
@@ -387,6 +404,7 @@ def evaluate_run_gate(
                     workflow,
                     policy_name,
                     require_current_risk_certification=require_current_risk_cert,
+                    certifying_policy=certifying_policy,
                 )
                 if profile_contract is None or profile_contract.require_certification
                 else _not_required(
@@ -398,6 +416,7 @@ def evaluate_run_gate(
                     workflow,
                     steps,
                     require_current_risk_certification=require_current_risk_cert,
+                    certifying_policy=certifying_policy,
                 )
                 if profile_contract is None
                 or profile_contract.require_identity_coverage
@@ -408,6 +427,7 @@ def evaluate_run_gate(
                     workflow,
                     steps,
                     require_current_risk_certification=require_current_risk_cert,
+                    certifying_policy=certifying_policy,
                 )
                 if profile_contract is None or profile_contract.require_effect_contracts
                 else _not_required(
@@ -445,6 +465,7 @@ def evaluate_run_gate(
                 step,
                 workflow,
                 require_current_risk_certification=require_current_risk_cert,
+                certifying_policy=certifying_policy,
             )
         ]
         if profile_contract is None or profile_contract.require_identity_coverage
@@ -479,6 +500,7 @@ def evaluate_run_gate(
                     step,
                     workflow,
                     require_current_risk_certification=require_current_risk_cert,
+                    certifying_policy=certifying_policy,
                 )
                 and has_system_effect(step)
                 for step in steps
@@ -551,12 +573,13 @@ def _gate_certification(
     policy_name: str,
     *,
     require_current_risk_certification: bool,
+    certifying_policy: Optional[Policy],
 ) -> GateResult:
     """Gate 1: the bundle must PASS the required certifying policy."""
     from openadapt_flow.policy import evaluate_policy, load_policy
 
     try:
-        policy = load_policy(policy_name)
+        policy = certifying_policy or load_policy(policy_name)
     except (FileNotFoundError, ValueError) as e:
         return _result(
             GATE_CERTIFICATION,
@@ -590,6 +613,7 @@ def _gate_identity(
     steps: list[Step],
     *,
     require_current_risk_certification: bool,
+    certifying_policy: Optional[Policy],
 ) -> GateResult:
     """Gate 2: every entity-sensitive / consequential action is identity-armed."""
     must_arm = [
@@ -599,6 +623,7 @@ def _gate_identity(
             step,
             workflow,
             require_current_risk_certification=require_current_risk_certification,
+            certifying_policy=certifying_policy,
         )
     ]
     unarmed = [s for s in must_arm if not is_identity_armed(s)]
@@ -623,6 +648,7 @@ def _gate_effect(
     steps: list[Step],
     *,
     require_current_risk_certification: bool,
+    certifying_policy: Optional[Policy],
 ) -> GateResult:
     """Gate 3: every consequential write DECLARES a (confirmed) effect contract.
 
@@ -639,12 +665,13 @@ def _gate_effect(
             step,
             workflow,
             require_current_risk_certification=require_current_risk_certification,
+            certifying_policy=certifying_policy,
         )
     ]
     # ApiBinding is an optional top rung: an unavailable pre-dispatch API call
     # falls through to GUI actuation.  Binding-local effects therefore cannot
     # cover the GUI path; the canonical step effects must cover that fallback.
-    screen_only = [s for s in writes if not s.effects]
+    screen_only = [s for s in writes if not all_effect_paths_covered(s)]
     unconfirmed = [s for s in writes if has_unconfirmed_effect_binding(s)]
     offenders = sorted({s.id for s in screen_only} | {s.id for s in unconfirmed})
     total = len(writes)
@@ -657,9 +684,17 @@ def _gate_effect(
         )
     parts = []
     if screen_only:
+        path_count = sum(len(missing_effect_paths(step)) for step in screen_only)
+        missing_names = sorted(
+            {
+                path.upper()
+                for step in screen_only
+                for path in missing_effect_paths(step)
+            }
+        )
         parts.append(
-            f"{len(screen_only)} GUI fallback path(s) would be verified by "
-            "SCREEN only (no step.effects contract)"
+            f"{path_count} executable path(s) across {len(screen_only)} step(s) "
+            f"({', '.join(missing_names)}) would be verified by SCREEN only"
         )
     if unconfirmed:
         parts.append(
@@ -686,6 +721,7 @@ def _gate_approval(
     require_approval: bool = True,
     allow_approval: bool = True,
     require_current_risk_certification: bool,
+    certifying_policy: Optional[Policy],
 ) -> GateResult:
     """Gate 4: writes with no configured verifier need explicit approval.
 
@@ -701,6 +737,7 @@ def _gate_approval(
             step,
             workflow,
             require_current_risk_certification=require_current_risk_certification,
+            certifying_policy=certifying_policy,
         )
         and has_system_effect(step)
     ]
@@ -709,18 +746,16 @@ def _gate_approval(
         untyped: list[str] = []
         observed: list[VerificationTier] = []
         for step in writes:
-            effects = step.effects or (
-                step.api_binding.effects if step.api_binding is not None else []
-            )
-            for effect in effects:
-                tier = verifier_effect_tier(effect_verifier, effect)
-                if tier is None:
-                    untyped.append(step.id)
-                elif minimum_effect_tier is not None and not tier.satisfies(
-                    minimum_effect_tier
-                ):
-                    weak.append(step.id)
-                    observed.append(tier)
+            for _path, effects in iter_effect_paths(step):
+                for effect in effects:
+                    tier = verifier_effect_tier(effect_verifier, effect)
+                    if tier is None:
+                        untyped.append(step.id)
+                    elif minimum_effect_tier is not None and not tier.satisfies(
+                        minimum_effect_tier
+                    ):
+                        weak.append(step.id)
+                        observed.append(tier)
         if untyped and minimum_effect_tier is not None:
             return _result(
                 GATE_APPROVAL,

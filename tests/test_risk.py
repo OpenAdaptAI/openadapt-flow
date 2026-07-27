@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from openadapt_flow.compiler import compile_recording
-from openadapt_flow.ir import ActionKind, Anchor, Step
+from openadapt_flow.ir import ActionKind, Anchor, Step, StructuralLocator
 from openadapt_flow.risk import classify_step_risk, infer_step_risk, is_write_shaped
 
 VIEWPORT = (1280, 800)
@@ -138,6 +138,50 @@ class TestHeuristic:
         inference = infer_step_risk(step)
         assert inference.risk == "reversible"
         assert inference.requires_review is True
+
+    @pytest.mark.parametrize("role", ["textbox", "searchbox", "textarea", "edit"])
+    def test_unlabelled_click_on_text_field_needs_no_review(self, role: str) -> None:
+        """A click on a structurally identified text-entry control only places
+        the caret, so it is not the ambiguous case. Regression: the bundled
+        tutorial clicks #username/#password/#note (all role=textbox, no OCR
+        label) and those three steps made ``openadapt quickstart`` fail
+        certification on every clean install."""
+        step = Step(
+            id="s",
+            intent="click at (10, 12)",
+            action=ActionKind.CLICK,
+            anchor=Anchor(
+                template="t.png",
+                region=(0, 0, 1, 1),
+                click_point=(10, 12),
+                structural=StructuralLocator(selector="#username", role=role),
+            ),
+        )
+        inference = infer_step_risk(step)
+        assert inference.risk == "reversible"
+        assert inference.requires_review is False
+
+    @pytest.mark.parametrize(
+        "role",
+        ["button", "link", "checkbox", "radio", "switch", "menuitem", "option", "tab"],
+    )
+    def test_unlabelled_click_on_actionable_role_still_requires_review(
+        self, role: str
+    ) -> None:
+        """Every role that CAN commit state on a single click stays ambiguous.
+        The text-entry carve-out must not widen into a general escape hatch."""
+        step = Step(
+            id="s",
+            intent="click at (10, 12)",
+            action=ActionKind.CLICK,
+            anchor=Anchor(
+                template="t.png",
+                region=(0, 0, 1, 1),
+                click_point=(10, 12),
+                structural=StructuralLocator(selector="#x", role=role),
+            ),
+        )
+        assert infer_step_risk(step).requires_review is True
 
 
 # --- end-to-end through the compiler ---------------------------------------

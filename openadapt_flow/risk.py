@@ -113,6 +113,15 @@ _WRITE_STEMS: tuple[str, ...] = (
 _WRITE_RE = re.compile(r"\b(?:" + "|".join(_WRITE_STEMS) + r")\b", re.IGNORECASE)
 
 
+#: Structural control roles whose only effect on click is to place the caret.
+#: Deliberately narrow: every role here must be incapable of committing
+#: application state by a pointer press alone. Toggles (``checkbox``,
+#: ``radio``, ``switch``), ``link`` (navigates), ``menuitem`` and ``option``
+#: (select/commit) are all excluded because a single click on them CAN change
+#: state. ``edit`` is the Windows UIA control type for a text field.
+_FOCUS_ONLY_ROLES = frozenset({"textbox", "searchbox", "textarea", "edit"})
+
+
 def is_write_shaped(text: str) -> bool:
     """True if ``text`` names a consequential-write action (see module doc)."""
     return bool(text) and _WRITE_RE.search(text) is not None
@@ -191,6 +200,20 @@ def infer_step_risk(step: Step) -> RiskInference:
     if step.action not in (ActionKind.CLICK, ActionKind.DOUBLE_CLICK):
         return RiskInference("reversible", "action is not a pointer submission")
     if step.anchor is None or not (step.anchor.ocr_text or "").strip():
+        # A click whose target is a structurally identified text-entry control
+        # is not ambiguous: clicking such a control places the caret. It cannot
+        # itself commit application state, and any resulting mutation arrives
+        # as a separate TYPE/KEY step that is classified on its own terms. The
+        # role comes from the captured structural locator (DOM/UIA), so this
+        # reads evidence we already hold rather than relaxing the gate.
+        structural = step.anchor.structural if step.anchor is not None else None
+        role = (structural.role if structural is not None else "") or ""
+        if role.strip().lower() in _FOCUS_ONLY_ROLES:
+            return RiskInference(
+                "reversible",
+                "pointer target is a structurally identified text-entry control "
+                "(click places the caret; it cannot commit state)",
+            )
         # An unlabelled primary click may be a focus/navigation action or an
         # icon-only write. Demo replay remains usable, but no policy may certify
         # the unresolved classification until qualification supplies an

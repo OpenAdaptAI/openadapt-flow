@@ -42,6 +42,7 @@ from typing import Annotated, Any, Literal, Optional, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from openadapt_flow.ir import RunReport
 from openadapt_flow.verification import VerificationTier
 
 #: Schema identifier carried by every emitted receipt.
@@ -353,7 +354,18 @@ def _build_receipt(
             there is no outcome the receipt could truthfully state.
     """
 
-    outcome = getattr(report, "execution_outcome", None)
+    # RunReport is mutable after construction, and model_copy/model_construct
+    # can also bypass nested validators.  The receipt is a publication boundary,
+    # so rebuild the complete typed envelope through JSON before trusting any
+    # field.  This additionally prevents arbitrary look-alike objects from
+    # supplying a hand-picked subset of report attributes.
+    try:
+        encoded_report = report.model_dump_json()
+        report = RunReport.model_validate_json(encoded_report)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ReceiptError("run report failed typed JSON revalidation") from exc
+
+    outcome = report.execution_outcome
     envelope = getattr(report, "outcome_envelope", None)
     profile = getattr(report, "execution_profile", None)
     transaction_outcome = getattr(report, "transaction_outcome", None)
@@ -395,6 +407,19 @@ def _build_receipt(
     required = envelope.required_contracts
     passed = envelope.passed_contracts
 
+    # Approved-unverified writes are useful in Demo, but no representation of
+    # that approval may coexist with a shareable VERIFIED receipt.  Check every
+    # retained mirror: report list, authorization mapping, result, and journal.
+    if (
+        report.approved_unverified_effect_step_ids
+        or report.governed_authorized_effect_contracts
+        or any(result.effect_approved_unverified for result in report.results)
+        or any(entry.approved_unverified for entry in report.effect_journal)
+    ):
+        raise ReceiptError(
+            "VERIFIED receipt cannot retain an approved-unverified write"
+        )
+
     required_identity_ids = set(getattr(report, "required_identity_step_ids", []))
     if len(required_identity_ids) != len(
         getattr(report, "required_identity_step_ids", [])
@@ -421,6 +446,29 @@ def _build_receipt(
         raise ReceiptError(
             "VERIFIED receipt requires complete workflow identity arming"
         )
+
+    for result in executed_identity_results:
+        identity = result.identity
+        assert identity is not None  # guarded by the complete-coverage check
+        if identity.mode != "signal_quorum":
+            continue
+        signals = [item.signal for item in identity.signal_evidence]
+        verified_signals = sum(
+            item.verdict == "verified" for item in identity.signal_evidence
+        )
+        if (
+            not signals
+            or len(signals) != len(set(signals))
+            or any(item.verdict == "conflict" for item in identity.signal_evidence)
+            or identity.quorum_required is None
+            or identity.quorum_verified is None
+            or identity.quorum_required > len(signals)
+            or identity.quorum_verified != verified_signals
+            or verified_signals < identity.quorum_required
+        ):
+            raise ReceiptError(
+                "VERIFIED receipt found inconsistent signal-quorum identity evidence"
+            )
 
     if any(
         not result.ok
@@ -453,14 +501,22 @@ def _build_receipt(
             )
         declared_effects.update(result.effect_contract_hashes)
         for evidence in result.effect_evidence:
-            if evidence.final_verdict != "confirmed":
+            if not (
+                evidence.initial_verdict == "confirmed"
+                and evidence.final_verdict == "confirmed"
+            ):
                 raise ReceiptError(
-                    "VERIFIED receipt found non-confirmed retained effect evidence"
+                    "VERIFIED receipt found effect evidence that was not cleanly "
+                    "confirmed"
                 )
             if evidence.observed_effect != "present":
                 raise ReceiptError(
                     "VERIFIED receipt requires every confirmed effect to be "
                     "observed present"
+                )
+            if evidence.reconciliation_completed or evidence.reconciliation_actions:
+                raise ReceiptError(
+                    "VERIFIED receipt cannot use reconciled effect evidence"
                 )
             tier = evidence.verification_tier
             if tier is None or int(tier) not in _TIER_NAMES:
@@ -492,6 +548,10 @@ def _build_receipt(
         raise ReceiptError(
             "retained effect evidence tiers disagree with the VERIFIED envelope"
         )
+    if envelope.compensation_actions or "compensation" in evidence_classes:
+        raise ReceiptError(
+            "VERIFIED receipt cannot retain compensation or reconciliation evidence"
+        )
 
     effect_results = [
         result
@@ -504,8 +564,33 @@ def _build_receipt(
             "VERIFIED receipt requires one retained transaction journal entry "
             "per effect-bearing step"
         )
+    if any(result.step_id not in required_identity_ids for result in effect_results):
+        raise ReceiptError(
+            "VERIFIED receipt requires identity coverage for every effect-bearing step"
+        )
+    from openadapt_flow.transaction import _attempt_state
+
     for result, entry in zip(effect_results, journal):
-        expected_attempt = "actuated_api" if result.actuation == "api" else "delivered"
+        expected_attempt = _attempt_state(result)
+        if expected_attempt == "not_actuated":
+            raise ReceiptError(
+                "VERIFIED receipt cannot claim an effect for a non-actuated step"
+            )
+        uncertainty = result.delivery_uncertainty
+        if expected_attempt == "delivery_uncertain":
+            if not (
+                uncertainty is not None
+                and uncertainty.verification_attempted
+                and uncertainty.postconditions_confirmed is True
+                and uncertainty.effects_confirmed is True
+                and uncertainty.resolved_by_contract
+            ):
+                raise ReceiptError(
+                    "VERIFIED receipt found unresolved action-delivery uncertainty"
+                )
+            expected_observed_at = uncertainty.observed_at
+        else:
+            expected_observed_at = None
         if not (
             entry.step_id == result.step_id
             and entry.consequential is True
@@ -515,6 +600,7 @@ def _build_receipt(
             and entry.effect_verified is True
             and entry.approved_unverified is False
             and entry.verification_performed is True
+            and entry.observed_at == expected_observed_at
             and entry.collateral_reconciliation_actions == 0
         ):
             raise ReceiptError(

@@ -19,10 +19,12 @@ from openadapt_flow.execution_profiles import (
     execution_profile_contract,
 )
 from openadapt_flow.ir import (
+    ActionDeliveryUncertainty,
     EffectJournalEntry,
     EffectVerificationEvidence,
     ExecutionOutcomeEnvelope,
     IdentityCheck,
+    IdentitySignalEvidence,
     OutcomeContractCounts,
     RunReport,
     StepResult,
@@ -322,6 +324,98 @@ def test_receipt_refuses_incomplete_verified_contract(
         )
 
 
+def test_receipt_revalidates_the_complete_run_report_from_json() -> None:
+    report = _report()
+    assert report.outcome_envelope is not None
+    # RunReport models are mutable after construction. This creates a state the
+    # envelope validator would have refused at load time.
+    report.outcome_envelope.passed_contracts.effect = 2
+    with pytest.raises(ReceiptError, match="typed JSON revalidation"):
+        build_receipt(report)
+
+
+@pytest.mark.parametrize("surface", ["list", "mapping", "result", "journal"])
+def test_receipt_refuses_every_approved_unverified_mirror(surface: str) -> None:
+    report = _report()
+    if surface == "list":
+        report.approved_unverified_effect_step_ids = ["step_000"]
+    elif surface == "mapping":
+        report.governed_authorized_effect_contracts = {
+            "step_000": ["sha256:" + "b" * 64]
+        }
+    elif surface == "result":
+        report.results[0].effect_approved_unverified = True
+    else:
+        report.effect_journal[0].approved_unverified = True
+    with pytest.raises(ReceiptError, match="approved-unverified"):
+        build_receipt(report)
+
+
+def test_receipt_requires_identity_on_every_effect_bearing_step() -> None:
+    envelope = _report().outcome_envelope
+    assert envelope is not None
+    no_identity = OutcomeContractCounts(
+        authorization=1, identity=0, postcondition=1, effect=1
+    )
+    envelope = envelope.model_copy(
+        update={"required_contracts": no_identity, "passed_contracts": no_identity}
+    )
+    with pytest.raises(ReceiptError, match="every effect-bearing step"):
+        build_receipt(_report(required_identity_step_ids=[], outcome_envelope=envelope))
+
+
+def _signal_quorum_identity() -> IdentityCheck:
+    evidence = [
+        IdentitySignalEvidence(
+            signal="record_id",
+            source="structured",
+            verdict="verified",
+            evidence_class="application_structured_text",
+            match="exact",
+        ),
+        IdentitySignalEvidence(
+            signal="secondary_identifier",
+            source="identifier_region",
+            verdict="verified",
+            evidence_class="recorded_and_live_region",
+            match="exact",
+        ),
+    ]
+    return IdentityCheck(
+        status="verified",
+        mode="signal_quorum",
+        signal_evidence=evidence,
+        quorum_required=2,
+        quorum_verified=2,
+    )
+
+
+def test_receipt_accepts_consistent_signal_quorum_identity() -> None:
+    result = (
+        _report().results[0].model_copy(update={"identity": _signal_quorum_identity()})
+    )
+    assert build_receipt(_report(results=[result])).outcome == "VERIFIED"
+
+
+@pytest.mark.parametrize("fault", ["duplicate", "conflict", "count", "quorum"])
+def test_receipt_refuses_inconsistent_signal_quorum_identity(fault: str) -> None:
+    identity = _signal_quorum_identity()
+    if fault == "duplicate":
+        duplicate = identity.signal_evidence[0].model_copy(
+            update={"source": "identifier_region"}
+        )
+        identity.signal_evidence[1] = duplicate
+    elif fault == "conflict":
+        identity.signal_evidence[1].verdict = "conflict"
+    elif fault == "count":
+        identity.quorum_verified = 1
+    else:
+        identity.quorum_required = 3
+    result = _report().results[0].model_copy(update={"identity": identity})
+    with pytest.raises(ReceiptError, match="signal-quorum"):
+        build_receipt(_report(results=[result]))
+
+
 def test_receipt_refuses_partial_effect_hash_coverage() -> None:
     result = (
         _report()
@@ -353,6 +447,25 @@ def test_receipt_refuses_confirmed_but_absent_effect() -> None:
     )
     result = _report().results[0].model_copy(update={"effect_evidence": [evidence]})
     with pytest.raises(ReceiptError, match="observed present"):
+        build_receipt(_report(results=[result]))
+
+
+@pytest.mark.parametrize(
+    "evidence_update",
+    [
+        {"initial_verdict": "indeterminate"},
+        {"reconciliation_completed": True},
+        {"reconciliation_actions": 1},
+    ],
+)
+def test_receipt_refuses_nonclean_effect_evidence(
+    evidence_update: dict[str, object],
+) -> None:
+    evidence = (
+        _report().results[0].effect_evidence[0].model_copy(update=evidence_update)
+    )
+    result = _report().results[0].model_copy(update={"effect_evidence": [evidence]})
+    with pytest.raises(ReceiptError, match="cleanly confirmed|reconciled"):
         build_receipt(_report(results=[result]))
 
 
@@ -406,6 +519,130 @@ def test_receipt_refuses_missing_or_contradictory_transaction_journal(
 ) -> None:
     with pytest.raises(ReceiptError, match="transaction journal"):
         build_receipt(_report(effect_journal=journal))
+
+
+def test_receipt_accepts_resolved_uncertain_delivery_with_exact_journal() -> None:
+    uncertainty = ActionDeliveryUncertainty(
+        operation="click",
+        native=False,
+        observed_at="2026-07-27T15:34:57+00:00",
+        cause_type="ActionDeliveryUncertain",
+        verification_attempted=True,
+        postconditions_confirmed=True,
+        effects_confirmed=True,
+        resolved_by_contract=True,
+    )
+    result = (
+        _report().results[0].model_copy(update={"delivery_uncertainty": uncertainty})
+    )
+    journal = [
+        _report()
+        .effect_journal[0]
+        .model_copy(
+            update={
+                "attempt_state": "delivery_uncertain",
+                "observed_at": uncertainty.observed_at,
+            }
+        )
+    ]
+    receipt = build_receipt(_report(results=[result], effect_journal=journal))
+    assert receipt.outcome == "VERIFIED"
+
+
+def test_receipt_refuses_non_actuated_effect_result() -> None:
+    result = _report().results[0].model_copy(update={"delivery_attempted": False})
+    journal = [
+        _report().effect_journal[0].model_copy(update={"attempt_state": "not_actuated"})
+    ]
+    with pytest.raises(ReceiptError, match="non-actuated"):
+        build_receipt(_report(results=[result], effect_journal=journal))
+
+
+def test_receipt_refuses_uncertain_delivery_with_wrong_observation_time() -> None:
+    uncertainty = ActionDeliveryUncertainty(
+        operation="click",
+        native=False,
+        observed_at="2026-07-27T15:34:57+00:00",
+        cause_type="ActionDeliveryUncertain",
+        verification_attempted=True,
+        postconditions_confirmed=True,
+        effects_confirmed=True,
+        resolved_by_contract=True,
+    )
+    result = (
+        _report().results[0].model_copy(update={"delivery_uncertainty": uncertainty})
+    )
+    journal = [
+        _report()
+        .effect_journal[0]
+        .model_copy(
+            update={
+                "attempt_state": "delivery_uncertain",
+                "observed_at": "2026-07-27T15:34:58+00:00",
+            }
+        )
+    ]
+    with pytest.raises(ReceiptError, match="transaction journal"):
+        build_receipt(_report(results=[result], effect_journal=journal))
+
+
+def test_receipt_refuses_unresolved_uncertain_delivery() -> None:
+    uncertainty = ActionDeliveryUncertainty(
+        operation="click",
+        native=False,
+        observed_at="2026-07-27T15:34:57+00:00",
+        cause_type="ActionDeliveryUncertain",
+        verification_attempted=True,
+        postconditions_confirmed=True,
+        effects_confirmed=True,
+        resolved_by_contract=False,
+    )
+    result = (
+        _report().results[0].model_copy(update={"delivery_uncertainty": uncertainty})
+    )
+    journal = [
+        _report()
+        .effect_journal[0]
+        .model_copy(
+            update={
+                "attempt_state": "delivery_uncertain",
+                "observed_at": uncertainty.observed_at,
+            }
+        )
+    ]
+    with pytest.raises(ReceiptError, match="unresolved action-delivery"):
+        build_receipt(_report(results=[result], effect_journal=journal))
+
+
+def test_receipt_binds_api_attempt_state_to_the_transaction_classifier() -> None:
+    result = _report().results[0].model_copy(update={"actuation": "api"})
+    with pytest.raises(ReceiptError, match="transaction journal"):
+        build_receipt(_report(results=[result]))
+    journal = [
+        _report().effect_journal[0].model_copy(update={"attempt_state": "actuated_api"})
+    ]
+    assert (
+        build_receipt(_report(results=[result], effect_journal=journal)).outcome
+        == "VERIFIED"
+    )
+
+
+def test_receipt_refuses_uncertainty_hidden_as_delivered() -> None:
+    uncertainty = ActionDeliveryUncertainty(
+        operation="click",
+        native=False,
+        observed_at="2026-07-27T15:34:57+00:00",
+        cause_type="ActionDeliveryUncertain",
+        verification_attempted=True,
+        postconditions_confirmed=True,
+        effects_confirmed=True,
+        resolved_by_contract=True,
+    )
+    result = (
+        _report().results[0].model_copy(update={"delivery_uncertainty": uncertainty})
+    )
+    with pytest.raises(ReceiptError, match="transaction journal"):
+        build_receipt(_report(results=[result]))
 
 
 def test_receipt_refuses_screen_only_effect_evidence() -> None:

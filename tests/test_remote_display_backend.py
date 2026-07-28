@@ -212,6 +212,31 @@ def test_absent_application_marker_returns_none_and_invalidates_lease() -> None:
     assert not any(call[0] == "mouse" for call in client.calls)
 
 
+def test_qualification_environment_rechecks_version_on_actuation_frame() -> None:
+    client = FakeClient()
+    version_ok = {"value": True}
+    backend = RemoteDisplayBackend(
+        client=client,
+        settle_s=0.0,
+        application_marker="Accuro",
+        application_marker_probe=lambda _png: True,
+        application_version_marker="8.0.0.3",
+        application_version_marker_probe=lambda _png: version_ok["value"],
+        environment_marker="clinic-remote-environment",
+        environment_marker_probe=lambda _png: True,
+        session_marker="clinic-session-qualification",
+        session_marker_probe=lambda _png: True,
+    )
+    assert backend.qualification_environment_identity() is not None
+    version_ok["value"] = False
+
+    with pytest.raises(
+        RemoteDisplayError, match="application, version, environment, or session"
+    ):
+        backend.acquire_actuation_frame()
+    assert not any(call[0] == "mouse" for call in client.calls)
+
+
 def test_context_observation_refuses_mutated_frame_before_input() -> None:
     client = FakeClient()
     backend = RemoteDisplayBackend(

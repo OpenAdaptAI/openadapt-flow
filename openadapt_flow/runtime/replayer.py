@@ -85,6 +85,7 @@ from openadapt_flow.ir import (
     Region,
     Resolution,
     RunReport,
+    SafetyRefusalEvidence,
     State,
     StateKind,
     Step,
@@ -94,6 +95,21 @@ from openadapt_flow.ir import (
 )
 from openadapt_flow.privacy import scrub_image_bytes as _scrub_png
 from openadapt_flow.privacy import scrub_text as _scrub_phi
+from openadapt_flow.qualification_environment import (
+    BackendQualificationEnvironmentObserver,
+    QualificationEnvironmentObservation,
+    QualificationEnvironmentObserver,
+)
+from openadapt_flow.qualification_faults import (
+    FaultMutationReceipt,
+    QualificationFaultContext,
+    QualificationFaultDriver,
+    QualificationFaultGate,
+    QualificationFaultKind,
+    effect_verifier_input_sha256,
+    sha256_bytes,
+    verify_fault_mutation_receipt,
+)
 from openadapt_flow.run_gate import is_consequential
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import healing as healing_mod
@@ -369,6 +385,10 @@ class Replayer:
         interstitials: Optional[list[Interstitial]] = None,
         control_overlay: Optional["RuntimeControlOverlayEmitter"] = None,
         idempotency_ledger: Optional["IdempotencyLedger"] = None,
+        qualification_fault_driver: Optional[QualificationFaultDriver] = None,
+        qualification_environment_observer: Optional[
+            QualificationEnvironmentObserver
+        ] = None,
     ) -> None:
         if vision is None:
             import openadapt_flow.vision as vision  # lazy: heavy OCR deps
@@ -533,6 +553,16 @@ class Replayer:
         # key is SUPPRESSED before any actuation (never blind-retried). None
         # (default) leaves the run path byte-for-byte unchanged.
         self.idempotency_ledger = idempotency_ledger
+        self.qualification_fault_driver = qualification_fault_driver
+        self.qualification_environment_observer = qualification_environment_observer
+        self._qualification_fault_mutations: list[FaultMutationReceipt] = []
+        self._qualification_fault_public_key: Optional[str] = None
+        self._qualification_environment_call: Optional[
+            Callable[[], QualificationEnvironmentObservation]
+        ] = None
+        self._qualification_environment_bound: Optional[
+            QualificationEnvironmentObservation
+        ] = None
 
     # -- public API ----------------------------------------------------------
 
@@ -668,6 +698,13 @@ class Replayer:
             if self.governed_authorization is not None
             else uuid.uuid4().hex
         )
+        self._qualification_fault_mutations = []
+        self._qualification_fault_public_key = None
+        self._qualification_environment_call = None
+        self._qualification_environment_bound = None
+        clear_guard = getattr(self.backend, "set_qualification_input_guard", None)
+        if callable(clear_guard):
+            clear_guard(None)
         # Parameter resolution (Workflow-program IR, Phase 1): recorded defaults
         # (``params`` dict) plus each TYPED ``param_specs`` example as a default,
         # with caller-supplied values overriding both. A v0 bundle (empty
@@ -789,6 +826,44 @@ class Replayer:
             report.governed_runtime_inputs_digest = (
                 self.governed_authorization.runtime_inputs_digest
             )
+            report.governed_qualification_project_id = (
+                self.governed_authorization.qualification_project_id
+            )
+            report.governed_qualification_project_revision = (
+                self.governed_authorization.qualification_project_revision
+            )
+            report.governed_qualification_project_contract_sha256 = (
+                self.governed_authorization.qualification_project_contract_sha256
+            )
+            report.governed_qualification_campaign_id_sha256 = (
+                self.governed_authorization.qualification_campaign_id_sha256
+            )
+            report.governed_qualification_case_id_sha256 = (
+                self._qualification_id_sha256(
+                    self.governed_authorization.qualification_case_id
+                )
+            )
+            report.governed_qualification_case_input_sha256 = (
+                self.governed_authorization.qualification_case_input_sha256
+            )
+            report.governed_qualification_run_id_sha256 = (
+                self.governed_authorization.qualification_run_id_sha256
+            )
+            report.governed_qualification_case_kind = (
+                self.governed_authorization.qualification_case_kind
+            )
+            report.governed_qualification_fault_driver_id = (
+                self.governed_authorization.qualification_fault_driver_id
+            )
+            report.governed_qualification_fault_driver_contract_sha256 = (
+                self.governed_authorization.qualification_fault_driver_contract_sha256
+            )
+            report.governed_qualification_fault_driver_key_id = (
+                self.governed_authorization.qualification_fault_driver_key_id
+            )
+            report.governed_qualification_fault_step_id_sha256 = (
+                self.governed_authorization.qualification_fault_step_id_sha256
+            )
             report.required_identity_step_ids = list(
                 self.governed_authorization.required_identity_step_ids
             )
@@ -808,6 +883,36 @@ class Replayer:
                         ok=False,
                         failure_category="governed_refusal",
                         error=f"{refusal} — refusing to run; run aborted",
+                    )
+                )
+                report.success = False
+                return self._finalize_report(report, workflow, run_dir)
+            environment_refusal = self._observe_qualification_environment(
+                workflow,
+                report,
+                execution_target_kind=execution_target_kind,
+            )
+            if environment_refusal is not None:
+                report.results.append(
+                    StepResult(
+                        step_id="<qualification-environment>",
+                        intent="observe exact qualification environment",
+                        ok=False,
+                        failure_category="governed_refusal",
+                        error=environment_refusal,
+                    )
+                )
+                report.success = False
+                return self._finalize_report(report, workflow, run_dir)
+            driver_refusal = self._qualification_fault_driver_refusal(workflow)
+            if driver_refusal is not None:
+                report.results.append(
+                    StepResult(
+                        step_id="<qualification-fault-driver>",
+                        intent="bind the environment-owned fault driver",
+                        ok=False,
+                        failure_category="runtime_failure",
+                        error=driver_refusal,
                     )
                 )
                 report.success = False
@@ -1123,6 +1228,7 @@ class Replayer:
     ) -> RunReport:
         """Persist exact evidence first, then project its terminal outcome."""
 
+        report.qualification_fault_mutations = list(self._qualification_fault_mutations)
         self._stamp_execution_outcome(report, workflow)
         # Record the terminal transaction outcome against the reserved key so a
         # later duplicate (suppressed above) can surface what already happened.
@@ -1136,6 +1242,9 @@ class Replayer:
                 report.idempotency_key, report.transaction_outcome
             )
         report.save(run_dir)
+        clear_guard = getattr(self.backend, "set_qualification_input_guard", None)
+        if callable(clear_guard):
+            clear_guard(None)
         self._emit_control_overlay_terminal(report.execution_outcome)
         return report
 
@@ -2895,6 +3004,246 @@ class Replayer:
 
     # -- per-step execution ---------------------------------------------------
 
+    def _qualification_fault_driver_refusal(self, workflow: Workflow) -> Optional[str]:
+        authorization = self.governed_authorization
+        if authorization is None or authorization.qualification_case_kind in {
+            None,
+            "representative",
+        }:
+            return None
+        driver = self.qualification_fault_driver
+        if driver is None:
+            return "qualification fault driver is not configured"
+        try:
+            if driver.driver_id != authorization.qualification_fault_driver_id:
+                return "qualification fault driver id does not match authorization"
+            if (
+                driver.contract_sha256
+                != authorization.qualification_fault_driver_contract_sha256
+            ):
+                return (
+                    "qualification fault driver contract does not match authorization"
+                )
+            if (
+                driver.attestation_key_id
+                != authorization.qualification_fault_driver_key_id
+            ):
+                return "qualification fault driver key does not match authorization"
+        except Exception:
+            return "qualification fault driver identity could not be observed"
+        project = workflow.qualification
+        assert project is not None
+        trusted = project.trusted_fault_driver_keys.get(
+            authorization.qualification_fault_driver_key_id or ""
+        )
+        if trusted is None:
+            return "qualification fault driver key is not trusted by the project"
+        self._qualification_fault_public_key = trusted
+        return None
+
+    @staticmethod
+    def _qualification_fault_gate_for_kind(
+        kind: QualificationFaultKind,
+    ) -> QualificationFaultGate:
+        gates: dict[QualificationFaultKind, QualificationFaultGate] = {
+            "ambiguity": "target_resolution",
+            "wrong_identity": "identity_verification",
+            "stale_identity": "actuation_revalidation",
+            "weak_effect": "effect_strength",
+            "missing_effect": "effect_verifier",
+        }
+        return gates[kind]
+
+    def _qualification_fault_context(
+        self,
+        *,
+        gate: QualificationFaultGate,
+        step: Step,
+        before_input_sha256: str,
+        effect_verifier: Any,
+        effects: tuple[Any, ...] = (),
+    ) -> Optional[QualificationFaultContext]:
+        authorization = self.governed_authorization
+        if authorization is None or authorization.qualification_case_kind in {
+            None,
+            "representative",
+        }:
+            return None
+        kind = cast(QualificationFaultKind, authorization.qualification_case_kind)
+        if self._qualification_fault_gate_for_kind(kind) != gate:
+            return None
+        if authorization.qualification_fault_step_id_sha256 != sha256_bytes(
+            step.id.encode("utf-8")
+        ):
+            return None
+        required = (
+            authorization.qualification_project_id,
+            authorization.qualification_project_revision,
+            authorization.qualification_project_contract_sha256,
+            authorization.qualification_campaign_id_sha256,
+            self._qualification_id_sha256(authorization.qualification_case_id),
+            authorization.qualification_case_input_sha256,
+            authorization.qualification_run_id_sha256,
+        )
+        if any(value is None for value in required):
+            raise RuntimeError("qualification_fault_binding_incomplete")
+        return QualificationFaultContext(
+            project_id=cast(str, required[0]),
+            project_revision=cast(int, required[1]),
+            project_contract_sha256=cast(str, required[2]),
+            campaign_id_sha256=cast(str, required[3]),
+            case_id_sha256=cast(str, required[4]),
+            case_input_sha256=cast(str, required[5]),
+            run_id_sha256=cast(str, required[6]),
+            step_id=step.id,
+            fault_kind=kind,
+            gate=gate,
+            before_input_sha256=before_input_sha256,
+            backend=self.backend,
+            vision=self.vision,
+            effect_verifier=effect_verifier,
+            effects=effects,
+        )
+
+    def _require_current_fault_driver_binding(self) -> QualificationFaultDriver:
+        """Snapshot the configured driver identity immediately before mutation."""
+
+        driver = self.qualification_fault_driver
+        authorization = self.governed_authorization
+        if driver is None or authorization is None:
+            raise RuntimeError("qualification_fault_driver_missing")
+        try:
+            observed = (
+                driver.driver_id,
+                driver.contract_sha256,
+                driver.attestation_key_id,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "qualification_fault_driver_identity_unavailable"
+            ) from exc
+        expected = (
+            authorization.qualification_fault_driver_id,
+            authorization.qualification_fault_driver_contract_sha256,
+            authorization.qualification_fault_driver_key_id,
+        )
+        if observed != expected:
+            raise RuntimeError("qualification_fault_driver_binding_changed")
+        return driver
+
+    def _validate_fault_mutation(
+        self,
+        context: QualificationFaultContext,
+        receipt: FaultMutationReceipt,
+        *,
+        after_input_sha256: str,
+    ) -> None:
+        authorization = self.governed_authorization
+        if authorization is None:
+            raise RuntimeError("qualification_fault_authorization_missing")
+        expected = {
+            "project_id": context.project_id,
+            "project_revision": context.project_revision,
+            "project_contract_sha256": context.project_contract_sha256,
+            "campaign_id_sha256": context.campaign_id_sha256,
+            "case_id_sha256": context.case_id_sha256,
+            "case_input_sha256": context.case_input_sha256,
+            "run_id_sha256": context.run_id_sha256,
+            "step_id_sha256": sha256_bytes(context.step_id.encode("utf-8")),
+            "fault_kind": context.fault_kind,
+            "gate": context.gate,
+            "driver_id": authorization.qualification_fault_driver_id,
+            "driver_contract_sha256": (
+                authorization.qualification_fault_driver_contract_sha256
+            ),
+            "attestation_key_id": (authorization.qualification_fault_driver_key_id),
+            "before_input_sha256": context.before_input_sha256,
+            "after_input_sha256": after_input_sha256,
+        }
+        actual = receipt.model_dump(mode="python")
+        if any(actual.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("qualification_fault_receipt_binding_invalid")
+        if context.before_input_sha256 == after_input_sha256:
+            raise RuntimeError("qualification_fault_input_unchanged")
+        trusted_key = self._qualification_fault_public_key
+        if trusted_key is None or not verify_fault_mutation_receipt(
+            receipt,
+            trusted_public_key_base64=trusted_key,
+        ):
+            raise RuntimeError("qualification_fault_receipt_signature_invalid")
+        if self._qualification_fault_mutations:
+            raise RuntimeError("qualification_fault_mutation_repeated")
+        self._qualification_fault_mutations.append(receipt)
+
+    def _apply_screen_fault_mutation(
+        self,
+        *,
+        gate: QualificationFaultGate,
+        step: Step,
+        before_png: bytes,
+        effect_verifier: Any,
+    ) -> bytes:
+        if self._qualification_fault_mutations:
+            return before_png
+        context = self._qualification_fault_context(
+            gate=gate,
+            step=step,
+            before_input_sha256=sha256_bytes(before_png),
+            effect_verifier=effect_verifier,
+        )
+        if context is None:
+            return before_png
+        driver = self._require_current_fault_driver_binding()
+        mutation = driver.mutate(context)
+        if mutation is None:
+            return before_png
+        if mutation.replace_effect_verifier:
+            raise RuntimeError("qualification_screen_fault_replaced_verifier")
+        after_png = self.backend.screenshot()
+        self._validate_fault_mutation(
+            context,
+            mutation.receipt,
+            after_input_sha256=sha256_bytes(after_png),
+        )
+        return after_png
+
+    def _apply_effect_fault_mutation(
+        self,
+        *,
+        gate: QualificationFaultGate,
+        step: Step,
+        effect_verifier: Any,
+        effects: tuple[Any, ...],
+    ) -> Any:
+        if self._qualification_fault_mutations:
+            return effect_verifier
+        before_sha256 = effect_verifier_input_sha256(effect_verifier, effects)
+        context = self._qualification_fault_context(
+            gate=gate,
+            step=step,
+            before_input_sha256=before_sha256,
+            effect_verifier=effect_verifier,
+            effects=effects,
+        )
+        if context is None:
+            return effect_verifier
+        driver = self._require_current_fault_driver_binding()
+        mutation = driver.mutate(context)
+        if mutation is None:
+            return effect_verifier
+        if not mutation.replace_effect_verifier:
+            raise RuntimeError("qualification_effect_fault_did_not_replace_verifier")
+        after_sha256 = effect_verifier_input_sha256(
+            mutation.effect_verifier,
+            effects,
+        )
+        self._validate_fault_mutation(
+            context,
+            mutation.receipt,
+            after_input_sha256=after_sha256,
+        )
+        return mutation.effect_verifier
+
     def _run_step(
         self,
         step: Step,
@@ -2937,6 +3286,26 @@ class Replayer:
         # binding param) to fall through to the GUI ladder below with NO write
         # yet performed (the no-double-write contract). See
         # openadapt_flow.runtime.actuators.
+        api_effect_verifier = self.effect_verifier
+        api_effects: tuple[Any, ...] = ()
+        if (
+            self.api_actuator is not None
+            and step.api_binding is not None
+            and step.api_binding.effects
+        ):
+            api_effects = tuple(self._resolve_effects(step.api_binding.effects, params))
+            api_effect_verifier = self._apply_effect_fault_mutation(
+                gate="effect_verifier",
+                step=step,
+                effect_verifier=api_effect_verifier,
+                effects=api_effects,
+            )
+            api_effect_verifier = self._apply_effect_fault_mutation(
+                gate="effect_strength",
+                step=step,
+                effect_verifier=api_effect_verifier,
+                effects=api_effects,
+            )
         if self.api_actuator is not None and step.api_binding is not None:
             if self._try_api_tier(
                 step,
@@ -2944,6 +3313,7 @@ class Replayer:
                 result,
                 workflow=workflow,
                 step_index=step_index,
+                effect_verifier=api_effect_verifier,
             ):
                 if not result.ok and result.failure_category is None:
                     result.safety_halt = True
@@ -3046,6 +3416,16 @@ class Replayer:
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
 
+            before_png = self._apply_screen_fault_mutation(
+                gate="target_resolution",
+                step=step,
+                before_png=before_png,
+                effect_verifier=active_verifier,
+            )
+            result.before_png = self._save_step_png(
+                run_dir, step.id, "before", before_png
+            )
+            last_frame = before_png
             resolution, matched_region, error = self._resolve_step(
                 step, before_png, bundle_dir, workflow
             )
@@ -3072,6 +3452,16 @@ class Replayer:
                 )
             result.resolution = resolution
             if error is None and resolution is not None:
+                before_png = self._apply_screen_fault_mutation(
+                    gate="identity_verification",
+                    step=step,
+                    before_png=before_png,
+                    effect_verifier=active_verifier,
+                )
+                result.before_png = self._save_step_png(
+                    run_dir, step.id, "before", before_png
+                )
+                last_frame = before_png
                 error = self._identity_gate_error(
                     step,
                     resolution,
@@ -3081,6 +3471,17 @@ class Replayer:
                     bundle_dir,
                     result,
                 )
+                if error is not None and result.identity is not None:
+                    code: Literal["identity_conflict", "identity_unverifiable"] = (
+                        "identity_conflict"
+                        if result.identity.status == "mismatch"
+                        else "identity_unverifiable"
+                    )
+                    result.safety_refusal_evidence = SafetyRefusalEvidence(
+                        stage="identity_verification",
+                        code=code,
+                        detector_input_sha256=sha256_bytes(before_png),
+                    )
             # System-of-record effect verification -- SNAPSHOT the record just
             # before the (consequential) action, so the post-action verifier
             # can count only what THIS step wrote (delta / at-most-once /
@@ -3089,7 +3490,31 @@ class Replayer:
             # error -- refuse to perform an unverifiable consequential write
             # rather than pass it silently.
             if error is None and step.effects:
-                if active_verifier is None and self._all_default_readback(step.effects):
+                resolved_effects = self._resolve_effects(step.effects, params)
+                effect_inputs = tuple(resolved_effects)
+                active_verifier = self._apply_effect_fault_mutation(
+                    gate="effect_verifier",
+                    step=step,
+                    effect_verifier=active_verifier,
+                    effects=effect_inputs,
+                )
+                active_verifier = self._apply_effect_fault_mutation(
+                    gate="effect_strength",
+                    step=step,
+                    effect_verifier=active_verifier,
+                    effects=effect_inputs,
+                )
+                missing_verifier_fault_applied = any(
+                    receipt.gate == "effect_verifier"
+                    and receipt.fault_kind == "missing_effect"
+                    for receipt in self._qualification_fault_mutations
+                )
+                if (
+                    error is None
+                    and active_verifier is None
+                    and self._all_default_readback(step.effects)
+                    and not missing_verifier_fault_applied
+                ):
                     # AUTO-DEFAULT (no connector): every declared effect is an
                     # auto-derived DIFFERENT-PATH on-screen read-back, whose
                     # measured false-CONFIRM rate is ~0. Wire a read-back
@@ -3097,7 +3522,9 @@ class Replayer:
                     # same-surface (weak) read-back or a structured effect is
                     # NOT eligible and falls through to the HALT/approval path.
                     active_verifier = self._auto_readback_verifier()
-                if active_verifier is None:
+                if error is not None:
+                    pass
+                elif active_verifier is None:
                     authorization = self.governed_authorization
                     approved = (
                         authorization is not None
@@ -3105,7 +3532,6 @@ class Replayer:
                     )
                     if approved:
                         assert authorization is not None
-                        resolved_effects = self._resolve_effects(step.effects, params)
                         result.effect_contract_hashes.extend(
                             effect.contract_hash() for effect in resolved_effects
                         )
@@ -3129,6 +3555,14 @@ class Replayer:
                             "no EffectVerifier configured for a step that declares "
                             "effects (fail-safe HALT)"
                         )
+                        result.safety_refusal_evidence = SafetyRefusalEvidence(
+                            stage="effect_verifier",
+                            code="effect_verifier_missing",
+                            detector_input_sha256=effect_verifier_input_sha256(
+                                None,
+                                effect_inputs,
+                            ),
+                        )
                     if error is not None and self.governed_authorization is not None:
                         result.safety_halt = True
                         result.failure_category = "governed_refusal"
@@ -3136,7 +3570,6 @@ class Replayer:
                     # Bind the effect contracts to this run's params BEFORE the
                     # pre-state snapshot (P0-3): match/value/idempotency_key must
                     # describe the record THIS run writes, not the demo's.
-                    resolved_effects = self._resolve_effects(step.effects, params)
                     result.effect_contract_hashes.extend(
                         effect.contract_hash() for effect in resolved_effects
                     )
@@ -3157,12 +3590,26 @@ class Replayer:
                         result.safety_halt = True
                         result.failure_category = "governed_refusal"
                         result.effect_results.append(error)
+                        result.safety_refusal_evidence = SafetyRefusalEvidence(
+                            stage="effect_strength",
+                            code="effect_strength_insufficient",
+                            detector_input_sha256=effect_verifier_input_sha256(
+                                active_verifier,
+                                effect_inputs,
+                            ),
+                        )
 
             if self._governed_asset_mutation is not None:
                 error = self._governed_asset_mutation
                 result.safety_halt = True
 
             if error is None:
+                before_png = self._apply_screen_fault_mutation(
+                    gate="actuation_revalidation",
+                    step=step,
+                    before_png=before_png,
+                    effect_verifier=active_verifier,
+                )
                 (
                     resolution,
                     matched_region,
@@ -3185,6 +3632,15 @@ class Replayer:
                         run_dir, step.id, "before", before_png
                     )
                     last_frame = before_png
+                if error is not None and any(
+                    receipt.gate == "actuation_revalidation"
+                    for receipt in self._qualification_fault_mutations
+                ):
+                    result.safety_refusal_evidence = SafetyRefusalEvidence(
+                        stage="actuation_revalidation",
+                        code="actuation_observation_changed",
+                        detector_input_sha256=sha256_bytes(before_png),
+                    )
 
             if error is None:
                 if resolved_effects is not None and active_verifier is not None:
@@ -3202,6 +3658,20 @@ class Replayer:
             if error is not None:
                 self._cancel_guarded_coordinate()
                 self._cancel_guarded_keyboard()
+
+            authorization = self.governed_authorization
+            if (
+                error is None
+                and authorization is not None
+                and authorization.qualification_fault_step_id_sha256
+                == sha256_bytes(step.id.encode("utf-8"))
+            ):
+                error = (
+                    "the bound qualification fault case did not produce its "
+                    "required detector refusal; refusing to cross the input boundary"
+                )
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
 
             if error is None:
                 # Structural postconditions compare against the final observed
@@ -3439,6 +3909,11 @@ class Replayer:
                 f"OCR safety refusal for step '{step.id}' "
                 f"({step.intent}): {exc} — no action was admitted"
             )
+            result.safety_refusal_evidence = SafetyRefusalEvidence(
+                stage="target_resolution",
+                code="target_ambiguous",
+                detector_input_sha256=sha256_bytes(last_frame),
+            )
         except StructuralResolutionRefused as exc:
             self._cancel_guarded_coordinate()
             self._cancel_guarded_keyboard()
@@ -3451,6 +3926,11 @@ class Replayer:
             result.error = (
                 f"Structural safety refusal for step '{step.id}' "
                 f"({step.intent}): {exc} — no action was admitted"
+            )
+            result.safety_refusal_evidence = SafetyRefusalEvidence(
+                stage="target_resolution",
+                code="target_ambiguous",
+                detector_input_sha256=sha256_bytes(last_frame),
             )
         except Exception as exc:  # defensive: report, don't crash the run
             self._cancel_guarded_coordinate()
@@ -3664,6 +4144,7 @@ class Replayer:
         *,
         workflow: Workflow,
         step_index: int,
+        effect_verifier: Any,
     ) -> bool:
         """Perform ``step.api_binding``'s write via the API and confirm it.
 
@@ -3727,7 +4208,10 @@ class Replayer:
             result.failure_category = "governed_refusal"
             result.error = identity_refusal
             return True
-        if self.effect_verifier is None:
+        # Bind the effect contracts to this run before either the verifier
+        # strength check or its detector-input digest is evaluated.
+        effects = self._resolve_effects(effects, params)
+        if effect_verifier is None:
             result.effect_verified = False
             result.effect_results.append(
                 "API binding present but no EffectVerifier is configured to "
@@ -3739,14 +4223,15 @@ class Replayer:
                 "but no EffectVerifier is configured to confirm the write -- "
                 "refusing an unverifiable consequential write; run aborted"
             )
+            result.safety_refusal_evidence = SafetyRefusalEvidence(
+                stage="effect_verifier",
+                code="effect_verifier_missing",
+                detector_input_sha256=effect_verifier_input_sha256(None, effects),
+            )
             return True
 
-        # Bind the effect contracts to this run's params BEFORE snapshotting the
-        # pre-state (P0-3): the same {param} substitution the ApiActuator applies
-        # to the URL/query/body must apply to what the write is verified against,
-        # or an API write for patient "Susan" would be confirmed against the
-        # demonstration's patient "Phil".
-        effects = self._resolve_effects(effects, params)
+        # The same parameter substitution that the ApiActuator applies to the
+        # URL/query/body now also applies to the effect checked below.
         api_hash_start = len(result.effect_contract_hashes)
         result.effect_contract_hashes.extend(
             effect.contract_hash() for effect in effects
@@ -3754,7 +4239,7 @@ class Replayer:
         refusal = self._profile_effect_tier_refusal(
             workflow,
             effects,
-            self.effect_verifier,
+            effect_verifier,
         )
         if refusal is not None:
             result.effect_verified = False
@@ -3762,13 +4247,21 @@ class Replayer:
             result.failure_category = "governed_refusal"
             result.effect_results.append(refusal)
             result.error = refusal
+            result.safety_refusal_evidence = SafetyRefusalEvidence(
+                stage="effect_strength",
+                code="effect_strength_insufficient",
+                detector_input_sha256=effect_verifier_input_sha256(
+                    effect_verifier,
+                    effects,
+                ),
+            )
             return True
 
         # Snapshot the system of record BEFORE the write so the verifier counts
         # only what THIS actuation wrote (delta / at-most-once / collateral
         # loss), then actuate exactly once.
         try:
-            before = self.effect_verifier.capture_pre_state()
+            before = effect_verifier.capture_pre_state()
         except Exception as exc:  # noqa: BLE001 - deployment verifier boundary
             result.effect_verified = False
             result.effect_results.append(
@@ -3785,7 +4278,7 @@ class Replayer:
         refusal = self._profile_effect_tier_refusal(
             workflow,
             effects,
-            self.effect_verifier,
+            effect_verifier,
         )
         if refusal is not None:
             result.effect_verified = False
@@ -3793,6 +4286,14 @@ class Replayer:
             result.failure_category = "governed_refusal"
             result.effect_results.append(refusal)
             result.error = refusal
+            result.safety_refusal_evidence = SafetyRefusalEvidence(
+                stage="effect_strength",
+                code="effect_strength_insufficient",
+                detector_input_sha256=effect_verifier_input_sha256(
+                    effect_verifier,
+                    effects,
+                ),
+            )
             return True
         overlay_current, overlay_total = self._control_overlay_progress(
             workflow, step_index, None
@@ -3807,6 +4308,7 @@ class Replayer:
         # process but before the actuator can return a receipt-like outcome.
         result.delivery_attempted = True
         try:
+            self._require_qualification_environment_current()
             outcome = self.api_actuator.actuate(binding, params)
         except Exception as exc:  # noqa: BLE001 - external actuator boundary
             # The actuator contract is no-throw, but a deployment adapter can
@@ -3865,7 +4367,13 @@ class Replayer:
             total_steps=overlay_total,
         )
         try:
-            error = self._verify_effects(step, before, result, effects=effects)
+            error = self._verify_effects(
+                step,
+                before,
+                result,
+                effects=effects,
+                verifier=effect_verifier,
+            )
         except Exception as exc:  # noqa: BLE001 - deployment verifier boundary
             result.effect_verified = False
             result.effect_results.append(
@@ -4592,20 +5100,35 @@ class Replayer:
                 f"'{step.id}' ({step.intent}): {detail}",
             )
 
-        fresh_resolution, fresh_region, error = self._resolve_step(
-            step,
-            fresh_png,
-            bundle_dir,
-            workflow,
-            # Opening an opaque select control can repeat its current value in
-            # the option popup. That text is valid target evidence before the
-            # focusing click, but it is no longer unique afterward. The second
-            # phase therefore requires the retained template or independent
-            # relational landmarks. Ambiguous or absent context still halts.
-            allow_target_ocr=not (
-                arm_keyboard and step.action is ActionKind.SELECT_OPTION
-            ),
-        )
+        try:
+            fresh_resolution, fresh_region, error = self._resolve_step(
+                step,
+                fresh_png,
+                bundle_dir,
+                workflow,
+                # Opening an opaque select control can repeat its current value
+                # in the option popup. That text is valid target evidence before
+                # the focusing click, but it is no longer unique afterward. The
+                # second phase therefore requires the retained template or
+                # independent relational landmarks.
+                allow_target_ocr=not (
+                    arm_keyboard and step.action is ActionKind.SELECT_OPTION
+                ),
+            )
+        except (OcrResolutionRefused, StructuralResolutionRefused) as exc:
+            result.safety_halt = True
+            result.safety_refusal_evidence = SafetyRefusalEvidence(
+                stage="actuation_revalidation",
+                code="actuation_observation_changed",
+                detector_input_sha256=sha256_bytes(fresh_png),
+            )
+            return (
+                None,
+                None,
+                fresh_png,
+                "Actuation preflight HALTED because the fresh target was "
+                f"ambiguous for step '{step.id}' ({step.intent}): {exc}",
+            )
         if error is not None:
             if self.governed_authorization is not None:
                 result.safety_halt = True
@@ -4881,6 +5404,7 @@ class Replayer:
                         "fresh actuation fingerprint — refusing raw coordinate "
                         "delivery; run aborted"
                     )
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 delivery_receipt = native_act(
                     step.anchor.structural,
@@ -4892,6 +5416,7 @@ class Replayer:
             else:
                 if requires_atomic_identity:
                     if isinstance(self.backend, RemoteActuationBackend):
+                        self._require_qualification_environment_current()
                         result.delivery_attempted = True
                         self.backend.click(
                             x,
@@ -4899,6 +5424,7 @@ class Replayer:
                             double=step.action is ActionKind.DOUBLE_CLICK,
                         )
                     elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                        self._require_qualification_environment_current()
                         result.delivery_attempted = True
                         result.delivery_receipt = self.backend.act_guarded_coordinate(
                             x,
@@ -4919,6 +5445,7 @@ class Replayer:
                             "— refusing raw coordinate delivery; run aborted"
                         )
                 else:
+                    self._require_qualification_environment_current()
                     result.delivery_attempted = True
                     self.backend.click(
                         x,
@@ -4953,9 +5480,11 @@ class Replayer:
                             "click, but this backend has no bounded right-click "
                             "operation"
                         )
+                    self._require_qualification_environment_current()
                     result.delivery_attempted = True
                     self.backend.right_click(x, y)
                 elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                    self._require_qualification_environment_current()
                     result.delivery_attempted = True
                     result.delivery_receipt = self.backend.act_guarded_coordinate(
                         x,
@@ -4973,6 +5502,7 @@ class Replayer:
                         "identity verification to delivery; run aborted"
                     )
             elif isinstance(self.backend, RichPointerActionBackend):
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 self.backend.right_click(x, y)
             else:
@@ -5012,6 +5542,7 @@ class Replayer:
                 and step.drag_end_anchor.structural is not None
                 and callable(structural_drag)
             ):
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 result.delivery_receipt = structural_drag(
                     step.anchor.structural,
@@ -5062,6 +5593,7 @@ class Replayer:
                         f"Step '{step.id}' ({step.intent}) could not bind its "
                         f"freshly resolved drag source: {detail}; run aborted"
                     )
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 result.delivery_receipt = self.backend.drag_guarded(
                     x,
@@ -5072,6 +5604,7 @@ class Replayer:
                 )
                 result.actuation = "guarded_coordinate"
             elif isinstance(self.backend, RichPointerActionBackend):
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 self.backend.drag(x, y, end_x, end_y)
             else:
@@ -5160,6 +5693,7 @@ class Replayer:
                     and step.anchor.structural is not None
                     and callable(native_act)
                 ):
+                    self._require_qualification_environment_current()
                     result.delivery_attempted = True
                     result.delivery_receipt = native_act(
                         step.anchor.structural,
@@ -5172,6 +5706,7 @@ class Replayer:
                         and not isinstance(self.backend, RemoteActuationBackend)
                         and isinstance(self.backend, GuardedCoordinateActionBackend)
                     ):
+                        self._require_qualification_environment_current()
                         result.delivery_attempted = True
                         result.delivery_receipt = self.backend.act_guarded_coordinate(
                             x,
@@ -5194,6 +5729,7 @@ class Replayer:
                             "delivery; run aborted"
                         )
                     else:
+                        self._require_qualification_environment_current()
                         result.delivery_attempted = True
                         self.backend.click(x, y)
                 field_point = (x, y)
@@ -5259,6 +5795,7 @@ class Replayer:
                         "selection"
                     )
                 assert field_region is not None
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 self.backend.select_option(text, step.selection_commit_key)
                 return None
@@ -5268,6 +5805,7 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_type:
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 result.delivery_receipt = cast(
                     GuardedKeyboardActionBackend, self.backend
@@ -5287,6 +5825,7 @@ class Replayer:
                     "run aborted"
                 )
             else:
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 self.backend.type_text(text)
             if not text:
@@ -5323,6 +5862,7 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_key:
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 result.delivery_receipt = cast(
                     GuardedKeyboardActionBackend, self.backend
@@ -5342,6 +5882,7 @@ class Replayer:
                     "run aborted"
                 )
             else:
+                self._require_qualification_environment_current()
                 result.delivery_attempted = True
                 self.backend.press(key)
             return None
@@ -5457,7 +5998,7 @@ class Replayer:
 
     def _wait_starting_state_settled(
         self, before_png: bytes
-    ) -> tuple[bytes, Optional[str]]:
+    ) -> tuple[bytes, Optional[str], Optional[bool]]:
         """Readiness gate: refuse to act on a frame that never settled.
 
         When ``require_settled`` is on, invoke exactly ONE readiness-aware settle
@@ -5470,14 +6011,18 @@ class Replayer:
         ``(frame, halt_reason)``.
         """
         if not self.require_settled:
-            return before_png, None
+            return before_png, None, None
         fn = getattr(self.vision, "wait_settled_result", None)
         if not callable(fn):
-            return before_png, (
-                "The configured vision facade cannot report whether the screen "
-                "settled (wait_settled_result is unavailable) - refusing to "
-                "act while require_settled=True; run aborted (starting state "
-                "not ready)."
+            return (
+                before_png,
+                (
+                    "The configured vision facade cannot report whether the screen "
+                    "settled (wait_settled_result is unavailable) - refusing to "
+                    "act while require_settled=True; run aborted (starting state "
+                    "not ready)."
+                ),
+                False,
             )
         try:
             result = fn(
@@ -5490,22 +6035,162 @@ class Replayer:
             if not isinstance(frame, bytes) or not isinstance(settled, bool):
                 raise TypeError("invalid settle result")
         except Exception as exc:
-            return before_png, (
-                "The screen readiness check failed "
-                f"({type(exc).__name__}) - refusing to act while "
-                "require_settled=True; run aborted (starting state not ready)."
+            return (
+                before_png,
+                (
+                    "The screen readiness check failed "
+                    f"({type(exc).__name__}) - refusing to act while "
+                    "require_settled=True; run aborted (starting state not ready)."
+                ),
+                False,
             )
         if not settled:
-            return frame, (
-                "The screen never stopped changing (still loading or animating) "
-                f"within {self.settle_readiness_timeout_s:.1f}s - refusing to act "
-                "on a mid-transition frame; run aborted (starting state not "
-                "ready). If this UI animates continuously, qualify the workflow "
-                "with a bounded per-step wait_until readiness predicate over a "
-                "stable observation region before retrying; otherwise keep the "
-                "readiness gate enabled and halt."
+            return (
+                frame,
+                (
+                    "The screen never stopped changing (still loading or animating) "
+                    f"within {self.settle_readiness_timeout_s:.1f}s - refusing to act "
+                    "on a mid-transition frame; run aborted (starting state not "
+                    "ready). If this UI animates continuously, qualify the workflow "
+                    "with a bounded per-step wait_until readiness predicate over a "
+                    "stable observation region before retrying; otherwise keep the "
+                    "readiness gate enabled and halt."
+                ),
+                False,
             )
-        return frame, None
+        return frame, None, True
+
+    @staticmethod
+    def _qualification_id_sha256(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _observe_qualification_environment(
+        self,
+        workflow: Workflow,
+        report: RunReport,
+        *,
+        execution_target_kind: Optional[ExecutionTargetKind],
+    ) -> Optional[str]:
+        """Retain exact live environment evidence for a campaign run.
+
+        Project labels are expected values only. They never become observed
+        evidence. A qualification case refuses before workflow actuation when
+        the active backend cannot independently return the application,
+        application version, and session identity or when either expected
+        application field differs.
+        """
+
+        authorization = self.governed_authorization
+        if authorization is None or authorization.qualification_case_id is None:
+            return None
+        project = workflow.qualification
+        if project is None or execution_target_kind is None:
+            return "qualification environment evidence is unavailable"
+        if (
+            authorization.qualification_run_id_sha256
+            != hashlib.sha256(self._run_id.encode("utf-8")).hexdigest()
+        ):
+            return "qualification run identity does not match its authorization"
+        if execution_target_kind != project.environment.target_kind:
+            return "qualification target kind does not match the project"
+
+        configured_observer = self.qualification_environment_observer
+        if configured_observer is None:
+            if not callable(
+                getattr(self.backend, "qualification_environment_identity", None)
+            ):
+                return (
+                    "qualification backend cannot observe the complete environment; "
+                    "configure the project's environment observer"
+                )
+            configured_observer = BackendQualificationEnvironmentObserver(self.backend)
+        expected_observer = (
+            project.environment.environment_observer_id,
+            project.environment.environment_observer_contract_sha256,
+        )
+        try:
+            observed_observer = (
+                configured_observer.observer_id,
+                configured_observer.contract_sha256,
+            )
+        except Exception:
+            return "qualification environment observer identity is unavailable"
+        if expected_observer != observed_observer:
+            return "qualification environment observer does not match the project"
+
+        def environment_call() -> QualificationEnvironmentObservation:
+            return configured_observer.observe(
+                self.backend,
+                project.environment.target_kind,
+            )
+
+        try:
+            observed = environment_call()
+        except Exception:
+            return "qualification environment observation failed"
+        application = observed.application_identity
+        application_version = observed.application_version
+        if observed.target_kind != project.environment.target_kind:
+            return "qualification environment observer returned the wrong surface"
+        session = observed.session_identity_sha256
+        report.observed_application_sha256 = hashlib.sha256(
+            application.encode("utf-8")
+        ).hexdigest()
+        report.observed_application_version_sha256 = hashlib.sha256(
+            application_version.encode("utf-8")
+        ).hexdigest()
+        report.observed_session_sha256 = session
+        report.observed_environment_digest = observed.environment_digest
+        report.qualification_environment_observer_id = observed_observer[0]
+        report.qualification_environment_observer_contract_sha256 = observed_observer[1]
+        report.observed_environment_binding_sha256 = observed.binding_sha256(
+            observer_id=observed_observer[0],
+            observer_contract_sha256=observed_observer[1],
+        )
+        if project.environment.expected_application_identity is None:
+            return (
+                "qualification project has no executable application identity; "
+                "set application_identity separately from the display name"
+            )
+        if application != project.environment.expected_application_identity:
+            return "observed qualification application does not match the project"
+        if application_version != project.environment.application_version:
+            return (
+                "observed qualification application version does not match the project"
+            )
+        if observed.environment_digest != project.environment.environment_digest:
+            return (
+                "observed qualification environment digest does not match the project"
+            )
+        self._qualification_environment_call = environment_call
+        self._qualification_environment_bound = observed
+        set_guard = getattr(self.backend, "set_qualification_input_guard", None)
+        if not callable(set_guard):
+            self._qualification_environment_call = None
+            self._qualification_environment_bound = None
+            return "qualification backend cannot bind an input-edge environment guard"
+        set_guard(self._require_qualification_environment_current)
+        return None
+
+    def _require_qualification_environment_current(self) -> None:
+        """Recheck the bound environment immediately before an input edge."""
+
+        call = self._qualification_environment_call
+        expected = self._qualification_environment_bound
+        if call is None or expected is None:
+            return
+        try:
+            observed = call()
+        except Exception as exc:
+            raise StructuralResolutionRefused(
+                "qualification environment could not be observed before input"
+            ) from exc
+        if observed != expected:
+            raise StructuralResolutionRefused(
+                "qualification environment changed before input"
+            )
 
     def _resettle_after_interstitial(
         self, before_png: bytes
@@ -5738,6 +6423,7 @@ class Replayer:
             handled_indices.add(active_index)
             try:
                 if it.dismiss_key is not None:
+                    self._require_qualification_environment_current()
                     self.backend.press(it.dismiss_key)
                 else:
                     assert resolution is not None
@@ -5753,11 +6439,13 @@ class Replayer:
                                 "structural dismissal cannot be delivered "
                                 "natively without a stable element handle"
                             )
+                        self._require_qualification_environment_current()
                         native_act(
                             it.dismiss_anchor.structural,
                             resolution.structural_handle,
                         )
                     else:
+                        self._require_qualification_environment_current()
                         self.backend.click(
                             int(resolution.point[0]), int(resolution.point[1])
                         )
@@ -5867,7 +6555,10 @@ class Replayer:
                     before_png,
                 )
         # (1) Readiness: never act on a frame that never settled.
-        before_png, readiness_error = self._wait_starting_state_settled(before_png)
+        before_png, readiness_error, settled = self._wait_starting_state_settled(
+            before_png
+        )
+        result.starting_state_settled = settled
         if readiness_error is not None:
             # Like an interstitial refusal, a not-ready starting state is a
             # safety halt. A program on_exception edge must not convert the
@@ -7043,11 +7734,14 @@ class Replayer:
             )
         result.input_retried = True
         if field_point is not None:
+            self._require_qualification_environment_current()
             self.backend.click(*field_point)
             # Replace, don't append: if the first attempt DID land but was
             # not visible to the diff/OCR, retyping raw would double it.
+            self._require_qualification_environment_current()
             self.backend.press("ControlOrMeta+a")
         retry_baseline = self.backend.screenshot()
+        self._require_qualification_environment_current()
         self.backend.type_text(text)
         landed, _changed = self._typed_input_landed(
             text,
@@ -7354,6 +8048,7 @@ class Replayer:
                 intent=next_step.intent,
             )
         if stop_pred is None or (dx == 0 and dy == 0):
+            self._require_qualification_environment_current()
             result.delivery_attempted = True
             self.backend.scroll(dx, dy)
             return None
@@ -7386,6 +8081,7 @@ class Replayer:
         budget = SCROLL_BUDGET_FACTOR * increment
         scrolled = 0.0
         while scrolled + increment <= budget:
+            self._require_qualification_environment_current()
             result.delivery_attempted = True
             self.backend.scroll(dx, dy)
             scrolled += increment

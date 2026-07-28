@@ -29,6 +29,7 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -474,10 +475,47 @@ class EnvironmentBoundary(BaseModel):
 
     target_kind: Literal["web", "windows", "macos", "linux", "rdp", "citrix"]
     application: str = Field(min_length=1, max_length=256)
+    application_identity: Optional[str] = Field(default=None, max_length=320)
     application_version: str = Field(min_length=1, max_length=128)
+    environment_observer_id: Optional[str] = Field(default=None, pattern=_ID_RE)
+    environment_observer_contract_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     environment_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     runtime_version: str = Field(min_length=1, max_length=64)
     required_capabilities: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _valid_observed_identity(self) -> "EnvironmentBoundary":
+        if self.application_identity is not None and not _valid_application_identity(
+            self.application_identity
+        ):
+            raise ValueError(
+                "application_identity must be an exact native application id "
+                "or bounded HTTP(S) origin"
+            )
+        observer = (
+            self.environment_observer_id,
+            self.environment_observer_contract_sha256,
+        )
+        if any(value is not None for value in observer) and not all(
+            value is not None for value in observer
+        ):
+            raise ValueError("environment observer binding is incomplete")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Keep old qualification contracts byte-stable until bindings exist."""
+
+        data: dict[str, Any] = handler(self)
+        if self.application_identity is None:
+            data.pop("application_identity", None)
+        if self.environment_observer_id is None:
+            data.pop("environment_observer_id", None)
+        if self.environment_observer_contract_sha256 is None:
+            data.pop("environment_observer_contract_sha256", None)
+        return data
 
     @field_validator("required_capabilities")
     @classmethod
@@ -494,6 +532,12 @@ class EnvironmentBoundary(BaseModel):
             separators=(",", ":"),
         ).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+    @property
+    def expected_application_identity(self) -> Optional[str]:
+        """Return the executable identity, separate from its display name."""
+
+        return self.application_identity
 
 
 class RequalificationCondition(BaseModel):
@@ -579,6 +623,7 @@ class QualificationProject(BaseModel):
         default_factory=list
     )
     trusted_runner_keys: dict[str, str] = Field(default_factory=dict)
+    trusted_fault_driver_keys: dict[str, str] = Field(default_factory=dict)
     last_certification: Optional[QualificationCertification] = None
 
     @model_validator(mode="after")
@@ -595,15 +640,23 @@ class QualificationProject(BaseModel):
                     f"action classification key {key!r} does not match step_id "
                     f"{classification.step_id!r}"
                 )
-        for key_id, public_key in self.trusted_runner_keys.items():
-            if not _ID_RE.fullmatch(key_id):
-                raise ValueError("trusted runner key id is invalid")
-            try:
-                raw_key = b64decode(public_key, validate=True)
-            except ValueError as exc:
-                raise ValueError("trusted runner public key must be base64") from exc
-            if len(raw_key) != 32:
-                raise ValueError("trusted runner public key must be 32-byte Ed25519")
+        for key_kind, keys in (
+            ("runner", self.trusted_runner_keys),
+            ("fault driver", self.trusted_fault_driver_keys),
+        ):
+            for key_id, public_key in keys.items():
+                if not _ID_RE.fullmatch(key_id):
+                    raise ValueError(f"trusted {key_kind} key id is invalid")
+                try:
+                    raw_key = b64decode(public_key, validate=True)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"trusted {key_kind} public key must be base64"
+                    ) from exc
+                if len(raw_key) != 32:
+                    raise ValueError(
+                        f"trusted {key_kind} public key must be 32-byte Ed25519"
+                    )
         case_ids = [case.id for case in self.cases]
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("qualification case ids must be unique")
@@ -614,6 +667,15 @@ class QualificationProject(BaseModel):
         if len(effect_refs) != len(set(effect_refs)):
             raise ValueError("effect verification references must be unique")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Omit the additive trust store until a fault driver is bound."""
+
+        data: dict[str, Any] = handler(self)
+        if not self.trusted_fault_driver_keys:
+            data.pop("trusted_fault_driver_keys", None)
+        return data
 
     def revision_digest(self) -> str:
         return self.contract_sha256()

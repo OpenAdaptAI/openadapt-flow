@@ -372,6 +372,30 @@ def test_absent_rdp_application_marker_invalidates_actuation_lease() -> None:
     assert transport.pointer_events == []
 
 
+def test_rdp_qualification_environment_rechecks_version_on_actuation_frame() -> None:
+    transport = FakeRDPTransport(app_screens())
+    version_ok = {"value": True}
+    backend = FreeRDPBackend(
+        transport,
+        application_marker="Accuro",
+        application_marker_probe=lambda _png: True,
+        application_version_marker="8.0.0.3",
+        application_version_marker_probe=lambda _png: version_ok["value"],
+        environment_marker="clinic-rdp-environment",
+        environment_marker_probe=lambda _png: True,
+        session_marker="clinic-rdp-qualification",
+        session_marker_probe=lambda _png: True,
+    )
+    assert backend.qualification_environment_identity() is not None
+    version_ok["value"] = False
+
+    with pytest.raises(
+        RuntimeError, match="application, version, environment, or session"
+    ):
+        backend.acquire_actuation_frame()
+    assert transport.pointer_events == []
+
+
 def test_rdp_context_observation_is_bound_to_frame_then_refuses_mutated_input() -> None:
     transport = FakeRDPTransport(app_screens())
     backend = FreeRDPBackend(

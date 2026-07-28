@@ -653,6 +653,30 @@ def test_native_run_network_state_remains_unknown_without_instrumentation():
     assert report.outcome_envelope.external_network_calls == "unknown"
 
 
+def test_verified_qualification_run_is_evidence_not_production_authority():
+    workflow = Workflow(name="qualification-read", steps=[])
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-25T00:00:00Z",
+        success=True,
+        execution_completed=True,
+        governed_authorization_id="authorization-qualification",
+        governed_approval_source="qualification-campaign",
+        governed_runtime_inputs_digest="f" * 64,
+    )
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == "VERIFIED"
+    assert report.production_eligible is False
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.qualification_evidence_only is True
+    assert report.outcome_envelope.production_eligible is False
+    restored = RunReport.model_validate(report.model_dump(mode="json"))
+    assert restored.outcome_envelope is not None
+    assert restored.outcome_envelope.qualification_evidence_only is True
+
+
 def test_report_separates_network_observation_from_screenshot_egress(tmp_path):
     workflow = Workflow(name="browser-read", steps=[])
     report = RunReport(

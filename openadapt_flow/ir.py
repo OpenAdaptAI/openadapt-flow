@@ -38,6 +38,8 @@ from pydantic import (
     model_validator,
 )
 
+from openadapt_flow.qualification_faults import FaultMutationReceipt
+
 if TYPE_CHECKING:
     # Type-only import for the Step.effects forward reference. The RUNTIME
     # import is at the BOTTOM of this module (see the note there) to avoid a
@@ -2040,6 +2042,27 @@ class EffectVerificationEvidence(BaseModel):
     observed_effect: Literal["present", "absent", "conflicting", "unknown"] = "unknown"
 
 
+class SafetyRefusalEvidence(BaseModel):
+    """Typed detector output for one fail-closed pre-action refusal."""
+
+    stage: Literal[
+        "target_resolution",
+        "identity_verification",
+        "actuation_revalidation",
+        "effect_strength",
+        "effect_verifier",
+    ]
+    code: Literal[
+        "target_ambiguous",
+        "identity_conflict",
+        "identity_unverifiable",
+        "actuation_observation_changed",
+        "effect_strength_insufficient",
+        "effect_verifier_missing",
+    ]
+    detector_input_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class StepResult(BaseModel):
     step_id: str
     intent: str
@@ -2120,6 +2143,15 @@ class StepResult(BaseModel):
     # can proceed only when the complete independent outcome contract proves
     # what happened.
     delivery_uncertainty: Optional[ActionDeliveryUncertainty] = None
+    safety_refusal_evidence: Optional[SafetyRefusalEvidence] = None
+    starting_state_settled: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Retained result of the bounded pre-action settling check. None "
+            "means no settling observation was made; it must not be treated "
+            "as proof that settled-state detection ran."
+        ),
+    )
     # Drift-oracle: postconditions that deterministically FAILED but were
     # confirmed by the optional on-prem VLM state-verifier under render drift
     # (recorded for audit; empty unless an appliance is configured).
@@ -2214,6 +2246,7 @@ class ExecutionOutcomeEnvelope(BaseModel):
     ]
     profile: Optional[Literal["demo", "standard", "regulated"]] = None
     production_eligible: bool = False
+    qualification_evidence_only: bool = False
     execution_completed: bool = False
     required_contracts: OutcomeContractCounts = Field(
         default_factory=OutcomeContractCounts
@@ -2246,8 +2279,11 @@ class ExecutionOutcomeEnvelope(BaseModel):
                 raise ValueError("VERIFIED requires every declared contract to pass")
             if self.profile not in {"standard", "regulated"}:
                 raise ValueError("VERIFIED requires a Standard or Regulated profile")
-            if not self.production_eligible:
-                raise ValueError("VERIFIED must be production eligible")
+            if not self.production_eligible and not self.qualification_evidence_only:
+                raise ValueError(
+                    "VERIFIED must be production eligible or bound to a "
+                    "qualification-only run"
+                )
             if required["authorization"] < 1 or passed["authorization"] < 1:
                 raise ValueError(
                     "VERIFIED requires a passed governed authorization contract"
@@ -2256,6 +2292,8 @@ class ExecutionOutcomeEnvelope(BaseModel):
             raise ValueError(
                 "only VERIFIED Standard or Regulated runs are production eligible"
             )
+        if self.production_eligible and self.qualification_evidence_only:
+            raise ValueError("qualification-only evidence cannot authorize production")
         has_compensation = "compensation" in self.evidence_classes
         if has_compensation != (self.compensation_actions > 0):
             raise ValueError(
@@ -2271,6 +2309,15 @@ class ExecutionOutcomeEnvelope(BaseModel):
                 "completed compensating actions require the ROLLED_BACK outcome"
             )
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Omit the additive qualification marker on ordinary run envelopes."""
+
+        data: dict[str, Any] = handler(self)
+        if not self.qualification_evidence_only:
+            data.pop("qualification_evidence_only", None)
+        return data
 
 
 class EffectJournalEntry(BaseModel):
@@ -2499,6 +2546,63 @@ class RunReport(BaseModel):
     governed_runtime_inputs_digest: Optional[str] = Field(
         default=None, pattern="^[a-f0-9]{64}$"
     )
+    governed_qualification_project_id: Optional[str] = None
+    governed_qualification_project_revision: Optional[int] = Field(default=None, ge=1)
+    governed_qualification_project_contract_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    governed_qualification_campaign_id_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    governed_qualification_case_id_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    governed_qualification_case_input_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    governed_qualification_run_id_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    governed_qualification_case_kind: Optional[
+        Literal[
+            "representative",
+            "ambiguity",
+            "wrong_identity",
+            "stale_identity",
+            "weak_effect",
+            "missing_effect",
+        ]
+    ] = None
+    governed_qualification_fault_driver_id: Optional[str] = None
+    governed_qualification_fault_driver_contract_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    governed_qualification_fault_driver_key_id: Optional[str] = None
+    governed_qualification_fault_step_id_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    qualification_fault_mutations: list[FaultMutationReceipt] = Field(
+        default_factory=list
+    )
+    observed_application_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    observed_application_version_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    observed_session_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    observed_environment_digest: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    observed_environment_binding_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    qualification_environment_observer_id: Optional[str] = None
+    qualification_environment_observer_contract_sha256: Optional[str] = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
     governed_authorized_effect_contracts: dict[str, list[str]] = Field(
         default_factory=dict
     )
@@ -2560,6 +2664,14 @@ class RunReport(BaseModel):
         if self.production_eligible != envelope.production_eligible:
             raise ValueError(
                 "production eligibility does not match its evidence envelope"
+            )
+        if (
+            "qualification_evidence_only" in envelope.model_fields_set
+            and envelope.qualification_evidence_only
+            != (self.governed_approval_source == "qualification-campaign")
+        ):
+            raise ValueError(
+                "qualification-only status does not match the governed approval"
             )
         if self.execution_completed is None or (
             self.execution_completed != envelope.execution_completed

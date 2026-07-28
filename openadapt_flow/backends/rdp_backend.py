@@ -290,6 +290,10 @@ class FreeRDPBackend:
         readiness_probe: Optional[Callable[[bytes], bool]] = None,
         application_marker: Optional[str] = None,
         application_marker_probe: Optional[Callable[[bytes], bool]] = None,
+        application_version_marker: Optional[str] = None,
+        application_version_marker_probe: Optional[Callable[[bytes], bool]] = None,
+        environment_marker: Optional[str] = None,
+        environment_marker_probe: Optional[Callable[[bytes], bool]] = None,
         workflow_state_marker: Optional[str] = None,
         workflow_state_marker_probe: Optional[Callable[[bytes], bool]] = None,
         session_marker: Optional[str] = None,
@@ -308,6 +312,20 @@ class FreeRDPBackend:
         self._application_marker_probe = _marker_probe(
             self._application_marker,
             application_marker_probe,
+        )
+        self._application_version_marker = _clean_marker(
+            application_version_marker, name="application_version_marker"
+        )
+        self._application_version_marker_probe = _marker_probe(
+            self._application_version_marker,
+            application_version_marker_probe,
+        )
+        self._environment_marker = _clean_marker(
+            environment_marker, name="environment_marker"
+        )
+        self._environment_marker_probe = _marker_probe(
+            self._environment_marker,
+            environment_marker_probe,
         )
         self._workflow_state_marker = _clean_marker(
             workflow_state_marker, name="workflow_state_marker"
@@ -332,6 +350,8 @@ class FreeRDPBackend:
         self._last_frame_monotonic: Optional[float] = None
         self._last_frame_digest: Optional[bytes] = None
         self._last_session_identity: Optional[str] = None
+        self._qualification_environment: Optional[tuple[str, str, str, str]] = None
+        self._qualification_input_guard: Optional[Callable[[], None]] = None
         self._actuation_frame_png: Optional[bytes] = None
         self._actuation_lease_state = _LEASE_NONE
         # Keep capture/geometry validation and a complete input gesture in one
@@ -402,6 +422,16 @@ class FreeRDPBackend:
                     "configured RDP session identity is unavailable on the "
                     "fresh actuation frame"
                 )
+            if self._qualification_environment is not None and (
+                self._qualification_environment_from_frame(png)
+                != self._qualification_environment
+            ):
+                self._invalidate_actuation_lease()
+                raise RuntimeError(
+                    "qualified application, version, environment, or session "
+                    "changed on the "
+                    "fresh actuation frame"
+                )
             self._actuation_frame_png = png
             self._actuation_lease_state = _LEASE_ARMED
             return png
@@ -415,6 +445,66 @@ class FreeRDPBackend:
             self._application_marker,
             self._application_marker_probe,
         )
+
+    def application_version_identity(self) -> Optional[str]:
+        """Return a PHI-free version marker verified on a fresh frame."""
+
+        return self._verified_marker_identity(
+            self._application_version_marker,
+            self._application_version_marker_probe,
+        )
+
+    def _qualification_environment_from_frame(
+        self, png: bytes
+    ) -> Optional[tuple[str, str, str, str]]:
+        """Verify all qualification environment signals on one exact frame."""
+
+        marker_pairs = (
+            (self._application_marker, self._application_marker_probe),
+            (
+                self._application_version_marker,
+                self._application_version_marker_probe,
+            ),
+            (self._environment_marker, self._environment_marker_probe),
+        )
+        if any(marker is None or probe is None for marker, probe in marker_pairs):
+            return None
+        try:
+            if not all(bool(probe(png)) for _marker, probe in marker_pairs if probe):
+                return None
+        except Exception:  # noqa: BLE001 - observer failure is unverifiable
+            return None
+        session = self._session_identity_from_frame(png)
+        if session is None:
+            return None
+        assert self._application_marker is not None
+        assert self._application_version_marker is not None
+        assert self._environment_marker is not None
+        environment_digest = hashlib.sha256(
+            f"rdp-environment-v1\0{self._environment_marker}".encode("utf-8")
+        ).hexdigest()
+        return (
+            self._application_marker,
+            self._application_version_marker,
+            session,
+            environment_digest,
+        )
+
+    def qualification_environment_identity(
+        self,
+    ) -> Optional[tuple[str, str, str, str]]:
+        """Bind app, version, and session from one fresh remote frame."""
+
+        with self._input_lock:
+            png = self._fresh_identity_frame()
+            if png is None:
+                return None
+            observed = self._qualification_environment_from_frame(png)
+            if observed is None:
+                self._invalidate_actuation_lease()
+                return None
+            self._qualification_environment = observed
+            return observed
 
     def workflow_state_identity(self) -> Optional[str]:
         """Return a PHI-free workflow-state marker verified on a fresh frame."""
@@ -788,6 +878,7 @@ class FreeRDPBackend:
             self._readiness_probe is not None
             or self._actuation_lease_state == _LEASE_ARMED
             or self._session_identity_configured
+            or self._qualification_environment is not None
         ):
             # Evaluate readiness on the current framebuffer, not merely the
             # resolver's leased image: a lock/disconnect or content change can
@@ -812,6 +903,16 @@ class FreeRDPBackend:
                     "RDP session identity changed or became unverifiable after "
                     "capture; refusing input"
                 )
+            if self._qualification_environment is not None and (
+                self._qualification_environment_from_frame(current_png)
+                != self._qualification_environment
+            ):
+                self._invalidate_actuation_lease()
+                raise RuntimeError(
+                    "qualified application, version, environment, or session "
+                    "changed after "
+                    "target resolution; refusing input"
+                )
             if self._actuation_lease_state == _LEASE_ARMED:
                 digest = self._canonical_frame_digest(current_img)
                 if self._last_frame_digest is None or digest != self._last_frame_digest:
@@ -825,7 +926,16 @@ class FreeRDPBackend:
                 self._actuation_frame_png = None
         # framebuffer/readiness work can block on the network; recheck at the
         # last common point before an input edge.
+        if self._qualification_input_guard is not None:
+            self._qualification_input_guard()
         self._assert_frame_fresh()
+
+    def set_qualification_input_guard(
+        self, guard: Optional[Callable[[], None]]
+    ) -> None:
+        """Install or clear the run-scoped qualification input guard."""
+
+        self._qualification_input_guard = guard
 
     @property
     def _session_identity_configured(self) -> bool:

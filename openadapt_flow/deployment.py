@@ -124,6 +124,13 @@ class BackendConfig(BaseModel):
     #: unwired and is not suitable for a governed consequential RDP write.
     rdp_readiness_text: Optional[str] = None
     rdp_readiness_min_ratio: float = Field(default=0.85, ge=0.0, le=1.0)
+    #: PHI-free markers observed from a fresh remote frame for qualification.
+    #: They are compared with the project boundary; they are not copied into
+    #: run evidence as plaintext.
+    rdp_application_marker: Optional[str] = None
+    rdp_application_version_marker: Optional[str] = None
+    rdp_environment_marker: Optional[str] = None
+    rdp_session_marker: Optional[str] = None
 
     # -- rdp/citrix (local remote-display client window) ---------------------
     #: Exact case-insensitive owner-app name of the local client WINDOW to drive
@@ -673,6 +680,7 @@ def build_replayer(
     runtime_config: Optional["RuntimeSection"] = None,
     phi_mode: Optional[bool] = None,
     checkpoint_key: Optional[str] = None,
+    qualification_fault_driver: Any = None,
 ) -> Any:
     """Wire one deployment-qualified backend into the governed Replayer.
 
@@ -812,6 +820,7 @@ def build_replayer(
         governed_authorization=governed_authorization,
         checkpoint_key=checkpoint_key,
         require_settled=require_settled,
+        qualification_fault_driver=qualification_fault_driver,
     )
 
 

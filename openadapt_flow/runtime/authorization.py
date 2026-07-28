@@ -16,13 +16,14 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openadapt_flow.ir import Interstitial, Step, Workflow
 from openadapt_flow.traversal import iter_workflow_steps
 
 _CONSUMED_IDS: set[str] = set()
 _CONSUMED_LOCK = threading.Lock()
+_QUALIFICATION_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 
 
 def effective_runtime_params(
@@ -129,6 +130,135 @@ class GovernedRunAuthorization(BaseModel):
         default_factory=tuple
     )
     approval_source: str = "local-cli-explicit-flag"
+    qualification_project_id: str | None = None
+    qualification_project_revision: int | None = Field(default=None, ge=1)
+    qualification_project_contract_sha256: str | None = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    qualification_case_id: str | None = Field(
+        default=None, pattern=_QUALIFICATION_ID_RE
+    )
+    qualification_campaign_id_sha256: str | None = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    qualification_case_input_sha256: str | None = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    qualification_run_id_sha256: str | None = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    qualification_case_kind: (
+        Literal[
+            "representative",
+            "ambiguity",
+            "wrong_identity",
+            "stale_identity",
+            "weak_effect",
+            "missing_effect",
+        ]
+        | None
+    ) = None
+    qualification_fault_driver_id: str | None = Field(
+        default=None, pattern=_QUALIFICATION_ID_RE
+    )
+    qualification_fault_driver_contract_sha256: str | None = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+    qualification_fault_driver_key_id: str | None = Field(
+        default=None, pattern=_QUALIFICATION_ID_RE
+    )
+    qualification_fault_step_id_sha256: str | None = Field(
+        default=None, pattern="^[a-f0-9]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def _qualification_binding_is_complete(self) -> "GovernedRunAuthorization":
+        values = (
+            self.qualification_project_id,
+            self.qualification_project_revision,
+            self.qualification_project_contract_sha256,
+            self.qualification_case_id,
+            self.qualification_campaign_id_sha256,
+            self.qualification_case_input_sha256,
+            self.qualification_run_id_sha256,
+        )
+        if any(value is not None for value in values) and not all(
+            value is not None for value in values
+        ):
+            raise ValueError("qualification-run authorization binding is incomplete")
+        if (
+            self.qualification_case_kind is not None
+            and self.qualification_case_id is None
+        ):
+            raise ValueError(
+                "qualification case kind requires a complete case authorization"
+            )
+        driver_values = (
+            self.qualification_fault_driver_id,
+            self.qualification_fault_driver_contract_sha256,
+            self.qualification_fault_driver_key_id,
+            self.qualification_fault_step_id_sha256,
+        )
+        if any(value is not None for value in driver_values) and not all(
+            value is not None for value in driver_values
+        ):
+            raise ValueError("qualification fault-driver binding is incomplete")
+        if self.qualification_case_kind in {
+            "ambiguity",
+            "wrong_identity",
+            "stale_identity",
+            "weak_effect",
+            "missing_effect",
+        } and not all(value is not None for value in driver_values):
+            raise ValueError("qualification fault cases require a bound fault driver")
+        if self.qualification_case_kind == "representative" and any(
+            value is not None for value in driver_values
+        ):
+            raise ValueError(
+                "representative qualification cases cannot bind a fault driver"
+            )
+        if self.qualification_case_id is not None and (
+            self.execution_profile != "standard"
+            or self.approval_source != "qualification-campaign"
+        ):
+            raise ValueError(
+                "qualification cases require the Standard profile and the "
+                "qualification-campaign approval source"
+            )
+        return self
+
+    def _qualification_binding_error(self, workflow: Workflow) -> str | None:
+        if self.qualification_case_id is None:
+            return None
+        project = workflow.qualification
+        if project is None:
+            return "qualification-run authorization requires a qualification project"
+        if project.project_id != self.qualification_project_id:
+            return "qualification-run authorization project id changed"
+        if project.revision != self.qualification_project_revision:
+            return "qualification-run authorization project revision changed"
+        if project.contract_sha256() != self.qualification_project_contract_sha256:
+            return "qualification-run authorization project contract changed"
+        case = next(
+            (case for case in project.cases if case.id == self.qualification_case_id),
+            None,
+        )
+        if case is None:
+            return "qualification-run authorization references an unknown case"
+        if self.qualification_case_kind != case.kind.value:
+            return "qualification-run authorization kind does not match its case"
+        if self.qualification_fault_step_id_sha256 is not None:
+            from openadapt_flow.traversal import iter_workflow_steps
+
+            matching_steps = [
+                step
+                for step in iter_workflow_steps(workflow)
+                if hashlib.sha256(step.id.encode("utf-8")).hexdigest()
+                == self.qualification_fault_step_id_sha256
+            ]
+            if len(matching_steps) != 1:
+                return "qualification fault target step is missing or ambiguous"
+        return None
 
     def validate_workflow(self, workflow: Workflow) -> str | None:
         """Return a refusal reason when this capability does not fit ``workflow``."""
@@ -161,13 +291,17 @@ class GovernedRunAuthorization(BaseModel):
                 "in-memory workflow semantics"
             )
 
+        qualification_binding_error = self._qualification_binding_error(workflow)
+        if qualification_binding_error is not None:
+            return qualification_binding_error
+        qualification_campaign = self.qualification_case_id is not None
         production_qualification = (
             self.execution_profile in {"standard", "regulated"}
             and workflow.qualification is not None
         )
         if production_qualification and self.admitted_policy_contract_sha256 is None:
             return "production qualification authorization has no exact policy digest"
-        if production_qualification:
+        if production_qualification and not qualification_campaign:
             assert self.admitted_policy_contract_sha256 is not None
             from openadapt_flow.qualification import current_certification_matches
 

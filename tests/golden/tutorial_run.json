@@ -32,14 +32,14 @@
     "authorization": 1,
     "effect": 2,
     "identity": 5,
-    "postcondition": 8
+    "postcondition": 9
   },
   "production_eligible": true,
   "required_contracts": {
     "authorization": 1,
     "effect": 2,
     "identity": 5,
-    "postcondition": 8
+    "postcondition": 9
   },
   "rung_counts": {
     "structural": 5

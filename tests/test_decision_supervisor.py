@@ -371,6 +371,39 @@ def test_one_cycle_publishes_executes_and_acknowledges_without_a_caller(tmp_path
     assert ack_body["result"] == "accepted"
 
 
+def test_a_reject_from_a_phone_ends_the_right_run(tmp_path):
+    """The action that terminates a run must reach the pause it names.
+
+    `reject` is the one answer whose whole value is the disagreement signal it
+    records, so delivering it to the wrong open pause -- or not at all -- is the
+    failure that matters most here.
+    """
+    runs = tmp_path / "runs"
+    bundles = tmp_path / "bundles"
+    _halted_run(runs, bundles, "one")
+    run_two, item_two = _halted_run(runs, bundles, "two")
+    deployment = _deployment()
+    executor = _ResultExecutor()
+    relay_body = _relayed_for(
+        run_two, item_two, deployment, action="reject", decision_action="reject"
+    )
+    supervisor, transport = _supervisor(
+        runs,
+        deployment=deployment,
+        executor=executor,
+        tasks=(200, {"accepted": True, "created": True, "task_id": "task_x"}),
+        poll=(200, {"decision": relay_body}),
+        ack=(200, {"accepted": True}),
+    )
+
+    report = supervisor.serve_once(wait_s=0.0)
+
+    assert report.acknowledged == "accepted"
+    assert report.outcome is not None
+    assert report.outcome.action == "reject"
+    assert report.outcome.pause_id == relay_body["task_id"].removeprefix("task_")
+
+
 def test_a_governed_refusal_is_acknowledged_and_re_raised(tmp_path):
     """A refused answer must reach the operator, not vanish into the loop."""
     runs = tmp_path / "runs"

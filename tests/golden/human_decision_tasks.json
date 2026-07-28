@@ -1,0 +1,273 @@
+{
+  "schema": "openadapt.human-decision-golden/v1",
+  "task_schema_version": "openadapt.human-decision-task/v1",
+  "action_vocabulary": [
+    "verify_and_resume",
+    "skip",
+    "teach",
+    "escalate"
+  ],
+  "required_authn_vocabulary": [
+    "aal2",
+    "local_session",
+    "webauthn"
+  ],
+  "safe_slot_fields": [
+    "candidate_count",
+    "confirmed_signal_count",
+    "required_signal_count"
+  ],
+  "never_populated_safe_slots": [
+    "candidate_count"
+  ],
+  "evidence_fields": [
+    "effect_confirmed_count",
+    "effect_required_count",
+    "frame_available_locally",
+    "identity_confirmed_count",
+    "identity_required_count",
+    "minimum_effect_tier",
+    "observed_effect_tier",
+    "sensitive_evidence_local_only"
+  ],
+  "category_question_map": {
+    "disambiguation": {
+      "task_kind": "ambiguity",
+      "question_template": "resolve_ambiguity"
+    },
+    "effect_escalated": {
+      "task_kind": "effect",
+      "question_template": "confirm_persisted_effect"
+    },
+    "effect_indeterminate": {
+      "task_kind": "effect",
+      "question_template": "confirm_persisted_effect"
+    },
+    "effect_refuted": {
+      "task_kind": "effect",
+      "question_template": "confirm_persisted_effect"
+    },
+    "effect_unverifiable": {
+      "task_kind": "effect",
+      "question_template": "confirm_persisted_effect"
+    },
+    "human_required": {
+      "task_kind": "human_step",
+      "question_template": "complete_human_step"
+    },
+    "identity": {
+      "task_kind": "identity",
+      "question_template": "confirm_identity"
+    },
+    "placeholder_effect": {
+      "task_kind": "effect",
+      "question_template": "confirm_persisted_effect"
+    },
+    "resolution": {
+      "task_kind": "ambiguity",
+      "question_template": "resolve_ambiguity"
+    }
+  },
+  "default_category_question": {
+    "task_kind": "halt",
+    "question_template": "review_halt"
+  },
+  "delivery_uncertain_override": {
+    "task_kind": "delivery_uncertain",
+    "question_template": "review_uncertain_delivery"
+  },
+  "emitted_task_kinds": [
+    "ambiguity",
+    "delivery_uncertain",
+    "effect",
+    "halt",
+    "human_step",
+    "identity"
+  ],
+  "never_emitted_task_kinds": [
+    "operator_review"
+  ],
+  "emitted_question_templates": [
+    "complete_human_step",
+    "confirm_identity",
+    "confirm_persisted_effect",
+    "resolve_ambiguity",
+    "review_halt",
+    "review_uncertain_delivery"
+  ],
+  "never_emitted_question_templates": [],
+  "halts": [
+    {
+      "halt_category": "delivery_uncertain",
+      "projected_category": "operator_review",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "human_required",
+      "projected_category": "human_required",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "placeholder_effect",
+      "projected_category": "placeholder_effect",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "effect_unverifiable",
+      "projected_category": "effect_unverifiable",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "effect_escalated",
+      "projected_category": "effect_escalated",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "effect_indeterminate",
+      "projected_category": "effect_indeterminate",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "effect_refuted",
+      "projected_category": "effect_refuted",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "unmet_guard",
+      "projected_category": "unmet_guard",
+      "delivery_state": "not_delivered",
+      "task_kind": "halt",
+      "question_template": "review_halt",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "disambiguation",
+      "projected_category": "disambiguation",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "identity",
+      "projected_category": "identity",
+      "delivery_state": "not_delivered",
+      "task_kind": "identity",
+      "question_template": "confirm_identity",
+      "non_null_safe_slots": [
+        "confirmed_signal_count",
+        "required_signal_count"
+      ],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "postcondition",
+      "projected_category": "postcondition",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "resolution",
+      "projected_category": "resolution",
+      "delivery_state": "not_delivered",
+      "task_kind": "ambiguity",
+      "question_template": "resolve_ambiguity",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    },
+    {
+      "halt_category": "halt",
+      "projected_category": "halt",
+      "delivery_state": "unknown",
+      "task_kind": "delivery_uncertain",
+      "question_template": "review_uncertain_delivery",
+      "non_null_safe_slots": [],
+      "allowed_actions": [
+        "teach",
+        "escalate"
+      ],
+      "required_authn": "aal2"
+    }
+  ]
+}

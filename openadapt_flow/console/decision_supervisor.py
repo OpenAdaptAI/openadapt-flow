@@ -109,8 +109,14 @@ class PublishReport:
 
     #: Pauses the control plane accepted for the first time.
     published: tuple[str, ...] = ()
-    #: Pauses the control plane already held at this exact revision.
+    #: Pauses the control plane said it already held, observed THIS pass.
     already_published: tuple[str, ...] = ()
+    #: Pauses the control plane accepted earlier in this process and that were
+    #: therefore not re-sent. Kept separate from ``already_published`` on
+    #: purpose: the supervisor did not ask the control plane about these this
+    #: pass, so reporting them as an observation would claim something it did
+    #: not observe.
+    previously_confirmed: tuple[str, ...] = ()
     #: Pauses whose POST left the process without a terminal response. These
     #: may or may not be visible on a phone and must not be described as
     #: reachable.
@@ -125,7 +131,12 @@ class PublishReport:
 
     @property
     def certain_count(self) -> int:
-        return len(self.published) + len(self.already_published)
+        """Pauses known to be answerable, by observation or by prior accept."""
+        return (
+            len(self.published)
+            + len(self.already_published)
+            + len(self.previously_confirmed)
+        )
 
 
 @dataclass(frozen=True)
@@ -257,6 +268,7 @@ class DecisionSupervisor:
         unknown: list[str] = []
         not_projectable: list[str] = []
         refused: list[str] = []
+        memoized: list[str] = []
         confirmed: set[tuple[str, str]] = set()
         for pause in self.open_pauses():
             key = (pause.task_id, pause.capability_digest)
@@ -265,7 +277,7 @@ class DecisionSupervisor:
                 # is a deterministic function of it, so re-POSTing would send
                 # identical bytes for no new information. A pause can stay open
                 # for hours; publishing it every cycle is noise, not safety.
-                already.append(pause.task_id)
+                memoized.append(pause.task_id)
                 confirmed.add(key)
                 continue
             try:
@@ -298,6 +310,7 @@ class DecisionSupervisor:
         return PublishReport(
             published=tuple(published),
             already_published=tuple(already),
+            previously_confirmed=tuple(memoized),
             unknown=tuple(unknown),
             not_projectable=tuple(not_projectable),
             refused=tuple(refused),

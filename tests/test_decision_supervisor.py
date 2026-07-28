@@ -280,7 +280,11 @@ def test_an_accepted_pause_is_not_republished_every_cycle(tmp_path):
     second = supervisor.publish_open_pauses()
 
     assert len(first.published) == 1
-    assert len(second.already_published) == 1
+    # Reported as previously confirmed, NOT as an observation: the supervisor
+    # did not ask the control plane about it this pass.
+    assert second.already_published == ()
+    assert len(second.previously_confirmed) == 1
+    assert second.certain_count == 1
     assert len([p for p, _ in transport.calls if p.endswith("/tasks")]) == 1
 
 

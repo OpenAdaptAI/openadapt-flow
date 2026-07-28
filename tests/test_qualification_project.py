@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from openadapt_flow.__main__ import main
 from openadapt_flow.execution_profiles import (
     ExecutionProfile,
+    build_outcome_envelope,
     qualified_effect_requirements,
 )
 from openadapt_flow.ir import (
@@ -353,6 +354,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 ],
                 success=True,
             )
+            report.outcome_envelope = build_outcome_envelope(report, workflow)
             representative_bytes = report.model_dump_json().encode()
             representative_input_path = "representative-input.json"
             (evidence_root / "representative-report.json").write_bytes(
@@ -547,6 +549,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 )
             ],
         )
+        report.outcome_envelope = build_outcome_envelope(report, workflow)
         report_bytes = report.model_dump_json().encode()
         receipt_bytes = receipt.artifact_bytes()
         prefix = case.id
@@ -1238,7 +1241,7 @@ def test_signed_passed_status_cannot_disagree_with_representative_run(
         evidence_root=evidence_root,
     )
     assert not report.passed
-    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
+    assert QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED in {
         refusal.code for refusal in report.refusals
     }
 
@@ -1253,6 +1256,8 @@ def test_signed_passed_status_cannot_disagree_with_representative_run(
         "identity_missing",
         "identity_policy_mode_swap",
         "effect_evidence_missing",
+        "outcome_envelope_missing",
+        "outcome_envelope_weakened",
         "actuation_path_swap",
         "authorization_path_map_swap",
     ],
@@ -1305,6 +1310,22 @@ def test_signed_representative_claim_cannot_replace_exact_step_evidence(
         payload["results"][0]["actuation"] = "api"
     elif mutation == "authorization_path_map_swap":
         payload["governed_qualification_case_action_paths"] = {"save": "api"}
+    elif mutation == "outcome_envelope_missing":
+        payload["outcome_envelope"] = None
+    elif mutation == "outcome_envelope_weakened":
+        payload["outcome_envelope"]["required_contracts"] = {
+            "authorization": 1,
+            "identity": 0,
+            "postcondition": 0,
+            "effect": 0,
+        }
+        payload["outcome_envelope"]["passed_contracts"] = {
+            "authorization": 1,
+            "identity": 0,
+            "postcondition": 0,
+            "effect": 0,
+        }
+        payload["outcome_envelope"]["evidence_classes"] = ["authorization"]
     else:
         payload["results"][0]["effect_evidence"] = []
     changed_bytes = json.dumps(payload, separators=(",", ":")).encode()

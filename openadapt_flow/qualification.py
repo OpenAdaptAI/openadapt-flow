@@ -34,7 +34,10 @@ from pydantic import (
     model_validator,
 )
 
-from openadapt_flow.execution_profiles import AUTOMATED_GUI_ACTUATIONS
+from openadapt_flow.execution_profiles import (
+    AUTOMATED_GUI_ACTUATIONS,
+    build_outcome_envelope,
+)
 from openadapt_flow.identity_signals import (
     canonical_normalizers,
     parameterize_identity_text,
@@ -1929,6 +1932,22 @@ def _case_run_report_integrity_error(
         return (
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
             "case report outcome does not recompute from its exact step evidence",
+        )
+    try:
+        expected_envelope = build_outcome_envelope(
+            report,
+            workflow,
+            runtime_worklists=case_worklists,
+        )
+    except ValueError:
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case report outcome envelope cannot be recomputed",
+        )
+    if report.outcome_envelope != expected_envelope:
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case report outcome envelope differs from its exact contract evidence",
         )
     if case.kind is not QualificationCaseKind.REPRESENTATIVE:
         fault_target = case.resolved_fault_target()

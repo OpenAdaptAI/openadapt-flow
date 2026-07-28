@@ -7,9 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from openadapt_flow.execution_profiles import build_outcome_envelope
 from openadapt_flow.ir import (
     ActionKind,
     LoopSpec,
+    Postcondition,
+    PostconditionKind,
     ProgramExecutionScopeFrame,
     ProgramGraph,
     ProgramTransitionEvidence,
@@ -54,6 +57,7 @@ def _program_workflow() -> Workflow:
         intent="Record one row",
         action=ActionKind.KEY,
         key="enter",
+        expect=[Postcondition(kind=PostconditionKind.TITLE_CHANGED)],
     )
     return Workflow(
         name="qualified-program",
@@ -172,6 +176,7 @@ def _program_case_evidence(
             starting_state_settled=True,
             delivery_attempted=True,
             actuation="guarded_keyboard",
+            postconditions_ok=True,
             program_scope=[
                 root_scope,
                 ProgramExecutionScopeFrame(
@@ -294,6 +299,11 @@ def _program_case_evidence(
             "done",
         ),
     ]
+    report.outcome_envelope = build_outcome_envelope(
+        report,
+        workflow,
+        runtime_worklists=worklists,
+    )
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir()
     report_path = evidence_root / "program-report.json"
@@ -370,6 +380,42 @@ def test_representative_program_accepts_exact_runtime_worklist_trace(
     workflow, case, result, evidence_root, _path = _program_case_evidence(tmp_path)
 
     assert _integrity_error(workflow, case, result, evidence_root) is None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "weakened"],
+)
+def test_representative_program_refuses_unbound_outcome_envelope(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    workflow, case, result, evidence_root, path = _program_case_evidence(tmp_path)
+    report = RunReport.model_validate_json(path.read_bytes())
+    if mutation == "missing":
+        changed = report.model_copy(update={"outcome_envelope": None})
+    else:
+        assert report.outcome_envelope is not None
+        weakened_counts = report.outcome_envelope.required_contracts.model_copy(
+            update={"postcondition": 0, "effect": 0}
+        )
+        changed = report.model_copy(
+            update={
+                "outcome_envelope": report.outcome_envelope.model_copy(
+                    update={
+                        "required_contracts": weakened_counts,
+                        "passed_contracts": weakened_counts,
+                        "evidence_classes": ["authorization"],
+                    }
+                )
+            }
+        )
+    result = _replace_report(result=result, path=path, report=changed)
+
+    error = _integrity_error(workflow, case, result, evidence_root)
+
+    assert error is not None
+    assert error[0] is QualificationRefusalCode.CASE_ATTESTATION_INVALID
 
 
 @pytest.mark.parametrize(

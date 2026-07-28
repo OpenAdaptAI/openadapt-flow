@@ -1454,6 +1454,12 @@ def test_standard_program_resume_preserves_exact_loop_contracts_without_reactuat
     assert resumed.success is True
     assert resumed_backend.actions == [("press", "Enter"), ("press", "Enter")]
     assert len(resumed.results) == 3
+    assert [result.program_scope[-1].row_index for result in resumed.results] == [
+        0,
+        1,
+        2,
+    ]
+    assert len({result.effect_contract_hashes[0] for result in resumed.results}) == 3
     assert all(
         result.identity is not None and result.identity.status == "verified"
         for result in resumed.results

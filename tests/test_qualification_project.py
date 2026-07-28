@@ -82,6 +82,7 @@ from openadapt_flow.qualification_faults import (
 )
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
+    effective_runtime_params,
     runtime_inputs_bytes,
     runtime_inputs_digest,
 )
@@ -237,9 +238,8 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
     )
     qualification_policy = load_policy("clinical-write")
     required_actions, required_identity = qualification_action_requirements(workflow)
-    resolved_action_effects = [
-        effect.resolve(workflow.params) for effect in action.effects
-    ]
+    case_params = effective_runtime_params(workflow, None)
+    resolved_action_effects = [effect.resolve(case_params) for effect in action.effects]
     results: list[QualificationCaseResult] = []
     for case in project.cases:
         run_sha256 = sha256_bytes(f"run:{case.id}".encode())
@@ -272,7 +272,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 governed_qualification_run_id_sha256=run_sha256,
                 governed_qualification_case_kind=case.kind.value,
                 governed_qualification_case_action_paths={action_id: "gui"},
-                params=dict(workflow.params),
+                params=case_params,
                 qualification_evidence_only=True,
                 observed_application_sha256=observed_application_sha256,
                 observed_application_version_sha256=observed_version_sha256,
@@ -439,6 +439,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             observed_environment_binding_sha256=observed_binding,
             qualification_environment_observer_id="fixture-observer",
             qualification_environment_observer_contract_sha256="c" * 64,
+            params=case_params,
             results=[
                 StepResult(
                     step_id=action_id,
@@ -1489,7 +1490,55 @@ def test_signed_fault_receipt_cannot_swap_its_case_target(tmp_path: Path) -> Non
     }
 
 
-def test_signed_fault_receipt_cannot_swap_its_actuation_path(tmp_path: Path) -> None:
+def test_signed_case_result_cannot_move_to_another_case(tmp_path: Path) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    representative = next(
+        case
+        for case in project.cases
+        if case.kind is QualificationCaseKind.REPRESENTATIVE
+    )
+    target = next(case for case in project.cases if case.id == "fault-ambiguity")
+    target.results = [representative.results[-1]]
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert any(
+        refusal.case_id == target.id
+        and refusal.code is QualificationRefusalCode.CASE_ATTESTATION_INVALID
+        for refusal in report.refusals
+    )
+
+
+@pytest.mark.parametrize(
+    ("receipt_update", "report_update", "expected_code"),
+    [
+        (
+            {"actuation_path": "api"},
+            {"governed_qualification_case_action_paths": {"save": "api"}},
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+        ),
+        (
+            {"fault_kind": "missing_effect"},
+            {"governed_qualification_case_kind": "missing_effect"},
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+        ),
+    ],
+)
+def test_signed_fault_receipt_cannot_swap_its_path_or_kind(
+    tmp_path: Path,
+    receipt_update: dict[str, object],
+    report_update: dict[str, object],
+    expected_code: QualificationRefusalCode,
+) -> None:
     workflow = _workflow()
     _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
     evidence_root = tmp_path / "evidence"
@@ -1502,9 +1551,7 @@ def test_signed_fault_receipt_cannot_swap_its_actuation_path(tmp_path: Path) -> 
     report_path = evidence_root / "fault-ambiguity.report.json"
     receipt = FaultMutationReceipt.model_validate_json(receipt_path.read_bytes())
     swapped_receipt = sign_fault_mutation_receipt(
-        receipt.model_copy(
-            update={"actuation_path": "api", "attestation_signature": ""}
-        ),
+        receipt.model_copy(update={**receipt_update, "attestation_signature": ""}),
         private_key=_RUNNER_PRIVATE_BYTES,
     )
     receipt_bytes = swapped_receipt.artifact_bytes()
@@ -1512,7 +1559,7 @@ def test_signed_fault_receipt_cannot_swap_its_actuation_path(tmp_path: Path) -> 
     retained_report = RunReport.model_validate_json(report_path.read_bytes())
     changed_report = retained_report.model_copy(
         update={
-            "governed_qualification_case_action_paths": {"save": "api"},
+            **report_update,
             "qualification_fault_mutations": [swapped_receipt],
         }
     )
@@ -1541,9 +1588,7 @@ def test_signed_fault_receipt_cannot_swap_its_actuation_path(tmp_path: Path) -> 
         evidence_root=evidence_root,
     )
 
-    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
-        refusal.code for refusal in qualification_report.refusals
-    }
+    assert expected_code in {refusal.code for refusal in qualification_report.refusals}
 
 
 def test_requalification_condition_advances_version_and_invalidates_certification() -> (

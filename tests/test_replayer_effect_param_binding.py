@@ -343,9 +343,10 @@ def test_resolved_contract_hash_preserves_literal_and_parameter_compatibility():
     params = {"record": "p1", "status": "saved"}
 
     assert literal.resolved_contract_hash({}) == literal.contract_hash()
-    assert parameterized.resolved_contract_hash(params) == parameterized.resolve(
-        params
-    ).contract_hash()
+    assert (
+        parameterized.resolved_contract_hash(params)
+        == parameterized.resolve(params).contract_hash()
+    )
 
 
 def test_run_identity_contract_hash_uses_only_the_retained_digest():

@@ -916,6 +916,7 @@ class _ExternalObserver:
         self.calls = 0
         self.observer_id_reads = 0
         self.contract_reads = 0
+        self._shared_observation: QualificationEnvironmentObservation | None = None
 
     @property
     def observer_id(self) -> str:
@@ -940,6 +941,14 @@ class _ExternalObserver:
             "session_identity_sha256": "6" * 64,
             "environment_digest": "7" * 64,
         }
+        if self.change_field == "reused_object":
+            if self._shared_observation is None:
+                self._shared_observation = (
+                    QualificationEnvironmentObservation.model_validate(values)
+                )
+            elif self.calls > 1:
+                self._shared_observation.environment_digest = "8" * 64
+            return self._shared_observation
         if self.calls > 1 and self.change_field is not None:
             if self.change_field == "application_identity":
                 values[self.change_field] = "replacement-app"
@@ -960,6 +969,7 @@ class _ExternalObserver:
         "environment_digest",
         "observer_id",
         "observer_contract",
+        "reused_object",
     ],
 )
 def test_external_observer_rechecks_every_environment_signal_before_input(

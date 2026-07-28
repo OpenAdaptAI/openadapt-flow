@@ -69,7 +69,7 @@ def runtime_inputs_bytes(
 def parse_runtime_inputs_bytes(
     value: bytes,
 ) -> tuple[dict[str, str], dict[str, list[dict[str, str]]]]:
-    """Parse one exact canonical governed-input artifact without exposing values."""
+    """Parse one exact canonical governed-input artifact."""
 
     try:
         payload = json.loads(value.decode("utf-8"))

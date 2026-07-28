@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
+
+import cv2
+import numpy as np
 import pytest
 
 from openadapt_flow.ir import (
@@ -9,9 +15,12 @@ from openadapt_flow.ir import (
     Anchor,
     ApiBinding,
     ApiIdentityBinding,
+    BundleManifest,
     IdentityCheck,
     IdentitySignalEvidence,
+    PixelIdentityEvidence,
     Step,
+    Workflow,
 )
 from openadapt_flow.qualification import (
     IdentityEnforcement,
@@ -26,6 +35,7 @@ from openadapt_flow.qualification_identity_evidence import (
     qualification_identity_evidence_error,
 )
 from openadapt_flow.runtime.identity import (
+    verify_pixel_identity,
     verify_structured_identity,
     verify_target_identity,
 )
@@ -34,6 +44,7 @@ from openadapt_flow.runtime.identity_template import (
     verify_structured_template,
     verify_template_identity,
 )
+from openadapt_flow.runtime.replayer import Replayer
 
 
 def _step() -> Step:
@@ -282,19 +293,85 @@ def test_canonical_template_identity_binds_exact_runtime_parameter() -> None:
     )
 
 
-def test_canonical_identity_accepts_exact_runtime_pixel_shape() -> None:
+def _pixel_crop() -> bytes:
+    image = np.full((48, 240, 3), 255, dtype=np.uint8)
+    cv2.putText(
+        image,
+        "A123-987",
+        (8, 34),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    return encoded.tobytes()
+
+
+def _retained_pixel_check(
+    tmp_path: Path,
+) -> tuple[Step, IdentityCheck, str, Path, Path]:
     step = _step()
     assert step.anchor is not None
     step.anchor.structured_identity = None
     step.anchor.context_text = None
     step.anchor.identifier_crop = "templates/identifiers/save.png"
     step.anchor.identifier_region = (0, 0, 100, 20)
-    valid = IdentityCheck(
+    recorded = _pixel_crop()
+    # A trailing byte gives the live crop a distinct content address without
+    # changing the exact decoded pixels evaluated by OpenCV.
+    live = recorded + b"\x00"
+    workflow = Workflow(name="pixel-evidence", steps=[step], manifest=BundleManifest())
+    recorded_sha256 = hashlib.sha256(recorded).hexdigest()
+    workflow.manifest.file_hashes[step.anchor.identifier_crop] = recorded_sha256
+    evidence = Replayer._retain_pixel_identity_evidence(
+        workflow=workflow,
+        anchor=step.anchor,
+        recorded_png=recorded,
+        live_png=live,
+        run_dir=tmp_path,
+    )
+    check = verify_pixel_identity(recorded, live, enable_verify=True)
+    assert check is not None and check.status == "verified"
+    check.pixel_evidence = evidence
+    recorded_path = tmp_path / evidence.recorded_crop_inventory_ref
+    live_path = tmp_path / evidence.live_crop_inventory_ref
+    return step, check, recorded_sha256, recorded_path, live_path
+
+
+def test_canonical_identity_rejects_fabricated_pixel_diagnostic() -> None:
+    step = _step()
+    assert step.anchor is not None
+    step.anchor.structured_identity = None
+    step.anchor.context_text = None
+    step.anchor.identifier_crop = "templates/identifiers/save.png"
+    step.anchor.identifier_region = (0, 0, 100, 20)
+    fabricated = IdentityCheck(
         status="verified",
         mode="pixel",
         coverage=1.0,
         expected="recorded identifier crop",
-        observed=("live identifier crop matches after alignment (worst window 0.040)"),
+        observed="live identifier crop matches after alignment (worst window 0.000)",
+    )
+
+    assert (
+        qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=fabricated,
+            step=step,
+            actuation_path="gui",
+        )
+        == "pixel identity verdict lacks exact retained crop evidence"
+    )
+
+
+def test_canonical_identity_accepts_exact_retained_pixel_crops(
+    tmp_path: Path,
+) -> None:
+    step, valid, recorded_sha256, _recorded_path, _live_path = _retained_pixel_check(
+        tmp_path
     )
 
     assert (
@@ -303,9 +380,96 @@ def test_canonical_identity_accepts_exact_runtime_pixel_shape() -> None:
             check=valid,
             step=step,
             actuation_path="gui",
+            evidence_root=tmp_path,
+            recorded_asset_sha256=recorded_sha256,
         )
         is None
     )
+
+
+def test_canonical_identity_rejects_mutated_pixel_crop(tmp_path: Path) -> None:
+    step, check, recorded_sha256, _recorded_path, live_path = _retained_pixel_check(
+        tmp_path
+    )
+    live_path.write_bytes(live_path.read_bytes() + b"mutated")
+
+    error = qualification_identity_evidence_error(
+        policy=_canonical_policy(),
+        check=check,
+        step=step,
+        actuation_path="gui",
+        evidence_root=tmp_path,
+        recorded_asset_sha256=recorded_sha256,
+    )
+    assert error == "pixel identity crop evidence is missing or does not match its hash"
+
+
+def test_canonical_identity_rejects_missing_pixel_crop(tmp_path: Path) -> None:
+    step, check, recorded_sha256, _recorded_path, live_path = _retained_pixel_check(
+        tmp_path
+    )
+    live_path.unlink()
+
+    error = qualification_identity_evidence_error(
+        policy=_canonical_policy(),
+        check=check,
+        step=step,
+        actuation_path="gui",
+        evidence_root=tmp_path,
+        recorded_asset_sha256=recorded_sha256,
+    )
+    assert error == "pixel identity crop evidence is missing or does not match its hash"
+
+
+def test_canonical_identity_rejects_symlinked_pixel_crop(tmp_path: Path) -> None:
+    step, check, recorded_sha256, recorded_path, live_path = _retained_pixel_check(
+        tmp_path
+    )
+    live_path.unlink()
+    os.symlink(recorded_path, live_path)
+
+    error = qualification_identity_evidence_error(
+        policy=_canonical_policy(),
+        check=check,
+        step=step,
+        actuation_path="gui",
+        evidence_root=tmp_path,
+        recorded_asset_sha256=recorded_sha256,
+    )
+    assert error == "pixel identity crop evidence is missing or does not match its hash"
+
+
+def test_pixel_identity_evidence_rejects_traversal_reference() -> None:
+    digest = "0" * 64
+    with pytest.raises(ValueError, match="not content-addressed"):
+        PixelIdentityEvidence(
+            recorded_crop_sha256=digest,
+            live_crop_sha256=digest,
+            recorded_crop_inventory_ref=f"../identity-crops/{digest}.png",
+            live_crop_inventory_ref=f"private/identity-crops/{digest}.png",
+            evaluator_contract_sha256=digest,
+        )
+
+
+def test_canonical_identity_rejects_other_evaluator_contract(tmp_path: Path) -> None:
+    step, check, recorded_sha256, _recorded_path, _live_path = _retained_pixel_check(
+        tmp_path
+    )
+    assert check.pixel_evidence is not None
+    other_contract = check.pixel_evidence.model_copy(
+        update={"evaluator_contract_sha256": "0" * 64}
+    )
+    changed = check.model_copy(update={"pixel_evidence": other_contract})
+
+    error = qualification_identity_evidence_error(
+        policy=_canonical_policy(),
+        check=changed,
+        step=step,
+        actuation_path="gui",
+        evidence_root=tmp_path,
+        recorded_asset_sha256=recorded_sha256,
+    )
+    assert error == "pixel identity evaluator contract does not match this runtime"
 
 
 @pytest.mark.parametrize(

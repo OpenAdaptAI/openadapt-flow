@@ -1872,6 +1872,7 @@ def _case_run_report_integrity_error(
             QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
             "case contains an invalid run report",
         )
+    run_evidence_root = (root / report_ref.relative_path).resolve().parent
 
     expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
     expected_action_paths = {
@@ -1917,7 +1918,7 @@ def _case_run_report_integrity_error(
         workflow,
         ExecutionProfile.STANDARD,
         runtime_worklists=case_worklists,
-        transition_evidence_root=(root / report_ref.relative_path).resolve().parent,
+        transition_evidence_root=run_evidence_root,
     ).value
     if (
         recomputed_outcome != report.execution_outcome
@@ -1980,7 +1981,7 @@ def _case_run_report_integrity_error(
             workflow,
             ExecutionProfile.STANDARD,
             runtime_worklists=case_worklists,
-            transition_evidence_root=(root / report_ref.relative_path).resolve().parent,
+            transition_evidence_root=run_evidence_root,
             _qualification_fault_target_step_id=fault_target.step_id,
         ).value
         if prior_contract_outcome != "VERIFIED":
@@ -2228,6 +2229,16 @@ def _case_run_report_integrity_error(
                             actuation_path=actuation_path,
                             runtime_params=scoped_case_params(item),
                             recorded_params=workflow.params,
+                            evidence_root=run_evidence_root,
+                            recorded_asset_sha256=(
+                                workflow.manifest.file_hashes.get(
+                                    step.anchor.identifier_crop
+                                )
+                                if workflow.manifest is not None
+                                and step.anchor is not None
+                                and step.anchor.identifier_crop is not None
+                                else None
+                            ),
                         )
                         is not None
                     )

@@ -1945,6 +1945,37 @@ class IdentitySignalEvidence(BaseModel):
     match: Literal["exact", "normalized"]
 
 
+class PixelIdentityEvidence(BaseModel):
+    """Content-addressed local proof behind a pixel identity verdict.
+
+    The report retains only hashes and run-relative inventory references. The
+    identifier pixels remain inside the customer-controlled run directory.
+    Certification re-reads these exact bytes and runs the same evaluator again.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    recorded_crop_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    live_crop_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recorded_crop_inventory_ref: str
+    live_crop_inventory_ref: str
+    evaluator_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _inventory_is_content_addressed(self) -> "PixelIdentityEvidence":
+        expected_recorded = f"private/identity-crops/{self.recorded_crop_sha256}.png"
+        expected_live = f"private/identity-crops/{self.live_crop_sha256}.png"
+        if self.recorded_crop_inventory_ref != expected_recorded:
+            raise ValueError(
+                "recorded pixel identity inventory reference is not content-addressed"
+            )
+        if self.live_crop_inventory_ref != expected_live:
+            raise ValueError(
+                "live pixel identity inventory reference is not content-addressed"
+            )
+        return self
+
+
 class IdentityCheck(BaseModel):
     """Outcome of the pre-click target-identity check (runtime.identity).
 
@@ -1996,6 +2027,13 @@ class IdentityCheck(BaseModel):
     signal_evidence: list[IdentitySignalEvidence] = Field(default_factory=list)
     quorum_required: Optional[int] = Field(default=None, ge=1)
     quorum_verified: Optional[int] = Field(default=None, ge=0)
+    pixel_evidence: Optional[PixelIdentityEvidence] = Field(
+        default=None,
+        description=(
+            "Hashes and local inventory references for the exact crops behind "
+            "a pixel verdict. Crop pixels never enter the report."
+        ),
+    )
 
 
 class HealEvent(BaseModel):

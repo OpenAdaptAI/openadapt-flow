@@ -8,8 +8,9 @@ the action.  A bare ``status="verified"`` is never sufficient.
 
 from __future__ import annotations
 
-import re
+import hashlib
 from collections.abc import Mapping, Sequence
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 from openadapt_flow.ir import IdentityCheck, Step
@@ -27,11 +28,6 @@ _EVIDENCE_CLASS_BY_SOURCE = {
     "workflow_state": "workflow_state_identity",
     "api_parameter": "api_request_effect_binding",
 }
-
-_PIXEL_VERIFIED_OBSERVATION = re.compile(
-    r"live identifier crop matches after alignment "
-    r"\(worst window (?P<distance>0\.\d{3})\)"
-)
 
 
 def _quorum_shape_error(
@@ -68,7 +64,37 @@ def _quorum_shape_error(
         return "retained identity coverage does not match its signal evidence"
     if check.expected or check.observed or check.param is not None:
         return "signal-quorum evidence contains an incompatible ladder payload"
+    if check.pixel_evidence is not None:
+        return "signal-quorum evidence contains an incompatible pixel payload"
     return None
+
+
+def _read_pixel_crop(
+    *, evidence_root: Path, inventory_ref: str, expected_sha256: str
+) -> Optional[bytes]:
+    """Read one exact local crop without following a link or leaving the root."""
+
+    root = evidence_root.resolve()
+    parts = PurePosixPath(inventory_ref).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return None
+    candidate = root.joinpath(*parts)
+    cursor = root
+    try:
+        for part in parts:
+            cursor /= part
+            if cursor.is_symlink():
+                return None
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+        if candidate.is_symlink() or not resolved.is_file():
+            return None
+        payload = resolved.read_bytes()
+    except (OSError, ValueError):
+        return None
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        return None
+    return payload
 
 
 def _canonical_ladder_error(
@@ -77,6 +103,8 @@ def _canonical_ladder_error(
     step: Step,
     runtime_params: Mapping[str, str],
     recorded_params: Mapping[str, str],
+    evidence_root: Optional[Path],
+    recorded_asset_sha256: Optional[str],
 ) -> Optional[str]:
     """Validate a canonical-ladder result against one runtime-emittable shape."""
 
@@ -93,19 +121,48 @@ def _canonical_ladder_error(
     if check.mode == "pixel":
         if not anchor.identifier_crop or anchor.identifier_region is None:
             return "pixel identity evidence has no retained identifier crop"
-        match = _PIXEL_VERIFIED_OBSERVATION.fullmatch(check.observed)
+        evidence = check.pixel_evidence
+        if evidence is None:
+            return "pixel identity verdict lacks exact retained crop evidence"
+        if evidence_root is None:
+            return "pixel identity verdict has no local evidence root"
         if (
-            check.coverage != 1.0
-            or check.expected != "recorded identifier crop"
-            or check.param is not None
-            or match is None
+            recorded_asset_sha256 is None
+            or evidence.recorded_crop_sha256 != recorded_asset_sha256
         ):
-            return "pixel identity evidence is not an exact runtime verdict"
-        from openadapt_flow.runtime.identity import PIXEL_VERIFY_MAX_WINDOW
+            return "pixel identity evidence does not bind the recorded anchor crop"
+        recorded = _read_pixel_crop(
+            evidence_root=evidence_root,
+            inventory_ref=evidence.recorded_crop_inventory_ref,
+            expected_sha256=evidence.recorded_crop_sha256,
+        )
+        live = _read_pixel_crop(
+            evidence_root=evidence_root,
+            inventory_ref=evidence.live_crop_inventory_ref,
+            expected_sha256=evidence.live_crop_sha256,
+        )
+        if recorded is None or live is None:
+            return "pixel identity crop evidence is missing or does not match its hash"
+        from openadapt_flow.runtime.identity import (
+            pixel_identity_evaluator_contract_sha256,
+            verify_pixel_identity,
+        )
 
-        if float(match.group("distance")) > PIXEL_VERIFY_MAX_WINDOW:
-            return "pixel identity evidence exceeds the runtime verification bound"
+        if (
+            evidence.evaluator_contract_sha256
+            != pixel_identity_evaluator_contract_sha256()
+        ):
+            return "pixel identity evaluator contract does not match this runtime"
+        pixel_result = verify_pixel_identity(recorded, live, enable_verify=True)
+        if pixel_result is None:
+            return "pixel identity crop evidence does not reproduce a verdict"
+        pixel_result.pixel_evidence = evidence
+        if pixel_result.status != "verified" or pixel_result != check:
+            return "pixel identity crop evidence does not reproduce the runtime verdict"
         return None
+
+    if check.pixel_evidence is not None:
+        return "non-pixel identity evidence contains an incompatible pixel payload"
 
     try:
         expected: Optional[IdentityCheck]
@@ -171,6 +228,8 @@ def qualification_identity_evidence_error(
     actuation_path: str,
     runtime_params: Optional[Mapping[str, str]] = None,
     recorded_params: Optional[Mapping[str, str]] = None,
+    evidence_root: Optional[Path] = None,
+    recorded_asset_sha256: Optional[str] = None,
 ) -> Optional[str]:
     """Return why a representative action did not prove its exact identity policy.
 
@@ -242,4 +301,6 @@ def qualification_identity_evidence_error(
         step=step,
         runtime_params=runtime_params or {},
         recorded_params=recorded_params or {},
+        evidence_root=evidence_root,
+        recorded_asset_sha256=recorded_asset_sha256,
     )

@@ -78,6 +78,7 @@ from openadapt_flow.ir import (
     Interstitial,
     InterstitialActionResult,
     LoopSpec,
+    PixelIdentityEvidence,
     Point,
     PostconditionKind,
     Predicate,
@@ -3836,6 +3837,7 @@ class Replayer:
                     workflow,
                     bundle_dir,
                     result,
+                    evidence_run_dir=run_dir,
                 )
                 if error is not None and result.identity is not None:
                     code: Literal["identity_conflict", "identity_unverifiable"] = (
@@ -3992,6 +3994,7 @@ class Replayer:
                     workflow,
                     bundle_dir,
                     result,
+                    run_dir=run_dir,
                     arm_keyboard=step.action in (ActionKind.KEY, ActionKind.HOTKEY),
                 )
                 result.resolution = resolution
@@ -4073,6 +4076,7 @@ class Replayer:
                         bundle_dir=bundle_dir,
                         before_png=before_png,
                         result=result,
+                        run_dir=run_dir,
                         graph_ctx=graph_ctx,
                     )
                 except ActionDeliveryUncertain as exc:
@@ -5028,6 +5032,8 @@ class Replayer:
         workflow: Workflow,
         bundle_dir: Path,
         result: StepResult,
+        *,
+        evidence_run_dir: Optional[Path] = None,
     ) -> Optional[str]:
         """Run the target-identity contract on one exact observed frame."""
         qualification = workflow.qualification
@@ -5064,6 +5070,37 @@ class Replayer:
         check = self._verify_identity(
             step, resolution, frame_png, params, workflow, bundle_dir
         )
+        if (
+            check.status == "verified"
+            and check.mode == "pixel"
+            and workflow.qualification is not None
+        ):
+            try:
+                if evidence_run_dir is None:
+                    raise OSError("pixel evidence has no local run directory")
+                recorded_png, live_png = self._identifier_crops(
+                    step.anchor,
+                    resolution,
+                    frame_png,
+                    bundle_dir,
+                    workflow=workflow,
+                )
+                if recorded_png is None or live_png is None:
+                    raise OSError("pixel evidence crops are unavailable")
+                check.pixel_evidence = self._retain_pixel_identity_evidence(
+                    workflow=workflow,
+                    anchor=step.anchor,
+                    recorded_png=recorded_png,
+                    live_png=live_png,
+                    run_dir=evidence_run_dir,
+                )
+            except OSError:
+                check = IdentityCheck(
+                    status="unreadable",
+                    mode="pixel",
+                    expected="recorded identifier crop",
+                    observed="exact local pixel evidence could not be retained",
+                )
         result.identity = check
         governed = (
             self.governed_authorization is not None
@@ -5129,6 +5166,67 @@ class Replayer:
         if error is not None and (governed or signal_quorum):
             result.safety_halt = True
         return error
+
+    @staticmethod
+    def _retain_pixel_identity_evidence(
+        *,
+        workflow: Workflow,
+        anchor: Anchor,
+        recorded_png: bytes,
+        live_png: bytes,
+        run_dir: Path,
+    ) -> PixelIdentityEvidence:
+        """Retain exact identity crops locally and return only PHI-free bindings."""
+
+        if anchor.identifier_crop is None:
+            raise OSError("pixel evidence has no recorded anchor reference")
+        recorded_sha256 = hashlib.sha256(recorded_png).hexdigest()
+        live_sha256 = hashlib.sha256(live_png).hexdigest()
+        if (
+            workflow.manifest is None
+            or workflow.manifest.file_hashes.get(anchor.identifier_crop)
+            != recorded_sha256
+        ):
+            raise OSError("recorded identity crop does not match the bundle manifest")
+
+        root = Path(run_dir).resolve()
+        private_dir = root / "private"
+        inventory_dir = private_dir / "identity-crops"
+        try:
+            if private_dir.is_symlink() or inventory_dir.is_symlink():
+                raise OSError("pixel evidence inventory path is a symlink")
+            inventory_dir.mkdir(parents=True, exist_ok=True)
+            if (
+                private_dir.is_symlink()
+                or inventory_dir.is_symlink()
+                or not inventory_dir.resolve().is_relative_to(root)
+            ):
+                raise OSError("pixel evidence inventory leaves the run root")
+            for digest, payload in (
+                (recorded_sha256, recorded_png),
+                (live_sha256, live_png),
+            ):
+                path = inventory_dir / f"{digest}.png"
+                if path.is_symlink():
+                    raise OSError("pixel evidence crop path is a symlink")
+                existing = path.read_bytes() if path.exists() else None
+                if existing is not None and existing != payload:
+                    raise OSError("pixel evidence digest path has other bytes")
+                path.write_bytes(payload)
+        except OSError:
+            raise
+
+        return PixelIdentityEvidence(
+            recorded_crop_sha256=recorded_sha256,
+            live_crop_sha256=live_sha256,
+            recorded_crop_inventory_ref=(
+                f"private/identity-crops/{recorded_sha256}.png"
+            ),
+            live_crop_inventory_ref=f"private/identity-crops/{live_sha256}.png",
+            evaluator_contract_sha256=(
+                identity_mod.pixel_identity_evaluator_contract_sha256()
+            ),
+        )
 
     def _step_is_consequential(self, step: Step, workflow: Workflow) -> bool:
         authorization = self.governed_authorization
@@ -5353,6 +5451,7 @@ class Replayer:
         bundle_dir: Path,
         result: StepResult,
         *,
+        run_dir: Path,
         arm_keyboard: bool = False,
     ) -> tuple[
         Optional[Resolution],
@@ -5611,6 +5710,7 @@ class Replayer:
                     workflow,
                     bundle_dir,
                     result,
+                    evidence_run_dir=run_dir,
                 )
             except Exception:
                 if guarded_coordinate:
@@ -5759,6 +5859,7 @@ class Replayer:
         bundle_dir: Path,
         before_png: bytes,
         result: StepResult,
+        run_dir: Path,
         graph_ctx: Optional["_GraphStepContext"] = None,
     ) -> Optional[str]:
         """Perform the step's action through the backend.
@@ -6151,6 +6252,7 @@ class Replayer:
                         workflow,
                         bundle_dir,
                         result,
+                        run_dir=run_dir,
                         arm_keyboard=True,
                     )
                     if remote_error is not None:

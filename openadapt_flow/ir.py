@@ -2091,6 +2091,25 @@ class ProgramExecutionScopeFrame(BaseModel):
         return self
 
 
+class ProgramGuardAssetEvidence(BaseModel):
+    """One content-addressed bundle asset used by a transition predicate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_ref: str = Field(min_length=1, max_length=512)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    inventory_ref: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def _asset_ref_is_content_addressed(self) -> "ProgramGuardAssetEvidence":
+        expected = f"private/program-transition-assets/{self.sha256}.bin"
+        if self.inventory_ref != expected:
+            raise ValueError(
+                "transition guard asset reference is not content-addressed"
+            )
+        return self
+
+
 class ProgramTransitionEvidence(BaseModel):
     """Exact ordered evidence for one evaluated program transition.
 
@@ -2110,12 +2129,17 @@ class ProgramTransitionEvidence(BaseModel):
     guard_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     guard_verdict: bool
     selected: bool
-    selected_target: str = Field(min_length=1, max_length=128)
+    selected_target: Optional[str] = Field(default=None, min_length=1, max_length=128)
     guard_evidence_kind: Literal["unconditional", "parameters", "frame"]
     observed_frame_sha256: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     observed_frame_inventory_ref: Optional[str] = None
+    observed_viewport: Optional[tuple[int, int]] = None
+    guard_evaluator_contract_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    guard_assets: list[ProgramGuardAssetEvidence] = Field(default_factory=list)
     governed_runtime_inputs_digest: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
@@ -2124,6 +2148,8 @@ class ProgramTransitionEvidence(BaseModel):
     def _evidence_is_exact_and_content_addressed(self) -> "ProgramTransitionEvidence":
         if self.selected != self.guard_verdict:
             raise ValueError("a transition decision must stop at its first true guard")
+        if self.selected and self.selected_target is None:
+            raise ValueError("a selected transition requires its target")
         has_frame_digest = self.observed_frame_sha256 is not None
         has_frame_ref = self.observed_frame_inventory_ref is not None
         if has_frame_digest != has_frame_ref:
@@ -2142,6 +2168,84 @@ class ProgramTransitionEvidence(BaseModel):
                 raise ValueError(
                     "transition frame inventory reference is not content-addressed"
                 )
+        if self.guard_evidence_kind == "frame":
+            if self.observed_viewport is None or any(
+                value <= 0 for value in self.observed_viewport
+            ):
+                raise ValueError("frame-backed guard evidence requires a viewport")
+            if self.guard_evaluator_contract_sha256 is None:
+                raise ValueError("frame-backed guard evidence requires an evaluator")
+            if len({item.source_ref for item in self.guard_assets}) != len(
+                self.guard_assets
+            ):
+                raise ValueError("transition guard asset references must be unique")
+        elif (
+            self.observed_viewport is not None
+            or self.guard_evaluator_contract_sha256 is not None
+            or self.guard_assets
+        ):
+            raise ValueError(
+                "non-visual guard evidence must not claim visual evaluator inputs"
+            )
+        return self
+
+
+class ProgramExceptionEvidence(BaseModel):
+    """Exact typed evidence for one non-action exception edge.
+
+    The classifier recomputes the declared failure from the workflow and the
+    governed runtime inputs. This row disambiguates an exception handler from
+    a normal transition that happens to use the same target state.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision_index: int = Field(ge=0)
+    graph_id: str = Field(min_length=1, max_length=128)
+    state_id: str = Field(min_length=1, max_length=128)
+    program_scope: list[ProgramExecutionScopeFrame] = Field(min_length=1)
+    target_state_id: str = Field(min_length=1, max_length=128)
+    failure_kind: Literal[
+        "branch_without_transition",
+        "missing_subflow",
+        "missing_loop_body",
+        "loop_bound_exceeded",
+    ]
+    governed_runtime_inputs_digest: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class AttendedProgramTransitionEvidence(BaseModel):
+    """A signed attended transition consumed without evaluating its guard again."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision_index: int = Field(ge=0)
+    graph_id: str = Field(min_length=1, max_length=128)
+    state_id: str = Field(min_length=1, max_length=128)
+    program_scope: list[ProgramExecutionScopeFrame] = Field(min_length=1)
+    target_state_id: Optional[str] = Field(default=None, max_length=128)
+    action: Literal["continue", "skip"]
+    receipt_pause_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_inventory_ref: str = Field(min_length=1, max_length=512)
+    control_frames_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    control_frames_inventory_ref: str = Field(min_length=1, max_length=512)
+    governed_runtime_inputs_digest: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def _receipt_ref_is_exact(self) -> "AttendedProgramTransitionEvidence":
+        expected = f".attended_program_receipts/{self.receipt_pause_id}.json"
+        if self.receipt_inventory_ref != expected:
+            raise ValueError("attended transition receipt reference is not exact")
+        expected_frames = (
+            f"private/program-transition-controls/{self.control_frames_sha256}.json"
+        )
+        if self.control_frames_inventory_ref != expected_frames:
+            raise ValueError("attended transition control reference is not exact")
         return self
 
 
@@ -2787,6 +2891,21 @@ class RunReport(BaseModel):
             "Ordered guard evaluations retained by the program runtime. "
             "Frame-backed evidence refers to private local run artifacts."
         ),
+    )
+    program_exception_evidence: list[ProgramExceptionEvidence] = Field(
+        default_factory=list,
+        description=(
+            "Ordered non-action exception edges whose causes can be recomputed "
+            "from the workflow and governed runtime inputs."
+        ),
+    )
+    attended_program_transition_evidence: list[AttendedProgramTransitionEvidence] = (
+        Field(
+            default_factory=list,
+            description=(
+                "Ordered signed attended transitions consumed during durable resume."
+            ),
+        )
     )
     # The structured HALT record (see HaltObservation): populated by
     # Replayer.run when the run stops on an unhandled state, so the halt->learn

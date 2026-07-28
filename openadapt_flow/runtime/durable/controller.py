@@ -32,7 +32,13 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
-from openadapt_flow.ir import Step, StepResult, Workflow
+from openadapt_flow.ir import (
+    ProgramExceptionEvidence,
+    ProgramTransitionEvidence,
+    Step,
+    StepResult,
+    Workflow,
+)
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.checkpoint import (
     CheckpointStore,
@@ -409,6 +415,12 @@ class DurableRun:
         program_checkpoint_seq: int = 0,
         program_history_hash: str = "",
         program_history_delta: Optional[list[str]] = None,
+        program_transition_evidence_delta: Optional[
+            list[ProgramTransitionEvidence]
+        ] = None,
+        program_exception_evidence_delta: Optional[
+            list[ProgramExceptionEvidence]
+        ] = None,
     ) -> None:
         """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
 
@@ -438,6 +450,12 @@ class DurableRun:
             program_checkpoint_seq=program_checkpoint_seq,
             program_history_hash=program_history_hash,
             program_history_delta=list(program_history_delta or []),
+            program_transition_evidence_delta=list(
+                program_transition_evidence_delta or []
+            ),
+            program_exception_evidence_delta=list(
+                program_exception_evidence_delta or []
+            ),
             delivery_uncertainty=result.delivery_uncertainty,
         )
         self.store.write_pending(pending)

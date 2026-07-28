@@ -12,6 +12,7 @@ from openadapt_flow.ir import (
     LoopSpec,
     ProgramExecutionScopeFrame,
     ProgramGraph,
+    ProgramTransitionEvidence,
     Relation,
     RunReport,
     State,
@@ -20,6 +21,7 @@ from openadapt_flow.ir import (
     StepResult,
     Transition,
     Workflow,
+    predicate_contract_sha256,
 )
 from openadapt_flow.qualification import (
     ActionRiskClass,
@@ -227,6 +229,71 @@ def _program_case_evidence(
         qualification_environment_observer_contract_sha256="c" * 64,
         results=[row_result(0), row_result(1)],
     )
+    assert workflow.program is not None
+    row_state = workflow.subflows["row-body"].states["write-state"]
+
+    def transition_evidence(
+        decision_index: int,
+        state: State,
+        scope: list[ProgramExecutionScopeFrame],
+        target: str,
+    ) -> ProgramTransitionEvidence:
+        return ProgramTransitionEvidence(
+            decision_index=decision_index,
+            graph_id=scope[-1].graph_id,
+            state_id=state.id,
+            program_scope=scope,
+            transition_index=0,
+            guard_contract_sha256=predicate_contract_sha256(None),
+            guard_verdict=True,
+            selected=True,
+            selected_target=target,
+            guard_evidence_kind="unconditional",
+            governed_runtime_inputs_digest=input_sha256,
+        )
+
+    report.program_transition_evidence = [
+        transition_evidence(
+            0,
+            workflow.program.states["start"],
+            [root_scope],
+            "rows",
+        ),
+        transition_evidence(
+            1,
+            row_state,
+            [
+                root_scope,
+                ProgramExecutionScopeFrame(
+                    graph_id="row-body",
+                    loop_state_id="rows",
+                    relation="cases",
+                    row_index=0,
+                ),
+            ],
+            "row-done",
+        ),
+        transition_evidence(
+            2,
+            row_state,
+            [
+                root_scope,
+                ProgramExecutionScopeFrame(
+                    graph_id="row-body",
+                    loop_state_id="rows",
+                    relation="cases",
+                    row_index=1,
+                ),
+            ],
+            "row-done",
+        ),
+        transition_evidence(
+            3,
+            workflow.program.states["rows"],
+            [root_scope],
+            "done",
+        ),
+    ]
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir()
     report_path = evidence_root / "program-report.json"

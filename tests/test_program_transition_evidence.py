@@ -272,6 +272,36 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
 
+    # A digest-bound frame plus a claimed True verdict is not proof. Rebuild a
+    # self-consistent alternate path around that claim; the shared evaluator
+    # must still recompute the exact visual predicate as False on these bytes.
+    forged_path = report.model_copy(deep=True)
+    forged_first = forged_path.program_transition_evidence[0].model_copy(
+        update={
+            "guard_verdict": True,
+            "selected": True,
+            "selected_target": "first",
+        }
+    )
+    forged_done = forged_path.program_transition_evidence[2].model_copy(
+        update={"state_id": "first"}
+    )
+    forged_path.program_transition_evidence = [forged_first, forged_done]
+    forged_path.visited_states = ["pick", "first", "done"]
+    forged_path.results[0] = forged_path.results[0].model_copy(
+        update={"step_id": "first", "intent": "first"}
+    )
+    assert (
+        classify_execution_outcome(
+            forged_path,
+            workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
 
 def test_transition_evidence_rejects_deleted_prefix_and_linear_invention(tmp_path):
     workflow, run_dir, report = _governed_report(
@@ -286,6 +316,47 @@ def test_transition_evidence_rejects_deleted_prefix_and_linear_invention(tmp_pat
     assert (
         classify_execution_outcome(
             deleted_prefix,
+            workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=run_dir,
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
+
+def test_standard_outcome_rejects_complete_unconditional_evidence_deletion(tmp_path):
+    workflow = Workflow(
+        name="unconditional-proof-required",
+        program=ProgramGraph(
+            entry="act",
+            states={
+                "act": State(
+                    id="act",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="act",
+                        intent="act",
+                        action=ActionKind.KEY,
+                        key="A",
+                    ),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(
+                    id="done",
+                    kind=StateKind.TERMINAL,
+                    outcome="success",
+                ),
+            },
+        ),
+    )
+    workflow, run_dir, report = _governed_report(workflow, tmp_path)
+
+    assert report.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert len(report.program_transition_evidence) == 1
+    deleted = report.model_copy(update={"program_transition_evidence": []})
+    assert (
+        classify_execution_outcome(
+            deleted,
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,

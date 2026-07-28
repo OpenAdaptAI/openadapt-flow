@@ -28,9 +28,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from openadapt_flow.ir import (
     ActionDeliveryUncertainty,
+    AttendedProgramTransitionEvidence,
     EffectVerificationEvidence,
     HealEvent,
     IdentityCheck,
+    ProgramExceptionEvidence,
+    ProgramTransitionEvidence,
     Resolution,
 )
 
@@ -196,7 +199,7 @@ class ProgramCheckpoint(BaseModel):
     #: so a resume can RE-VERIFY (read-only) that the already-confirmed writes
     #: still hold before continuing. Consistent with the run manifest already
     #: persisting the run's params; a run directory is sensitive at rest.
-    new_effects: list[dict] = Field(default_factory=list)
+    new_effects: list[dict[str, object]] = Field(default_factory=list)
     #: Structured verification evidence for ``new_effect_keys``. Persisted so
     #: an idempotently skipped action on resume retains the original proof
     #: rather than being downgraded to an unverified completion.
@@ -205,7 +208,7 @@ class ProgramCheckpoint(BaseModel):
     #: independently confirmed. Kept separate so resume never promotes them to
     #: CONFIRMED while still preventing duplicate re-execution.
     new_unverified_effect_keys: list[str] = Field(default_factory=list)
-    new_unverified_effects: list[dict] = Field(default_factory=list)
+    new_unverified_effects: list[dict[str, object]] = Field(default_factory=list)
     #: Exact action evidence needed to reconstruct the already-verified leg in
     #: the final resumed report. Additive defaults make old checkpoints load;
     #: missing legacy identity/postcondition evidence then fails production
@@ -234,10 +237,18 @@ class ProgramCheckpoint(BaseModel):
     #: ordered deltas reconstruct one complete graph trace without O(N^2)
     #: checkpoint prefixes.
     visited_states_delta: list[str] = Field(default_factory=list)
+    #: Exact ordered transition decisions since the preceding checkpoint.
+    program_transition_evidence_delta: list[ProgramTransitionEvidence] = Field(
+        default_factory=list
+    )
+    program_exception_evidence_delta: list[ProgramExceptionEvidence] = Field(
+        default_factory=list
+    )
     #: Present only when staff completed/skipped the action represented by this
     #: checkpoint. Resume consumes its exact target instead of re-evaluating a
     #: guarded edge or re-actuating the source action.
     attended_transition: Optional[ProgramTransitionReceipt] = None
+    attended_transition_evidence: Optional[AttendedProgramTransitionEvidence] = None
     #: Content hash of the bundle this checkpoint was captured against.
     bundle_version: str = ""
     created_at: str = Field(default_factory=_now)

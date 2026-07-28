@@ -34,7 +34,15 @@ from typing import Any, Callable, Iterator, Literal, Optional, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openadapt_flow.ir import State, StateKind, Step, StepResult, Workflow
+from openadapt_flow.ir import (
+    AttendedProgramTransitionEvidence,
+    ProgramExecutionScopeFrame,
+    State,
+    StateKind,
+    Step,
+    StepResult,
+    Workflow,
+)
 from openadapt_flow.policy import StepSafetyProjection, project_step_safety
 from openadapt_flow.runtime.durable.approval import (
     ApprovalRecord,
@@ -2271,6 +2279,12 @@ class BoundAttendedExecutor:
             expected_texts=expected_texts,
             transition_history_hash=pending.program_history_hash,
             visited_states_delta=list(pending.program_history_delta),
+            program_transition_evidence_delta=list(
+                pending.program_transition_evidence_delta
+            ),
+            program_exception_evidence_delta=list(
+                pending.program_exception_evidence_delta
+            ),
             bundle_version=capability.bundle_version,
             attended_transition=receipt,
             created_at=capability.issued_at,
@@ -2294,7 +2308,97 @@ class BoundAttendedExecutor:
                 "the exact attended program pause changed before transition commit"
             )
         receipt = action_store.write_program_receipt(receipt)
-        checkpoint = checkpoint.model_copy(update={"attended_transition": receipt})
+        prior_decision_indexes = (
+            [
+                item.decision_index
+                for prior_checkpoint in store.program_checkpoints()
+                for item in prior_checkpoint.program_transition_evidence_delta
+            ]
+            + [
+                item.decision_index
+                for prior_checkpoint in store.program_checkpoints()
+                if prior_checkpoint.attended_transition_evidence is not None
+                for item in [prior_checkpoint.attended_transition_evidence]
+            ]
+            + [
+                item.decision_index
+                for prior_checkpoint in store.program_checkpoints()
+                for item in prior_checkpoint.program_exception_evidence_delta
+            ]
+            + [
+                item.decision_index
+                for item in pending.program_transition_evidence_delta
+            ]
+            + [item.decision_index for item in pending.program_exception_evidence_delta]
+        )
+        receipt_path = action_store._receipt_path(receipt.pause_id)
+        receipt_sha256 = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        control_payload = json.dumps(
+            [frame.model_dump(mode="json") for frame in pending.program_frames],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        control_sha256 = hashlib.sha256(control_payload).hexdigest()
+        control_ref = f"private/program-transition-controls/{control_sha256}.json"
+        control_path = Path(run_dir) / control_ref
+        control_dir = control_path.parent
+        run_root = Path(run_dir).resolve()
+        if control_dir.is_symlink() or control_path.is_symlink():
+            raise AttendedActionRefused(
+                "the attended transition control path must not be a symlink"
+            )
+        control_dir.mkdir(parents=True, exist_ok=True)
+        if control_dir.is_symlink() or not control_dir.resolve().is_relative_to(
+            run_root
+        ):
+            raise AttendedActionRefused(
+                "the attended transition control path leaves the run directory"
+            )
+        if control_path.is_file():
+            if control_path.read_bytes() != control_payload:
+                raise AttendedActionRefused(
+                    "the attended transition control digest has other bytes"
+                )
+        else:
+            action_store._atomic_write(control_path, control_payload)
+        scope = [
+            ProgramExecutionScopeFrame(
+                graph_id=frame.graph_id,
+                loop_state_id=(
+                    frame.loop.loop_state_id if frame.loop is not None else None
+                ),
+                relation=frame.loop.relation if frame.loop is not None else None,
+                row_index=frame.loop.row_index if frame.loop is not None else None,
+            )
+            for frame in pending.program_frames
+        ]
+        attended_evidence = AttendedProgramTransitionEvidence(
+            decision_index=max(prior_decision_indexes, default=-1) + 1,
+            graph_id=receipt.source_graph_id,
+            state_id=receipt.source_state_id,
+            program_scope=scope,
+            target_state_id=receipt.target_state_id,
+            action=receipt.action,
+            receipt_pause_id=receipt.pause_id,
+            receipt_sha256=receipt_sha256,
+            receipt_inventory_ref=(
+                f"{PROGRAM_RECEIPTS_DIRNAME}/{receipt.pause_id}.json"
+            ),
+            control_frames_sha256=control_sha256,
+            control_frames_inventory_ref=control_ref,
+            governed_runtime_inputs_digest=(
+                manifest.governed_authorization.runtime_inputs_digest
+                if manifest.governed_authorization is not None
+                else None
+            ),
+        )
+        checkpoint = checkpoint.model_copy(
+            update={
+                "attended_transition": receipt,
+                "attended_transition_evidence": attended_evidence,
+            }
+        )
         if existing_seq == source_seq:
             store.write_program_checkpoint(checkpoint)
         store.write_approval(approval)

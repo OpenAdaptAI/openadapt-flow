@@ -11,6 +11,7 @@ assembling a potentially contradictory collection of permissive flags.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
@@ -377,6 +378,7 @@ class _ProgramActionOccurrence:
     step: Any
     program_scope: tuple[Any, ...]
     exception_edge: bool = False
+    attended_action: str | None = None
 
 
 def _program_action_trace(
@@ -386,9 +388,13 @@ def _program_action_trace(
     runtime_params: Mapping[str, str] | None = None,
     runtime_worklists: Mapping[str, list[dict[str, str]]] | None = None,
     transition_evidence: list[Any] | None = None,
+    exception_evidence: list[Any] | None = None,
+    attended_transition_evidence: list[Any] | None = None,
     transition_evidence_root: Path | None = None,
+    transition_predicate_vision: Any | None = None,
     governed_runtime_inputs_digest: str | None = None,
     halted_at_step_id: str | None = None,
+    reported_results: list[Any] | None = None,
 ) -> list[_ProgramActionOccurrence] | None:
     """Validate one complete graph walk and return its action occurrences.
 
@@ -406,6 +412,14 @@ def _program_action_trace(
         StateKind,
         predicate_contract_sha256,
     )
+    from openadapt_flow.runtime.program_predicates import (
+        PROGRAM_PREDICATE_EVALUATOR_SHA256,
+        evaluate_program_predicate,
+        predicate_template_refs,
+    )
+
+    if transition_predicate_vision is None:
+        import openadapt_flow.vision as transition_predicate_vision
 
     graphs = {"__program__": workflow.program, **workflow.subflows}
     state_owner: dict[str, str] = {}
@@ -422,6 +436,8 @@ def _program_action_trace(
 
     cursor = 0
     evidence_cursor = 0
+    exception_evidence_cursor = 0
+    attended_evidence_cursor = 0
     expected_evidence_decision_index = 0
     actions: list[_ProgramActionOccurrence] = []
     halted_at_requested_action = False
@@ -492,18 +508,14 @@ def _program_action_trace(
         nonlocal evidence_cursor, expected_evidence_decision_index
         evidence = transition_evidence or []
         if evidence_cursor >= len(evidence):
-            if evidence:
-                raise ValueError("program transition evidence omits a decision")
-            return None
+            raise ValueError("program transition evidence omits a decision")
         first = evidence[evidence_cursor]
         if (
             first.graph_id != graph_id
             or first.state_id != state.id
             or tuple(first.program_scope) != scope
         ):
-            if evidence:
-                raise ValueError("program transition evidence omits a decision")
-            return None
+            raise ValueError("program transition evidence omits a decision")
         if first.decision_index != expected_evidence_decision_index:
             raise ValueError("program transition evidence sequence is not contiguous")
         end = evidence_cursor
@@ -516,13 +528,10 @@ def _program_action_trace(
         expected_evidence_decision_index += 1
         return group
 
-    def _verify_frame_inventory(item: Any) -> None:
+    def _verified_inventory_bytes(ref: str, expected_sha256: str) -> bytes:
         if transition_evidence_root is None:
             raise ValueError("visual transition evidence has no local evidence root")
         root = transition_evidence_root.resolve()
-        ref = item.observed_frame_inventory_ref
-        if ref is None:
-            raise ValueError("visual transition evidence has no frame reference")
         parts = PurePosixPath(ref).parts
         candidate = root.joinpath(*parts)
         cursor_path = root
@@ -546,8 +555,9 @@ def _program_action_trace(
             payload = path.read_bytes()
         except OSError as exc:
             raise ValueError("transition frame evidence is unreadable") from exc
-        if hashlib.sha256(payload).hexdigest() != item.observed_frame_sha256:
-            raise ValueError("transition frame evidence digest does not match")
+        if hashlib.sha256(payload).hexdigest() != expected_sha256:
+            raise ValueError("transition evidence digest does not match")
+        return payload
 
     def _validated_evidence_target(
         *,
@@ -567,9 +577,11 @@ def _program_action_trace(
         if indexes != list(range(len(group))) or len(group) > len(state.transitions):
             raise ValueError("transition evidence does not follow declaration order")
         selected = [item for item in group if item.selected]
-        if len(selected) != 1 or selected[0] is not group[-1]:
-            raise ValueError("transition evidence does not end at one selected guard")
-        target = selected[0].selected_target
+        if len(selected) > 1 or (selected and selected[0] is not group[-1]):
+            raise ValueError("transition evidence has an invalid selected guard")
+        if not selected and len(group) != len(state.transitions):
+            raise ValueError("unmatched transition evidence is incomplete")
+        target = selected[0].selected_target if selected else None
         if any(item.selected_target != target for item in group):
             raise ValueError("transition evidence rows disagree on the selected target")
         for item, transition in zip(group, state.transitions):
@@ -597,10 +609,196 @@ def _program_action_trace(
             if recomputed is not None and item.guard_verdict != recomputed:
                 raise ValueError("transition evidence guard verdict differs")
             if uses_frame:
-                _verify_frame_inventory(item)
-        if target != state.transitions[group[-1].transition_index].target:
+                if (
+                    item.guard_evaluator_contract_sha256
+                    != PROGRAM_PREDICATE_EVALUATOR_SHA256
+                    or item.observed_frame_inventory_ref is None
+                    or item.observed_frame_sha256 is None
+                    or item.observed_viewport is None
+                ):
+                    raise ValueError("transition visual evaluator contract differs")
+                frame = _verified_inventory_bytes(
+                    item.observed_frame_inventory_ref,
+                    item.observed_frame_sha256,
+                )
+                expected_refs = predicate_template_refs(transition.guard)
+                if (
+                    tuple(asset.source_ref for asset in item.guard_assets)
+                    != expected_refs
+                ):
+                    raise ValueError("transition guard asset inventory differs")
+                retained_assets = {
+                    asset.source_ref: _verified_inventory_bytes(
+                        asset.inventory_ref,
+                        asset.sha256,
+                    )
+                    for asset in item.guard_assets
+                }
+                assert transition.guard is not None
+                recomputed_visual = evaluate_program_predicate(
+                    transition.guard,
+                    frame,
+                    current_params,
+                    vision=transition_predicate_vision,
+                    viewport=item.observed_viewport,
+                    asset_loader=retained_assets.get,
+                )
+                if item.guard_verdict != recomputed_visual:
+                    raise ValueError("transition visual guard verdict differs")
+        if (
+            target is not None
+            and target != state.transitions[group[-1].transition_index].target
+        ):
             raise ValueError("transition evidence selected an undeclared target")
-        return str(target)
+        return str(target) if target is not None else None
+
+    def _validated_attended_target(
+        *,
+        graph_id: str,
+        state: Any,
+        scope: tuple[Any, ...],
+    ) -> tuple[bool, str | None, str | None]:
+        nonlocal attended_evidence_cursor, expected_evidence_decision_index
+        evidence = attended_transition_evidence or []
+        if attended_evidence_cursor >= len(evidence):
+            return False, None, None
+        item = evidence[attended_evidence_cursor]
+        if (
+            item.graph_id != graph_id
+            or item.state_id != state.id
+            or tuple(item.program_scope) != scope
+        ):
+            return False, None, None
+        if item.decision_index != expected_evidence_decision_index:
+            raise ValueError("attended transition evidence sequence is not contiguous")
+        if item.governed_runtime_inputs_digest != governed_runtime_inputs_digest:
+            raise ValueError("attended transition input binding differs")
+        payload = _verified_inventory_bytes(
+            item.receipt_inventory_ref,
+            item.receipt_sha256,
+        )
+        from openadapt_flow.runtime.durable.attended import (
+            AttendedActionRefused,
+            AttendedActionStore,
+        )
+        from openadapt_flow.runtime.durable.program_checkpoint import (
+            GraphFrame,
+            ProgramTransitionReceipt,
+            control_frames_hash,
+        )
+
+        if transition_evidence_root is None:
+            raise ValueError("attended transition evidence has no local evidence root")
+        try:
+            parsed = ProgramTransitionReceipt.model_validate_json(payload)
+            authenticated = AttendedActionStore(
+                transition_evidence_root
+            ).read_program_receipt(item.receipt_pause_id)
+        except (ValueError, AttendedActionRefused) as exc:
+            raise ValueError("attended transition receipt does not verify") from exc
+        if (
+            authenticated != parsed
+            or parsed.pause_id != item.receipt_pause_id
+            or parsed.source_graph_id != graph_id
+            or parsed.source_state_id != state.id
+            or parsed.target_state_id != item.target_state_id
+            or parsed.action != item.action
+        ):
+            raise ValueError("attended transition receipt binding differs")
+        control_payload = _verified_inventory_bytes(
+            item.control_frames_inventory_ref,
+            item.control_frames_sha256,
+        )
+        try:
+            control_frames = [
+                GraphFrame.model_validate(frame)
+                for frame in json.loads(control_payload)
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("attended transition control frames are invalid") from exc
+        if (
+            not control_frames
+            or control_frames_hash(control_frames) != parsed.control_frames_hash
+            or control_frames[-1].graph_id != graph_id
+            or control_frames[-1].state_id != state.id
+        ):
+            raise ValueError("attended transition control-frame binding differs")
+        retained_scope = tuple(
+            ProgramExecutionScopeFrame(
+                graph_id=frame.graph_id,
+                loop_state_id=(
+                    frame.loop.loop_state_id if frame.loop is not None else None
+                ),
+                relation=frame.loop.relation if frame.loop is not None else None,
+                row_index=frame.loop.row_index if frame.loop is not None else None,
+            )
+            for frame in control_frames
+        )
+        if retained_scope != scope:
+            raise ValueError("attended transition program scope differs")
+        targets = [str(transition.target) for transition in state.transitions]
+        if item.target_state_id is None:
+            if targets:
+                raise ValueError("attended transition omitted a declared successor")
+        elif item.target_state_id not in targets:
+            raise ValueError("attended transition selected an undeclared successor")
+        attended_evidence_cursor += 1
+        expected_evidence_decision_index += 1
+        return True, item.target_state_id, item.action
+
+    def _expected_non_action_exception_kind(
+        state: Any,
+        *,
+        branch_evaluated: bool,
+        branch_target: str | None,
+    ) -> str | None:
+        """Recompute the exact non-action failure that runtime can handle."""
+
+        if (
+            state.kind is StateKind.BRANCH
+            and branch_evaluated
+            and branch_target is None
+        ):
+            return "branch_without_transition"
+        if state.kind is StateKind.SUBFLOW_CALL and (
+            state.subflow is None or state.subflow not in graphs
+        ):
+            return "missing_subflow"
+        if state.kind is StateKind.LOOP and state.loop is not None:
+            if state.loop.body not in graphs:
+                return "missing_loop_body"
+            rows = _rows(state.loop.relation)
+            if rows is not None and len(rows) > state.loop.max_iterations:
+                return "loop_bound_exceeded"
+        return None
+
+    def _validated_exception_target(
+        *,
+        graph_id: str,
+        state: Any,
+        scope: tuple[Any, ...],
+        expected_kind: str,
+    ) -> str:
+        """Authenticate one recomputable non-action exception edge."""
+
+        nonlocal exception_evidence_cursor, expected_evidence_decision_index
+        evidence = exception_evidence or []
+        if exception_evidence_cursor >= len(evidence):
+            raise ValueError("program exception edge lacks typed evidence")
+        item = evidence[exception_evidence_cursor]
+        if (
+            item.graph_id != graph_id
+            or item.state_id != state.id
+            or tuple(item.program_scope) != scope
+            or item.decision_index != expected_evidence_decision_index
+            or item.target_state_id != state.on_exception
+            or item.failure_kind != expected_kind
+            or item.governed_runtime_inputs_digest != governed_runtime_inputs_digest
+        ):
+            raise ValueError("program exception evidence binding differs")
+        exception_evidence_cursor += 1
+        expected_evidence_decision_index += 1
+        return str(item.target_state_id)
 
     def _selected_transition_target(
         state: Any,
@@ -608,21 +806,24 @@ def _program_action_trace(
         *,
         graph_id: str,
         scope: tuple[Any, ...],
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         """Apply the runtime's ordered, first-matching transition semantics."""
 
+        attended, attended_target, attended_action = _validated_attended_target(
+            graph_id=graph_id,
+            state=state,
+            scope=scope,
+        )
+        if attended:
+            return attended_target, attended_action
         if not state.transitions:
-            return None
+            return None, None
         evidence_target = _validated_evidence_target(
             graph_id=graph_id,
             state=state,
             scope=scope,
             current_params=current_params,
         )
-        if transition_evidence and evidence_target is None:
-            raise ValueError(
-                "ordered transition evidence omits a preceding program decision"
-            )
         for transition in state.transitions:
             if transition.guard is None:
                 target = str(transition.target)
@@ -630,22 +831,22 @@ def _program_action_trace(
                     raise ValueError(
                         "retained transition evidence chose another target"
                     )
-                return target
+                return target, None
             matched = _reported_guard_value(transition.guard, current_params)
             if matched is None:
                 if evidence_target is None:
-                    raise ValueError(
-                        "program trace lacks retained evidence for a visual guard"
-                    )
-                return evidence_target
+                    continue
+                return evidence_target, None
             if matched:
                 target = str(transition.target)
                 if evidence_target is not None and target != evidence_target:
                     raise ValueError(
                         "retained transition evidence chose another target"
                     )
-                return target
-        raise ValueError("program trace continues after no transition matched")
+                return target, None
+        if evidence_target is not None:
+            raise ValueError("transition evidence selected a guard that did not match")
+        return None, None
 
     def _next_state(
         state: Any,
@@ -658,42 +859,126 @@ def _program_action_trace(
     ) -> str | None:
         nonlocal cursor, halted_at_requested_action
         if not state.transitions and state.on_exception is None:
+            attended, attended_target, attended_action = _validated_attended_target(
+                graph_id=graph_id,
+                state=state,
+                scope=scope,
+            )
+            if attended:
+                if attended_target is not None or occurrence_index is None:
+                    raise ValueError("attended fall-off transition is invalid")
+                previous = actions[occurrence_index]
+                actions[occurrence_index] = _ProgramActionOccurrence(
+                    state_id=previous.state_id,
+                    step=previous.step,
+                    program_scope=previous.program_scope,
+                    attended_action=attended_action,
+                )
             return None
         if cursor >= len(visited_states):
             raise ValueError("program trace ended before a declared successor")
         candidate = visited_states[cursor]
+        branch_evaluated = state.kind is StateKind.BRANCH
+        branch_target: str | None = None
+        branch_attended_action: str | None = None
+        if branch_evaluated:
+            branch_target, branch_attended_action = _selected_transition_target(
+                state,
+                current_params,
+                graph_id=graph_id,
+                scope=scope,
+            )
+        expected_non_action_exception = _expected_non_action_exception_kind(
+            state,
+            branch_evaluated=branch_evaluated,
+            branch_target=branch_target,
+        )
+        if expected_non_action_exception is not None:
+            if state.on_exception is None:
+                raise ValueError("unhandled non-action failure cannot continue")
+            exception_target = _validated_exception_target(
+                graph_id=graph_id,
+                state=state,
+                scope=scope,
+                expected_kind=expected_non_action_exception,
+            )
+            if candidate != exception_target:
+                raise ValueError("program trace bypassed its exception handler")
+            return exception_target
         normal_targets = {transition.target for transition in state.transitions}
+        explicit_exception_edge: bool | None = None
+        if occurrence_index is not None and reported_results is not None:
+            if occurrence_index >= len(reported_results):
+                raise ValueError("program trace lacks its action result")
+            reported = reported_results[occurrence_index]
+            if reported.exception_handled:
+                if reported.skipped or reported.ok:
+                    raise ValueError("program exception result has an invalid shape")
+                explicit_exception_edge = True
+            else:
+                explicit_exception_edge = False
         if (
             state.on_exception is not None
             and candidate == state.on_exception
             and candidate not in normal_targets
         ):
-            if occurrence_index is not None:
+            if occurrence_index is None or explicit_exception_edge is not True:
+                raise ValueError("program exception edge lacks an exact action result")
+            previous = actions[occurrence_index]
+            actions[occurrence_index] = _ProgramActionOccurrence(
+                state_id=previous.state_id,
+                step=previous.step,
+                program_scope=previous.program_scope,
+                exception_edge=True,
+            )
+            return candidate
+        if (
+            state.on_exception is not None
+            and candidate == state.on_exception
+            and candidate in normal_targets
+            and explicit_exception_edge is True
+        ):
+            if occurrence_index is None:
+                raise ValueError("non-action exception edge is ambiguous")
+            previous = actions[occurrence_index]
+            actions[occurrence_index] = _ProgramActionOccurrence(
+                state_id=previous.state_id,
+                step=previous.step,
+                program_scope=previous.program_scope,
+                exception_edge=True,
+            )
+            return candidate
+        if branch_evaluated:
+            selected_target, attended_action = branch_target, branch_attended_action
+        else:
+            selected_target, attended_action = _selected_transition_target(
+                state,
+                current_params,
+                graph_id=graph_id,
+                scope=scope,
+            )
+        if candidate == selected_target:
+            if explicit_exception_edge is True:
+                raise ValueError("exception result entered a normal edge")
+            if occurrence_index is not None and attended_action is not None:
                 previous = actions[occurrence_index]
                 actions[occurrence_index] = _ProgramActionOccurrence(
                     state_id=previous.state_id,
                     step=previous.step,
                     program_scope=previous.program_scope,
-                    exception_edge=True,
+                    attended_action=attended_action,
                 )
-            return candidate
-        selected_target = _selected_transition_target(
-            state,
-            current_params,
-            graph_id=graph_id,
-            scope=scope,
-        )
-        if candidate == selected_target:
             return candidate
         if state.on_exception is not None and candidate == state.on_exception:
-            if occurrence_index is not None:
-                previous = actions[occurrence_index]
-                actions[occurrence_index] = _ProgramActionOccurrence(
-                    state_id=previous.state_id,
-                    step=previous.step,
-                    program_scope=previous.program_scope,
-                    exception_edge=True,
-                )
+            if occurrence_index is None or explicit_exception_edge is not True:
+                raise ValueError("program exception edge lacks an exact action result")
+            previous = actions[occurrence_index]
+            actions[occurrence_index] = _ProgramActionOccurrence(
+                state_id=previous.state_id,
+                step=previous.step,
+                program_scope=previous.program_scope,
+                exception_edge=True,
+            )
             return candidate
         raise ValueError("program trace crossed an undeclared transition")
 
@@ -742,38 +1027,38 @@ def _program_action_trace(
                     raise ValueError("successful trace reached a non-success terminal")
                 return
             if state.kind is StateKind.SUBFLOW_CALL:
-                if state.subflow is None or state.subflow not in graphs:
-                    raise ValueError("subflow call target is missing")
-                _consume_graph(
-                    state.subflow,
-                    (*scope, ProgramExecutionScopeFrame(graph_id=state.subflow)),
-                    depth=depth + 1,
-                    current_params=current_params,
-                )
+                if state.subflow is not None and state.subflow in graphs:
+                    _consume_graph(
+                        state.subflow,
+                        (*scope, ProgramExecutionScopeFrame(graph_id=state.subflow)),
+                        depth=depth + 1,
+                        current_params=current_params,
+                    )
             elif state.kind is StateKind.LOOP:
-                if state.loop is None or state.loop.body not in graphs:
+                if state.loop is None:
                     raise ValueError("loop body is missing")
                 rows = _rows(state.loop.relation)
-                if rows is None or len(rows) > state.loop.max_iterations:
+                if rows is None:
                     raise ValueError(
                         "loop worklist is unavailable or outside its bound"
                     )
-                for row_index in range(len(rows)):
-                    iteration_params = {**current_params, **rows[row_index]}
-                    _consume_graph(
-                        state.loop.body,
-                        (
-                            *scope,
-                            ProgramExecutionScopeFrame(
-                                graph_id=state.loop.body,
-                                loop_state_id=state.id,
-                                relation=state.loop.relation,
-                                row_index=row_index,
+                if state.loop.body in graphs and len(rows) <= state.loop.max_iterations:
+                    for row_index in range(len(rows)):
+                        iteration_params = {**current_params, **rows[row_index]}
+                        _consume_graph(
+                            state.loop.body,
+                            (
+                                *scope,
+                                ProgramExecutionScopeFrame(
+                                    graph_id=state.loop.body,
+                                    loop_state_id=state.id,
+                                    relation=state.loop.relation,
+                                    row_index=row_index,
+                                ),
                             ),
-                        ),
-                        depth=depth + 1,
-                        current_params=iteration_params,
-                    )
+                            depth=depth + 1,
+                            current_params=iteration_params,
+                        )
             state_id = _next_state(
                 state,
                 graph,
@@ -796,6 +1081,10 @@ def _program_action_trace(
         return None
     if evidence_cursor != len(transition_evidence or []):
         return None
+    if exception_evidence_cursor != len(exception_evidence or []):
+        return None
+    if attended_evidence_cursor != len(attended_transition_evidence or []):
+        return None
     if cursor != len(visited_states) or (
         halted_at_step_id is not None and not halted_at_requested_action
     ):
@@ -810,6 +1099,7 @@ def classify_execution_outcome(
     *,
     runtime_worklists: Mapping[str, list[dict[str, str]]] | None = None,
     transition_evidence_root: Path | None = None,
+    transition_predicate_vision: Any | None = None,
     _qualification_fault_target_step_id: str | None = None,
 ) -> ExecutionOutcome:
     """Classify a completed report without changing legacy ``success``.
@@ -961,6 +1251,12 @@ def classify_execution_outcome(
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if any(result.program_scope for result in report.results):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if report.program_exception_evidence:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if report.attended_program_transition_evidence:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if any(result.exception_handled for result in report.results):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
         if fault_prefix_review:
             target_indexes = [
                 index
@@ -994,9 +1290,13 @@ def classify_execution_outcome(
             runtime_params=report.params,
             runtime_worklists=runtime_worklists,
             transition_evidence=report.program_transition_evidence,
+            exception_evidence=report.program_exception_evidence,
+            attended_transition_evidence=(report.attended_program_transition_evidence),
             transition_evidence_root=transition_evidence_root,
+            transition_predicate_vision=transition_predicate_vision,
             governed_runtime_inputs_digest=report.governed_runtime_inputs_digest,
             halted_at_step_id=_qualification_fault_target_step_id,
+            reported_results=report.results,
         )
         if expected_action_trace is None:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
@@ -1016,8 +1316,25 @@ def classify_execution_outcome(
             if (
                 result.step_id != occurrence.step.id
                 or tuple(result.program_scope) != occurrence.program_scope
-                or occurrence.exception_edge
-                != bool(result.exception_handled and not result.ok)
+                or (
+                    occurrence.exception_edge
+                    and (result.skipped or result.ok or not result.exception_handled)
+                )
+                or (not occurrence.exception_edge and result.exception_handled)
+                or (
+                    occurrence.attended_action == "skip"
+                    and (
+                        not result.skipped or result.actuation != "human_attended_skip"
+                    )
+                )
+                or (
+                    occurrence.attended_action == "continue"
+                    and (result.skipped or result.actuation != "human_attended")
+                )
+                or (
+                    occurrence.attended_action is None
+                    and result.actuation in HUMAN_ATTENDED_ACTUATIONS
+                )
             ):
                 return ExecutionOutcome.COMPLETED_UNVERIFIED
             paired_results.append((result, occurrence.step))
@@ -1066,7 +1383,9 @@ def classify_execution_outcome(
     for result, step in paired_results:
         if result.skipped or result.exception_handled:
             if (
-                result.delivery_attempted is not False
+                (result.skipped and not result.ok)
+                or (result.exception_handled and (result.skipped or result.ok))
+                or result.delivery_attempted is not False
                 or result.delivery_receipt is not None
                 or result.delivery_uncertainty is not None
                 or result.effect_verified is not None
@@ -1267,6 +1586,7 @@ def stamp_execution_outcome(
     *,
     runtime_worklists: Mapping[str, list[dict[str, str]]] | None = None,
     transition_evidence_root: Path | None = None,
+    transition_predicate_vision: Any | None = None,
 ) -> ExecutionOutcome:
     """Write the profile and precise outcome into ``report``."""
 
@@ -1283,6 +1603,7 @@ def stamp_execution_outcome(
         resolved,
         runtime_worklists=runtime_worklists,
         transition_evidence_root=transition_evidence_root,
+        transition_predicate_vision=transition_predicate_vision,
     )
     report.execution_profile = resolved.value
     report.execution_outcome = outcome.value

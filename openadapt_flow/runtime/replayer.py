@@ -83,8 +83,10 @@ from openadapt_flow.ir import (
     PostconditionKind,
     Predicate,
     PredicateKind,
+    ProgramExceptionEvidence,
     ProgramExecutionScopeFrame,
     ProgramGraph,
+    ProgramGuardAssetEvidence,
     ProgramTransitionEvidence,
     Region,
     Resolution,
@@ -140,6 +142,12 @@ from openadapt_flow.runtime.effects import (
     EffectState,
     EffectVerifier,
     reconcile_or_escalate,
+)
+from openadapt_flow.runtime.program_predicates import (
+    PROGRAM_PREDICATE_EVALUATOR_SHA256,
+    evaluate_program_predicate,
+    predicate_template_refs,
+    predicate_uses_frame,
 )
 from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 from openadapt_flow.verification import (
@@ -1124,6 +1132,7 @@ class Replayer:
             report.execution_profile,
             runtime_worklists=self._outcome_worklists,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=self.vision,
         )
 
     def _begin_control_overlay(self, profile: Optional[str]) -> None:
@@ -1569,6 +1578,17 @@ class Replayer:
                 prior_checkpoints = store.program_checkpoints()
                 prior_history = self._program_checkpoint_history(prior_checkpoints)
                 if prior_history is not None:
+                    for prior_checkpoint in prior_checkpoints:
+                        report.program_transition_evidence.extend(
+                            prior_checkpoint.program_transition_evidence_delta
+                        )
+                        report.program_exception_evidence.extend(
+                            prior_checkpoint.program_exception_evidence_delta
+                        )
+                        if prior_checkpoint.attended_transition_evidence is not None:
+                            report.attended_program_transition_evidence.append(
+                                prior_checkpoint.attended_transition_evidence
+                            )
                     resumed_results = self._resumed_program_results(
                         prior_checkpoints, workflow
                     )
@@ -1584,6 +1604,12 @@ class Replayer:
                         ),
                     )
             self._program_checkpoint_history_len = len(report.visited_states)
+            self._program_transition_evidence_checkpoint_len = len(
+                report.program_transition_evidence
+            )
+            self._program_exception_evidence_checkpoint_len = len(
+                report.program_exception_evidence
+            )
         else:
             self._program_seq = 0
             self._completed_effect_keys = []
@@ -1591,6 +1617,8 @@ class Replayer:
             self._completed_unverified_effect_keys = []
             self._bundle_version = ""
             self._program_checkpoint_history_len = 0
+            self._program_transition_evidence_checkpoint_len = 0
+            self._program_exception_evidence_checkpoint_len = 0
         try:
             if resume_checkpoint is not None:
                 # RESTORE the interpreter state and continue from the pause.
@@ -1808,12 +1836,15 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 report=report,
                 run_dir=run_dir,
+                allow_unmatched=True,
             )
             if nxt is None:
                 return self._on_state_failure(
                     state,
                     f"branch state '{state.id}' has no transitions to follow "
                     "— run aborted",
+                    failure_kind="branch_without_transition",
+                    report=report,
                 )
             return nxt
 
@@ -1837,6 +1868,8 @@ class Replayer:
                     state,
                     f"subflow_call state '{state.id}' names undefined subflow "
                     f"'{state.subflow}' — run aborted",
+                    failure_kind="missing_subflow",
+                    report=report,
                 )
             self._walk_graph(
                 sub,
@@ -1972,6 +2005,8 @@ class Replayer:
                 state,
                 f"loop state '{state.id}' body subflow '{loop.body}' is not "
                 "defined — run aborted",
+                failure_kind="missing_loop_body",
+                report=report,
             )
         rows = self._resolve_worklist(state, loop, workflow, worklists)
         if len(rows) > loop.max_iterations:
@@ -1979,6 +2014,8 @@ class Replayer:
                 state,
                 f"loop state '{state.id}' worklist has {len(rows)} rows, "
                 f"exceeding max_iterations={loop.max_iterations} — run aborted",
+                failure_kind="loop_bound_exceeded",
+                report=report,
             )
         for i, row in enumerate(rows):
             iter_params = {**params, **row}
@@ -2008,12 +2045,60 @@ class Replayer:
             run_dir=run_dir,
         )
 
-    def _on_state_failure(self, state: State, reason: str) -> str:
+    def _on_state_failure(
+        self,
+        state: State,
+        reason: str,
+        *,
+        failure_kind: Literal[
+            "branch_without_transition",
+            "missing_subflow",
+            "missing_loop_body",
+            "loop_bound_exceeded",
+        ],
+        report: RunReport,
+    ) -> str:
         """A non-action state hit an unrecoverable condition: route to its
         ``on_exception`` handler if it has one, else HALT the run."""
         if state.on_exception is not None:
+            scope = self._program_execution_scope()
+            if not scope:
+                raise _ProgramHalt(
+                    "halt",
+                    "program exception evidence has no execution scope — run aborted",
+                    safety=True,
+                )
+            report.program_exception_evidence.append(
+                ProgramExceptionEvidence(
+                    decision_index=self._next_program_decision_index(report),
+                    graph_id=scope[-1].graph_id,
+                    state_id=state.id,
+                    program_scope=scope,
+                    target_state_id=state.on_exception,
+                    failure_kind=failure_kind,
+                    governed_runtime_inputs_digest=(
+                        report.governed_runtime_inputs_digest
+                    ),
+                )
+            )
             return state.on_exception
         raise _ProgramHalt("halt", reason)
+
+    @staticmethod
+    def _next_program_decision_index(report: RunReport) -> int:
+        """Return the next index shared by all typed program decisions."""
+
+        decision_indexes = [
+            evidence.decision_index for evidence in report.program_transition_evidence
+        ]
+        decision_indexes.extend(
+            evidence.decision_index for evidence in report.program_exception_evidence
+        )
+        decision_indexes.extend(
+            evidence.decision_index
+            for evidence in report.attended_program_transition_evidence
+        )
+        return max(decision_indexes, default=-1) + 1
 
     def _resolve_worklist(
         self,
@@ -2046,6 +2131,7 @@ class Replayer:
         bundle_dir: Path,
         report: Optional[RunReport] = None,
         run_dir: Optional[Path] = None,
+        allow_unmatched: bool = False,
     ) -> Optional[str]:
         """Pick this state's next state id (RFC §2.2): evaluate ``transitions``
         IN ORDER, first whose guard holds wins; ``None`` guard is unconditional.
@@ -2066,6 +2152,7 @@ class Replayer:
                 evaluations=[(0, True)],
                 selected_target=target,
                 frame=None,
+                bundle_dir=bundle_dir,
                 report=report,
                 run_dir=run_dir,
             )
@@ -2084,10 +2171,22 @@ class Replayer:
                     evaluations=evaluations,
                     selected_target=t.target,
                     frame=frame,
+                    bundle_dir=bundle_dir,
                     report=report,
                     run_dir=run_dir,
                 )
                 return t.target
+        self._retain_program_transition_evidence(
+            state=state,
+            evaluations=evaluations,
+            selected_target=None,
+            frame=frame,
+            bundle_dir=bundle_dir,
+            report=report,
+            run_dir=run_dir,
+        )
+        if allow_unmatched:
+            return None
         raise _ProgramHalt(
             "halt",
             f"no outgoing transition matched at state '{state.id}' on the "
@@ -2104,26 +2203,16 @@ class Replayer:
     def _program_guard_uses_frame(predicate: Optional[Predicate]) -> bool:
         """Return whether a guard contract reads the observed application frame."""
 
-        if predicate is None:
-            return False
-        if predicate.kind in {
-            PredicateKind.ANCHOR_RESOLVES,
-            PredicateKind.TEXT_PRESENT,
-            PredicateKind.TEXT_ABSENT,
-        }:
-            return True
-        return any(
-            Replayer._program_guard_uses_frame(operand)
-            for operand in predicate.operands
-        )
+        return predicate_uses_frame(predicate)
 
     def _retain_program_transition_evidence(
         self,
         *,
         state: State,
         evaluations: list[tuple[int, bool]],
-        selected_target: str,
+        selected_target: Optional[str],
         frame: Optional[bytes],
+        bundle_dir: Path,
         report: Optional[RunReport],
         run_dir: Optional[Path],
     ) -> None:
@@ -2138,18 +2227,10 @@ class Replayer:
                 "program transition evidence has no execution scope — run aborted",
                 safety=True,
             )
-        decision_index = (
-            max(
-                (
-                    evidence.decision_index
-                    for evidence in report.program_transition_evidence
-                ),
-                default=-1,
-            )
-            + 1
-        )
+        decision_index = self._next_program_decision_index(report)
         frame_sha256: Optional[str] = None
         frame_ref: Optional[str] = None
+        viewport: Optional[tuple[int, int]] = None
         if any(
             self._program_guard_uses_frame(state.transitions[index].guard)
             for index, _verdict in evaluations
@@ -2162,6 +2243,10 @@ class Replayer:
                 )
             frame_sha256 = hashlib.sha256(frame).hexdigest()
             frame_ref = f"private/program-transitions/{frame_sha256}.png"
+            viewport = (
+                int(self.backend.viewport[0]),
+                int(self.backend.viewport[1]),
+            )
             root = Path(run_dir).resolve()
             private_dir = root / "private"
             inventory_dir = private_dir / "program-transitions"
@@ -2190,7 +2275,7 @@ class Replayer:
                     safety=True,
                 ) from exc
 
-        selected_index = evaluations[-1][0]
+        selected_index = evaluations[-1][0] if selected_target is not None else None
         for transition_index, verdict in evaluations:
             transition = state.transitions[transition_index]
             uses_frame = self._program_guard_uses_frame(transition.guard)
@@ -2201,6 +2286,57 @@ class Replayer:
                 evidence_kind = "frame"
             else:
                 evidence_kind = "parameters"
+            assets: list[ProgramGuardAssetEvidence] = []
+            if uses_frame and transition.guard is not None:
+                root = Path(run_dir).resolve()
+                private_dir = root / "private"
+                asset_dir = private_dir / "program-transition-assets"
+                for source_ref in predicate_template_refs(transition.guard):
+                    payload = self._asset_bytes(bundle_dir, source_ref)
+                    if payload is None:
+                        raise _ProgramHalt(
+                            "halt",
+                            "program transition guard asset is unavailable — "
+                            "run aborted",
+                            safety=True,
+                        )
+                    digest = hashlib.sha256(payload).hexdigest()
+                    inventory_ref = f"private/program-transition-assets/{digest}.bin"
+                    try:
+                        if private_dir.is_symlink() or asset_dir.is_symlink():
+                            raise OSError(
+                                "transition asset inventory path is a symlink"
+                            )
+                        asset_dir.mkdir(parents=True, exist_ok=True)
+                        if (
+                            private_dir.is_symlink()
+                            or asset_dir.is_symlink()
+                            or not asset_dir.resolve().is_relative_to(root)
+                        ):
+                            raise OSError("transition asset inventory leaves run root")
+                        path = root / inventory_ref
+                        if path.is_symlink():
+                            raise OSError("transition asset path is a symlink")
+                        existing = path.read_bytes() if path.exists() else None
+                        if existing is not None and existing != payload:
+                            raise OSError(
+                                "transition asset digest path has other bytes"
+                            )
+                        path.write_bytes(payload)
+                    except OSError as exc:
+                        raise _ProgramHalt(
+                            "halt",
+                            "program transition guard asset could not be retained "
+                            f"exactly ({type(exc).__name__}) — run aborted",
+                            safety=True,
+                        ) from exc
+                    assets.append(
+                        ProgramGuardAssetEvidence(
+                            source_ref=source_ref,
+                            sha256=digest,
+                            inventory_ref=inventory_ref,
+                        )
+                    )
             report.program_transition_evidence.append(
                 ProgramTransitionEvidence(
                     decision_index=decision_index,
@@ -2210,11 +2346,19 @@ class Replayer:
                     transition_index=transition_index,
                     guard_contract_sha256=predicate_contract_sha256(transition.guard),
                     guard_verdict=verdict,
-                    selected=transition_index == selected_index,
+                    selected=(
+                        selected_index is not None
+                        and transition_index == selected_index
+                    ),
                     selected_target=selected_target,
                     guard_evidence_kind=evidence_kind,
                     observed_frame_sha256=frame_sha256 if uses_frame else None,
                     observed_frame_inventory_ref=frame_ref if uses_frame else None,
+                    observed_viewport=viewport if uses_frame else None,
+                    guard_evaluator_contract_sha256=(
+                        PROGRAM_PREDICATE_EVALUATOR_SHA256 if uses_frame else None
+                    ),
+                    guard_assets=assets,
                     governed_runtime_inputs_digest=(
                         report.governed_runtime_inputs_digest
                     ),
@@ -2535,10 +2679,22 @@ class Replayer:
             expected_texts=expected,
             transition_history_hash=_history_hash(report.visited_states),
             visited_states_delta=visited_states_delta,
+            program_transition_evidence_delta=report.program_transition_evidence[
+                self._program_transition_evidence_checkpoint_len :
+            ],
+            program_exception_evidence_delta=report.program_exception_evidence[
+                self._program_exception_evidence_checkpoint_len :
+            ],
             bundle_version=self._bundle_version,
         )
         durable.record_program_checkpoint(checkpoint)
         self._program_checkpoint_history_len = len(report.visited_states)
+        self._program_transition_evidence_checkpoint_len = len(
+            report.program_transition_evidence
+        )
+        self._program_exception_evidence_checkpoint_len = len(
+            report.program_exception_evidence
+        )
 
     def _record_program_pause(
         self, halt: "_ProgramHalt", report: RunReport, *, workflow: Workflow
@@ -2574,6 +2730,12 @@ class Replayer:
             program_history_hash=halt.program_history_hash,
             program_history_delta=report.visited_states[
                 self._program_checkpoint_history_len :
+            ],
+            program_transition_evidence_delta=report.program_transition_evidence[
+                self._program_transition_evidence_checkpoint_len :
+            ],
+            program_exception_evidence_delta=report.program_exception_evidence[
+                self._program_exception_evidence_checkpoint_len :
             ],
         )
 
@@ -7215,66 +7377,18 @@ class Replayer:
         ``param_equals`` is a string compare, and ``and`` / ``or`` / ``not``
         compose. An unknown kind fails safe (does not hold).
         """
-        kind = pred.kind
-        if kind is PredicateKind.ANCHOR_RESOLVES:
-            if pred.anchor is None:
-                return False
-            template_png = self._asset_bytes(
+        return evaluate_program_predicate(
+            pred,
+            frame_png,
+            params,
+            vision=self.vision,
+            viewport=self.backend.viewport,
+            asset_loader=lambda rel: self._asset_bytes(
                 bundle_dir,
-                pred.anchor.template,
+                rel,
                 workflow=workflow,
-            )
-            return (
-                resolve(
-                    pred.anchor,
-                    frame_png,
-                    self.vision,
-                    None,  # NEVER ground inside a predicate probe: stay model-free
-                    pred.intent or pred.anchor.ocr_text or "",
-                    template_png=template_png,
-                    viewport=self.backend.viewport,
-                )
-                is not None
-            )
-        if kind is PredicateKind.TEXT_PRESENT:
-            return bool(pred.text) and self.vision.text_present(frame_png, pred.text)
-        if kind is PredicateKind.TEXT_ABSENT:
-            return not (pred.text and self.vision.text_present(frame_png, pred.text))
-        if kind is PredicateKind.PARAM_EQUALS:
-            return pred.param is not None and str(params.get(pred.param)) == str(
-                pred.value
-            )
-        if kind is PredicateKind.AND:
-            return all(
-                self._predicate_holds(
-                    op,
-                    frame_png,
-                    bundle_dir,
-                    params,
-                    workflow=workflow,
-                )
-                for op in pred.operands
-            )
-        if kind is PredicateKind.OR:
-            return any(
-                self._predicate_holds(
-                    op,
-                    frame_png,
-                    bundle_dir,
-                    params,
-                    workflow=workflow,
-                )
-                for op in pred.operands
-            )
-        if kind is PredicateKind.NOT:
-            return bool(pred.operands) and not self._predicate_holds(
-                pred.operands[0],
-                frame_png,
-                bundle_dir,
-                params,
-                workflow=workflow,
-            )
-        return False
+            ),
+        )
 
     @staticmethod
     def _describe_predicate(pred: Predicate) -> str:

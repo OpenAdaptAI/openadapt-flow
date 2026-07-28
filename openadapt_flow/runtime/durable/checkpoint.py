@@ -49,6 +49,8 @@ from openadapt_flow.ir import (
     EffectVerificationEvidence,
     HealEvent,
     IdentityCheck,
+    ProgramExceptionEvidence,
+    ProgramTransitionEvidence,
     Resolution,
 )
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
@@ -228,6 +230,13 @@ class PendingEscalation(BaseModel):
     #: Exact PHI-free trace suffix since the last verified program checkpoint.
     #: An attended completion copies this suffix into its new checkpoint.
     program_history_delta: list[str] = Field(default_factory=list)
+    #: Exact transition decisions since the last verified program checkpoint.
+    program_transition_evidence_delta: list[ProgramTransitionEvidence] = Field(
+        default_factory=list
+    )
+    program_exception_evidence_delta: list[ProgramExceptionEvidence] = Field(
+        default_factory=list
+    )
     #: Exact, PHI-free record that this step may already have actuated.  Resume
     #: must not re-enter it automatically: a human-completed verification
     #: checkpoint or a fresh explicit uncertain-retry authorization is needed.

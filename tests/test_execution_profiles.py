@@ -34,6 +34,7 @@ from openadapt_flow.ir import (
     PredicateKind,
     ProgramExecutionScopeFrame,
     ProgramGraph,
+    ProgramTransitionEvidence,
     Relation,
     Resolution,
     RunReport,
@@ -43,6 +44,7 @@ from openadapt_flow.ir import (
     StepResult,
     Transition,
     Workflow,
+    predicate_contract_sha256,
 )
 from openadapt_flow.qualification import (
     EffectVerificationPolicy,
@@ -88,6 +90,39 @@ def _bind_report_to_workflow(report: RunReport, workflow: Workflow) -> RunReport
     run_id = report.governed_authorization_id or "profile-test-run"
     report.run_id_sha256 = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
     return report
+
+
+def _transition_evidence(
+    *,
+    decision_index: int,
+    state: State,
+    verdicts: list[bool],
+    target: str,
+    inputs_digest: str,
+) -> list[ProgramTransitionEvidence]:
+    scope = [ProgramExecutionScopeFrame(graph_id="__program__")]
+    return [
+        ProgramTransitionEvidence(
+            decision_index=decision_index,
+            graph_id="__program__",
+            state_id=state.id,
+            program_scope=scope,
+            transition_index=index,
+            guard_contract_sha256=predicate_contract_sha256(
+                state.transitions[index].guard
+            ),
+            guard_verdict=verdict,
+            selected=index == len(verdicts) - 1,
+            selected_target=target,
+            guard_evidence_kind=(
+                "unconditional"
+                if state.transitions[index].guard is None
+                else "parameters"
+            ),
+            governed_runtime_inputs_digest=inputs_digest,
+        )
+        for index, verdict in enumerate(verdicts)
+    ]
 
 
 class _TieredVerifier:
@@ -943,6 +978,13 @@ def test_program_outcome_requires_exact_ordered_action_trace():
         ],
     )
     _bind_report_to_workflow(report, workflow)
+    report.program_transition_evidence = _transition_evidence(
+        decision_index=0,
+        state=workflow.program.states["write"],
+        verdicts=[True],
+        target="done",
+        inputs_digest=report.governed_runtime_inputs_digest or "",
+    )
     assert (
         classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.VERIFIED
@@ -1022,6 +1064,13 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
         ],
     )
     _bind_report_to_workflow(report, workflow)
+    report.program_transition_evidence = _transition_evidence(
+        decision_index=0,
+        state=workflow.program.states["prepare"],
+        verdicts=[True],
+        target="submit",
+        inputs_digest=report.governed_runtime_inputs_digest or "",
+    )
 
     assert (
         classify_execution_outcome(
@@ -1109,7 +1158,28 @@ def test_program_outcome_recomputes_ordered_parameter_transitions():
                 )
             ],
         )
-        return _bind_report_to_workflow(report, workflow)
+        _bind_report_to_workflow(report, workflow)
+        pick = workflow.program.states["pick"]
+        first_guard_matches = bool(
+            pick.transitions[0].guard is not None and route == "first"
+        )
+        report.program_transition_evidence = [
+            *_transition_evidence(
+                decision_index=0,
+                state=pick,
+                verdicts=[True] if first_guard_matches else [False, True],
+                target="first" if first_guard_matches else "second",
+                inputs_digest=report.governed_runtime_inputs_digest or "",
+            ),
+            *_transition_evidence(
+                decision_index=1,
+                state=workflow.program.states["second"],
+                verdicts=[True],
+                target="done",
+                inputs_digest=report.governed_runtime_inputs_digest or "",
+            ),
+        ]
+        return report
 
     two_unconditional = _workflow(
         [Transition(target="first"), Transition(target="second")]
@@ -1173,6 +1243,289 @@ def test_program_outcome_recomputes_ordered_parameter_transitions():
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
+
+
+def test_program_edge_kind_disambiguates_normal_and_exception_paths(tmp_path):
+    def workflow(
+        *,
+        failing_source: bool,
+        branch_source: bool = False,
+        missing_subflow: bool = False,
+    ) -> Workflow:
+        source = (
+            State(
+                id="source",
+                kind=(StateKind.BRANCH if missing_subflow else StateKind.SUBFLOW_CALL),
+                subflow=None if missing_subflow else "empty",
+                transitions=(
+                    [
+                        Transition(
+                            guard=Predicate(
+                                kind=PredicateKind.PARAM_EQUALS,
+                                param="route",
+                                value="normal",
+                            ),
+                            target="normal",
+                        )
+                    ]
+                    if missing_subflow
+                    else [Transition(target="normal")]
+                ),
+                on_exception="handler",
+            )
+            if branch_source
+            else State(
+                id="source",
+                kind=StateKind.ACTION,
+                step=Step(
+                    id="source-step",
+                    intent="source",
+                    action=(ActionKind.CLICK if failing_source else ActionKind.KEY),
+                    key=None if failing_source else "S",
+                ),
+                transitions=[Transition(target="handler")],
+                on_exception="handler",
+            )
+        )
+        return Workflow(
+            name="edge-kind",
+            program=ProgramGraph(
+                entry="source",
+                states={
+                    "source": source,
+                    "normal": State(
+                        id="normal",
+                        kind=StateKind.ACTION,
+                        step=Step(
+                            id="normal-step",
+                            intent="normal",
+                            action=ActionKind.KEY,
+                            key="N",
+                        ),
+                        transitions=[Transition(target="done")],
+                    ),
+                    "handler": State(
+                        id="handler",
+                        kind=StateKind.ACTION,
+                        step=Step(
+                            id="handler-step",
+                            intent="handler",
+                            action=ActionKind.KEY,
+                            key="H",
+                        ),
+                        transitions=[Transition(target="done")],
+                    ),
+                    "done": State(
+                        id="done",
+                        kind=StateKind.TERMINAL,
+                        outcome="success",
+                    ),
+                },
+            ),
+            subflows=(
+                {
+                    "empty": ProgramGraph(
+                        entry="empty-done",
+                        states={
+                            "empty-done": State(
+                                id="empty-done",
+                                kind=StateKind.TERMINAL,
+                                outcome="success",
+                            )
+                        },
+                    )
+                }
+                if branch_source and not missing_subflow
+                else {}
+            ),
+        )
+
+    def governed_run(item: Workflow, root: Path) -> tuple[Workflow, RunReport, Path]:
+        bundle = root / "bundle"
+        run_dir = root / "run"
+        item.save(bundle)
+        item = Workflow.load(bundle)
+        assert item.manifest is not None
+        authorization = GovernedRunAuthorization(
+            bundle_content_digest=item.manifest.content_digest,
+            runtime_inputs_digest=runtime_inputs_digest(item, None, None),
+            admitted_policy_name="permissive",
+            execution_profile="standard",
+            minimum_effect_tier=int(VerificationTier.PERSISTED_STATE_REACQUISITION),
+            required_identity_step_ids=(),
+        )
+        report = Replayer(
+            FakeBackend(),
+            vision=_ReadyVision(),
+            governed_authorization=authorization,
+            durable=True,
+            require_settled=True,
+            poll_interval_s=0.0,
+        ).run(item, bundle_dir=bundle, run_dir=run_dir)
+        return item, report, run_dir
+
+    normal_workflow, normal, normal_root = governed_run(
+        workflow(failing_source=False), tmp_path / "normal"
+    )
+    assert normal.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert normal.results[0].exception_handled is False
+    assert (
+        classify_execution_outcome(
+            normal,
+            normal_workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=normal_root,
+            transition_predicate_vision=_ReadyVision(),
+        )
+        is ExecutionOutcome.VERIFIED
+    )
+
+    exception_workflow, exception, exception_root = governed_run(
+        workflow(failing_source=True), tmp_path / "exception"
+    )
+    assert exception.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert exception.results[0].ok is False
+    assert exception.results[0].exception_handled is True
+    assert exception.results[0].skipped is False
+    assert (
+        classify_execution_outcome(
+            exception,
+            exception_workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=exception_root,
+            transition_predicate_vision=_ReadyVision(),
+        )
+        is ExecutionOutcome.VERIFIED
+    )
+    invalid_exception_shape = exception.model_copy(deep=True)
+    invalid_exception_shape.results[0].ok = True
+    assert (
+        classify_execution_outcome(
+            invalid_exception_shape,
+            exception_workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=exception_root,
+            transition_predicate_vision=_ReadyVision(),
+        )
+        is not ExecutionOutcome.VERIFIED
+    )
+
+    # A non-action branch cannot silently route to on_exception when its exact
+    # unconditional transition selected a different state.
+    branch_workflow, branch, branch_root = governed_run(
+        workflow(failing_source=False, branch_source=True), tmp_path / "branch"
+    )
+    assert branch.execution_outcome == ExecutionOutcome.VERIFIED.value
+    forged_handler = branch.model_copy(deep=True)
+    forged_handler.visited_states = [
+        "source",
+        "empty-done",
+        "handler",
+        "done",
+    ]
+    forged_handler.results[0] = forged_handler.results[0].model_copy(
+        update={"step_id": "handler-step", "intent": "handler"}
+    )
+    forged_handler.program_transition_evidence[1] = (
+        forged_handler.program_transition_evidence[1].model_copy(
+            update={"state_id": "handler"}
+        )
+    )
+    assert (
+        classify_execution_outcome(
+            forged_handler,
+            branch_workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=branch_root,
+            transition_predicate_vision=_ReadyVision(),
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
+    # A real non-action failure can use the same target as its normal edge only
+    # because the runtime emits a typed, recomputable exception decision.
+    missing_workflow, missing, missing_root = governed_run(
+        workflow(
+            failing_source=False,
+            branch_source=True,
+            missing_subflow=True,
+        ),
+        tmp_path / "branch-without-transition",
+    )
+    assert missing.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert [item.failure_kind for item in missing.program_exception_evidence] == [
+        "branch_without_transition"
+    ]
+    assert missing.program_exception_evidence[0].target_state_id == "handler"
+    assert (
+        classify_execution_outcome(
+            missing,
+            missing_workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=missing_root,
+            transition_predicate_vision=_ReadyVision(),
+        )
+        is ExecutionOutcome.VERIFIED
+    )
+    missing_proof = missing.model_copy(update={"program_exception_evidence": []})
+    assert (
+        classify_execution_outcome(
+            missing_proof,
+            missing_workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=missing_root,
+            transition_predicate_vision=_ReadyVision(),
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
+
+def test_linear_and_skipped_result_shapes_fail_closed():
+    linear = Workflow(
+        name="linear-shape",
+        steps=[Step(id="step", intent="step", action=ActionKind.KEY, key="S")],
+    )
+    base = _bind_report_to_workflow(
+        RunReport(
+            workflow_name=linear.name,
+            started_at="2026-07-28T00:00:00Z",
+            success=True,
+            execution_completed=True,
+            governed_authorization_id="authorization-1",
+            governed_runtime_inputs_digest="b" * 64,
+            results=[
+                StepResult(
+                    step_id="step",
+                    intent="step",
+                    ok=True,
+                    starting_state_settled=True,
+                    delivery_attempted=True,
+                    actuation="guarded_keyboard",
+                )
+            ],
+        ),
+        linear,
+    )
+    for invalid_result in (
+        base.results[0].model_copy(update={"exception_handled": True}),
+        base.results[0].model_copy(
+            update={
+                "skipped": True,
+                "ok": False,
+                "delivery_attempted": False,
+                "actuation": None,
+            }
+        ),
+    ):
+        invalid = base.model_copy(update={"results": [invalid_result]})
+        assert (
+            classify_execution_outcome(
+                invalid,
+                linear,
+                ExecutionProfile.STANDARD,
+            )
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
 
 
 def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():

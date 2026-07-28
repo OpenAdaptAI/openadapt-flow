@@ -22,6 +22,7 @@ from openadapt_flow.console.human_decisions import (
     portable_remote_decision_task,
 )
 from openadapt_flow.deployment import DeploymentConfig
+from openadapt_flow.execution_profiles import _program_action_trace
 from openadapt_flow.ir import (
     ActionDeliveryUncertainty,
     ActionKind,
@@ -704,6 +705,54 @@ def test_program_continue_commits_exact_receipt_without_reactuating_source(tmp_p
     if os.name != "nt":
         assert receipt_path.parent.stat().st_mode & 0o077 == 0
         assert receipt_path.stat().st_mode & 0o077 == 0
+    resumed_report = RunReport.model_validate_json((run / "report.json").read_bytes())
+    assert len(resumed_report.attended_program_transition_evidence) == 1
+    transition_evidence = resumed_report.attended_program_transition_evidence[0]
+    assert transition_evidence.state_id == "human"
+    assert transition_evidence.target_state_id == "next"
+    assert transition_evidence.action == "continue"
+    assert transition_evidence.decision_index == 0
+    assert [
+        item.decision_index for item in resumed_report.program_transition_evidence
+    ] == [1]
+    assert (
+        _program_action_trace(
+            workflow,
+            resumed_report.visited_states,
+            runtime_params=resumed_report.params,
+            transition_evidence=resumed_report.program_transition_evidence,
+            attended_transition_evidence=(
+                resumed_report.attended_program_transition_evidence
+            ),
+            transition_evidence_root=run,
+            governed_runtime_inputs_digest=(
+                resumed_report.governed_runtime_inputs_digest
+            ),
+            reported_results=resumed_report.results,
+        )
+        is not None
+    )
+    tampered = resumed_report.model_copy(deep=True)
+    tampered.attended_program_transition_evidence[0] = (
+        tampered.attended_program_transition_evidence[0].model_copy(
+            update={"receipt_sha256": "0" * 64}
+        )
+    )
+    assert (
+        _program_action_trace(
+            workflow,
+            tampered.visited_states,
+            runtime_params=tampered.params,
+            transition_evidence=tampered.program_transition_evidence,
+            attended_transition_evidence=(
+                tampered.attended_program_transition_evidence
+            ),
+            transition_evidence_root=run,
+            governed_runtime_inputs_digest=tampered.governed_runtime_inputs_digest,
+            reported_results=tampered.results,
+        )
+        is None
+    )
 
 
 def test_program_continue_rebinds_exact_pause_before_transition_commit(tmp_path):

@@ -567,6 +567,7 @@ class _FaultDriver:
         decline: bool = False,
         change_binding: str | None = None,
         non_refusing_effect_mutation: bool = False,
+        stale_identity_mismatch: bool = False,
         signing_key: Ed25519PrivateKey | None = None,
     ) -> None:
         self.kind = kind
@@ -577,6 +578,7 @@ class _FaultDriver:
         self.decline = decline
         self.change_binding = change_binding
         self.non_refusing_effect_mutation = non_refusing_effect_mutation
+        self.stale_identity_mismatch = stale_identity_mismatch
         self.calls = 0
         self._identity_reads = {"id": 0, "contract": 0, "key": 0}
         self._signing_key = signing_key or Ed25519PrivateKey.generate()
@@ -618,7 +620,12 @@ class _FaultDriver:
             return None
         replacement = context.effect_verifier
         replace_effect_verifier = False
-        if self.kind in {
+        if self.kind is QualificationCaseKind.STALE_IDENTITY and (
+            self.stale_identity_mismatch
+        ):
+            context.backend.wrong_identity = True
+            after_sha256 = sha256_bytes(context.backend.screenshot())
+        elif self.kind in {
             QualificationCaseKind.AMBIGUITY,
             QualificationCaseKind.STALE_IDENTITY,
         }:
@@ -2224,6 +2231,132 @@ def test_all_fault_cases_mutate_real_detector_input_and_halt_before_delivery(
         is None
     )
     assert backend.actions == []
+
+
+@pytest.mark.parametrize(
+    ("stale_identity_mismatch", "expected_resolution", "expected_identity_status"),
+    [
+        (False, False, "verified"),
+        (True, True, "mismatch"),
+    ],
+)
+def test_stale_identity_integrity_accepts_both_runtime_emittable_shapes(
+    tmp_path: Path,
+    stale_identity_mismatch: bool,
+    expected_resolution: bool,
+    expected_identity_status: str,
+) -> None:
+    """Stale input can refuse at re-resolution or after exact identity proof."""
+
+    driver = _FaultDriver(
+        QualificationCaseKind.STALE_IDENTITY,
+        stale_identity_mismatch=stale_identity_mismatch,
+    )
+    workflow, bundle = _fault_workflow(
+        tmp_path,
+        QualificationCaseKind.STALE_IDENTITY,
+        driver,
+    )
+    run_id = f"stale-identity-shape-{stale_identity_mismatch}"
+    run_dir = tmp_path / f"run-stale-identity-shape-{stale_identity_mismatch}"
+    backend = _ObservedBackend()
+    report = Replayer(
+        backend,
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.STALE_IDENTITY,
+            driver,
+            run_id=run_id,
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+
+    assert report.execution_outcome == "HALTED"
+    assert len(report.results) == 1
+    target = report.results[0]
+    assert (target.resolution is not None) is expected_resolution
+    assert target.identity is not None
+    assert target.identity.status == expected_identity_status
+    assert target.delivery_attempted is False
+    assert backend.actions == []
+
+    evidence_root = tmp_path / f"evidence-stale-{stale_identity_mismatch}"
+    case, result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=evidence_root,
+        run_dir=run_dir,
+        case_id="fault-stale-identity",
+    )
+    assert workflow.qualification is not None
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=workflow.qualification,
+            case=case,
+            result=result,
+            evidence_root=evidence_root,
+        )
+        is None
+    )
+
+    forged_effect = report.model_copy(deep=True)
+    forged_effect.results[0] = target.model_copy(
+        update={"effect_contract_hashes": ["sha256:" + "f" * 64]}
+    )
+    forged_effect_root = tmp_path / f"evidence-stale-effect-{stale_identity_mismatch}"
+    forged_effect_case, forged_effect_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=forged_effect,
+        evidence_root=forged_effect_root,
+        run_dir=run_dir,
+        case_id="fault-stale-identity",
+    )
+    forged_effect_error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=workflow.qualification,
+        case=forged_effect_case,
+        result=forged_effect_result,
+        evidence_root=forged_effect_root,
+    )
+    assert forged_effect_error is not None
+    assert "effect contracts" in forged_effect_error[1]
+
+    if target.resolution is not None:
+        forged_resolution = report.model_copy(deep=True)
+        forged_resolution.results[0] = target.model_copy(
+            update={
+                "resolution": target.resolution.model_copy(update={"point": (9, 8)})
+            }
+        )
+        forged_resolution_root = tmp_path / "evidence-stale-resolution"
+        forged_resolution_case, forged_resolution_result = _fault_case_integrity_result(
+            workflow=workflow,
+            report=forged_resolution,
+            evidence_root=forged_resolution_root,
+            run_dir=run_dir,
+            case_id="fault-stale-identity",
+        )
+        forged_resolution_error = _case_run_report_integrity_error(
+            workflow=workflow,
+            project=workflow.qualification,
+            case=forged_resolution_case,
+            result=forged_resolution_result,
+            evidence_root=forged_resolution_root,
+        )
+        assert forged_resolution_error is not None
+        assert "resolution" in forged_resolution_error[1]
 
 
 @pytest.mark.parametrize("delivery_attempted", [None, True])

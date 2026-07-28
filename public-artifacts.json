@@ -5741,7 +5741,7 @@
     },
     {
       "path": "tests/golden/human_decision_tasks.json",
-      "sha256": "014185bf6af272aa66374406ef24e6a3a6707eba7dafdab683f570583bb3c82b"
+      "sha256": "f9079c184c21b163838a695d45895f68b147571d48d2fb4faf605f2924918fee"
     }
   ]
 }

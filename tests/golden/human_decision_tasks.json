@@ -4,6 +4,7 @@
   "action_vocabulary": [
     "verify_and_resume",
     "skip",
+    "reject",
     "teach",
     "escalate"
   ],
@@ -105,6 +106,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -118,6 +120,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -131,6 +134,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -144,6 +148,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -157,6 +162,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -170,6 +176,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -183,6 +190,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -196,6 +204,7 @@
       "question_template": "review_halt",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -209,6 +218,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -225,6 +235,7 @@
         "required_signal_count"
       ],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -238,6 +249,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -251,6 +263,7 @@
       "question_template": "resolve_ambiguity",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],
@@ -264,6 +277,7 @@
       "question_template": "review_uncertain_delivery",
       "non_null_safe_slots": [],
       "allowed_actions": [
+        "reject",
         "teach",
         "escalate"
       ],

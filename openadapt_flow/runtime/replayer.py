@@ -558,6 +558,7 @@ class Replayer:
         self.qualification_environment_observer = qualification_environment_observer
         self._qualification_fault_mutations: list[FaultMutationReceipt] = []
         self._qualification_fault_public_key: Optional[str] = None
+        self._qualification_case_action_paths: dict[str, Literal["gui", "api"]] = {}
         self._qualification_environment_call: Optional[
             Callable[[], QualificationEnvironmentObservation]
         ] = None
@@ -701,6 +702,7 @@ class Replayer:
         )
         self._qualification_fault_mutations = []
         self._qualification_fault_public_key = None
+        self._qualification_case_action_paths = {}
         self._qualification_environment_call = None
         self._qualification_environment_bound = None
         clear_guard = getattr(self.backend, "set_qualification_input_guard", None)
@@ -855,6 +857,12 @@ class Replayer:
             )
             report.governed_qualification_case_kind = (
                 self.governed_authorization.qualification_case_kind
+            )
+            self._qualification_case_action_paths = dict(
+                self.governed_authorization.qualification_case_action_paths
+            )
+            report.governed_qualification_case_action_paths = dict(
+                self._qualification_case_action_paths
             )
             report.governed_qualification_fault_driver_id = (
                 self.governed_authorization.qualification_fault_driver_id
@@ -3102,6 +3110,7 @@ class Replayer:
         *,
         gate: QualificationFaultGate,
         step: Step,
+        actuation_path: Literal["gui", "api"],
         before_input_sha256: str,
         effect_verifier: Any,
         effects: tuple[Any, ...] = (),
@@ -3118,6 +3127,8 @@ class Replayer:
         if authorization.qualification_fault_step_id_sha256 != sha256_bytes(
             step.id.encode("utf-8")
         ):
+            return None
+        if self._qualification_case_action_paths.get(step.id) != actuation_path:
             return None
         required = (
             authorization.qualification_project_id,
@@ -3139,6 +3150,7 @@ class Replayer:
             case_input_sha256=cast(str, required[5]),
             run_id_sha256=cast(str, required[6]),
             step_id=step.id,
+            actuation_path=actuation_path,
             fault_kind=kind,
             gate=gate,
             before_input_sha256=before_input_sha256,
@@ -3193,6 +3205,7 @@ class Replayer:
             "case_input_sha256": context.case_input_sha256,
             "run_id_sha256": context.run_id_sha256,
             "step_id_sha256": sha256_bytes(context.step_id.encode("utf-8")),
+            "actuation_path": context.actuation_path,
             "fault_kind": context.fault_kind,
             "gate": context.gate,
             "driver_id": authorization.qualification_fault_driver_id,
@@ -3231,6 +3244,7 @@ class Replayer:
         context = self._qualification_fault_context(
             gate=gate,
             step=step,
+            actuation_path="gui",
             before_input_sha256=sha256_bytes(before_png),
             effect_verifier=effect_verifier,
         )
@@ -3255,6 +3269,7 @@ class Replayer:
         *,
         gate: QualificationFaultGate,
         step: Step,
+        actuation_path: Literal["gui", "api"],
         effect_verifier: Any,
         effects: tuple[Any, ...],
     ) -> Any:
@@ -3264,6 +3279,7 @@ class Replayer:
         context = self._qualification_fault_context(
             gate=gate,
             step=step,
+            actuation_path=actuation_path,
             before_input_sha256=before_sha256,
             effect_verifier=effect_verifier,
             effects=effects,
@@ -3320,6 +3336,38 @@ class Replayer:
         overlay_current, overlay_total = self._control_overlay_progress(
             workflow, step_index, graph_ctx
         )
+        qualification_path: Literal["gui", "api"] | None = None
+        authorization = self.governed_authorization
+        if (
+            authorization is not None
+            and authorization.qualification_case_id is not None
+        ):
+            from openadapt_flow.qualification import qualification_action_requirements
+
+            required_actions, _required_identity = qualification_action_requirements(
+                workflow
+            )
+            qualification_path = self._qualification_case_action_paths.get(step.id)
+            if step.id in required_actions and qualification_path is None:
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = (
+                    "qualification case reached a required write outside its exact "
+                    "authorized actuation-path map"
+                )
+                result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+                return result
+            if qualification_path == "api" and (
+                step.api_binding is None or self.api_actuator is None
+            ):
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = (
+                    "qualification case requires the API actuation path, but its "
+                    "binding or actuator is unavailable"
+                )
+                result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+                return result
         # API/tool tier -- the TOP of the capability ladder. When the step
         # carries an api_binding and an ApiActuator is configured, PERFORM the
         # write via the API (deterministic, $0, no GUI), CONFIRM it with the
@@ -3333,7 +3381,8 @@ class Replayer:
         api_effects: tuple[Any, ...] = ()
         api_fault_mutation_start = len(self._qualification_fault_mutations)
         if (
-            self.api_actuator is not None
+            qualification_path != "gui"
+            and self.api_actuator is not None
             and step.api_binding is not None
             and step.api_binding.effects
         ):
@@ -3341,16 +3390,22 @@ class Replayer:
             api_effect_verifier = self._apply_effect_fault_mutation(
                 gate="effect_verifier",
                 step=step,
+                actuation_path="api",
                 effect_verifier=api_effect_verifier,
                 effects=api_effects,
             )
             api_effect_verifier = self._apply_effect_fault_mutation(
                 gate="effect_strength",
                 step=step,
+                actuation_path="api",
                 effect_verifier=api_effect_verifier,
                 effects=api_effects,
             )
-        if self.api_actuator is not None and step.api_binding is not None:
+        if (
+            qualification_path != "gui"
+            and self.api_actuator is not None
+            and step.api_binding is not None
+        ):
             if self._try_api_tier(
                 step,
                 params,
@@ -3366,6 +3421,16 @@ class Replayer:
                         if self.governed_authorization is not None
                         else "safety_halt"
                     )
+                result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+                return result
+            if qualification_path == "api":
+                result.ok = False
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = (
+                    "qualification case requires the API actuation path, but that "
+                    "path reported unavailable; refusing GUI fallback"
+                )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
             if len(self._qualification_fault_mutations) > api_fault_mutation_start:
@@ -3551,12 +3616,14 @@ class Replayer:
                 active_verifier = self._apply_effect_fault_mutation(
                     gate="effect_verifier",
                     step=step,
+                    actuation_path="gui",
                     effect_verifier=active_verifier,
                     effects=effect_inputs,
                 )
                 active_verifier = self._apply_effect_fault_mutation(
                     gate="effect_strength",
                     step=step,
+                    actuation_path="gui",
                     effect_verifier=active_verifier,
                     effects=effect_inputs,
                 )

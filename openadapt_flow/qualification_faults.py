@@ -70,6 +70,17 @@ def fault_detector_contract_error(
     required_gate, required_code = expected_fault_detector(receipt.fault_kind)
     if receipt.gate != required_gate:
         return "fault_detector_gate_mismatch"
+    matching_paths = getattr(report, "governed_qualification_case_action_paths", {})
+    matching_step_ids = [
+        step_id
+        for step_id in matching_paths
+        if sha256_bytes(step_id.encode("utf-8")) == receipt.step_id_sha256
+    ]
+    if (
+        len(matching_step_ids) != 1
+        or matching_paths.get(matching_step_ids[0]) != receipt.actuation_path
+    ):
+        return "fault_detector_actuation_path_mismatch"
     detector_refusals = [
         result
         for result in report.results
@@ -147,6 +158,7 @@ class FaultMutationReceipt(BaseModel):
     case_input_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     run_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     step_id_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    actuation_path: Literal["gui", "api"]
     fault_kind: QualificationFaultKind
     gate: QualificationFaultGate
     driver_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -205,6 +217,7 @@ class QualificationFaultContext:
     case_input_sha256: str
     run_id_sha256: str
     step_id: str
+    actuation_path: Literal["gui", "api"]
     fault_kind: QualificationFaultKind
     gate: QualificationFaultGate
     before_input_sha256: str

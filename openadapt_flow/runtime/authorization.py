@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -225,6 +226,9 @@ class GovernedRunAuthorization(BaseModel):
         ]
         | None
     ) = None
+    qualification_case_action_paths: dict[str, Literal["gui", "api"]] = Field(
+        default_factory=dict
+    )
     qualification_fault_driver_id: str | None = Field(
         default=None, pattern=_QUALIFICATION_ID_RE
     )
@@ -260,6 +264,22 @@ class GovernedRunAuthorization(BaseModel):
             raise ValueError(
                 "qualification case kind requires a complete case authorization"
             )
+        if self.qualification_case_id is None and self.qualification_case_action_paths:
+            raise ValueError(
+                "qualification action paths require a complete case authorization"
+            )
+        if self.qualification_case_kind is not None:
+            if not self.qualification_case_action_paths:
+                raise ValueError(
+                    "qualification cases require an exact actuation-path map"
+                )
+            if any(
+                re.fullmatch(_QUALIFICATION_ID_RE, step_id) is None
+                for step_id in self.qualification_case_action_paths
+            ):
+                raise ValueError(
+                    "qualification action paths contain an invalid step id"
+                )
         driver_values = (
             self.qualification_fault_driver_id,
             self.qualification_fault_driver_contract_sha256,
@@ -278,6 +298,20 @@ class GovernedRunAuthorization(BaseModel):
             "missing_effect",
         } and not all(value is not None for value in driver_values):
             raise ValueError("qualification fault cases require a bound fault driver")
+        if (
+            self.qualification_case_kind
+            in {
+                "ambiguity",
+                "wrong_identity",
+                "stale_identity",
+                "weak_effect",
+                "missing_effect",
+            }
+            and len(self.qualification_case_action_paths) != 1
+        ):
+            raise ValueError(
+                "qualification fault cases require exactly one actuation path"
+            )
         if self.qualification_case_kind == "representative" and any(
             value is not None for value in driver_values
         ):
@@ -343,13 +377,24 @@ class GovernedRunAuthorization(BaseModel):
                 "qualification-run authorization omits required identity steps: "
                 + ", ".join(missing_identity)
             )
+        case_action_paths = {
+            target.step_id: target.actuation_path for target in case.action_targets
+        }
+        if self.qualification_case_action_paths != case_action_paths:
+            return "qualification-run action paths do not match the case contract"
+        from openadapt_flow.traversal import iter_workflow_steps
+
+        workflow_steps = {step.id: step for step in iter_workflow_steps(workflow)}
+        for step_id, actuation_path in case_action_paths.items():
+            step = workflow_steps.get(step_id)
+            if step is None:
+                return "qualification case targets an unknown workflow action"
+            if actuation_path == "api" and step.api_binding is None:
+                return "qualification case targets a missing API actuation path"
         if case.kind.value == "representative":
-            target_steps = set(case.required_action_step_ids)
+            target_steps = set(case_action_paths)
             if not target_steps:
                 return "representative qualification case has no required actions"
-            from openadapt_flow.traversal import iter_workflow_steps
-
-            workflow_steps = {step.id for step in iter_workflow_steps(workflow)}
             unknown_targets = sorted(target_steps.difference(workflow_steps))
             if unknown_targets:
                 return (
@@ -359,9 +404,18 @@ class GovernedRunAuthorization(BaseModel):
             if self.qualification_fault_step_id_sha256 is not None:
                 return "representative qualification case binds a fault target"
         else:
-            target_id = case.target_step_id
-            if target_id is None:
+            if len(case.action_targets) != 1:
                 return "qualification fault case has no target action"
+            target = case.action_targets[0]
+            target_id = target.step_id
+            if target.actuation_path == "api" and case.kind.value not in {
+                "weak_effect",
+                "missing_effect",
+            }:
+                return (
+                    "API qualification fault paths support only weak-effect and "
+                    "missing-effect cases"
+                )
             if target_id not in required_actions:
                 return "qualification fault case targets an unqualified action"
             if case.kind.value in {"wrong_identity", "stale_identity"} and (

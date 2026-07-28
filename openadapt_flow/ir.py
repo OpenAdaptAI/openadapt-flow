@@ -2602,6 +2602,9 @@ class RunReport(BaseModel):
             "missing_effect",
         ]
     ] = None
+    governed_qualification_case_action_paths: dict[str, Literal["gui", "api"]] = Field(
+        default_factory=dict
+    )
     governed_qualification_fault_driver_id: Optional[str] = None
     governed_qualification_fault_driver_contract_sha256: Optional[str] = Field(
         default=None, pattern="^[a-f0-9]{64}$"

@@ -8,7 +8,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -34,6 +34,7 @@ from openadapt_flow.qualification import (
     ActionRiskClass,
     ActionRiskClassification,
     EnvironmentBoundary,
+    QualificationActionTarget,
     QualificationCase,
     QualificationCaseKind,
     QualificationOutcome,
@@ -290,6 +291,7 @@ class _FaultDriver:
             case_input_sha256=context.case_input_sha256,
             run_id_sha256=context.run_id_sha256,
             step_id_sha256=sha256_bytes(context.step_id.encode("utf-8")),
+            actuation_path=context.actuation_path,
             fault_kind=context.fault_kind,
             gate=context.gate,
             driver_id=self._driver_id,
@@ -317,6 +319,7 @@ def _fault_workflow(
     driver: _FaultDriver,
     *,
     api_effect_only: bool = False,
+    actuation_path: Literal["gui", "api"] = "gui",
 ) -> tuple[Workflow, Path]:
     bundle = tmp_path / f"bundle-{kind.value}"
     (bundle / "templates").mkdir(parents=True)
@@ -366,7 +369,10 @@ def _fault_workflow(
     backend = _ObservedBackend()
     observer = BackendQualificationEnvironmentObserver(backend)
     workflow = Workflow(name=f"fault-{kind.value}", surface="web", steps=[step])
-    if api_effect_only:
+    if api_effect_only or kind in {
+        QualificationCaseKind.WEAK_EFFECT,
+        QualificationCaseKind.MISSING_EFFECT,
+    }:
         workflow.params["record_id"] = "synthetic-1"
     init_project(
         workflow,
@@ -407,9 +413,21 @@ def _fault_workflow(
             update={
                 "runtime_input_sha256": input_sha256,
                 **(
-                    {"required_action_step_ids": ["submit"]}
+                    {
+                        "action_targets": [
+                            QualificationActionTarget(
+                                step_id="submit", actuation_path="gui"
+                            )
+                        ]
+                    }
                     if case.kind is QualificationCaseKind.REPRESENTATIVE
-                    else {"target_step_id": "submit"}
+                    else {
+                        "action_targets": [
+                            QualificationActionTarget(
+                                step_id="submit", actuation_path=actuation_path
+                            )
+                        ]
+                    }
                 ),
             }
         )
@@ -428,6 +446,7 @@ def _fault_authorization(
     driver: _FaultDriver,
     *,
     run_id: str,
+    actuation_path: Literal["gui", "api"] = "gui",
 ) -> GovernedRunAuthorization:
     assert workflow.manifest is not None and workflow.qualification is not None
     case_id = f"fault-{kind.value.replace('_', '-')}"
@@ -451,6 +470,7 @@ def _fault_authorization(
         qualification_case_input_sha256=input_sha256,
         qualification_run_id_sha256=sha256_bytes(run_id.encode("utf-8")),
         qualification_case_kind=kind.value,
+        qualification_case_action_paths={"submit": actuation_path},
         qualification_fault_driver_id=driver._driver_id,
         qualification_fault_driver_contract_sha256=driver._contract_sha256,
         qualification_fault_driver_key_id=driver.key_id,
@@ -466,11 +486,13 @@ def _run_fault(
     api_effect_only: bool = False,
     api_actuator: Any = None,
 ):
+    actuation_path = "api" if api_effect_only and api_actuator is not None else "gui"
     workflow, bundle = _fault_workflow(
         tmp_path,
         kind,
         driver,
         api_effect_only=api_effect_only,
+        actuation_path=actuation_path,
     )
     run_id = f"run-{kind.value}-{id(driver)}"
     backend = _ObservedBackend()
@@ -482,6 +504,7 @@ def _run_fault(
             kind,
             driver,
             run_id=run_id,
+            actuation_path=actuation_path,
         ),
         qualification_fault_driver=driver,
         effect_verifier=_StrongEffectVerifier(),
@@ -567,6 +590,7 @@ def test_detector_receipt_rejects_unknown_or_attempted_delivery(
         case_input_sha256="d" * 64,
         run_id_sha256="e" * 64,
         step_id_sha256=sha256_bytes(b"submit"),
+        actuation_path="gui",
         fault_kind="ambiguity",
         gate="target_resolution",
         driver_id="driver",
@@ -588,7 +612,11 @@ def test_detector_receipt_rejects_unknown_or_attempted_delivery(
             detector_input_sha256="2" * 64,
         ),
     )
-    report = SimpleNamespace(execution_outcome="HALTED", results=[result])
+    report = SimpleNamespace(
+        execution_outcome="HALTED",
+        results=[result],
+        governed_qualification_case_action_paths={"submit": "gui"},
+    )
 
     assert (
         fault_detector_contract_error(report, receipt)
@@ -618,6 +646,7 @@ def test_fault_receipt_signature_rejects_wrong_key_and_tampering() -> None:
         case_input_sha256="d" * 64,
         run_id_sha256="e" * 64,
         step_id_sha256="f" * 64,
+        actuation_path="gui",
         fault_kind="ambiguity",
         gate="target_resolution",
         driver_id="driver",
@@ -738,13 +767,140 @@ def test_api_fault_mutation_cannot_fall_through_to_gui_when_api_is_unavailable(
     assert backend.actions == []
     assert report.results[0].delivery_attempted is False
     assert report.results[0].safety_refusal_evidence is None
-    assert "refusing to reuse that mutation" in (report.results[0].error or "")
+    assert "requires the API actuation path" in (report.results[0].error or "")
     assert (
         fault_detector_contract_error(
             report,
             report.qualification_fault_mutations[0],
         )
         == "fault_detector_refusal_not_observed"
+    )
+
+
+def test_gui_qualification_path_bypasses_a_configured_api_tier(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.AMBIGUITY)
+    workflow, bundle = _fault_workflow(
+        tmp_path,
+        QualificationCaseKind.AMBIGUITY,
+        driver,
+        actuation_path="gui",
+    )
+    workflow.steps[0].api_binding = ApiBinding(
+        method="POST",
+        url_template="/synthetic-submit",
+    )
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    run_id = "gui-path-bypasses-api"
+    actuator = _UnavailableApiActuator()
+    backend = _ObservedBackend()
+
+    report = Replayer(
+        backend,
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.AMBIGUITY,
+            driver,
+            run_id=run_id,
+            actuation_path="gui",
+        ),
+        qualification_fault_driver=driver,
+        api_actuator=actuator,
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=tmp_path / "run-gui-bypasses-api",
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+
+    assert actuator.calls == 0
+    assert report.execution_outcome == "HALTED"
+    assert len(report.qualification_fault_mutations) == 1
+    assert report.qualification_fault_mutations[0].actuation_path == "gui"
+
+
+def test_qualification_run_halts_before_an_undeclared_write(tmp_path: Path) -> None:
+    driver = _FaultDriver(QualificationCaseKind.WEAK_EFFECT)
+    workflow, bundle = _fault_workflow(
+        tmp_path,
+        QualificationCaseKind.WEAK_EFFECT,
+        driver,
+    )
+    workflow.steps.append(Step(id="inspect", intent="Inspect", action=ActionKind.WAIT))
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id="inspect",
+            classification=ActionRiskClass.READ_ONLY,
+            explanation="The inspection step does not change business state",
+            operator_confirmed=True,
+        ),
+    )
+    project = workflow.qualification
+    assert project is not None
+    representative = next(
+        case
+        for case in project.cases
+        if case.kind is QualificationCaseKind.REPRESENTATIVE
+    )
+    representative.action_targets = [
+        QualificationActionTarget(step_id="inspect", actuation_path="gui")
+    ]
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    assert workflow.manifest is not None and workflow.qualification is not None
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
+    run_id = "undeclared-write"
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=input_sha256,
+        admitted_policy_name="clinical-write",
+        admitted_policy_contract_sha256="e" * 64,
+        execution_profile="standard",
+        minimum_effect_tier=3,
+        required_identity_step_ids=("submit",),
+        approval_source="qualification-campaign",
+        qualification_project_id=workflow.qualification.project_id,
+        qualification_project_revision=workflow.qualification.revision,
+        qualification_project_contract_sha256=(
+            workflow.qualification.contract_sha256()
+        ),
+        qualification_case_id=representative.id,
+        qualification_campaign_id_sha256=sha256_bytes(b"campaign"),
+        qualification_case_input_sha256=input_sha256,
+        qualification_run_id_sha256=sha256_bytes(run_id.encode()),
+        qualification_case_kind="representative",
+        qualification_case_action_paths={"inspect": "gui"},
+    )
+    backend = _ObservedBackend()
+
+    report = Replayer(
+        backend,
+        vision=_Vision(),
+        governed_authorization=authorization,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=tmp_path / "run-undeclared-write",
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+
+    assert report.execution_outcome == "HALTED"
+    assert backend.actions == []
+    assert "outside its exact authorized actuation-path map" in (
+        report.results[0].error or ""
     )
 
 
@@ -865,7 +1021,9 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
             id="representative-1",
             kind=QualificationCaseKind.REPRESENTATIVE,
             runtime_input_sha256=input_sha256,
-            required_action_step_ids=["submit"],
+            action_targets=[
+                QualificationActionTarget(step_id="submit", actuation_path="gui")
+            ],
             expected_outcome=QualificationOutcome.VERIFIED,
         ),
     )
@@ -893,6 +1051,7 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
         qualification_case_input_sha256=input_sha256,
         qualification_run_id_sha256=sha256_bytes(run_id.encode("utf-8")),
         qualification_case_kind="representative",
+        qualification_case_action_paths={"submit": "gui"},
     )
     report = Replayer(
         backend,

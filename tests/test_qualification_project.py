@@ -44,6 +44,7 @@ from openadapt_flow.qualification import (
     IdentityEnforcement,
     IdentityPolicy,
     IdentitySignalPolicy,
+    QualificationActionTarget,
     QualificationCase,
     QualificationCaseKind,
     QualificationCaseResult,
@@ -190,7 +191,12 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         case.model_copy(
             update={
                 "runtime_input_sha256": case_input_sha256,
-                "target_step_id": action_id,
+                "action_targets": [
+                    QualificationActionTarget(
+                        step_id=action_id,
+                        actuation_path="gui",
+                    )
+                ],
             }
         )
         for case in project.cases
@@ -202,7 +208,9 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             kind=QualificationCaseKind.REPRESENTATIVE,
             input_ref="fixtures/representative-1",
             runtime_input_sha256=case_input_sha256,
-            required_action_step_ids=[action_id],
+            action_targets=[
+                QualificationActionTarget(step_id=action_id, actuation_path="gui")
+            ],
             expected_outcome=QualificationOutcome.VERIFIED,
         ),
     )
@@ -229,6 +237,9 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
     )
     qualification_policy = load_policy("clinical-write")
     required_actions, required_identity = qualification_action_requirements(workflow)
+    resolved_action_effects = [
+        effect.resolve(workflow.params) for effect in action.effects
+    ]
     results: list[QualificationCaseResult] = []
     for case in project.cases:
         run_sha256 = sha256_bytes(f"run:{case.id}".encode())
@@ -260,6 +271,8 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 governed_qualification_case_input_sha256=case_input_sha256,
                 governed_qualification_run_id_sha256=run_sha256,
                 governed_qualification_case_kind=case.kind.value,
+                governed_qualification_case_action_paths={action_id: "gui"},
+                params=dict(workflow.params),
                 qualification_evidence_only=True,
                 observed_application_sha256=observed_application_sha256,
                 observed_application_version_sha256=observed_version_sha256,
@@ -288,7 +301,10 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                             True if action_id in required_actions else None
                         ),
                         effect_contract_hashes=(
-                            [effect.contract_hash() for effect in action.effects]
+                            [
+                                effect.contract_hash()
+                                for effect in resolved_action_effects
+                            ]
                             if action_id in required_actions
                             else []
                         ),
@@ -302,7 +318,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                                     final_verdict="confirmed",
                                     observed_effect="present",
                                 )
-                                for effect in action.effects
+                                for effect in resolved_action_effects
                             ]
                             if action_id in required_actions
                             else []
@@ -372,6 +388,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 case_input_sha256=case_input_sha256,
                 run_id_sha256=run_sha256,
                 step_id_sha256=sha256_bytes(action_id.encode()),
+                actuation_path="gui",
                 fault_kind=case.kind.value,
                 gate=gate,
                 driver_id="fixture-driver",
@@ -406,6 +423,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             governed_qualification_case_input_sha256=case_input_sha256,
             governed_qualification_run_id_sha256=run_sha256,
             governed_qualification_case_kind=case.kind.value,
+            governed_qualification_case_action_paths={action_id: "gui"},
             governed_qualification_fault_driver_id="fixture-driver",
             governed_qualification_fault_driver_contract_sha256="d" * 64,
             governed_qualification_fault_driver_key_id="test-fault-driver",
@@ -1052,6 +1070,8 @@ def test_signed_passed_status_cannot_disagree_with_representative_run(
         "delivery_missing",
         "identity_missing",
         "effect_evidence_missing",
+        "actuation_path_swap",
+        "authorization_path_map_swap",
     ],
 )
 def test_signed_representative_claim_cannot_replace_exact_step_evidence(
@@ -1076,6 +1096,10 @@ def test_signed_representative_claim_cannot_replace_exact_step_evidence(
         payload["results"][0]["delivery_attempted"] = False
     elif mutation == "identity_missing":
         payload["results"][0]["identity"] = None
+    elif mutation == "actuation_path_swap":
+        payload["results"][0]["actuation"] = "api"
+    elif mutation == "authorization_path_map_swap":
+        payload["governed_qualification_case_action_paths"] = {"save": "api"}
     else:
         payload["results"][0]["effect_evidence"] = []
     changed_bytes = json.dumps(payload, separators=(",", ":")).encode()
@@ -1133,14 +1157,18 @@ def test_case_scope_setter_versions_and_invalidates_certification() -> None:
         workflow,
         case_id="fault-ambiguity",
         runtime_input_sha256=input_sha256,
-        target_step_id="save",
+        action_targets=[
+            QualificationActionTarget(step_id="save", actuation_path="gui")
+        ],
     )
 
     assert project.revision == revision + 1
     assert project.last_certification is None
     case = next(item for item in project.cases if item.id == "fault-ambiguity")
     assert case.runtime_input_sha256 == input_sha256
-    assert case.target_step_id == "save"
+    assert case.action_targets == [
+        QualificationActionTarget(step_id="save", actuation_path="gui")
+    ]
     add_case(
         workflow,
         QualificationCase(
@@ -1156,6 +1184,7 @@ def test_case_scope_setter_versions_and_invalidates_certification() -> None:
             workflow,
             case_id="representative-1",
             runtime_input_sha256=input_sha256,
+            action_targets=[],
         )
 
 
@@ -1193,7 +1222,9 @@ def test_required_cases_cannot_hide_a_second_qualified_write() -> None:
             workflow,
             case_id=case.id,
             runtime_input_sha256=input_sha256,
-            target_step_id="save",
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="gui")
+            ],
         )
     add_case(
         workflow,
@@ -1201,7 +1232,9 @@ def test_required_cases_cannot_hide_a_second_qualified_write() -> None:
             id="representative-save",
             kind="representative",
             runtime_input_sha256=input_sha256,
-            required_action_step_ids=["save"],
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="gui")
+            ],
             expected_outcome="verified",
         ),
     )
@@ -1211,7 +1244,9 @@ def test_required_cases_cannot_hide_a_second_qualified_write() -> None:
             id="optional-representative-send",
             kind="representative",
             runtime_input_sha256=input_sha256,
-            required_action_step_ids=["send"],
+            action_targets=[
+                QualificationActionTarget(step_id="send", actuation_path="gui")
+            ],
             expected_outcome="verified",
             required=False,
         ),
@@ -1231,6 +1266,93 @@ def test_required_cases_cannot_hide_a_second_qualified_write() -> None:
     )
 
 
+def test_one_representative_case_cannot_claim_both_paths_for_one_step() -> None:
+    with pytest.raises(ValueError, match="only one path per step"):
+        QualificationCase(
+            id="representative-both-paths",
+            kind="representative",
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="gui"),
+                QualificationActionTarget(step_id="save", actuation_path="api"),
+            ],
+            expected_outcome="verified",
+        )
+
+
+def test_api_effect_path_requires_its_own_representative_and_fault_cases() -> None:
+    workflow = _workflow()
+    api_effect = workflow.steps[0].effects[0].model_copy(deep=True)
+    workflow.steps[0].api_binding = ApiBinding(
+        method="POST",
+        url_template="/records/{record_id}",
+        effects=[api_effect],
+    )
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    set_effect_policy(
+        workflow,
+        step_id="save",
+        effect_index=0,
+        tier=VerificationTier.INDEPENDENT_SYSTEM,
+        actuation_path="api",
+    )
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
+    project = workflow.qualification
+    assert project is not None
+    for case in project.cases:
+        set_case_scope(
+            workflow,
+            case_id=case.id,
+            runtime_input_sha256=input_sha256,
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="gui")
+            ],
+        )
+    add_case(
+        workflow,
+        QualificationCase(
+            id="representative-gui",
+            kind="representative",
+            runtime_input_sha256=input_sha256,
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="gui")
+            ],
+            expected_outcome="verified",
+        ),
+    )
+
+    report = evaluate_qualification(workflow)
+
+    api_refusals = [
+        refusal
+        for refusal in report.refusals
+        if refusal.details.get("actuation_path") == "api"
+    ]
+    assert any(
+        refusal.code is QualificationRefusalCode.REPRESENTATIVE_ACTION_UNCOVERED
+        for refusal in api_refusals
+    )
+    assert {
+        refusal.details.get("kind")
+        for refusal in api_refusals
+        if refusal.code is QualificationRefusalCode.FAULT_ACTION_UNCOVERED
+    } == {"weak_effect", "missing_effect"}
+
+    set_case_scope(
+        workflow,
+        case_id="fault-ambiguity",
+        runtime_input_sha256=input_sha256,
+        action_targets=[
+            QualificationActionTarget(step_id="save", actuation_path="api")
+        ],
+    )
+    report = evaluate_qualification(workflow)
+    assert any(
+        refusal.code is QualificationRefusalCode.CASE_TARGET_INVALID
+        and refusal.case_id == "fault-ambiguity"
+        for refusal in report.refusals
+    )
+
+
 def test_qualification_authorization_cannot_omit_project_identity_scope(
     tmp_path: Path,
 ) -> None:
@@ -1243,7 +1365,9 @@ def test_qualification_authorization_cannot_omit_project_identity_scope(
             id="representative-1",
             kind="representative",
             runtime_input_sha256=input_sha256,
-            required_action_step_ids=["save"],
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="gui")
+            ],
             expected_outcome="verified",
         ),
     )
@@ -1271,6 +1395,7 @@ def test_qualification_authorization_cannot_omit_project_identity_scope(
         qualification_case_input_sha256=input_sha256,
         qualification_run_id_sha256="f" * 64,
         qualification_case_kind="representative",
+        qualification_case_action_paths={"save": "gui"},
     )
 
     assert authorization.validate_workflow(workflow) == (
@@ -1289,7 +1414,9 @@ def test_fault_case_cannot_target_a_read_only_decoy() -> None:
         workflow,
         case_id="fault-ambiguity",
         runtime_input_sha256=input_sha256,
-        target_step_id="inspect",
+        action_targets=[
+            QualificationActionTarget(step_id="inspect", actuation_path="gui")
+        ],
     )
 
     report = evaluate_qualification(workflow)
@@ -1329,6 +1456,63 @@ def test_signed_fault_receipt_cannot_swap_its_case_target(tmp_path: Path) -> Non
     changed_report = retained_report.model_copy(
         update={
             "governed_qualification_fault_step_id_sha256": swapped_step_sha256,
+            "qualification_fault_mutations": [swapped_receipt],
+        }
+    )
+    report_bytes = changed_report.model_dump_json().encode()
+    report_path.write_bytes(report_bytes)
+    changed_digests = {
+        "run_report": hashlib.sha256(report_bytes).hexdigest(),
+        "fault_receipt": hashlib.sha256(receipt_bytes).hexdigest(),
+    }
+    changed_refs = [
+        ref.model_copy(update={"sha256": changed_digests[ref.kind]})
+        if ref.kind in changed_digests
+        else ref
+        for ref in result.evidence
+    ]
+    case.results[-1] = sign_case_result(
+        result.model_copy(
+            update={"evidence": changed_refs, "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+    qualification_report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
+        refusal.code for refusal in qualification_report.refusals
+    }
+
+
+def test_signed_fault_receipt_cannot_swap_its_actuation_path(tmp_path: Path) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == "fault-ambiguity")
+    result = case.results[-1]
+    receipt_path = evidence_root / "fault-ambiguity.receipt.json"
+    report_path = evidence_root / "fault-ambiguity.report.json"
+    receipt = FaultMutationReceipt.model_validate_json(receipt_path.read_bytes())
+    swapped_receipt = sign_fault_mutation_receipt(
+        receipt.model_copy(
+            update={"actuation_path": "api", "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+    receipt_bytes = swapped_receipt.artifact_bytes()
+    receipt_path.write_bytes(receipt_bytes)
+    retained_report = RunReport.model_validate_json(report_path.read_bytes())
+    changed_report = retained_report.model_copy(
+        update={
+            "governed_qualification_case_action_paths": {"save": "api"},
             "qualification_fault_mutations": [swapped_receipt],
         }
     )

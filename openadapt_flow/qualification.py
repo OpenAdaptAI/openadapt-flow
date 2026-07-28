@@ -373,6 +373,15 @@ class QualificationOutcome(str, Enum):
     ROLLED_BACK = "rolled_back"
 
 
+class QualificationActionTarget(BaseModel):
+    """One exact workflow action and actuation path exercised by a case."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step_id: str = Field(pattern=_ID_RE)
+    actuation_path: Literal["gui", "api"]
+
+
 class EvidenceRef(BaseModel):
     """Local or customer-controlled evidence reference; never evidence content."""
 
@@ -469,8 +478,7 @@ class QualificationCase(BaseModel):
     description: str = Field(default="", max_length=512)
     input_ref: Optional[str] = Field(default=None, max_length=256)
     runtime_input_sha256: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    target_step_id: Optional[str] = Field(default=None, pattern=_ID_RE)
-    required_action_step_ids: list[str] = Field(default_factory=list)
+    action_targets: list[QualificationActionTarget] = Field(default_factory=list)
     expected_outcome: QualificationOutcome
     required: bool = True
     results: list[QualificationCaseResult] = Field(default_factory=list)
@@ -489,15 +497,19 @@ class QualificationCase(BaseModel):
                 raise ValueError("representative cases must expect VERIFIED")
         elif self.expected_outcome is not QualificationOutcome.HALTED:
             raise ValueError("deterministic fault cases must expect HALTED")
-        targets = [item.strip() for item in self.required_action_step_ids]
-        if any(not item for item in targets) or len(targets) != len(set(targets)):
-            raise ValueError("representative action steps must be unique")
-        self.required_action_step_ids = sorted(targets)
+        targets = sorted(
+            self.action_targets,
+            key=lambda item: (item.step_id, item.actuation_path),
+        )
         if self.kind is QualificationCaseKind.REPRESENTATIVE:
-            if self.target_step_id is not None:
-                raise ValueError("representative cases cannot bind a fault target")
-        elif self.required_action_step_ids:
-            raise ValueError("fault cases cannot declare representative actions")
+            step_ids = [item.step_id for item in targets]
+            if len(step_ids) != len(set(step_ids)):
+                raise ValueError(
+                    "a representative case can exercise only one path per step"
+                )
+        elif len(targets) > 1:
+            raise ValueError("a fault case can bind at most one action target")
+        self.action_targets = targets
         return self
 
     @model_serializer(mode="wrap")
@@ -507,10 +519,8 @@ class QualificationCase(BaseModel):
         data: dict[str, Any] = handler(self)
         if self.runtime_input_sha256 is None:
             data.pop("runtime_input_sha256", None)
-        if self.target_step_id is None:
-            data.pop("target_step_id", None)
-        if not self.required_action_step_ids:
-            data.pop("required_action_step_ids", None)
+        if not self.action_targets:
+            data.pop("action_targets", None)
         return data
 
 
@@ -1562,8 +1572,7 @@ def set_case_scope(
     *,
     case_id: str,
     runtime_input_sha256: str,
-    target_step_id: Optional[str] = None,
-    required_action_step_ids: Iterable[str] = (),
+    action_targets: Iterable[QualificationActionTarget],
 ) -> QualificationProject:
     """Bind a qualification case to its approved input and action scope."""
 
@@ -1574,29 +1583,38 @@ def set_case_scope(
     if case is None:
         raise QualificationError(f"unknown qualification case {case_id!r}")
     steps = _steps_by_id(workflow)
-    action_ids = sorted({item.strip() for item in required_action_step_ids})
+    targets = list(action_targets)
+    target_step_ids = [target.step_id for target in targets]
+    unknown = sorted(set(target_step_ids).difference(steps))
+    if unknown:
+        raise QualificationError(
+            "qualification case targets unknown workflow actions: " + ", ".join(unknown)
+        )
+    invalid_api_targets = sorted(
+        target.step_id
+        for target in targets
+        if target.actuation_path == "api" and steps[target.step_id].api_binding is None
+    )
+    if invalid_api_targets:
+        raise QualificationError(
+            "qualification case targets missing API paths: "
+            + ", ".join(invalid_api_targets)
+        )
     if case.kind is QualificationCaseKind.REPRESENTATIVE:
-        if target_step_id is not None:
-            raise QualificationError("representative cases cannot bind a fault target")
-        if not action_ids:
+        if not targets:
             raise QualificationError("representative cases require an action scope")
-        unknown = sorted(set(action_ids).difference(steps))
-        if unknown:
+        if len(target_step_ids) != len(set(target_step_ids)):
             raise QualificationError(
-                "representative case targets unknown workflow actions: "
-                + ", ".join(unknown)
+                "a representative case can exercise only one path per step"
             )
     else:
-        if action_ids:
-            raise QualificationError("fault cases cannot bind representative actions")
-        if target_step_id is None or target_step_id not in steps:
-            raise QualificationError("fault cases require one known target action")
+        if len(targets) != 1:
+            raise QualificationError("fault cases require one action target")
     updated = QualificationCase.model_validate(
         case.model_copy(
             update={
                 "runtime_input_sha256": runtime_input_sha256,
-                "target_step_id": target_step_id,
-                "required_action_step_ids": action_ids,
+                "action_targets": targets,
             }
         ).model_dump(mode="python")
     )
@@ -1793,6 +1811,9 @@ def _case_run_report_integrity_error(
         )
 
     expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
+    expected_action_paths = {
+        target.step_id: target.actuation_path for target in case.action_targets
+    }
     expected_workflow_contract = workflow_contract_sha256(workflow)
     expected_outcome = result.observed_outcome.value.upper()
     expected_bindings = (
@@ -1810,6 +1831,7 @@ def _case_run_report_integrity_error(
         report.governed_runtime_inputs_digest == result.case_input_sha256,
         report.governed_qualification_run_id_sha256 == result.run_id_sha256,
         report.governed_qualification_case_kind == case.kind.value,
+        report.governed_qualification_case_action_paths == expected_action_paths,
         report.execution_outcome == expected_outcome,
         report.execution_profile == "standard",
         report.governed_minimum_effect_tier == int(project.minimum_effect_tier),
@@ -1927,9 +1949,9 @@ def _case_run_report_integrity_error(
         required_actions, required_identity = qualification_action_requirements(
             workflow
         )
-        declared_targets = set(case.required_action_step_ids)
+        declared_targets = expected_action_paths
         steps = _steps_by_id(workflow)
-        if not declared_targets or not declared_targets.issubset(steps):
+        if not declared_targets or not set(declared_targets).issubset(steps):
             return (
                 QualificationRefusalCode.CASE_ATTESTATION_INVALID,
                 "representative case targets are missing or outside the workflow",
@@ -1939,18 +1961,20 @@ def _case_run_report_integrity_error(
                 QualificationRefusalCode.CASE_ATTESTATION_INVALID,
                 "case report omits required project identity gates",
             )
-        for step_id in sorted(declared_targets):
+        for step_id, actuation_path in sorted(declared_targets.items()):
             step_results = [
                 item
                 for item in report.results
                 if item.step_id == step_id
                 and not item.skipped
                 and not item.exception_handled
+                and ("api" if item.actuation == "api" else "gui") == actuation_path
             ]
             if not step_results:
                 return (
                     QualificationRefusalCode.CASE_NOT_PASSED,
-                    f"representative case did not execute target action {step_id!r}",
+                    "representative case did not execute target action "
+                    f"{step_id!r} through its {actuation_path} path",
                 )
             step = steps[step_id]
             from openadapt_flow.policy import effects_for_actuation
@@ -2017,6 +2041,19 @@ def _case_run_report_integrity_error(
                     QualificationRefusalCode.CASE_NOT_PASSED,
                     f"representative action {step_id!r} lacks complete verified evidence",
                 )
+        for item in report.results:
+            if (
+                item.step_id in required_actions
+                and not item.skipped
+                and not item.exception_handled
+                and expected_action_paths.get(item.step_id)
+                != ("api" if item.actuation == "api" else "gui")
+            ):
+                return (
+                    QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                    "representative report executed a qualified write outside its "
+                    "authorized actuation path map",
+                )
     return None
 
 
@@ -2078,10 +2115,12 @@ def _fault_case_integrity_error(
         )
 
     expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
+    target = case.action_targets[0] if len(case.action_targets) == 1 else None
     expected_target_sha256 = (
-        sha256_bytes(case.target_step_id.encode("utf-8"))
-        if case.target_step_id is not None
-        else None
+        sha256_bytes(target.step_id.encode("utf-8")) if target is not None else None
+    )
+    expected_action_paths = (
+        {target.step_id: target.actuation_path} if target is not None else {}
     )
     expected_bindings = (
         receipt.fault_kind == case.kind.value,
@@ -2106,6 +2145,9 @@ def _fault_case_integrity_error(
         report.governed_qualification_fault_step_id_sha256
         == receipt.step_id_sha256
         == expected_target_sha256,
+        report.governed_qualification_case_action_paths == expected_action_paths,
+        receipt.actuation_path
+        == (target.actuation_path if target is not None else None),
     )
     if not all(expected_bindings):
         return (
@@ -2736,8 +2778,33 @@ def evaluate_qualification(
             or case.kind in required_kinds
         )
     ]
-    required_action_ids = {step.id for step in effect_required_steps}
-    workflow_step_ids = {step.id for step in steps}
+    required_gui_targets: set[tuple[str, Literal["gui", "api"]]] = {
+        (step.id, "gui") for step in effect_required_steps
+    }
+    required_api_targets: set[tuple[str, Literal["gui", "api"]]] = {
+        (step.id, "api")
+        for step in effect_required_steps
+        if step.api_binding is not None and bool(step.api_binding.effects)
+    }
+    required_representative_targets = required_gui_targets | required_api_targets
+    required_fault_targets: dict[
+        QualificationCaseKind,
+        set[tuple[str, Literal["gui", "api"]]],
+    ] = {
+        QualificationCaseKind.AMBIGUITY: set(required_gui_targets),
+        QualificationCaseKind.WEAK_EFFECT: (
+            set(required_gui_targets) | set(required_api_targets)
+        ),
+        QualificationCaseKind.MISSING_EFFECT: (
+            set(required_gui_targets) | set(required_api_targets)
+        ),
+        QualificationCaseKind.WRONG_IDENTITY: {
+            (step_id, "gui") for step_id in consequential_ids
+        },
+        QualificationCaseKind.STALE_IDENTITY: {
+            (step_id, "gui") for step_id in consequential_ids
+        },
+    }
     for case in required_cases:
         if case.runtime_input_sha256 is None:
             refusals.append(
@@ -2751,48 +2818,48 @@ def evaluate_qualification(
                     ),
                 )
             )
+        targets = {
+            (target.step_id, target.actuation_path) for target in case.action_targets
+        }
+        valid_path_targets = {
+            (step.id, path)
+            for step in steps
+            for path in (("gui", "api") if step.api_binding is not None else ("gui",))
+        }
         if case.kind is QualificationCaseKind.REPRESENTATIVE:
-            targets = set(case.required_action_step_ids)
-            invalid_targets = not targets or not targets.issubset(workflow_step_ids)
-            target_path = "required_action_step_ids"
+            invalid_targets = not targets or len(targets) != len(case.action_targets)
         else:
-            targets = (
-                {case.target_step_id} if case.target_step_id is not None else set()
-            )
-            eligible_targets = (
-                consequential_ids
-                if case.kind
-                in {
-                    QualificationCaseKind.WRONG_IDENTITY,
-                    QualificationCaseKind.STALE_IDENTITY,
-                }
-                else required_action_ids
-            )
             invalid_targets = len(targets) != 1 or not targets.issubset(
-                eligible_targets
+                required_fault_targets[case.kind]
             )
-            target_path = "target_step_id"
+        invalid_targets = invalid_targets or not targets.issubset(valid_path_targets)
         if invalid_targets:
             refusals.append(
                 QualificationRefusal(
                     code=QualificationRefusalCode.CASE_TARGET_INVALID,
-                    path=f"qualification.cases.{case.id}.{target_path}",
+                    path=f"qualification.cases.{case.id}.action_targets",
                     case_id=case.id,
                     message=(
                         f"case {case.id!r} has missing or ineligible qualified "
                         "action scope"
                     ),
-                    details={"target_step_ids": ",".join(sorted(targets))},
+                    details={
+                        "action_targets": ",".join(
+                            f"{step_id}:{path}" for step_id, path in sorted(targets)
+                        )
+                    },
                 )
             )
 
     representative_coverage = {
-        step_id
+        (target.step_id, target.actuation_path)
         for case in required_cases
         if case.kind is QualificationCaseKind.REPRESENTATIVE
-        for step_id in case.required_action_step_ids
+        for target in case.action_targets
     }
-    for step_id in sorted(required_action_ids - representative_coverage):
+    for step_id, target_path in sorted(
+        required_representative_targets - representative_coverage
+    ):
         refusals.append(
             QualificationRefusal(
                 code=QualificationRefusalCode.REPRESENTATIVE_ACTION_UNCOVERED,
@@ -2800,26 +2867,20 @@ def evaluate_qualification(
                 step_id=step_id,
                 message=(
                     f"qualified write action {step_id!r} has no required "
-                    "representative case"
+                    f"representative case for its {target_path} path"
                 ),
+                details={"actuation_path": target_path},
             )
         )
     fault_coverage = {
-        (case.kind, case.target_step_id)
+        (case.kind, target.step_id, target.actuation_path)
         for case in required_cases
         if case.kind is not QualificationCaseKind.REPRESENTATIVE
-        and case.target_step_id is not None
-    }
-    fault_targets_by_kind = {
-        QualificationCaseKind.AMBIGUITY: required_action_ids,
-        QualificationCaseKind.WEAK_EFFECT: required_action_ids,
-        QualificationCaseKind.MISSING_EFFECT: required_action_ids,
-        QualificationCaseKind.WRONG_IDENTITY: consequential_ids,
-        QualificationCaseKind.STALE_IDENTITY: consequential_ids,
+        for target in case.action_targets
     }
     for kind in sorted(required_kinds, key=lambda item: item.value):
-        for step_id in sorted(fault_targets_by_kind[kind]):
-            if (kind, step_id) not in fault_coverage:
+        for step_id, target_path in sorted(required_fault_targets[kind]):
+            if (kind, step_id, target_path) not in fault_coverage:
                 refusals.append(
                     QualificationRefusal(
                         code=QualificationRefusalCode.FAULT_ACTION_UNCOVERED,
@@ -2827,9 +2888,12 @@ def evaluate_qualification(
                         step_id=step_id,
                         message=(
                             f"consequential action {step_id!r} has no required "
-                            f"{kind.value} fault case"
+                            f"{kind.value} fault case for its {target_path} path"
                         ),
-                        details={"kind": kind.value},
+                        details={
+                            "kind": kind.value,
+                            "actuation_path": target_path,
+                        },
                     )
                 )
 

@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 from base64 import b64decode, b64encode
+from collections import Counter
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -467,6 +468,9 @@ class QualificationCase(BaseModel):
     kind: QualificationCaseKind
     description: str = Field(default="", max_length=512)
     input_ref: Optional[str] = Field(default=None, max_length=256)
+    runtime_input_sha256: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    target_step_id: Optional[str] = Field(default=None, pattern=_ID_RE)
+    required_action_step_ids: list[str] = Field(default_factory=list)
     expected_outcome: QualificationOutcome
     required: bool = True
     results: list[QualificationCaseResult] = Field(default_factory=list)
@@ -485,7 +489,29 @@ class QualificationCase(BaseModel):
                 raise ValueError("representative cases must expect VERIFIED")
         elif self.expected_outcome is not QualificationOutcome.HALTED:
             raise ValueError("deterministic fault cases must expect HALTED")
+        targets = [item.strip() for item in self.required_action_step_ids]
+        if any(not item for item in targets) or len(targets) != len(set(targets)):
+            raise ValueError("representative action steps must be unique")
+        self.required_action_step_ids = sorted(targets)
+        if self.kind is QualificationCaseKind.REPRESENTATIVE:
+            if self.target_step_id is not None:
+                raise ValueError("representative cases cannot bind a fault target")
+        elif self.required_action_step_ids:
+            raise ValueError("fault cases cannot declare representative actions")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Keep old projects loadable while certification fails closed."""
+
+        data: dict[str, Any] = handler(self)
+        if self.runtime_input_sha256 is None:
+            data.pop("runtime_input_sha256", None)
+        if self.target_step_id is None:
+            data.pop("target_step_id", None)
+        if not self.required_action_step_ids:
+            data.pop("required_action_step_ids", None)
+        return data
 
 
 class EnvironmentBoundary(BaseModel):
@@ -737,7 +763,11 @@ class QualificationRefusalCode(str, Enum):
     EFFECT_TIER_INSUFFICIENT = "effect_tier_insufficient"
     HIGH_RISK_SCREEN_ONLY = "high_risk_screen_only"
     REPRESENTATIVE_CASE_MISSING = "representative_case_missing"
+    REPRESENTATIVE_ACTION_UNCOVERED = "representative_action_uncovered"
     FAULT_CASE_MISSING = "fault_case_missing"
+    FAULT_ACTION_UNCOVERED = "fault_action_uncovered"
+    CASE_INPUT_UNBOUND = "case_input_unbound"
+    CASE_TARGET_INVALID = "case_target_invalid"
     CASE_NOT_PASSED = "case_not_passed"
     CASE_EVIDENCE_MISSING = "case_evidence_missing"
     CASE_EVIDENCE_UNVERIFIED = "case_evidence_unverified"
@@ -915,6 +945,54 @@ def _executable_risk_floor(step: "Step") -> Optional[ActionRiskClass]:
     if step.risk == "irreversible" or effect_floor is ActionRiskClass.IRREVERSIBLE:
         return ActionRiskClass.IRREVERSIBLE
     return effect_floor
+
+
+def qualification_action_requirements(
+    workflow: "Workflow",
+) -> tuple[set[str], set[str]]:
+    """Return required actuation and identity step IDs for qualification.
+
+    The project classification is authoritative only after operator review.
+    Missing, unknown, or unconfirmed classifications remain consequential so
+    a caller cannot weaken a campaign authorization while review is incomplete.
+    Executable effect/risk declarations always provide a hard lower bound.
+    """
+
+    project = workflow.qualification
+    if project is None:
+        return set(), set()
+    required_actions: set[str] = set()
+    required_identity: set[str] = set()
+    for step in _steps_by_id(workflow).values():
+        classification = project.action_classifications.get(step.id)
+        if (
+            classification is None
+            or not classification.operator_confirmed
+            or classification.classification is ActionRiskClass.UNKNOWN
+        ):
+            effective = ActionRiskClass.CONSEQUENTIAL
+        else:
+            effective = classification.classification
+        floor = _executable_risk_floor(step)
+        if floor is ActionRiskClass.IRREVERSIBLE:
+            effective = ActionRiskClass.IRREVERSIBLE
+        elif (
+            floor is ActionRiskClass.STATE_CHANGING
+            and effective is ActionRiskClass.READ_ONLY
+        ):
+            effective = ActionRiskClass.STATE_CHANGING
+        if effective in {
+            ActionRiskClass.STATE_CHANGING,
+            ActionRiskClass.CONSEQUENTIAL,
+            ActionRiskClass.IRREVERSIBLE,
+        }:
+            required_actions.add(step.id)
+        if effective in {
+            ActionRiskClass.CONSEQUENTIAL,
+            ActionRiskClass.IRREVERSIBLE,
+        }:
+            required_identity.add(step.id)
+    return required_actions, required_identity
 
 
 def available_identity_sources(step: "Step") -> set[IdentityEvidenceSource]:
@@ -1479,6 +1557,58 @@ def add_case(workflow: "Workflow", case: QualificationCase) -> QualificationProj
     return project
 
 
+def set_case_scope(
+    workflow: "Workflow",
+    *,
+    case_id: str,
+    runtime_input_sha256: str,
+    target_step_id: Optional[str] = None,
+    required_action_step_ids: Iterable[str] = (),
+) -> QualificationProject:
+    """Bind a qualification case to its approved input and action scope."""
+
+    project = workflow.qualification
+    if project is None:
+        raise QualificationError("initialize qualification before scoping cases")
+    case = next((item for item in project.cases if item.id == case_id), None)
+    if case is None:
+        raise QualificationError(f"unknown qualification case {case_id!r}")
+    steps = _steps_by_id(workflow)
+    action_ids = sorted({item.strip() for item in required_action_step_ids})
+    if case.kind is QualificationCaseKind.REPRESENTATIVE:
+        if target_step_id is not None:
+            raise QualificationError("representative cases cannot bind a fault target")
+        if not action_ids:
+            raise QualificationError("representative cases require an action scope")
+        unknown = sorted(set(action_ids).difference(steps))
+        if unknown:
+            raise QualificationError(
+                "representative case targets unknown workflow actions: "
+                + ", ".join(unknown)
+            )
+    else:
+        if action_ids:
+            raise QualificationError("fault cases cannot bind representative actions")
+        if target_step_id is None or target_step_id not in steps:
+            raise QualificationError("fault cases require one known target action")
+    updated = QualificationCase.model_validate(
+        case.model_copy(
+            update={
+                "runtime_input_sha256": runtime_input_sha256,
+                "target_step_id": target_step_id,
+                "required_action_step_ids": action_ids,
+            }
+        ).model_dump(mode="python")
+    )
+    if updated == case:
+        return project
+    previous = project.revision_digest()
+    project.cases = [updated if item.id == case_id else item for item in project.cases]
+    _touch(project, previous)
+    _invalidate_certification(workflow)
+    return project
+
+
 def _attestation_payload(result: QualificationCaseResult) -> bytes:
     payload = result.model_dump(
         mode="json",
@@ -1615,6 +1745,7 @@ def _case_run_report_integrity_error(
     if (
         input_ref.sha256 != result.case_input_sha256
         or hashlib.sha256(input_bytes).hexdigest() != result.case_input_sha256
+        or case.runtime_input_sha256 != result.case_input_sha256
     ):
         return (
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
@@ -1629,18 +1760,20 @@ def _case_run_report_integrity_error(
         )
 
     expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
+    expected_workflow_contract = workflow_contract_sha256(workflow)
     expected_outcome = result.observed_outcome.value.upper()
     expected_bindings = (
         report.workflow_name == workflow.name,
+        report.workflow_contract_sha256
+        == result.workflow_contract_sha256
+        == expected_workflow_contract,
         report.governed_qualification_project_id == project.project_id,
         report.governed_qualification_project_revision == project.revision,
         report.governed_qualification_project_contract_sha256
         == project.contract_sha256(),
-        report.governed_qualification_campaign_id_sha256
-        == result.campaign_id_sha256,
+        report.governed_qualification_campaign_id_sha256 == result.campaign_id_sha256,
         report.governed_qualification_case_id_sha256 == expected_case_sha256,
-        report.governed_qualification_case_input_sha256
-        == result.case_input_sha256,
+        report.governed_qualification_case_input_sha256 == result.case_input_sha256,
         report.governed_runtime_inputs_digest == result.case_input_sha256,
         report.governed_qualification_run_id_sha256 == result.run_id_sha256,
         report.governed_qualification_case_kind == case.kind.value,
@@ -1653,13 +1786,31 @@ def _case_run_report_integrity_error(
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
             "case report, input, signed result, and project bindings differ",
         )
+
+    from openadapt_flow.execution_profiles import (
+        ExecutionProfile,
+        classify_execution_outcome,
+    )
+
+    recomputed_outcome = classify_execution_outcome(
+        report,
+        workflow,
+        ExecutionProfile.STANDARD,
+    ).value
+    if (
+        recomputed_outcome != report.execution_outcome
+        or recomputed_outcome != expected_outcome
+    ):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case report outcome does not recompute from its exact step evidence",
+        )
     if policy is not None:
         from openadapt_flow.policy import policy_contract_sha256
 
         if (
             report.governed_policy_name != policy.name
-            or report.governed_policy_contract_sha256
-            != policy_contract_sha256(policy)
+            or report.governed_policy_contract_sha256 != policy_contract_sha256(policy)
         ):
             return (
                 QualificationRefusalCode.CASE_ATTESTATION_INVALID,
@@ -1738,6 +1889,81 @@ def _case_run_report_integrity_error(
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
             "representative case report contains a qualification fault mutation",
         )
+    if case.kind is QualificationCaseKind.REPRESENTATIVE:
+        required_actions, required_identity = qualification_action_requirements(
+            workflow
+        )
+        declared_targets = set(case.required_action_step_ids)
+        steps = _steps_by_id(workflow)
+        if not declared_targets or not declared_targets.issubset(steps):
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "representative case targets are missing or outside the workflow",
+            )
+        if not required_identity.issubset(set(report.required_identity_step_ids)):
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "case report omits required project identity gates",
+            )
+        for step_id in sorted(declared_targets):
+            step_results = [
+                item
+                for item in report.results
+                if item.step_id == step_id
+                and not item.skipped
+                and not item.exception_handled
+            ]
+            if not step_results:
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    f"representative case did not execute target action {step_id!r}",
+                )
+            step = steps[step_id]
+            from openadapt_flow.policy import effects_for_actuation
+
+            minimum_tier = VerificationTier(project.minimum_effect_tier)
+
+            def result_has_sufficient_effect_evidence(item: Any) -> bool:
+                if step_id not in required_actions:
+                    return True
+                effects = effects_for_actuation(step, item.actuation)
+                expected_hashes = Counter(effect.contract_hash() for effect in effects)
+                retained_hashes = Counter(item.effect_contract_hashes)
+                evidence_hashes = Counter(
+                    evidence.effect_contract_hash
+                    for evidence in item.effect_evidence
+                    if evidence.final_verdict == "confirmed"
+                    and evidence.verification_tier is not None
+                    and VerificationTier(evidence.verification_tier).satisfies(
+                        minimum_tier
+                    )
+                )
+                return bool(expected_hashes) and (
+                    retained_hashes == expected_hashes == evidence_hashes
+                )
+
+            if any(
+                not item.ok
+                or item.delivery_attempted is not True
+                or (step.expect and item.postconditions_ok is not True)
+                or (
+                    step_id in required_actions
+                    and (
+                        item.effect_approved_unverified
+                        or item.effect_verified is not True
+                        or not result_has_sufficient_effect_evidence(item)
+                    )
+                )
+                or (
+                    step_id in required_identity
+                    and (item.identity is None or item.identity.status != "verified")
+                )
+                for item in step_results
+            ):
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    f"representative action {step_id!r} lacks complete verified evidence",
+                )
     return None
 
 
@@ -1799,6 +2025,11 @@ def _fault_case_integrity_error(
         )
 
     expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
+    expected_target_sha256 = (
+        sha256_bytes(case.target_step_id.encode("utf-8"))
+        if case.target_step_id is not None
+        else None
+    )
     expected_bindings = (
         report.governed_qualification_campaign_id_sha256
         == result.campaign_id_sha256
@@ -1816,7 +2047,9 @@ def _fault_case_integrity_error(
         report.governed_qualification_fault_driver_contract_sha256
         == receipt.driver_contract_sha256,
         report.governed_qualification_fault_driver_key_id == receipt.attestation_key_id,
-        report.governed_qualification_fault_step_id_sha256 == receipt.step_id_sha256,
+        report.governed_qualification_fault_step_id_sha256
+        == receipt.step_id_sha256
+        == expected_target_sha256,
     )
     if not all(expected_bindings):
         return (
@@ -1962,7 +2195,10 @@ def _case_result_integrity_error(
         )
         if report_error is not None:
             return report_error
-    if case.kind is not QualificationCaseKind.REPRESENTATIVE and not evidence_preverified:
+    if (
+        case.kind is not QualificationCaseKind.REPRESENTATIVE
+        and not evidence_preverified
+    ):
         fault_error = _fault_case_integrity_error(
             project=project,
             case=case,
@@ -2394,13 +2630,22 @@ def evaluate_qualification(
         if step_effects_covered:
             effect_covered += 1
 
-    required_kinds = {
-        QualificationCaseKind.AMBIGUITY,
-        QualificationCaseKind.WRONG_IDENTITY,
-        QualificationCaseKind.STALE_IDENTITY,
-        QualificationCaseKind.WEAK_EFFECT,
-        QualificationCaseKind.MISSING_EFFECT,
-    }
+    required_kinds: set[QualificationCaseKind] = set()
+    if effect_required_steps:
+        required_kinds.update(
+            {
+                QualificationCaseKind.AMBIGUITY,
+                QualificationCaseKind.WEAK_EFFECT,
+                QualificationCaseKind.MISSING_EFFECT,
+            }
+        )
+    if consequential_steps:
+        required_kinds.update(
+            {
+                QualificationCaseKind.WRONG_IDENTITY,
+                QualificationCaseKind.STALE_IDENTITY,
+            }
+        )
     required_kinds_present = {case.kind for case in project.cases if case.required}
     if QualificationCaseKind.REPRESENTATIVE not in required_kinds_present:
         refusals.append(
@@ -2425,8 +2670,113 @@ def evaluate_qualification(
             )
         )
 
+    required_cases = [
+        case
+        for case in project.cases
+        if case.required
+        and (
+            case.kind is QualificationCaseKind.REPRESENTATIVE
+            or case.kind in required_kinds
+        )
+    ]
+    required_action_ids = {step.id for step in effect_required_steps}
+    workflow_step_ids = {step.id for step in steps}
+    for case in required_cases:
+        if case.runtime_input_sha256 is None:
+            refusals.append(
+                QualificationRefusal(
+                    code=QualificationRefusalCode.CASE_INPUT_UNBOUND,
+                    path=f"qualification.cases.{case.id}.runtime_input_sha256",
+                    case_id=case.id,
+                    message=(
+                        f"required case {case.id!r} has no approved runtime-input "
+                        "digest"
+                    ),
+                )
+            )
+        if case.kind is QualificationCaseKind.REPRESENTATIVE:
+            targets = set(case.required_action_step_ids)
+            invalid_targets = not targets or not targets.issubset(workflow_step_ids)
+            target_path = "required_action_step_ids"
+        else:
+            targets = (
+                {case.target_step_id} if case.target_step_id is not None else set()
+            )
+            eligible_targets = (
+                consequential_ids
+                if case.kind
+                in {
+                    QualificationCaseKind.WRONG_IDENTITY,
+                    QualificationCaseKind.STALE_IDENTITY,
+                }
+                else required_action_ids
+            )
+            invalid_targets = len(targets) != 1 or not targets.issubset(
+                eligible_targets
+            )
+            target_path = "target_step_id"
+        if invalid_targets:
+            refusals.append(
+                QualificationRefusal(
+                    code=QualificationRefusalCode.CASE_TARGET_INVALID,
+                    path=f"qualification.cases.{case.id}.{target_path}",
+                    case_id=case.id,
+                    message=(
+                        f"case {case.id!r} has missing or ineligible qualified "
+                        "action scope"
+                    ),
+                    details={"target_step_ids": ",".join(sorted(targets))},
+                )
+            )
+
+    representative_coverage = {
+        step_id
+        for case in required_cases
+        if case.kind is QualificationCaseKind.REPRESENTATIVE
+        for step_id in case.required_action_step_ids
+    }
+    for step_id in sorted(required_action_ids - representative_coverage):
+        refusals.append(
+            QualificationRefusal(
+                code=QualificationRefusalCode.REPRESENTATIVE_ACTION_UNCOVERED,
+                path="qualification.cases",
+                step_id=step_id,
+                message=(
+                    f"qualified write action {step_id!r} has no required "
+                    "representative case"
+                ),
+            )
+        )
+    fault_coverage = {
+        (case.kind, case.target_step_id)
+        for case in required_cases
+        if case.kind is not QualificationCaseKind.REPRESENTATIVE
+        and case.target_step_id is not None
+    }
+    fault_targets_by_kind = {
+        QualificationCaseKind.AMBIGUITY: required_action_ids,
+        QualificationCaseKind.WEAK_EFFECT: required_action_ids,
+        QualificationCaseKind.MISSING_EFFECT: required_action_ids,
+        QualificationCaseKind.WRONG_IDENTITY: consequential_ids,
+        QualificationCaseKind.STALE_IDENTITY: consequential_ids,
+    }
+    for kind in sorted(required_kinds, key=lambda item: item.value):
+        for step_id in sorted(fault_targets_by_kind[kind]):
+            if (kind, step_id) not in fault_coverage:
+                refusals.append(
+                    QualificationRefusal(
+                        code=QualificationRefusalCode.FAULT_ACTION_UNCOVERED,
+                        path="qualification.cases",
+                        step_id=step_id,
+                        message=(
+                            f"consequential action {step_id!r} has no required "
+                            f"{kind.value} fault case"
+                        ),
+                        details={"kind": kind.value},
+                    )
+                )
+
     passed_cases = 0
-    required_cases = [case for case in project.cases if case.required]
     evidence_preverified = bool(
         evidence_root is None
         and _certified_evidence_contract_sha256 is not None

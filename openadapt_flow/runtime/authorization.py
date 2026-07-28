@@ -275,6 +275,57 @@ class GovernedRunAuthorization(BaseModel):
             return "qualification-run authorization references an unknown case"
         if self.qualification_case_kind != case.kind.value:
             return "qualification-run authorization kind does not match its case"
+        if case.runtime_input_sha256 is None:
+            return "qualification case has no approved runtime-input digest"
+        if self.qualification_case_input_sha256 != case.runtime_input_sha256:
+            return "qualification-run input does not match its case contract"
+
+        from openadapt_flow.qualification import qualification_action_requirements
+
+        try:
+            required_actions, required_identity = qualification_action_requirements(
+                workflow
+            )
+        except ValueError:
+            return "qualification action requirements are ambiguous"
+        missing_identity = sorted(
+            required_identity.difference(self.required_identity_step_ids)
+        )
+        if missing_identity:
+            return (
+                "qualification-run authorization omits required identity steps: "
+                + ", ".join(missing_identity)
+            )
+        if case.kind.value == "representative":
+            target_steps = set(case.required_action_step_ids)
+            if not target_steps:
+                return "representative qualification case has no required actions"
+            from openadapt_flow.traversal import iter_workflow_steps
+
+            workflow_steps = {step.id for step in iter_workflow_steps(workflow)}
+            unknown_targets = sorted(target_steps.difference(workflow_steps))
+            if unknown_targets:
+                return (
+                    "representative case targets unknown workflow actions: "
+                    + ", ".join(unknown_targets)
+                )
+            if self.qualification_fault_step_id_sha256 is not None:
+                return "representative qualification case binds a fault target"
+        else:
+            target_id = case.target_step_id
+            if target_id is None:
+                return "qualification fault case has no target action"
+            if target_id not in required_actions:
+                return "qualification fault case targets an unqualified action"
+            if case.kind.value in {"wrong_identity", "stale_identity"} and (
+                target_id not in required_identity
+            ):
+                return "identity fault case target is not consequential"
+            if (
+                self.qualification_fault_step_id_sha256
+                != hashlib.sha256(target_id.encode("utf-8")).hexdigest()
+            ):
+                return "qualification fault target does not match its case contract"
         if self.qualification_fault_step_id_sha256 is not None:
             from openadapt_flow.traversal import iter_workflow_steps
 

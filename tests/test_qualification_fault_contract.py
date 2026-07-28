@@ -22,6 +22,7 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     ApiBinding,
+    ApiIdentityBinding,
     SafetyRefusalEvidence,
     Step,
     StepResult,
@@ -30,12 +31,15 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.qualification import (
+    ActionRiskClass,
+    ActionRiskClassification,
     EnvironmentBoundary,
     QualificationCase,
     QualificationCaseKind,
     QualificationOutcome,
     add_case,
     init_project,
+    set_action_classification,
 )
 from openadapt_flow.qualification_environment import (
     BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256,
@@ -53,11 +57,12 @@ from openadapt_flow.qualification_faults import (
     verify_fault_mutation_receipt,
 )
 from openadapt_flow.runtime import Replayer
+from openadapt_flow.runtime.actuators import ActuationStatus, ApiActuationResult
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     runtime_inputs_digest,
 )
-from openadapt_flow.runtime.effects import Effect, EffectKind
+from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
 from openadapt_flow.verification import VerificationTier
 
 _SESSION = "a" * 64
@@ -173,6 +178,25 @@ class _WeakEffectVerifier:
     verification_tier = VerificationTier.IMMEDIATE_SCREEN
 
 
+class _NonRefusingEffectVerifier:
+    verification_tier = VerificationTier.INDEPENDENT_SYSTEM
+
+    def capture_pre_state(self) -> object:
+        return object()
+
+
+class _UnavailableApiActuator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def actuate(self, _binding: ApiBinding, _params: dict[str, str]):
+        self.calls += 1
+        return ApiActuationResult(
+            status=ActuationStatus.UNAVAILABLE,
+            reason="fixture request was not sent",
+        )
+
+
 class _FaultDriver:
     key_id = "test-fault-driver"
 
@@ -182,6 +206,7 @@ class _FaultDriver:
         *,
         decline: bool = False,
         change_binding: str | None = None,
+        non_refusing_effect_mutation: bool = False,
         signing_key: Ed25519PrivateKey | None = None,
     ) -> None:
         self.kind = kind
@@ -191,6 +216,7 @@ class _FaultDriver:
         ).hexdigest()
         self.decline = decline
         self.change_binding = change_binding
+        self.non_refusing_effect_mutation = non_refusing_effect_mutation
         self.calls = 0
         self._identity_reads = {"id": 0, "contract": 0, "key": 0}
         self._signing_key = signing_key or Ed25519PrivateKey.generate()
@@ -243,11 +269,14 @@ class _FaultDriver:
             after_sha256 = sha256_bytes(context.backend.screenshot())
         else:
             replace_effect_verifier = True
-            replacement = (
-                None
-                if self.kind is QualificationCaseKind.MISSING_EFFECT
-                else _WeakEffectVerifier()
-            )
+            if self.non_refusing_effect_mutation:
+                replacement = _NonRefusingEffectVerifier()
+            else:
+                replacement = (
+                    None
+                    if self.kind is QualificationCaseKind.MISSING_EFFECT
+                    else _WeakEffectVerifier()
+                )
             after_sha256 = effect_verifier_input_sha256(
                 replacement,
                 context.effects,
@@ -298,26 +327,14 @@ def _fault_workflow(
         region=(5, 5, 6, 6),
         click_point=(8, 8),
     )
-    if kind in {
-        QualificationCaseKind.WRONG_IDENTITY,
-        QualificationCaseKind.STALE_IDENTITY,
-    }:
-        anchor.structured_identity = "Synthetic record"
+    anchor.structured_identity = "Synthetic record"
     step = Step(
         id="submit",
         intent="Submit",
         action=ActionKind.CLICK,
         anchor=anchor,
-        identity_armed=kind
-        in {
-            QualificationCaseKind.WRONG_IDENTITY,
-            QualificationCaseKind.STALE_IDENTITY,
-        },
-        risk=(
-            "irreversible"
-            if kind is QualificationCaseKind.STALE_IDENTITY
-            else "reversible"
-        ),
+        identity_armed=True,
+        risk="irreversible",
     )
     if kind in {
         QualificationCaseKind.WEAK_EFFECT,
@@ -326,21 +343,31 @@ def _fault_workflow(
         effects = [
             Effect(
                 kind=EffectKind.RECORD_WRITTEN,
-                match={"record_id": "synthetic-1"},
+                match={"record_id": ValueExpr(param="record_id")},
                 risk="irreversible",
             )
         ]
         if api_effect_only:
             step.api_binding = ApiBinding(
                 method="POST",
-                url_template="/synthetic-records",
+                url_template="/synthetic-records/{record_id}",
                 effects=effects,
+                identity=[
+                    ApiIdentityBinding(
+                        key="record_id",
+                        param="record_id",
+                        effect_field="record_id",
+                        request_pointers=["/url/record_id"],
+                    )
+                ],
             )
         else:
             step.effects = effects
     backend = _ObservedBackend()
     observer = BackendQualificationEnvironmentObserver(backend)
     workflow = Workflow(name=f"fault-{kind.value}", surface="web", steps=[step])
+    if api_effect_only:
+        workflow.params["record_id"] = "synthetic-1"
     init_project(
         workflow,
         environment=EnvironmentBoundary(
@@ -356,6 +383,15 @@ def _fault_workflow(
             runtime_version="test",
         ),
     )
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id="submit",
+            classification=ActionRiskClass.IRREVERSIBLE,
+            explanation="qualification fault target changes business state",
+            operator_confirmed=True,
+        ),
+    )
     add_case(
         workflow,
         QualificationCase(
@@ -364,7 +400,21 @@ def _fault_workflow(
             expected_outcome=QualificationOutcome.VERIFIED,
         ),
     )
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
     assert workflow.qualification is not None
+    workflow.qualification.cases = [
+        case.model_copy(
+            update={
+                "runtime_input_sha256": input_sha256,
+                **(
+                    {"required_action_step_ids": ["submit"]}
+                    if case.kind is QualificationCaseKind.REPRESENTATIVE
+                    else {"target_step_id": "submit"}
+                ),
+            }
+        )
+        for case in workflow.qualification.cases
+    ]
     workflow.qualification.trusted_fault_driver_keys[driver.key_id] = (
         driver.public_key_base64
     )
@@ -389,6 +439,7 @@ def _fault_authorization(
         admitted_policy_contract_sha256="e" * 64,
         execution_profile="standard",
         minimum_effect_tier=3,
+        required_identity_step_ids=("submit",),
         approval_source="qualification-campaign",
         qualification_project_id=workflow.qualification.project_id,
         qualification_project_revision=workflow.qualification.revision,
@@ -413,6 +464,7 @@ def _run_fault(
     driver: _FaultDriver,
     *,
     api_effect_only: bool = False,
+    api_actuator: Any = None,
 ):
     workflow, bundle = _fault_workflow(
         tmp_path,
@@ -433,6 +485,7 @@ def _run_fault(
         ),
         qualification_fault_driver=driver,
         effect_verifier=_StrongEffectVerifier(),
+        api_actuator=api_actuator,
         durable=True,
         require_settled=True,
         poll_interval_s=0.0,
@@ -662,10 +715,40 @@ def test_inactive_api_path_does_not_consume_a_fault_mutation(tmp_path: Path) -> 
     assert backend.actions == []
 
 
-class _ExternalObserver:
-    observer_id = "test.external-environment"
-    contract_sha256 = "9" * 64
+def test_api_fault_mutation_cannot_fall_through_to_gui_when_api_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(
+        QualificationCaseKind.WEAK_EFFECT,
+        non_refusing_effect_mutation=True,
+    )
+    actuator = _UnavailableApiActuator()
 
+    report, backend = _run_fault(
+        tmp_path,
+        QualificationCaseKind.WEAK_EFFECT,
+        driver,
+        api_effect_only=True,
+        api_actuator=actuator,
+    )
+
+    assert report.execution_outcome == "HALTED"
+    assert actuator.calls == 1
+    assert len(report.qualification_fault_mutations) == 1
+    assert backend.actions == []
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].safety_refusal_evidence is None
+    assert "refusing to reuse that mutation" in (report.results[0].error or "")
+    assert (
+        fault_detector_contract_error(
+            report,
+            report.qualification_fault_mutations[0],
+        )
+        == "fault_detector_refusal_not_observed"
+    )
+
+
+class _ExternalObserver:
     def __init__(
         self,
         *,
@@ -675,6 +758,22 @@ class _ExternalObserver:
         self.target_kind = target_kind
         self.change_field = change_field
         self.calls = 0
+        self.observer_id_reads = 0
+        self.contract_reads = 0
+
+    @property
+    def observer_id(self) -> str:
+        self.observer_id_reads += 1
+        if self.change_field == "observer_id" and self.observer_id_reads > 4:
+            return "test.replacement-environment"
+        return "test.external-environment"
+
+    @property
+    def contract_sha256(self) -> str:
+        self.contract_reads += 1
+        if self.change_field == "observer_contract" and self.contract_reads > 4:
+            return "8" * 64
+        return "9" * 64
 
     def observe(self, _backend: Any, _target_kind: str):
         self.calls += 1
@@ -703,6 +802,8 @@ class _ExternalObserver:
         "application_version",
         "session_identity_sha256",
         "environment_digest",
+        "observer_id",
+        "observer_contract",
     ],
 )
 def test_external_observer_rechecks_every_environment_signal_before_input(
@@ -728,7 +829,10 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
                     structural=StructuralLocator(selector="#submit"),
                     region=(5, 5, 6, 6),
                     click_point=(8, 8),
+                    structured_identity="Synthetic record",
                 ),
+                identity_armed=True,
+                risk="irreversible",
             )
         ],
     )
@@ -745,11 +849,23 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
             runtime_version="test",
         ),
     )
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id="submit",
+            classification=ActionRiskClass.IRREVERSIBLE,
+            explanation="qualification environment target changes business state",
+            operator_confirmed=True,
+        ),
+    )
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
     add_case(
         workflow,
         QualificationCase(
             id="representative-1",
             kind=QualificationCaseKind.REPRESENTATIVE,
+            runtime_input_sha256=input_sha256,
+            required_action_step_ids=["submit"],
             expected_outcome=QualificationOutcome.VERIFIED,
         ),
     )
@@ -765,6 +881,7 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
         admitted_policy_contract_sha256="5" * 64,
         execution_profile="standard",
         minimum_effect_tier=3,
+        required_identity_step_ids=("submit",),
         approval_source="qualification-campaign",
         qualification_project_id=workflow.qualification.project_id,
         qualification_project_revision=workflow.qualification.revision,
@@ -797,9 +914,12 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
     assert backend.actions == []
     assert report.observed_environment_digest == "7" * 64
     assert report.observed_environment_binding_sha256 is not None
-    assert "qualification environment changed before input" in (
-        report.results[0].error or ""
+    expected_refusal = (
+        "qualification environment observer binding changed before input"
+        if change_field in {"observer_id", "observer_contract"}
+        else "qualification environment changed before input"
     )
+    assert expected_refusal in (report.results[0].error or "")
     assert backend._input_guard is None
 
 

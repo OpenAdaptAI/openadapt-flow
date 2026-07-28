@@ -717,6 +717,8 @@ class Replayer:
         merged.update(params or {})
         params = merged
 
+        from openadapt_flow.qualification import workflow_contract_sha256
+
         report = RunReport(
             workflow_name=workflow.name,
             started_at=datetime.now(timezone.utc).isoformat(),
@@ -733,6 +735,7 @@ class Replayer:
             bundle_content_digest=(
                 workflow.manifest.content_digest if workflow.manifest else None
             ),
+            workflow_contract_sha256=workflow_contract_sha256(workflow),
             source_recording_sha256=(
                 workflow.manifest.provenance.source_recording_sha256
                 if workflow.manifest
@@ -3288,6 +3291,7 @@ class Replayer:
         # openadapt_flow.runtime.actuators.
         api_effect_verifier = self.effect_verifier
         api_effects: tuple[Any, ...] = ()
+        api_fault_mutation_start = len(self._qualification_fault_mutations)
         if (
             self.api_actuator is not None
             and step.api_binding is not None
@@ -3322,6 +3326,18 @@ class Replayer:
                         if self.governed_authorization is not None
                         else "safety_halt"
                     )
+                result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+                return result
+            if len(self._qualification_fault_mutations) > api_fault_mutation_start:
+                result.ok = False
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = (
+                    "the qualification fault changed the API detector input, but "
+                    "the API path became unavailable without producing the required "
+                    "detector refusal; refusing to reuse that mutation on the GUI "
+                    "actuation path"
+                )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
 
@@ -6121,10 +6137,37 @@ class Replayer:
             return "qualification environment observer does not match the project"
 
         def environment_call() -> QualificationEnvironmentObservation:
-            return configured_observer.observe(
+            try:
+                before_observer = (
+                    configured_observer.observer_id,
+                    configured_observer.contract_sha256,
+                )
+            except Exception as exc:
+                raise StructuralResolutionRefused(
+                    "qualification environment observer binding is unavailable"
+                ) from exc
+            if before_observer != observed_observer:
+                raise StructuralResolutionRefused(
+                    "qualification environment observer binding changed before input"
+                )
+            current = configured_observer.observe(
                 self.backend,
                 project.environment.target_kind,
             )
+            try:
+                after_observer = (
+                    configured_observer.observer_id,
+                    configured_observer.contract_sha256,
+                )
+            except Exception as exc:
+                raise StructuralResolutionRefused(
+                    "qualification environment observer binding is unavailable"
+                ) from exc
+            if after_observer != before_observer:
+                raise StructuralResolutionRefused(
+                    "qualification environment observer binding changed during observation"
+                )
+            return current
 
         try:
             observed = environment_call()
@@ -6183,6 +6226,8 @@ class Replayer:
             return
         try:
             observed = call()
+        except StructuralResolutionRefused:
+            raise
         except Exception as exc:
             raise StructuralResolutionRefused(
                 "qualification environment could not be observed before input"

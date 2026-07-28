@@ -20,6 +20,8 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     ApiBinding,
+    EffectVerificationEvidence,
+    IdentityCheck,
     Postcondition,
     PostconditionKind,
     RunReport,
@@ -45,6 +47,7 @@ from openadapt_flow.qualification import (
     QualificationCase,
     QualificationCaseKind,
     QualificationCaseResult,
+    QualificationCertification,
     QualificationOutcome,
     QualificationRefusalCode,
     RequalificationCondition,
@@ -55,8 +58,10 @@ from openadapt_flow.qualification import (
     current_certification_matches,
     evaluate_qualification,
     init_project,
+    qualification_action_requirements,
     record_case_results,
     set_action_classification,
+    set_case_scope,
     set_effect_policy,
     set_identity_policy,
     set_minimum_effect_tier,
@@ -177,12 +182,27 @@ def _configure(workflow: Workflow, *, tier: VerificationTier) -> None:
 def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
     project = workflow.qualification
     assert project is not None
+    action = workflow.steps[0]
+    action_id = action.id
+    case_input = runtime_inputs_bytes(workflow, None, None)
+    case_input_sha256 = hashlib.sha256(case_input).hexdigest()
+    project.cases = [
+        case.model_copy(
+            update={
+                "runtime_input_sha256": case_input_sha256,
+                "target_step_id": action_id,
+            }
+        )
+        for case in project.cases
+    ]
     add_case(
         workflow,
         QualificationCase(
             id="representative-1",
             kind=QualificationCaseKind.REPRESENTATIVE,
             input_ref="fixtures/representative-1",
+            runtime_input_sha256=case_input_sha256,
+            required_action_step_ids=[action_id],
             expected_outcome=QualificationOutcome.VERIFIED,
         ),
     )
@@ -194,8 +214,6 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
     project = workflow.qualification
     assert project is not None
     evidence_root.mkdir(parents=True, exist_ok=True)
-    case_input = runtime_inputs_bytes(workflow, None, None)
-    case_input_sha256 = hashlib.sha256(case_input).hexdigest()
     campaign_sha256 = sha256_bytes(b"qualification-campaign")
     observed_application_sha256 = sha256_bytes(b"qualified-app")
     observed_version_sha256 = sha256_bytes(b"1")
@@ -210,12 +228,14 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         session_identity_sha256=observed_session_sha256,
     )
     qualification_policy = load_policy("clinical-write")
+    required_actions, required_identity = qualification_action_requirements(workflow)
     results: list[QualificationCaseResult] = []
     for case in project.cases:
         run_sha256 = sha256_bytes(f"run:{case.id}".encode())
         if case.kind is QualificationCaseKind.REPRESENTATIVE:
             report = RunReport(
                 workflow_name=workflow.name,
+                workflow_contract_sha256=workflow_contract_sha256(workflow),
                 started_at="2026-07-28T00:00:00Z",
                 execution_profile="standard",
                 execution_outcome="VERIFIED",
@@ -227,16 +247,16 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                     qualification_policy
                 ),
                 governed_minimum_effect_tier=int(project.minimum_effect_tier),
+                governed_authorization_id="qualification-representative",
                 governed_runtime_inputs_digest=case_input_sha256,
+                required_identity_step_ids=sorted(required_identity),
                 governed_qualification_project_id=project.project_id,
                 governed_qualification_project_revision=project.revision,
                 governed_qualification_project_contract_sha256=(
                     project.contract_sha256()
                 ),
                 governed_qualification_campaign_id_sha256=campaign_sha256,
-                governed_qualification_case_id_sha256=sha256_bytes(
-                    case.id.encode()
-                ),
+                governed_qualification_case_id_sha256=sha256_bytes(case.id.encode()),
                 governed_qualification_case_input_sha256=case_input_sha256,
                 governed_qualification_run_id_sha256=run_sha256,
                 governed_qualification_case_kind=case.kind.value,
@@ -248,6 +268,47 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 observed_environment_binding_sha256=observed_binding,
                 qualification_environment_observer_id="fixture-observer",
                 qualification_environment_observer_contract_sha256="c" * 64,
+                results=[
+                    StepResult(
+                        step_id=action_id,
+                        intent=action.intent,
+                        ok=True,
+                        delivery_attempted=True,
+                        identity=(
+                            IdentityCheck(
+                                status="verified",
+                                mode="structured",
+                                coverage=1.0,
+                            )
+                            if action_id in required_identity
+                            else None
+                        ),
+                        postconditions_ok=True,
+                        effect_verified=(
+                            True if action_id in required_actions else None
+                        ),
+                        effect_contract_hashes=(
+                            [effect.contract_hash() for effect in action.effects]
+                            if action_id in required_actions
+                            else []
+                        ),
+                        effect_evidence=(
+                            [
+                                EffectVerificationEvidence(
+                                    effect_contract_hash=effect.contract_hash(),
+                                    substrate="fixture-system-of-record",
+                                    verification_tier=int(project.minimum_effect_tier),
+                                    initial_verdict="confirmed",
+                                    final_verdict="confirmed",
+                                    observed_effect="present",
+                                )
+                                for effect in action.effects
+                            ]
+                            if action_id in required_actions
+                            else []
+                        ),
+                    )
+                ],
                 success=True,
             )
             representative_bytes = report.model_dump_json().encode()
@@ -310,7 +371,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 case_id_sha256=sha256_bytes(case.id.encode()),
                 case_input_sha256=case_input_sha256,
                 run_id_sha256=run_sha256,
-                step_id_sha256=sha256_bytes(b"save"),
+                step_id_sha256=sha256_bytes(action_id.encode()),
                 fault_kind=case.kind.value,
                 gate=gate,
                 driver_id="fixture-driver",
@@ -324,6 +385,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         )
         report = RunReport(
             workflow_name=workflow.name,
+            workflow_contract_sha256=workflow_contract_sha256(workflow),
             started_at="2026-07-28T00:00:00Z",
             execution_profile="standard",
             execution_outcome="HALTED",
@@ -347,7 +409,9 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             governed_qualification_fault_driver_id="fixture-driver",
             governed_qualification_fault_driver_contract_sha256="d" * 64,
             governed_qualification_fault_driver_key_id="test-fault-driver",
-            governed_qualification_fault_step_id_sha256=sha256_bytes(b"save"),
+            governed_qualification_fault_step_id_sha256=sha256_bytes(
+                action_id.encode()
+            ),
             qualification_evidence_only=True,
             qualification_fault_mutations=[receipt],
             observed_application_sha256=observed_application_sha256,
@@ -359,8 +423,8 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             qualification_environment_observer_contract_sha256="c" * 64,
             results=[
                 StepResult(
-                    step_id="save",
-                    intent="Save the record",
+                    step_id=action_id,
+                    intent=action.intent,
                     ok=False,
                     safety_halt=True,
                     delivery_attempted=False,
@@ -977,6 +1041,324 @@ def test_signed_passed_status_cannot_disagree_with_representative_run(
     assert not report.passed
     assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
         refusal.code for refusal in report.refusals
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "empty_results",
+        "workflow_contract_swap",
+        "delivery_missing",
+        "identity_missing",
+        "effect_evidence_missing",
+    ],
+)
+def test_signed_representative_claim_cannot_replace_exact_step_evidence(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == "representative-1")
+    result = case.results[-1]
+    path = evidence_root / "representative-report.json"
+    payload = json.loads(path.read_text())
+    if mutation == "empty_results":
+        payload["results"] = []
+    elif mutation == "workflow_contract_swap":
+        payload["workflow_contract_sha256"] = "f" * 64
+    elif mutation == "delivery_missing":
+        payload["results"][0]["delivery_attempted"] = False
+    elif mutation == "identity_missing":
+        payload["results"][0]["identity"] = None
+    else:
+        payload["results"][0]["effect_evidence"] = []
+    changed_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    path.write_bytes(changed_bytes)
+    changed_digest = hashlib.sha256(changed_bytes).hexdigest()
+    changed_refs = [
+        ref.model_copy(update={"sha256": changed_digest})
+        if ref.kind == "run_report"
+        else ref
+        for ref in result.evidence
+    ]
+    case.results[-1] = sign_case_result(
+        result.model_copy(
+            update={"evidence": changed_refs, "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert not report.passed
+    expected_code = (
+        QualificationRefusalCode.CASE_NOT_PASSED
+        if mutation == "delivery_missing"
+        else QualificationRefusalCode.CASE_ATTESTATION_INVALID
+    )
+    assert expected_code in {refusal.code for refusal in report.refusals}
+
+
+def test_case_scope_setter_versions_and_invalidates_certification() -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    project = workflow.qualification
+    assert project is not None
+    project.last_certification = QualificationCertification(
+        project_revision=project.revision,
+        project_contract_sha256=project.contract_sha256(),
+        workflow_contract_sha256=workflow_contract_sha256(workflow),
+        environment_contract_sha256=project.environment.contract_sha256(),
+        policy_name="clinical-write",
+        policy_contract_sha256="b" * 64,
+        passed=True,
+        report_sha256="c" * 64,
+        case_evidence_contract_sha256="a" * 64,
+        certified_at="2026-07-28T00:00:00Z",
+    )
+    revision = project.revision
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
+
+    set_case_scope(
+        workflow,
+        case_id="fault-ambiguity",
+        runtime_input_sha256=input_sha256,
+        target_step_id="save",
+    )
+
+    assert project.revision == revision + 1
+    assert project.last_certification is None
+    case = next(item for item in project.cases if item.id == "fault-ambiguity")
+    assert case.runtime_input_sha256 == input_sha256
+    assert case.target_step_id == "save"
+    add_case(
+        workflow,
+        QualificationCase(
+            id="representative-1",
+            kind="representative",
+            expected_outcome="verified",
+        ),
+    )
+    with pytest.raises(
+        ValueError, match="representative cases require an action scope"
+    ):
+        set_case_scope(
+            workflow,
+            case_id="representative-1",
+            runtime_input_sha256=input_sha256,
+        )
+
+
+def test_required_cases_cannot_hide_a_second_qualified_write() -> None:
+    workflow = _workflow()
+    second = workflow.steps[0].model_copy(deep=True)
+    second.id = "send"
+    second.intent = "Send the second qualified write"
+    workflow.steps.append(second)
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id="send",
+            classification="irreversible",
+            explanation="The second action changes source-of-record state",
+            operator_confirmed=True,
+        ),
+    )
+    set_identity_policy(
+        workflow,
+        IdentityPolicy(step_id="send", enforcement="canonical_ladder"),
+    )
+    set_effect_policy(
+        workflow,
+        step_id="send",
+        effect_index=0,
+        tier=VerificationTier.INDEPENDENT_SYSTEM,
+    )
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
+    project = workflow.qualification
+    assert project is not None
+    for case in list(project.cases):
+        set_case_scope(
+            workflow,
+            case_id=case.id,
+            runtime_input_sha256=input_sha256,
+            target_step_id="save",
+        )
+    add_case(
+        workflow,
+        QualificationCase(
+            id="representative-save",
+            kind="representative",
+            runtime_input_sha256=input_sha256,
+            required_action_step_ids=["save"],
+            expected_outcome="verified",
+        ),
+    )
+    add_case(
+        workflow,
+        QualificationCase(
+            id="optional-representative-send",
+            kind="representative",
+            runtime_input_sha256=input_sha256,
+            required_action_step_ids=["send"],
+            expected_outcome="verified",
+            required=False,
+        ),
+    )
+
+    report = evaluate_qualification(workflow)
+
+    assert any(
+        refusal.code is QualificationRefusalCode.REPRESENTATIVE_ACTION_UNCOVERED
+        and refusal.step_id == "send"
+        for refusal in report.refusals
+    )
+    assert any(
+        refusal.code is QualificationRefusalCode.FAULT_ACTION_UNCOVERED
+        and refusal.step_id == "send"
+        for refusal in report.refusals
+    )
+
+
+def test_qualification_authorization_cannot_omit_project_identity_scope(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
+    add_case(
+        workflow,
+        QualificationCase(
+            id="representative-1",
+            kind="representative",
+            runtime_input_sha256=input_sha256,
+            required_action_step_ids=["save"],
+            expected_outcome="verified",
+        ),
+    )
+    bundle = tmp_path / "bundle"
+    (bundle / "templates").mkdir(parents=True)
+    (bundle / "templates" / "save.png").write_bytes(b"fixture")
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    project = workflow.qualification
+    assert project is not None and workflow.manifest is not None
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=input_sha256,
+        admitted_policy_name="clinical-write",
+        admitted_policy_contract_sha256="d" * 64,
+        execution_profile="standard",
+        minimum_effect_tier=3,
+        required_identity_step_ids=(),
+        approval_source="qualification-campaign",
+        qualification_project_id=project.project_id,
+        qualification_project_revision=project.revision,
+        qualification_project_contract_sha256=project.contract_sha256(),
+        qualification_case_id="representative-1",
+        qualification_campaign_id_sha256="e" * 64,
+        qualification_case_input_sha256=input_sha256,
+        qualification_run_id_sha256="f" * 64,
+        qualification_case_kind="representative",
+    )
+
+    assert authorization.validate_workflow(workflow) == (
+        "qualification-run authorization omits required identity steps: save"
+    )
+
+
+def test_fault_case_cannot_target_a_read_only_decoy() -> None:
+    workflow = _workflow()
+    workflow.steps.append(
+        Step(id="inspect", intent="Inspect the result", action=ActionKind.WAIT)
+    )
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
+    set_case_scope(
+        workflow,
+        case_id="fault-ambiguity",
+        runtime_input_sha256=input_sha256,
+        target_step_id="inspect",
+    )
+
+    report = evaluate_qualification(workflow)
+
+    assert any(
+        refusal.code is QualificationRefusalCode.CASE_TARGET_INVALID
+        and refusal.case_id == "fault-ambiguity"
+        for refusal in report.refusals
+    )
+
+
+def test_signed_fault_receipt_cannot_swap_its_case_target(tmp_path: Path) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == "fault-ambiguity")
+    result = case.results[-1]
+    receipt_path = evidence_root / "fault-ambiguity.receipt.json"
+    report_path = evidence_root / "fault-ambiguity.report.json"
+    receipt = FaultMutationReceipt.model_validate_json(receipt_path.read_bytes())
+    swapped_step_sha256 = sha256_bytes(b"read-only-decoy")
+    swapped_receipt = sign_fault_mutation_receipt(
+        receipt.model_copy(
+            update={
+                "step_id_sha256": swapped_step_sha256,
+                "attestation_signature": "",
+            }
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+    receipt_bytes = swapped_receipt.artifact_bytes()
+    receipt_path.write_bytes(receipt_bytes)
+    retained_report = RunReport.model_validate_json(report_path.read_bytes())
+    changed_report = retained_report.model_copy(
+        update={
+            "governed_qualification_fault_step_id_sha256": swapped_step_sha256,
+            "qualification_fault_mutations": [swapped_receipt],
+        }
+    )
+    report_bytes = changed_report.model_dump_json().encode()
+    report_path.write_bytes(report_bytes)
+    changed_digests = {
+        "run_report": hashlib.sha256(report_bytes).hexdigest(),
+        "fault_receipt": hashlib.sha256(receipt_bytes).hexdigest(),
+    }
+    changed_refs = [
+        ref.model_copy(update={"sha256": changed_digests[ref.kind]})
+        if ref.kind in changed_digests
+        else ref
+        for ref in result.evidence
+    ]
+    case.results[-1] = sign_case_result(
+        result.model_copy(
+            update={"evidence": changed_refs, "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+    qualification_report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
+        refusal.code for refusal in qualification_report.refusals
     }
 
 

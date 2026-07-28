@@ -2526,6 +2526,14 @@ class RunReport(BaseModel):
         ),
     )
     bundle_content_digest: Optional[str] = Field(default=None, pattern="^[a-f0-9]{64}$")
+    workflow_contract_sha256: Optional[str] = Field(
+        default=None,
+        pattern="^[a-f0-9]{64}$",
+        description=(
+            "Exact executable workflow semantics and sealed visual-asset hashes "
+            "observed by the runtime before execution."
+        ),
+    )
     source_recording_sha256: Optional[str] = Field(
         default=None, pattern="^[a-f0-9]{64}$"
     )

@@ -212,12 +212,23 @@ def classify_execution_outcome(
     from openadapt_flow.run_gate import is_consequential
     from openadapt_flow.traversal import iter_workflow_steps
 
+    qualification_review_context = bool(
+        report.qualification_evidence_only
+        and workflow.qualification is not None
+        and report.governed_qualification_project_id
+        == workflow.qualification.project_id
+        and report.governed_qualification_project_revision
+        == workflow.qualification.revision
+        and report.governed_qualification_project_contract_sha256
+        == workflow.qualification.contract_sha256()
+    )
     consequential = {
         step.id
         for step in iter_workflow_steps(workflow)
         if is_consequential(
             step,
             workflow,
+            require_current_risk_certification=not qualification_review_context,
             certifying_policy_sha256=report.governed_policy_contract_sha256,
         )
     }

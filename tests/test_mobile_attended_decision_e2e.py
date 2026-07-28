@@ -1206,6 +1206,17 @@ def test_reject_terminates_the_run_and_the_run_report_says_so(tmp_path, monkeypa
     assert pending is not None, "the audit record of what was rejected was deleted"
     assert pending.status == "rejected"
 
+    # -- and it no longer dangles ------------------------------------------
+    # The retained pause file must not keep the run in the queue as something
+    # awaiting an answer. A terminated run that still offers an answerable
+    # question is exactly the dangling pause this action exists to avoid.
+    item_after = client.get("/api/attention").json()[0]
+    assert item_after["status"] == "rejected"
+    assert item_after["durably_paused"] is False
+    detail_after = client.get(f"/api/attention/{item_after['id']}").json()
+    assert detail_after["task"] is None
+    assert detail_after["task_digest"] is None
+
 
 def test_a_rejected_run_cannot_be_resumed_or_answered_again(tmp_path, monkeypatch):
     """Terminal means enforced, not merely reported.
@@ -1219,7 +1230,7 @@ def test_a_rejected_run_cannot_be_resumed_or_answered_again(tmp_path, monkeypatc
     from openadapt_flow.runtime.durable.approval import ApprovalRecord, RunRejected
     from openadapt_flow.runtime.durable.resume import resume
 
-    _wf, bundles, runs, bundle, run, _capability = _halt(tmp_path)
+    _wf, bundles, runs, bundle, run, capability = _halt(tmp_path)
     _app, client = _phone(bundles, runs, monkeypatch)
     item, detail = _open_task(client)
     assert (
@@ -1229,6 +1240,8 @@ def test_a_rejected_run_cannot_be_resumed_or_answered_again(tmp_path, monkeypatc
         == 200
     )
 
+    # Through the console the run no longer projects an answerable task at
+    # all, so every action is refused before admission looks at the request.
     for action, key in (
         ("reject", "reject-twice-key-000001"),
         ("escalate", "escalate-after-reject-01"),
@@ -1236,7 +1249,29 @@ def test_a_rejected_run_cannot_be_resumed_or_answered_again(tmp_path, monkeypatc
     ):
         again = _post(client, item, _decision(detail, action=action, key=key))
         assert again.status_code == 409, action
-        assert "terminal" in again.json()["detail"], action
+        assert "no current signed human decision task" in again.json()["detail"], action
+
+    # And bypassing the console entirely -- a retried relay still holding the
+    # exact capability from before the rejection -- the engine itself refuses,
+    # and says the run is terminal rather than blaming a stale page.
+    from openadapt_flow.runtime.durable.attended import AttendedActionRequest
+
+    for action, disposition, key in (
+        ("reject", "rejected_by_operator", "engine-reject-after-reject"),
+        ("escalate", "needs_assistance", "engine-escalate-after-rejct"),
+        ("continue", "completed_by_operator", "engine-continue-after-rejct"),
+    ):
+        with pytest.raises(AttendedActionRefused, match="terminal"):
+            execute_attended_action(
+                run,
+                AttendedActionRequest(
+                    capability_digest=capability.digest,
+                    idempotency_key=key,
+                    action=action,
+                    disposition=disposition,
+                ),
+                operator="front-desk",
+            )
 
     approval = ApprovalRecord(
         approver="supervisor",

@@ -659,6 +659,72 @@ def test_governed_program_loop_refuses_a_tampered_cursor_copy(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ("leaf_state", "leaf_graph", "parent_state", "malformed_cursor"),
+)
+def test_governed_program_refuses_a_tampered_active_frame_path(tmp_path, mutation):
+    class FrameMutationReplayer(Replayer):
+        def _act(self, step, resolution, params, **kwargs):
+            if mutation == "leaf_state":
+                self._frame_stack[-1]["state_id"] = "body-done"
+            elif mutation == "leaf_graph":
+                self._frame_stack[-1]["graph_id"] = "missing-body"
+            elif mutation == "parent_state":
+                self._frame_stack[0]["state_id"] = "done"
+            else:
+                self._frame_stack[-1]["loop"] = object()
+            return super()._act(step, resolution, params, **kwargs)
+
+    workflow, bundle = _seal(tmp_path, _governed_loop_workflow())
+    worklists = {"queue": [{"patient": "A"}]}
+    authorization = _authorization(workflow, worklists=worklists)
+    backend = FakeBackend()
+    run_dir = tmp_path / f"tampered-{mutation}-run"
+
+    report = FrameMutationReplayer(
+        backend,
+        vision=FakeVision(),
+        governed_authorization=authorization,
+        durable=True,
+    ).run(
+        workflow,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].safety_halt is True
+    assert "program" in (report.results[0].error or "")
+    assert CheckpointStore(run_dir).program_checkpoints() == []
+
+
+def test_demo_program_refuses_a_tampered_active_frame_path(tmp_path):
+    class FrameMutationReplayer(Replayer):
+        def _act(self, step, resolution, params, **kwargs):
+            self._frame_stack[-1]["state_id"] = "body-done"
+            return super()._act(step, resolution, params, **kwargs)
+
+    workflow, bundle = _seal(tmp_path, _governed_loop_workflow())
+    backend = FakeBackend()
+
+    report = FrameMutationReplayer(backend, vision=FakeVision()).run(
+        workflow,
+        worklists={"queue": [{"patient": "A"}]},
+        bundle_dir=bundle,
+        run_dir=tmp_path / "tampered-demo-frame-run",
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].safety_halt is True
+    assert "leaf frame" in (report.results[0].error or "")
+
+
 def test_program_exception_handler_cannot_catch_governed_identity_halt(tmp_path):
     step = context_click_step("Jane Sample 1980-01-15 MRN 123")
     step.timeout_s = 0.1

@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openadapt_flow.ir import (
     ActionDeliveryUncertainty,
@@ -234,3 +234,13 @@ class ProgramCheckpoint(BaseModel):
     #: Content hash of the bundle this checkpoint was captured against.
     bundle_version: str = ""
     created_at: str = Field(default_factory=_now)
+
+    @model_validator(mode="after")
+    def _leaf_matches_verified_state(self) -> "ProgramCheckpoint":
+        """Reject a checkpoint whose durable cursor contradicts its verdict."""
+
+        if self.frames and self.frames[-1].state_id != self.verified_state_id:
+            raise ValueError(
+                "the leaf program frame must match the verified checkpoint state"
+            )
+        return self

@@ -932,12 +932,16 @@ def test_program_transition_refuses_a_different_checkpoint_at_reserved_sequence(
     )
     pending = store.read_pending()
     assert pending is not None
+    different_frames = list(pending.program_frames)
+    different_frames[-1] = different_frames[-1].model_copy(
+        update={"state_id": "unrelated"}
+    )
     store.write_program_checkpoint(
         ProgramCheckpoint(
             workflow_name=workflow.name,
             seq=1,
             verified_state_id="unrelated",
-            frames=list(pending.program_frames),
+            frames=different_frames,
             bound_params={},
             bundle_version=capability.bundle_version,
         )

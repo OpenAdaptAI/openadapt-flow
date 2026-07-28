@@ -454,6 +454,7 @@ class Replayer:
         self._active_runtime_worklists: Optional[dict[str, list[dict[str, str]]]] = None
         self._active_delivery_resolution: Optional[Resolution] = None
         self._active_delivery_region: Optional[Region] = None
+        self._current_graph_id: Optional[str] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -1613,6 +1614,7 @@ class Replayer:
                     f"program references undefined state '{state_id}' — run aborted",
                 )
             report.visited_states.append(state.id)
+            self._current_graph_id = str(frame["graph_id"])
             self._current_state_id = state.id
             self._current_intent = (
                 state.step.intent if state.step is not None else state.id
@@ -1751,6 +1753,11 @@ class Replayer:
         if self._skip_completed_effect_state(state, params, report):
             return self._select_transition(state, params=params, bundle_dir=bundle_dir)
         ctx = self._build_graph_ctx(state, graph)
+        # Keep the exact validated interpreter cursor from before any backend,
+        # vision, overlay, or verifier callback. A callback can corrupt the
+        # mutable live frame stack. A refusal must still persist a safe resume
+        # cursor instead of serializing that corrupted state.
+        pre_action_frames = [self._frame_to_model(frame) for frame in self._frame_stack]
         result = self._run_step(
             state.step,
             workflow=workflow,
@@ -1781,9 +1788,7 @@ class Replayer:
                 result.error or f"action state '{state.id}' failed — run aborted",
                 safety=result.safety_halt,
             )
-            halt.program_frames = [
-                self._frame_to_model(frame) for frame in self._frame_stack
-            ]
+            halt.program_frames = pre_action_frames
             halt.program_params = dict(params)
             halt.program_history_hash = _history_hash(report.visited_states)
             raise halt
@@ -1929,11 +1934,14 @@ class Replayer:
 
     def _frame_to_model(self, frame: dict) -> GraphFrame:
         """Snapshot one live interpreter frame as a durable :class:`GraphFrame`."""
+        loop = frame["loop"]
+        if loop is not None:
+            loop = LoopCursor.model_validate(loop).model_copy(deep=True)
         return GraphFrame(
             graph_id=frame["graph_id"],
             state_id=frame["state_id"],
             params=dict(frame["params"]),
-            loop=frame["loop"],
+            loop=loop,
         )
 
     def _skip_completed_effect_state(
@@ -2667,6 +2675,14 @@ class Replayer:
         mid-loop pause finishes the in-progress row and runs the remaining rows.
         """
         assert workflow.program is not None
+        if checkpoint.frames and (
+            not isinstance(checkpoint.frames[-1], GraphFrame)
+            or checkpoint.frames[-1].state_id != checkpoint.verified_state_id
+        ):
+            raise _ProgramHalt(
+                "halt",
+                "the durable interpreter cursor does not match its verified state",
+            )
         receipt = checkpoint.attended_transition
         if receipt is not None:
             if (
@@ -3255,7 +3271,7 @@ class Replayer:
                     # too, immediately before the next delivery boundary.
                     if fresh_reacquisitions:
                         error = self._fresh_actuation_authorization_refusal(
-                            workflow, params
+                            workflow, params, step
                         )
                         if error is not None:
                             result.safety_halt = True
@@ -3360,7 +3376,7 @@ class Replayer:
 
                         fresh_reacquisitions += 1
                         error = self._fresh_actuation_authorization_refusal(
-                            workflow, params
+                            workflow, params, step
                         )
                         if error is None:
                             (
@@ -3438,7 +3454,7 @@ class Replayer:
                         # permission to assume delivery. Success now requires
                         # the complete configured contract.
                         error = None
-                    except StructuralResolutionRefused:
+                    except (OcrResolutionRefused, StructuralResolutionRefused):
                         # This typed refusal proves that the current delivery
                         # boundary did not emit input. Preserve its exact safety
                         # semantics even when an earlier focus edge in the same
@@ -3654,9 +3670,14 @@ class Replayer:
             result.ok = False
             result.safety_halt = True
             result.failure_category = "safety_halt"
+            admission = (
+                "no further action was admitted after the earlier input edge"
+                if result.delivery_attempted is True
+                else "no action was admitted"
+            )
             result.error = (
                 f"OCR safety refusal for step '{step.id}' "
-                f"({step.intent}): {exc} — no action was admitted"
+                f"({step.intent}): {exc} — {admission}"
             )
         except StructuralResolutionRefused as exc:
             self._cancel_guarded_coordinate()
@@ -5186,24 +5207,135 @@ class Replayer:
             retried=retried,
         )
 
+    def _active_program_frame_refusal(
+        self,
+        workflow: Workflow,
+        params: dict[str, str],
+        step: Step,
+        base_params: dict[str, str],
+    ) -> Optional[str]:
+        """Bind the live interpreter path to the sealed program before input."""
+
+        frames = getattr(self, "_frame_stack", ())
+        if not frames:
+            if workflow.program is not None:
+                return "governed program execution lost its active control frame"
+            return None
+        if workflow.program is None:
+            return "governed linear execution acquired an unexpected program frame"
+
+        expected_params = dict(base_params)
+        parent_state: Optional[State] = None
+        for index, frame in enumerate(frames):
+            graph_id = frame.get("graph_id")
+            graph = (
+                workflow.program
+                if graph_id == TOP_GRAPH_ID
+                else workflow.subflows.get(str(graph_id))
+            )
+            state_id = frame.get("state_id")
+            state = graph.states.get(str(state_id)) if graph is not None else None
+            if graph is None or state is None:
+                return (
+                    "governed program control frame no longer matches a sealed "
+                    "graph and state"
+                )
+
+            cursor = frame.get("loop")
+            if index == 0:
+                if graph_id != TOP_GRAPH_ID or cursor is not None:
+                    return (
+                        "governed program root frame no longer matches the sealed "
+                        "program entry path"
+                    )
+            elif cursor is not None:
+                loop = parent_state.loop if parent_state is not None else None
+                if (
+                    parent_state is None
+                    or parent_state.kind is not StateKind.LOOP
+                    or loop is None
+                    or parent_state.id != cursor.loop_state_id
+                    or cursor.relation != loop.relation
+                    or graph_id != loop.body
+                ):
+                    return (
+                        "governed program loop cursor no longer matches its "
+                        "sealed loop state"
+                    )
+                source_rows: Optional[list[dict[str, str]]]
+                if (
+                    self._active_runtime_worklists is not None
+                    and loop.relation in self._active_runtime_worklists
+                ):
+                    source_rows = self._active_runtime_worklists[loop.relation]
+                else:
+                    relation = workflow.data_sources.get(loop.relation)
+                    source_rows = relation.rows if relation is not None else None
+                if source_rows is None or cursor.rows != source_rows:
+                    return (
+                        "governed program loop cursor no longer matches its "
+                        "authorized worklist"
+                    )
+                if cursor.row_index < 0 or cursor.row_index >= len(source_rows):
+                    return "governed program loop lost its authorized iteration cursor"
+                expected_params.update(source_rows[cursor.row_index])
+            elif (
+                parent_state is None
+                or parent_state.kind is not StateKind.SUBFLOW_CALL
+                or parent_state.subflow != graph_id
+            ):
+                return (
+                    "governed program child frame no longer matches its sealed "
+                    "subflow call"
+                )
+
+            if frame.get("params") != expected_params:
+                return (
+                    "governed program frame parameters no longer derive from "
+                    "the authorized base inputs and active worklist rows"
+                )
+            parent_state = state
+
+        leaf = frames[-1]
+        if (
+            leaf.get("graph_id") != self._current_graph_id
+            or leaf.get("state_id") != self._current_state_id
+            or parent_state is None
+            or parent_state.kind is not StateKind.ACTION
+            or parent_state.step != step
+        ):
+            return (
+                "governed program leaf frame no longer matches the exact sealed "
+                "action being executed"
+            )
+        if params != expected_params:
+            return (
+                "governed program iteration parameters no longer derive from "
+                "the authorized base inputs and active worklist row"
+            )
+        return None
+
     def _fresh_actuation_authorization_refusal(
         self,
         workflow: Workflow,
         params: dict[str, str],
+        step: Step,
     ) -> Optional[str]:
         """Recheck exact governed authority and inputs before fresh input."""
 
         profile_refusal = self._profile_runtime_refusal(workflow)
         if profile_refusal is not None:
             return profile_refusal
+        base_params = self._governed_base_params
+        if base_params is None:
+            if self.governed_authorization is not None or workflow.program is not None:
+                return "runtime lost its admitted parameter scope before input"
+            return self._governed_asset_mutation
         authorization = self.governed_authorization
         if authorization is not None:
             authorization_refusal = authorization.validate_workflow(workflow)
             if authorization_refusal is not None:
                 return authorization_refusal
-            base_params = self._governed_base_params
-            if base_params is None:
-                return "governed run authorization lost its admitted parameter scope"
             actual_inputs = runtime_inputs_digest(
                 workflow,
                 base_params,
@@ -5215,81 +5347,29 @@ class Replayer:
                     "governed run authorization no longer matches the current "
                     "runtime inputs"
                 )
-            expected_params = dict(base_params)
-            frames = getattr(self, "_frame_stack", ())
-            for index, frame in enumerate(frames):
-                cursor = frame.get("loop")
-                if cursor is not None:
-                    if index == 0:
-                        return (
-                            "governed program loop has no sealed parent state "
-                            "for its active iteration"
-                        )
-                    parent = frames[index - 1]
-                    parent_graph_id = parent.get("graph_id")
-                    parent_graph = (
-                        workflow.program
-                        if parent_graph_id == TOP_GRAPH_ID
-                        else workflow.subflows.get(str(parent_graph_id))
-                    )
-                    loop_state = (
-                        parent_graph.states.get(cursor.loop_state_id)
-                        if parent_graph is not None
-                        else None
-                    )
-                    loop = loop_state.loop if loop_state is not None else None
-                    if (
-                        loop_state is None
-                        or loop_state.kind is not StateKind.LOOP
-                        or loop is None
-                        or parent.get("state_id") != cursor.loop_state_id
-                        or cursor.relation != loop.relation
-                        or frame.get("graph_id") != loop.body
-                    ):
-                        return (
-                            "governed program loop cursor no longer matches its "
-                            "sealed loop state"
-                        )
-                    source_rows: Optional[list[dict[str, str]]]
-                    if (
-                        self._active_runtime_worklists is not None
-                        and loop.relation in self._active_runtime_worklists
-                    ):
-                        source_rows = self._active_runtime_worklists[loop.relation]
-                    else:
-                        relation = workflow.data_sources.get(loop.relation)
-                        source_rows = relation.rows if relation is not None else None
-                    if source_rows is None or cursor.rows != source_rows:
-                        return (
-                            "governed program loop cursor no longer matches its "
-                            "authorized worklist"
-                        )
-                    if cursor.row_index < 0 or cursor.row_index >= len(source_rows):
-                        return (
-                            "governed program loop lost its authorized iteration cursor"
-                        )
-                    expected_params.update(source_rows[cursor.row_index])
-                if frame.get("params") != expected_params:
-                    return (
-                        "governed program frame parameters no longer derive from "
-                        "the authorized base inputs and active worklist rows"
-                    )
-            if params != expected_params:
-                return (
-                    "governed program iteration parameters no longer derive "
-                    "from the authorized base inputs and active worklist row"
-                )
+        try:
+            frame_refusal = self._active_program_frame_refusal(
+                workflow, params, step, base_params
+            )
+        except Exception as exc:  # noqa: BLE001 - mutated interpreter boundary
+            frame_refusal = (
+                "program frame validation failed closed before input "
+                f"({type(exc).__name__})"
+            )
+        if frame_refusal is not None:
+            return frame_refusal
         return self._governed_asset_mutation
 
     def _delivery_authorization_refusal(
         self,
         workflow: Workflow,
         params: dict[str, str],
+        step: Step,
         result: StepResult,
     ) -> Optional[str]:
         """Recheck exact authority at the last point before input delivery."""
 
-        refusal = self._fresh_actuation_authorization_refusal(workflow, params)
+        refusal = self._fresh_actuation_authorization_refusal(workflow, params, step)
         if refusal is not None:
             self._cancel_guarded_coordinate()
             self._cancel_guarded_keyboard()
@@ -5345,7 +5425,9 @@ class Replayer:
                         "fresh actuation fingerprint — refusing raw coordinate "
                         "delivery; run aborted"
                     )
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 structural_locator = step.anchor.structural
@@ -5365,7 +5447,7 @@ class Replayer:
                 if requires_atomic_identity:
                     if isinstance(self.backend, RemoteActuationBackend):
                         refusal = self._delivery_authorization_refusal(
-                            workflow, params, result
+                            workflow, params, step, result
                         )
                         if refusal is not None:
                             return refusal
@@ -5379,7 +5461,7 @@ class Replayer:
                         )
                     elif isinstance(self.backend, GuardedCoordinateActionBackend):
                         refusal = self._delivery_authorization_refusal(
-                            workflow, params, result
+                            workflow, params, step, result
                         )
                         if refusal is not None:
                             return refusal
@@ -5409,7 +5491,7 @@ class Replayer:
                         )
                 else:
                     refusal = self._delivery_authorization_refusal(
-                        workflow, params, result
+                        workflow, params, step, result
                     )
                     if refusal is not None:
                         return refusal
@@ -5450,7 +5532,7 @@ class Replayer:
                             "operation"
                         )
                     refusal = self._delivery_authorization_refusal(
-                        workflow, params, result
+                        workflow, params, step, result
                     )
                     if refusal is not None:
                         return refusal
@@ -5462,7 +5544,7 @@ class Replayer:
                     )
                 elif isinstance(self.backend, GuardedCoordinateActionBackend):
                     refusal = self._delivery_authorization_refusal(
-                        workflow, params, result
+                        workflow, params, step, result
                     )
                     if refusal is not None:
                         return refusal
@@ -5490,7 +5572,9 @@ class Replayer:
                         "identity verification to delivery; run aborted"
                     )
             elif isinstance(self.backend, RichPointerActionBackend):
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 self._deliver_backend_call(
@@ -5536,7 +5620,9 @@ class Replayer:
                 and step.drag_end_anchor.structural is not None
                 and callable(structural_drag)
             ):
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 source_locator = step.anchor.structural
@@ -5596,7 +5682,9 @@ class Replayer:
                         f"Step '{step.id}' ({step.intent}) could not bind its "
                         f"freshly resolved drag source: {detail}; run aborted"
                     )
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 drag_backend = cast(GuardedDragActionBackend, self.backend)
@@ -5612,7 +5700,9 @@ class Replayer:
                 )
                 result.actuation = "guarded_coordinate"
             elif isinstance(self.backend, RichPointerActionBackend):
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 self._deliver_backend_call(
@@ -5708,7 +5798,7 @@ class Replayer:
                     and callable(native_act)
                 ):
                     refusal = self._delivery_authorization_refusal(
-                        workflow, params, result
+                        workflow, params, step, result
                     )
                     if refusal is not None:
                         return refusal
@@ -5730,7 +5820,7 @@ class Replayer:
                         and isinstance(self.backend, GuardedCoordinateActionBackend)
                     ):
                         refusal = self._delivery_authorization_refusal(
-                            workflow, params, result
+                            workflow, params, step, result
                         )
                         if refusal is not None:
                             return refusal
@@ -5762,7 +5852,7 @@ class Replayer:
                         )
                     else:
                         refusal = self._delivery_authorization_refusal(
-                            workflow, params, result
+                            workflow, params, step, result
                         )
                         if refusal is not None:
                             return refusal
@@ -5852,7 +5942,9 @@ class Replayer:
                         "selection"
                     )
                 assert field_region is not None
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 self._deliver_backend_call(
@@ -5868,7 +5960,9 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_type:
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 result.delivery_receipt = self._deliver_backend_call(
@@ -5892,7 +5986,9 @@ class Replayer:
                     "run aborted"
                 )
             else:
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 self._deliver_backend_call(result, lambda: self.backend.type_text(text))
@@ -5934,7 +6030,9 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_key:
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 result.delivery_receipt = self._deliver_backend_call(
@@ -5958,7 +6056,9 @@ class Replayer:
                     "run aborted"
                 )
             else:
-                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
                 if refusal is not None:
                     return refusal
                 self._deliver_backend_call(result, lambda: self.backend.press(key))
@@ -7695,7 +7795,9 @@ class Replayer:
                         "could not freshly resolve its field; run aborted"
                     )
                 field_point = retry_resolution.point
-            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            refusal = self._delivery_authorization_refusal(
+                workflow, params, step, result
+            )
             if refusal is not None:
                 result.input_verified = False
                 return refusal
@@ -7732,7 +7834,9 @@ class Replayer:
                         f"Typed input retry for step '{step.id}' ({step.intent}) "
                         "resolved to a different field after refocus; run aborted"
                     )
-            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            refusal = self._delivery_authorization_refusal(
+                workflow, params, step, result
+            )
             if refusal is not None:
                 result.input_verified = False
                 return refusal
@@ -7776,7 +7880,7 @@ class Replayer:
                 f"Typed input retry for step '{step.id}' ({step.intent}) "
                 "resolved to a different field before retyping; run aborted"
             )
-        refusal = self._delivery_authorization_refusal(workflow, params, result)
+        refusal = self._delivery_authorization_refusal(workflow, params, step, result)
         if refusal is not None:
             result.input_verified = False
             return refusal
@@ -8106,7 +8210,9 @@ class Replayer:
                 intent=next_step.intent,
             )
         if stop_pred is None or (dx == 0 and dy == 0):
-            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            refusal = self._delivery_authorization_refusal(
+                workflow, params, step, result
+            )
             if refusal is not None:
                 return refusal
             self._deliver_backend_call(
@@ -8167,7 +8273,9 @@ class Replayer:
                     return scroll_error
                 if readiness_holds(fresh_scroll_frame):
                     return None
-            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            refusal = self._delivery_authorization_refusal(
+                workflow, params, step, result
+            )
             if refusal is not None:
                 return refusal
             self._deliver_backend_call(

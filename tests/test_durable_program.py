@@ -33,6 +33,7 @@ from openadapt_flow.ir import (
     PredicateKind,
     ProgramGraph,
     Relation,
+    RunReport,
     State,
     StateKind,
     Step,
@@ -47,14 +48,58 @@ from openadapt_flow.runtime.durable import (
     StateDiverged,
     resume,
 )
+from openadapt_flow.runtime.durable.program_checkpoint import (
+    GraphFrame,
+    ProgramCheckpoint,
+)
 from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
-from openadapt_flow.runtime.replayer import Replayer
+from openadapt_flow.runtime.replayer import Replayer, _ProgramHalt
 
 # Reuse the scripted fakes + the scripted system-of-record verifier.
 from tests.test_durable_runtime import FakeSoRVerifier, _approval, _vision_ok
 from tests.test_replayer import FakeBackend, FakeVision
 
 # -- builders ----------------------------------------------------------------
+
+
+def test_program_checkpoint_rejects_a_leaf_that_is_not_the_verified_state():
+    with pytest.raises(ValueError, match="leaf program frame"):
+        ProgramCheckpoint(
+            workflow_name="w",
+            seq=1,
+            verified_state_id="verified",
+            frames=[GraphFrame(graph_id="__program__", state_id="different")],
+        )
+
+
+def test_program_resume_rejects_a_constructed_inconsistent_leaf(tmp_path):
+    action = State(
+        id="verified",
+        kind=StateKind.ACTION,
+        step=Step(id="type", intent="type", action=ActionKind.TYPE, text="A"),
+    )
+    workflow = Workflow(
+        name="w",
+        program=ProgramGraph(entry="verified", states={"verified": action}),
+    )
+    checkpoint = ProgramCheckpoint.model_construct(
+        workflow_name="w",
+        seq=1,
+        verified_state_id="verified",
+        frames=[GraphFrame(graph_id="__program__", state_id="different")],
+        bound_params={},
+    )
+
+    with pytest.raises(_ProgramHalt, match="cursor does not match"):
+        Replayer(FakeBackend(), vision=FakeVision())._resume_program_state(
+            checkpoint,
+            workflow=workflow,
+            worklists={},
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run",
+            report=RunReport(workflow_name="w", started_at="now"),
+            new_crops={},
+        )
 
 
 def _patient_effect() -> Effect:

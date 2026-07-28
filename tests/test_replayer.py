@@ -2510,6 +2510,69 @@ def _selection_matches(*, region=(100, 100, 50, 20), point=(110, 105)):
     return [Match(point=point, region=region, confidence=0.95) for _ in range(4)]
 
 
+@pytest.mark.parametrize("action", (ActionKind.TYPE, ActionKind.SELECT_OPTION))
+def test_post_focus_ocr_ambiguity_remains_a_no_keyboard_refusal(
+    bundle, run_dir, action
+):
+    class PostFocusOcrMutationReplayer(Replayer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.revalidations = 0
+
+        def _revalidate_consequential_actuation(self, *args, **kwargs):
+            self.revalidations += 1
+            if self.revalidations == 2:
+                raise AmbiguousOcrMatchError("synthetic duplicate OCR lines")
+            return super()._revalidate_consequential_actuation(*args, **kwargs)
+
+    vision = FakeVision()
+    vision.template_results = _selection_matches()
+    if action is ActionKind.SELECT_OPTION:
+        workflow = _remote_selection_workflow()
+        params = {"state": "Massachusetts"}
+        backend = SelectRemoteBackend(selected_value="Massachusetts")
+    else:
+        workflow = Workflow(
+            name="remote-type",
+            surface="rdp",
+            execution_mode="external",
+            steps=[
+                Step(
+                    id="t1",
+                    intent="type the governed value",
+                    action=ActionKind.TYPE,
+                    text="Massachusetts",
+                    anchor=click_step().anchor,
+                    risk="irreversible",
+                )
+            ],
+        )
+        params = {}
+        frame = make_png()
+        backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+
+    replayer = PostFocusOcrMutationReplayer(backend, vision=vision)
+    report = replayer.run(
+        workflow,
+        params=params,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert replayer.revalidations == 2
+    assert backend.actions == [("click", 110, 105, False)]
+    assert result.delivery_attempted is True
+    assert result.delivery_uncertainty is None
+    assert result.safety_halt is True
+    assert "synthetic duplicate OCR lines" in (result.error or "")
+    assert "no further action was admitted" in (result.error or "")
+    assert report.execution_outcome != "VERIFIED"
+    if isinstance(backend, SelectRemoteBackend):
+        assert backend.select_calls == []
+
+
 def test_remote_selection_verifies_committed_value_in_live_resolved_region(
     bundle, run_dir
 ):

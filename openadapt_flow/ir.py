@@ -2351,11 +2351,12 @@ class ProgramTransitionEvidence(BaseModel):
 
 
 class ProgramExceptionEvidence(BaseModel):
-    """Exact typed evidence for one non-action exception edge.
+    """Exact typed evidence for one program exception edge.
 
-    The classifier recomputes the declared failure from the workflow and the
-    governed runtime inputs. This row disambiguates an exception handler from
-    a normal transition that happens to use the same target state.
+    The classifier recomputes non-action failures from the workflow and the
+    governed runtime inputs.  An action failure binds the typed runtime-failure
+    category and the exact retained error digest.  Both forms disambiguate an
+    exception handler from a normal transition with the same target state.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -2366,14 +2367,26 @@ class ProgramExceptionEvidence(BaseModel):
     program_scope: list[ProgramExecutionScopeFrame] = Field(min_length=1)
     target_state_id: str = Field(min_length=1, max_length=128)
     failure_kind: Literal[
+        "action_failure",
         "branch_without_transition",
         "missing_subflow",
         "missing_loop_body",
         "loop_bound_exceeded",
     ]
+    error_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    action_failure_category: Optional[Literal["runtime_failure"]] = None
     governed_runtime_inputs_digest: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+
+    @model_validator(mode="after")
+    def _typed_cause_matches_edge(self) -> "ProgramExceptionEvidence":
+        action = self.failure_kind == "action_failure"
+        if action != bool(self.error_sha256 and self.action_failure_category):
+            raise ValueError(
+                "action exception evidence requires one exact typed error cause"
+            )
+        return self
 
 
 class AttendedProgramTransitionEvidence(BaseModel):

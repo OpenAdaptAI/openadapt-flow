@@ -430,6 +430,34 @@ class DurableRun:
         duplicating it.
         """
         if result.ok:
+            from openadapt_flow.action_evidence import action_evidence_error
+
+            profile = (
+                self.governed_authorization.execution_profile
+                if self.governed_authorization is not None
+                else None
+            )
+            identity_required = bool(
+                step.identity_armed
+                or (
+                    self.governed_authorization is not None
+                    and self.governed_authorization.requires_verified_identity(step.id)
+                )
+            )
+            evidence_error = action_evidence_error(
+                step,
+                result,
+                params=params,
+                identity_required=identity_required,
+                strict_production=(
+                    profile in {"standard", "regulated"} and identity_required
+                ),
+            )
+            if evidence_error is not None:
+                raise StateDiverged(
+                    "refusing a durable checkpoint with invalid action evidence: "
+                    f"{evidence_error}"
+                )
             self.store.write_checkpoint(
                 RunCheckpoint(
                     run_id=self.run_id,

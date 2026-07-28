@@ -18,6 +18,7 @@ from openadapt_flow.execution_profiles import (
     stamp_execution_outcome,
 )
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionDeliveryUncertainty,
     ActionKind,
     Anchor,
@@ -25,6 +26,7 @@ from openadapt_flow.ir import (
     ApiIdentityBinding,
     EffectVerificationEvidence,
     ExecutionOutcomeEnvelope,
+    FreshActuationEvent,
     Guard,
     IdentityCheck,
     IdentitySignalEvidence,
@@ -85,6 +87,33 @@ from tests.test_durable_runtime import FakeSoRVerifier, _approval
 from tests.test_replayer import FakeBackend, FakeVision, make_png
 
 _KEY = "profile-test-key"
+
+
+def _keyboard_receipt() -> ActionDeliveryReceipt:
+    return ActionDeliveryReceipt(
+        receipt_id="profile-key",
+        operation="physical_press",
+        native=False,
+        delivered_at="2026-07-28T00:00:00+00:00",
+    )
+
+
+def _coordinate_click_receipt() -> ActionDeliveryReceipt:
+    return ActionDeliveryReceipt(
+        receipt_id="profile-click",
+        operation="guarded_coordinate_click",
+        native=False,
+        delivered_at="2026-07-28T00:00:00+00:00",
+    )
+
+
+def _coordinate_resolution() -> Resolution:
+    return Resolution(
+        rung="template",
+        point=(5, 5),
+        confidence=0.99,
+        elapsed_ms=1.0,
+    )
 
 
 def _bind_report_to_workflow(report: RunReport, workflow: Workflow) -> RunReport:
@@ -521,10 +550,15 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
     verified.results[0].starting_state_settled = True
     verified.results[0].delivery_attempted = True
     verified.results[0].actuation = "guarded_coordinate"
+    verified.results[0].resolution = _coordinate_resolution()
+    verified.results[0].delivery_receipt = _coordinate_click_receipt()
     verified.required_identity_step_ids = ["save"]
     verified.results[0].identity = IdentityCheck(
         status="verified",
         mode="structured",
+        coverage=1.0,
+        expected="Synthetic record",
+        observed="Synthetic record",
     )
     verified.results[0].effect_verified = True
     effect_hash = _effect().contract_hash()
@@ -647,7 +681,15 @@ def _verified_production_report(workflow: Workflow) -> RunReport:
                     starting_state_settled=True,
                     delivery_attempted=True,
                     actuation="guarded_coordinate",
-                    identity=IdentityCheck(status="verified", mode="structured"),
+                    resolution=_coordinate_resolution(),
+                    delivery_receipt=_coordinate_click_receipt(),
+                    identity=IdentityCheck(
+                        status="verified",
+                        mode="structured",
+                        coverage=1.0,
+                        expected="Synthetic record",
+                        observed="Synthetic record",
+                    ),
                     postconditions_ok=True,
                     effect_verified=True,
                     effect_contract_hashes=[effect_hash],
@@ -735,6 +777,78 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
             classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_receipt",
+        "wrong_receipt_operation",
+        "missing_resolution",
+        "status_only_identity",
+        "failed_settling",
+        "terminal_fresh_frame_mismatch",
+    ),
+)
+def test_verified_gui_outcome_requires_exact_runtime_action_evidence(mutation):
+    workflow = _workflow()
+    report = _verified_production_report(workflow)
+    result = report.results[0]
+    if mutation == "missing_receipt":
+        result.delivery_receipt = None
+    elif mutation == "wrong_receipt_operation":
+        result.delivery_receipt = _keyboard_receipt()
+    elif mutation == "missing_resolution":
+        result.resolution = None
+    elif mutation == "status_only_identity":
+        result.identity = IdentityCheck(status="verified", mode="structured")
+    elif mutation == "failed_settling":
+        result.starting_state_settled = False
+    else:
+        result.fresh_actuation_events = [
+            FreshActuationEvent(
+                attempt=1,
+                operation="click",
+                changed_pixel_count=1,
+                changed_bbox=(0, 0, 1, 1),
+                frame_size=(10, 10),
+                retried=False,
+            )
+        ]
+
+    assert (
+        classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
+
+@pytest.mark.parametrize("action", [ActionKind.TYPE, ActionKind.SELECT_OPTION])
+def test_human_attended_input_does_not_invent_engine_readback(action):
+    workflow = _workflow()
+    step = workflow.steps[0]
+    step.action = action
+    step.text = "Synthetic value"
+    if action is ActionKind.SELECT_OPTION:
+        step.selection_commit_key = "Enter"
+    report = _verified_production_report(workflow)
+    result = report.results[0]
+    result.actuation = "human_attended"
+    result.delivery_attempted = False
+    result.delivery_receipt = None
+    result.resolution = None
+    result.starting_state_settled = None
+    result.input_verified = None
+
+    assert (
+        classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.VERIFIED
+    )
+    forged = report.model_copy(deep=True)
+    forged.results[0].input_verified = True
+    assert (
+        classify_execution_outcome(forged, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
 
 
 def test_qualified_per_effect_tier_is_required_for_verified_outcome():
@@ -937,16 +1051,36 @@ def test_api_verified_outcome_requires_runtime_delivery_attempt_shape(action):
         )
 
 
-def test_effect_free_api_success_shape_is_never_verified():
+@pytest.mark.parametrize(
+    ("action", "action_fields"),
+    [
+        (ActionKind.KEY, {"key": "Enter"}),
+        (ActionKind.TYPE, {"text": "Synthetic value"}),
+        (
+            ActionKind.SELECT_OPTION,
+            {
+                "text": "Synthetic value",
+                "selection_commit_key": "Enter",
+                "selection_region": (0, 0, 10, 10),
+                "anchor": Anchor(
+                    template="field.png",
+                    region=(0, 0, 10, 10),
+                    click_point=(5, 5),
+                ),
+            },
+        ),
+    ],
+)
+def test_effect_free_api_success_shape_is_never_verified(action, action_fields):
     workflow = Workflow(
         name="effect-free-api",
         steps=[
             Step(
                 id="lookup",
                 intent="look up record",
-                action=ActionKind.KEY,
-                key="Enter",
+                action=action,
                 api_binding=ApiBinding(method="GET", url_template="/records"),
+                **action_fields,
             )
         ],
     )
@@ -1010,6 +1144,7 @@ def test_program_outcome_requires_exact_ordered_action_trace():
                 starting_state_settled=True,
                 delivery_attempted=True,
                 actuation="guarded_keyboard",
+                delivery_receipt=_keyboard_receipt(),
                 program_scope=[ProgramExecutionScopeFrame(graph_id="__program__")],
             )
         ],
@@ -1097,6 +1232,7 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
                 starting_state_settled=True,
                 delivery_attempted=True,
                 actuation="guarded_keyboard",
+                delivery_receipt=_keyboard_receipt(),
                 program_scope=scope,
             ),
             StepResult(
@@ -1251,6 +1387,7 @@ def test_program_outcome_recomputes_ordered_parameter_transitions():
                     starting_state_settled=True,
                     delivery_attempted=True,
                     actuation="guarded_keyboard",
+                    delivery_receipt=_keyboard_receipt(),
                     program_scope=[ProgramExecutionScopeFrame(graph_id="__program__")],
                 )
             ],
@@ -1319,6 +1456,25 @@ def test_program_outcome_recomputes_ordered_parameter_transitions():
         )
         is ExecutionOutcome.VERIFIED
     )
+    exact = _report(ordered_guard, route="second")
+    for update in (
+        {"graph_id": "forged-graph"},
+        {"state_id": "forged-state"},
+        {"program_scope": [ProgramExecutionScopeFrame(graph_id="forged-graph")]},
+        {"decision_index": 1},
+    ):
+        tampered = exact.model_copy(deep=True)
+        tampered.program_transition_evidence[1] = tampered.program_transition_evidence[
+            1
+        ].model_copy(update=update)
+        assert (
+            classify_execution_outcome(
+                tampered,
+                ordered_guard,
+                ExecutionProfile.STANDARD,
+            )
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
 
     visual_guard = _workflow(
         [
@@ -1484,6 +1640,16 @@ def test_program_edge_kind_disambiguates_normal_and_exception_paths(tmp_path):
     assert exception.results[0].ok is False
     assert exception.results[0].exception_handled is True
     assert exception.results[0].skipped is False
+    assert len(exception.program_exception_evidence) == 1
+    action_failure = exception.program_exception_evidence[0]
+    assert action_failure.failure_kind == "action_failure"
+    assert action_failure.action_failure_category == "runtime_failure"
+    assert (
+        action_failure.error_sha256
+        == hashlib.sha256(
+            (exception.results[0].error or "").encode("utf-8")
+        ).hexdigest()
+    )
     assert (
         classify_execution_outcome(
             exception,
@@ -1506,6 +1672,24 @@ def test_program_edge_kind_disambiguates_normal_and_exception_paths(tmp_path):
         )
         is not ExecutionOutcome.VERIFIED
     )
+    for update in (
+        {"error_sha256": "0" * 64},
+        {"action_failure_category": None},
+    ):
+        tampered_cause = exception.model_copy(deep=True)
+        tampered_cause.program_exception_evidence[0] = action_failure.model_copy(
+            update=update
+        )
+        assert (
+            classify_execution_outcome(
+                tampered_cause,
+                exception_workflow,
+                ExecutionProfile.STANDARD,
+                transition_evidence_root=exception_root,
+                transition_predicate_vision=_ReadyVision(),
+            )
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
 
     # A non-action branch cannot silently route to on_exception when its exact
     # unconditional transition selected a different state.
@@ -1598,6 +1782,7 @@ def test_linear_and_skipped_result_shapes_fail_closed():
                     starting_state_settled=True,
                     delivery_attempted=True,
                     actuation="guarded_keyboard",
+                    delivery_receipt=_keyboard_receipt(),
                 )
             ],
         ),

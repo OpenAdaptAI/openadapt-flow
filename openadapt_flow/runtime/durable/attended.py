@@ -2401,6 +2401,70 @@ def execute_attended_action(
         return decision
 
 
+def _validated_attended_result(
+    step: Step,
+    result: StepResult,
+    *,
+    identity: Optional[IdentityCheck],
+    skipped: bool,
+    params: dict[str, str],
+    manifest: Any,
+) -> StepResult:
+    """Return the exact evidence shape emitted by an attended completion."""
+
+    retained = result.model_copy(
+        deep=True,
+        update={
+            "ok": True,
+            "skipped": skipped,
+            "actuation": "human_attended_skip" if skipped else "human_attended",
+            "identity": None if skipped else identity,
+            "delivery_attempted": False,
+            # Fresh revalidation can use the normal resolver and settled-state
+            # machinery to prove the postcondition and business effect.  Those
+            # observations do not mean that the engine delivered the action.
+            # Retain the human path exactly and do not convert revalidation
+            # evidence into a synthetic GUI receipt.
+            "delivery_receipt": None,
+            "delivery_uncertainty": None,
+            "resolution": None,
+            "drag_end_resolution": None,
+            "starting_state_settled": None,
+            "input_verified": None,
+            "input_retried": False,
+            "fresh_actuation_events": [],
+        },
+    )
+    from openadapt_flow.action_evidence import action_evidence_error
+
+    authorization = manifest.governed_authorization
+    evidence_error = action_evidence_error(
+        step,
+        retained,
+        params=params,
+        identity_required=bool(
+            not skipped
+            and (
+                step.identity_armed
+                or (
+                    authorization is not None
+                    and authorization.requires_verified_identity(step.id)
+                )
+            )
+        ),
+        strict_production=(
+            authorization is not None
+            and authorization.execution_profile in {"standard", "regulated"}
+        ),
+    )
+    if evidence_error is not None:
+        raise AttendedActionRefused(
+            "the human-completed checkpoint has invalid action evidence: "
+            f"{evidence_error}"
+        )
+    return retained
+
+
 def checkpoint_human_completed_step(
     run_dir: Path | str,
     *,
@@ -2452,6 +2516,14 @@ def checkpoint_human_completed_step(
         raise AttendedActionRefused(
             "the human-completed source retained a conflicting identity"
         )
+    retained_result = _validated_attended_result(
+        source_step,
+        result,
+        identity=capability.source_identity,
+        skipped=False,
+        params=params,
+        manifest=manifest,
+    )
     checkpoint = RunCheckpoint(
         run_id=capability.run_id,
         workflow_name=capability.workflow_name,
@@ -2461,16 +2533,35 @@ def checkpoint_human_completed_step(
         intent=result.intent,
         next_step_index=capability.step_index + 1,
         params=dict(params),
-        effect_verified=result.effect_verified,
-        effect_approved_unverified=result.effect_approved_unverified,
-        effect_contract_hashes=list(result.effect_contract_hashes),
+        effect_verified=retained_result.effect_verified,
+        effect_approved_unverified=retained_result.effect_approved_unverified,
+        effect_contract_hashes=list(retained_result.effect_contract_hashes),
+        effect_evidence=list(retained_result.effect_evidence),
         identity=capability.source_identity,
-        postconditions_ok=result.postconditions_ok,
+        input_verified=retained_result.input_verified,
+        starting_state_settled=retained_result.starting_state_settled,
+        delivery_attempted=retained_result.delivery_attempted,
+        delivery_receipt=retained_result.delivery_receipt,
+        drag_end_resolution=retained_result.drag_end_resolution,
+        fresh_actuation_events=list(retained_result.fresh_actuation_events),
+        postconditions_ok=retained_result.postconditions_ok,
         expected_postconditions=[
             condition.model_copy(deep=True) for condition in source_step.expect
         ],
         skipped=False,
         actuation="human_attended",
+        delivery_uncertainty=retained_result.delivery_uncertainty,
+        resolution=retained_result.resolution,
+        governed_authorization_id=(
+            manifest.governed_authorization.authorization_id
+            if manifest.governed_authorization is not None
+            else None
+        ),
+        governed_approval_source=(
+            manifest.governed_authorization.approval_source
+            if manifest.governed_authorization is not None
+            else None
+        ),
         attended_capability_digest=capability.digest,
     )
     store.write_checkpoint(checkpoint)
@@ -2629,6 +2720,15 @@ class BoundAttendedExecutor:
             raise AttendedActionRefused(
                 "the exact attended pause changed before checkpoint commit"
             )
+        source_step = workflow.steps[capability.step_index]
+        retained_result = _validated_attended_result(
+            source_step,
+            result,
+            identity=(None if skipped else capability.source_identity),
+            skipped=skipped,
+            params=dict(manifest.params),
+            manifest=manifest,
+        )
         checkpoint = RunCheckpoint(
             run_id=manifest.run_id,
             workflow_name=capability.workflow_name,
@@ -2638,10 +2738,10 @@ class BoundAttendedExecutor:
             intent=result.intent,
             next_step_index=capability.step_index + 1,
             params=dict(manifest.params),
-            effect_verified=result.effect_verified,
-            effect_approved_unverified=result.effect_approved_unverified,
-            effect_contract_hashes=list(result.effect_contract_hashes),
-            effect_evidence=list(result.effect_evidence),
+            effect_verified=retained_result.effect_verified,
+            effect_approved_unverified=retained_result.effect_approved_unverified,
+            effect_contract_hashes=list(retained_result.effect_contract_hashes),
+            effect_evidence=list(retained_result.effect_evidence),
             governed_authorization_id=(
                 manifest.governed_authorization.authorization_id
                 if manifest.governed_authorization is not None
@@ -2652,7 +2752,13 @@ class BoundAttendedExecutor:
                 if manifest.governed_authorization is not None
                 else None
             ),
-            postconditions_ok=result.postconditions_ok,
+            input_verified=retained_result.input_verified,
+            starting_state_settled=retained_result.starting_state_settled,
+            delivery_attempted=retained_result.delivery_attempted,
+            delivery_receipt=retained_result.delivery_receipt,
+            drag_end_resolution=retained_result.drag_end_resolution,
+            fresh_actuation_events=list(retained_result.fresh_actuation_events),
+            postconditions_ok=retained_result.postconditions_ok,
             expected_postconditions=(
                 [
                     condition.model_copy(deep=True)
@@ -2664,6 +2770,8 @@ class BoundAttendedExecutor:
             skipped=skipped,
             actuation="human_attended_skip" if skipped else "human_attended",
             identity=(None if skipped else capability.source_identity),
+            delivery_uncertainty=retained_result.delivery_uncertainty,
+            resolution=retained_result.resolution,
             attended_capability_digest=capability.digest,
         )
         store.write_checkpoint(checkpoint)
@@ -2783,12 +2891,23 @@ class BoundAttendedExecutor:
         action_store = AttendedActionStore(run_dir)
         receipt = action_store.seal_program_receipt(receipt)
         attended_effects = effects_for_actuation(state.step, "gui")
+        retained_result = _validated_attended_result(
+            state.step,
+            result,
+            identity=(None if skipped else capability.source_identity),
+            skipped=skipped,
+            params=params,
+            manifest=manifest,
+        )
         resolved_effects = (
             [
                 effect.model_dump(mode="json")
                 for effect in resume_replayer._resolve_effects(attended_effects, params)
             ]
-            if (result.effect_verified is True or result.effect_approved_unverified)
+            if (
+                retained_result.effect_verified is True
+                or retained_result.effect_approved_unverified
+            )
             and attended_effects
             else []
         )
@@ -2816,33 +2935,42 @@ class BoundAttendedExecutor:
             frames=list(pending.program_frames),
             bound_params=params,
             new_effect_keys=(
-                list(result.effect_contract_hashes)
-                if result.effect_verified is True
+                list(retained_result.effect_contract_hashes)
+                if retained_result.effect_verified is True
                 else []
             ),
-            new_effects=(resolved_effects if result.effect_verified is True else []),
+            new_effects=(
+                resolved_effects if retained_result.effect_verified is True else []
+            ),
             new_effect_evidence=(
-                list(result.effect_evidence) if result.effect_verified is True else []
+                list(retained_result.effect_evidence)
+                if retained_result.effect_verified is True
+                else []
             ),
             new_unverified_effect_keys=(
-                list(result.effect_contract_hashes)
-                if result.effect_approved_unverified
+                list(retained_result.effect_contract_hashes)
+                if retained_result.effect_approved_unverified
                 else []
             ),
             new_unverified_effects=(
-                resolved_effects if result.effect_approved_unverified else []
+                resolved_effects if retained_result.effect_approved_unverified else []
             ),
             step_id=state.step.id,
             # The live verifier's result describes the next continuation
             # target. The signed capability retains the already human-actuated
             # source identity used for the completed source step.
             identity=(None if skipped else capability.source_identity),
-            input_verified=result.input_verified,
-            starting_state_settled=result.starting_state_settled,
-            delivery_attempted=result.delivery_attempted,
-            postconditions_ok=result.postconditions_ok,
+            input_verified=retained_result.input_verified,
+            starting_state_settled=retained_result.starting_state_settled,
+            delivery_attempted=retained_result.delivery_attempted,
+            delivery_receipt=retained_result.delivery_receipt,
+            drag_end_resolution=retained_result.drag_end_resolution,
+            fresh_actuation_events=list(retained_result.fresh_actuation_events),
+            postconditions_ok=retained_result.postconditions_ok,
             skipped=skipped,
             actuation="human_attended_skip" if skipped else "human_attended",
+            delivery_uncertainty=retained_result.delivery_uncertainty,
+            resolution=retained_result.resolution,
             attended_capability_digest=capability.digest,
             governed_authorization_id=(
                 manifest.governed_authorization.authorization_id

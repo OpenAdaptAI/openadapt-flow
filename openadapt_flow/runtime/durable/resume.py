@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from openadapt_flow.ir import ExecutionTargetKind, RunReport, Step, Workflow
@@ -86,6 +87,13 @@ def _validate_retained_step_proof(
     effect_evidence: list[Any],
     stored_effects: Optional[list[dict[str, Any]]],
     identity: Any,
+    input_verified: Optional[bool],
+    starting_state_settled: Optional[bool],
+    delivery_attempted: Optional[bool],
+    delivery_receipt: Any,
+    resolution: Any,
+    drag_end_resolution: Any,
+    fresh_actuation_events: list[Any],
     postconditions_ok: Optional[bool],
     delivery_uncertainty: Any,
     governed_authorization_id: Optional[str],
@@ -112,13 +120,37 @@ def _validate_retained_step_proof(
     identity_required = step.identity_armed or (
         authorization is not None and authorization.requires_verified_identity(step.id)
     )
-    if (
-        not skipped
-        and identity_required
-        and (identity is None or getattr(identity, "status", None) != "verified")
-    ):
+    from openadapt_flow.action_evidence import action_evidence_error
+
+    action_error = action_evidence_error(
+        step,
+        SimpleNamespace(
+            ok=True,
+            skipped=skipped,
+            actuation=actuation,
+            identity=identity,
+            input_verified=input_verified,
+            input_retried=False,
+            starting_state_settled=starting_state_settled,
+            delivery_attempted=delivery_attempted,
+            delivery_receipt=delivery_receipt,
+            resolution=resolution,
+            drag_end_resolution=drag_end_resolution,
+            fresh_actuation_events=fresh_actuation_events,
+            delivery_uncertainty=delivery_uncertainty,
+            postconditions_ok=postconditions_ok,
+        ),
+        params=params,
+        identity_required=identity_required,
+        strict_production=(
+            authorization is not None
+            and authorization.execution_profile in {"standard", "regulated"}
+            and identity_required
+        ),
+    )
+    if action_error is not None:
         raise StateDiverged(
-            "retained checkpoint lacks the declared verified identity proof"
+            f"retained checkpoint action evidence is invalid: {action_error}"
         )
     if (
         not skipped
@@ -129,7 +161,12 @@ def _validate_retained_step_proof(
         raise StateDiverged(
             "retained checkpoint lacks the declared postcondition proof"
         )
-    if delivery_uncertainty is not None:
+    if delivery_uncertainty is not None and not (
+        delivery_uncertainty.verification_attempted
+        and delivery_uncertainty.effects_confirmed is True
+        and delivery_uncertainty.resolved_by_contract
+        and (not step.expect or delivery_uncertainty.postconditions_confirmed is True)
+    ):
         raise StateDiverged(
             "a verified checkpoint cannot retain unresolved delivery uncertainty"
         )
@@ -336,6 +373,13 @@ def _linear_resume_checkpoint(
             effect_evidence=checkpoint.effect_evidence,
             stored_effects=None,
             identity=checkpoint.identity,
+            input_verified=checkpoint.input_verified,
+            starting_state_settled=checkpoint.starting_state_settled,
+            delivery_attempted=checkpoint.delivery_attempted,
+            delivery_receipt=checkpoint.delivery_receipt,
+            resolution=checkpoint.resolution,
+            drag_end_resolution=checkpoint.drag_end_resolution,
+            fresh_actuation_events=list(checkpoint.fresh_actuation_events),
             postconditions_ok=checkpoint.postconditions_ok,
             delivery_uncertainty=checkpoint.delivery_uncertainty,
             governed_authorization_id=checkpoint.governed_authorization_id,
@@ -523,6 +567,13 @@ def _program_resume_checkpoints(
                 else checkpoint.new_unverified_effects
             ),
             identity=checkpoint.identity,
+            input_verified=checkpoint.input_verified,
+            starting_state_settled=checkpoint.starting_state_settled,
+            delivery_attempted=checkpoint.delivery_attempted,
+            delivery_receipt=checkpoint.delivery_receipt,
+            resolution=checkpoint.resolution,
+            drag_end_resolution=checkpoint.drag_end_resolution,
+            fresh_actuation_events=list(checkpoint.fresh_actuation_events),
             postconditions_ok=checkpoint.postconditions_ok,
             delivery_uncertainty=checkpoint.delivery_uncertainty,
             governed_authorization_id=checkpoint.governed_authorization_id,

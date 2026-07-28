@@ -2478,6 +2478,33 @@ class Replayer:
             # A skipped guard is ok=True; only a genuine failure lands here.
             if state.on_exception is not None and not result.safety_halt:
                 result.exception_handled = True
+                if (
+                    result.failure_category != "runtime_failure"
+                    or result.error is None
+                    or not result.program_scope
+                ):
+                    raise _ProgramHalt(
+                        "halt",
+                        "handled action failure lacks an exact typed cause",
+                        safety=True,
+                    )
+                report.program_exception_evidence.append(
+                    ProgramExceptionEvidence(
+                        decision_index=self._next_program_decision_index(report),
+                        graph_id=result.program_scope[-1].graph_id,
+                        state_id=state.id,
+                        program_scope=list(result.program_scope),
+                        target_state_id=state.on_exception,
+                        failure_kind="action_failure",
+                        error_sha256=hashlib.sha256(
+                            result.error.encode("utf-8")
+                        ).hexdigest(),
+                        action_failure_category="runtime_failure",
+                        governed_runtime_inputs_digest=(
+                            report.governed_runtime_inputs_digest
+                        ),
+                    )
+                )
                 return state.on_exception  # graph try/except: route + continue
             halt = _ProgramHalt(
                 "halt",
@@ -3225,6 +3252,50 @@ class Replayer:
         if durable is None:
             return
         step = state.step
+        if step is None:
+            raise _ProgramHalt(
+                "halt",
+                "verified action checkpoint has no compiled step",
+                safety=True,
+            )
+        from openadapt_flow.action_evidence import action_evidence_error
+
+        profile = (
+            self.governed_authorization.execution_profile
+            if self.governed_authorization is not None
+            else None
+        )
+        evidence_error = action_evidence_error(
+            step,
+            result,
+            params=params,
+            identity_required=(
+                step.identity_armed
+                or (
+                    self.governed_authorization is not None
+                    and self.governed_authorization.requires_verified_identity(step.id)
+                )
+            ),
+            strict_production=(
+                profile in {"standard", "regulated"}
+                and (
+                    step.identity_armed
+                    or (
+                        self.governed_authorization is not None
+                        and self.governed_authorization.requires_verified_identity(
+                            step.id
+                        )
+                    )
+                )
+            ),
+        )
+        if evidence_error is not None:
+            raise _ProgramHalt(
+                "halt",
+                "refusing a durable checkpoint with invalid action evidence: "
+                f"{evidence_error}",
+                safety=True,
+            )
         new_keys = (
             list(result.effect_contract_hashes)
             if result.effect_verified is True
@@ -3237,9 +3308,7 @@ class Replayer:
         )
         from openadapt_flow.policy import effects_for_actuation
 
-        declared_effects = (
-            effects_for_actuation(step, result.actuation) if step is not None else []
-        )
+        declared_effects = effects_for_actuation(step, result.actuation)
         resolved_effects = (
             [
                 e.model_dump(mode="json")
@@ -3254,15 +3323,11 @@ class Replayer:
         if new_keys:
             self._completed_effect_evidence.extend(result.effect_evidence)
         self._completed_unverified_effect_keys.extend(new_unverified_keys)
-        expected = (
-            [
-                pc.text
-                for pc in step.expect
-                if pc.kind is PostconditionKind.TEXT_PRESENT and pc.text
-            ]
-            if step is not None
-            else []
-        )
+        expected = [
+            pc.text
+            for pc in step.expect
+            if pc.kind is PostconditionKind.TEXT_PRESENT and pc.text
+        ]
         self._program_seq += 1
         report_history = list(report.visited_states)
         transition_delta = report_history[self._program_history_boundary_index :]
@@ -3280,7 +3345,7 @@ class Replayer:
             new_effect_evidence=(list(result.effect_evidence) if new_keys else []),
             new_unverified_effect_keys=new_unverified_keys,
             new_unverified_effects=(resolved_effects if new_unverified_keys else []),
-            step_id=step.id if step is not None else state.id,
+            step_id=step.id,
             identity=result.identity,
             input_verified=result.input_verified,
             starting_state_settled=result.starting_state_settled,
@@ -3309,7 +3374,7 @@ class Replayer:
             expected_texts=expected,
             expected_postconditions=(
                 [condition.model_copy(deep=True) for condition in step.expect]
-                if step is not None and not result.skipped
+                if not result.skipped
                 else []
             ),
             transition_history_hash=_history_hash(transition_history),

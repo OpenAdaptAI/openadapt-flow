@@ -20,6 +20,11 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 from urllib.parse import urlsplit
 
+from openadapt_flow.action_evidence import (
+    AUTOMATED_GUI_ACTUATIONS,
+    HUMAN_ATTENDED_ACTUATIONS,
+    action_evidence_error,
+)
 from openadapt_flow.decision_delivery import DecisionDeliveryTier
 from openadapt_flow.verification import VerificationTier
 
@@ -43,12 +48,6 @@ class ExecutionOutcome(str, Enum):
     HALTED = "HALTED"
     FAILED = "FAILED"
     ROLLED_BACK = "ROLLED_BACK"
-
-
-AUTOMATED_GUI_ACTUATIONS = frozenset(
-    {"uia", "dom", "guarded_coordinate", "guarded_keyboard", "remote_guarded"}
-)
-HUMAN_ATTENDED_ACTUATIONS = frozenset({"human_attended", "human_attended_skip"})
 
 
 @dataclass(frozen=True)
@@ -535,6 +534,14 @@ def _program_action_trace(
         group = evidence[evidence_cursor:end]
         evidence_cursor = end
         expected_evidence_decision_index += 1
+        if any(
+            item.graph_id != graph_id
+            or item.state_id != state.id
+            or tuple(item.program_scope) != scope
+            or item.decision_index != first.decision_index
+            for item in group
+        ):
+            raise ValueError("transition evidence decision rows disagree")
         return group
 
     def _verified_inventory_bytes(ref: str, expected_sha256: str) -> bytes:
@@ -851,6 +858,7 @@ def _program_action_trace(
         state: Any,
         scope: tuple[Any, ...],
         expected_kind: str,
+        action_result: Any | None = None,
     ) -> str:
         """Authenticate one recomputable non-action exception edge."""
 
@@ -869,6 +877,18 @@ def _program_action_trace(
             or item.governed_runtime_inputs_digest != governed_runtime_inputs_digest
         ):
             raise ValueError("program exception evidence binding differs")
+        if expected_kind == "action_failure":
+            if (
+                action_result is None
+                or action_result.error is None
+                or action_result.failure_category != "runtime_failure"
+                or item.action_failure_category != "runtime_failure"
+                or item.error_sha256
+                != hashlib.sha256(action_result.error.encode("utf-8")).hexdigest()
+            ):
+                raise ValueError("program action exception cause differs")
+        elif item.error_sha256 is not None or item.action_failure_category is not None:
+            raise ValueError("non-action exception invents an action cause")
         exception_evidence_cursor += 1
         expected_evidence_decision_index += 1
         return str(item.target_state_id)
@@ -992,12 +1012,27 @@ def _program_action_trace(
                 explicit_exception_edge = True
             else:
                 explicit_exception_edge = False
+        action_exception_target: str | None = None
+        if explicit_exception_edge is True:
+            if state.on_exception is None:
+                raise ValueError("action exception result has no declared handler")
+            action_exception_target = _validated_exception_target(
+                graph_id=graph_id,
+                state=state,
+                scope=scope,
+                expected_kind="action_failure",
+                action_result=reported,
+            )
         if (
             state.on_exception is not None
             and candidate == state.on_exception
             and candidate not in normal_targets
         ):
-            if occurrence_index is None or explicit_exception_edge is not True:
+            if (
+                occurrence_index is None
+                or explicit_exception_edge is not True
+                or action_exception_target != candidate
+            ):
                 raise ValueError("program exception edge lacks an exact action result")
             previous = actions[occurrence_index]
             actions[occurrence_index] = _ProgramActionOccurrence(
@@ -1013,7 +1048,7 @@ def _program_action_trace(
             and candidate in normal_targets
             and explicit_exception_edge is True
         ):
-            if occurrence_index is None:
+            if occurrence_index is None or action_exception_target != candidate:
                 raise ValueError("non-action exception edge is ambiguous")
             previous = actions[occurrence_index]
             actions[occurrence_index] = _ProgramActionOccurrence(
@@ -1045,7 +1080,11 @@ def _program_action_trace(
                 )
             return candidate
         if state.on_exception is not None and candidate == state.on_exception:
-            if occurrence_index is None or explicit_exception_edge is not True:
+            if (
+                occurrence_index is None
+                or explicit_exception_edge is not True
+                or action_exception_target != candidate
+            ):
                 raise ValueError("program exception edge lacks an exact action result")
             previous = actions[occurrence_index]
             actions[occurrence_index] = _ProgramActionOccurrence(
@@ -1468,9 +1507,20 @@ def classify_execution_outcome(
             paired_results = paired_results[:-1]
             identity_results = action_results[:-1]
     required_identity_ids = set(report.required_identity_step_ids)
+    allowed_required_identity_sets = [expected_required_identity_ids]
+    if fault_prefix_review:
+        # A qualification campaign can bind the complete workflow identity
+        # inventory, while a real pre-delivery run can retain only the identity
+        # requirements admitted for its executed prefix.  Both are exact.  The
+        # target refusal is proved separately and never borrows a verified row.
+        allowed_required_identity_sets.append(
+            expected_required_identity_ids.intersection(
+                result.step_id for result in identity_results
+            )
+        )
     if (
         len(report.required_identity_step_ids) != len(required_identity_ids)
-        or required_identity_ids != expected_required_identity_ids
+        or required_identity_ids not in allowed_required_identity_sets
     ):
         return ExecutionOutcome.COMPLETED_UNVERIFIED
     if any(
@@ -1576,6 +1626,50 @@ def classify_execution_outcome(
         if not result.ok:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         is_consequential_result = result.step_id in consequential
+        scoped_params = _scoped_params(result)
+        if scoped_params is None:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        evidence_error = action_evidence_error(
+            step,
+            result,
+            params=scoped_params,
+            identity_required=result.step_id in required_identity_ids,
+            strict_production=(
+                is_consequential_result or result.step_id in required_identity_ids
+            ),
+        )
+        if evidence_error is not None:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        project = workflow.qualification
+        identity_policy = (
+            project.identity_policies.get(step.id) if project is not None else None
+        )
+        if result.step_id in required_identity_ids and identity_policy is not None:
+            from openadapt_flow.qualification_identity_evidence import (
+                qualification_identity_evidence_error,
+            )
+
+            recorded_asset_sha256 = (
+                workflow.manifest.file_hashes.get(step.anchor.identifier_crop)
+                if workflow.manifest is not None
+                and step.anchor is not None
+                and step.anchor.identifier_crop is not None
+                else None
+            )
+            if (
+                qualification_identity_evidence_error(
+                    policy=identity_policy,
+                    check=result.identity,
+                    step=step,
+                    actuation_path=("api" if result.actuation == "api" else "gui"),
+                    runtime_params=scoped_params,
+                    recorded_params=workflow.params,
+                    evidence_root=transition_evidence_root,
+                    recorded_asset_sha256=recorded_asset_sha256,
+                )
+                is not None
+            ):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
         if step.action is ActionKind.WAIT:
             if result.actuation is not None:
                 return ExecutionOutcome.COMPLETED_UNVERIFIED
@@ -1665,12 +1759,12 @@ def classify_execution_outcome(
             continue
         from openadapt_flow.policy import has_postcondition_contract
 
-        if not api_actuation and not has_postcondition_contract(step):
+        if not has_postcondition_contract(
+            step,
+            actuation_path="api" if api_actuation else "gui",
+        ):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if result.effect_approved_unverified or result.effect_verified is not True:
-            return ExecutionOutcome.COMPLETED_UNVERIFIED
-        scoped_params = _scoped_params(result)
-        if scoped_params is None:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if api_actuation and not _api_identity_evidence_is_exact(
             workflow=workflow,

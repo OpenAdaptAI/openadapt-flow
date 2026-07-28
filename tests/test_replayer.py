@@ -270,7 +270,7 @@ class FakeBackend:
         self.type_text(text)
         return ActionDeliveryReceipt(
             receipt_id="test-guarded-type",
-            operation="guarded_type",
+            operation="physical_type_text",
             native=False,
             delivered_at="2026-07-25T00:00:00+00:00",
         )
@@ -280,7 +280,7 @@ class FakeBackend:
         self.press(key)
         return ActionDeliveryReceipt(
             receipt_id="test-guarded-key",
-            operation="guarded_key",
+            operation="physical_press",
             native=False,
             delivered_at="2026-07-25T00:00:00+00:00",
         )

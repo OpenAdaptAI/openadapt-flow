@@ -149,13 +149,21 @@ def has_screen_postcondition(step: Step) -> bool:
     return bool(step.expect)
 
 
-def has_postcondition_contract(step: Step) -> bool:
+def has_postcondition_contract(
+    step: Step,
+    *,
+    actuation_path: EffectPath = "gui",
+) -> bool:
     """Whether replay can prove the immediate result of this exact action.
 
-    Typed input and option selection have intrinsic read-back contracts in the
-    replayer. Other consequential actions require an explicit postcondition.
+    Typed input and option selection have intrinsic GUI read-back contracts.
+    An API path cannot borrow that GUI evidence.  Its exact independently read
+    effect contract is the target-state contract until a response-contract
+    schema is declared and retained explicitly.
     """
 
+    if actuation_path == "api":
+        return bool(step.api_binding is not None and step.api_binding.effects)
     return bool(step.expect) or step.action in {
         ActionKind.TYPE,
         ActionKind.SELECT_OPTION,

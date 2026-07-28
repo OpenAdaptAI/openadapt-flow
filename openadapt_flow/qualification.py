@@ -1059,6 +1059,7 @@ def qualification_action_requirements(
         }:
             required_actions.add(step.id)
         if effective in {
+            ActionRiskClass.STATE_CHANGING,
             ActionRiskClass.CONSEQUENTIAL,
             ActionRiskClass.IRREVERSIBLE,
         }:
@@ -3901,7 +3902,7 @@ def evaluate_qualification(
 
     from openadapt_flow.policy import executable_actuation_paths
 
-    for step in consequential_steps:
+    for step in [*state_changing_steps, *consequential_steps]:
         executable_paths = executable_actuation_paths(step)
         gui_required = "gui" in executable_paths
         api_required = "api" in executable_paths
@@ -3922,7 +3923,7 @@ def evaluate_qualification(
                     path=f"steps.{step.id}.identity_armed",
                     step_id=step.id,
                     message=(
-                        "consequential action has no exact identity contract for "
+                        "state-changing action has no exact identity contract for "
                         "executable path(s): " + ", ".join(missing_paths)
                     ),
                 )
@@ -3933,7 +3934,7 @@ def evaluate_qualification(
                     code=QualificationRefusalCode.IDENTITY_POLICY_MISSING,
                     path=f"qualification.identity_policies.{step.id}",
                     step_id=step.id,
-                    message="consequential action has no identity match policy",
+                    message="state-changing action has no identity match policy",
                 )
             )
         elif identity_policy.enforcement is IdentityEnforcement.CANONICAL_LADDER:

@@ -27,6 +27,7 @@ from openadapt_flow.execution_profiles import (
     qualified_effect_requirements,
 )
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionKind,
     Anchor,
     ApiBinding,
@@ -504,7 +505,15 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                         step_id=action_id,
                         intent=action.intent,
                         ok=True,
+                        resolution=fault_resolution,
                         delivery_attempted=True,
+                        delivery_receipt=ActionDeliveryReceipt(
+                            receipt_id="qualification-click",
+                            operation="guarded_coordinate_click",
+                            native=False,
+                            delivered_at="2026-07-28T00:00:00+00:00",
+                        ),
+                        before_png=fault_frame_inventory_ref,
                         identity=(
                             IdentityCheck(
                                 status="verified",
@@ -1264,7 +1273,7 @@ def test_signal_quorum_is_executable_qualification_identity_coverage() -> None:
     assert report.identity_covered_action_count == 1
 
 
-def test_state_changing_is_not_mislabeled_or_identity_gated() -> None:
+def test_state_changing_requires_identity_without_becoming_consequential() -> None:
     workflow = Workflow(
         name="reversible-write",
         params={"record_id": "1"},
@@ -1274,6 +1283,12 @@ def test_state_changing_is_not_mislabeled_or_identity_gated() -> None:
                 intent="Update a reversible draft",
                 action=ActionKind.TYPE,
                 text="draft",
+                anchor=Anchor(
+                    template="templates/draft.png",
+                    region=(0, 0, 10, 10),
+                    click_point=(5, 5),
+                    context_text="Draft record",
+                ),
                 effects=[
                     Effect(
                         kind=EffectKind.FIELD_EQUALS,
@@ -1306,6 +1321,18 @@ def test_state_changing_is_not_mislabeled_or_identity_gated() -> None:
         step_id="draft",
         effect_index=0,
         tier=VerificationTier.IMMEDIATE_SCREEN,
+    )
+    refused = evaluate_qualification(workflow)
+    refused_codes = {refusal.code for refusal in refused.refusals}
+    assert QualificationRefusalCode.IDENTITY_POLICY_MISSING in refused_codes
+
+    workflow.steps[0].identity_armed = True
+    set_identity_policy(
+        workflow,
+        IdentityPolicy(
+            step_id="draft",
+            enforcement=IdentityEnforcement.CANONICAL_LADDER,
+        ),
     )
     report = evaluate_qualification(workflow)
     codes = {refusal.code for refusal in report.refusals}
@@ -1635,11 +1662,7 @@ def test_signed_representative_claim_cannot_replace_exact_step_evidence(
     )
 
     assert not report.passed
-    expected_code = (
-        QualificationRefusalCode.CASE_NOT_PASSED
-        if mutation == "identity_policy_mode_swap"
-        else QualificationRefusalCode.CASE_ATTESTATION_INVALID
-    )
+    expected_code = QualificationRefusalCode.CASE_ATTESTATION_INVALID
     assert expected_code in {refusal.code for refusal in report.refusals}
 
 

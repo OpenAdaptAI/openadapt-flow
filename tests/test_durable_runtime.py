@@ -28,6 +28,7 @@ from openadapt_flow.ir import (
     PostconditionKind,
     Resolution,
     Step,
+    StepResult,
     Workflow,
 )
 from openadapt_flow.runtime.durable import (
@@ -43,7 +44,9 @@ from openadapt_flow.runtime.durable import (
 )
 from openadapt_flow.runtime.durable.approval import approval_pause_digest
 from openadapt_flow.runtime.durable.authority import DurableAuthority
-from openadapt_flow.runtime.durable.controller import resumed_step_results
+from openadapt_flow.runtime.durable.checkpoint import RunManifest
+from openadapt_flow.runtime.durable.controller import DurableRun, resumed_step_results
+from openadapt_flow.runtime.durable.resume import _validate_retained_step_proof
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
@@ -384,6 +387,160 @@ def test_linear_checkpoint_retains_exact_delivery_proof(tmp_path):
     assert restored.drag_end_resolution == drag_end
     assert restored.fresh_actuation_events == [event]
     assert restored.before_png == "steps/submit_before.png"
+
+
+def test_checkpoint_creation_rejects_impossible_action_evidence(tmp_path):
+    step = Step(
+        id="submit",
+        intent="Submit",
+        action=ActionKind.CLICK,
+        anchor={
+            "template": "submit.png",
+            "region": (0, 0, 10, 10),
+            "click_point": (5, 5),
+        },
+    )
+    workflow = Workflow(name="checkpoint-action-proof", steps=[step])
+    bundle, run_dir = _dirs(tmp_path)
+    workflow.save(bundle)
+    durable = DurableRun(
+        run_dir,
+        run_id="run-action-proof",
+        workflow_name=workflow.name,
+        bundle_dir=bundle,
+        params={},
+        worklists={},
+    )
+    impossible = StepResult(
+        step_id=step.id,
+        intent=step.intent,
+        ok=True,
+        actuation="guarded_coordinate",
+        starting_state_settled=True,
+        delivery_attempted=True,
+        resolution=Resolution(
+            rung="template",
+            point=(5, 5),
+            confidence=0.99,
+            elapsed_ms=1.0,
+        ),
+        delivery_receipt=ActionDeliveryReceipt(
+            receipt_id="wrong-operation",
+            operation="physical_press",
+            native=False,
+            delivered_at="2026-07-28T00:00:01+00:00",
+        ),
+    )
+
+    with pytest.raises(StateDiverged, match="invalid action evidence"):
+        durable.record(0, step, impossible, {})
+    assert durable.store.checkpoints() == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("input_verified", True),
+        ("starting_state_settled", False),
+        ("delivery_attempted", False),
+        (
+            "delivery_receipt",
+            ActionDeliveryReceipt(
+                receipt_id="wrong-operation",
+                operation="physical_press",
+                native=False,
+                delivered_at="2026-07-28T00:00:01+00:00",
+            ),
+        ),
+        (
+            "resolution",
+            Resolution(
+                rung="ocr",
+                point=(5, 5),
+                confidence=0.99,
+                elapsed_ms=1.0,
+            ),
+        ),
+        (
+            "fresh_actuation_events",
+            [
+                FreshActuationEvent(
+                    attempt=1,
+                    operation="click",
+                    changed_pixel_count=1,
+                    changed_bbox=(0, 0, 1, 1),
+                    frame_size=(10, 10),
+                    retried=False,
+                )
+            ],
+        ),
+    ],
+)
+def test_resume_admission_rejects_invalid_retained_action_evidence(field, value):
+    step = Step(
+        id="submit",
+        intent="Submit",
+        action=ActionKind.CLICK,
+        anchor={
+            "template": "submit.png",
+            "region": (0, 0, 10, 10),
+            "click_point": (5, 5),
+        },
+    )
+    workflow = Workflow(name="retained-action-proof", steps=[step])
+    manifest = RunManifest(
+        run_id="run-action-proof",
+        workflow_name=workflow.name,
+        bundle_dir="/tmp/retained-action-proof",
+        params={},
+    )
+    proof = {
+        "input_verified": None,
+        "starting_state_settled": True,
+        "delivery_attempted": True,
+        "delivery_receipt": ActionDeliveryReceipt(
+            receipt_id="click-receipt",
+            operation="guarded_coordinate_click",
+            native=False,
+            delivered_at="2026-07-28T00:00:01+00:00",
+        ),
+        "resolution": Resolution(
+            rung="template",
+            point=(5, 5),
+            confidence=0.99,
+            elapsed_ms=1.0,
+        ),
+        "fresh_actuation_events": [],
+    }
+    proof[field] = value
+
+    with pytest.raises(StateDiverged, match="action evidence is invalid"):
+        _validate_retained_step_proof(
+            step=step,
+            params={},
+            run_id=manifest.run_id,
+            skipped=False,
+            actuation="guarded_coordinate",
+            effect_verified=None,
+            effect_approved_unverified=False,
+            effect_contract_hashes=[],
+            effect_evidence=[],
+            stored_effects=None,
+            identity=None,
+            input_verified=proof["input_verified"],
+            starting_state_settled=proof["starting_state_settled"],
+            delivery_attempted=proof["delivery_attempted"],
+            delivery_receipt=proof["delivery_receipt"],
+            resolution=proof["resolution"],
+            drag_end_resolution=None,
+            fresh_actuation_events=proof["fresh_actuation_events"],
+            postconditions_ok=None,
+            delivery_uncertainty=None,
+            governed_authorization_id=None,
+            governed_approval_source=None,
+            manifest=manifest,
+            workflow=workflow,
+        )
 
 
 def test_resume_refuses_a_checkpoint_added_after_the_pause(tmp_path):

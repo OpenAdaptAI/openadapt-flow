@@ -25,9 +25,23 @@ from openadapt_flow.ir import (
     Step,
     Workflow,
 )
+from openadapt_flow.qualification import (
+    EnvironmentBoundary,
+    IdentityPolicy,
+    IdentitySignalPolicy,
+    init_project,
+    set_identity_policy,
+)
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     runtime_inputs_digest,
+)
+from openadapt_flow.runtime.effects import (
+    Effect,
+    EffectKind,
+    EffectState,
+    EffectVerdict,
+    Verdict,
 )
 from openadapt_flow.runtime.replayer import Replayer
 from openadapt_flow.vision.ocr import AmbiguousOcrMatchError
@@ -344,6 +358,10 @@ class FreshMismatchRemoteBackend(RemoteLeaseBackend):
         self.mismatch_count = mismatch_count
         self.changed_bbox = changed_bbox
         self.raise_uncertain_after_click = False
+        self.reset_count = 0
+
+    def reset_fresh_actuation_state(self) -> None:
+        self.reset_count += 1
 
     def click(self, x, y, *, double=False):
         self.click_attempts += 1
@@ -685,6 +703,7 @@ def test_remote_preedge_frame_mismatch_reacquires_and_delivers_once(bundle, run_
     assert report.success is True
     assert backend.acquire_count == 2
     assert backend.click_attempts == 2
+    assert backend.reset_count == 1
     assert backend.actions == [("click", 110, 105, False)]
     assert result.delivery_attempted is True
     assert [event.model_dump() for event in result.fresh_actuation_events] == [
@@ -726,6 +745,7 @@ def test_remote_repeated_preedge_mismatch_halts_without_delivery(bundle, run_dir
     assert "reacquisition limit was exhausted" in result.error
     assert backend.acquire_count == 3
     assert backend.click_attempts == 3
+    assert backend.reset_count == 2
     assert backend.actions == []
     assert [event.retried for event in result.fresh_actuation_events] == [
         True,
@@ -759,6 +779,259 @@ def test_remote_preedge_retry_refuses_a_changed_target(bundle, run_dir):
     assert backend.click_attempts == 1
     assert backend.actions == []
     assert [event.retried for event in result.fresh_actuation_events] == [True]
+
+
+def test_remote_preedge_mismatch_without_full_revalidation_does_not_retry(
+    bundle, run_dir
+):
+    frame = make_png()
+    backend = FreshMismatchRemoteBackend(frame=frame, mismatch_count=1)
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    ]
+
+    report = Replayer(backend, vision=vision).run(
+        Workflow(
+            name="wf",
+            steps=[click_step(risk="reversible", ocr_text="Open details")],
+        ),
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert backend.reset_count == 0
+    assert backend.click_attempts == 1
+    assert backend.actions == []
+    assert result.delivery_attempted is False
+    assert result.fresh_actuation_events[0].retried is False
+    assert "no complete consequential revalidation contract" in (result.error or "")
+
+
+def test_remote_preedge_diagnostic_uses_live_translated_identity_region(
+    bundle, run_dir
+):
+    frame = make_png()
+    backend = FreshMismatchRemoteBackend(
+        frame=frame,
+        mismatch_count=1,
+        changed_bbox=(152, 102, 2, 2),
+    )
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(170, 125), region=(160, 120, 50, 20), confidence=0.95)
+        for _ in range(3)
+    ]
+    step = click_step(risk="irreversible")
+    assert step.anchor is not None
+    step.anchor = step.anchor.model_copy(update={"identifier_region": (90, 80, 10, 10)})
+
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]),
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    event = report.results[0].fresh_actuation_events[0]
+    assert report.success is True
+    assert event.target_intersection is False
+    assert event.identity_intersection is True
+
+
+class _ChangingContextRemoteBackend(FreshMismatchRemoteBackend):
+    def __init__(self, *, source: str, expected: str, changed: str):
+        super().__init__(frame=make_png(), mismatch_count=1)
+        self.source = source
+        self.expected = expected
+        self.changed = changed
+        self.observations = 0
+
+    def _context_value(self, source: str):
+        if source != self.source:
+            return None
+        self.observations += 1
+        return self.expected if self.observations <= 2 else self.changed
+
+    def application_identity(self):
+        return self._context_value("application")
+
+    def session_identity(self):
+        return self._context_value("session")
+
+    def workflow_state_identity(self):
+        return self._context_value("workflow_state")
+
+
+@pytest.mark.parametrize(
+    ("source", "expected", "changed"),
+    [
+        ("application", "reference.application", "wrong.application"),
+        ("session", "a" * 64, "b" * 64),
+        ("workflow_state", "save.dialog.ready", "other.dialog.ready"),
+    ],
+)
+def test_remote_preedge_retry_refuses_changed_execution_context(
+    bundle, run_dir, source, expected, changed
+):
+    step = click_step(risk="irreversible")
+    workflow = Workflow(
+        name="context-retry",
+        surface="rdp",
+        execution_mode="external",
+        steps=[step],
+    )
+    init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="rdp",
+            application="Reference application",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+    )
+    set_identity_policy(
+        workflow,
+        IdentityPolicy(
+            step_id=step.id,
+            signals=[
+                IdentitySignalPolicy(
+                    key=source,
+                    source=source,
+                    match="exact",
+                    expected_value=expected,
+                )
+            ],
+            quorum=1,
+        ),
+    )
+    backend = _ChangingContextRemoteBackend(
+        source=source,
+        expected=expected,
+        changed=changed,
+    )
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+        for _ in range(3)
+    ]
+
+    report = Replayer(backend, vision=vision).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert backend.click_attempts == 1
+    assert backend.actions == []
+    assert result.identity is not None
+    assert result.identity.status == "mismatch"
+    assert "Identity signal quorum conflicted" in (result.error or "")
+
+
+class _WorklistMutatingVision(FakeVision):
+    def __init__(self, worklists):
+        super().__init__()
+        self.worklists = worklists
+        self.resolve_calls = 0
+
+    def find_template(self, *args, **kwargs):
+        match = super().find_template(*args, **kwargs)
+        self.resolve_calls += 1
+        if self.resolve_calls == 3:
+            self.worklists["cases"].append({"id": "2"})
+        return match
+
+
+def test_remote_preedge_retry_rechecks_runtime_inputs_after_observation(
+    bundle, run_dir
+):
+    worklists = {"cases": [{"id": "1"}]}
+    workflow = Workflow(
+        name="governed-retry",
+        steps=[click_step(risk="irreversible")],
+    )
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    assert workflow.manifest is not None
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, worklists),
+        admitted_policy_name="test",
+    )
+    backend = FreshMismatchRemoteBackend(frame=make_png(), mismatch_count=1)
+    vision = _WorklistMutatingVision(worklists)
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+        for _ in range(3)
+    ]
+
+    report = Replayer(
+        backend,
+        vision=vision,
+        governed_authorization=authorization,
+    ).run(
+        workflow,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is False
+    assert backend.click_attempts == 1
+    assert backend.actions == []
+    assert "authorization no longer matches the current runtime inputs" in (
+        report.results[0].error or ""
+    )
+
+
+class _CountingEffectVerifier:
+    substrate = "test-store"
+
+    def __init__(self):
+        self.pre_state_calls = 0
+
+    def capture_pre_state(self):
+        self.pre_state_calls += 1
+        return EffectState(substrate=self.substrate, reachable=True)
+
+    def verify(self, effect, before):
+        del before
+        return EffectVerdict(
+            verdict=Verdict.CONFIRMED,
+            kind=effect.kind,
+            substrate=self.substrate,
+        )
+
+
+def test_remote_preedge_retry_refreshes_effect_pre_state(bundle, run_dir):
+    backend = FreshMismatchRemoteBackend(frame=make_png(), mismatch_count=1)
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+        for _ in range(3)
+    ]
+    step = click_step(risk="irreversible")
+    step.effects = [Effect(kind=EffectKind.RECORD_WRITTEN, match={"id": "1"})]
+    verifier = _CountingEffectVerifier()
+
+    report = Replayer(
+        backend,
+        vision=vision,
+        effect_verifier=verifier,
+    ).run(
+        Workflow(name="effect-retry", steps=[step]),
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is True
+    assert verifier.pre_state_calls == 2
+    assert backend.actions == [("click", 110, 105, False)]
 
 
 def test_remote_preedge_retry_refuses_a_changed_identity(bundle, run_dir):

@@ -80,7 +80,8 @@ class FreshActuationRequired(RuntimeError):
         frame_size: tuple[int, int],
     ) -> None:
         super().__init__(
-            "surface changed before input; acquire a fresh actuation frame"
+            "surface changed before input because frame content changed; "
+            "acquire a fresh actuation frame"
         )
         if changed_pixel_count < 1:
             raise ValueError("fresh-actuation mismatch must change at least one pixel")
@@ -516,6 +517,22 @@ class RemoteActuationBackend(Protocol):
 
     def acquire_actuation_frame(self) -> bytes:
         """Acquire focus/readiness and return the freshly leased PNG frame."""
+        ...
+
+
+@runtime_checkable
+class FreshActuationReacquisitionBackend(Protocol):
+    """Reset one proved zero-input invalidation for bounded reacquisition.
+
+    The runtime calls this seam only after :class:`FreshActuationRequired`.
+    Implementations must refuse every lease state except the typed invalidated
+    state.  The reset grants no actuation authority; the runtime must repeat
+    its complete fresh-frame, target, identity, and authorization checks before
+    another delivery attempt.
+    """
+
+    def reset_fresh_actuation_state(self) -> None:
+        """Clear one typed invalidation so a complete fresh lease can be made."""
         ...
 
 

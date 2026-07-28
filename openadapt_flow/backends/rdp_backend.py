@@ -406,6 +406,21 @@ class FreeRDPBackend:
             self._actuation_lease_state = _LEASE_ARMED
             return png
 
+    def reset_fresh_actuation_state(self) -> None:
+        """Reset only a typed zero-input content invalidation.
+
+        This does not arm a lease.  The runtime must reacquire and revalidate a
+        new frame before it can send input.
+        """
+
+        with self._input_lock:
+            if self._actuation_lease_state != _LEASE_INVALIDATED:
+                raise RuntimeError(
+                    "RDP fresh-actuation reset requires a typed invalidated lease"
+                )
+            self._actuation_lease_state = _LEASE_NONE
+            self._actuation_frame_png = None
+
     # -- Optional ExecutionContextIdentityBackend --------------------------
 
     def application_identity(self) -> Optional[str]:

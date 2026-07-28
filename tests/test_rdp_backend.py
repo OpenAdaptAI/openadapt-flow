@@ -599,6 +599,26 @@ def test_bound_actuation_refuses_same_session_content_change_before_input() -> N
     assert raised.value.frame_size == VIEWPORT
 
 
+def test_bound_actuation_can_reset_only_a_typed_zero_edge_invalidation() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, readiness_probe=lambda _png: True)
+    with pytest.raises(RuntimeError, match="requires a typed invalidated lease"):
+        backend.reset_fresh_actuation_state()
+
+    backend.acquire_actuation_frame()
+    changed = transport.screens[0].copy()
+    changed.putpixel((0, 0), (244, 245, 245))
+    transport.screens[0] = changed
+    with pytest.raises(FreshActuationRequired):
+        backend.click(*BUTTON_CENTER)
+
+    backend.reset_fresh_actuation_state()
+    backend.acquire_actuation_frame()
+    backend.click(*BUTTON_CENTER)
+
+    assert len(transport.pointer_events) == 2
+
+
 def test_observation_invalidates_bound_actuation_before_input() -> None:
     transport = FakeRDPTransport(app_screens())
     backend = FreeRDPBackend(transport)

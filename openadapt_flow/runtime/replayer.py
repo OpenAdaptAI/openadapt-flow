@@ -50,6 +50,7 @@ from openadapt_flow.backend import (
     Backend,
     BrowserPresentationGeometryBackend,
     FocusedElementActuationLeaseBackend,
+    FreshActuationReacquisitionBackend,
     FreshActuationRequired,
     GuardedCoordinateActionBackend,
     GuardedDragActionBackend,
@@ -100,7 +101,10 @@ from openadapt_flow.run_gate import is_consequential
 from openadapt_flow.runtime import heal as heal_mod
 from openadapt_flow.runtime import healing as healing_mod
 from openadapt_flow.runtime import identity as identity_mod
-from openadapt_flow.runtime.authorization import GovernedRunAuthorization
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    runtime_inputs_digest,
+)
 from openadapt_flow.runtime.durable.approval import StateDiverged
 from openadapt_flow.runtime.durable.program_checkpoint import (
     TOP_GRAPH_ID,
@@ -446,6 +450,7 @@ class Replayer:
         self._governed_asset_hashes: dict[str, str] = {}
         self._governed_plaintext_assets = False
         self._governed_asset_mutation: Optional[str] = None
+        self._active_runtime_worklists: Optional[dict[str, list[dict[str, str]]]] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -684,6 +689,10 @@ class Replayer:
                 merged.setdefault(pname, spec.example)
         merged.update(params or {})
         params = merged
+        # Preserve the exact caller-owned worklist object for last-common-point
+        # authorization checks.  A callback that mutates it after admission
+        # must invalidate the authorization before any reacquired input edge.
+        self._active_runtime_worklists = worklists
 
         report = RunReport(
             workflow_name=workflow.name,
@@ -3231,6 +3240,22 @@ class Replayer:
                         target_tracking=overlay_target,
                         observation_png=before_png,
                     )
+                    # A retry reaches this last common point only after fresh
+                    # target, context identity, and effect pre-state callbacks.
+                    # Recheck exact authority after the presentation callback
+                    # too, immediately before the next delivery boundary.
+                    if fresh_reacquisitions:
+                        error = self._fresh_actuation_authorization_refusal(
+                            workflow, params
+                        )
+                        if error is not None:
+                            result.safety_halt = True
+                            result.failure_category = (
+                                "governed_refusal"
+                                if self.governed_authorization is not None
+                                else "safety_halt"
+                            )
+                            break
                     try:
                         error = self._act(
                             step,
@@ -3244,16 +3269,41 @@ class Replayer:
                             graph_ctx=graph_ctx,
                         )
                     except FreshActuationRequired as exc:
+                        retry_reset_error: Optional[str] = None
+                        reacquisition_backend = (
+                            cast(FreshActuationReacquisitionBackend, self.backend)
+                            if isinstance(
+                                self.backend, FreshActuationReacquisitionBackend
+                            )
+                            else None
+                        )
                         can_retry = (
                             result.delivery_attempted is False
                             and fresh_reacquisitions
                             < _MAX_FRESH_ACTUATION_REACQUISITIONS
+                            and self._step_needs_consequential_revalidation(
+                                step, workflow
+                            )
+                            and isinstance(self.backend, RemoteActuationBackend)
+                            and reacquisition_backend is not None
                         )
+                        if can_retry:
+                            assert reacquisition_backend is not None
+                            try:
+                                reacquisition_backend.reset_fresh_actuation_state()
+                            except Exception as reset_exc:  # noqa: BLE001
+                                retry_reset_error = (
+                                    "the backend refused the typed zero-input "
+                                    "lease reset "
+                                    f"({type(reset_exc).__name__})"
+                                )
+                                can_retry = False
                         result.fresh_actuation_events.append(
                             self._fresh_actuation_event(
                                 exc,
                                 step=step,
                                 workflow=workflow,
+                                resolution=resolution,
                                 matched_region=matched_region,
                                 retried=can_retry,
                                 attempt=len(result.fresh_actuation_events) + 1,
@@ -3262,15 +3312,31 @@ class Replayer:
                         self._cancel_guarded_coordinate()
                         self._cancel_guarded_keyboard()
                         if not can_retry:
-                            if result.delivery_attempted is False:
+                            if retry_reset_error is not None:
+                                retry_detail = retry_reset_error
+                            elif result.delivery_attempted is not False:
+                                retry_detail = (
+                                    "an earlier input edge crossed for this step, "
+                                    "so replay cannot retry it"
+                                )
+                            elif fresh_reacquisitions >= (
+                                _MAX_FRESH_ACTUATION_REACQUISITIONS
+                            ):
                                 retry_detail = (
                                     "the bounded fresh-frame reacquisition "
                                     "limit was exhausted"
                                 )
+                            elif not self._step_needs_consequential_revalidation(
+                                step, workflow
+                            ):
+                                retry_detail = (
+                                    "the step has no complete consequential "
+                                    "revalidation contract"
+                                )
                             else:
                                 retry_detail = (
-                                    "an earlier input edge crossed for this step, "
-                                    "so replay cannot retry it"
+                                    "the backend cannot reset a typed invalidated "
+                                    "lease for complete fresh revalidation"
                                 )
                             error = f"{exc}; {retry_detail}"
                             result.safety_halt = True
@@ -3282,7 +3348,9 @@ class Replayer:
                             break
 
                         fresh_reacquisitions += 1
-                        error = self._fresh_actuation_authorization_refusal(workflow)
+                        error = self._fresh_actuation_authorization_refusal(
+                            workflow, params
+                        )
                         if error is None:
                             (
                                 resolution,
@@ -4983,18 +5051,44 @@ class Replayer:
         )
 
     @staticmethod
+    def _translate_recorded_region(
+        step: Step,
+        resolution: Optional[Resolution],
+        region: Region,
+    ) -> Region:
+        """Map recorded anchor-relative geometry onto the live target point."""
+
+        if step.anchor is None or resolution is None:
+            return region
+        recorded_x, recorded_y = step.anchor.click_point
+        live_x, live_y = resolution.point
+        x, y, width, height = region
+        return (
+            live_x + x - recorded_x,
+            live_y + y - recorded_y,
+            width,
+            height,
+        )
+
+    @classmethod
     def _fresh_actuation_identity_regions(
+        cls,
         step: Step,
         workflow: Workflow,
+        resolution: Optional[Resolution],
     ) -> list[Region]:
         regions: list[Region] = []
         if step.anchor is not None and step.anchor.identifier_region is not None:
-            regions.append(step.anchor.identifier_region)
+            regions.append(
+                cls._translate_recorded_region(
+                    step, resolution, step.anchor.identifier_region
+                )
+            )
         if workflow.qualification is not None:
             policy = workflow.qualification.identity_policies.get(step.id)
             if policy is not None:
                 regions.extend(
-                    signal.region
+                    cls._translate_recorded_region(step, resolution, signal.region)
                     for signal in policy.signals
                     if signal.region is not None
                 )
@@ -5006,19 +5100,24 @@ class Replayer:
         *,
         step: Step,
         workflow: Workflow,
+        resolution: Optional[Resolution],
         matched_region: Optional[Region],
         retried: bool,
         attempt: int,
     ) -> FreshActuationEvent:
         target_region = matched_region
         if target_region is None and step.anchor is not None:
-            target_region = step.anchor.region
+            target_region = self._translate_recorded_region(
+                step, resolution, step.anchor.region
+            )
         target_intersection = (
             self._regions_intersect(exc.changed_bbox, target_region)
             if target_region is not None
             else None
         )
-        identity_regions = self._fresh_actuation_identity_regions(step, workflow)
+        identity_regions = self._fresh_actuation_identity_regions(
+            step, workflow, resolution
+        )
         identity_intersection = (
             any(
                 self._regions_intersect(exc.changed_bbox, region)
@@ -5041,8 +5140,9 @@ class Replayer:
     def _fresh_actuation_authorization_refusal(
         self,
         workflow: Workflow,
+        params: dict[str, str],
     ) -> Optional[str]:
-        """Recheck the same governed authority before a fresh input attempt."""
+        """Recheck exact governed authority and inputs before fresh input."""
 
         profile_refusal = self._profile_runtime_refusal(workflow)
         if profile_refusal is not None:
@@ -5052,6 +5152,17 @@ class Replayer:
             authorization_refusal = authorization.validate_workflow(workflow)
             if authorization_refusal is not None:
                 return authorization_refusal
+            actual_inputs = runtime_inputs_digest(
+                workflow,
+                params,
+                self._active_runtime_worklists,
+                interstitials=list(self._interstitials),
+            )
+            if actual_inputs != authorization.runtime_inputs_digest:
+                return (
+                    "governed run authorization no longer matches the current "
+                    "runtime inputs"
+                )
         return self._governed_asset_mutation
 
     def _act(

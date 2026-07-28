@@ -887,6 +887,7 @@ class MacOSBackend(RemoteDisplayBackend):
         *,
         point: Optional[tuple[int, int]] = None,
         consume_actuation_lease: bool = True,
+        operation: str = "remote_input",
     ) -> None:
         """Gate native input on the exact frame lease plus exact AX/CG window."""
         self._ensure_input_trusted()
@@ -904,6 +905,7 @@ class MacOSBackend(RemoteDisplayBackend):
                 self,
                 point=point,
                 consume_actuation_lease=consume_actuation_lease,
+                operation=operation,
             )
         except RemoteDisplayError as exc:
             raise MacOSBackendError(str(exc)) from exc

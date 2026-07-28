@@ -759,6 +759,23 @@ class RemoteDisplayBackend:
             self._actuation_frame_png = png
             return png
 
+    def reset_fresh_actuation_state(self) -> None:
+        """Reset only a typed zero-input content invalidation.
+
+        This clears the stale prepared point but grants no actuation authority.
+        The runtime must prepare, acquire, and validate a new lease.
+        """
+
+        with self._input_lock:
+            if self._actuation_lease_state != _LEASE_INVALIDATED:
+                raise RemoteDisplayError(
+                    "remote-display fresh-actuation reset requires a typed "
+                    "invalidated lease"
+                )
+            self._actuation_lease_state = _LEASE_NONE
+            self._actuation_frame_png = None
+            self._prepared_pointer_point = None
+
     # -- Optional ExecutionContextIdentityBackend --------------------------
 
     def application_identity(self) -> Optional[str]:

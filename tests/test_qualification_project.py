@@ -1518,6 +1518,37 @@ def test_signed_case_result_cannot_move_to_another_case(tmp_path: Path) -> None:
     )
 
 
+def test_signed_case_result_cannot_change_the_expected_outcome(tmp_path: Path) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == "fault-ambiguity")
+    case.results[-1] = sign_case_result(
+        case.results[-1].model_copy(
+            update={
+                "observed_outcome": QualificationOutcome.VERIFIED,
+                "attestation_signature": "",
+            }
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert any(
+        refusal.case_id == case.id
+        and refusal.code is QualificationRefusalCode.CASE_ATTESTATION_INVALID
+        for refusal in report.refusals
+    )
+
+
 @pytest.mark.parametrize(
     ("receipt_update", "report_update", "expected_code"),
     [

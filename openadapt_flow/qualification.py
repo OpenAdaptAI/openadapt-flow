@@ -2214,6 +2214,11 @@ def _case_result_integrity_error(
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
             "case result does not match its containing qualification case",
         )
+    if result.observed_outcome is not case.expected_outcome:
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case result outcome does not match its containing qualification case",
+        )
     if result.project_id != project.project_id:
         return (
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,

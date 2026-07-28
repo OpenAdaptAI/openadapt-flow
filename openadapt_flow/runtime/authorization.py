@@ -65,6 +65,53 @@ def runtime_inputs_bytes(
     return canonical.encode("utf-8")
 
 
+def parse_runtime_inputs_bytes(
+    value: bytes,
+) -> tuple[dict[str, str], dict[str, list[dict[str, str]]]]:
+    """Parse one exact canonical governed-input artifact without exposing values."""
+
+    try:
+        payload = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("runtime-input artifact is not canonical JSON") from exc
+    if not isinstance(payload, dict) or set(payload).difference(
+        {"params", "worklists", "interstitials"}
+    ):
+        raise ValueError("runtime-input artifact has an invalid shape")
+    params = payload.get("params")
+    worklists = payload.get("worklists")
+    if not isinstance(params, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in params.items()
+    ):
+        raise ValueError("runtime-input artifact has invalid parameters")
+    if not isinstance(worklists, dict) or any(
+        not isinstance(name, str)
+        or not isinstance(rows, list)
+        or any(
+            not isinstance(row, dict)
+            or any(
+                not isinstance(key, str) or not isinstance(item, str)
+                for key, item in row.items()
+            )
+            for row in rows
+        )
+        for name, rows in worklists.items()
+    ):
+        raise ValueError("runtime-input artifact has invalid worklists")
+    interstitials = payload.get("interstitials")
+    if interstitials is not None and not isinstance(interstitials, list):
+        raise ValueError("runtime-input artifact has invalid interstitials")
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    if canonical != value:
+        raise ValueError("runtime-input artifact is not in canonical form")
+    return dict(params), {
+        name: [dict(row) for row in rows] for name, rows in worklists.items()
+    }
+
+
 def runtime_inputs_digest(
     workflow: Workflow,
     params: dict[str, str] | None,

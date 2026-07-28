@@ -17,11 +17,9 @@ against the in-process MockMed fault server end-to-end. Zero model calls.
 
 from __future__ import annotations
 
-import requests
+import hashlib
 
-# Reuse the scripted fakes from the main replayer unit tests (pytest's prepend
-# import mode puts tests/ on sys.path).
-from tests.test_replayer import FakeBackend, FakeVision, Match
+import requests
 
 from openadapt_flow.ir import (
     ActionKind,
@@ -42,6 +40,7 @@ from openadapt_flow.runtime.effects import (
     Verdict,
 )
 from openadapt_flow.runtime.replayer import Replayer
+from tests.test_replayer import FakeBackend, FakeVision, Match
 
 # -- helpers -----------------------------------------------------------------
 
@@ -331,6 +330,42 @@ def test_resolved_contract_hash_is_recorded(tmp_path):
     demo = effect.resolve({"patient_id": "phil", "note": "phil-note"})
     assert recorded == resolved.contract_hash()
     assert recorded != demo.contract_hash()
+
+
+def test_resolved_contract_hash_preserves_literal_and_parameter_compatibility():
+    literal = Effect(kind=EffectKind.RECORD_WRITTEN, match={"record": "p1"})
+    parameterized = Effect(
+        kind=EffectKind.FIELD_EQUALS,
+        match={"record": ValueExpr(param="record")},
+        field="status",
+        value=ValueExpr(param="status"),
+    )
+    params = {"record": "p1", "status": "saved"}
+
+    assert literal.resolved_contract_hash({}) == literal.contract_hash()
+    assert parameterized.resolved_contract_hash(params) == parameterized.resolve(
+        params
+    ).contract_hash()
+
+
+def test_run_identity_contract_hash_uses_only_the_retained_digest():
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"record": "p1"},
+        idempotency_key=ValueExpr(param="__run_id__"),
+    )
+    raw_run_id = "private-run-identity"
+    digest = hashlib.sha256(raw_run_id.encode()).hexdigest()
+    resolved = effect.resolve(
+        {"__run_id__": raw_run_id},
+        opaque_param_sha256={"__run_id__": digest},
+    )
+
+    assert str(resolved.idempotency_key) == raw_run_id
+    assert resolved.contract_hash() == effect.resolved_contract_hash(
+        {}, opaque_param_sha256={"__run_id__": digest}
+    )
+    assert raw_run_id not in resolved.contract_hash()
 
 
 # -- 5. end-to-end against the REAL RestRecordVerifier + MockMed -------------

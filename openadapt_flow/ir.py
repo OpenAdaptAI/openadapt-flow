@@ -2019,6 +2019,26 @@ class InterstitialActionResult(BaseModel):
     error: Optional[str] = None
 
 
+class ProgramExecutionScopeFrame(BaseModel):
+    """PHI-free control scope for one action in a program run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    graph_id: str = Field(min_length=1, max_length=128)
+    loop_state_id: Optional[str] = Field(default=None, max_length=128)
+    relation: Optional[str] = Field(default=None, max_length=128)
+    row_index: Optional[int] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _loop_scope_is_complete(self) -> "ProgramExecutionScopeFrame":
+        loop_values = (self.loop_state_id, self.relation, self.row_index)
+        if any(value is not None for value in loop_values) and not all(
+            value is not None for value in loop_values
+        ):
+            raise ValueError("program loop scope is incomplete")
+        return self
+
+
 class EffectVerificationEvidence(BaseModel):
     """Structured evidence behind one effect-verification decision."""
 
@@ -2127,6 +2147,7 @@ class StepResult(BaseModel):
     # resolution ladder (the default). Diagnostic/audit — lets an operator see
     # which steps ran on the deterministic API tier vs the visual floor.
     actuation: Optional[str] = None
+    program_scope: list[ProgramExecutionScopeFrame] = Field(default_factory=list)
     # OS/UIA action-delivery evidence only. It deliberately cannot satisfy a
     # postcondition or system-of-record effect; those independent verdicts are
     # recorded in ``postconditions_ok`` / ``effect_verified``.

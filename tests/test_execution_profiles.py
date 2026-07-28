@@ -15,6 +15,7 @@ from openadapt_flow.execution_profiles import (
     stamp_execution_outcome,
 )
 from openadapt_flow.ir import (
+    ActionDeliveryUncertainty,
     ActionKind,
     Anchor,
     ApiBinding,
@@ -463,6 +464,7 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
             verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
             initial_verdict="confirmed",
             final_verdict="confirmed",
+            observed_effect="present",
         )
     ]
     persisted = verified.model_copy(deep=True)
@@ -519,6 +521,116 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
+
+
+def _verified_production_report(workflow: Workflow) -> RunReport:
+    effect_hash = workflow.steps[0].effects[0].contract_hash()
+    return RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-28T00:00:00Z",
+        success=True,
+        execution_completed=True,
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="a" * 64,
+        results=[
+            StepResult(
+                step_id="save",
+                intent="save",
+                ok=True,
+                postconditions_ok=True,
+                effect_verified=True,
+                effect_contract_hashes=[effect_hash],
+                effect_evidence=[
+                    EffectVerificationEvidence(
+                        effect_contract_hash=effect_hash,
+                        substrate="test",
+                        verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
+                        initial_verdict="confirmed",
+                        final_verdict="confirmed",
+                        observed_effect="present",
+                    )
+                ],
+            )
+        ],
+    )
+
+
+def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence():
+    workflow = _workflow()
+    verified = _verified_production_report(workflow)
+    assert (
+        classify_execution_outcome(verified, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.VERIFIED
+    )
+
+    canceled = verified.model_copy(update={"canceled": True})
+    failed = verified.model_copy(update={"terminal_outcome": "failed"})
+    bad_effect = verified.model_copy(deep=True)
+    bad_effect.results[0].effect_evidence[0].observed_effect = "absent"
+    uncertain = verified.model_copy(deep=True)
+    uncertain.results[0].delivery_uncertainty = ActionDeliveryUncertainty(
+        operation="click",
+        native=False,
+        observed_at="2026-07-28T00:00:01Z",
+        cause_type="ActionDeliveryUncertain",
+    )
+
+    assert (
+        classify_execution_outcome(canceled, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.HALTED
+    )
+    assert (
+        classify_execution_outcome(failed, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.FAILED
+    )
+    for report in (bad_effect, uncertain):
+        assert (
+            classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
+
+
+def test_program_outcome_requires_exact_ordered_action_trace():
+    workflow = Workflow(
+        name="program-outcome",
+        program=ProgramGraph(
+            entry="write",
+            states={
+                "write": State(
+                    id="write",
+                    kind=StateKind.ACTION,
+                    step=Step(id="write", intent="write", action=ActionKind.KEY),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+    )
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-28T00:00:00Z",
+        success=True,
+        execution_completed=True,
+        terminal_outcome="success",
+        visited_states=["write", "done"],
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="b" * 64,
+        results=[StepResult(step_id="write", intent="write", ok=True)],
+    )
+    assert (
+        classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.VERIFIED
+    )
+
+    for invalid in (
+        report.model_copy(update={"visited_states": []}),
+        report.model_copy(update={"results": []}),
+        report.model_copy(update={"terminal_outcome": None}),
+    ):
+        assert (
+            classify_execution_outcome(invalid, workflow, ExecutionProfile.STANDARD)
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
 
 
 def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():

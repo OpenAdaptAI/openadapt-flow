@@ -1751,6 +1751,39 @@ def _case_run_report_integrity_error(
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
             "case-input bytes do not match the signed case-result binding",
         )
+    from openadapt_flow.runtime.authorization import parse_runtime_inputs_bytes
+
+    try:
+        case_params, case_worklists = parse_runtime_inputs_bytes(input_bytes)
+    except ValueError:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "case input is not a valid canonical governed-input artifact",
+        )
+
+    def scoped_case_params(item: Any) -> Optional[dict[str, str]]:
+        if workflow.program is None:
+            return dict(case_params) if not item.program_scope else None
+        if not item.program_scope or item.program_scope[0].graph_id != "__program__":
+            return None
+        allowed_graphs = {"__program__", *workflow.subflows}
+        scoped = dict(case_params)
+        for frame in item.program_scope:
+            if frame.graph_id not in allowed_graphs:
+                return None
+            if frame.relation is None:
+                continue
+            rows = case_worklists.get(frame.relation)
+            if rows is None:
+                relation = workflow.data_sources.get(frame.relation)
+                if relation is None:
+                    return None
+                rows = relation.rows
+            if frame.row_index is None or frame.row_index >= len(rows):
+                return None
+            scoped.update(rows[frame.row_index])
+        return scoped
+
     try:
         report = RunReport.model_validate_json(report_bytes)
     except ValueError:
@@ -1780,6 +1813,7 @@ def _case_run_report_integrity_error(
         report.execution_outcome == expected_outcome,
         report.execution_profile == "standard",
         report.governed_minimum_effect_tier == int(project.minimum_effect_tier),
+        report.params == case_params,
     )
     if not all(expected_bindings):
         return (
@@ -1927,7 +1961,26 @@ def _case_run_report_integrity_error(
                 if step_id not in required_actions:
                     return True
                 effects = effects_for_actuation(step, item.actuation)
-                expected_hashes = Counter(effect.contract_hash() for effect in effects)
+                if any(
+                    effect.referenced_params().intersection(workflow.secret_params)
+                    for effect in effects
+                ):
+                    return False
+                resolved_params = scoped_case_params(item)
+                if resolved_params is None:
+                    return False
+                try:
+                    expected_hashes = Counter(
+                        effect.resolved_contract_hash(
+                            resolved_params,
+                            opaque_param_sha256={
+                                "__run_id__": result.run_id_sha256 or ""
+                            },
+                        )
+                        for effect in effects
+                    )
+                except ValueError:
+                    return False
                 retained_hashes = Counter(item.effect_contract_hashes)
                 evidence_hashes = Counter(
                     evidence.effect_contract_hash
@@ -2031,6 +2084,9 @@ def _fault_case_integrity_error(
         else None
     )
     expected_bindings = (
+        receipt.fault_kind == case.kind.value,
+        report.governed_qualification_case_kind == case.kind.value,
+        result.observed_outcome is case.expected_outcome,
         report.governed_qualification_campaign_id_sha256
         == result.campaign_id_sha256
         == receipt.campaign_id_sha256,
@@ -2102,6 +2158,7 @@ def _fault_case_integrity_error(
 def _case_result_integrity_error(
     workflow: "Workflow",
     project: QualificationProject,
+    case: QualificationCase,
     result: QualificationCaseResult,
     *,
     evidence_root: Optional[Path],
@@ -2110,6 +2167,11 @@ def _case_result_integrity_error(
 ) -> Optional[tuple[QualificationRefusalCode, str]]:
     """Return the first fail-closed attestation/evidence error."""
 
+    if result.case_id != case.id:
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case result does not match its containing qualification case",
+        )
     if result.project_id != project.project_id:
         return (
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
@@ -2178,12 +2240,6 @@ def _case_result_integrity_error(
     # actual bytes.  Later admission can independently recompute the exact
     # qualification decision from the signed, hash-bound references without
     # copying sensitive evidence into the portable bundle.
-    case = next((item for item in project.cases if item.id == result.case_id), None)
-    if case is None:
-        return (
-            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
-            "case result references an unknown qualification case",
-        )
     if not evidence_preverified:
         report_error = _case_run_report_integrity_error(
             workflow=workflow,
@@ -2261,6 +2317,7 @@ def record_case_results(
         error = _case_result_integrity_error(
             workflow,
             project,
+            case,
             result,
             evidence_root=Path(evidence_root),
         )
@@ -2798,6 +2855,7 @@ def evaluate_qualification(
         integrity_error = _case_result_integrity_error(
             workflow,
             project,
+            case,
             result,
             evidence_root=Path(evidence_root) if evidence_root is not None else None,
             evidence_preverified=evidence_preverified,

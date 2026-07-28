@@ -81,6 +81,7 @@ from openadapt_flow.ir import (
     PostconditionKind,
     Predicate,
     PredicateKind,
+    ProgramExecutionScopeFrame,
     ProgramGraph,
     Region,
     Resolution,
@@ -1541,8 +1542,12 @@ class Replayer:
             )
             self._bundle_version = _bundle_version(bundle_dir)
             if resume_checkpoint is not None:
+                prior_checkpoints = store.program_checkpoints()
                 resumed_results = self._resumed_program_results(
-                    store.program_checkpoints(), workflow
+                    prior_checkpoints, workflow
+                )
+                report.visited_states.extend(
+                    checkpoint.verified_state_id for checkpoint in prior_checkpoints
                 )
                 report.results.extend(resumed_results)
                 for result in resumed_results:
@@ -1850,6 +1855,7 @@ class Replayer:
             new_crops=new_crops,
             graph_ctx=ctx,
         )
+        result.program_scope = self._program_execution_scope()
         report.results.append(result)
         self._account_result(report, result)
         if self._program_durable is not None:
@@ -2025,6 +2031,22 @@ class Replayer:
             loop=frame["loop"],
         )
 
+    def _program_execution_scope(self) -> list[ProgramExecutionScopeFrame]:
+        """Return graph and loop cursors without retaining worklist values."""
+
+        scope: list[ProgramExecutionScopeFrame] = []
+        for frame in getattr(self, "_frame_stack", []):
+            loop = frame.get("loop")
+            scope.append(
+                ProgramExecutionScopeFrame(
+                    graph_id=frame["graph_id"],
+                    loop_state_id=(loop.loop_state_id if loop is not None else None),
+                    relation=(loop.relation if loop is not None else None),
+                    row_index=(loop.row_index if loop is not None else None),
+                )
+            )
+        return scope
+
     def _skip_completed_effect_state(
         self, state: State, params: dict[str, str], report: RunReport
     ) -> bool:
@@ -2101,6 +2123,7 @@ class Replayer:
                     "re-executed; it remains unverified"
                 ]
             ),
+            program_scope=self._program_execution_scope(),
         )
         report.results.append(result)
         self._account_result(report, result)
@@ -2155,6 +2178,23 @@ class Replayer:
                     resolution=checkpoint.resolution,
                     drift_oracle_calls=checkpoint.drift_oracle_calls,
                     heal=checkpoint.heal,
+                    program_scope=[
+                        ProgramExecutionScopeFrame(
+                            graph_id=frame.graph_id,
+                            loop_state_id=(
+                                frame.loop.loop_state_id
+                                if frame.loop is not None
+                                else None
+                            ),
+                            relation=(
+                                frame.loop.relation if frame.loop is not None else None
+                            ),
+                            row_index=(
+                                frame.loop.row_index if frame.loop is not None else None
+                            ),
+                        )
+                        for frame in checkpoint.frames
+                    ],
                 )
             )
         return results
@@ -4420,7 +4460,14 @@ class Replayer:
         returned value-identical -- ``resolve`` is a no-op for it.
         """
         namespace = {**params, "__run_id__": self._run_id}
-        return [effect.resolve(namespace) for effect in effects]
+        run_id_sha256 = hashlib.sha256(self._run_id.encode("utf-8")).hexdigest()
+        return [
+            effect.resolve(
+                namespace,
+                opaque_param_sha256={"__run_id__": run_id_sha256},
+            )
+            for effect in effects
+        ]
 
     def _profile_effect_tier_refusal(
         self,
@@ -6208,7 +6255,11 @@ class Replayer:
                 "observed qualification environment digest does not match the project"
             )
         self._qualification_environment_call = environment_call
-        self._qualification_environment_bound = observed
+        # The observer owns ``observed`` and can legally reuse or mutate that
+        # object on a later call.  Keep an independent immutable-value
+        # snapshot so such mutation cannot also change the expected side of
+        # the input-edge comparison.
+        self._qualification_environment_bound = observed.model_copy(deep=True)
         set_guard = getattr(self.backend, "set_qualification_input_guard", None)
         if not callable(set_guard):
             self._qualification_environment_call = None

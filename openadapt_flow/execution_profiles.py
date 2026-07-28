@@ -20,7 +20,7 @@ from openadapt_flow.decision_delivery import DecisionDeliveryTier
 from openadapt_flow.verification import VerificationTier
 
 if TYPE_CHECKING:
-    from openadapt_flow.ir import RunReport, Workflow
+    from openadapt_flow.ir import RunReport, State, Workflow
 
 
 class ExecutionProfile(str, Enum):
@@ -168,6 +168,41 @@ def required_effect_tier(
     return required
 
 
+def _program_action_trace(
+    workflow: Workflow,
+    visited_states: list[str],
+) -> list[str] | None:
+    """Project an unambiguous visited-state trace to its action step ids.
+
+    The state trace preserves loop multiplicity and subflow order.  A state id
+    that is absent or reused across graphs is not sufficient audit evidence,
+    so production classification fails closed instead of guessing which state
+    executed.
+    """
+
+    if not visited_states or workflow.program is None:
+        return None
+    from openadapt_flow.ir import StateKind
+
+    states_by_id: dict[str, State] = {}
+    graphs = [workflow.program, *workflow.subflows.values()]
+    for graph in graphs:
+        for state in graph.states.values():
+            if state.id in states_by_id:
+                return None
+            states_by_id[state.id] = state
+    action_trace: list[str] = []
+    for state_id in visited_states:
+        visited_state = states_by_id.get(state_id)
+        if visited_state is None:
+            return None
+        if visited_state.kind is StateKind.ACTION:
+            if visited_state.step is None:
+                return None
+            action_trace.append(visited_state.step.id)
+    return action_trace
+
+
 def classify_execution_outcome(
     report: RunReport,
     workflow: Workflow,
@@ -190,11 +225,28 @@ def classify_execution_outcome(
     )
     if _completed_compensation_actions(report) > 0:
         return ExecutionOutcome.ROLLED_BACK
+    if execution_completed and (
+        report.canceled
+        or report.halt is not None
+        or report.terminal_outcome
+        in {
+            "halt",
+            "escalate",
+            "cancelled",
+            "canceled",
+        }
+    ):
+        return ExecutionOutcome.HALTED
+    if execution_completed and report.terminal_outcome in {"failed", "failure"}:
+        return ExecutionOutcome.FAILED
     if not execution_completed:
         refusal_step_ids = {"<authorization>", "<params>", "<profile>"}
         governed_halt = (
             report.terminal_outcome in {"halt", "escalate"}
             or any(result.safety_halt for result in report.results)
+            or any(
+                result.safety_refusal_evidence is not None for result in report.results
+            )
             or any(
                 result.failure_category in {"governed_refusal", "safety_halt"}
                 for result in report.results
@@ -207,6 +259,21 @@ def classify_execution_outcome(
         return ExecutionOutcome.COMPLETED_UNVERIFIED
     if not (report.governed_authorization_id and report.governed_runtime_inputs_digest):
         return ExecutionOutcome.COMPLETED_UNVERIFIED
+
+    unhandled_results = [
+        result
+        for result in report.results
+        if not result.ok and not result.skipped and not result.exception_handled
+    ]
+    if any(
+        result.safety_halt
+        or result.safety_refusal_evidence is not None
+        or result.failure_category in {"governed_refusal", "safety_halt"}
+        for result in report.results
+    ):
+        return ExecutionOutcome.HALTED
+    if unhandled_results:
+        return ExecutionOutcome.FAILED
 
     # Import lazily: run_gate imports this module for the profile contract.
     from openadapt_flow.run_gate import is_consequential
@@ -242,6 +309,35 @@ def classify_execution_outcome(
         )
         if observed_results != expected_results:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
+    else:
+        if report.terminal_outcome != "success":
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        expected_action_trace = _program_action_trace(
+            workflow,
+            report.visited_states,
+        )
+        if expected_action_trace is None:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        program_step_ids = {
+            state.step.id
+            for graph in [workflow.program, *workflow.subflows.values()]
+            for state in graph.states.values()
+            if state.step is not None
+        }
+        pseudo_step_ids = {"<authorization>", "<params>", "<profile>", "<terminal>"}
+        if any(
+            result.step_id not in program_step_ids
+            and result.step_id not in pseudo_step_ids
+            for result in report.results
+        ):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        observed_action_trace = [
+            result.step_id
+            for result in report.results
+            if result.step_id in program_step_ids
+        ]
+        if observed_action_trace != expected_action_trace:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
     required_identity_ids = set(report.required_identity_step_ids)
     if any(
         result.identity is None or result.identity.status != "verified"
@@ -263,6 +359,25 @@ def classify_execution_outcome(
             continue
         if not result.ok:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if result.input_verified is False or result.starting_state_settled is False:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if result.identity is not None and result.identity.status != "verified":
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if any(
+            not interstitial.ok
+            or not interstitial.delivered
+            or interstitial.clearance_ok is not True
+            for interstitial in result.interstitial_actions
+        ):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        uncertainty = result.delivery_uncertainty
+        if uncertainty is not None and not (
+            uncertainty.verification_attempted
+            and uncertainty.effects_confirmed is True
+            and uncertainty.resolved_by_contract
+            and (not step.expect or uncertainty.postconditions_confirmed is True)
+        ):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
         if step.expect and result.postconditions_ok is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if result.step_id not in consequential:
@@ -274,12 +389,19 @@ def classify_execution_outcome(
         effects = effects_for_actuation(step, result.actuation)
         if len(result.effect_contract_hashes) != len(effects):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        evidence_hashes = Counter(
-            item.effect_contract_hash
+        if any(
+            item.initial_verdict != "confirmed"
+            or item.final_verdict != "confirmed"
+            or item.observed_effect != "present"
+            or item.reconciliation_completed
+            or item.reconciliation_actions
+            or item.verification_tier is None
+            or not VerificationTier(item.verification_tier).satisfies(minimum)
             for item in result.effect_evidence
-            if item.final_verdict == "confirmed"
-            and item.verification_tier is not None
-            and VerificationTier(item.verification_tier).satisfies(minimum)
+        ):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        evidence_hashes = Counter(
+            item.effect_contract_hash for item in result.effect_evidence
         )
         if not result.effect_contract_hashes or evidence_hashes != Counter(
             result.effect_contract_hashes
@@ -299,12 +421,12 @@ def stamp_execution_outcome(
     report.external_network_calls = _external_network_call_state(report)
     if report.execution_completed is None:
         report.execution_completed = report.success
-    outcome = classify_execution_outcome(report, workflow, resolved)
-    report.execution_profile = resolved.value
-    report.execution_outcome = outcome.value
     report.qualification_evidence_only = bool(
         report.governed_qualification_case_id_sha256
     )
+    outcome = classify_execution_outcome(report, workflow, resolved)
+    report.execution_profile = resolved.value
+    report.execution_outcome = outcome.value
     report.production_eligible = bool(
         execution_profile_contract(resolved).production
         and outcome is ExecutionOutcome.VERIFIED

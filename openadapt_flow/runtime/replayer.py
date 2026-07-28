@@ -144,10 +144,11 @@ from openadapt_flow.runtime.effects import (
     reconcile_or_escalate,
 )
 from openadapt_flow.runtime.program_predicates import (
-    PROGRAM_PREDICATE_EVALUATOR_SHA256,
     evaluate_program_predicate,
+    exact_png_size,
     predicate_template_refs,
     predicate_uses_frame,
+    program_predicate_evaluator_contract_sha256,
 )
 from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 from openadapt_flow.verification import (
@@ -2231,6 +2232,9 @@ class Replayer:
         frame_sha256: Optional[str] = None
         frame_ref: Optional[str] = None
         viewport: Optional[tuple[int, int]] = None
+        context_sha256: Optional[str] = None
+        context_ref: Optional[str] = None
+        evaluator_contract_sha256: Optional[str] = None
         if any(
             self._program_guard_uses_frame(state.transitions[index].guard)
             for index, _verdict in evaluations
@@ -2247,17 +2251,53 @@ class Replayer:
                 int(self.backend.viewport[0]),
                 int(self.backend.viewport[1]),
             )
+            try:
+                retained_frame_size = exact_png_size(frame)
+            except Exception as exc:
+                raise _ProgramHalt(
+                    "halt",
+                    "visual program transition frame is not a valid PNG "
+                    f"({type(exc).__name__}) — run aborted",
+                    safety=True,
+                ) from exc
+            evaluator_contract_sha256 = program_predicate_evaluator_contract_sha256(
+                self.vision
+            )
+            context_payload = json.dumps(
+                {
+                    "schema_version": 1,
+                    "frame_sha256": frame_sha256,
+                    "frame_size": list(retained_frame_size),
+                    "viewport": list(viewport),
+                    "evaluator_contract_sha256": evaluator_contract_sha256,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            context_sha256 = hashlib.sha256(context_payload).hexdigest()
+            context_ref = (
+                f"private/program-transition-observations/{context_sha256}.json"
+            )
             root = Path(run_dir).resolve()
             private_dir = root / "private"
             inventory_dir = private_dir / "program-transitions"
+            context_dir = private_dir / "program-transition-observations"
             try:
-                if private_dir.is_symlink() or inventory_dir.is_symlink():
-                    raise OSError("transition inventory path is a symlink")
-                inventory_dir.mkdir(parents=True, exist_ok=True)
                 if (
                     private_dir.is_symlink()
                     or inventory_dir.is_symlink()
+                    or context_dir.is_symlink()
+                ):
+                    raise OSError("transition inventory path is a symlink")
+                inventory_dir.mkdir(parents=True, exist_ok=True)
+                context_dir.mkdir(parents=True, exist_ok=True)
+                if (
+                    private_dir.is_symlink()
+                    or inventory_dir.is_symlink()
+                    or context_dir.is_symlink()
                     or not inventory_dir.resolve().is_relative_to(root)
+                    or not context_dir.resolve().is_relative_to(root)
                 ):
                     raise OSError("transition inventory leaves the run root")
                 frame_path = root / frame_ref
@@ -2267,6 +2307,15 @@ class Replayer:
                 if existing is not None and existing != frame:
                     raise OSError("transition frame digest path has other bytes")
                 frame_path.write_bytes(frame)
+                context_path = root / context_ref
+                if context_path.is_symlink():
+                    raise OSError("transition context path is a symlink")
+                existing_context = (
+                    context_path.read_bytes() if context_path.exists() else None
+                )
+                if existing_context is not None and existing_context != context_payload:
+                    raise OSError("transition context digest path has other bytes")
+                context_path.write_bytes(context_payload)
             except OSError as exc:
                 raise _ProgramHalt(
                     "halt",
@@ -2355,8 +2404,12 @@ class Replayer:
                     observed_frame_sha256=frame_sha256 if uses_frame else None,
                     observed_frame_inventory_ref=frame_ref if uses_frame else None,
                     observed_viewport=viewport if uses_frame else None,
+                    observed_context_sha256=(context_sha256 if uses_frame else None),
+                    observed_context_inventory_ref=(
+                        context_ref if uses_frame else None
+                    ),
                     guard_evaluator_contract_sha256=(
-                        PROGRAM_PREDICATE_EVALUATOR_SHA256 if uses_frame else None
+                        evaluator_contract_sha256 if uses_frame else None
                     ),
                     guard_assets=assets,
                     governed_runtime_inputs_digest=(

@@ -24,6 +24,7 @@ from openadapt_flow.ir import (
     ApiIdentityBinding,
     EffectVerificationEvidence,
     ExecutionOutcomeEnvelope,
+    Guard,
     IdentityCheck,
     IdentitySignalEvidence,
     LoopSpec,
@@ -994,6 +995,21 @@ def test_program_outcome_requires_exact_ordered_action_trace():
         report.model_copy(update={"visited_states": []}),
         report.model_copy(update={"results": []}),
         report.model_copy(update={"terminal_outcome": None}),
+        report.model_copy(
+            update={
+                "results": [
+                    report.results[0].model_copy(
+                        update={
+                            "skipped": True,
+                            "ok": True,
+                            "starting_state_settled": None,
+                            "delivery_attempted": False,
+                            "actuation": None,
+                        }
+                    )
+                ]
+            }
+        ),
     ):
         assert (
             classify_execution_outcome(invalid, workflow, ExecutionProfile.STANDARD)
@@ -1053,6 +1069,7 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
                 ok=False,
                 safety_halt=True,
                 delivery_attempted=False,
+                error="target ambiguity refused before delivery",
                 program_scope=scope,
             ),
             StepResult(
@@ -1060,6 +1077,7 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
                 intent="program halt",
                 ok=False,
                 safety_halt=True,
+                error="target ambiguity refused before delivery",
             ),
         ],
     )
@@ -1092,6 +1110,17 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
             }
         ),
         report.model_copy(update={"terminal_outcome": "success"}),
+        report.model_copy(update={"terminal_outcome": "escalate"}),
+        report.model_copy(
+            update={
+                "results": [
+                    *report.results[:-1],
+                    report.results[-1].model_copy(
+                        update={"error": "an unrelated terminal reason"}
+                    ),
+                ]
+            }
+        ),
     ):
         assert (
             classify_execution_outcome(
@@ -1526,6 +1555,57 @@ def test_linear_and_skipped_result_shapes_fail_closed():
             )
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
+
+    guarded = Workflow(
+        name="declared-guard-skip",
+        params={"mode": "disabled"},
+        steps=[
+            Step(
+                id="optional",
+                intent="optional",
+                action=ActionKind.KEY,
+                key="O",
+                guard=Guard(
+                    predicate=Predicate(
+                        kind=PredicateKind.PARAM_EQUALS,
+                        param="mode",
+                        value="enabled",
+                    ),
+                    on_unmet="skip",
+                ),
+            )
+        ],
+    )
+    guarded_report = _bind_report_to_workflow(
+        RunReport(
+            workflow_name=guarded.name,
+            started_at="2026-07-28T00:00:00Z",
+            success=True,
+            execution_completed=True,
+            governed_authorization_id="authorization-1",
+            governed_runtime_inputs_digest="b" * 64,
+            params={"mode": "disabled"},
+            results=[
+                StepResult(
+                    step_id="optional",
+                    intent="optional",
+                    ok=True,
+                    skipped=True,
+                    starting_state_settled=True,
+                    delivery_attempted=False,
+                )
+            ],
+        ),
+        guarded,
+    )
+    assert (
+        classify_execution_outcome(
+            guarded_report,
+            guarded,
+            ExecutionProfile.STANDARD,
+        )
+        is ExecutionOutcome.VERIFIED
+    )
 
 
 def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():

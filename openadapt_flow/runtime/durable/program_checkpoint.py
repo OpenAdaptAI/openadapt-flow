@@ -134,6 +134,15 @@ def control_frames_hash(frames: list[GraphFrame]) -> str:
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
+def bound_params_sha256(params: dict[str, str]) -> str:
+    """Return a PHI-free digest of one exact attended parameter scope."""
+
+    canonical = json.dumps(
+        params, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 class ProgramTransitionReceipt(BaseModel):
     """Exact, idempotent attended transition admitted at a program pause.
 
@@ -145,10 +154,15 @@ class ProgramTransitionReceipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: int = 2
     run_id: str
     workflow_name: str
     bundle_version: str
+    workflow_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    governed_runtime_inputs_digest: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    bound_params_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     pause_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     pause_digest: str
     action: Literal["continue", "skip"]

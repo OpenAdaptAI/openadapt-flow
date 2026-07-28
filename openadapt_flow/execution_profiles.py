@@ -11,6 +11,7 @@ assembling a potentially contradictory collection of permissive flags.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from dataclasses import dataclass
@@ -393,6 +394,8 @@ def _program_action_trace(
     transition_evidence_root: Path | None = None,
     transition_predicate_vision: Any | None = None,
     governed_runtime_inputs_digest: str | None = None,
+    run_id_sha256: str | None = None,
+    workflow_contract_digest: str | None = None,
     halted_at_step_id: str | None = None,
     reported_results: list[Any] | None = None,
 ) -> list[_ProgramActionOccurrence] | None:
@@ -413,9 +416,10 @@ def _program_action_trace(
         predicate_contract_sha256,
     )
     from openadapt_flow.runtime.program_predicates import (
-        PROGRAM_PREDICATE_EVALUATOR_SHA256,
         evaluate_program_predicate,
+        exact_png_size,
         predicate_template_refs,
+        program_predicate_evaluator_contract_sha256,
     )
 
     if transition_predicate_vision is None:
@@ -611,16 +615,46 @@ def _program_action_trace(
             if uses_frame:
                 if (
                     item.guard_evaluator_contract_sha256
-                    != PROGRAM_PREDICATE_EVALUATOR_SHA256
+                    != program_predicate_evaluator_contract_sha256(
+                        transition_predicate_vision
+                    )
                     or item.observed_frame_inventory_ref is None
                     or item.observed_frame_sha256 is None
                     or item.observed_viewport is None
+                    or item.observed_context_inventory_ref is None
+                    or item.observed_context_sha256 is None
                 ):
                     raise ValueError("transition visual evaluator contract differs")
                 frame = _verified_inventory_bytes(
                     item.observed_frame_inventory_ref,
                     item.observed_frame_sha256,
                 )
+                try:
+                    observed_size = exact_png_size(frame)
+                except Exception as exc:
+                    raise ValueError(
+                        "transition frame is not an exact PNG observation"
+                    ) from exc
+                context_payload = _verified_inventory_bytes(
+                    item.observed_context_inventory_ref,
+                    item.observed_context_sha256,
+                )
+                try:
+                    observed_context = json.loads(context_payload)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "transition observation context is invalid"
+                    ) from exc
+                if observed_context != {
+                    "schema_version": 1,
+                    "frame_sha256": item.observed_frame_sha256,
+                    "frame_size": list(observed_size),
+                    "viewport": list(item.observed_viewport),
+                    "evaluator_contract_sha256": (item.guard_evaluator_contract_sha256),
+                }:
+                    raise ValueError(
+                        "transition viewport differs from its exact observation"
+                    )
                 expected_refs = predicate_template_refs(transition.guard)
                 if (
                     tuple(asset.source_ref for asset in item.guard_assets)
@@ -657,6 +691,7 @@ def _program_action_trace(
         graph_id: str,
         state: Any,
         scope: tuple[Any, ...],
+        current_params: Mapping[str, str],
     ) -> tuple[bool, str | None, str | None]:
         nonlocal attended_evidence_cursor, expected_evidence_decision_index
         evidence = attended_transition_evidence or []
@@ -681,9 +716,12 @@ def _program_action_trace(
             AttendedActionRefused,
             AttendedActionStore,
         )
+        from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
         from openadapt_flow.runtime.durable.program_checkpoint import (
             GraphFrame,
             ProgramTransitionReceipt,
+            bound_params_sha256,
+            bundle_version,
             control_frames_hash,
         )
 
@@ -694,7 +732,8 @@ def _program_action_trace(
             authenticated = AttendedActionStore(
                 transition_evidence_root
             ).read_program_receipt(item.receipt_pause_id)
-        except (ValueError, AttendedActionRefused) as exc:
+            manifest = CheckpointStore(transition_evidence_root).read_manifest()
+        except (OSError, ValueError, AttendedActionRefused) as exc:
             raise ValueError("attended transition receipt does not verify") from exc
         if (
             authenticated != parsed
@@ -703,8 +742,32 @@ def _program_action_trace(
             or parsed.source_state_id != state.id
             or parsed.target_state_id != item.target_state_id
             or parsed.action != item.action
+            or run_id_sha256 is None
+            or hashlib.sha256(parsed.run_id.encode("utf-8")).hexdigest()
+            != run_id_sha256
+            or parsed.workflow_name != workflow.name
+            or workflow_contract_digest is None
+            or parsed.workflow_contract_sha256 != workflow_contract_digest
+            or parsed.governed_runtime_inputs_digest != governed_runtime_inputs_digest
+            or parsed.bound_params_sha256 != bound_params_sha256(dict(current_params))
+            or manifest is None
+            or manifest.run_id != parsed.run_id
+            or manifest.workflow_name != parsed.workflow_name
+            or manifest.params != dict(runtime_params or {})
+            or (
+                manifest.governed_authorization.runtime_inputs_digest
+                if manifest.governed_authorization is not None
+                else None
+            )
+            != governed_runtime_inputs_digest
         ):
             raise ValueError("attended transition receipt binding differs")
+        try:
+            live_bundle_version = bundle_version(manifest.bundle_dir)
+        except OSError as exc:
+            raise ValueError("attended transition bundle cannot be verified") from exc
+        if parsed.bundle_version != live_bundle_version:
+            raise ValueError("attended transition bundle binding differs")
         control_payload = _verified_inventory_bytes(
             item.control_frames_inventory_ref,
             item.control_frames_sha256,
@@ -721,6 +784,7 @@ def _program_action_trace(
             or control_frames_hash(control_frames) != parsed.control_frames_hash
             or control_frames[-1].graph_id != graph_id
             or control_frames[-1].state_id != state.id
+            or control_frames[-1].params != dict(current_params)
         ):
             raise ValueError("attended transition control-frame binding differs")
         retained_scope = tuple(
@@ -813,6 +877,7 @@ def _program_action_trace(
             graph_id=graph_id,
             state=state,
             scope=scope,
+            current_params=current_params,
         )
         if attended:
             return attended_target, attended_action
@@ -863,6 +928,7 @@ def _program_action_trace(
                 graph_id=graph_id,
                 state=state,
                 scope=scope,
+                current_params=current_params,
             )
             if attended:
                 if attended_target is not None or occurrence_index is None:
@@ -1282,7 +1348,7 @@ def classify_execution_outcome(
     else:
         if not fault_prefix_review and report.terminal_outcome != "success":
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        if fault_prefix_review and report.terminal_outcome not in {"halt", "escalate"}:
+        if fault_prefix_review and report.terminal_outcome != "halt":
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         expected_action_trace = _program_action_trace(
             workflow,
@@ -1295,6 +1361,8 @@ def classify_execution_outcome(
             transition_evidence_root=transition_evidence_root,
             transition_predicate_vision=transition_predicate_vision,
             governed_runtime_inputs_digest=report.governed_runtime_inputs_digest,
+            run_id_sha256=report.run_id_sha256,
+            workflow_contract_digest=report.workflow_contract_sha256,
             halted_at_step_id=_qualification_fault_target_step_id,
             reported_results=report.results,
         )
@@ -1302,14 +1370,23 @@ def classify_execution_outcome(
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         action_results = report.results
         if fault_prefix_review:
+            terminal_result = action_results[-1] if action_results else None
             if (
-                not action_results
-                or action_results[-1].step_id != "<terminal>"
-                or action_results[-1].ok
-                or not action_results[-1].safety_halt
+                terminal_result is None
+                or terminal_result.step_id != "<terminal>"
+                or terminal_result.intent != "program halt"
+                or terminal_result.ok
+                or not terminal_result.safety_halt
             ):
                 return ExecutionOutcome.COMPLETED_UNVERIFIED
             action_results = action_results[:-1]
+            if (
+                not action_results
+                or action_results[-1].ok
+                or action_results[-1].error is None
+                or terminal_result.error != action_results[-1].error
+            ):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
         if len(action_results) != len(expected_action_trace):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         for result, occurrence in zip(action_results, expected_action_trace):
@@ -1380,6 +1457,42 @@ def classify_execution_outcome(
             scoped.update(rows[frame.row_index])
         return scoped
 
+    def _reported_parameter_predicate_value(
+        predicate: Any, current_params: Mapping[str, str]
+    ) -> bool | None:
+        """Recompute a guard only when all of its inputs are report-bound."""
+
+        from openadapt_flow.ir import PredicateKind
+
+        if predicate.kind is PredicateKind.PARAM_EQUALS:
+            return predicate.param is not None and str(
+                current_params.get(predicate.param)
+            ) == str(predicate.value)
+        if predicate.kind is PredicateKind.AND:
+            values = [
+                _reported_parameter_predicate_value(item, current_params)
+                for item in predicate.operands
+            ]
+            if any(value is False for value in values):
+                return False
+            return True if all(value is True for value in values) else None
+        if predicate.kind is PredicateKind.OR:
+            values = [
+                _reported_parameter_predicate_value(item, current_params)
+                for item in predicate.operands
+            ]
+            if any(value is True for value in values):
+                return True
+            return False if all(value is False for value in values) else None
+        if predicate.kind is PredicateKind.NOT:
+            if not predicate.operands:
+                return False
+            value = _reported_parameter_predicate_value(
+                predicate.operands[0], current_params
+            )
+            return None if value is None else not value
+        return None
+
     for result, step in paired_results:
         if result.skipped or result.exception_handled:
             if (
@@ -1393,6 +1506,23 @@ def classify_execution_outcome(
                 or result.effect_evidence
             ):
                 return ExecutionOutcome.COMPLETED_UNVERIFIED
+            if result.skipped:
+                scoped_params = _scoped_params(result)
+                declared_guard_skip = bool(
+                    scoped_params is not None
+                    and step.guard is not None
+                    and step.guard.on_unmet == "skip"
+                    and _reported_parameter_predicate_value(
+                        step.guard.predicate, scoped_params
+                    )
+                    is False
+                )
+                authenticated_attended_skip = (
+                    workflow.program is not None
+                    and result.actuation == "human_attended_skip"
+                )
+                if not (declared_guard_skip or authenticated_attended_skip):
+                    return ExecutionOutcome.COMPLETED_UNVERIFIED
             continue
         if not result.ok:
             return ExecutionOutcome.COMPLETED_UNVERIFIED

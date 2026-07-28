@@ -2136,6 +2136,10 @@ class ProgramTransitionEvidence(BaseModel):
     )
     observed_frame_inventory_ref: Optional[str] = None
     observed_viewport: Optional[tuple[int, int]] = None
+    observed_context_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    observed_context_inventory_ref: Optional[str] = None
     guard_evaluator_contract_sha256: Optional[str] = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
@@ -2175,12 +2179,29 @@ class ProgramTransitionEvidence(BaseModel):
                 raise ValueError("frame-backed guard evidence requires a viewport")
             if self.guard_evaluator_contract_sha256 is None:
                 raise ValueError("frame-backed guard evidence requires an evaluator")
+            if (
+                self.observed_context_sha256 is None
+                or self.observed_context_inventory_ref is None
+            ):
+                raise ValueError(
+                    "frame-backed guard evidence requires exact observation context"
+                )
+            expected_context = (
+                "private/program-transition-observations/"
+                f"{self.observed_context_sha256}.json"
+            )
+            if self.observed_context_inventory_ref != expected_context:
+                raise ValueError(
+                    "transition observation context is not content-addressed"
+                )
             if len({item.source_ref for item in self.guard_assets}) != len(
                 self.guard_assets
             ):
                 raise ValueError("transition guard asset references must be unique")
         elif (
             self.observed_viewport is not None
+            or self.observed_context_sha256 is not None
+            or self.observed_context_inventory_ref is not None
             or self.guard_evaluator_contract_sha256 is not None
             or self.guard_assets
         ):

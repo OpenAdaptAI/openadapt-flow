@@ -9,15 +9,89 @@ produce.
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Callable, Mapping
+import importlib.metadata
+import inspect
+import io
+import json
+import platform
+from collections.abc import Hashable
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Callable, Mapping, cast
+
+from PIL import Image
 
 from openadapt_flow.ir import Predicate, PredicateKind
 from openadapt_flow.runtime.resolver import resolve
 
-PROGRAM_PREDICATE_EVALUATOR_ID = "openadapt.program-predicate-evaluator/v1"
-PROGRAM_PREDICATE_EVALUATOR_SHA256 = hashlib.sha256(
-    PROGRAM_PREDICATE_EVALUATOR_ID.encode("utf-8")
-).hexdigest()
+PROGRAM_PREDICATE_EVALUATOR_ID = "openadapt.program-predicate-evaluator/v2"
+
+
+def _source_sha256(value: Any) -> str:
+    """Hash the installed implementation behind one evaluator dependency."""
+
+    try:
+        source = inspect.getsource(value).encode("utf-8")
+    except (OSError, TypeError):
+        module = inspect.getmodule(value)
+        module_path = getattr(module, "__file__", None)
+        if module_path is None:
+            source = repr(value).encode("utf-8")
+        else:
+            source = Path(module_path).read_bytes()
+    return hashlib.sha256(source).hexdigest()
+
+
+@lru_cache(maxsize=32)
+def _evaluator_contract_for_implementation(vision_type: Hashable) -> str:
+    """Bind the verifier to exact code, runtime, and dependency versions.
+
+    A version label alone does not identify executable predicate semantics.
+    The retained contract therefore names the installed evaluator and resolver
+    source, the concrete vision implementation, Python, and the image/OCR
+    dependency versions used by that implementation.
+    """
+
+    versions: dict[str, str] = {}
+    for distribution in ("numpy", "opencv-python", "pillow", "pytesseract"):
+        try:
+            versions[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions[distribution] = "absent"
+    payload = {
+        "contract": PROGRAM_PREDICATE_EVALUATOR_ID,
+        "python": platform.python_version(),
+        "evaluator_module_sha256": hashlib.sha256(
+            Path(__file__).read_bytes()
+        ).hexdigest(),
+        "evaluator_source_sha256": _source_sha256(evaluate_program_predicate),
+        "resolver_source_sha256": _source_sha256(resolve),
+        "vision_implementation": (
+            f"{getattr(vision_type, '__module__', '')}."
+            f"{getattr(vision_type, '__qualname__', getattr(vision_type, '__name__', ''))}"
+        ),
+        "vision_source_sha256": _source_sha256(vision_type),
+        "dependencies": versions,
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def program_predicate_evaluator_contract_sha256(vision: Any) -> str:
+    """Return the cached exact contract for one vision implementation."""
+
+    vision_type = vision if inspect.ismodule(vision) else type(vision)
+    return _evaluator_contract_for_implementation(cast(Hashable, vision_type))
+
+
+def exact_png_size(frame_png: bytes) -> tuple[int, int]:
+    """Read the exact pixel dimensions bound by retained PNG bytes."""
+
+    with Image.open(io.BytesIO(frame_png)) as image:
+        image.verify()
+        return int(image.width), int(image.height)
 
 
 def predicate_template_refs(predicate: Predicate | None) -> tuple[str, ...]:

@@ -60,6 +60,7 @@ from openadapt_flow.runtime.durable.checkpoint import (
 from openadapt_flow.runtime.durable.program_checkpoint import (
     ProgramCheckpoint,
     ProgramTransitionReceipt,
+    bound_params_sha256,
     bundle_version,
     control_frames_hash,
 )
@@ -2192,10 +2193,19 @@ class BoundAttendedExecutor:
         cursor_digest = capability.program_cursor_digest
         if cursor_digest is None:
             raise AttendedActionRefused("the program cursor is not signed")
+        from openadapt_flow.qualification import workflow_contract_sha256
+
         receipt = ProgramTransitionReceipt(
             run_id=capability.run_id,
             workflow_name=capability.workflow_name,
             bundle_version=capability.bundle_version,
+            workflow_contract_sha256=workflow_contract_sha256(workflow),
+            governed_runtime_inputs_digest=(
+                manifest.governed_authorization.runtime_inputs_digest
+                if manifest.governed_authorization is not None
+                else None
+            ),
+            bound_params_sha256=bound_params_sha256(params),
             pause_id=capability.pause_id,
             pause_digest=capability.pause_digest,
             action="skip" if skipped else "continue",

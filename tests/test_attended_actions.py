@@ -50,6 +50,7 @@ from openadapt_flow.qualification import (
     EnvironmentBoundary,
     init_project,
     set_action_classification,
+    workflow_contract_sha256,
 )
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import (
@@ -728,9 +729,59 @@ def test_program_continue_commits_exact_receipt_without_reactuating_source(tmp_p
             governed_runtime_inputs_digest=(
                 resumed_report.governed_runtime_inputs_digest
             ),
+            run_id_sha256=resumed_report.run_id_sha256,
+            workflow_contract_digest=workflow_contract_sha256(workflow),
             reported_results=resumed_report.results,
         )
         is not None
+    )
+    assert (
+        _program_action_trace(
+            workflow,
+            resumed_report.visited_states,
+            runtime_params=resumed_report.params,
+            transition_evidence=resumed_report.program_transition_evidence,
+            attended_transition_evidence=(
+                resumed_report.attended_program_transition_evidence
+            ),
+            transition_evidence_root=run,
+            governed_runtime_inputs_digest=(
+                resumed_report.governed_runtime_inputs_digest
+            ),
+            run_id_sha256="0" * 64,
+            workflow_contract_digest=workflow_contract_sha256(workflow),
+            reported_results=resumed_report.results,
+        )
+        is None
+    )
+    rebound_inputs = resumed_report.model_copy(deep=True)
+    rebound_inputs.governed_runtime_inputs_digest = "b" * 64
+    rebound_inputs.program_transition_evidence = [
+        item.model_copy(update={"governed_runtime_inputs_digest": "b" * 64})
+        for item in rebound_inputs.program_transition_evidence
+    ]
+    rebound_inputs.attended_program_transition_evidence = [
+        item.model_copy(update={"governed_runtime_inputs_digest": "b" * 64})
+        for item in rebound_inputs.attended_program_transition_evidence
+    ]
+    assert (
+        _program_action_trace(
+            workflow,
+            rebound_inputs.visited_states,
+            runtime_params=rebound_inputs.params,
+            transition_evidence=rebound_inputs.program_transition_evidence,
+            attended_transition_evidence=(
+                rebound_inputs.attended_program_transition_evidence
+            ),
+            transition_evidence_root=run,
+            governed_runtime_inputs_digest=(
+                rebound_inputs.governed_runtime_inputs_digest
+            ),
+            run_id_sha256=rebound_inputs.run_id_sha256,
+            workflow_contract_digest=workflow_contract_sha256(workflow),
+            reported_results=rebound_inputs.results,
+        )
+        is None
     )
     tampered = resumed_report.model_copy(deep=True)
     tampered.attended_program_transition_evidence[0] = (
@@ -749,6 +800,8 @@ def test_program_continue_commits_exact_receipt_without_reactuating_source(tmp_p
             ),
             transition_evidence_root=run,
             governed_runtime_inputs_digest=tampered.governed_runtime_inputs_digest,
+            run_id_sha256=tampered.run_id_sha256,
+            workflow_contract_digest=workflow_contract_sha256(workflow),
             reported_results=tampered.results,
         )
         is None

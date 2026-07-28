@@ -175,6 +175,7 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
         )
         is ExecutionOutcome.VERIFIED
     )
@@ -186,6 +187,7 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
@@ -201,6 +203,7 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
@@ -216,6 +219,7 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
@@ -227,6 +231,7 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
@@ -242,6 +247,24 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
+    changed_viewport = report.model_copy(deep=True)
+    changed_viewport.program_transition_evidence[0] = (
+        changed_viewport.program_transition_evidence[0].model_copy(
+            update={"observed_viewport": (1, 1)}
+        )
+    )
+    assert (
+        classify_execution_outcome(
+            changed_viewport,
+            workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
@@ -268,6 +291,7 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
                 workflow,
                 ExecutionProfile.STANDARD,
                 transition_evidence_root=run_dir,
+                transition_predicate_vision=_SettledVision(),
             )
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
@@ -319,6 +343,7 @@ def test_transition_evidence_rejects_deleted_prefix_and_linear_invention(tmp_pat
             workflow,
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )

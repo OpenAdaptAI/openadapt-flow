@@ -8,13 +8,17 @@ network, no model call. The theses these pin:
 * a run that HALTs mid-way (a REFUTED effect) writes a ``PendingEscalation``
   plus checkpoints for the PRIOR verified steps, and does not die silently;
 * ``resume`` continues from the LAST verified checkpoint -- it re-executes only
-  the paused step onward and NEVER re-runs an already-confirmed step (no
-  re-performed / double write);
+  the paused step onward, rechecks retained effects without re-performing their
+  actions, and never creates a double write;
 * escalation pauses deterministically for an operator; it never hands the
   remaining workflow to a free-form agent.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+import pytest
 
 from openadapt_flow.ir import (
     ActionKind,
@@ -25,11 +29,18 @@ from openadapt_flow.ir import (
 )
 from openadapt_flow.runtime.durable import (
     ApprovalRecord,
+    ApprovalRequired,
     CheckpointStore,
+    RunCheckpoint,
+    StateDiverged,
     bundle_version,
+    issue_resume_approval,
     resume,
     resume_point,
 )
+from openadapt_flow.runtime.durable.approval import approval_pause_digest
+from openadapt_flow.runtime.durable.authority import DurableAuthority
+from openadapt_flow.runtime.durable.controller import resumed_step_results
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
@@ -61,10 +72,15 @@ class FakeSoRVerifier:
         self.refute: set[tuple] = set()
         self.verify_calls: list[dict] = []
         self.capture_calls = 0
+        self.records: list[dict] = []
 
     def capture_pre_state(self, context=None) -> EffectState:
         self.capture_calls += 1
-        return EffectState(substrate=self.substrate, reachable=True, records=[])
+        return EffectState(
+            substrate=self.substrate,
+            reachable=True,
+            records=[dict(record) for record in self.records],
+        )
 
     def verify(self, expected: Effect, before: EffectState, context=None):
         self.verify_calls.append(dict(expected.match))
@@ -78,6 +94,9 @@ class FakeSoRVerifier:
                 observed_count=0,
                 expected_count=expected.expected_count,
             )
+        record = dict(expected.match)
+        if record not in self.records:
+            self.records.append(record)
         return EffectVerdict(
             verdict=Verdict.CONFIRMED,
             kind=expected.kind,
@@ -125,14 +144,23 @@ def _dirs(tmp_path):
     return bundle, tmp_path / "run"
 
 
-def _approval(bundle) -> ApprovalRecord:
+def _approval(bundle, run_dir=None) -> ApprovalRecord:
     """An authenticated approval for the given bundle (P0-5): resume now REQUIRES
     one, so every legitimate resume in these tests carries an operator identity,
     a chosen resolution, and the bundle version it was granted against."""
-    return ApprovalRecord(
+    run_dir = run_dir or bundle.parent / "run"
+    store = CheckpointStore(run_dir)
+    manifest = store.read_manifest()
+    pending = store.read_pending()
+    assert manifest is not None and pending is not None
+    return issue_resume_approval(
+        pending,
         approver="operator@example.com",
         resolution="verified the system of record; approve resume",
         bundle_version=bundle_version(bundle),
+        run_id=manifest.run_id,
+        workflow_name=manifest.workflow_name,
+        run_dir=run_dir,
     )
 
 
@@ -176,6 +204,13 @@ def test_clean_run_checkpoints_each_step_and_completes(tmp_path):
     assert store.read_pending() is None
     # $0: no model calls.
     assert report.model_calls == 0
+
+
+def test_linear_resume_never_synthesizes_missing_verified_history(tmp_path):
+    workflow = _three_step_workflow(with_effects=False)
+
+    with pytest.raises(StateDiverged, match="exact verified checkpoint"):
+        resumed_step_results(tmp_path / "empty-run", workflow, 1)
 
 
 # -- halt mid-way: pending escalation + prior checkpoints -------------------
@@ -269,10 +304,94 @@ def test_resume_continues_from_last_checkpoint(tmp_path):
     assert store.read_pending() is None
 
 
+def test_resume_requires_the_active_pause_and_exact_inputs(tmp_path):
+    _report, run_dir, bundle, _backend, verifier = _run_to_halt(tmp_path)
+    replayer = Replayer(FakeBackend(), vision=_vision_ok(), effect_verifier=verifier)
+
+    with pytest.raises(StateDiverged, match="parameters differ"):
+        resume(
+            run_dir,
+            replayer,
+            approval=_approval(bundle),
+            params={"who": "different"},
+        )
+
+    store = CheckpointStore(run_dir)
+    approval = _approval(bundle)
+    store.clear_pending()
+    with pytest.raises(ApprovalRequired, match="no active durable pause"):
+        resume(run_dir, replayer, approval=approval)
+    assert replayer.backend.actions == []
+
+
+def test_resume_refuses_a_checkpoint_added_after_the_pause(tmp_path):
+    _report, run_dir, bundle, _backend, verifier = _run_to_halt(tmp_path)
+    store = CheckpointStore(run_dir)
+    pending = store.read_pending()
+    assert pending is not None
+    store.write_checkpoint(
+        RunCheckpoint(
+            run_id=pending.run_id,
+            bundle_version=bundle_version(bundle),
+            workflow_name="durable-demo",
+            step_index=2,
+            step_id="s2",
+            next_step_index=3,
+            params={"who": "alice"},
+        )
+    )
+    backend = FakeBackend()
+    with pytest.raises(
+        StateDiverged,
+        match="checkpoint history|monotonic authority",
+    ):
+        resume(
+            run_dir,
+            Replayer(backend, vision=_vision_ok(), effect_verifier=verifier),
+            approval=_approval(bundle),
+        )
+    assert backend.actions == []
+
+
+def test_attended_checkpoint_must_follow_the_active_pause(tmp_path):
+    _report, run_dir, bundle, _backend, verifier = _run_to_halt(tmp_path)
+    store = CheckpointStore(run_dir)
+    pending = store.read_pending()
+    assert pending is not None
+    before_pause = (
+        datetime.fromisoformat(pending.created_at) - timedelta(hours=1)
+    ).isoformat()
+    store.write_checkpoint(
+        RunCheckpoint(
+            run_id=pending.run_id,
+            bundle_version=bundle_version(bundle),
+            workflow_name="durable-demo",
+            step_index=2,
+            step_id="s2",
+            next_step_index=3,
+            params={"who": "alice"},
+            actuation="human_attended",
+            created_at=before_pause,
+        )
+    )
+    store.write_pending(pending.model_copy(update={"status": "approved"}))
+    backend = FakeBackend()
+    with pytest.raises(
+        StateDiverged,
+        match="history changed|monotonic authority",
+    ):
+        resume(
+            run_dir,
+            Replayer(backend, vision=_vision_ok(), effect_verifier=verifier),
+            approval=_approval(bundle),
+        )
+    assert backend.actions == []
+
+
 # -- resume is idempotent w.r.t. already-confirmed steps (no double write) ---
 
 
-def test_resume_does_not_reverify_confirmed_steps(tmp_path):
+def test_resume_revalidates_but_does_not_repeat_confirmed_steps(tmp_path):
     report, run_dir, bundle, _orig_backend, verifier = _run_to_halt(tmp_path)
     assert report.success is False
 
@@ -289,10 +408,11 @@ def test_resume_does_not_reverify_confirmed_steps(tmp_path):
     resumed = resume(run_dir, resume_replayer, approval=_approval(bundle))
 
     assert resumed.success is True
-    # Idempotency: the already-confirmed steps' effects are NOT re-verified on
-    # resume (their writes are never re-performed); only s2 is verified again.
+    # Resume re-reads the retained effects before it continues. It does not
+    # repeat their actions; only s2 is actuated on this leg.
     verified_steps = [call["step"] for call in verifier.verify_calls]
     assert verified_steps == ["s2"]
+    assert verifier.capture_calls >= 1
     # And the resumed report still accounts for the whole workflow.
     assert [r.step_id for r in resumed.results] == ["s0", "s1", "s2"]
     assert all(r.ok for r in resumed.results)
@@ -400,3 +520,47 @@ def test_non_durable_run_writes_no_durable_artifacts(tmp_path):
     assert store.checkpoints() == []
     assert store.read_manifest() is None
     assert store.read_pending() is None
+
+
+def test_fresh_durable_run_refuses_an_owned_run_directory_before_actuation(tmp_path):
+    workflow = _three_step_workflow(with_effects=False)
+    bundle, run_dir = _dirs(tmp_path)
+    workflow.save(bundle)
+    first = Replayer(FakeBackend(), vision=_vision_ok(), durable=True)
+    assert first.run(workflow, bundle_dir=bundle, run_dir=run_dir).success is True
+
+    second_backend = FakeBackend()
+    with pytest.raises(StateDiverged, match="already contains a durable run"):
+        Replayer(second_backend, vision=_vision_ok(), durable=True).run(
+            workflow, bundle_dir=bundle, run_dir=run_dir
+        )
+    assert second_backend.actions == []
+
+
+def test_resume_approval_is_bound_to_the_exact_active_pause(tmp_path):
+    _report, run_dir, bundle, _backend, _verifier = _run_to_halt(tmp_path)
+    approval = _approval(bundle)
+    store = CheckpointStore(run_dir)
+    pending = store.read_pending()
+    assert pending is not None
+    changed = pending.model_copy(
+        update={"reason": "a later pause needs a new approval"}
+    )
+    authority = DurableAuthority(run_dir, store)
+    record = authority.validate(store.read_manifest())
+    store.write_pending(changed)
+    authority.advance(
+        store.read_manifest(),
+        expected_progress_digest=record.progress_digest,
+        phase="paused",
+        pause_binding_sha256=approval_pause_digest(changed),
+    )
+
+    backend = FakeBackend()
+    with pytest.raises(ApprovalRequired, match="exact active"):
+        resume(
+            run_dir,
+            Replayer(backend, vision=_vision_ok(), effect_verifier=FakeSoRVerifier()),
+            approval=approval,
+        )
+    assert backend.actions == []

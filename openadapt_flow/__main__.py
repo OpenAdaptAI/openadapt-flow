@@ -1564,7 +1564,11 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     import getpass
 
     from openadapt_flow import crypto
-    from openadapt_flow.runtime.durable.approval import ApprovalRecord
+    from openadapt_flow.runtime.durable.approval import (
+        ResumeRefused,
+        enforce_resume_authorization,
+        issue_resume_approval,
+    )
     from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
     from openadapt_flow.runtime.durable.program_checkpoint import bundle_version
 
@@ -1574,10 +1578,13 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     if pending is None:
         print(f"No pending escalation at {run_dir} — nothing to approve.")
         return 1
-    if store.read_approval() is not None:
-        print(f"Pending escalation at {run_dir} is already approved.")
-        return 0
-
+    manifest = store.read_manifest()
+    if manifest is None or not manifest.run_id:
+        print(
+            "The exact durable run manifest is unavailable. Start a fresh run "
+            "instead of approving an unbound pause."
+        )
+        return 1
     authorize_uncertain_retry = bool(getattr(args, "authorize_uncertain_retry", False))
     if pending.delivery_uncertainty is not None and not authorize_uncertain_retry:
         print(
@@ -1587,32 +1594,63 @@ def _cmd_approve(args: argparse.Namespace) -> int:
             "necessary, rerun approve with --authorize-uncertain-retry."
         )
         return 1
+    try:
+        store.validate_namespace(manifest)
+    except ResumeRefused as exc:
+        print(f"Approval refused: {exc}")
+        return 1
+    if pending.status == "rejected":
+        print("This durable pause was rejected and cannot be approved or resumed.")
+        return 1
 
     # The approver identity defaults to the invoking OS user (a resume with a
     # blank approver is refused by the durable library); --approver overrides.
     approver = args.approver or getpass.getuser()
-    manifest = store.read_manifest()
-    bundle_ver = ""
-    if manifest is not None:
+    try:
+        bundle_ver = bundle_version(manifest.bundle_dir)
+    except OSError:
+        print(
+            "The retained bundle is unavailable. Restore it before approving "
+            "this pause."
+        )
+        return 1
+    existing_approval = store.read_approval()
+    if pending.status == "approved" and existing_approval is not None:
         try:
-            bundle_ver = bundle_version(manifest.bundle_dir)
-        except OSError:
-            bundle_ver = ""
+            enforce_resume_authorization(
+                pending,
+                existing_approval,
+                bundle_version=bundle_ver,
+                run_id=manifest.run_id,
+                workflow_name=manifest.workflow_name,
+                run_dir=run_dir,
+            )
+        except ResumeRefused:
+            pass
+        else:
+            print(f"Pending escalation at {run_dir} is already approved.")
+            return 0
     resolution = args.resolution or (
         pending.proposed_options[0] if pending.proposed_options else "approved"
     )
-    store.write_approval(
-        ApprovalRecord(
-            approver=approver,
-            resolution=resolution,
-            bundle_version=bundle_ver,
-            workflow_name=pending.workflow_name,
-            run_dir=str(run_dir),
-            authorize_uncertain_retry=authorize_uncertain_retry,
-        )
+    approval = issue_resume_approval(
+        pending,
+        approver=approver,
+        resolution=resolution,
+        bundle_version=bundle_ver,
+        workflow_name=pending.workflow_name,
+        run_id=manifest.run_id,
+        run_dir=run_dir,
+        authorize_uncertain_retry=authorize_uncertain_retry,
     )
-    # Keep the pending status in sync for the audit trail.
-    store.write_pending(pending.model_copy(update={"status": "approved"}))
+    # Bind the exact authority and pause-state transition in one filesystem
+    # transaction. A concurrent resume cannot replace the retained approver or
+    # leave approval.json describing authority that the live attempt did not use.
+    store.commit_approval_transition(
+        expected_pending=pending,
+        approval=approval,
+        target_status="approved",
+    )
     print(
         f"Approved pending escalation at {run_dir} by {approver!r} "
         f"(step {pending.step_index} '{pending.step_id}': {pending.category}).\n"

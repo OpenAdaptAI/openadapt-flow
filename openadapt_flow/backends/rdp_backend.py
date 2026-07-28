@@ -59,9 +59,9 @@ import time
 import unicodedata
 from typing import Callable, Optional, Protocol, Union, runtime_checkable
 
-from PIL import Image
+from PIL import Image, ImageChops
 
-from openadapt_flow.backend import ActionDeliveryUncertain
+from openadapt_flow.backend import ActionDeliveryUncertain, FreshActuationRequired
 
 # What a transport may hand back as the current frame: a PIL image, or raw
 # pixel bytes (RGB or RGBA, row-major) that the backend wraps with the
@@ -436,6 +436,21 @@ class FreeRDPBackend:
             self._actuation_lease_state = _LEASE_ARMED
             return png
 
+    def reset_fresh_actuation_state(self) -> None:
+        """Reset only a typed zero-input content invalidation.
+
+        This does not arm a lease.  The runtime must reacquire and revalidate a
+        new frame before it can send input.
+        """
+
+        with self._input_lock:
+            if self._actuation_lease_state != _LEASE_INVALIDATED:
+                raise RuntimeError(
+                    "RDP fresh-actuation reset requires a typed invalidated lease"
+                )
+            self._actuation_lease_state = _LEASE_NONE
+            self._actuation_frame_png = None
+
     # -- Optional ExecutionContextIdentityBackend --------------------------
 
     def application_identity(self) -> Optional[str]:
@@ -574,7 +589,10 @@ class FreeRDPBackend:
         that press/release sequence sent twice.
         """
         with self._input_lock:
-            self._ensure_input_ready(point=(int(x), int(y)))
+            self._ensure_input_ready(
+                point=(int(x), int(y)),
+                operation="rdp_double_click" if double else "rdp_click",
+            )
             presses = 2 if double else 1
             for _ in range(presses):
                 self._assert_frame_fresh()
@@ -586,7 +604,7 @@ class FreeRDPBackend:
 
         with self._input_lock:
             point = (int(x), int(y))
-            self._ensure_input_ready(point=point)
+            self._ensure_input_ready(point=point, operation="rdp_right_click")
             self._assert_frame_fresh()
             try:
                 self._transport.pointer(*point, "right", True)
@@ -608,7 +626,7 @@ class FreeRDPBackend:
         with self._input_lock:
             start = (int(x), int(y))
             end = (int(end_x), int(end_y))
-            self._ensure_input_ready(point=start)
+            self._ensure_input_ready(point=start, operation="rdp_drag")
             assert self._viewport is not None
             if not (
                 0 <= end[0] < self._viewport[0] and 0 <= end[1] < self._viewport[1]
@@ -661,7 +679,7 @@ class FreeRDPBackend:
             return
         with self._input_lock:
             self._focus_input_surface()
-            self._ensure_input_ready()
+            self._ensure_input_ready(operation="rdp_type_text")
             self._dispatch_text_locked(text)
 
     def press(self, key: str) -> None:
@@ -683,7 +701,7 @@ class FreeRDPBackend:
         parts = normalize_chord(key)
         with self._input_lock:
             self._focus_input_surface()
-            self._ensure_input_ready()
+            self._ensure_input_ready(operation="rdp_press")
             self._dispatch_key_locked(parts)
 
     def select_option(self, text: str, commit_key: str) -> None:
@@ -702,7 +720,7 @@ class FreeRDPBackend:
         parts = normalize_chord(commit_key)
         with self._input_lock:
             self._focus_input_surface()
-            self._ensure_input_ready()
+            self._ensure_input_ready(operation="rdp_select_option")
             try:
                 self._dispatch_text_locked(text, strict_release=True)
                 self._dispatch_key_locked(parts, strict_release=True)
@@ -807,7 +825,7 @@ class FreeRDPBackend:
         if dx == 0 and dy == 0:
             return
         with self._input_lock:
-            self._ensure_input_ready()
+            self._ensure_input_ready(operation="rdp_scroll")
             self._transport.wheel(int(dx), int(dy))
 
     # -- lifecycle -----------------------------------------------------------
@@ -835,7 +853,12 @@ class FreeRDPBackend:
         if callable(focus):
             focus()
 
-    def _ensure_input_ready(self, *, point: Optional[tuple[int, int]] = None) -> None:
+    def _ensure_input_ready(
+        self,
+        *,
+        point: Optional[tuple[int, int]] = None,
+        operation: str = "rdp_input",
+    ) -> None:
         """Validate the frame lease, dimensions, bounds and readiness hook.
 
         The resolver acts on screenshot pixels. Sending those coordinates after
@@ -916,11 +939,16 @@ class FreeRDPBackend:
             if self._actuation_lease_state == _LEASE_ARMED:
                 digest = self._canonical_frame_digest(current_img)
                 if self._last_frame_digest is None or digest != self._last_frame_digest:
+                    changed_pixel_count, changed_bbox = self._frame_difference(
+                        self._actuation_frame_png,
+                        current_img,
+                    )
                     self._invalidate_actuation_lease()
-                    raise RuntimeError(
-                        "RDP frame content changed after target and identity "
-                        "resolution; refusing input and requiring a fresh "
-                        "actuation lease"
+                    raise FreshActuationRequired(
+                        operation=operation,
+                        changed_pixel_count=changed_pixel_count,
+                        changed_bbox=changed_bbox,
+                        frame_size=current,
                     )
                 self._actuation_lease_state = _LEASE_NONE
                 self._actuation_frame_png = None
@@ -1059,6 +1087,28 @@ class FreeRDPBackend:
         digest.update(rgb.height.to_bytes(4, "big"))
         digest.update(rgb.tobytes())
         return digest.digest()
+
+    @staticmethod
+    def _frame_difference(
+        expected_png: Optional[bytes], current: Image.Image
+    ) -> tuple[int, tuple[int, int, int, int]]:
+        """Return exact, payload-free diff geometry for a rejected frame."""
+
+        if expected_png is None:
+            raise RuntimeError("armed RDP lease has no retained actuation frame")
+        expected = Image.open(io.BytesIO(expected_png)).convert("RGB")
+        observed = current.convert("RGB")
+        if expected.size != observed.size:
+            raise RuntimeError("RDP diff frames have inconsistent dimensions")
+        difference = ImageChops.difference(expected, observed)
+        raw_bbox = difference.getbbox()
+        if raw_bbox is None:
+            raise RuntimeError("RDP frame digest changed without a pixel difference")
+        x1, y1, x2, y2 = raw_bbox
+        red, green, blue = difference.split()
+        changed_mask = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+        changed_pixel_count = sum(changed_mask.histogram()[1:])
+        return changed_pixel_count, (x1, y1, x2 - x1, y2 - y1)
 
 
 # =============================================================================

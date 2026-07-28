@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -104,6 +106,14 @@ class Landmark(BaseModel):
     relation: Literal["left_of", "right_of", "above", "below"]
     ocr_text: str
     distance_px: int
+    match_mode: Literal["fuzzy", "exact"] = Field(
+        default="fuzzy",
+        description=(
+            "OCR comparison mode for this retained relation. Compiler-mined "
+            "generic context remains fuzzy; a qualified opaque-field label "
+            "uses exact normalized text so a near label cannot authorize input."
+        ),
+    )
     dx_px: Optional[int] = Field(
         default=None,
         description="Exact x offset landmark center -> target click point",
@@ -112,6 +122,20 @@ class Landmark(BaseModel):
         default=None,
         description="Exact y offset landmark center -> target click point",
     )
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Keep legacy fuzzy landmarks byte-semantically unchanged.
+
+        The package supports Pydantic 2.5, before ``Field(exclude_if=...)``.
+        This v2-compatible serializer omits the additive default while keeping
+        an explicit exact-label contract inside new bundle digests.
+        """
+
+        data: dict[str, Any] = handler(self)
+        if self.match_mode == "fuzzy":
+            data.pop("match_mode", None)
+        return data
 
 
 class StructuralLocator(BaseModel):
@@ -1919,6 +1943,37 @@ class ActionDeliveryUncertainty(BaseModel):
     resolved_by_contract: bool = False
 
 
+class FreshActuationEvent(BaseModel):
+    """PHI-free evidence for one pre-input actuation-frame mismatch.
+
+    The runtime records only the number and geometry of changed pixels.  It
+    does not retain the rejected frame or its pixel values.  ``retried`` is
+    true only when no earlier input edge crossed for this workflow step and a
+    bounded reacquisition remained available.
+    """
+
+    attempt: int = Field(ge=1)
+    operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    changed_pixel_count: int = Field(ge=1)
+    changed_bbox: Region
+    frame_size: tuple[int, int]
+    target_intersection: Optional[bool] = None
+    identity_intersection: Optional[bool] = None
+    retried: bool
+
+    @model_validator(mode="after")
+    def _valid_geometry(self) -> "FreshActuationEvent":
+        frame_width, frame_height = self.frame_size
+        x, y, width, height = self.changed_bbox
+        if frame_width <= 0 or frame_height <= 0:
+            raise ValueError("fresh-actuation frame size must be positive")
+        if x < 0 or y < 0 or width <= 0 or height <= 0:
+            raise ValueError("fresh-actuation bounding box must be positive")
+        if x + width > frame_width or y + height > frame_height:
+            raise ValueError("fresh-actuation bounding box exceeds the frame")
+        return self
+
+
 class IdentitySignalEvidence(BaseModel):
     """PHI-free audit evidence for one qualified identity signal."""
 
@@ -2376,7 +2431,12 @@ class StepResult(BaseModel):
     #: learning evidence but is not itself proof that a failure was a governed
     #: safety halt.
     failure_category: Optional[
-        Literal["governed_refusal", "safety_halt", "runtime_failure"]
+        Literal[
+            "governed_refusal",
+            "safety_halt",
+            "runtime_failure",
+            "continuation_preempted",
+        ]
     ] = None
     # One stable, NON-secret-bearing SHA-256 digest per verified effect, taken
     # AFTER the effect's ValueExpr contract was bound to THIS run's params
@@ -2396,12 +2456,18 @@ class StepResult(BaseModel):
     # recorded in ``postconditions_ok`` / ``effect_verified``.
     delivery_receipt: Optional[ActionDeliveryReceipt] = None
     # Explicit state-machine proof of whether this workflow step crossed an
-    # action-delivery boundary. ``False`` is written when a live step begins,
-    # then changed to ``True`` immediately before the backend/API is invoked.
-    # ``None`` means a legacy or synthesized result did not retain this fact;
-    # callers must treat that as unknown rather than infer non-delivery from a
-    # failure category or error string.
+    # action-delivery boundary. ``False`` is written when a live step begins.
+    # A typed fresh-frame mismatch keeps it false only when the backend proves
+    # no input edge occurred. Successful delivery, uncertain delivery, and an
+    # untyped backend exception all change it to True. ``None`` means a legacy
+    # or synthesized result did not retain this fact; callers must treat that
+    # as unknown rather than infer non-delivery from a failure category or
+    # error string.
     delivery_attempted: Optional[bool] = None
+    # Bounded, PHI-free diagnostics for pre-input actuation-frame mismatches.
+    # No rejected screenshot or pixel value is retained. A terminal mismatch
+    # is present with ``retried=False``.
+    fresh_actuation_events: list[FreshActuationEvent] = Field(default_factory=list)
     # The action API raised after delivery may have begun.  This is neither a
     # receipt nor an ordinary backend failure: the runtime never retries and
     # can proceed only when the complete independent outcome contract proves
@@ -3018,11 +3084,43 @@ class RunReport(BaseModel):
             raise ValueError("ROLLED_BACK is a non-success outcome")
         return self
 
-    def save(self, run_dir: Path | str) -> Path:
+    def save(
+        self,
+        run_dir: Path | str,
+        *,
+        filename: str = "report.json",
+    ) -> Path:
         run = Path(run_dir)
         run.mkdir(parents=True, exist_ok=True)
-        path = run / "report.json"
-        path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        if Path(filename).name != filename:
+            raise ValueError("report filename must be one local file name")
+        path = run / filename
+        payload = self.model_dump_json(indent=2).encode("utf-8")
+        temporary = run / (f".{filename}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            try:
+                directory = os.open(run, os.O_RDONLY)
+            except OSError:
+                directory = None
+            if directory is not None:
+                try:
+                    os.fsync(directory)
+                except OSError:
+                    pass
+                finally:
+                    os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
         return path
 
 

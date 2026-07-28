@@ -1,0 +1,1359 @@
+"""External monotonic authority for durable run and continuation state.
+
+The run directory is evidence, not the only authority. A backup can restore
+every file in that directory to an older approved pause. This registry lives
+outside the run directory and records monotonic delivery/terminal state, so a
+same-path restore cannot repeat a consequential continuation.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import sqlite3
+import stat
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict
+
+from openadapt_flow.runtime.durable.approval import (
+    StateDiverged,
+    approval_pause_digest,
+)
+
+AUTHORITY_DB_ENV = "OPENADAPT_DURABLE_AUTHORITY_DB"
+AUTHORITY_SCHEMA_VERSION = 1
+JOURNAL_GENESIS_DIGEST = "sha256:" + hashlib.sha256(b"").hexdigest()
+JOURNAL_MAC_DOMAIN = b"openadapt-attended-journal-v1\0"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _default_db_path() -> Path:
+    configured = os.getenv(AUTHORITY_DB_ENV)
+    if configured:
+        # Keep the final path lexical. Resolving it here would follow an
+        # attacker-controlled database symlink before `_connect` can reject it.
+        return Path(os.path.abspath(os.fspath(Path(configured).expanduser())))
+    return Path.home() / ".openadapt" / "durable-authority" / "authority.sqlite3"
+
+
+def _path_key(run_dir: Path) -> str:
+    canonical = str(run_dir.resolve()).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+class DurableAuthorityBusy(StateDiverged):
+    """A different process or uncertain delivery owns the durable authority."""
+
+
+class DurableAuthorityRecord(BaseModel):
+    """PHI-free monotonic authority for one canonical run path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    path_key: str
+    namespace_id: str
+    run_id: str
+    revision: int
+    phase: Literal[
+        "claimed",
+        "active",
+        "paused",
+        "continuing",
+        "reconciliation_required",
+        "terminal_prepared",
+        "completed",
+        "rejected",
+    ]
+    progress_digest: str
+    pause_binding_sha256: str = ""
+    approval_digest: str = ""
+    report_sha256: str = ""
+    attempt_id: str = ""
+    operation: str = ""
+    owner_nonce_sha256: str = ""
+    attempt_phase: Literal[
+        "none",
+        "validating",
+        "delivery_started",
+        "reconciliation_required",
+        "terminal_prepared",
+    ] = "none"
+    reject_requested: bool = False
+    delivery_sequence: int = 0
+    acquired_at: str = ""
+    expires_at: str = ""
+    journal_sequence: int = 0
+    journal_head_digest: str = JOURNAL_GENESIS_DIGEST
+    updated_at: str
+
+
+class DurableAuthority:
+    """SQLite-backed single-host authority for one durable run directory."""
+
+    def __init__(self, run_dir: Path | str, store: Any) -> None:
+        self.run_dir = Path(run_dir).resolve()
+        self.store = store
+        self._configured_db_path = _default_db_path()
+        try:
+            # Resolve the parent only. This catches an ancestor symlink that
+            # redirects the database back into the rollback-capable run tree,
+            # while preserving the final lexical path so `_connect` can reject
+            # a database-file symlink without following it.
+            effective_db_path = (
+                self._configured_db_path.parent.resolve()
+                / self._configured_db_path.name
+            )
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority path is unavailable"
+            ) from exc
+        if (
+            effective_db_path == self.run_dir
+            or self.run_dir in effective_db_path.parents
+        ):
+            raise DurableAuthorityBusy(
+                "the external durable authority must be outside the run directory"
+            )
+        # Retain the resolved parent selected during construction. The final
+        # component stays lexical so `_connect` can still reject a database-file
+        # symlink without following it.
+        self.db_path = effective_db_path
+        self.path_key = _path_key(self.run_dir)
+
+    def _connect(self) -> sqlite3.Connection:
+        try:
+            current_db_path = (
+                self._configured_db_path.parent.resolve()
+                / self._configured_db_path.name
+            )
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority path is unavailable"
+            ) from exc
+        if current_db_path != self.db_path:
+            raise DurableAuthorityBusy(
+                "the external durable authority ancestor changed after admission"
+            )
+        parent_existed = self.db_path.parent.exists()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            parent_stat = os.lstat(self.db_path.parent)
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority directory is unavailable"
+            ) from exc
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise DurableAuthorityBusy(
+                "the external durable authority parent must be a directory"
+            )
+        if not parent_existed and os.name != "nt":
+            os.chmod(self.db_path.parent, 0o700)
+        if self.db_path.is_symlink():
+            raise DurableAuthorityBusy(
+                "the external durable authority database must not be a symlink"
+            )
+        if self.db_path.exists():
+            try:
+                db_stat = os.lstat(self.db_path)
+            except OSError as exc:
+                raise DurableAuthorityBusy(
+                    "the external durable authority database is unavailable"
+                ) from exc
+            if not stat.S_ISREG(db_stat.st_mode):
+                raise DurableAuthorityBusy(
+                    "the external durable authority database must be a regular file"
+                )
+            if os.name != "nt" and db_stat.st_mode & 0o077:
+                raise DurableAuthorityBusy(
+                    "the external durable authority database permissions are too broad"
+                )
+        connection: Optional[sqlite3.Connection] = None
+        try:
+            connection = sqlite3.connect(
+                self.db_path.as_uri() + "?mode=rwc&nofollow=1",
+                timeout=15.0,
+                isolation_level=None,
+                uri=True,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA busy_timeout=15000")
+            connection.execute(
+                """
+            CREATE TABLE IF NOT EXISTS durable_authority (
+                path_key TEXT PRIMARY KEY,
+                namespace_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                revision INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                progress_digest TEXT NOT NULL,
+                pause_binding_sha256 TEXT NOT NULL,
+                approval_digest TEXT NOT NULL,
+                report_sha256 TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                owner_nonce_sha256 TEXT NOT NULL,
+                attempt_phase TEXT NOT NULL,
+                reject_requested INTEGER NOT NULL,
+                delivery_sequence INTEGER NOT NULL,
+                acquired_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                journal_sequence INTEGER NOT NULL DEFAULT 0,
+                journal_head_digest TEXT NOT NULL DEFAULT
+                    'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+                updated_at TEXT NOT NULL
+            )
+            """
+            )
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(durable_authority)"
+                ).fetchall()
+            }
+            old_columns = {
+                "path_key",
+                "namespace_id",
+                "run_id",
+                "schema_version",
+                "revision",
+                "phase",
+                "progress_digest",
+                "pause_binding_sha256",
+                "approval_digest",
+                "report_sha256",
+                "attempt_id",
+                "operation",
+                "owner_nonce_sha256",
+                "attempt_phase",
+                "reject_requested",
+                "delivery_sequence",
+                "acquired_at",
+                "expires_at",
+                "updated_at",
+            }
+            expected_columns = old_columns | {"journal_sequence", "journal_head_digest"}
+            if columns == old_columns:
+                connection.execute(
+                    "ALTER TABLE durable_authority ADD COLUMN "
+                    "journal_sequence INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute(
+                    "ALTER TABLE durable_authority ADD COLUMN "
+                    "journal_head_digest TEXT NOT NULL DEFAULT "
+                    f"'{JOURNAL_GENESIS_DIGEST}'"
+                )
+                columns = expected_columns
+            if columns != expected_columns:
+                raise DurableAuthorityBusy(
+                    "the external durable authority schema is incompatible"
+                )
+            connection.execute(
+                """
+            CREATE TABLE IF NOT EXISTS attended_journal (
+                path_key TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                previous_record_digest TEXT NOT NULL,
+                snapshot_digest TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                record_digest TEXT NOT NULL,
+                record_mac TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (path_key, sequence),
+                UNIQUE (path_key, record_digest)
+            )
+            """
+            )
+            journal_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(attended_journal)"
+                ).fetchall()
+            }
+            if journal_columns != {
+                "path_key",
+                "sequence",
+                "run_id",
+                "previous_record_digest",
+                "snapshot_digest",
+                "snapshot_json",
+                "record_digest",
+                "record_mac",
+                "created_at",
+            }:
+                raise DurableAuthorityBusy(
+                    "the external attended-journal schema is incompatible"
+                )
+            if self.db_path.exists() and os.name != "nt":
+                os.chmod(self.db_path, 0o600)
+            return connection
+        except Exception:
+            if connection is not None:
+                connection.close()
+            raise
+
+    def _journal_key(self, *, create: bool) -> bytes:
+        """Return the authority-owned HMAC key outside the run directory."""
+
+        key_path = self.db_path.with_name(self.db_path.name + ".journal-key")
+        descriptor: Optional[int] = None
+        try:
+            descriptor = os.open(
+                key_path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            if not create:
+                raise DurableAuthorityBusy(
+                    "the external attended-journal key is missing"
+                ) from None
+            key = secrets.token_bytes(32)
+            try:
+                descriptor = os.open(
+                    key_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+            except FileExistsError:
+                return self._journal_key(create=False)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(key)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                directory = os.open(key_path.parent, os.O_RDONLY)
+            except OSError:
+                directory = -1
+            if directory >= 0:
+                try:
+                    os.fsync(directory)
+                except OSError:
+                    pass
+                finally:
+                    os.close(directory)
+            descriptor = os.open(
+                key_path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external attended-journal key is unavailable"
+            ) from exc
+        assert descriptor is not None
+        try:
+            key_stat = os.fstat(descriptor)
+            key = os.read(descriptor, 33)
+        finally:
+            os.close(descriptor)
+        if not stat.S_ISREG(key_stat.st_mode):
+            raise DurableAuthorityBusy(
+                "the external attended-journal key must be a regular file"
+            )
+        if len(key) != 32:
+            raise DurableAuthorityBusy("the external attended-journal key is invalid")
+        if os.name != "nt":
+            try:
+                if key_stat.st_mode & 0o077:
+                    raise DurableAuthorityBusy(
+                        "the external attended-journal key permissions are too broad"
+                    )
+            except OSError as exc:
+                raise DurableAuthorityBusy(
+                    "the external attended-journal key is unavailable"
+                ) from exc
+        return key
+
+    @staticmethod
+    def _journal_unsigned(
+        *,
+        path_key: str,
+        sequence: int,
+        run_id: str,
+        previous_record_digest: str,
+        snapshot_digest: str,
+        snapshot_json: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        return {
+            "path_key": path_key,
+            "sequence": sequence,
+            "run_id": run_id,
+            "previous_record_digest": previous_record_digest,
+            "snapshot_digest": snapshot_digest,
+            "snapshot_json": snapshot_json,
+            "created_at": created_at,
+        }
+
+    @staticmethod
+    def _canonical(value: Any) -> bytes:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+    def _validated_journal_head(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        expected_run_id: str,
+        authority_record: DurableAuthorityRecord,
+    ) -> tuple[Optional[str], str]:
+        """Verify the full external hash chain and return its latest snapshot."""
+
+        rows = connection.execute(
+            "SELECT * FROM attended_journal WHERE path_key = ? ORDER BY sequence",
+            (self.path_key,),
+        ).fetchall()
+        if not rows:
+            if (
+                authority_record.journal_sequence != 0
+                or authority_record.journal_head_digest != JOURNAL_GENESIS_DIGEST
+            ):
+                raise DurableAuthorityBusy(
+                    "the external attended-decision journal tail was restored"
+                )
+            return None, JOURNAL_GENESIS_DIGEST
+        key = self._journal_key(create=False)
+        previous = JOURNAL_GENESIS_DIGEST
+        latest_snapshot: Optional[str] = None
+        for expected_sequence, row in enumerate(rows, start=1):
+            values = dict(row)
+            if (
+                values["sequence"] != expected_sequence
+                or values["run_id"] != expected_run_id
+                or values["previous_record_digest"] != previous
+            ):
+                raise DurableAuthorityBusy(
+                    "the external attended-decision journal chain is invalid"
+                )
+            snapshot_json = str(values["snapshot_json"])
+            snapshot_digest = (
+                "sha256:" + hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+            )
+            if snapshot_digest != values["snapshot_digest"]:
+                raise DurableAuthorityBusy(
+                    "the external attended-decision snapshot changed"
+                )
+            unsigned = self._journal_unsigned(
+                path_key=self.path_key,
+                sequence=expected_sequence,
+                run_id=expected_run_id,
+                previous_record_digest=previous,
+                snapshot_digest=snapshot_digest,
+                snapshot_json=snapshot_json,
+                created_at=str(values["created_at"]),
+            )
+            record_digest = (
+                "sha256:" + hashlib.sha256(self._canonical(unsigned)).hexdigest()
+            )
+            record_mac = (
+                "hmac-sha256:"
+                + hmac.new(
+                    key,
+                    JOURNAL_MAC_DOMAIN + record_digest.encode("ascii"),
+                    hashlib.sha256,
+                ).hexdigest()
+            )
+            if not hmac.compare_digest(
+                record_digest, values["record_digest"]
+            ) or not hmac.compare_digest(record_mac, values["record_mac"]):
+                raise DurableAuthorityBusy(
+                    "the external attended-decision journal HMAC does not verify"
+                )
+            previous = record_digest
+            latest_snapshot = snapshot_json
+        if (
+            len(rows) != authority_record.journal_sequence
+            or previous != authority_record.journal_head_digest
+        ):
+            raise DurableAuthorityBusy(
+                "the external attended-decision journal tail was restored"
+            )
+        return latest_snapshot, previous
+
+    @staticmethod
+    def _validate_snapshot_extension(
+        previous_json: Optional[str],
+        snapshot_json: str,
+    ) -> None:
+        """Require one decision-log snapshot to extend the prior snapshot."""
+
+        try:
+            current = json.loads(snapshot_json)
+            previous = json.loads(previous_json) if previous_json is not None else None
+        except ValueError as exc:
+            raise DurableAuthorityBusy(
+                "the attended-decision snapshot is not valid JSON"
+            ) from exc
+        if not isinstance(current, dict) or set(current) != {
+            "schema_version",
+            "decisions",
+            "relay_acknowledgements",
+        }:
+            raise DurableAuthorityBusy(
+                "the attended-decision snapshot has an invalid schema"
+            )
+        if (
+            current.get("schema_version") != 1
+            or not isinstance(current.get("decisions"), list)
+            or not isinstance(current.get("relay_acknowledgements"), list)
+        ):
+            raise DurableAuthorityBusy(
+                "the attended-decision snapshot has an invalid schema"
+            )
+        if previous is None:
+            return
+        if not isinstance(previous, dict):
+            raise DurableAuthorityBusy(
+                "the prior attended-decision snapshot is invalid"
+            )
+        old_decisions = previous.get("decisions")
+        new_decisions = current["decisions"]
+        old_acks = previous.get("relay_acknowledgements")
+        new_acks = current["relay_acknowledgements"]
+        if (
+            not isinstance(old_decisions, list)
+            or not isinstance(old_acks, list)
+            or len(new_decisions) < len(old_decisions)
+            or new_decisions[: len(old_decisions)] != old_decisions
+            or len(new_acks) < len(old_acks)
+        ):
+            raise DurableAuthorityBusy(
+                "the attended-decision snapshot is not append-only"
+            )
+        confirmations = 0
+        for old, new in zip(old_acks, new_acks):
+            if old == new:
+                continue
+            if not isinstance(old, dict) or not isinstance(new, dict):
+                raise DurableAuthorityBusy(
+                    "the attended-decision acknowledgement changed"
+                )
+            immutable_old = {
+                key: value
+                for key, value in old.items()
+                if key not in {"confirmed", "confirmed_at", "record_mac"}
+            }
+            immutable_new = {
+                key: value
+                for key, value in new.items()
+                if key not in {"confirmed", "confirmed_at", "record_mac"}
+            }
+            if (
+                immutable_old != immutable_new
+                or old.get("confirmed") is not False
+                or old.get("confirmed_at") is not None
+                or new.get("confirmed") is not True
+                or not isinstance(new.get("confirmed_at"), str)
+                or not new.get("confirmed_at")
+            ):
+                raise DurableAuthorityBusy(
+                    "the attended-decision acknowledgement changed"
+                )
+            confirmations += 1
+        if confirmations > 1:
+            raise DurableAuthorityBusy(
+                "one journal revision confirmed multiple relay acknowledgements"
+            )
+
+    def read_attended_snapshot(
+        self, *, expected_run_id: str
+    ) -> tuple[Optional[str], str]:
+        """Read the authenticated journal snapshot and its monotonic head."""
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or record.run_id != expected_run_id:
+                raise DurableAuthorityBusy(
+                    "the attended journal does not match the durable run"
+                )
+            return self._validated_journal_head(
+                connection,
+                expected_run_id=expected_run_id,
+                authority_record=record,
+            )
+
+    def append_attended_snapshot(
+        self,
+        *,
+        expected_run_id: str,
+        expected_head_digest: str,
+        snapshot_json: str,
+    ) -> str:
+        """Append one authenticated journal revision in the external authority."""
+
+        # Parse before the transaction so invalid JSON never enters authority.
+        self._validate_snapshot_extension(None, snapshot_json)
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or record.run_id != expected_run_id:
+                raise DurableAuthorityBusy(
+                    "the attended journal does not match the durable run"
+                )
+            latest, head = self._validated_journal_head(
+                connection,
+                expected_run_id=expected_run_id,
+                authority_record=record,
+            )
+            if head != expected_head_digest:
+                raise DurableAuthorityBusy(
+                    "the attended-decision journal changed before append"
+                )
+            self._validate_snapshot_extension(latest, snapshot_json)
+            sequence = record.journal_sequence + 1
+            created_at = _now()
+            snapshot_digest = (
+                "sha256:" + hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+            )
+            unsigned = self._journal_unsigned(
+                path_key=self.path_key,
+                sequence=sequence,
+                run_id=expected_run_id,
+                previous_record_digest=head,
+                snapshot_digest=snapshot_digest,
+                snapshot_json=snapshot_json,
+                created_at=created_at,
+            )
+            record_digest = (
+                "sha256:" + hashlib.sha256(self._canonical(unsigned)).hexdigest()
+            )
+            key = self._journal_key(create=True)
+            record_mac = (
+                "hmac-sha256:"
+                + hmac.new(
+                    key,
+                    JOURNAL_MAC_DOMAIN + record_digest.encode("ascii"),
+                    hashlib.sha256,
+                ).hexdigest()
+            )
+            connection.execute(
+                """
+                INSERT INTO attended_journal (
+                    path_key, sequence, run_id, previous_record_digest,
+                    snapshot_digest, snapshot_json, record_digest, record_mac,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.path_key,
+                    sequence,
+                    expected_run_id,
+                    head,
+                    snapshot_digest,
+                    snapshot_json,
+                    record_digest,
+                    record_mac,
+                    created_at,
+                ),
+            )
+            self._update(
+                connection,
+                record,
+                journal_sequence=sequence,
+                journal_head_digest=record_digest,
+            )
+            return record_digest
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        connection: Optional[sqlite3.Connection] = None
+        try:
+            connection = self._connect()
+            connection.execute("BEGIN IMMEDIATE")
+        except (OSError, sqlite3.Error) as exc:
+            if connection is not None:
+                connection.close()
+            raise DurableAuthorityBusy(
+                "the external durable authority is unavailable"
+            ) from exc
+        try:
+            yield connection
+            connection.execute("COMMIT")
+        except sqlite3.Error as exc:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise DurableAuthorityBusy(
+                "the external durable authority transaction failed"
+            ) from exc
+        except Exception:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _record(row: Optional[sqlite3.Row]) -> Optional[DurableAuthorityRecord]:
+        if row is None:
+            return None
+        try:
+            return DurableAuthorityRecord.model_validate(dict(row))
+        except ValueError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority record is invalid"
+            ) from exc
+
+    def _read(self, connection: sqlite3.Connection) -> Optional[DurableAuthorityRecord]:
+        return self._record(
+            connection.execute(
+                "SELECT * FROM durable_authority WHERE path_key = ?",
+                (self.path_key,),
+            ).fetchone()
+        )
+
+    @staticmethod
+    def _identity_matches(record: DurableAuthorityRecord, manifest: Any) -> bool:
+        return (
+            record.schema_version == AUTHORITY_SCHEMA_VERSION
+            and record.namespace_id == manifest.namespace_id
+            and record.run_id == manifest.run_id
+        )
+
+    @staticmethod
+    def _parse_time(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _update(
+        self,
+        connection: sqlite3.Connection,
+        record: DurableAuthorityRecord,
+        **changes: Any,
+    ) -> DurableAuthorityRecord:
+        updated = record.model_copy(
+            update={
+                **changes,
+                "revision": record.revision + 1,
+                "updated_at": _now(),
+            }
+        )
+        values = updated.model_dump(mode="python")
+        values["reject_requested"] = int(updated.reject_requested)
+        assignments = ", ".join(
+            f"{name} = :{name}" for name in values if name != "path_key"
+        )
+        cursor = connection.execute(
+            f"UPDATE durable_authority SET {assignments} "
+            "WHERE path_key = :path_key AND revision = :expected_revision",
+            {**values, "expected_revision": record.revision},
+        )
+        if cursor.rowcount != 1:
+            raise DurableAuthorityBusy(
+                "the external durable authority changed before commit"
+            )
+        return updated
+
+    def claim(self, manifest: Any) -> None:
+        """Permanently reserve a canonical path for one fresh run identity."""
+
+        if not manifest.namespace_id or not manifest.run_id:
+            raise DurableAuthorityBusy("the fresh durable identity is incomplete")
+        with self._transaction() as connection:
+            retained = self._read(connection)
+            if retained is not None:
+                if (
+                    self._identity_matches(retained, manifest)
+                    and retained.phase == "claimed"
+                    and not retained.progress_digest
+                    and not retained.attempt_id
+                    and retained.journal_sequence == 0
+                    and retained.journal_head_digest == JOURNAL_GENESIS_DIGEST
+                ):
+                    # A process can stop after the external claim commits but
+                    # before the local claim and manifest exist. The exact run
+                    # can finish that one initialization; no other identity can.
+                    return
+                raise DurableAuthorityBusy(
+                    "this canonical run path already has durable authority; "
+                    "use a new run directory"
+                )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO durable_authority (
+                        path_key, namespace_id, run_id, schema_version, revision,
+                        phase, progress_digest, pause_binding_sha256,
+                        approval_digest,
+                        report_sha256, attempt_id, operation,
+                        owner_nonce_sha256, attempt_phase, reject_requested,
+                        delivery_sequence, acquired_at, expires_at, updated_at
+                    ) VALUES (?, ?, ?, 1, 1, 'claimed', '', '', '', '', '', '', '',
+                              'none', 0, 0, '', '', ?)
+                    """,
+                    (self.path_key, manifest.namespace_id, manifest.run_id, _now()),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise DurableAuthorityBusy(
+                    "the durable run identity is already registered"
+                ) from exc
+
+    def activate(self, manifest: Any) -> str:
+        """Bind a fresh local manifest/claim snapshot to its permanent record."""
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy(
+                    "the external durable claim does not match this run"
+                )
+            if record.phase != "claimed" or record.progress_digest:
+                raise DurableAuthorityBusy(
+                    "the fresh durable authority was already activated"
+                )
+            digest = self.store.continuation_state_digest()
+            self._update(
+                connection,
+                record,
+                phase="active",
+                progress_digest=digest,
+            )
+            return digest
+
+    def validate(self, manifest: Any) -> DurableAuthorityRecord:
+        """Require external identity and the exact current local progress."""
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy(
+                    "the external durable authority is missing or belongs to "
+                    "a different run"
+                )
+            if record.phase in {
+                "claimed",
+                "reconciliation_required",
+                "terminal_prepared",
+                "completed",
+                "rejected",
+            }:
+                raise DurableAuthorityBusy(
+                    f"the durable authority is {record.phase}; automatic "
+                    "continuation is refused"
+                )
+            digest = self.store.continuation_state_digest()
+            if record.progress_digest != digest:
+                raise DurableAuthorityBusy(
+                    "local durable state does not match the external monotonic "
+                    "authority; reconcile or start a new run"
+                )
+            return record
+
+    def advance(
+        self,
+        manifest: Any,
+        *,
+        expected_progress_digest: str,
+        phase: Literal["active", "paused", "continuing"],
+        pause_binding_sha256: str = "",
+        attempt_id: str = "",
+        owner_nonce_sha256: str = "",
+    ) -> str:
+        """CAS one trusted local mutation into the monotonic record."""
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy("durable authority identity changed")
+            if record.progress_digest != expected_progress_digest:
+                raise DurableAuthorityBusy(
+                    "durable authority progress changed before local commit"
+                )
+            if record.attempt_id and (
+                record.attempt_id != attempt_id
+                or record.owner_nonce_sha256 != owner_nonce_sha256
+            ):
+                raise DurableAuthorityBusy(
+                    "a different continuation owns durable progress"
+                )
+            digest = self.store.continuation_state_digest()
+            if digest == record.progress_digest:
+                return digest
+            self._update(
+                connection,
+                record,
+                phase=phase,
+                progress_digest=digest,
+                pause_binding_sha256=pause_binding_sha256,
+                attempt_phase=(
+                    "validating" if record.attempt_id else record.attempt_phase
+                ),
+            )
+            return digest
+
+    def acquire(
+        self,
+        manifest: Any,
+        *,
+        pause_binding_sha256: str,
+        attempt_id: str,
+        operation: str,
+        owner_nonce_sha256: str,
+        acquired_at: str,
+        expires_at: str,
+        now: datetime,
+    ) -> None:
+        """Acquire one external single-flight continuation attempt."""
+
+        reconciliation_required = False
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy("durable authority identity changed")
+            digest = self.store.continuation_state_digest()
+            if digest != record.progress_digest:
+                raise DurableAuthorityBusy(
+                    "local durable state was restored or changed outside the "
+                    "monotonic authority"
+                )
+            if record.phase not in {"paused", "continuing"}:
+                raise DurableAuthorityBusy(
+                    f"durable continuation is unavailable while authority is "
+                    f"{record.phase}"
+                )
+            if (
+                record.pause_binding_sha256
+                and record.pause_binding_sha256 != pause_binding_sha256
+            ):
+                raise DurableAuthorityBusy(
+                    "the external authority binds a different active pause"
+                )
+            if record.attempt_id:
+                expired = bool(record.expires_at) and (
+                    self._parse_time(record.expires_at) < now
+                )
+                if not expired:
+                    raise DurableAuthorityBusy(
+                        "another continuation is already in progress"
+                    )
+                if record.attempt_phase != "validating":
+                    self._update(
+                        connection,
+                        record,
+                        phase="reconciliation_required",
+                        attempt_phase="reconciliation_required",
+                    )
+                    reconciliation_required = True
+            if not reconciliation_required:
+                self._update(
+                    connection,
+                    record,
+                    phase="continuing",
+                    pause_binding_sha256=pause_binding_sha256,
+                    approval_digest="",
+                    attempt_id=attempt_id,
+                    operation=operation,
+                    owner_nonce_sha256=owner_nonce_sha256,
+                    attempt_phase="validating",
+                    reject_requested=False,
+                    delivery_sequence=0,
+                    acquired_at=acquired_at,
+                    expires_at=expires_at,
+                )
+        if reconciliation_required:
+            # Raise only after the transaction commits the monotonic refusal.
+            # Raising inside ``_transaction`` would roll the safety state back.
+            raise DurableAuthorityBusy(
+                "an expired continuation may have delivered input; "
+                "reconciliation is required"
+            )
+
+    def bind_approval(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+        approval_digest: str,
+    ) -> None:
+        """Bind exact per-pause authority without changing executable progress."""
+
+        with self._transaction() as connection:
+            record = self._owned(connection, manifest, attempt_id, owner_nonce_sha256)
+            if record.approval_digest:
+                if record.approval_digest != approval_digest:
+                    raise DurableAuthorityBusy(
+                        "the external authority already binds a different approval"
+                    )
+                return
+            if record.attempt_phase != "validating" or record.delivery_sequence != 0:
+                raise DurableAuthorityBusy(
+                    "approval can bind only before continuation delivery"
+                )
+            self._update(connection, record, approval_digest=approval_digest)
+
+    def before_delivery(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+    ) -> None:
+        with self._transaction() as connection:
+            record = self._owned(connection, manifest, attempt_id, owner_nonce_sha256)
+            if record.reject_requested or record.attempt_phase not in {
+                "validating",
+                "delivery_started",
+            }:
+                raise DurableAuthorityBusy(
+                    "the continuation was rejected or is not eligible for delivery"
+                )
+            if self.store.continuation_state_digest() != record.progress_digest:
+                raise DurableAuthorityBusy(
+                    "durable state changed before the delivery fence"
+                )
+            self._update(
+                connection,
+                record,
+                attempt_phase="delivery_started",
+                delivery_sequence=record.delivery_sequence + 1,
+            )
+
+    def acknowledge_progress(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+        terminal_pause: bool,
+        external_delivery: bool = False,
+    ) -> str:
+        with self._transaction() as connection:
+            record = self._owned(connection, manifest, attempt_id, owner_nonce_sha256)
+            if record.attempt_phase not in {"validating", "delivery_started"}:
+                raise DurableAuthorityBusy(
+                    "the continuation cannot acknowledge progress in this phase"
+                )
+            # A continuation can make durable progress without an input edge.
+            # Examples are an observation-only WAIT that becomes true and a
+            # pre-delivery refusal that writes a new pause.  In those cases the
+            # authority remains in ``validating`` because ``before_delivery``
+            # never ran.  The owned attempt and changed state digest are the
+            # required proof.  A real engine input edge still must pass through
+            # ``before_delivery`` and therefore moves to ``delivery_started``.
+            digest = self.store.continuation_state_digest()
+            if digest == record.progress_digest:
+                raise DurableAuthorityBusy(
+                    "the continuation has no new durable progress to acknowledge"
+                )
+            pending = self.store.read_pending()
+            pause_binding = ""
+            if pending is not None:
+                from openadapt_flow.runtime.durable.approval import (
+                    approval_pause_digest,
+                )
+
+                pause_binding = approval_pause_digest(pending)
+            self._update(
+                connection,
+                record,
+                phase="paused" if terminal_pause else "continuing",
+                progress_digest=digest,
+                pause_binding_sha256=pause_binding,
+                attempt_phase="validating",
+                delivery_sequence=(
+                    max(1, record.delivery_sequence)
+                    if external_delivery
+                    else record.delivery_sequence
+                ),
+            )
+            return digest
+
+    def request_reject(
+        self,
+        *,
+        expected_run_id: str,
+        expected_pause_binding: str,
+    ) -> Literal["none", "preempted", "uncertain"]:
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not record.attempt_id:
+                return "none"
+            if (
+                record.run_id != expected_run_id
+                or record.pause_binding_sha256 != expected_pause_binding
+            ):
+                raise DurableAuthorityBusy(
+                    "the active continuation belongs to a different pause"
+                )
+            if (
+                record.attempt_phase == "delivery_started"
+                or record.delivery_sequence > 0
+            ):
+                self._update(
+                    connection,
+                    record,
+                    phase="reconciliation_required",
+                    attempt_phase="reconciliation_required",
+                )
+                return "uncertain"
+            if record.attempt_phase != "validating":
+                raise DurableAuthorityBusy(
+                    "the continuation cannot be cleanly rejected"
+                )
+            self._update(connection, record, reject_requested=True)
+            return "preempted"
+
+    def mark_executor_uncertain(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+    ) -> None:
+        """Fence an executor response that has no proven durable outcome."""
+
+        with self._transaction() as connection:
+            record = self._owned(connection, manifest, attempt_id, owner_nonce_sha256)
+            self._update(
+                connection,
+                record,
+                phase="reconciliation_required",
+                attempt_phase="reconciliation_required",
+            )
+
+    def prove_executor_outcome(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+        source_pause_binding: str,
+    ) -> Optional[tuple[Literal["completed", "refused", "halted"], bool]]:
+        """Derive an executor result from durable state, not its transport value."""
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy("durable authority identity changed")
+            digest = self.store.continuation_state_digest()
+            pending = self.store.read_pending()
+            if record.phase == "completed":
+                report_path = self.run_dir / "report.json"
+                try:
+                    report_sha256 = (
+                        "sha256:" + hashlib.sha256(report_path.read_bytes()).hexdigest()
+                    )
+                except OSError:
+                    return None
+                if (
+                    record.pause_binding_sha256 == source_pause_binding
+                    and record.attempt_phase == "none"
+                    and not record.attempt_id
+                    and pending is None
+                    and record.progress_digest == digest
+                    and bool(record.report_sha256)
+                    and record.report_sha256 == report_sha256
+                ):
+                    return "completed", True
+                return None
+
+            owned = (
+                record.attempt_id == attempt_id
+                and record.owner_nonce_sha256 == owner_nonce_sha256
+            )
+            if not owned or record.progress_digest != digest:
+                return None
+            if (
+                record.phase == "paused"
+                and record.attempt_phase == "validating"
+                and pending is not None
+                and pending.status == "pending"
+                and approval_pause_digest(pending) != source_pause_binding
+            ):
+                return "halted", False
+            if (
+                record.phase == "continuing"
+                and record.pause_binding_sha256 == source_pause_binding
+                and record.attempt_phase == "validating"
+                and record.delivery_sequence == 0
+                and pending is not None
+                and pending.status == "pending"
+                and approval_pause_digest(pending) == source_pause_binding
+            ):
+                return "refused", False
+            return None
+
+    def attest_executor_outcome(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+        status: Literal["completed", "refused", "halted"],
+        report_success: Optional[bool],
+        source_pause_binding: str,
+    ) -> None:
+        """Derive an attended executor outcome from monotonic durable state."""
+        proven = self.prove_executor_outcome(
+            manifest,
+            attempt_id=attempt_id,
+            owner_nonce_sha256=owner_nonce_sha256,
+            source_pause_binding=source_pause_binding,
+        )
+        if proven != (status, report_success):
+            raise DurableAuthorityBusy(
+                "the executor receipt has no matching durable authority proof"
+            )
+
+    def prepare_terminal(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+        report_sha256: str,
+    ) -> None:
+        with self._transaction() as connection:
+            record = self._owned(connection, manifest, attempt_id, owner_nonce_sha256)
+            if record.reject_requested or record.attempt_phase != "validating":
+                raise DurableAuthorityBusy(
+                    "the continuation cannot enter terminal commit"
+                )
+            if self.store.continuation_state_digest() != record.progress_digest:
+                raise DurableAuthorityBusy(
+                    "durable state changed before terminal commit"
+                )
+            self._update(
+                connection,
+                record,
+                phase="terminal_prepared",
+                report_sha256=report_sha256,
+                attempt_phase="terminal_prepared",
+            )
+
+    def finalize_terminal(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+        report_sha256: str,
+    ) -> None:
+        with self._transaction() as connection:
+            record = self._owned(connection, manifest, attempt_id, owner_nonce_sha256)
+            if (
+                record.phase != "terminal_prepared"
+                or record.attempt_phase != "terminal_prepared"
+                or record.report_sha256 != report_sha256
+            ):
+                raise DurableAuthorityBusy(
+                    "terminal authority was not prepared for this exact report"
+                )
+            if self.store.read_pending() is not None:
+                raise DurableAuthorityBusy(
+                    "the exact durable pause remains active at terminal commit"
+                )
+            digest = self.store.continuation_state_digest()
+            self._update(
+                connection,
+                record,
+                phase="completed",
+                progress_digest=digest,
+                attempt_id="",
+                operation="",
+                owner_nonce_sha256="",
+                attempt_phase="none",
+                reject_requested=False,
+                approval_digest="",
+                acquired_at="",
+                expires_at="",
+            )
+
+    def release(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+    ) -> None:
+        with self._transaction() as connection:
+            try:
+                record = self._owned(
+                    connection, manifest, attempt_id, owner_nonce_sha256
+                )
+            except DurableAuthorityBusy:
+                return
+            if record.phase in {"terminal_prepared", "reconciliation_required"}:
+                return
+            digest = self.store.continuation_state_digest()
+            pending = self.store.read_pending()
+            if pending is not None and pending.status == "rejected":
+                self._update(
+                    connection,
+                    record,
+                    phase="rejected",
+                    progress_digest=digest,
+                    attempt_id="",
+                    operation="",
+                    owner_nonce_sha256="",
+                    attempt_phase="none",
+                    reject_requested=False,
+                    approval_digest="",
+                    acquired_at="",
+                    expires_at="",
+                )
+                return
+            if record.attempt_phase == "delivery_started" or (
+                digest != record.progress_digest
+            ):
+                self._update(
+                    connection,
+                    record,
+                    phase="reconciliation_required",
+                    attempt_phase="reconciliation_required",
+                )
+                return
+            phase = "paused" if pending is not None else "active"
+            self._update(
+                connection,
+                record,
+                phase=phase,
+                attempt_id="",
+                operation="",
+                owner_nonce_sha256="",
+                attempt_phase="none",
+                reject_requested=False,
+                approval_digest="",
+                acquired_at="",
+                expires_at="",
+            )
+
+    def _owned(
+        self,
+        connection: sqlite3.Connection,
+        manifest: Any,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+    ) -> DurableAuthorityRecord:
+        record = self._read(connection)
+        if (
+            record is None
+            or not self._identity_matches(record, manifest)
+            or record.attempt_id != attempt_id
+            or record.owner_nonce_sha256 != owner_nonce_sha256
+        ):
+            raise DurableAuthorityBusy(
+                "the external continuation authority is no longer owned by this attempt"
+            )
+        return record

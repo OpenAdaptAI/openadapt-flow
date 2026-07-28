@@ -27,6 +27,7 @@ from openadapt_flow.backend import (
     ActionDeliveryUncertain,
     Backend,
     ExecutionContextIdentityBackend,
+    FreshActuationRequired,
     IdentityBackend,
     StructuralBackend,
 )
@@ -409,8 +410,11 @@ def test_rdp_context_observation_is_bound_to_frame_then_refuses_mutated_input() 
     transport.screens[0] = changed
 
     assert backend.workflow_state_identity() == "Ready to submit"
-    with pytest.raises(RuntimeError, match="frame content changed"):
+    with pytest.raises(FreshActuationRequired) as raised:
         backend.click(*BUTTON_CENTER)
+    assert raised.value.changed_pixel_count == 1
+    assert raised.value.changed_bbox == (0, 0, 1, 1)
+    assert raised.value.frame_size == VIEWPORT
     assert transport.pointer_events == []
 
 
@@ -609,10 +613,34 @@ def test_bound_actuation_refuses_same_session_content_change_before_input() -> N
     changed.putpixel((0, 0), (244, 245, 245))
     transport.screens[0] = changed
 
-    with pytest.raises(RuntimeError, match="frame content changed"):
+    with pytest.raises(FreshActuationRequired) as raised:
         backend.click(*BUTTON_CENTER)
 
     assert transport.pointer_events == []
+    assert raised.value.operation == "rdp_click"
+    assert raised.value.changed_pixel_count == 1
+    assert raised.value.changed_bbox == (0, 0, 1, 1)
+    assert raised.value.frame_size == VIEWPORT
+
+
+def test_bound_actuation_can_reset_only_a_typed_zero_edge_invalidation() -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport, readiness_probe=lambda _png: True)
+    with pytest.raises(RuntimeError, match="requires a typed invalidated lease"):
+        backend.reset_fresh_actuation_state()
+
+    backend.acquire_actuation_frame()
+    changed = transport.screens[0].copy()
+    changed.putpixel((0, 0), (244, 245, 245))
+    transport.screens[0] = changed
+    with pytest.raises(FreshActuationRequired):
+        backend.click(*BUTTON_CENTER)
+
+    backend.reset_fresh_actuation_state()
+    backend.acquire_actuation_frame()
+    backend.click(*BUTTON_CENTER)
+
+    assert len(transport.pointer_events) == 2
 
 
 def test_observation_invalidates_bound_actuation_before_input() -> None:
@@ -765,7 +793,7 @@ def test_bulk_text_revalidates_frame_after_restoring_outer_focus() -> None:
     backend.acquire_actuation_frame()
     transport.change_frame_on_focus = True
 
-    with pytest.raises(RuntimeError, match="frame content changed"):
+    with pytest.raises(FreshActuationRequired):
         backend.type_text("Massachusetts")
 
     assert transport.focus_calls == 1
@@ -853,7 +881,7 @@ def test_select_option_revalidates_frame_after_restoring_outer_focus() -> None:
     backend.acquire_actuation_frame()
     transport.change_frame_on_focus = True
 
-    with pytest.raises(RuntimeError, match="frame content changed"):
+    with pytest.raises(FreshActuationRequired):
         backend.select_option("Massachusetts", "Enter")
 
     assert transport.focus_calls == 1

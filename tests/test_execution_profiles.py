@@ -66,7 +66,7 @@ from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     runtime_inputs_digest,
 )
-from openadapt_flow.runtime.durable import CheckpointStore, resume
+from openadapt_flow.runtime.durable import ApprovalRequired, CheckpointStore, resume
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
@@ -2120,7 +2120,7 @@ def test_halt_and_infrastructure_failure_remain_distinct():
     )
 
 
-def test_backend_exception_is_failed_even_when_halt_observation_is_emitted(tmp_path):
+def test_backend_exception_can_verify_only_from_the_complete_effect_contract(tmp_path):
     workflow = _key_workflow("backend-failure", with_effect=True)
     workflow, bundle = _sealed(tmp_path, workflow, encrypted=False)
     gate = _gate(
@@ -2145,9 +2145,14 @@ def test_backend_exception_is_failed_even_when_halt_observation_is_emitted(tmp_p
         require_settled=True,
     ).run(workflow, bundle_dir=bundle, run_dir=tmp_path / "backend-run")
 
-    assert report.halt is not None
-    assert report.execution_outcome == ExecutionOutcome.FAILED.value
-    assert report.results[0].failure_category == "runtime_failure"
+    result = report.results[0]
+    assert report.halt is None
+    assert report.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert result.delivery_uncertainty is not None
+    assert result.delivery_uncertainty.resolved_by_contract is True
+    assert result.postconditions_ok is True
+    assert result.effect_verified is True
+    assert result.failure_category is None
 
 
 def test_standard_rechecks_settled_requirement_at_actuation_boundary(tmp_path):
@@ -2269,7 +2274,7 @@ def test_standard_verified_run_records_tiered_effect_evidence(tmp_path):
     assert report.outcome_envelope.model_calls == 0
 
 
-def test_standard_resume_retains_structured_effect_evidence(tmp_path):
+def test_standard_direct_resume_cursor_injection_is_refused(tmp_path):
     workflow, bundle = _sealed(
         tmp_path,
         _key_workflow("verified-resume", with_effect=True),
@@ -2297,28 +2302,22 @@ def test_standard_resume_retains_structured_effect_evidence(tmp_path):
     assert initial.execution_outcome == ExecutionOutcome.VERIFIED.value
     actions_before_resume = list(backend.actions)
 
-    resumed = Replayer(
-        backend,
-        vision=_ReadyVision(),
-        effect_verifier=_TieredVerifier(),
-        governed_authorization=authorization,
-        governed_continuation=True,
-        durable=True,
-        require_settled=True,
-    ).run(
-        workflow,
-        bundle_dir=bundle,
-        run_dir=run_dir,
-        resume_from=1,
-    )
-
+    with pytest.raises(ApprovalRequired, match="authenticated resume API"):
+        Replayer(
+            backend,
+            vision=_ReadyVision(),
+            effect_verifier=_TieredVerifier(),
+            governed_authorization=authorization,
+            governed_continuation=True,
+            durable=True,
+            require_settled=True,
+        ).run(
+            workflow,
+            bundle_dir=bundle,
+            run_dir=run_dir,
+            resume_from=1,
+        )
     assert backend.actions == actions_before_resume
-    assert resumed.execution_outcome == ExecutionOutcome.VERIFIED.value, (
-        resumed.model_dump_json(indent=2)
-    )
-    assert resumed.results[0].effect_evidence[0].verification_tier == 1
-    assert resumed.results[0].identity is not None
-    assert resumed.results[0].identity.status == "verified"
 
 
 def test_resume_preserves_failed_leg_model_and_network_evidence(tmp_path):
@@ -2386,7 +2385,7 @@ def test_resume_preserves_failed_leg_model_and_network_evidence(tmp_path):
             require_settled=True,
             poll_interval_s=0.0,
         ),
-        approval=_approval(bundle),
+        approval=_approval(bundle, run_dir),
     )
 
     assert resumed.execution_outcome == ExecutionOutcome.VERIFIED.value
@@ -2398,7 +2397,7 @@ def test_resume_preserves_failed_leg_model_and_network_evidence(tmp_path):
     assert resumed.outcome_envelope.external_network_calls == "observed"
 
 
-def test_standard_resume_from_legacy_checkpoint_is_unverified(tmp_path):
+def test_standard_direct_legacy_checkpoint_resume_is_refused(tmp_path):
     workflow, bundle = _sealed(
         tmp_path,
         _key_workflow("legacy-resume", with_effect=True),
@@ -2430,24 +2429,22 @@ def test_standard_resume_from_legacy_checkpoint_is_unverified(tmp_path):
     checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
     actions_before_resume = list(backend.actions)
 
-    resumed = Replayer(
-        backend,
-        vision=_ReadyVision(),
-        effect_verifier=_TieredVerifier(),
-        governed_authorization=authorization,
-        governed_continuation=True,
-        durable=True,
-        require_settled=True,
-    ).run(
-        workflow,
-        bundle_dir=bundle,
-        run_dir=run_dir,
-        resume_from=1,
-    )
-
+    with pytest.raises(ApprovalRequired, match="authenticated resume API"):
+        Replayer(
+            backend,
+            vision=_ReadyVision(),
+            effect_verifier=_TieredVerifier(),
+            governed_authorization=authorization,
+            governed_continuation=True,
+            durable=True,
+            require_settled=True,
+        ).run(
+            workflow,
+            bundle_dir=bundle,
+            run_dir=run_dir,
+            resume_from=1,
+        )
     assert backend.actions == actions_before_resume
-    assert resumed.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
-    assert resumed.success is False
 
 
 def _governed_loop_workflow() -> Workflow:
@@ -2550,17 +2547,6 @@ def test_standard_program_resume_preserves_exact_loop_contracts_without_reactuat
     assert len(CheckpointStore(run_dir).program_checkpoints()) == 1, (
         initial.model_dump_json(indent=2)
     )
-    store = CheckpointStore(run_dir)
-    checkpoint = store.program_checkpoints()[0]
-    checkpoint.resolution = Resolution(
-        rung="grounder", point=(5, 5), confidence=0.9, elapsed_ms=1.0
-    )
-    checkpoint.drift_oracle_calls = 1
-    store.write_program_checkpoint(checkpoint)
-    manifest = store.read_manifest()
-    assert manifest is not None
-    manifest.screenshots_may_leave_box = True
-    store.write_manifest(manifest)
     verifier.refute.clear()
     resumed_backend = FakeBackend()
     resumed = resume(
@@ -2593,9 +2579,9 @@ def test_standard_program_resume_preserves_exact_loop_contracts_without_reactuat
     assert resumed.outcome_envelope.passed_contracts.identity == 3
     assert resumed.outcome_envelope.required_contracts.effect == 3
     assert resumed.outcome_envelope.passed_contracts.effect == 3
-    assert resumed.model_calls == 2
-    assert resumed.rung_counts["grounder"] == 1
-    assert resumed.screenshots_may_leave_box is True
+    assert resumed.model_calls == 0
+    assert resumed.rung_counts["template"] == 3
+    assert resumed.screenshots_may_leave_box is False
 
 
 def test_program_resume_idempotency_includes_self_contained_api_effects():

@@ -22,6 +22,7 @@ from PIL import Image
 from openadapt_flow.backend import (
     Backend,
     ExecutionContextIdentityBackend,
+    FreshActuationRequired,
     IdentityBackend,
     PreparedPointerActuationBackend,
     StructuralActionBackend,
@@ -492,10 +493,68 @@ def test_bound_actuation_refuses_same_window_content_change_before_input() -> No
     # valid. Only the remote pixels changed after resolution.
     client.frame_color = (11, 22, 34)
 
-    with pytest.raises(RemoteDisplayError, match="frame content changed"):
+    with pytest.raises(FreshActuationRequired) as raised:
         backend.click(100, 100)
 
     assert not any(call[0] == "mouse" for call in client.calls)
+    assert raised.value.operation == "remote_click"
+    assert raised.value.changed_pixel_count == client.px[0] * client.px[1]
+    assert raised.value.changed_bbox == (0, 0, client.px[0], client.px[1])
+    assert raised.value.frame_size == client.px
+
+
+def test_replayer_reacquires_real_remote_display_lease_after_zero_edge_change(
+    tmp_path,
+) -> None:
+    from tests.test_replayer import FakeVision, Match, click_step, make_png
+
+    class OneMismatchBackend(RemoteDisplayBackend):
+        def __init__(self, *, client):
+            super().__init__(client=client, settle_s=0.0)
+            self.click_attempts = 0
+
+        def click(self, x, y, *, double=False):
+            self.click_attempts += 1
+            if self.click_attempts == 1:
+                self._client.frame_color = (11, 22, 34)
+            return super().click(x, y, double=double)
+
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.runtime.replayer import Replayer
+
+    client = FakeClient(
+        window=WindowInfo(
+            window_id=1,
+            owner="Parallels Desktop",
+            title="Windows 11",
+            pid=99,
+            bounds=(0.0, 0.0, 300.0, 200.0),
+            on_screen=True,
+        ),
+        px=(300, 200),
+    )
+    backend = OneMismatchBackend(client=client)
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+        for _ in range(3)
+    ]
+    bundle = tmp_path / "bundle"
+    (bundle / "templates").mkdir(parents=True)
+    (bundle / "templates" / "btn.png").write_bytes(make_png((50, 20)))
+
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="real-lease-retry", steps=[click_step(risk="irreversible")]),
+        bundle_dir=bundle,
+        run_dir=tmp_path / "run",
+    )
+
+    assert report.success is True
+    assert backend.click_attempts == 2
+    assert len([call for call in client.calls if call[0] == "mouse"]) == 2
+    assert [event.retried for event in report.results[0].fresh_actuation_events] == [
+        True
+    ]
 
 
 def test_bound_actuation_accepts_same_pixels_with_different_png_encoding() -> None:

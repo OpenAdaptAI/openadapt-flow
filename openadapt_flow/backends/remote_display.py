@@ -63,9 +63,9 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
-from PIL import Image
+from PIL import Image, ImageChops
 
-from openadapt_flow.backend import ActionDeliveryUncertain
+from openadapt_flow.backend import ActionDeliveryUncertain, FreshActuationRequired
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _LEASE_NONE = 0
@@ -76,6 +76,13 @@ _SESSION_DIGEST_HEX_LENGTH = 64
 
 class RemoteDisplayError(RuntimeError):
     """A remote-display capture/inject operation failed (or is not permitted)."""
+
+
+class _RemoteDisplayFreshActuationRequired(
+    FreshActuationRequired,
+    RemoteDisplayError,
+):
+    """A typed zero-edge mismatch that preserves backend error compatibility."""
 
 
 @dataclass(frozen=True)
@@ -574,6 +581,7 @@ class RemoteDisplayBackend:
         self._frame_window: Optional[WindowInfo] = None
         self._last_frame_monotonic: Optional[float] = None
         self._last_frame_digest: Optional[bytes] = None
+        self._actuation_frame_png: Optional[bytes] = None
         self._last_session_identity: Optional[str] = None
         self._qualification_environment: Optional[tuple[str, str, str, str]] = None
         self._qualification_input_guard: Optional[Callable[[], None]] = None
@@ -778,7 +786,25 @@ class RemoteDisplayBackend:
                     "fresh actuation frame"
                 )
             self._actuation_lease_state = _LEASE_ARMED
+            self._actuation_frame_png = png
             return png
+
+    def reset_fresh_actuation_state(self) -> None:
+        """Reset only a typed zero-input content invalidation.
+
+        This clears the stale prepared point but grants no actuation authority.
+        The runtime must prepare, acquire, and validate a new lease.
+        """
+
+        with self._input_lock:
+            if self._actuation_lease_state != _LEASE_INVALIDATED:
+                raise RemoteDisplayError(
+                    "remote-display fresh-actuation reset requires a typed "
+                    "invalidated lease"
+                )
+            self._actuation_lease_state = _LEASE_NONE
+            self._actuation_frame_png = None
+            self._prepared_pointer_point = None
 
     # -- Optional ExecutionContextIdentityBackend --------------------------
 
@@ -894,7 +920,7 @@ class RemoteDisplayBackend:
             # consume it before intentionally moving the pointer.  With an
             # ordinary observation this still validates focus, geometry, trust,
             # frame age, bounds, and occlusion.
-            self._ensure_input_ready(point=point)
+            self._ensure_input_ready(point=point, operation="remote_pointer_prepare")
             sx, sy = self._to_screen(*point)
             self._assert_click_target(sx, sy)
             self._assert_frame_fresh()
@@ -918,17 +944,26 @@ class RemoteDisplayBackend:
                 # Exact post-hover frame/context validation happens immediately
                 # before the first button edge.  No cursor move occurs after
                 # this check.
-                self._ensure_input_ready(point=point)
+                self._ensure_input_ready(
+                    point=point,
+                    operation="remote_double_click" if double else "remote_click",
+                )
             else:
                 # Reversible/direct callers retain the ordinary path.  They do
                 # not carry a consequential content lease, but still validate
                 # trust, focus, geometry, bounds, occlusion, and freshness.
-                self._ensure_input_ready(point=point)
+                self._ensure_input_ready(
+                    point=point,
+                    operation="remote_double_click" if double else "remote_click",
+                )
                 sx, sy = self._to_screen(*point)
                 self._assert_click_target(sx, sy)
                 self._client.mouse_move(sx, sy)
                 time.sleep(self._settle_s)
-                self._ensure_input_ready(point=point)
+                self._ensure_input_ready(
+                    point=point,
+                    operation="remote_double_click" if double else "remote_click",
+                )
             sx, sy = self._to_screen(int(x), int(y))
             self._prepared_pointer_point = None
             counts = 2 if double else 1
@@ -955,14 +990,14 @@ class RemoteDisplayBackend:
                         "consequential remote right click was not pre-positioned "
                         "at the freshly resolved target"
                     )
-                self._ensure_input_ready(point=point)
+                self._ensure_input_ready(point=point, operation="remote_right_click")
             else:
-                self._ensure_input_ready(point=point)
+                self._ensure_input_ready(point=point, operation="remote_right_click")
                 sx, sy = self._to_screen(*point)
                 self._assert_click_target(sx, sy)
                 self._client.mouse_move(sx, sy)
                 time.sleep(self._settle_s)
-                self._ensure_input_ready(point=point)
+                self._ensure_input_ready(point=point, operation="remote_right_click")
             sx, sy = self._to_screen(*point)
             self._prepared_pointer_point = None
             self._assert_click_target(sx, sy)
@@ -1014,14 +1049,14 @@ class RemoteDisplayBackend:
                         "consequential remote drag was not pre-positioned at "
                         "the freshly resolved source"
                     )
-                self._ensure_input_ready(point=start)
+                self._ensure_input_ready(point=start, operation="remote_drag")
             else:
-                self._ensure_input_ready(point=start)
+                self._ensure_input_ready(point=start, operation="remote_drag")
                 start_sx, start_sy = self._to_screen(*start)
                 self._assert_click_target(start_sx, start_sy)
                 self._client.mouse_move(start_sx, start_sy)
                 time.sleep(self._settle_s)
-                self._ensure_input_ready(point=start)
+                self._ensure_input_ready(point=start, operation="remote_drag")
             assert self._viewport is not None
             if not (
                 0 <= end[0] < self._viewport[0] and 0 <= end[1] < self._viewport[1]
@@ -1077,7 +1112,7 @@ class RemoteDisplayBackend:
         if not text:
             return
         with self._input_lock:
-            self._ensure_input_ready()
+            self._ensure_input_ready(operation="remote_type_text")
             self._client.type_chars(text)
 
     def press(self, key: str) -> None:
@@ -1090,7 +1125,7 @@ class RemoteDisplayBackend:
         """
         mods, final = _split_chord(key)
         with self._input_lock:
-            self._ensure_input_ready()
+            self._ensure_input_ready(operation="remote_press")
             # A bare printable key with no modifiers: type it as a character.
             if len(final) == 1 and not mods:
                 self._client.type_chars(final)
@@ -1113,7 +1148,7 @@ class RemoteDisplayBackend:
         if dx == 0 and dy == 0:
             return
         with self._input_lock:
-            self._ensure_input_ready()
+            self._ensure_input_ready(operation="remote_scroll")
             self._client.scroll(int(dx), int(dy))
 
     # -- internals -----------------------------------------------------------
@@ -1154,6 +1189,7 @@ class RemoteDisplayBackend:
         *,
         point: Optional[tuple[int, int]] = None,
         consume_actuation_lease: bool = True,
+        operation: str = "remote_input",
     ) -> None:
         """Fail LOUD if input can't actually be delivered; else focus the app.
 
@@ -1267,14 +1303,21 @@ class RemoteDisplayBackend:
                 # itself after its first state-changing edge.
                 digest = _canonical_rgb_digest(png)
                 if self._last_frame_digest is None or digest != self._last_frame_digest:
+                    changed_pixel_count, changed_bbox = self._frame_difference(
+                        self._actuation_frame_png,
+                        png,
+                    )
                     self._actuation_lease_state = _LEASE_INVALIDATED
-                    raise RemoteDisplayError(
-                        "remote-display frame content changed after target and "
-                        "identity resolution; refusing input and requiring a "
-                        "fresh actuation lease"
+                    self._actuation_frame_png = None
+                    raise _RemoteDisplayFreshActuationRequired(
+                        operation=operation,
+                        changed_pixel_count=changed_pixel_count,
+                        changed_bbox=changed_bbox,
+                        frame_size=self._viewport,
                     )
                 if consume_actuation_lease:
                     self._actuation_lease_state = _LEASE_NONE
+                    self._actuation_frame_png = None
         # Activation, window resolution, capture and readiness/OCR may all
         # block. Re-resolve the exact window/key identity and age again at the
         # last common point before input.
@@ -1311,6 +1354,35 @@ class RemoteDisplayBackend:
     def _invalidate_actuation_lease(self) -> None:
         if self._actuation_lease_state == _LEASE_ARMED:
             self._actuation_lease_state = _LEASE_INVALIDATED
+        self._actuation_frame_png = None
+
+    @staticmethod
+    def _frame_difference(
+        expected_png: Optional[bytes], observed_png: bytes
+    ) -> tuple[int, tuple[int, int, int, int]]:
+        """Return exact, payload-free diff geometry for a rejected frame."""
+
+        if expected_png is None:
+            raise RemoteDisplayError(
+                "armed remote-display lease has no retained actuation frame"
+            )
+        expected = Image.open(io.BytesIO(expected_png)).convert("RGB")
+        observed = Image.open(io.BytesIO(observed_png)).convert("RGB")
+        if expected.size != observed.size:
+            raise RemoteDisplayError(
+                "remote-display diff frames have inconsistent dimensions"
+            )
+        difference = ImageChops.difference(expected, observed)
+        raw_bbox = difference.getbbox()
+        if raw_bbox is None:
+            raise RemoteDisplayError(
+                "remote-display frame digest changed without a pixel difference"
+            )
+        x1, y1, x2, y2 = raw_bbox
+        red, green, blue = difference.split()
+        changed_mask = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+        changed_pixel_count = sum(changed_mask.histogram()[1:])
+        return changed_pixel_count, (x1, y1, x2 - x1, y2 - y1)
 
     def _fresh_identity_frame(self) -> Optional[bytes]:
         """Passively capture one bounded frame without replacing a valid lease.

@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from openadapt_flow.ir import (
     AttendedProgramTransitionEvidence,
+    IdentityCheck,
     ProgramExecutionScopeFrame,
     State,
     StateKind,
@@ -43,13 +44,20 @@ from openadapt_flow.ir import (
     StepResult,
     Workflow,
 )
-from openadapt_flow.policy import StepSafetyProjection, project_step_safety
+from openadapt_flow.policy import (
+    StepSafetyProjection,
+    effects_for_actuation,
+    project_step_safety,
+)
 from openadapt_flow.runtime.durable.approval import (
     ApprovalRecord,
     ApprovalRequired,
     BundleMismatch,
     PauseExpired,
     ResumeRefused,
+    StateDiverged,
+    approval_pause_digest,
+    issue_resume_approval,
     pause_is_expired,
 )
 from openadapt_flow.runtime.durable.checkpoint import (
@@ -178,6 +186,11 @@ class AttendedPauseCapability(BaseModel):
         default_factory=SignedTransitionBaseline
     )
     delivery_state: Literal["not_delivered", "delivered", "unknown"] = "unknown"
+    #: Source-record identity captured by the engine at the original halt.
+    #: It is not supplied or attested by the operator, and it is distinct from
+    #: any identity check for the next continuation target.
+    source_identity_required: bool = False
+    source_identity: Optional[IdentityCheck] = None
     issued_at: str
     expires_at: str
     allowed_actions: tuple[
@@ -196,6 +209,8 @@ class AttendedPauseCapability(BaseModel):
         # remains resumable across the package upgrade.
         if self.schema_version < 2:
             exclude.add("event_sequence")
+        if self.schema_version < 3:
+            exclude.update({"source_identity_required", "source_identity"})
         return self.model_dump(exclude=exclude, mode="json")
 
     @property
@@ -236,6 +251,8 @@ class AttendedActionRequest(BaseModel):
 
 class AttendedExecutionResult(BaseModel):
     """Outcome returned by a deployment-bound continue/skip executor."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: Literal["completed", "refused", "halted"]
     message: str
@@ -444,6 +461,37 @@ def _program_pause_state(
     return state
 
 
+def _source_step(workflow: Workflow, pending: PendingEscalation) -> Optional[Step]:
+    """Return the exact action step represented by one durable pause."""
+
+    if pending.program:
+        state = _program_pause_state(workflow, pending)
+        return state.step if state is not None else None
+    if 0 <= pending.step_index < len(workflow.steps):
+        step = workflow.steps[pending.step_index]
+        if step.id == pending.step_id:
+            return step
+    return None
+
+
+def _source_identity_required(step: Step, manifest: Any) -> bool:
+    authorization = getattr(manifest, "governed_authorization", None)
+    return bool(
+        step.identity_armed
+        or (
+            authorization is not None
+            and authorization.requires_verified_identity(step.id)
+        )
+    )
+
+
+def _identity_status(identity: Optional[IdentityCheck]) -> Optional[str]:
+    value = getattr(identity, "status", None)
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
 def _relative_postcondition_kinds(step: Any) -> set[str]:
     return {
         pc.kind.value if hasattr(pc.kind, "value") else str(pc.kind)
@@ -458,6 +506,7 @@ def _allowed_actions(
     pending: PendingEscalation,
     baseline: SignedTransitionBaseline,
     manifest: Any,
+    source_identity: Optional[IdentityCheck],
 ) -> tuple[Literal["continue", "skip", "reject", "teach", "escalate"], ...]:
     """Derive mutation authority from the exact workflow step semantics.
 
@@ -499,16 +548,7 @@ def _allowed_actions(
     # (a non-action program pause), unlike continue and skip below.
     if pending.delivery_uncertainty is None:
         actions.insert(0, "reject")
-    step: Optional[Step]
-    if pending.program:
-        state = _program_pause_state(workflow, pending)
-        step = state.step if state is not None else None
-    elif 0 <= pending.step_index < len(workflow.steps):
-        step = workflow.steps[pending.step_index]
-        if step.id != pending.step_id:
-            step = None
-    else:
-        step = None
+    step = _source_step(workflow, pending)
     if step is None:
         return tuple(actions)
 
@@ -531,6 +571,11 @@ def _allowed_actions(
         bool(step.expect or gui_effects)
         and has_relative_baseline
         and not has_unsupported_effect
+        and _identity_status(source_identity) != "mismatch"
+        and (
+            not _source_identity_required(step, manifest)
+            or _identity_status(source_identity) == "verified"
+        )
     ):
         actions.insert(0, "continue")
 
@@ -824,6 +869,23 @@ class AttendedActionStore:
             )
         return matches[0]
 
+    def signed_capability_for_digest(
+        self,
+        capability_digest: str,
+    ) -> AttendedPauseCapability:
+        """Return one authenticated current or historical capability."""
+
+        matches = [
+            capability
+            for capability in self._signed_capabilities()
+            if capability.digest == capability_digest
+        ]
+        if len(matches) != 1:
+            raise AttendedActionRefused(
+                "the exact signed attended capability is missing or ambiguous"
+            )
+        return matches[0]
+
     def _verify_relay_ack_context(
         self,
         record: AttendedRelayAcknowledgement,
@@ -1012,13 +1074,32 @@ class AttendedActionStore:
         """Issue once for a new pause; re-reads an existing valid capability."""
         revision = bundle_version(manifest.bundle_dir)
         expected = _expected_transition(workflow, pending)
-        pause_digest = _digest(pending)
+        pause_digest = approval_pause_digest(pending)
         # Creating the HMAC key before digesting transition values gives the
         # baseline and capability signature one stable per-run trust root.
         self._key(create=True)
         baseline = self._transition_baseline(transition_observation)
         delivery_state = _delivery_state(result)
-        allowed_actions = _allowed_actions(workflow, pending, baseline, manifest)
+        source_step = _source_step(workflow, pending)
+        if source_step is not None and result.step_id != source_step.id:
+            raise AttendedActionRefused(
+                "the halt identity does not match its source workflow step"
+            )
+        source_identity = (
+            result.identity.model_copy(deep=True)
+            if result.identity is not None
+            else None
+        )
+        source_identity_required = bool(
+            source_step is not None and _source_identity_required(source_step, manifest)
+        )
+        allowed_actions = _allowed_actions(
+            workflow,
+            pending,
+            baseline,
+            manifest,
+            source_identity,
+        )
         event_sequence = 1
         if self.capability_path.is_file():
             existing = self.read()
@@ -1035,6 +1116,8 @@ class AttendedActionStore:
                 and existing.workflow_name == pending.workflow_name
                 and existing.transition_baseline == baseline
                 and existing.allowed_actions == allowed_actions
+                and existing.source_identity_required == source_identity_required
+                and existing.source_identity == source_identity
             ):
                 return existing
             # A resumed run may halt again before the first request's terminal
@@ -1068,7 +1151,7 @@ class AttendedActionStore:
             expected_next_transition=expected,
         )
         capability = AttendedPauseCapability(
-            schema_version=2,
+            schema_version=3,
             event_sequence=event_sequence,
             pause_id=secrets.token_hex(16),
             run_id=manifest.run_id,
@@ -1085,6 +1168,8 @@ class AttendedActionStore:
             program_cursor_digest=_program_cursor_digest(pending),
             transition_baseline=baseline,
             delivery_state=delivery_state,
+            source_identity_required=source_identity_required,
+            source_identity=source_identity,
             issued_at=_iso(now),
             expires_at=_iso(now + timedelta(seconds=max(1.0, ttl_s))),
             allowed_actions=allowed_actions,
@@ -1135,7 +1220,7 @@ class AttendedActionStore:
         live_version = bundle_version(manifest.bundle_dir)
         if live_version != capability.bundle_version:
             raise BundleMismatch("the bundle revision changed after the attended pause")
-        if _digest(pending) != capability.pause_digest:
+        if approval_pause_digest(pending) != capability.pause_digest:
             raise AttendedActionRefused(
                 "the exact durable pause changed after capability issuance"
             )
@@ -1168,16 +1253,97 @@ class AttendedActionStore:
         return capability
 
     def _read_log(self) -> AttendedDecisionLog:
-        if not self.decisions_path.is_file():
-            return AttendedDecisionLog()
+        log, _head = self._read_log_with_head()
+        return log
+
+    def _read_log_with_head(self) -> tuple[AttendedDecisionLog, str]:
+        """Read the external monotonic journal and repair its local projection."""
+
+        from openadapt_flow.runtime.durable.authority import (
+            JOURNAL_GENESIS_DIGEST,
+            DurableAuthority,
+            DurableAuthorityBusy,
+        )
+
         try:
-            return AttendedDecisionLog.model_validate_json(
-                self.decisions_path.read_text()
+            capability = self.read()
+            authority = DurableAuthority(
+                self.run_dir,
+                CheckpointStore(self.run_dir),
             )
+            snapshot, head = authority.read_attended_snapshot(
+                expected_run_id=capability.run_id
+            )
+        except DurableAuthorityBusy as exc:
+            raise AttendedActionRefused(
+                "the external attended decision journal is unavailable or invalid"
+            ) from exc
+        if snapshot is None:
+            if self.decisions_path.is_file():
+                try:
+                    local = AttendedDecisionLog.model_validate_json(
+                        self.decisions_path.read_text()
+                    )
+                except (OSError, ValueError) as exc:
+                    raise AttendedActionRefused(
+                        "the local attended decision projection is invalid"
+                    ) from exc
+                if local.decisions or local.relay_acknowledgements:
+                    raise AttendedActionRefused(
+                        "the local attended decision history has no external "
+                        "monotonic authority"
+                    )
+            return AttendedDecisionLog(), JOURNAL_GENESIS_DIGEST
+        try:
+            log = AttendedDecisionLog.model_validate_json(snapshot)
         except ValueError as exc:
             raise AttendedActionRefused(
-                "the attended decision audit log is invalid"
+                "the authenticated attended decision snapshot is invalid"
             ) from exc
+        payload = snapshot.encode("utf-8")
+        try:
+            local_matches = (
+                self.decisions_path.is_file()
+                and not self.decisions_path.is_symlink()
+                and self.decisions_path.read_bytes() == payload
+            )
+        except OSError:
+            local_matches = False
+        if not local_matches:
+            # The JSON file is a recoverable local projection. The append-only,
+            # HMAC-chained SQLite journal outside the run directory is authority.
+            self._atomic_write(self.decisions_path, payload)
+        return log, head
+
+    def _append_log_snapshot(
+        self,
+        *,
+        log: AttendedDecisionLog,
+        expected_head: str,
+    ) -> None:
+        """Commit authority first, then publish the recoverable local projection."""
+
+        from openadapt_flow.runtime.durable.authority import (
+            DurableAuthority,
+            DurableAuthorityBusy,
+        )
+
+        capability = self.read()
+        payload = log.model_dump_json(indent=2)
+        try:
+            DurableAuthority(
+                self.run_dir,
+                CheckpointStore(self.run_dir),
+            ).append_attended_snapshot(
+                expected_run_id=capability.run_id,
+                expected_head_digest=expected_head,
+                snapshot_json=payload,
+            )
+        except DurableAuthorityBusy as exc:
+            raise AttendedActionRefused(
+                "the external attended decision journal changed or is unavailable"
+            ) from exc
+        self._atomic_write(self.decisions_path, payload.encode("utf-8"))
 
     def prior(self, request: AttendedActionRequest) -> Optional[AttendedDecision]:
         request_digest = _digest(request)
@@ -1285,13 +1451,11 @@ class AttendedActionStore:
         key: Optional[str] = None,
     ) -> None:
         with self._decision_log_lock():
-            log = self._read_log()
+            log, head = self._read_log_with_head()
             log.decisions.append(decision)
             if relay_binding is not None:
                 self._add_relay_acknowledgement(log, relay_binding, decision, key=key)
-            self._atomic_write(
-                self.decisions_path, log.model_dump_json(indent=2).encode("utf-8")
-            )
+            self._append_log_snapshot(log=log, expected_head=head)
 
     def retain_relay_acknowledgement(
         self,
@@ -1302,7 +1466,7 @@ class AttendedActionStore:
     ) -> None:
         """Bind a prior exact engine result for an idempotent remote replay."""
         with self._decision_log_lock():
-            log = self._read_log()
+            log, head = self._read_log_with_head()
             retained = [
                 candidate
                 for candidate in log.decisions
@@ -1315,10 +1479,7 @@ class AttendedActionStore:
             before = len(log.relay_acknowledgements)
             self._add_relay_acknowledgement(log, binding, decision, key=key)
             if len(log.relay_acknowledgements) != before:
-                self._atomic_write(
-                    self.decisions_path,
-                    log.model_dump_json(indent=2).encode("utf-8"),
-                )
+                self._append_log_snapshot(log=log, expected_head=head)
 
     def _validated_relay_acknowledgement(
         self,
@@ -1401,7 +1562,7 @@ class AttendedActionStore:
     ) -> None:
         """Mark the exact relay record only after Cloud accepted the ACK."""
         with self._decision_log_lock():
-            log = self._read_log()
+            log, head = self._read_log_with_head()
             matched = self._validated_relay_acknowledgement(log, binding, key=key)
             if matched is None:
                 raise AttendedActionRefused(
@@ -1426,9 +1587,7 @@ class AttendedActionStore:
                 update={"record_mac": self._relay_ack_mac(candidate)}
             )
             log.relay_acknowledgements[index] = candidate
-            self._atomic_write(
-                self.decisions_path, log.model_dump_json(indent=2).encode("utf-8")
-            )
+            self._append_log_snapshot(log=log, expected_head=head)
 
     @contextmanager
     def lease(
@@ -1437,45 +1596,25 @@ class AttendedActionStore:
         *,
         ttl_s: float = DEFAULT_LEASE_TTL_S,
         now: Optional[datetime] = None,
+        wait_s: float = 0.0,
+        key: Optional[str] = None,
     ) -> Iterator[None]:
-        """Acquire one per-run action lease with no silent stale takeover."""
-        now = now or _now()
-        lease = {
-            "request_digest": _digest(request),
-            "idempotency_key": request.idempotency_key,
-            "acquired_at": _iso(now),
-            "expires_at": _iso(now + timedelta(seconds=max(1.0, ttl_s))),
-        }
-        self.run_dir.mkdir(parents=True, exist_ok=True)
+        """Acquire the shared direct/attended continuation lease."""
+        from openadapt_flow.runtime.durable.continuation import (
+            ContinuationBusy,
+            ContinuationCoordinator,
+        )
+
         try:
-            fd = os.open(self.lease_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            try:
-                existing = json.loads(self.lease_path.read_text())
-                expired = _parse(str(existing["expires_at"])) < now
-            except (OSError, ValueError, KeyError):
-                expired = False
-            if expired:
-                raise AttendedActionBusy(
-                    "a prior action lease expired without a recorded outcome; "
-                    "delivery is uncertain and must be reconciled before retry"
-                ) from None
-            raise AttendedActionBusy(
-                "another attended action is already in progress"
-            ) from None
-        try:
-            with os.fdopen(fd, "w") as handle:
-                json.dump(lease, handle, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._fsync_parent(self.lease_path)
-            yield
-        finally:
-            try:
-                self.lease_path.unlink()
-                self._fsync_parent(self.lease_path)
-            except FileNotFoundError:
-                pass
+            with ContinuationCoordinator(self.run_dir, key=key).lease(
+                operation=request.action,
+                ttl_s=ttl_s,
+                now=now,
+                wait_s=wait_s,
+            ):
+                yield
+        except ContinuationBusy as exc:
+            raise AttendedActionBusy(str(exc)) from exc
 
 
 def validate_attended_program_receipt(
@@ -1484,7 +1623,9 @@ def validate_attended_program_receipt(
     checkpoint: ProgramCheckpoint,
     pending: Optional[PendingEscalation],
     manifest: Any,
+    workflow: Workflow,
     live_bundle_version: str,
+    historical: bool = False,
 ) -> ProgramTransitionReceipt:
     """Authenticate and bind a receipt before interpreter restoration."""
     receipt = checkpoint.attended_transition
@@ -1496,6 +1637,38 @@ def validate_attended_program_receipt(
         raise AttendedActionRefused(
             "the program checkpoint does not match its atomic transition receipt"
         )
+    if not checkpoint.frames:
+        raise AttendedActionRefused(
+            "the attended program checkpoint has no interpreter frame"
+        )
+    from openadapt_flow.runtime.durable.program_checkpoint import TOP_GRAPH_ID
+
+    graph_id = checkpoint.frames[-1].graph_id
+    graph = (
+        workflow.program
+        if graph_id == TOP_GRAPH_ID
+        else workflow.subflows.get(graph_id)
+    )
+    source_state = (
+        graph.states.get(receipt.source_state_id) if graph is not None else None
+    )
+    source_step = source_state.step if source_state is not None else None
+    if source_step is None:
+        raise AttendedActionRefused("the attended program source action is unavailable")
+    validate_attended_checkpoint_identity(
+        run_dir,
+        checkpoint=checkpoint,
+        step=source_step,
+        manifest=manifest,
+        live_bundle_version=live_bundle_version,
+        state_id=receipt.source_state_id,
+    )
+    from openadapt_flow.qualification import workflow_contract_sha256
+
+    authorization = manifest.governed_authorization
+    expected_runtime_inputs_digest = (
+        authorization.runtime_inputs_digest if authorization is not None else None
+    )
     if (
         not checkpoint.frames
         or receipt.run_id != manifest.run_id
@@ -1508,11 +1681,19 @@ def validate_attended_program_receipt(
         or checkpoint.frames[-1].state_id != receipt.source_state_id
         or checkpoint.verified_state_id != receipt.source_state_id
         or receipt.control_frames_hash != control_frames_hash(checkpoint.frames)
+        or receipt.workflow_contract_sha256 != workflow_contract_sha256(workflow)
+        or receipt.governed_runtime_inputs_digest != expected_runtime_inputs_digest
+        or receipt.bound_params_sha256 != bound_params_sha256(checkpoint.bound_params)
     ):
         raise AttendedActionRefused(
             "the attended program receipt does not match its signed "
             "run/bundle/pause/state/frame lineage"
         )
+    if historical:
+        # The signed per-run receipt is the durable authority for a prior
+        # attended transition. Its original pending file has since been
+        # replaced by later progress and a newer active pause.
+        return receipt
     is_current_pause = (
         pending is not None
         and pending.program
@@ -1534,6 +1715,9 @@ def validate_attended_program_receipt(
             or receipt.cursor_digest != _program_cursor_digest(pending)
             or receipt.cursor_digest != capability.program_cursor_digest
             or checkpoint.transition_history_hash != pending.program_history_hash
+            or checkpoint.transition_parent_hash != pending.program_history_hash
+            or checkpoint.transition_delta
+            or checkpoint.transition_history != pending.program_history
             or capability.run_id != manifest.run_id
             or capability.workflow_name != manifest.workflow_name
             or capability.bundle_version != live_bundle_version
@@ -1553,6 +1737,93 @@ def validate_attended_program_receipt(
             "exact checkpoint lineage"
         )
     return receipt
+
+
+def validate_attended_checkpoint_identity(
+    run_dir: Path | str,
+    *,
+    checkpoint: RunCheckpoint | ProgramCheckpoint,
+    step: Step,
+    manifest: Any,
+    live_bundle_version: str,
+    state_id: Optional[str] = None,
+) -> Optional[AttendedPauseCapability]:
+    """Bind a human-attended checkpoint to its signed source identity.
+
+    The operator can request a continuation. The operator cannot create or
+    replace identity evidence. The only accepted identity is the engine-owned
+    result retained in the exact signed pause capability.
+    """
+
+    attended = checkpoint.actuation in {
+        "human_attended",
+        "human_attended_skip",
+    }
+    capability_digest = checkpoint.attended_capability_digest
+    if not attended:
+        if capability_digest is not None:
+            raise AttendedActionRefused(
+                "a non-attended checkpoint carries attended identity authority"
+            )
+        return None
+    if not capability_digest:
+        raise AttendedActionRefused(
+            "the attended checkpoint has no signed source capability"
+        )
+    capability = AttendedActionStore(run_dir).signed_capability_for_digest(
+        capability_digest
+    )
+    expected_capability_step_id = state_id or step.id
+    if (
+        capability.run_id != manifest.run_id
+        or capability.workflow_name != manifest.workflow_name
+        or capability.bundle_version != live_bundle_version
+        or checkpoint.run_id != manifest.run_id
+        or checkpoint.workflow_name != manifest.workflow_name
+        or checkpoint.bundle_version != live_bundle_version
+        or capability.step_id != expected_capability_step_id
+        or capability.state_id != state_id
+        or checkpoint.step_id != step.id
+    ):
+        raise AttendedActionRefused(
+            "the attended source capability does not match the checkpoint lineage"
+        )
+
+    required = _source_identity_required(step, manifest)
+    if capability.schema_version < 3:
+        if required:
+            raise AttendedActionRefused(
+                "the attended source identity predates identity-bound continuation"
+            )
+        source_identity = None
+    else:
+        if capability.source_identity_required != required:
+            raise AttendedActionRefused(
+                "the signed source identity requirement changed"
+            )
+        source_identity = capability.source_identity
+
+    source_status = _identity_status(source_identity)
+    if source_status == "mismatch":
+        raise AttendedActionRefused(
+            "the original attended halt retained a conflicting source identity"
+        )
+    skipped = checkpoint.actuation == "human_attended_skip"
+    if skipped:
+        if checkpoint.identity is not None:
+            raise AttendedActionRefused(
+                "a skipped attended action cannot carry source identity proof"
+            )
+        return capability
+    if required and source_status != "verified":
+        raise AttendedActionRefused(
+            "the attended source action lacks verified identity evidence"
+        )
+    if checkpoint.identity != source_identity:
+        raise AttendedActionRefused(
+            "the attended checkpoint identity differs from its signed source proof"
+        )
+    return capability
 
 
 def issue_attended_capability(
@@ -1592,6 +1863,8 @@ def attended_capability_summary(
         "expires_at": capability.expires_at,
         "allowed_actions": list(capability.allowed_actions),
         "delivery_state": capability.delivery_state,
+        "source_identity_required": capability.source_identity_required,
+        "source_identity_status": _identity_status(capability.source_identity),
     }
 
 
@@ -1649,7 +1922,10 @@ def _terminate_rejected_run(
     from openadapt_flow.ir import RunReport
     from openadapt_flow.transaction import classify_transaction_outcome
 
-    checkpoints.write_pending(pending.model_copy(update={"status": "rejected"}))
+    checkpoints.cas_pending(
+        checkpoints.model_digest(pending),
+        pending.model_copy(update={"status": "rejected"}),
+    )
 
     # Read the report directly rather than through the console's loader: the
     # console is an optional extra and a presentation layer, and the runtime
@@ -1677,19 +1953,65 @@ def _terminate_rejected_run(
 def _approval(
     capability: AttendedPauseCapability,
     *,
+    pending: PendingEscalation,
     operator: str,
     resolution: str,
     run_dir: Path,
 ) -> ApprovalRecord:
-    if not operator.strip():
-        raise ApprovalRequired("attended actions require an authenticated operator")
-    return ApprovalRecord(
+    return issue_resume_approval(
+        pending,
         approver=operator,
         resolution=resolution,
         bundle_version=capability.bundle_version,
         workflow_name=capability.workflow_name,
-        run_dir=str(run_dir),
+        run_id=capability.run_id,
+        run_dir=run_dir,
     )
+
+
+def _audit_only_decision(
+    capability: AttendedPauseCapability,
+    request: AttendedActionRequest,
+    *,
+    operator: str,
+) -> AttendedDecision:
+    """Create a non-actuating decision that leaves the live pause intact."""
+
+    if request.action == "teach":
+        return AttendedDecision(
+            pause_id=capability.pause_id,
+            capability_digest=capability.digest,
+            request_digest=_digest(request),
+            idempotency_key=request.idempotency_key,
+            action=request.action,
+            operator=operator,
+            disposition=request.disposition or "teach_requested",
+            status="needs_demonstration",
+            message=(
+                "Record the corrective demonstration, then run the existing "
+                "governed teach command. Its regression/revision gate decides "
+                "accepted, banked-progress, or refused; identity-evidence "
+                "changes are never auto-promoted."
+            ),
+            next_transition=capability.expected_next_transition,
+        )
+    if request.action == "escalate":
+        return AttendedDecision(
+            pause_id=capability.pause_id,
+            capability_digest=capability.digest,
+            request_digest=_digest(request),
+            idempotency_key=request.idempotency_key,
+            action=request.action,
+            operator=operator,
+            disposition=request.disposition or "needs_assistance",
+            status="escalated",
+            message=(
+                "Escalation recorded. The durable pause remains intact and "
+                "can be continued after a qualified operator resolves it."
+            ),
+            next_transition=capability.expected_next_transition,
+        )
+    raise AttendedActionRefused("this attended action is not audit-only")
 
 
 def execute_attended_action(
@@ -1720,6 +2042,17 @@ def execute_attended_action(
         raise AttendedActionRefused(
             "the disposition does not match the requested attended action"
         )
+    checkpoints = CheckpointStore(run_dir, key=key)
+    manifest = checkpoints.read_manifest()
+    if manifest is None:
+        raise AttendedActionRefused("the run is not durably paused")
+    try:
+        checkpoints._validate_local_namespace(manifest)  # noqa: SLF001
+    except StateDiverged as exc:
+        raise AttendedActionRefused(
+            "the durable run identity or canonical path changed"
+        ) from exc
+
     actions = AttendedActionStore(run_dir)
     prior = actions.prior(request)
     if prior is not None:
@@ -1733,21 +2066,74 @@ def execute_attended_action(
                 actions.retain_relay_acknowledgement(relay_binding, prior, key=key)
             return prior
 
-    checkpoints = CheckpointStore(run_dir, key=key)
     pending = checkpoints.read_pending()
-    manifest = checkpoints.read_manifest()
-    if pending is None or manifest is None:
+    if pending is None:
         raise AttendedActionRefused("the run is not durably paused")
     _refuse_rejected_pause(pending)
     capability = actions.validate(request, pending=pending, manifest=manifest, now=now)
+    unresolved_before_lease = actions.unresolved_delivery(capability.pause_id)
+    if unresolved_before_lease is not None:
+        if request.action in {"teach", "escalate"}:
+            # An uncertain input edge must prevent another action, but it must
+            # not prevent the operator from preserving a demonstration request
+            # or escalating the retained pause. These records do not resume,
+            # retry, reject, or otherwise actuate the workflow.
+            decision = _audit_only_decision(
+                capability,
+                request,
+                operator=operator,
+            )
+            actions.append(decision, relay_binding=relay_binding, key=key)
+            return decision
+        if request.action == "reject":
+            raise AttendedActionRefused(
+                "this action may already have been delivered; ending the run "
+                "cannot un-send it and would remove the pause needed to "
+                "reconcile. Escalate it instead"
+            )
+        if request.action in {"continue", "skip"}:
+            raise AttendedActionRefused(
+                "another request for this pause may have crossed the delivery "
+                "boundary; reconcile its live state before continuing or skipping"
+            )
+    try:
+        checkpoints.validate_namespace(manifest)
+    except StateDiverged as exc:
+        raise AttendedActionRefused(
+            "the durable pause changed outside its monotonic authority"
+        ) from exc
 
-    with actions.lease(request, now=now):
+    reject_wait_s = 0.0
+    if request.action == "reject":
+        from openadapt_flow.runtime.durable.continuation import (
+            ContinuationCoordinator,
+        )
+
+        preemption = ContinuationCoordinator(run_dir, key=key).request_reject(
+            expected_run_id=capability.run_id,
+            expected_pause_binding=capability.pause_digest,
+        )
+        if preemption == "uncertain":
+            raise AttendedActionRefused(
+                "continuation delivery already started; rejection now requires "
+                "effect reconciliation and cannot claim a clean cancellation"
+            )
+        if preemption == "preempted":
+            reject_wait_s = 5.0
+
+    with actions.lease(
+        request,
+        now=now,
+        wait_s=reject_wait_s,
+        key=key,
+    ):
         # Repeat the complete validation under the lease: the bundle/pause may
         # have changed between page load and lock acquisition.
         pending = checkpoints.read_pending()
         manifest = checkpoints.read_manifest()
         if pending is None or manifest is None:
             raise AttendedActionRefused("the run is no longer durably paused")
+        checkpoints.validate_namespace(manifest)
         _refuse_rejected_pause(pending)
         capability = actions.validate(
             request, pending=pending, manifest=manifest, now=now
@@ -1816,42 +2202,11 @@ def execute_attended_action(
             actions.append(decision, relay_binding=relay_binding, key=key)
             return decision
 
-        if request.action == "teach":
-            decision = AttendedDecision(
-                pause_id=capability.pause_id,
-                capability_digest=capability.digest,
-                request_digest=request_digest,
-                idempotency_key=request.idempotency_key,
-                action=request.action,
+        if request.action in {"teach", "escalate"}:
+            decision = _audit_only_decision(
+                capability,
+                request,
                 operator=operator,
-                disposition=request.disposition or "teach_requested",
-                status="needs_demonstration",
-                message=(
-                    "Record the corrective demonstration, then run the existing "
-                    "governed teach command. Its regression/revision gate decides "
-                    "accepted, banked-progress, or refused; identity-evidence "
-                    "changes are never auto-promoted."
-                ),
-                next_transition=capability.expected_next_transition,
-            )
-            actions.append(decision, relay_binding=relay_binding, key=key)
-            return decision
-
-        if request.action == "escalate":
-            decision = AttendedDecision(
-                pause_id=capability.pause_id,
-                capability_digest=capability.digest,
-                request_digest=request_digest,
-                idempotency_key=request.idempotency_key,
-                action=request.action,
-                operator=operator,
-                disposition=request.disposition or "needs_assistance",
-                status="escalated",
-                message=(
-                    "Escalation recorded. The durable pause remains intact and "
-                    "can be continued after a qualified operator resolves it."
-                ),
-                next_transition=capability.expected_next_transition,
             )
             actions.append(decision, relay_binding=relay_binding, key=key)
             return decision
@@ -1868,7 +2223,25 @@ def execute_attended_action(
             else "operator requested policy-scoped skip"
         )
         approval = _approval(
-            capability, operator=operator, resolution=resolution, run_dir=run_dir
+            capability,
+            pending=pending,
+            operator=operator,
+            resolution=resolution,
+            run_dir=run_dir,
+        )
+        from openadapt_flow.runtime.durable.continuation import (
+            ContinuationCoordinator,
+            current_continuation_token,
+        )
+
+        continuation_token = current_continuation_token()
+        if continuation_token is None:
+            raise AttendedActionRefused(
+                "the attended decision lost its continuation authority"
+            )
+        ContinuationCoordinator(run_dir, key=key).bind_approval(
+            continuation_token,
+            approval,
         )
         prepared = AttendedDecision(
             pause_id=capability.pause_id,
@@ -1896,26 +2269,74 @@ def execute_attended_action(
             }
         )
         actions.append(started)
+        executor_returned = False
+        coordinator = ContinuationCoordinator(run_dir, key=key)
         try:
-            result = (
+            raw_result = (
                 executor.continue_run(run_dir, capability, approval)
                 if request.action == "continue"
                 else executor.skip_run(run_dir, capability, approval)
             )
-        except Exception:
-            uncertain = started.model_copy(
-                update={
-                    "decision_id": secrets.token_hex(16),
-                    "status": "delivery_uncertain",
-                    "message": (
-                        "the deployment-bound action did not return a terminal "
-                        "receipt; reconcile live state before any retry"
-                    ),
-                    "created_at": _iso(_now()),
-                }
+            executor_returned = True
+            result = AttendedExecutionResult.model_validate(raw_result)
+            coordinator.attest_executor_outcome(
+                continuation_token,
+                status=result.status,
+                report_success=result.report_success,
+                source_pause_binding=capability.pause_digest,
             )
-            actions.append(uncertain)
-            raise
+        except Exception as exc:
+            proven = coordinator.prove_executor_outcome(
+                continuation_token,
+                source_pause_binding=capability.pause_digest,
+            )
+            if proven is not None and proven[0] in {"completed", "halted"}:
+                proven_status, proven_success = proven
+                result = AttendedExecutionResult(
+                    status=proven_status,
+                    message=(
+                        "The durable run completed and its exact report was "
+                        "verified after the executor transport failed."
+                        if proven_status == "completed"
+                        else (
+                            "The durable continuation halted at a new exact pause; "
+                            "the executor transport did not carry its valid receipt."
+                            if proven_status == "halted"
+                            else "The durable state proves that no continuation "
+                            "delivery was admitted."
+                        )
+                    ),
+                    report_success=proven_success,
+                    resumed_from=capability.step_id,
+                    next_transition=capability.expected_next_transition,
+                )
+            else:
+                try:
+                    coordinator.mark_executor_uncertain(continuation_token)
+                except Exception as fence_exc:
+                    raise AttendedActionRefused(
+                        "the executor outcome was invalid and its continuation "
+                        "authority could not be fenced"
+                    ) from fence_exc
+                uncertain = started.model_copy(
+                    update={
+                        "decision_id": secrets.token_hex(16),
+                        "status": "delivery_uncertain",
+                        "message": (
+                            "the deployment-bound action did not return a terminal "
+                            "receipt; reconcile live state before any retry"
+                        ),
+                        "created_at": _iso(_now()),
+                    }
+                )
+                actions.append(uncertain)
+                if not executor_returned:
+                    raise
+                if isinstance(exc, AttendedActionRefused):
+                    raise
+                raise AttendedActionRefused(
+                    "the executor did not return an outcome proven by durable state"
+                ) from exc
         decision = AttendedDecision(
             pause_id=capability.pause_id,
             capability_digest=capability.digest,
@@ -1943,6 +2364,22 @@ def checkpoint_human_completed_step(
     key: Optional[str] = None,
 ) -> RunCheckpoint:
     """Advance a linear resume point after outcome verification, without acting."""
+    store = CheckpointStore(run_dir, key=key)
+    manifest = store.read_manifest()
+    if manifest is None:
+        raise AttendedActionRefused(
+            "the human-completed checkpoint has no durable run manifest"
+        )
+    workflow = Workflow.load(manifest.bundle_dir, key=key)
+    if (
+        capability.step_index < 0
+        or capability.step_index >= len(workflow.steps)
+        or workflow.steps[capability.step_index].id != capability.step_id
+    ):
+        raise AttendedActionRefused(
+            "the human-completed checkpoint does not match the workflow step"
+        )
+    source_step = workflow.steps[capability.step_index]
     if not result.ok or result.postconditions_ok is False:
         raise AttendedActionRefused(
             "the human-completed step did not pass outcome verification"
@@ -1951,8 +2388,28 @@ def checkpoint_human_completed_step(
         raise AttendedActionRefused(
             "the human-completed step's independent effect was not confirmed"
         )
+    authenticated = AttendedActionStore(run_dir).signed_capability_for_digest(
+        capability.digest
+    )
+    if authenticated != capability:
+        raise AttendedActionRefused(
+            "the human-completed checkpoint does not use the signed capability"
+        )
+    if capability.source_identity_required and (
+        capability.schema_version < 3
+        or _identity_status(capability.source_identity) != "verified"
+    ):
+        raise AttendedActionRefused(
+            "the human-completed source lacks verified identity evidence"
+        )
+    if _identity_status(capability.source_identity) == "mismatch":
+        raise AttendedActionRefused(
+            "the human-completed source retained a conflicting identity"
+        )
     checkpoint = RunCheckpoint(
+        run_id=capability.run_id,
         workflow_name=capability.workflow_name,
+        bundle_version=capability.bundle_version,
         step_index=capability.step_index,
         step_id=capability.step_id,
         intent=result.intent,
@@ -1961,11 +2418,16 @@ def checkpoint_human_completed_step(
         effect_verified=result.effect_verified,
         effect_approved_unverified=result.effect_approved_unverified,
         effect_contract_hashes=list(result.effect_contract_hashes),
+        identity=capability.source_identity,
         postconditions_ok=result.postconditions_ok,
+        expected_postconditions=[
+            condition.model_copy(deep=True) for condition in source_step.expect
+        ],
         skipped=False,
         actuation="human_attended",
+        attended_capability_digest=capability.digest,
     )
-    CheckpointStore(run_dir, key=key).write_checkpoint(checkpoint)
+    store.write_checkpoint(checkpoint)
     return checkpoint
 
 
@@ -2029,8 +2491,34 @@ class BoundAttendedExecutor:
             raise AttendedActionRefused(
                 "workflow identity changed after attended capability issuance"
             )
+        authenticated = AttendedActionStore(run_dir).signed_capability_for_digest(
+            capability.digest
+        )
+        if authenticated != capability:
+            raise AttendedActionRefused(
+                "the attended executor did not receive the signed pause capability"
+            )
+        pending = store.read_pending()
+        source_step = _source_step(workflow, pending) if pending is not None else None
+        if (
+            pending is None
+            or source_step is None
+            or approval_pause_digest(pending) != capability.pause_digest
+            or capability.source_identity_required
+            != _source_identity_required(source_step, manifest)
+            or (
+                capability.source_identity_required
+                and (
+                    capability.schema_version < 3
+                    or _identity_status(capability.source_identity) != "verified"
+                )
+            )
+            or _identity_status(capability.source_identity) == "mismatch"
+        ):
+            raise AttendedActionRefused(
+                "the signed attended source identity no longer matches the run"
+            )
         if workflow.program is not None:
-            pending = store.read_pending()
             state = (
                 _program_pause_state(workflow, pending) if pending is not None else None
             )
@@ -2091,12 +2579,14 @@ class BoundAttendedExecutor:
         # exact signed pause immediately before committing the human-completed
         # checkpoint; never approve a newer pause under an older capability.
         pending = store.read_pending()
-        if pending is None or _digest(pending) != capability.pause_digest:
+        if pending is None or approval_pause_digest(pending) != capability.pause_digest:
             raise AttendedActionRefused(
                 "the exact attended pause changed before checkpoint commit"
             )
         checkpoint = RunCheckpoint(
+            run_id=manifest.run_id,
             workflow_name=capability.workflow_name,
+            bundle_version=capability.bundle_version,
             step_index=capability.step_index,
             step_id=capability.step_id,
             intent=result.intent,
@@ -2117,12 +2607,39 @@ class BoundAttendedExecutor:
                 else None
             ),
             postconditions_ok=result.postconditions_ok,
+            expected_postconditions=(
+                [
+                    condition.model_copy(deep=True)
+                    for condition in workflow.steps[capability.step_index].expect
+                ]
+                if not skipped
+                else []
+            ),
             skipped=skipped,
             actuation="human_attended_skip" if skipped else "human_attended",
+            identity=(None if skipped else capability.source_identity),
+            attended_capability_digest=capability.digest,
         )
         store.write_checkpoint(checkpoint)
-        store.write_approval(approval)
-        store.write_pending(pending.model_copy(update={"status": "approved"}))
+        store.commit_approval_transition(
+            expected_pending=pending,
+            approval=approval,
+            target_status="approved",
+        )
+        from openadapt_flow.runtime.durable.continuation import (
+            ContinuationCoordinator,
+            current_continuation_token,
+        )
+
+        token = current_continuation_token()
+        if token is None:
+            raise AttendedActionRefused(
+                "the attended completion lost its continuation authority"
+            )
+        ContinuationCoordinator(run_dir, key=self.key).acknowledge_progress(
+            token,
+            external_delivery=True,
+        )
 
         # Import lazily to avoid a durable-module cycle.
         from openadapt_flow.runtime.durable.resume import resume
@@ -2219,14 +2736,14 @@ class BoundAttendedExecutor:
         )
         action_store = AttendedActionStore(run_dir)
         receipt = action_store.seal_program_receipt(receipt)
+        attended_effects = effects_for_actuation(state.step, "gui")
         resolved_effects = (
             [
                 effect.model_dump(mode="json")
-                for effect in resume_replayer._resolve_effects(
-                    state.step.effects, params
-                )
+                for effect in resume_replayer._resolve_effects(attended_effects, params)
             ]
-            if result.effect_verified is True and state.step.effects
+            if (result.effect_verified is True or result.effect_approved_unverified)
+            and attended_effects
             else []
         )
         expected_texts = (
@@ -2245,6 +2762,7 @@ class BoundAttendedExecutor:
             else []
         )
         checkpoint = ProgramCheckpoint(
+            run_id=manifest.run_id,
             workflow_name=capability.workflow_name,
             seq=source_seq + 1,
             verified_state_id=state.id,
@@ -2256,7 +2774,7 @@ class BoundAttendedExecutor:
                 if result.effect_verified is True
                 else []
             ),
-            new_effects=resolved_effects,
+            new_effects=(resolved_effects if result.effect_verified is True else []),
             new_effect_evidence=(
                 list(result.effect_evidence) if result.effect_verified is True else []
             ),
@@ -2265,17 +2783,21 @@ class BoundAttendedExecutor:
                 if result.effect_approved_unverified
                 else []
             ),
+            new_unverified_effects=(
+                resolved_effects if result.effect_approved_unverified else []
+            ),
             step_id=state.step.id,
-            # ``result.identity`` here proves the next continuation target, not
-            # the already human-actuated source. Do not mislabel it as source
-            # identity evidence.
-            identity=None,
+            # The live verifier's result describes the next continuation
+            # target. The signed capability retains the already human-actuated
+            # source identity used for the completed source step.
+            identity=(None if skipped else capability.source_identity),
             input_verified=result.input_verified,
             starting_state_settled=result.starting_state_settled,
             delivery_attempted=result.delivery_attempted,
             postconditions_ok=result.postconditions_ok,
             skipped=skipped,
             actuation="human_attended_skip" if skipped else "human_attended",
+            attended_capability_digest=capability.digest,
             governed_authorization_id=(
                 manifest.governed_authorization.authorization_id
                 if manifest.governed_authorization is not None
@@ -2287,6 +2809,11 @@ class BoundAttendedExecutor:
                 else None
             ),
             expected_texts=expected_texts,
+            expected_postconditions=(
+                [condition.model_copy(deep=True) for condition in state.step.expect]
+                if not skipped
+                else []
+            ),
             transition_history_hash=pending.program_history_hash,
             visited_states_delta=list(pending.program_history_delta),
             program_transition_evidence_delta=list(
@@ -2295,6 +2822,9 @@ class BoundAttendedExecutor:
             program_exception_evidence_delta=list(
                 pending.program_exception_evidence_delta
             ),
+            transition_parent_hash=pending.program_history_hash,
+            transition_delta=[],
+            transition_history=list(pending.program_history),
             bundle_version=capability.bundle_version,
             attended_transition=receipt,
             created_at=capability.issued_at,
@@ -2313,7 +2843,10 @@ class BoundAttendedExecutor:
         # Re-bind the exact signed pause before writing any receipt, checkpoint,
         # or approval; a newer pause must remain completely untouched.
         live_pending = store.read_pending()
-        if live_pending is None or _digest(live_pending) != capability.pause_digest:
+        if (
+            live_pending is None
+            or approval_pause_digest(live_pending) != capability.pause_digest
+        ):
             raise AttendedActionRefused(
                 "the exact attended program pause changed before transition commit"
             )
@@ -2411,11 +2944,31 @@ class BoundAttendedExecutor:
         )
         if existing_seq == source_seq:
             store.write_program_checkpoint(checkpoint)
-        store.write_approval(approval)
         live_pending = store.read_pending()
-        if live_pending is None or _digest(live_pending) != capability.pause_digest:
+        if (
+            live_pending is None
+            or approval_pause_digest(live_pending) != capability.pause_digest
+        ):
             raise AttendedActionRefused("the program pause changed before resume")
-        store.write_pending(live_pending.model_copy(update={"status": "approved"}))
+        store.commit_approval_transition(
+            expected_pending=live_pending,
+            approval=approval,
+            target_status="approved",
+        )
+        from openadapt_flow.runtime.durable.continuation import (
+            ContinuationCoordinator,
+            current_continuation_token,
+        )
+
+        token = current_continuation_token()
+        if token is None:
+            raise AttendedActionRefused(
+                "the attended program completion lost its continuation authority"
+            )
+        ContinuationCoordinator(run_dir, key=self.key).acknowledge_progress(
+            token,
+            external_delivery=True,
+        )
 
         from openadapt_flow.runtime.durable.resume import resume
 

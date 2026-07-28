@@ -15,9 +15,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal, Optional
 
 from openadapt_flow.console import human_decisions
 from openadapt_flow.console.attention import attention_item
+from openadapt_flow.console.decision_context import (
+    RemoteHaltContextV1,
+    remote_halt_context,
+)
 from openadapt_flow.console.halt_detail import RUNG_ORDER
 from openadapt_flow.console.human_decisions import RemoteDecisionProjection
 from openadapt_flow.ir import (
@@ -334,8 +339,11 @@ def test_the_cloud_safe_task_is_unchanged_by_the_local_enrichment(tmp_path):
     assert "halt" not in task
     assert "resolution_ladder" not in json.dumps(task)
     assert PROTECTED_VALUE not in json.dumps(task)
-    # ...and it is structurally unreachable from the remote lane: the relayed
-    # projection has no field the local presentation could ride in.
+    # ...and the remote lane has exactly two fields the presentation could ride
+    # in, both of which are closed by construction. `halt_context` is a
+    # `RemoteHaltContextV1`, which has no string-valued field at all, and
+    # `delivery_tier` is a two-member literal. Nothing else may be added here
+    # without this assertion failing first.
     assert set(RemoteDecisionProjection.model_fields) == {
         "schema_version",
         "task",
@@ -344,5 +352,28 @@ def test_the_cloud_safe_task_is_unchanged_by_the_local_enrichment(tmp_path):
         "event_sequence",
         "expected_transition_digest",
         "idempotency_scope_digest",
+        "delivery_tier",
+        "halt_context",
         "binding_digest",
     }
+    # The remote halt context cannot express a protected value: every field is
+    # a closed enum drawn from the engine's own literals, a bounded integer, or
+    # a boolean. Proving it structurally is stronger than proving it for this
+    # one fixture, so both are asserted.
+    for name, field in RemoteHaltContextV1.model_fields.items():
+        if name in {"resolution_ladder", "will_recheck"}:
+            continue
+        assert field.annotation in (
+            bool,
+            Optional[int],
+            Literal["openadapt.remote-halt-context/v1"],
+            str,
+            Optional[str],
+        ), name
+    context = remote_halt_context(detail["presentation"]["halt"])
+    assert context is not None
+    assert PROTECTED_VALUE not in json.dumps(context.model_dump(mode="json"))
+    # The TYPE step's target had an accessible name; the local tier already
+    # withheld it, and the remote tier still reports that it exists.
+    assert context.target_label_withheld is True
+    assert context.target_role == "textbox"

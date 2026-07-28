@@ -21,9 +21,11 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     ApiBinding,
+    ApiIdentityBinding,
     EffectVerificationEvidence,
     ExecutionOutcomeEnvelope,
     IdentityCheck,
+    IdentitySignalEvidence,
     LoopSpec,
     OutcomeContractCounts,
     Postcondition,
@@ -546,6 +548,15 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
             runtime_version="1.21.0",
         ),
         minimum_effect_tier=VerificationTier.INDEPENDENT_SYSTEM,
+        effect_policies=[
+            EffectVerificationPolicy(
+                step_id="save",
+                actuation_path="gui",
+                effect_index=0,
+                effect_contract_hash=workflow.steps[0].effects[0].contract_hash(),
+                tier=VerificationTier.INDEPENDENT_SYSTEM,
+            )
+        ],
     )
     assert (
         classify_execution_outcome(
@@ -782,24 +793,114 @@ def test_qualified_per_effect_tier_is_enforced_at_gate_and_runtime(tmp_path):
 
 def test_api_verified_outcome_requires_runtime_delivery_attempt_shape():
     workflow = _workflow()
+    workflow.params["record_id"] = "synthetic-1"
+    api_effect = workflow.steps[0].effects[0].model_copy(deep=True)
+    api_effect.match["record_id"] = ValueExpr(param="record_id")
     workflow.steps[0].api_binding = ApiBinding(
         method="POST",
         url_template="/records",
-        effects=[workflow.steps[0].effects[0].model_copy(deep=True)],
+        body_template={"record_id": "{record_id}"},
+        effects=[api_effect],
+        identity=[
+            ApiIdentityBinding(
+                key="record_id",
+                param="record_id",
+                effect_field="record_id",
+                request_pointers=["/body/record_id"],
+            )
+        ],
     )
     report = _verified_production_report(workflow)
+    report.params = {"record_id": "synthetic-1"}
     report.results[0].actuation = "api"
     report.results[0].delivery_attempted = True
+    report.results[0].resolution = None
+    report.results[0].delivery_receipt = None
+    report.results[0].starting_state_settled = None
+    report.results[0].postconditions_ok = None
+    report.results[0].identity = IdentityCheck(
+        status="verified",
+        mode="signal_quorum",
+        coverage=1.0,
+        signal_evidence=[
+            IdentitySignalEvidence(
+                signal="record_id",
+                source="api_parameter",
+                verdict="verified",
+                evidence_class="api_request_effect_binding",
+                match="exact",
+            )
+        ],
+        quorum_required=1,
+        quorum_verified=1,
+    )
     _bind_report_to_workflow(report, workflow)
+    api_effect_hash = api_effect.resolved_contract_hash(report.params)
+    report.results[0].effect_contract_hashes = [api_effect_hash]
+    report.results[0].effect_evidence[0].effect_contract_hash = api_effect_hash
     not_delivered = report.model_copy(deep=True)
     not_delivered.results[0].delivery_attempted = False
+    mixed_gui_api = report.model_copy(deep=True)
+    mixed_gui_api.results[0].resolution = Resolution(
+        point=(5, 5),
+        rung="geometry",
+        confidence=0.1,
+        elapsed_ms=1.0,
+    )
+    mixed_gui_api.results[0].starting_state_settled = True
+    mixed_gui_api.results[0].postconditions_ok = True
+    status_only_identity = report.model_copy(deep=True)
+    status_only_identity.results[0].identity = IdentityCheck(
+        status="verified", mode="structured"
+    )
 
     assert (
         classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.VERIFIED
     )
+    for invalid in (not_delivered, mixed_gui_api, status_only_identity):
+        assert (
+            classify_execution_outcome(invalid, workflow, ExecutionProfile.STANDARD)
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
+
+
+def test_effect_free_api_success_shape_is_never_verified():
+    workflow = Workflow(
+        name="effect-free-api",
+        steps=[
+            Step(
+                id="lookup",
+                intent="look up record",
+                action=ActionKind.KEY,
+                key="Enter",
+                api_binding=ApiBinding(method="GET", url_template="/records"),
+            )
+        ],
+    )
+    report = _bind_report_to_workflow(
+        RunReport(
+            workflow_name=workflow.name,
+            started_at="2026-07-28T00:00:00Z",
+            success=True,
+            execution_completed=True,
+            governed_authorization_id="authorization-1",
+            governed_runtime_inputs_digest="a" * 64,
+            results=[
+                StepResult(
+                    step_id="lookup",
+                    intent="look up record",
+                    ok=True,
+                    actuation="api",
+                    delivery_attempted=True,
+                )
+            ],
+        ),
+        workflow,
+    )
+
     assert (
-        classify_execution_outcome(not_delivered, workflow, ExecutionProfile.STANDARD)
+        classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
 
@@ -1085,6 +1186,15 @@ def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():
             runtime_version="1.22.0",
         ),
         minimum_effect_tier=VerificationTier.INDEPENDENT_SYSTEM,
+        effect_policies=[
+            EffectVerificationPolicy(
+                step_id="save",
+                actuation_path="gui",
+                effect_index=0,
+                effect_contract_hash=workflow.steps[0].effects[0].contract_hash(),
+                tier=VerificationTier.INDEPENDENT_SYSTEM,
+            )
+        ],
     )
     effect_hash = _effect().contract_hash()
     report = RunReport(
@@ -1109,6 +1219,7 @@ def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():
                         ),
                         initial_verdict="confirmed",
                         final_verdict="confirmed",
+                        observed_effect="present",
                     )
                 ],
             )
@@ -1121,6 +1232,103 @@ def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():
     assert report.outcome_envelope is not None
     assert report.outcome_envelope.passed_contracts.effect == 0
     assert "effect_tier_3" in report.outcome_envelope.evidence_classes
+
+
+def test_outcome_envelope_never_counts_an_unrelated_effect_hash():
+    workflow = _workflow()
+    report = _verified_production_report(workflow)
+    exact_hash = report.results[0].effect_contract_hashes[0]
+    unrelated = "sha256:" + "f" * 64
+    report.results[0].effect_contract_hashes = [unrelated]
+    report.results[0].effect_evidence[0].effect_contract_hash = unrelated
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.required_contracts.effect == 1
+    assert report.outcome_envelope.passed_contracts.effect == 0
+    assert not any(
+        item.startswith("effect_tier_")
+        for item in report.outcome_envelope.evidence_classes
+    )
+
+    extra_evidence = _verified_production_report(workflow)
+    extra_evidence.results[0].effect_evidence.append(
+        EffectVerificationEvidence(
+            effect_contract_hash=unrelated,
+            substrate="test",
+            verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
+            initial_verdict="confirmed",
+            final_verdict="confirmed",
+            observed_effect="present",
+        )
+    )
+    assert extra_evidence.results[0].effect_contract_hashes == [exact_hash]
+
+    stamp_execution_outcome(extra_evidence, workflow, ExecutionProfile.STANDARD)
+
+    assert extra_evidence.outcome_envelope is not None
+    assert extra_evidence.outcome_envelope.passed_contracts.effect == 0
+
+
+def test_incomplete_qualification_effect_policy_never_verifies_or_counts():
+    workflow = _workflow()
+    workflow.qualification = QualificationProject(
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="fixture",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+        minimum_effect_tier=VerificationTier.PERSISTED_STATE_REACQUISITION,
+        effect_policies=[],
+    )
+    report = _verified_production_report(workflow)
+    report.results[0].effect_evidence[
+        0
+    ].verification_tier = VerificationTier.PERSISTED_STATE_REACQUISITION
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
+    assert report.production_eligible is False
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.required_contracts.effect == 1
+    assert report.outcome_envelope.passed_contracts.effect == 0
+
+
+def test_linear_result_cannot_inject_loop_scope_into_effect_binding():
+    workflow = _workflow()
+    workflow.params["record_id"] = "base"
+    workflow.data_sources["rows"] = Relation(
+        name="rows", rows=[{"record_id": "forged"}]
+    )
+    workflow.steps[0].effects[0].match["record_id"] = ValueExpr(param="record_id")
+    report = _verified_production_report(workflow)
+    report.params = {"record_id": "base"}
+    report.results[0].program_scope = [
+        ProgramExecutionScopeFrame(
+            graph_id="__program__",
+            loop_state_id="forged-loop",
+            relation="rows",
+            row_index=0,
+        )
+    ]
+    forged_hash = (
+        workflow.steps[0].effects[0].resolved_contract_hash({"record_id": "forged"})
+    )
+    report.results[0].effect_contract_hashes = [forged_hash]
+    report.results[0].effect_evidence[0].effect_contract_hash = forged_hash
+    _bind_report_to_workflow(report, workflow)
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.execution_outcome == ExecutionOutcome.COMPLETED_UNVERIFIED.value
+    assert report.production_eligible is False
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.passed_contracts.effect == 0
 
 
 def test_missing_declared_postcondition_is_completed_unverified_not_an_envelope_crash():

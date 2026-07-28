@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Mapping
+from urllib.parse import urlsplit
 
 from openadapt_flow.decision_delivery import DecisionDeliveryTier
 from openadapt_flow.verification import VerificationTier
@@ -196,25 +197,47 @@ def qualified_effect_requirements(
 
     from openadapt_flow.ir import QualifiedEffectRequirement
     from openadapt_flow.policy import iter_effect_paths
+    from openadapt_flow.qualification import qualification_action_requirements
     from openadapt_flow.traversal import iter_workflow_steps
 
     steps = {step.id: step for step in iter_workflow_steps(workflow)}
+    required_actions, _required_identity = qualification_action_requirements(workflow)
+    expected_keys: set[tuple[str, str, int]] = set()
+    for step_id in required_actions:
+        step = steps[step_id]
+        for actuation_path, effects in iter_effect_paths(step):
+            if not effects:
+                raise ValueError(
+                    "qualified action path has no effect contract to assign a tier"
+                )
+            expected_keys.update(
+                (step.id, actuation_path, effect_index)
+                for effect_index in range(len(effects))
+            )
+    actual_keys = {
+        (binding.step_id, binding.actuation_path, binding.effect_index)
+        for binding in project.effect_policies
+    }
+    if actual_keys != expected_keys:
+        raise ValueError(
+            "qualification project must assign an exact tier to every effect"
+        )
     global_minimum = required_effect_tier(workflow, resolved)
     requirements: list[QualifiedEffectRequirement] = []
     for binding in sorted(
         project.effect_policies,
         key=lambda item: (item.step_id, item.actuation_path, item.effect_index),
     ):
-        step = steps.get(binding.step_id)
-        if step is None:
+        bound_step = steps.get(binding.step_id)
+        if bound_step is None:
             raise ValueError("qualified effect requirement references an unknown step")
-        paths = dict(iter_effect_paths(step))
-        effects = paths.get(binding.actuation_path)
-        if effects is None or binding.effect_index >= len(effects):
+        paths = dict(iter_effect_paths(bound_step))
+        bound_effects = paths.get(binding.actuation_path)
+        if bound_effects is None or binding.effect_index >= len(bound_effects):
             raise ValueError(
                 "qualified effect requirement references a missing actuation effect"
             )
-        effect = effects[binding.effect_index]
+        effect = bound_effects[binding.effect_index]
         if effect.contract_hash() != binding.effect_contract_hash:
             raise ValueError("qualified effect contract changed after qualification")
         required = VerificationTier(binding.tier)
@@ -230,6 +253,120 @@ def qualified_effect_requirements(
             )
         )
     return tuple(requirements)
+
+
+def _api_identity_evidence_is_exact(
+    *,
+    workflow: Workflow,
+    step: Any,
+    check: Any,
+    scoped_params: Mapping[str, str],
+    effects: list[Any],
+) -> bool:
+    """Return whether an API result matches its exact identity binding.
+
+    API execution does not have a GUI identity observation.  Its identity
+    proof is the qualified parameter binding shared by the outgoing request
+    and the independently verified effect.  A bare ``status=verified`` report
+    is therefore not sufficient.
+    """
+
+    binding = step.api_binding
+    if binding is None or not binding.identity or check is None:
+        return False
+    project = workflow.qualification
+    policy = project.identity_policies.get(step.id) if project is not None else None
+    if policy is not None:
+        from openadapt_flow.qualification_identity_evidence import (
+            qualification_identity_evidence_error,
+        )
+
+        if (
+            qualification_identity_evidence_error(
+                policy=policy,
+                check=check,
+                step=step,
+                actuation_path="api",
+                runtime_params=scoped_params,
+                recorded_params=workflow.params,
+            )
+            is not None
+        ):
+            return False
+        required = policy.quorum
+    else:
+        # Legacy certified workflows without a QualificationProject use the
+        # same one-signal minimum that the API runtime enforces.
+        required = 1
+
+    expected_signals = [item.key for item in binding.identity]
+    actual_signals = [item.signal for item in check.signal_evidence]
+    if actual_signals != expected_signals:
+        return False
+    if any(
+        item.source != "api_parameter"
+        or item.verdict != "verified"
+        or item.evidence_class != "api_request_effect_binding"
+        or item.match != "exact"
+        for item in check.signal_evidence
+    ):
+        return False
+    if (
+        check.status != "verified"
+        or check.mode != "signal_quorum"
+        or check.coverage != 1.0
+        or check.quorum_required != required
+        or check.quorum_verified != len(binding.identity)
+        or check.expected
+        or check.observed
+        or check.param is not None
+    ):
+        return False
+
+    for identity in binding.identity:
+        if not scoped_params.get(identity.param):
+            return False
+        effect_path = tuple(identity.effect_field.split("."))
+        if not any(
+            tuple(field.split(".")) == effect_path
+            and expression.param == identity.param
+            for effect in effects
+            for field, expression in effect.match.items()
+        ):
+            return False
+        token = "{" + identity.param + "}"
+        for pointer in identity.request_pointers:
+            pointer_parts = [
+                item.replace("~1", "/").replace("~0", "~")
+                for item in pointer.lstrip("/").split("/")
+            ]
+            if tuple(pointer_parts[1:]) != effect_path:
+                return False
+            if pointer_parts[0] == "url":
+                path_segments = [
+                    item
+                    for item in urlsplit(binding.url_template).path.split("/")
+                    if item
+                ]
+                if token not in path_segments:
+                    return False
+                continue
+            value: Any = (
+                binding.body_template if pointer_parts[0] == "body" else binding.query
+            )
+            for part in pointer_parts[1:]:
+                if isinstance(value, dict) and part in value:
+                    value = value[part]
+                elif isinstance(value, list) and part.isdigit():
+                    index = int(part)
+                    if index >= len(value):
+                        return False
+                    value = value[index]
+                else:
+                    return False
+            if value != token:
+                return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -822,7 +959,7 @@ def classify_execution_outcome(
     if workflow.program is None:
         if report.program_transition_evidence:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        if report.program_transition_evidence:
+        if any(result.program_scope for result in report.results):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if fault_prefix_review:
             target_indexes = [
@@ -908,6 +1045,8 @@ def classify_execution_outcome(
     from openadapt_flow.ir import ActionKind
 
     def _scoped_params(result: Any) -> dict[str, str] | None:
+        if workflow.program is None and result.program_scope:
+            return None
         scoped = dict(report.params)
         for frame in result.program_scope:
             if frame.relation is None:
@@ -957,9 +1096,38 @@ def classify_execution_outcome(
             *HUMAN_ATTENDED_ACTUATIONS,
         }:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
+        api_actuation = result.actuation == "api"
+        from openadapt_flow.policy import effects_for_actuation
+
+        effects = effects_for_actuation(step, result.actuation)
         automated_gui = result.actuation in AUTOMATED_GUI_ACTUATIONS or (
             result.actuation is None and step.action is not ActionKind.WAIT
         )
+        if api_actuation:
+            # The API tier bypasses the GUI resolve/settle/act/postcondition
+            # path. A successful API result therefore contains only the API
+            # delivery marker, API identity evidence, and independent effect
+            # evidence. Reject a report that combines API effects with GUI-only
+            # artifacts; the runtime cannot emit that mixed path.
+            if (
+                result.resolution is not None
+                or result.drag_end_resolution is not None
+                or result.delivery_receipt is not None
+                or result.delivery_uncertainty is not None
+                or result.starting_state_settled is not None
+                or result.input_verified is not None
+                or result.input_retried
+                or result.postconditions_ok is not None
+                or result.postcondition_drift_rescues
+                or result.drift_oracle_calls
+                or result.heal is not None
+                or result.before_png is not None
+                or result.after_png is not None
+                or result.interstitial_actions
+            ):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
+            if not effects:
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
         if automated_gui and result.starting_state_settled is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if (
@@ -974,7 +1142,7 @@ def classify_execution_outcome(
             and result.delivery_attempted is not True
         ):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        if result.actuation == "api" and result.delivery_attempted is not True:
+        if api_actuation and result.delivery_attempted is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if result.identity is not None and result.identity.status != "verified":
             return ExecutionOutcome.COMPLETED_UNVERIFIED
@@ -993,17 +1161,22 @@ def classify_execution_outcome(
             and (not step.expect or uncertainty.postconditions_confirmed is True)
         ):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        if step.expect and result.postconditions_ok is not True:
+        if not api_actuation and step.expect and result.postconditions_ok is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if not is_consequential_result:
             continue
         if result.effect_approved_unverified or result.effect_verified is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        from openadapt_flow.policy import effects_for_actuation
-
-        effects = effects_for_actuation(step, result.actuation)
         scoped_params = _scoped_params(result)
         if scoped_params is None:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if api_actuation and not _api_identity_evidence_is_exact(
+            workflow=workflow,
+            step=step,
+            check=result.identity,
+            scoped_params=scoped_params,
+            effects=effects,
+        ):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         opaque = (
             {"__run_id__": report.run_id_sha256}
@@ -1122,7 +1295,11 @@ def stamp_execution_outcome(
         report.success = outcome is ExecutionOutcome.VERIFIED
     elif outcome is ExecutionOutcome.ROLLED_BACK:
         report.success = False
-    report.outcome_envelope = build_outcome_envelope(report, workflow)
+    report.outcome_envelope = build_outcome_envelope(
+        report,
+        workflow,
+        runtime_worklists=runtime_worklists,
+    )
     # Section 3: refine the coarse outcome into a first-class terminal
     # transaction outcome + effect journal. Additive -- reads the fields set
     # above and never mutates them (leaf import; see openadapt_flow.transaction).
@@ -1148,7 +1325,10 @@ def _completed_compensation_actions(report: RunReport) -> int:
 
 
 def build_outcome_envelope(
-    report: RunReport, workflow: Workflow
+    report: RunReport,
+    workflow: Workflow,
+    *,
+    runtime_worklists: Mapping[str, list[dict[str, str]]] | None = None,
 ) -> ExecutionOutcomeEnvelope:
     """Build the versioned PHI-free evidence summary for ``report``.
 
@@ -1211,6 +1391,7 @@ def build_outcome_envelope(
         if report.execution_profile is not None
         else None
     )
+    effect_requirements_valid = True
     try:
         envelope_requirements = (
             qualified_effect_requirements(workflow, report.execution_profile)
@@ -1219,13 +1400,36 @@ def build_outcome_envelope(
         )
     except ValueError:
         envelope_requirements = ()
+        effect_requirements_valid = False
+
+    def _scoped_params(result: Any) -> dict[str, str] | None:
+        if workflow.program is None and result.program_scope:
+            return None
+        scoped = dict(report.params)
+        for frame in result.program_scope:
+            if frame.relation is None:
+                continue
+            if runtime_worklists is not None and frame.relation in runtime_worklists:
+                rows = runtime_worklists[frame.relation]
+            else:
+                relation = workflow.data_sources.get(frame.relation)
+                if relation is None:
+                    return None
+                rows = relation.rows
+            if frame.row_index is None or frame.row_index >= len(rows):
+                return None
+            scoped.update(rows[frame.row_index])
+        return scoped
+
     compensation_actions = _completed_compensation_actions(report)
     for result in report.results:
         if result.skipped or result.exception_handled:
             continue
         step = steps_by_id.get(result.step_id)
+        bound_effect_tiers: set[int] = set()
         if step is not None:
-            postcondition_count = len(step.expect)
+            api_actuation = result.actuation == "api"
+            postcondition_count = 0 if api_actuation else len(step.expect)
             required_postconditions += postcondition_count
             if result.postconditions_ok is True:
                 passed_postconditions += postcondition_count
@@ -1233,50 +1437,101 @@ def build_outcome_envelope(
 
             effects = effects_for_actuation(step, result.actuation)
             required_effects += len(effects)
-        if result.effect_verified is True:
-            actuation_path = "api" if result.actuation == "api" else "gui"
-            requirement_by_index = {
-                item.effect_index: item
-                for item in envelope_requirements
-                if item.step_id == result.step_id
-                and item.actuation_path == actuation_path
-            }
-            required_by_hash: dict[str, list[VerificationTier]] = {}
-            for index, effect_hash in enumerate(result.effect_contract_hashes):
-                requirement = requirement_by_index.get(index)
-                required_tier = (
-                    VerificationTier(requirement.minimum_tier)
-                    if requirement is not None
-                    else minimum_effect_tier
+            if result.effect_verified is True and effects:
+                scoped_params = _scoped_params(result)
+                actuation_path = "api" if api_actuation else "gui"
+                requirement_by_index = {
+                    item.effect_index: item
+                    for item in envelope_requirements
+                    if item.step_id == result.step_id
+                    and item.actuation_path == actuation_path
+                }
+                requirements_complete = effect_requirements_valid and (
+                    not requirement_by_index
+                    or set(requirement_by_index) == set(range(len(effects)))
                 )
-                if required_tier is not None:
-                    required_by_hash.setdefault(effect_hash, []).append(required_tier)
-            observed_by_hash: dict[str, list[VerificationTier]] = {}
-            for evidence in result.effect_evidence:
-                if (
-                    evidence.final_verdict == "confirmed"
-                    and evidence.verification_tier is not None
-                ):
-                    observed_by_hash.setdefault(
-                        evidence.effect_contract_hash, []
-                    ).append(VerificationTier(evidence.verification_tier))
-            for effect_hash, required_tiers in required_by_hash.items():
-                observed_tiers = observed_by_hash.get(effect_hash, [])
-                required_tiers.sort(key=int)
-                observed_tiers.sort(key=int)
-                passed_effects += sum(
-                    observed.satisfies(required_tier)
-                    for observed, required_tier in zip(observed_tiers, required_tiers)
+                required_by_hash: dict[str, list[VerificationTier]] = {}
+                expected_hashes: list[str] = []
+                if scoped_params is not None and requirements_complete:
+                    opaque = (
+                        {"__run_id__": report.run_id_sha256}
+                        if report.run_id_sha256 is not None
+                        else {}
+                    )
+                    try:
+                        for index, effect in enumerate(effects):
+                            requirement = requirement_by_index.get(index)
+                            if requirement is not None and (
+                                requirement.effect_contract_hash
+                                != effect.contract_hash()
+                            ):
+                                raise ValueError(
+                                    "qualified effect contract does not match"
+                                )
+                            effect_hash = effect.resolved_contract_hash(
+                                scoped_params,
+                                opaque_param_sha256=opaque,
+                            )
+                            expected_hashes.append(effect_hash)
+                            required_tier = (
+                                VerificationTier(requirement.minimum_tier)
+                                if requirement is not None
+                                else minimum_effect_tier
+                                or VerificationTier.IMMEDIATE_SCREEN
+                            )
+                            required_by_hash.setdefault(effect_hash, []).append(
+                                required_tier
+                            )
+                    except ValueError:
+                        required_by_hash = {}
+                        expected_hashes = []
+                if Counter(result.effect_contract_hashes) != Counter(expected_hashes):
+                    required_by_hash = {}
+                observed_by_hash: dict[str, list[VerificationTier]] = {}
+                evidence_shape_is_exact = len(result.effect_evidence) == len(
+                    expected_hashes
                 )
+                for evidence in result.effect_evidence:
+                    if (
+                        evidence.initial_verdict == "confirmed"
+                        and evidence.final_verdict == "confirmed"
+                        and evidence.observed_effect == "present"
+                        and not evidence.reconciliation_completed
+                        and evidence.reconciliation_actions == 0
+                        and evidence.verification_tier is not None
+                    ):
+                        observed_by_hash.setdefault(
+                            evidence.effect_contract_hash, []
+                        ).append(VerificationTier(evidence.verification_tier))
+                    else:
+                        evidence_shape_is_exact = False
+                if Counter(
+                    evidence.effect_contract_hash for evidence in result.effect_evidence
+                ) != Counter(expected_hashes):
+                    evidence_shape_is_exact = False
+                if not evidence_shape_is_exact:
+                    required_by_hash = {}
+                for effect_hash, required_tiers in required_by_hash.items():
+                    observed_tiers = observed_by_hash.get(effect_hash, [])
+                    bound_effect_tiers.update(int(tier) for tier in observed_tiers)
+                    if len(observed_tiers) != len(required_tiers):
+                        continue
+                    required_tiers.sort(key=int)
+                    observed_tiers.sort(key=int)
+                    for observed, required_tier in zip(observed_tiers, required_tiers):
+                        if observed.satisfies(required_tier):
+                            passed_effects += 1
         if result.identity is not None and result.identity.status == "verified":
             evidence_classes.add("identity")
-        if result.postconditions_ok is True and step is not None and step.expect:
+        if (
+            result.postconditions_ok is True
+            and step is not None
+            and result.actuation != "api"
+            and step.expect
+        ):
             evidence_classes.add("postcondition")
         for evidence in result.effect_evidence:
-            if (
-                evidence.final_verdict == "confirmed"
-                and evidence.verification_tier is not None
-            ):
+            if evidence.verification_tier in bound_effect_tiers:
                 evidence_class = effect_class_by_tier.get(evidence.verification_tier)
                 if evidence_class is not None:
                     evidence_classes.add(evidence_class)

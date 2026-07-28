@@ -456,6 +456,7 @@ class Replayer:
         self._active_delivery_region: Optional[Region] = None
         self._current_graph_id: Optional[str] = None
         self._execution_workflow_snapshot: Optional[Workflow] = None
+        self._execution_snapshot_required = False
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -656,6 +657,7 @@ class Replayer:
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
+        self._execution_snapshot_required = True
         try:
             self._execution_workflow_snapshot = workflow.model_copy(deep=True)
         except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
@@ -5387,7 +5389,11 @@ class Replayer:
 
         snapshot = self._execution_workflow_snapshot
         if snapshot is None:
-            if self.governed_authorization is not None or workflow.program is not None:
+            if (
+                self._execution_snapshot_required
+                or self.governed_authorization is not None
+                or workflow.program is not None
+            ):
                 return "workflow semantics could not be snapshotted before execution"
             # Preserve the private direct-_act compatibility seam for a linear
             # Demo step. Public run() always installs a snapshot first.

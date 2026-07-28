@@ -25,6 +25,15 @@ from openadapt_flow.qualification import (
 from openadapt_flow.qualification_identity_evidence import (
     qualification_identity_evidence_error,
 )
+from openadapt_flow.runtime.identity import (
+    verify_structured_identity,
+    verify_target_identity,
+)
+from openadapt_flow.runtime.identity_template import (
+    build_identity_template,
+    verify_structured_template,
+    verify_template_identity,
+)
 
 
 def _step() -> Step:
@@ -97,14 +106,9 @@ def _quorum_check() -> IdentityCheck:
     )
 
 
-def test_canonical_identity_requires_retained_ladder_comparison() -> None:
-    valid = IdentityCheck(
-        status="verified",
-        mode="structured",
-        coverage=1.0,
-        expected="retained identity",
-        observed="live identity",
-    )
+def test_canonical_identity_requires_exact_runtime_structured_comparison() -> None:
+    valid = verify_structured_identity("Record: A123", " record:   a123 ")
+    assert valid is not None
     assert (
         qualification_identity_evidence_error(
             policy=_canonical_policy(),
@@ -114,11 +118,193 @@ def test_canonical_identity_requires_retained_ladder_comparison() -> None:
         )
         is None
     )
+
+    for mutation in (
+        {"expected": "Other record"},
+        {"observed": "Other record"},
+        {"coverage": 0.01},
+    ):
+        assert qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=valid.model_copy(update=mutation),
+            step=_step(),
+            actuation_path="gui",
+        )
+
+
+def test_canonical_identity_accepts_exact_runtime_context_comparison() -> None:
+    step = _step()
+    assert step.anchor is not None
+    step.anchor.structured_identity = None
+    step.anchor.context_text = "Patient Alice Smith date March Seven"
+    valid = verify_target_identity(
+        step.anchor.context_text,
+        "Patient Alice Smith date March Seven",
+    )
+
+    assert valid.mode == "context"
+    assert (
+        qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=valid,
+            step=step,
+            actuation_path="gui",
+        )
+        is None
+    )
+
+
+def test_canonical_identity_accepts_exact_template_structured_comparison() -> None:
+    step = _step()
+    assert step.anchor is not None
+    template = build_identity_template(
+        None,
+        structured_identity=step.anchor.structured_identity,
+    )
+    assert template is not None
+    step.anchor.identity_template = template
+    step.anchor.structured_identity = None
+    valid = verify_structured_template(template, " record:   a123 ")
+    assert valid is not None
+
+    assert (
+        qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=valid,
+            step=step,
+            actuation_path="gui",
+        )
+        is None
+    )
+
+
+def test_canonical_identity_accepts_exact_template_context_comparison() -> None:
+    step = _step()
+    assert step.anchor is not None
+    context_text = "Patient Alice Smith date March Seven"
+    template = build_identity_template(context_text)
+    assert template is not None
+    step.anchor.identity_template = template
+    step.anchor.structured_identity = None
+    step.anchor.context_text = None
+    valid = verify_template_identity(template, context_text)
+
+    assert valid.mode == "context"
+    assert (
+        qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=valid,
+            step=step,
+            actuation_path="gui",
+        )
+        is None
+    )
+
+
+def test_canonical_identity_binds_exact_runtime_parameter() -> None:
+    step = _step()
+    assert step.anchor is not None
+    step.anchor.structured_identity = None
+    step.anchor.context_text = "Patient Alice Smith account ABCXYZ"
+    recorded_params = {"record_id": "ABCXYZ"}
+    runtime_params = {"record_id": "QWERTY"}
+    valid = verify_target_identity(
+        step.anchor.context_text,
+        "Patient Alice Smith account QWERTY",
+        params=runtime_params,
+        param_examples=recorded_params,
+    )
+
+    assert valid.mode == "param"
+    assert valid.param == "record_id"
+    assert (
+        qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=valid,
+            step=step,
+            actuation_path="gui",
+            runtime_params=runtime_params,
+            recorded_params=recorded_params,
+        )
+        is None
+    )
     assert qualification_identity_evidence_error(
         policy=_canonical_policy(),
-        check=valid.model_copy(update={"observed": ""}),
-        step=_step(),
+        check=valid.model_copy(update={"param": "other_record"}),
+        step=step,
         actuation_path="gui",
+        runtime_params=runtime_params,
+        recorded_params=recorded_params,
+    )
+
+
+def test_canonical_template_identity_binds_exact_runtime_parameter() -> None:
+    step = _step()
+    assert step.anchor is not None
+    context_text = "Patient Alice Smith account ABCXYZ"
+    recorded_params = {"record_id": "ABCXYZ"}
+    runtime_params = {"record_id": "QWERTY"}
+    template = build_identity_template(
+        context_text,
+        param_examples=recorded_params,
+    )
+    assert template is not None
+    step.anchor.identity_template = template
+    step.anchor.structured_identity = None
+    step.anchor.context_text = None
+    valid = verify_template_identity(
+        template,
+        "Patient Alice Smith account QWERTY",
+        params=runtime_params,
+        param_examples=recorded_params,
+    )
+
+    assert valid.mode == "param"
+    assert valid.param == "record_id"
+    assert (
+        qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=valid,
+            step=step,
+            actuation_path="gui",
+            runtime_params=runtime_params,
+            recorded_params=recorded_params,
+        )
+        is None
+    )
+    assert qualification_identity_evidence_error(
+        policy=_canonical_policy(),
+        check=valid,
+        step=step,
+        actuation_path="gui",
+        runtime_params={"other_record": "QWERTY"},
+        recorded_params=recorded_params,
+    )
+
+
+def test_canonical_identity_accepts_exact_runtime_pixel_shape() -> None:
+    step = _step()
+    assert step.anchor is not None
+    step.anchor.structured_identity = None
+    step.anchor.context_text = None
+    step.anchor.identifier_crop = "templates/identifiers/save.png"
+    step.anchor.identifier_region = (0, 0, 100, 20)
+    valid = IdentityCheck(
+        status="verified",
+        mode="pixel",
+        coverage=1.0,
+        expected="recorded identifier crop",
+        observed=("live identifier crop matches after alignment (worst window 0.040)"),
+    )
+
+    assert (
+        qualification_identity_evidence_error(
+            policy=_canonical_policy(),
+            check=valid,
+            step=step,
+            actuation_path="gui",
+        )
+        is None
     )
 
 

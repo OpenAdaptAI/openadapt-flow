@@ -99,7 +99,14 @@ def fault_detector_contract_error(
     ):
         return "fault_detector_delivery_boundary_crossed"
     refusal_index = report.results.index(detector_refusals[0])
-    if refusal_index != len(report.results) - 1:
+    trailing_results = report.results[refusal_index + 1 :]
+    if trailing_results and not (
+        len(trailing_results) == 1
+        and trailing_results[0].step_id == "<terminal>"
+        and not trailing_results[0].ok
+        and trailing_results[0].safety_halt
+        and getattr(report, "terminal_outcome", None) in {"halt", "escalate"}
+    ):
         return "fault_detector_refusal_not_terminal"
     return None
 

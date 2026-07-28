@@ -84,6 +84,7 @@ from openadapt_flow.ir import (
     PredicateKind,
     ProgramExecutionScopeFrame,
     ProgramGraph,
+    ProgramTransitionEvidence,
     Region,
     Resolution,
     RunReport,
@@ -94,6 +95,7 @@ from openadapt_flow.ir import (
     StepResult,
     UnarmedStep,
     Workflow,
+    predicate_contract_sha256,
 )
 from openadapt_flow.privacy import scrub_image_bytes as _scrub_png
 from openadapt_flow.privacy import scrub_text as _scrub_phi
@@ -1103,7 +1105,9 @@ class Replayer:
 
         return self._finalize_report(report, workflow, run_dir)
 
-    def _stamp_execution_outcome(self, report: RunReport, workflow: Workflow) -> None:
+    def _stamp_execution_outcome(
+        self, report: RunReport, workflow: Workflow, run_dir: Path
+    ) -> None:
         """Apply the named profile's evidence contract before persistence."""
 
         if report.execution_profile is None:
@@ -1115,6 +1119,7 @@ class Replayer:
             workflow,
             report.execution_profile,
             runtime_worklists=self._outcome_worklists,
+            transition_evidence_root=run_dir,
         )
 
     def _begin_control_overlay(self, profile: Optional[str]) -> None:
@@ -1248,7 +1253,7 @@ class Replayer:
         """Persist exact evidence first, then project its terminal outcome."""
 
         report.qualification_fault_mutations = list(self._qualification_fault_mutations)
-        self._stamp_execution_outcome(report, workflow)
+        self._stamp_execution_outcome(report, workflow, run_dir)
         # Record the terminal transaction outcome against the reserved key so a
         # later duplicate (suppressed above) can surface what already happened.
         # The suppressed replay itself never overwrites the original outcome.
@@ -1793,7 +1798,13 @@ class Replayer:
             # A branch performs no action: it picks an outgoing edge purely by
             # guard (evaluated on the current frame). No matching edge is a
             # fail-safe HALT unless the state routes to an exception handler.
-            nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
+            nxt = self._select_transition(
+                state,
+                params=params,
+                bundle_dir=bundle_dir,
+                report=report,
+                run_dir=run_dir,
+            )
             if nxt is None:
                 return self._on_state_failure(
                     state,
@@ -1835,7 +1846,13 @@ class Replayer:
                 new_crops=new_crops,
                 depth=depth + 1,
             )
-            return self._select_transition(state, params=params, bundle_dir=bundle_dir)
+            return self._select_transition(
+                state,
+                params=params,
+                bundle_dir=bundle_dir,
+                report=report,
+                run_dir=run_dir,
+            )
 
         raise _ProgramHalt(
             "halt", f"state '{state.id}' has unsupported kind {state.kind!r}"
@@ -1863,7 +1880,13 @@ class Replayer:
         # confirmed consequential write is never re-performed. Keyed on the
         # resolved effect contract hashes recorded in the completed-effect ledger.
         if self._skip_completed_effect_state(state, params, report):
-            return self._select_transition(state, params=params, bundle_dir=bundle_dir)
+            return self._select_transition(
+                state,
+                params=params,
+                bundle_dir=bundle_dir,
+                report=report,
+                run_dir=run_dir,
+            )
         ctx = self._build_graph_ctx(state, graph)
         result = self._run_step(
             state.step,
@@ -1908,7 +1931,13 @@ class Replayer:
         # selecting an outgoing guarded edge: predicate evaluation can halt,
         # but the already-performed write must still enter the effect ledger.
         self._record_program_checkpoint(state, result, params, report)
-        nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
+        nxt = self._select_transition(
+            state,
+            params=params,
+            bundle_dir=bundle_dir,
+            report=report,
+            run_dir=run_dir,
+        )
         return nxt
 
     def _exec_loop_state(
@@ -1967,7 +1996,13 @@ class Replayer:
                     rows=rows,
                 ),
             )
-        return self._select_transition(state, params=params, bundle_dir=bundle_dir)
+        return self._select_transition(
+            state,
+            params=params,
+            bundle_dir=bundle_dir,
+            report=report,
+            run_dir=run_dir,
+        )
 
     def _on_state_failure(self, state: State, reason: str) -> str:
         """A non-action state hit an unrecoverable condition: route to its
@@ -2005,6 +2040,8 @@ class Replayer:
         *,
         params: dict[str, str],
         bundle_dir: Path,
+        report: Optional[RunReport] = None,
+        run_dir: Optional[Path] = None,
     ) -> Optional[str]:
         """Pick this state's next state id (RFC §2.2): evaluate ``transitions``
         IN ORDER, first whose guard holds wins; ``None`` guard is unconditional.
@@ -2019,14 +2056,33 @@ class Replayer:
         if not transitions:
             return None
         if all(t.guard is None for t in transitions):
-            return transitions[0].target
+            target = transitions[0].target
+            self._retain_program_transition_evidence(
+                state=state,
+                evaluations=[(0, True)],
+                selected_target=target,
+                frame=None,
+                report=report,
+                run_dir=run_dir,
+            )
+            return target
         frame = self.vision.wait_settled(self.backend)
-        for t in transitions:
+        evaluations: list[tuple[int, bool]] = []
+        for transition_index, t in enumerate(transitions):
             matched = t.guard is None or self._predicate_holds(
                 t.guard, frame, bundle_dir, params
             )
+            evaluations.append((transition_index, matched))
             self._raise_on_governed_asset_mutation()
             if matched:
+                self._retain_program_transition_evidence(
+                    state=state,
+                    evaluations=evaluations,
+                    selected_target=t.target,
+                    frame=frame,
+                    report=report,
+                    run_dir=run_dir,
+                )
                 return t.target
         raise _ProgramHalt(
             "halt",
@@ -2039,6 +2095,127 @@ class Replayer:
             )
             + ") — run aborted",
         )
+
+    @staticmethod
+    def _program_guard_uses_frame(predicate: Optional[Predicate]) -> bool:
+        """Return whether a guard contract reads the observed application frame."""
+
+        if predicate is None:
+            return False
+        if predicate.kind in {
+            PredicateKind.ANCHOR_RESOLVES,
+            PredicateKind.TEXT_PRESENT,
+            PredicateKind.TEXT_ABSENT,
+        }:
+            return True
+        return any(
+            Replayer._program_guard_uses_frame(operand)
+            for operand in predicate.operands
+        )
+
+    def _retain_program_transition_evidence(
+        self,
+        *,
+        state: State,
+        evaluations: list[tuple[int, bool]],
+        selected_target: str,
+        frame: Optional[bytes],
+        report: Optional[RunReport],
+        run_dir: Optional[Path],
+    ) -> None:
+        """Retain the exact ordered evidence used to select one transition."""
+
+        if report is None or run_dir is None:
+            return
+        scope = self._program_execution_scope()
+        if not scope:
+            raise _ProgramHalt(
+                "halt",
+                "program transition evidence has no execution scope — run aborted",
+                safety=True,
+            )
+        decision_index = (
+            max(
+                (
+                    evidence.decision_index
+                    for evidence in report.program_transition_evidence
+                ),
+                default=-1,
+            )
+            + 1
+        )
+        frame_sha256: Optional[str] = None
+        frame_ref: Optional[str] = None
+        if any(
+            self._program_guard_uses_frame(state.transitions[index].guard)
+            for index, _verdict in evaluations
+        ):
+            if frame is None:
+                raise _ProgramHalt(
+                    "halt",
+                    "visual program transition has no retained frame — run aborted",
+                    safety=True,
+                )
+            frame_sha256 = hashlib.sha256(frame).hexdigest()
+            frame_ref = f"private/program-transitions/{frame_sha256}.png"
+            root = Path(run_dir).resolve()
+            private_dir = root / "private"
+            inventory_dir = private_dir / "program-transitions"
+            try:
+                if private_dir.is_symlink() or inventory_dir.is_symlink():
+                    raise OSError("transition inventory path is a symlink")
+                inventory_dir.mkdir(parents=True, exist_ok=True)
+                if (
+                    private_dir.is_symlink()
+                    or inventory_dir.is_symlink()
+                    or not inventory_dir.resolve().is_relative_to(root)
+                ):
+                    raise OSError("transition inventory leaves the run root")
+                frame_path = root / frame_ref
+                if frame_path.is_symlink():
+                    raise OSError("transition frame path is a symlink")
+                existing = frame_path.read_bytes() if frame_path.exists() else None
+                if existing is not None and existing != frame:
+                    raise OSError("transition frame digest path has other bytes")
+                frame_path.write_bytes(frame)
+            except OSError as exc:
+                raise _ProgramHalt(
+                    "halt",
+                    "program transition frame could not be retained exactly "
+                    f"({type(exc).__name__}) — run aborted",
+                    safety=True,
+                ) from exc
+
+        selected_index = evaluations[-1][0]
+        for transition_index, verdict in evaluations:
+            transition = state.transitions[transition_index]
+            uses_frame = self._program_guard_uses_frame(transition.guard)
+            evidence_kind: Literal["unconditional", "parameters", "frame"]
+            if transition.guard is None:
+                evidence_kind = "unconditional"
+            elif uses_frame:
+                evidence_kind = "frame"
+            else:
+                evidence_kind = "parameters"
+            report.program_transition_evidence.append(
+                ProgramTransitionEvidence(
+                    decision_index=decision_index,
+                    graph_id=scope[-1].graph_id,
+                    state_id=state.id,
+                    program_scope=scope,
+                    transition_index=transition_index,
+                    guard_contract_sha256=predicate_contract_sha256(transition.guard),
+                    guard_verdict=verdict,
+                    selected=transition_index == selected_index,
+                    selected_target=selected_target,
+                    guard_evidence_kind=evidence_kind,
+                    observed_frame_sha256=frame_sha256 if uses_frame else None,
+                    observed_frame_inventory_ref=frame_ref if uses_frame else None,
+                    governed_runtime_inputs_digest=(
+                        report.governed_runtime_inputs_digest
+                    ),
+                )
+            )
 
     # -- Tier-3 durable checkpoint / pause / resume (program mode, RFC §5) ----
 
@@ -2971,7 +3148,11 @@ class Replayer:
                     attended_transition.target_state_id
                     if attended_transition is not None
                     else self._select_transition(
-                        state, params=params, bundle_dir=bundle_dir
+                        state,
+                        params=params,
+                        bundle_dir=bundle_dir,
+                        report=report,
+                        run_dir=run_dir,
                     )
                 )
                 if nxt is not None:
@@ -3036,12 +3217,20 @@ class Replayer:
                         ),
                     )
                 nxt = self._select_transition(
-                    state, params=params, bundle_dir=bundle_dir
+                    state,
+                    params=params,
+                    bundle_dir=bundle_dir,
+                    report=report,
+                    run_dir=run_dir,
                 )
             else:
                 # subflow_call: continue after the call once the child returned.
                 nxt = self._select_transition(
-                    state, params=params, bundle_dir=bundle_dir
+                    state,
+                    params=params,
+                    bundle_dir=bundle_dir,
+                    report=report,
+                    run_dir=run_dir,
                 )
             if nxt is not None:
                 live["state_id"] = nxt

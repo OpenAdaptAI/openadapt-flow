@@ -253,6 +253,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         if case.kind is QualificationCaseKind.REPRESENTATIVE:
             report = RunReport(
                 workflow_name=workflow.name,
+                run_id_sha256=run_sha256,
                 workflow_contract_sha256=workflow_contract_sha256(workflow),
                 started_at="2026-07-28T00:00:00Z",
                 execution_profile="standard",
@@ -413,6 +414,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         )
         report = RunReport(
             workflow_name=workflow.name,
+            run_id_sha256=run_sha256,
             workflow_contract_sha256=workflow_contract_sha256(workflow),
             started_at="2026-07-28T00:00:00Z",
             execution_profile="standard",
@@ -425,7 +427,9 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 qualification_policy
             ),
             governed_minimum_effect_tier=int(project.minimum_effect_tier),
+            governed_authorization_id="qualification-fault",
             governed_runtime_inputs_digest=case_input_sha256,
+            required_identity_step_ids=sorted(required_identity),
             governed_qualification_project_id=project.project_id,
             governed_qualification_project_revision=project.revision,
             governed_qualification_project_contract_sha256=(project.contract_sha256()),
@@ -557,6 +561,63 @@ def _replace_representative_report(
             update={"evidence": changed_refs, "attestation_signature": ""}
         ),
         private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+
+def _replace_fault_report(
+    workflow: Workflow,
+    evidence_root: Path,
+    case_id: str,
+    mutate: Callable[[dict[str, Any]], None],
+) -> None:
+    """Replace and re-sign one retained fault report after mutation."""
+
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == case_id)
+    result = case.results[-1]
+    path = evidence_root / f"{case_id}.report.json"
+    payload = json.loads(path.read_text())
+    mutate(payload)
+    changed_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    path.write_bytes(changed_bytes)
+    changed_digest = hashlib.sha256(changed_bytes).hexdigest()
+    changed_refs = [
+        ref.model_copy(update={"sha256": changed_digest})
+        if ref.kind == "run_report"
+        else ref
+        for ref in result.evidence
+    ]
+    case.results[-1] = sign_case_result(
+        result.model_copy(
+            update={"evidence": changed_refs, "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+
+def test_fault_report_cannot_claim_a_success_terminal(tmp_path: Path) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    _replace_fault_report(
+        workflow,
+        evidence_root,
+        "fault-ambiguity",
+        lambda payload: payload.update({"terminal_outcome": "success"}),
+    )
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert any(
+        refusal.case_id == "fault-ambiguity"
+        and refusal.code is QualificationRefusalCode.CASE_ATTESTATION_INVALID
+        for refusal in report.refusals
     )
 
 
@@ -1109,6 +1170,7 @@ def test_signed_passed_status_cannot_disagree_with_representative_run(
     "mutation",
     [
         "empty_results",
+        "run_id_swap",
         "workflow_contract_swap",
         "delivery_missing",
         "identity_missing",
@@ -1134,6 +1196,8 @@ def test_signed_representative_claim_cannot_replace_exact_step_evidence(
     payload = json.loads(path.read_text())
     if mutation == "empty_results":
         payload["results"] = []
+    elif mutation == "run_id_swap":
+        payload["run_id_sha256"] = "f" * 64
     elif mutation == "workflow_contract_swap":
         payload["workflow_contract_sha256"] = "f" * 64
     elif mutation == "delivery_missing":

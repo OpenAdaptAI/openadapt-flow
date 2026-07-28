@@ -702,6 +702,20 @@ class Guard(BaseModel):
 Predicate.model_rebuild()  # resolve the self-referential `operands`
 
 
+def predicate_contract_sha256(predicate: Optional[Predicate]) -> str:
+    """Return the canonical contract digest for one program transition guard."""
+
+    payload: dict[str, Any]
+    if predicate is None:
+        payload = {"kind": "unconditional"}
+    else:
+        payload = predicate.model_dump(mode="json")
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(canonical).hexdigest()
+
+
 class Interstitial(BaseModel):
     """A KNOWN recurring interstitial that can appear at a step's entry frame
     and would otherwise block the run (docs/LIMITS.md "state dependency").
@@ -2039,6 +2053,60 @@ class ProgramExecutionScopeFrame(BaseModel):
         return self
 
 
+class ProgramTransitionEvidence(BaseModel):
+    """Exact ordered evidence for one evaluated program transition.
+
+    A decision emits one row for each transition evaluated before the first
+    match. The final row is the selected transition. Frame-backed rows bind to
+    a content-addressed private frame inside the local run directory. The
+    report carries only the digest and inventory reference, not the pixels.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision_index: int = Field(ge=0)
+    graph_id: str = Field(min_length=1, max_length=128)
+    state_id: str = Field(min_length=1, max_length=128)
+    program_scope: list[ProgramExecutionScopeFrame] = Field(min_length=1)
+    transition_index: int = Field(ge=0)
+    guard_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    guard_verdict: bool
+    selected: bool
+    selected_target: str = Field(min_length=1, max_length=128)
+    guard_evidence_kind: Literal["unconditional", "parameters", "frame"]
+    observed_frame_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    observed_frame_inventory_ref: Optional[str] = None
+    governed_runtime_inputs_digest: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def _evidence_is_exact_and_content_addressed(self) -> "ProgramTransitionEvidence":
+        if self.selected != self.guard_verdict:
+            raise ValueError("a transition decision must stop at its first true guard")
+        has_frame_digest = self.observed_frame_sha256 is not None
+        has_frame_ref = self.observed_frame_inventory_ref is not None
+        if has_frame_digest != has_frame_ref:
+            raise ValueError(
+                "transition frame digest and inventory reference must appear together"
+            )
+        if self.guard_evidence_kind == "frame" and not has_frame_digest:
+            raise ValueError("frame-backed guard evidence requires an exact frame")
+        if self.guard_evidence_kind != "frame" and has_frame_digest:
+            raise ValueError(
+                "non-visual guard evidence must not claim an observed frame"
+            )
+        if self.observed_frame_sha256 is not None:
+            expected = f"private/program-transitions/{self.observed_frame_sha256}.png"
+            if self.observed_frame_inventory_ref != expected:
+                raise ValueError(
+                    "transition frame inventory reference is not content-addressed"
+                )
+        return self
+
+
 class EffectVerificationEvidence(BaseModel):
     """Structured evidence behind one effect-verification decision."""
 
@@ -2660,6 +2728,13 @@ class RunReport(BaseModel):
     # additive and empty/None on a linear run.
     terminal_outcome: Optional[str] = None
     visited_states: list[str] = Field(default_factory=list)
+    program_transition_evidence: list[ProgramTransitionEvidence] = Field(
+        default_factory=list,
+        description=(
+            "Ordered guard evaluations retained by the program runtime. "
+            "Frame-backed evidence refers to private local run artifacts."
+        ),
+    )
     # The structured HALT record (see HaltObservation): populated by
     # Replayer.run when the run stops on an unhandled state, so the halt->learn
     # loop can lift it into the trace corpus. None on a successful run (and on

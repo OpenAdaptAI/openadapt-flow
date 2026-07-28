@@ -8,7 +8,8 @@ the action.  A bare ``status="verified"`` is never sufficient.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Optional
 
 from openadapt_flow.ir import IdentityCheck, Step
@@ -26,6 +27,11 @@ _EVIDENCE_CLASS_BY_SOURCE = {
     "workflow_state": "workflow_state_identity",
     "api_parameter": "api_request_effect_binding",
 }
+
+_PIXEL_VERIFIED_OBSERVATION = re.compile(
+    r"live identifier crop matches after alignment "
+    r"\(worst window (?P<distance>0\.\d{3})\)"
+)
 
 
 def _quorum_shape_error(
@@ -65,12 +71,106 @@ def _quorum_shape_error(
     return None
 
 
+def _canonical_ladder_error(
+    check: IdentityCheck,
+    *,
+    step: Step,
+    runtime_params: Mapping[str, str],
+    recorded_params: Mapping[str, str],
+) -> Optional[str]:
+    """Validate a canonical-ladder result against one runtime-emittable shape."""
+
+    if (
+        check.signal_evidence
+        or check.quorum_required is not None
+        or check.quorum_verified is not None
+    ):
+        return "canonical ladder evidence contains an incompatible quorum payload"
+    anchor = step.anchor
+    if anchor is None:
+        return "canonical ladder evidence belongs to an action without an anchor"
+
+    if check.mode == "pixel":
+        if not anchor.identifier_crop or anchor.identifier_region is None:
+            return "pixel identity evidence has no retained identifier crop"
+        match = _PIXEL_VERIFIED_OBSERVATION.fullmatch(check.observed)
+        if (
+            check.coverage != 1.0
+            or check.expected != "recorded identifier crop"
+            or check.param is not None
+            or match is None
+        ):
+            return "pixel identity evidence is not an exact runtime verdict"
+        from openadapt_flow.runtime.identity import PIXEL_VERIFY_MAX_WINDOW
+
+        if float(match.group("distance")) > PIXEL_VERIFY_MAX_WINDOW:
+            return "pixel identity evidence exceeds the runtime verification bound"
+        return None
+
+    try:
+        expected: Optional[IdentityCheck]
+        if check.mode == "structured":
+            template = anchor.identity_template
+            if template is not None and template.structured:
+                from openadapt_flow.runtime.identity_template import (
+                    verify_structured_template,
+                )
+
+                expected = verify_structured_template(
+                    template,
+                    check.observed,
+                    params=dict(runtime_params),
+                    param_examples=dict(recorded_params),
+                )
+            else:
+                from openadapt_flow.runtime.identity import verify_structured_identity
+
+                expected = verify_structured_identity(
+                    anchor.structured_identity,
+                    check.observed,
+                )
+        elif check.mode in {"context", "param"}:
+            template = anchor.identity_template
+            if template is not None and template.tokens:
+                from openadapt_flow.runtime.identity_template import (
+                    verify_template_identity,
+                )
+
+                expected = verify_template_identity(
+                    template,
+                    check.observed,
+                    params=dict(runtime_params),
+                    param_examples=dict(recorded_params),
+                )
+            elif anchor.context_text is not None:
+                from openadapt_flow.runtime.identity import verify_target_identity
+
+                expected = verify_target_identity(
+                    anchor.context_text,
+                    check.observed,
+                    params=dict(runtime_params),
+                    param_examples=dict(recorded_params),
+                )
+            else:
+                expected = None
+        else:
+            return "retained identity mode is not a definitive canonical ladder result"
+    except (TypeError, ValueError):
+        return "canonical ladder evidence could not be reproduced"
+
+    if expected is None or expected.status != "verified" or expected != check:
+        return "canonical ladder evidence does not reproduce the runtime verdict"
+    return None
+
+
 def qualification_identity_evidence_error(
     *,
     policy: "IdentityPolicy",
     check: Optional[IdentityCheck],
     step: Step,
     actuation_path: str,
+    runtime_params: Optional[Mapping[str, str]] = None,
+    recorded_params: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     """Return why a representative action did not prove its exact identity policy.
 
@@ -137,16 +237,9 @@ def qualification_identity_evidence_error(
 
     if enforcement != "canonical_ladder":
         return "qualified identity policy uses an unknown enforcement mode"
-    if check.mode not in {"context", "param", "structured", "pixel"}:
-        return "retained identity mode is not a definitive canonical ladder result"
-    if (
-        check.signal_evidence
-        or check.quorum_required is not None
-        or check.quorum_verified is not None
-    ):
-        return "canonical ladder evidence contains an incompatible quorum payload"
-    if not (0.0 < check.coverage <= 1.0):
-        return "canonical ladder evidence has no positive retained coverage"
-    if not check.expected.strip() or not check.observed.strip():
-        return "canonical ladder evidence omits its retained comparison"
-    return None
+    return _canonical_ladder_error(
+        check,
+        step=step,
+        runtime_params=runtime_params or {},
+        recorded_params=recorded_params or {},
+    )

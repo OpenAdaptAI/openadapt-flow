@@ -68,8 +68,10 @@ def runtime_inputs_bytes(
 
 def parse_runtime_inputs_bytes(
     value: bytes,
+    *,
+    workflow: Workflow,
 ) -> tuple[dict[str, str], dict[str, list[dict[str, str]]]]:
-    """Parse one exact canonical governed-input artifact."""
+    """Parse bytes that this workflow's runtime serializer can emit exactly."""
 
     try:
         payload = json.loads(value.decode("utf-8"))
@@ -103,6 +105,7 @@ def parse_runtime_inputs_bytes(
     interstitials = payload.get("interstitials")
     if interstitials is not None and not isinstance(interstitials, list):
         raise ValueError("runtime-input artifact has invalid interstitials")
+    validated_interstitials: list[Interstitial] = []
     if interstitials is not None:
         try:
             validated_interstitials = [
@@ -117,14 +120,18 @@ def parse_runtime_inputs_bytes(
             for interstitial in validated_interstitials
         ] != interstitials:
             raise ValueError("runtime-input artifact has non-canonical interstitials")
-    canonical = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-    if canonical != value:
-        raise ValueError("runtime-input artifact is not in canonical form")
-    return dict(params), {
+    canonical_worklists = {
         name: [dict(row) for row in rows] for name, rows in worklists.items()
     }
+    canonical = runtime_inputs_bytes(
+        workflow,
+        dict(params),
+        canonical_worklists,
+        interstitials=(validated_interstitials if interstitials is not None else None),
+    )
+    if canonical != value:
+        raise ValueError("runtime-input artifact is not in canonical form")
+    return dict(params), canonical_worklists
 
 
 def runtime_inputs_digest(

@@ -161,6 +161,7 @@ def must_be_identity_armed(
     *,
     require_current_risk_certification: bool = True,
     certifying_policy: Optional[Policy] = None,
+    certifying_policy_sha256: Optional[str] = None,
 ) -> bool:
     """Whether the pre-click identity check MUST be armed on ``step``.
 
@@ -174,6 +175,7 @@ def must_be_identity_armed(
         workflow,
         require_current_risk_certification=require_current_risk_certification,
         certifying_policy=certifying_policy,
+        certifying_policy_sha256=certifying_policy_sha256,
     ):
         # A consequential keyboard submission with no retained anchor is an
         # identity-coverage defect, not a reason to exempt the action.
@@ -185,11 +187,13 @@ def must_be_identity_armed(
         workflow,
         require_current_risk_certification=require_current_risk_certification,
         certifying_policy=certifying_policy,
+        certifying_policy_sha256=certifying_policy_sha256,
     ) or "entity_navigation" in step_tags(
         step,
         workflow,
         require_current_certification=require_current_risk_certification,
         certifying_policy=certifying_policy,
+        certifying_policy_sha256=certifying_policy_sha256,
     )
 
 

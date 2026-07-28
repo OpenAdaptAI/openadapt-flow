@@ -18,6 +18,11 @@ from PIL import Image, ImageDraw
 from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
 from openadapt_flow.deployment import build_replayer
+from openadapt_flow.execution_profiles import (
+    ExecutionOutcome,
+    ExecutionProfile,
+    classify_execution_outcome,
+)
 from openadapt_flow.ir import (
     ActionDeliveryReceipt,
     ActionKind,
@@ -729,6 +734,33 @@ def test_later_fault_target_allows_prior_required_write_then_halts(
     assert receipt.step_id_sha256 == sha256_bytes(b"submit")
     assert fault_detector_contract_error(report, receipt) is None
 
+    assert (
+        classify_execution_outcome(
+            report,
+            workflow,
+            ExecutionProfile.STANDARD,
+            _qualification_fault_target_step_id="submit",
+        )
+        is ExecutionOutcome.VERIFIED
+    )
+    insufficient_prior_evidence = report.model_copy(
+        update={
+            "results": [
+                report.results[0].model_copy(update={"effect_evidence": []}),
+                report.results[1],
+            ]
+        }
+    )
+    assert (
+        classify_execution_outcome(
+            insufficient_prior_evidence,
+            workflow,
+            ExecutionProfile.STANDARD,
+            _qualification_fault_target_step_id="submit",
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
 
 def test_authorization_rejects_fault_target_removed_from_permitted_scope(
     tmp_path: Path,
@@ -912,6 +944,20 @@ def test_detector_receipt_rejects_any_result_after_the_fault_refusal() -> None:
         fault_detector_contract_error(report, receipt)
         == "fault_detector_refusal_not_terminal"
     )
+
+    program_terminal = StepResult(
+        step_id="<terminal>",
+        intent="program halt",
+        ok=False,
+        safety_halt=True,
+    )
+    program_report = SimpleNamespace(
+        execution_outcome="HALTED",
+        terminal_outcome="halt",
+        results=[refusal, program_terminal],
+        governed_qualification_case_action_paths={"submit": "gui"},
+    )
+    assert fault_detector_contract_error(program_report, receipt) is None
 
 
 def test_fault_receipt_signature_rejects_wrong_key_and_tampering() -> None:

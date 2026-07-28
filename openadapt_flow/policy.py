@@ -392,6 +392,7 @@ def step_tags(
     *,
     require_current_certification: bool = False,
     certifying_policy: Optional["Policy"] = None,
+    certifying_policy_sha256: Optional[str] = None,
 ) -> set[str]:
     """Semantic tags a policy's ``require_*`` lists can match against (as an
     alternative to raw keywords).
@@ -424,6 +425,7 @@ def step_tags(
         workflow,
         require_current_certification=require_current_certification,
         certifying_policy=certifying_policy,
+        certifying_policy_sha256=certifying_policy_sha256,
     )
     if effective_risk == "irreversible":
         tags.update(("irreversible", "write"))

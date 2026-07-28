@@ -22,10 +22,13 @@ from openadapt_flow.ir import (
     ApiBinding,
     EffectVerificationEvidence,
     ExecutionOutcomeEnvelope,
+    IdentityCheck,
     LoopSpec,
     OutcomeContractCounts,
     Postcondition,
     PostconditionKind,
+    Predicate,
+    PredicateKind,
     ProgramExecutionScopeFrame,
     ProgramGraph,
     Relation,
@@ -470,6 +473,11 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
     verified.results[0].starting_state_settled = True
     verified.results[0].delivery_attempted = True
     verified.results[0].actuation = "guarded_coordinate"
+    verified.required_identity_step_ids = ["save"]
+    verified.results[0].identity = IdentityCheck(
+        status="verified",
+        mode="structured",
+    )
     verified.results[0].effect_verified = True
     effect_hash = _effect().contract_hash()
     verified.results[0].effect_contract_hashes = [effect_hash]
@@ -557,6 +565,7 @@ def _verified_production_report(workflow: Workflow) -> RunReport:
             execution_completed=True,
             governed_authorization_id="authorization-1",
             governed_runtime_inputs_digest="a" * 64,
+            required_identity_step_ids=["save"],
             results=[
                 StepResult(
                     step_id="save",
@@ -565,6 +574,7 @@ def _verified_production_report(workflow: Workflow) -> RunReport:
                     starting_state_settled=True,
                     delivery_attempted=True,
                     actuation="guarded_coordinate",
+                    identity=IdentityCheck(status="verified", mode="structured"),
                     postconditions_ok=True,
                     effect_verified=True,
                     effect_contract_hashes=[effect_hash],
@@ -592,6 +602,13 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
         classify_execution_outcome(verified, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.VERIFIED
     )
+
+    omitted_identity_requirement = verified.model_copy(deep=True)
+    omitted_identity_requirement.required_identity_step_ids = []
+    extra_identity_requirement = verified.model_copy(deep=True)
+    extra_identity_requirement.required_identity_step_ids.append("undeclared")
+    duplicate_identity_requirement = verified.model_copy(deep=True)
+    duplicate_identity_requirement.required_identity_step_ids.append("save")
 
     canceled = verified.model_copy(update={"canceled": True})
     failed = verified.model_copy(update={"terminal_outcome": "failed"})
@@ -637,6 +654,9 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
         unknown_action,
         disguised_delivery,
         unknown_actuation,
+        omitted_identity_requirement,
+        extra_identity_requirement,
+        duplicate_identity_requirement,
     ):
         assert (
             classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
@@ -696,6 +716,222 @@ def test_program_outcome_requires_exact_ordered_action_trace():
             classify_execution_outcome(invalid, workflow, ExecutionProfile.STANDARD)
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
+
+
+def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
+    workflow = Workflow(
+        name="program-fault-prefix",
+        program=ProgramGraph(
+            entry="prepare",
+            states={
+                "prepare": State(
+                    id="prepare",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="prepare",
+                        intent="prepare",
+                        action=ActionKind.KEY,
+                    ),
+                    transitions=[Transition(target="submit")],
+                ),
+                "submit": State(
+                    id="submit",
+                    kind=StateKind.ACTION,
+                    step=Step(id="submit", intent="submit", action=ActionKind.KEY),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+    )
+    scope = [ProgramExecutionScopeFrame(graph_id="__program__")]
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-28T00:00:00Z",
+        success=False,
+        execution_completed=False,
+        terminal_outcome="halt",
+        visited_states=["prepare", "submit"],
+        governed_authorization_id="authorization-1",
+        governed_runtime_inputs_digest="b" * 64,
+        results=[
+            StepResult(
+                step_id="prepare",
+                intent="prepare",
+                ok=True,
+                starting_state_settled=True,
+                delivery_attempted=True,
+                actuation="guarded_keyboard",
+                program_scope=scope,
+            ),
+            StepResult(
+                step_id="submit",
+                intent="submit",
+                ok=False,
+                safety_halt=True,
+                delivery_attempted=False,
+                program_scope=scope,
+            ),
+            StepResult(
+                step_id="<terminal>",
+                intent="program halt",
+                ok=False,
+                safety_halt=True,
+            ),
+        ],
+    )
+    _bind_report_to_workflow(report, workflow)
+
+    assert (
+        classify_execution_outcome(
+            report,
+            workflow,
+            ExecutionProfile.STANDARD,
+            _qualification_fault_target_step_id="submit",
+        )
+        is ExecutionOutcome.VERIFIED
+    )
+    for invalid in (
+        report.model_copy(update={"visited_states": ["submit"]}),
+        report.model_copy(
+            update={
+                "results": [
+                    report.results[0].model_copy(update={"delivery_attempted": False}),
+                    *report.results[1:],
+                ]
+            }
+        ),
+        report.model_copy(update={"terminal_outcome": "success"}),
+    ):
+        assert (
+            classify_execution_outcome(
+                invalid,
+                workflow,
+                ExecutionProfile.STANDARD,
+                _qualification_fault_target_step_id="submit",
+            )
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
+
+
+def test_program_outcome_recomputes_ordered_parameter_transitions():
+    def _workflow(transitions: list[Transition]) -> Workflow:
+        return Workflow(
+            name="ordered-program-outcome",
+            program=ProgramGraph(
+                entry="pick",
+                states={
+                    "pick": State(
+                        id="pick",
+                        kind=StateKind.BRANCH,
+                        transitions=transitions,
+                    ),
+                    "first": State(
+                        id="first",
+                        kind=StateKind.ACTION,
+                        step=Step(id="first", intent="first", action=ActionKind.KEY),
+                        transitions=[Transition(target="done")],
+                    ),
+                    "second": State(
+                        id="second",
+                        kind=StateKind.ACTION,
+                        step=Step(id="second", intent="second", action=ActionKind.KEY),
+                        transitions=[Transition(target="done")],
+                    ),
+                    "done": State(
+                        id="done", kind=StateKind.TERMINAL, outcome="success"
+                    ),
+                },
+            ),
+        )
+
+    def _report(workflow: Workflow, *, route: str) -> RunReport:
+        report = RunReport(
+            workflow_name=workflow.name,
+            started_at="2026-07-28T00:00:00Z",
+            success=True,
+            execution_completed=True,
+            terminal_outcome="success",
+            visited_states=["pick", "second", "done"],
+            params={"route": route},
+            governed_authorization_id="authorization-1",
+            governed_runtime_inputs_digest="b" * 64,
+            results=[
+                StepResult(
+                    step_id="second",
+                    intent="second",
+                    ok=True,
+                    starting_state_settled=True,
+                    delivery_attempted=True,
+                    actuation="guarded_keyboard",
+                    program_scope=[ProgramExecutionScopeFrame(graph_id="__program__")],
+                )
+            ],
+        )
+        return _bind_report_to_workflow(report, workflow)
+
+    two_unconditional = _workflow(
+        [Transition(target="first"), Transition(target="second")]
+    )
+    assert (
+        classify_execution_outcome(
+            _report(two_unconditional, route="second"),
+            two_unconditional,
+            ExecutionProfile.STANDARD,
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
+    ordered_guard = _workflow(
+        [
+            Transition(
+                guard=Predicate(
+                    kind=PredicateKind.PARAM_EQUALS,
+                    param="route",
+                    value="first",
+                ),
+                target="first",
+            ),
+            Transition(target="second"),
+        ]
+    )
+    assert (
+        classify_execution_outcome(
+            _report(ordered_guard, route="first"),
+            ordered_guard,
+            ExecutionProfile.STANDARD,
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+    assert (
+        classify_execution_outcome(
+            _report(ordered_guard, route="second"),
+            ordered_guard,
+            ExecutionProfile.STANDARD,
+        )
+        is ExecutionOutcome.VERIFIED
+    )
+
+    visual_guard = _workflow(
+        [
+            Transition(
+                guard=Predicate(
+                    kind=PredicateKind.TEXT_PRESENT,
+                    text="Approve",
+                ),
+                target="first",
+            ),
+            Transition(target="second"),
+        ]
+    )
+    assert (
+        classify_execution_outcome(
+            _report(visual_guard, route="second"),
+            visual_guard,
+            ExecutionProfile.STANDARD,
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
 
 
 def test_outcome_envelope_counts_only_effects_meeting_the_required_tier():

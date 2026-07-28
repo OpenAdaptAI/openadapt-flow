@@ -1832,7 +1832,10 @@ def _case_run_report_integrity_error(
     from openadapt_flow.runtime.authorization import parse_runtime_inputs_bytes
 
     try:
-        case_params, case_worklists = parse_runtime_inputs_bytes(input_bytes)
+        case_params, case_worklists = parse_runtime_inputs_bytes(
+            input_bytes,
+            workflow=workflow,
+        )
     except ValueError:
         return (
             QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
@@ -1890,6 +1893,7 @@ def _case_run_report_integrity_error(
         report.governed_qualification_case_input_sha256 == result.case_input_sha256,
         report.governed_runtime_inputs_digest == result.case_input_sha256,
         report.governed_qualification_run_id_sha256 == result.run_id_sha256,
+        report.run_id_sha256 == result.run_id_sha256,
         report.governed_qualification_case_kind == case.kind.value,
         report.governed_qualification_case_action_paths == expected_action_paths,
         report.execution_outcome == expected_outcome,
@@ -1913,6 +1917,7 @@ def _case_run_report_integrity_error(
         workflow,
         ExecutionProfile.STANDARD,
         runtime_worklists=case_worklists,
+        transition_evidence_root=(root / report_ref.relative_path).resolve().parent,
     ).value
     if (
         recomputed_outcome != report.execution_outcome
@@ -1922,6 +1927,67 @@ def _case_run_report_integrity_error(
             QualificationRefusalCode.CASE_ATTESTATION_INVALID,
             "case report outcome does not recompute from its exact step evidence",
         )
+    if case.kind is not QualificationCaseKind.REPRESENTATIVE:
+        fault_target = case.resolved_fault_target()
+        if fault_target is None:
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "fault case does not identify its exact refusal target",
+            )
+        if report.execution_completed is not False or report.success:
+            return (
+                QualificationRefusalCode.CASE_NOT_PASSED,
+                "fault case did not retain an incomplete halted execution state",
+            )
+        if workflow.program is None:
+            if report.terminal_outcome is not None:
+                return (
+                    QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                    "linear fault case reports an inconsistent terminal outcome",
+                )
+        elif report.terminal_outcome not in {"halt", "escalate"}:
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "program fault case did not terminate at a refusal outcome",
+            )
+        if report.halt is not None and report.halt.outcome != (
+            report.terminal_outcome or "halt"
+        ):
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "fault case halt evidence conflicts with its terminal outcome",
+            )
+        action_results = (
+            report.results[:-1]
+            if workflow.program is not None
+            and report.results
+            and report.results[-1].step_id == "<terminal>"
+            else report.results
+        )
+        prior_action_results = action_results[:-1]
+        if any(
+            item.step_id in expected_action_paths
+            and expected_action_paths[item.step_id]
+            != _qualification_actuation_path(item.actuation)
+            for item in prior_action_results
+        ):
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "fault case executed an action outside its authorized path map",
+            )
+        prior_contract_outcome = classify_execution_outcome(
+            report,
+            workflow,
+            ExecutionProfile.STANDARD,
+            runtime_worklists=case_worklists,
+            transition_evidence_root=(root / report_ref.relative_path).resolve().parent,
+            _qualification_fault_target_step_id=fault_target.step_id,
+        ).value
+        if prior_contract_outcome != "VERIFIED":
+            return (
+                QualificationRefusalCode.CASE_NOT_PASSED,
+                "fault case prior actions lack complete production evidence",
+            )
     if policy is not None:
         from openadapt_flow.policy import policy_contract_sha256
 
@@ -2160,6 +2226,8 @@ def _case_run_report_integrity_error(
                             check=item.identity,
                             step=step,
                             actuation_path=actuation_path,
+                            runtime_params=scoped_case_params(item),
+                            recorded_params=workflow.params,
                         )
                         is not None
                     )
@@ -2267,6 +2335,7 @@ def _fault_case_integrity_error(
         report.governed_qualification_run_id_sha256
         == result.run_id_sha256
         == receipt.run_id_sha256,
+        report.run_id_sha256 == receipt.run_id_sha256,
         report.governed_qualification_fault_driver_id == receipt.driver_id,
         report.governed_qualification_fault_driver_contract_sha256
         == receipt.driver_contract_sha256,

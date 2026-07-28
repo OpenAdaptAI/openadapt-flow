@@ -42,7 +42,12 @@ from openadapt_flow.runtime.durable.approval import (
     StateDiverged,
     enforce_resume_authorization,
 )
-from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+from openadapt_flow.runtime.durable.checkpoint import (
+    CheckpointStore,
+    PendingEscalation,
+    RunCheckpoint,
+    RunManifest,
+)
 from openadapt_flow.runtime.durable.program_checkpoint import (
     ProgramCheckpoint,
     bundle_version,
@@ -60,6 +65,69 @@ def resume_point(run_dir: Path | str, *, key: Optional[str] = None) -> int:
     """
     last = CheckpointStore(run_dir, key=key).last_checkpoint()
     return last.next_step_index if last is not None else 0
+
+
+def _created_no_later(checkpoint_created_at: str, pause_created_at: str) -> bool:
+    """Return whether one checkpoint predates its retained pause."""
+
+    try:
+        return datetime.fromisoformat(checkpoint_created_at) <= datetime.fromisoformat(
+            pause_created_at
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _linear_resume_checkpoint(
+    *,
+    checkpoints: list[RunCheckpoint],
+    pending: PendingEscalation,
+    manifest: RunManifest,
+    workflow: Workflow,
+) -> Optional[RunCheckpoint]:
+    """Validate the exact linear history retained by one active pause."""
+
+    attended = (
+        bool(checkpoints)
+        and pending.status == "approved"
+        and checkpoints[-1].step_index == pending.step_index
+        and checkpoints[-1].step_id == pending.step_id
+        and checkpoints[-1].actuation in {"human_attended", "human_attended_skip"}
+    )
+    expected_count = pending.resume_from_index + (1 if attended else 0)
+    if len(checkpoints) != expected_count:
+        raise StateDiverged(
+            "the linear checkpoint history does not match the durable pause cursor"
+        )
+    for index, checkpoint in enumerate(checkpoints):
+        if (
+            index >= len(workflow.steps)
+            or checkpoint.workflow_name != workflow.name
+            or checkpoint.step_index != index
+            or checkpoint.next_step_index != index + 1
+            or checkpoint.step_id != workflow.steps[index].id
+            or checkpoint.params != manifest.params
+        ):
+            raise StateDiverged(
+                "the linear checkpoint history does not match the workflow"
+            )
+        is_attended_tail = attended and index == len(checkpoints) - 1
+        if not is_attended_tail and not _created_no_later(
+            checkpoint.created_at, pending.created_at
+        ):
+            raise StateDiverged(
+                "the linear checkpoint history changed after the durable pause"
+            )
+    prior = (
+        checkpoints[-2]
+        if attended and len(checkpoints) > 1
+        else (checkpoints[-1] if checkpoints and not attended else None)
+    )
+    if pending.resume_from_step_id != (prior.step_id if prior is not None else None):
+        raise StateDiverged(
+            "the linear checkpoint cursor does not match the durable pause"
+        )
+    return checkpoints[-1] if checkpoints else None
 
 
 def resume(
@@ -123,23 +191,31 @@ def resume(
     manifest = store.read_manifest()
     pending = store.read_pending()
 
-    resolved_bundle = bundle_dir or (manifest.bundle_dir if manifest else None)
-    if resolved_bundle is None:
+    if manifest is None:
         raise FileNotFoundError(
-            f"Cannot resume {run_dir}: no durable manifest was found and no "
-            "bundle_dir was supplied. A resumable run must have been executed "
-            "with durability enabled (Replayer(..., durable=True))."
+            f"Cannot resume {run_dir}: no durable manifest was found. A "
+            "continuation must use the exact retained run context."
         )
+    if pending is None:
+        raise ApprovalRequired(
+            "the run has no active durable pause to approve and resume"
+        )
+
+    resolved_bundle = bundle_dir or manifest.bundle_dir
     resolved_bundle = Path(resolved_bundle)
-    resolved_params = (
-        params if params is not None else (manifest.params if manifest else {})
-    )
-    resolved_worklists = (
-        worklists
-        if worklists is not None
-        else (manifest.worklists if manifest is not None else {})
-    )
-    resolved_healed = save_healed_to or (manifest.save_healed_to if manifest else None)
+    if params is not None and params != manifest.params:
+        raise StateDiverged(
+            "resume parameters differ from the exact retained run inputs"
+        )
+    if worklists is not None and worklists != manifest.worklists:
+        raise StateDiverged(
+            "resume worklists differ from the exact retained run inputs"
+        )
+    resolved_params = dict(manifest.params)
+    resolved_worklists = {
+        name: [dict(row) for row in rows] for name, rows in manifest.worklists.items()
+    }
+    resolved_healed = save_healed_to or manifest.save_healed_to
 
     live_bundle_version = bundle_version(resolved_bundle)
 
@@ -147,40 +223,47 @@ def resume(
     # A pending escalation means a human was asked to authorize the resume; no
     # valid approval => refuse (never a silent proceed). A run_dir with no
     # pending escalation is not a paused run -- nothing to authorize.
-    approved: Optional[ApprovalRecord] = None
-    if pending is not None:
-        approved = enforce_resume_authorization(
-            pending,
-            approval if approval is not None else store.read_approval(),
-            bundle_version=live_bundle_version,
-            now=now,
+    if pending.workflow_name != manifest.workflow_name or (
+        not pending.program and pending.params != manifest.params
+    ):
+        raise StateDiverged(
+            "the durable pause does not match the exact retained run manifest"
         )
-        if pending.delivery_uncertainty is not None:
-            last_linear = store.last_checkpoint()
-            last_program = store.last_program_checkpoint()
-            reconciled_without_retry = (
-                not pending.program
-                and last_linear is not None
-                and last_linear.step_index == pending.step_index
-                and last_linear.next_step_index > pending.step_index
-                and last_linear.actuation in {"human_attended", "human_attended_skip"}
-            ) or (
-                pending.program
-                and last_program is not None
-                and last_program.verified_state_id
-                == (pending.state_id or pending.step_id)
-                and last_program.attended_transition is not None
+    approved: ApprovalRecord = enforce_resume_authorization(
+        pending,
+        approval if approval is not None else store.read_approval(),
+        bundle_version=live_bundle_version,
+        now=now,
+    )
+    if pending.delivery_uncertainty is not None:
+        last_linear = store.last_checkpoint()
+        last_program = store.last_program_checkpoint()
+        reconciled_without_retry = (
+            not pending.program
+            and last_linear is not None
+            and last_linear.step_index == pending.step_index
+            and last_linear.next_step_index > pending.step_index
+            and last_linear.actuation in {"human_attended", "human_attended_skip"}
+        ) or (
+            pending.program
+            and last_program is not None
+            and last_program.verified_state_id == (pending.state_id or pending.step_id)
+            and last_program.attended_transition is not None
+        )
+        if not reconciled_without_retry and not approved.authorize_uncertain_retry:
+            raise ApprovalRequired(
+                "the paused step may already have actuated; ordinary resume "
+                "cannot repeat it. Reconcile and independently verify the "
+                "outcome through the attended completion path, or create a "
+                "fresh approval that explicitly authorizes one "
+                "uncertain-delivery retry"
             )
-            if not reconciled_without_retry and not approved.authorize_uncertain_retry:
-                raise ApprovalRequired(
-                    "the paused step may already have actuated; ordinary resume "
-                    "cannot repeat it. Reconcile and independently verify the "
-                    "outcome through the attended completion path, or create a "
-                    "fresh approval that explicitly authorizes one "
-                    "uncertain-delivery retry"
-                )
 
     workflow = Workflow.load(resolved_bundle, key=key)
+    if workflow.name != manifest.workflow_name:
+        raise StateDiverged(
+            "the durable manifest names a different workflow than the bundle"
+        )
     if manifest is not None and manifest.governed_authorization is not None:
         existing = getattr(replayer, "governed_authorization", None)
         if existing is not None and existing != manifest.governed_authorization:
@@ -194,7 +277,11 @@ def resume(
     replayer.checkpoint_key = key
     program_checkpoint: Optional[ProgramCheckpoint] = store.last_program_checkpoint()
 
-    if program_checkpoint is not None or (pending is not None and pending.program):
+    if workflow.program is not None:
+        if not pending.program:
+            raise StateDiverged(
+                "a program workflow cannot resume from a linear durable pause"
+            )
         return _resume_program(
             store=store,
             replayer=replayer,
@@ -211,8 +298,19 @@ def resume(
             pending=pending,
         )
 
-    # -- linear resume (unchanged control flow; now gated by approval) --------
-    start_index = resume_point(run_dir, key=key)
+    if pending.program:
+        raise StateDiverged(
+            "a linear workflow cannot resume from a program durable pause"
+        )
+    # -- linear resume -------------------------------------------------------
+    linear_checkpoints = store.checkpoints()
+    last_linear = _linear_resume_checkpoint(
+        checkpoints=linear_checkpoints,
+        pending=pending,
+        manifest=manifest,
+        workflow=workflow,
+    )
+    start_index = last_linear.next_step_index if last_linear is not None else 0
     from openadapt_flow.runtime.replayer import _DURABLE_RESUME_AUTHORITY
 
     effective_run_id = replayer._admit_durable_resume(
@@ -272,7 +370,33 @@ def _resume_program(
     run that halted on its very FIRST state has no checkpoint (``checkpoint`` is
     None): there is nothing verified to restore, so it resumes from the top.
     """
-    if checkpoint is not None:
+    attended_checkpoint = (
+        checkpoint is not None
+        and checkpoint.attended_transition is not None
+        and pending.status == "approved"
+        and checkpoint.seq == pending.program_checkpoint_seq + 1
+        and checkpoint.verified_state_id == (pending.state_id or pending.step_id)
+    )
+    if checkpoint is None:
+        if (
+            pending.program_checkpoint_seq != 0
+            or pending.resume_from_step_id is not None
+        ):
+            raise StateDiverged(
+                "the durable program pause lost its verified interpreter checkpoint"
+            )
+    else:
+        if checkpoint.workflow_name != workflow.name or (
+            not attended_checkpoint
+            and (
+                checkpoint.seq != pending.program_checkpoint_seq
+                or pending.resume_from_step_id != checkpoint.verified_state_id
+                or not _created_no_later(checkpoint.created_at, pending.created_at)
+            )
+        ):
+            raise StateDiverged(
+                "the program checkpoint cursor changed after the durable pause"
+            )
         if checkpoint.attended_transition is not None:
             if manifest is None:
                 raise BundleMismatch(
@@ -288,15 +412,6 @@ def _resume_program(
                 pending=pending,
                 manifest=manifest,
                 live_bundle_version=live_bundle_version,
-            )
-        elif (
-            pending is not None
-            and pending.program
-            and pending.program_checkpoint_seq != checkpoint.seq
-        ):
-            raise StateDiverged(
-                "the durable program pause does not continue from the last "
-                "verified interpreter checkpoint"
             )
         if (
             checkpoint.bundle_version

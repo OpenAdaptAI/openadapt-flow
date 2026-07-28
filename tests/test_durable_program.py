@@ -53,7 +53,14 @@ from openadapt_flow.runtime.durable.program_checkpoint import (
     LoopCursor,
     ProgramCheckpoint,
 )
-from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
+from openadapt_flow.runtime.effects import (
+    Effect,
+    EffectKind,
+    EffectState,
+    EffectVerdict,
+    ValueExpr,
+    Verdict,
+)
 from openadapt_flow.runtime.replayer import Replayer, _ProgramHalt
 
 # Reuse the scripted fakes + the scripted system-of-record verifier.
@@ -430,6 +437,106 @@ def test_delivery_callback_cannot_remove_a_required_postcondition(tmp_path):
     assert "workflow semantics changed" in (report.results[0].error or "")
 
 
+def test_settling_callback_cannot_remove_a_required_postcondition(tmp_path):
+    workflow = Workflow(
+        name="settling-mutation",
+        steps=[
+            Step(
+                id="submit",
+                intent="submit",
+                action=ActionKind.KEY,
+                key="Enter",
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT,
+                        text="Saved",
+                    )
+                ],
+                effects=[Effect(kind=EffectKind.RECORD_WRITTEN, match={"id": "1"})],
+            )
+        ],
+    )
+
+    class MutatingVision(FakeVision):
+        def wait_settled(self, backend, **kwargs):
+            frame = super().wait_settled(backend, **kwargs)
+            if self.settle_count == 2:
+                workflow.steps[0].expect.clear()
+            return frame
+
+    class ConfirmingVerifier:
+        substrate = "independent-test-store"
+
+        def capture_pre_state(self, context=None):
+            return EffectState(substrate=self.substrate, reachable=True)
+
+        def verify(self, effect, before, context=None):
+            return EffectVerdict(
+                verdict=Verdict.CONFIRMED,
+                kind=effect.kind,
+                substrate=self.substrate,
+            )
+
+    backend = FakeBackend()
+    report = Replayer(
+        backend,
+        vision=MutatingVision(),
+        effect_verifier=ConfirmingVerifier(),
+        durable=True,
+    ).run(
+        workflow,
+        bundle_dir=tmp_path / "bundle",
+        run_dir=tmp_path / "run",
+    )
+
+    assert report.success is False
+    assert report.results[0].postconditions_ok is False
+    assert CheckpointStore(tmp_path / "run").checkpoints() == []
+
+
+def test_program_settling_mutation_cannot_create_a_verified_checkpoint(tmp_path):
+    state = State(
+        id="submit-state",
+        kind=StateKind.ACTION,
+        step=Step(
+            id="submit",
+            intent="submit",
+            action=ActionKind.KEY,
+            key="A",
+            expect=[Postcondition(kind=PostconditionKind.TEXT_PRESENT, text="Saved")],
+        ),
+        transitions=[Transition(target="done")],
+    )
+    workflow = Workflow(
+        name="program-settling-mutation",
+        program=ProgramGraph(
+            entry="submit-state",
+            states={
+                "submit-state": state,
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+    )
+
+    class MutatingVision(FakeVision):
+        def wait_settled(self, backend, **kwargs):
+            frame = super().wait_settled(backend, **kwargs)
+            if self.settle_count == 2:
+                assert workflow.program is not None
+                workflow.program.states["submit-state"].step.expect.clear()
+            return frame
+
+    workflow.save(tmp_path / "bundle")
+    report = Replayer(FakeBackend(), vision=MutatingVision(), durable=True).run(
+        workflow,
+        bundle_dir=tmp_path / "bundle",
+        run_dir=tmp_path / "run",
+    )
+
+    assert report.success is False
+    assert CheckpointStore(tmp_path / "run").program_checkpoints() == []
+
+
 def test_guard_callback_cannot_replace_the_selected_program_target(tmp_path):
     workflow = Workflow(
         name="transition-mutation",
@@ -694,6 +801,25 @@ def test_program_resume_without_approval_is_refused(tmp_path):
         )
     # The pause is still there (nothing was consumed / resumed).
     assert CheckpointStore(run_dir).read_pending() is not None
+
+
+def test_program_resume_requires_the_active_pause_and_exact_worklist(tmp_path):
+    _report, run_dir, bundle, verifier = _run_branch_loop_to_pause(tmp_path)
+    backend = FakeBackend()
+    replayer = Replayer(backend, vision=FakeVision(), effect_verifier=verifier)
+
+    with pytest.raises(StateDiverged, match="worklists differ"):
+        resume(
+            run_dir,
+            replayer,
+            approval=_approval(bundle),
+            worklists={"queue": [{"patient": "different"}]},
+        )
+
+    CheckpointStore(run_dir).clear_pending()
+    with pytest.raises(ApprovalRequired, match="no active durable pause"):
+        resume(run_dir, replayer, approval=_approval(bundle))
+    assert backend.actions == []
 
 
 # -- 4. resume after the app state DIVERGED from the checkpoint is refused ----

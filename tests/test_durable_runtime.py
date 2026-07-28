@@ -27,7 +27,9 @@ from openadapt_flow.ir import (
 )
 from openadapt_flow.runtime.durable import (
     ApprovalRecord,
+    ApprovalRequired,
     CheckpointStore,
+    RunCheckpoint,
     StateDiverged,
     bundle_version,
     resume,
@@ -278,6 +280,47 @@ def test_resume_continues_from_last_checkpoint(tmp_path):
     assert [c.step_index for c in store.checkpoints()] == [0, 1, 2]
     # The pending escalation was cleared when the resume started.
     assert store.read_pending() is None
+
+
+def test_resume_requires_the_active_pause_and_exact_inputs(tmp_path):
+    _report, run_dir, bundle, _backend, verifier = _run_to_halt(tmp_path)
+    replayer = Replayer(FakeBackend(), vision=_vision_ok(), effect_verifier=verifier)
+
+    with pytest.raises(StateDiverged, match="parameters differ"):
+        resume(
+            run_dir,
+            replayer,
+            approval=_approval(bundle),
+            params={"who": "different"},
+        )
+
+    store = CheckpointStore(run_dir)
+    store.clear_pending()
+    with pytest.raises(ApprovalRequired, match="no active durable pause"):
+        resume(run_dir, replayer, approval=_approval(bundle))
+    assert replayer.backend.actions == []
+
+
+def test_resume_refuses_a_checkpoint_added_after_the_pause(tmp_path):
+    _report, run_dir, bundle, _backend, verifier = _run_to_halt(tmp_path)
+    store = CheckpointStore(run_dir)
+    store.write_checkpoint(
+        RunCheckpoint(
+            workflow_name="durable-demo",
+            step_index=2,
+            step_id="s2",
+            next_step_index=3,
+            params={"who": "alice"},
+        )
+    )
+    backend = FakeBackend()
+    with pytest.raises(StateDiverged, match="checkpoint history"):
+        resume(
+            run_dir,
+            Replayer(backend, vision=_vision_ok(), effect_verifier=verifier),
+            approval=_approval(bundle),
+        )
+    assert backend.actions == []
 
 
 # -- resume is idempotent w.r.t. already-confirmed steps (no double write) ---

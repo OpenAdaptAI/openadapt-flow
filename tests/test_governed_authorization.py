@@ -120,6 +120,61 @@ def test_in_memory_semantic_mutation_halts_before_action(tmp_path):
     assert "in-memory workflow semantics" in (report.results[0].error or "")
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("runtime_inputs_digest", "0" * 64),
+        ("required_identity_step_ids", ()),
+        ("minimum_effect_tier", 1),
+        ("unverified_write_approvals", ()),
+    ],
+)
+def test_callback_cannot_change_the_admitted_authorization(
+    tmp_path, field, replacement
+):
+    effect = Effect(kind=EffectKind.RECORD_WRITTEN, match={"id": "1"})
+    step = context_click_step("Jane Sample 1980-01-15 MRN 123")
+    step.effects = [effect]
+    workflow, bundle = _seal(
+        tmp_path, Workflow(name=f"authorization-{field}", steps=[step])
+    )
+    authorization = _authorization(workflow, required=(step.id,)).model_copy(
+        update={
+            "minimum_effect_tier": 4,
+            "unverified_write_approvals": (
+                UnverifiedWriteApproval(
+                    step_id=step.id,
+                    effect_contract_hashes=(effect.contract_hash(),),
+                ),
+            ),
+        }
+    )
+
+    class MutatingBackend(FakeBackend):
+        mutated = False
+
+        def screenshot(self):
+            if not self.mutated:
+                self.mutated = True
+                object.__setattr__(authorization, field, replacement)
+            return super().screenshot()
+
+    backend = MutatingBackend()
+    vision = resolving_vision()
+    vision.ocr_lines = [OcrLine("Jane Sample 1980-01-15 MRN 123")]
+    report = Replayer(
+        backend,
+        vision=vision,
+        governed_authorization=authorization,
+    ).run(workflow, bundle_dir=bundle, run_dir=tmp_path / "run")
+
+    assert report.success is False
+    assert backend.actions == []
+    assert "authorization changed after run admission" in (
+        report.results[0].error or ""
+    )
+
+
 def test_bundle_asset_mismatch_halts_before_action(tmp_path):
     step = context_click_step("Jane Sample 1980-01-15 MRN 123")
     workflow, bundle = _seal(tmp_path, Workflow(name="assets", steps=[step]))

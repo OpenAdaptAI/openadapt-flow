@@ -55,7 +55,9 @@ from openadapt_flow.console.halt_detail import (
 )
 from openadapt_flow.ir import ActionKind
 
-REMOTE_HALT_CONTEXT_SCHEMA = "openadapt.remote-halt-context/v1"
+REMOTE_HALT_CONTEXT_SCHEMA: Literal["openadapt.remote-halt-context/v1"] = (
+    "openadapt.remote-halt-context/v1"
+)
 
 #: Halt categories a remote surface may be told about. Taken from the console's
 #: own set plus the two synthesised values ``attention`` can produce, so this

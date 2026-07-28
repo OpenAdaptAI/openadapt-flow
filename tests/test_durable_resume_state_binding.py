@@ -17,6 +17,7 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.runtime.durable import (
+    ApprovalRequired,
     BundleMismatch,
     CheckpointStore,
     StateDiverged,
@@ -158,6 +159,35 @@ def test_linear_resume_revalidates_retained_text_absent_before_input(tmp_path):
             ),
             approval=_approval(bundle),
         )
+
+    assert backend.actions == []
+
+
+def test_resume_rechecks_bundle_inside_admission_before_input(tmp_path):
+    bundle, run_dir, verifier = _run_to_second_action_pause(
+        tmp_path, _linear_absence_workflow()
+    )
+    verifier.refute.clear()
+    backend = FakeBackend()
+    replayer = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=verifier,
+        poll_interval_s=0.0,
+    )
+    approved = _approval(bundle)
+    admit = replayer._admit_durable_resume
+
+    def mutate_bundle_then_admit(*args, **kwargs):
+        changed = Workflow.load(bundle)
+        changed.steps[1].intent = "changed after the outer resume check"
+        changed.save(bundle)
+        return admit(*args, **kwargs)
+
+    replayer._admit_durable_resume = mutate_bundle_then_admit
+
+    with pytest.raises(ApprovalRequired, match="changed after resume approval"):
+        resume(run_dir, replayer, approval=approved)
 
     assert backend.actions == []
 

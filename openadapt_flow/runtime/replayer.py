@@ -772,6 +772,21 @@ class Replayer:
             durable_context=durable_context,
             authorizing_approval=authorizing_approval,
         )
+        approval_bundle_version = getattr(
+            authorizing_approval,
+            "bundle_version",
+            None,
+        )
+        if not isinstance(approval_bundle_version, str) or not hmac.compare_digest(
+            payload["bundle_version"],
+            approval_bundle_version,
+        ):
+            from openadapt_flow.runtime.durable.approval import ApprovalRequired
+
+            raise ApprovalRequired(
+                "the workflow bundle changed after resume approval; refusing "
+                "to mint continuation authority"
+            )
         canonical = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")

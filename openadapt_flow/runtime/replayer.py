@@ -2989,7 +2989,9 @@ class Replayer:
     def _program_execution_scope(self) -> list[ProgramExecutionScopeFrame]:
         """Return graph and loop cursors without retaining worklist values."""
 
-        frames = [self._frame_to_model(frame) for frame in self._frame_stack]
+        frames = [
+            self._frame_to_model(frame) for frame in getattr(self, "_frame_stack", [])
+        ]
         return self._program_scope_from_frames(frames)
 
     @staticmethod

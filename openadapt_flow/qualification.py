@@ -1765,6 +1765,7 @@ def _case_run_report_integrity_error(
     result: QualificationCaseResult,
     evidence_root: Optional[Path],
     policy: Optional["Policy"] = None,
+    transition_predicate_vision: Any | None = None,
 ) -> Optional[tuple[QualificationRefusalCode, str]]:
     """Bind one signed case result to its exact retained run and input bytes."""
 
@@ -1919,6 +1920,7 @@ def _case_run_report_integrity_error(
         ExecutionProfile.STANDARD,
         runtime_worklists=case_worklists,
         transition_evidence_root=run_evidence_root,
+        transition_predicate_vision=transition_predicate_vision,
     ).value
     if (
         recomputed_outcome != report.execution_outcome
@@ -1982,6 +1984,7 @@ def _case_run_report_integrity_error(
             ExecutionProfile.STANDARD,
             runtime_worklists=case_worklists,
             transition_evidence_root=run_evidence_root,
+            transition_predicate_vision=transition_predicate_vision,
             _qualification_fault_target_step_id=fault_target.step_id,
         ).value
         if prior_contract_outcome != "VERIFIED":
@@ -2415,6 +2418,7 @@ def _case_result_integrity_error(
     evidence_root: Optional[Path],
     evidence_preverified: bool = False,
     policy: Optional["Policy"] = None,
+    transition_predicate_vision: Any | None = None,
 ) -> Optional[tuple[QualificationRefusalCode, str]]:
     """Return the first fail-closed attestation/evidence error."""
 
@@ -2504,6 +2508,7 @@ def _case_result_integrity_error(
             result=result,
             evidence_root=evidence_root,
             policy=policy,
+            transition_predicate_vision=transition_predicate_vision,
         )
         if report_error is not None:
             return report_error
@@ -2558,6 +2563,7 @@ def record_case_results(
     results: Iterable[QualificationCaseResult],
     *,
     evidence_root: Path | str,
+    transition_predicate_vision: Any | None = None,
 ) -> QualificationProject:
     """Record results produced by a local/Desktop/customer-controlled runner."""
 
@@ -2576,6 +2582,7 @@ def record_case_results(
             case,
             result,
             evidence_root=Path(evidence_root),
+            transition_predicate_vision=transition_predicate_vision,
         )
         if error is not None:
             raise QualificationError(f"{error[0].value}: {error[1]}")
@@ -2616,6 +2623,7 @@ def run_cases(
     *,
     case_ids: Optional[set[str]] = None,
     evidence_root: Path | str,
+    transition_predicate_vision: Any | None = None,
 ) -> list[QualificationCaseResult]:
     """Execute selected cases through a caller-supplied local runner.
 
@@ -2638,7 +2646,12 @@ def run_cases(
             )
     contract = workflow_contract_sha256(workflow)
     results = [executor(case, project, contract) for case in selected]
-    record_case_results(workflow, results, evidence_root=evidence_root)
+    record_case_results(
+        workflow,
+        results,
+        evidence_root=evidence_root,
+        transition_predicate_vision=transition_predicate_vision,
+    )
     return results
 
 
@@ -2657,6 +2670,7 @@ def evaluate_qualification(
     *,
     policy: Optional["Policy"] = None,
     evidence_root: Optional[Path | str] = None,
+    transition_predicate_vision: Any | None = None,
     _certified_evidence_contract_sha256: Optional[str] = None,
 ) -> QualificationReport:
     """Evaluate qualification coverage without mutating or executing a workflow."""
@@ -3160,6 +3174,7 @@ def evaluate_qualification(
             evidence_root=Path(evidence_root) if evidence_root is not None else None,
             evidence_preverified=evidence_preverified,
             policy=policy,
+            transition_predicate_vision=transition_predicate_vision,
         )
         if integrity_error is not None:
             refusals.append(
@@ -3239,6 +3254,7 @@ def certify_project(
     *,
     policy: "Policy",
     evidence_root: Path | str,
+    transition_predicate_vision: Any | None = None,
 ) -> QualificationReport:
     """Evaluate and persist the exact qualification decision in memory."""
 
@@ -3247,6 +3263,7 @@ def certify_project(
         workflow,
         policy=policy,
         evidence_root=evidence_root,
+        transition_predicate_vision=transition_predicate_vision,
     )
     if project is not None:
         from openadapt_flow.policy import policy_contract_sha256

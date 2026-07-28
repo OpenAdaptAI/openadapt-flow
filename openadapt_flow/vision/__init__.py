@@ -10,6 +10,8 @@ Public API (see DESIGN.md "Vision API"):
 - :func:`wait_settled`, :func:`wait_settled_result`, :class:`SettleResult`
 """
 
+from typing import Any
+
 from openadapt_flow.vision.hashing import phash_distance, phash_png
 from openadapt_flow.vision.match import (
     Match,
@@ -34,6 +36,56 @@ from openadapt_flow.vision.settle import (
     wait_settled_result,
 )
 
+
+def _contract_state(value: Any, *, depth: int = 0) -> Any:
+    """Return stable behavior-affecting state for the built-in OCR engine."""
+
+    if value is None or isinstance(value, (bool, float, int, str)):
+        return value
+    if depth >= 3:
+        return {"type": f"{type(value).__module__}.{type(value).__qualname__}"}
+    if isinstance(value, (list, tuple)):
+        return [_contract_state(item, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _contract_state(item, depth=depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    state = {
+        str(key): _contract_state(item, depth=depth + 1)
+        for key, item in sorted(vars(value).items())
+        if not str(key).startswith("_")
+        and (
+            item is None or isinstance(item, (bool, float, int, str, list, tuple, dict))
+        )
+    }
+    return {
+        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "state": state,
+    }
+
+
+def program_predicate_contract() -> dict[str, Any]:
+    """Describe the exact active built-in visual-predicate configuration."""
+
+    from rapidocr_onnxruntime import RapidOCR
+
+    from openadapt_flow.vision import ocr as _ocr_callable
+
+    ocr_module = __import__(_ocr_callable.__module__, fromlist=["_engine"])
+    engine = getattr(ocr_module, "_engine", None)
+    if engine is None:
+        # Contract the default lazy engine before the first OCR call. This
+        # produces the same semantic configuration before and after lazy
+        # initialization, while the dependency artifact digest binds its exact
+        # models and native runtime.
+        engine = RapidOCR()
+    return {
+        "ocr_backend": "rapidocr-onnxruntime",
+        "ocr_engine": _contract_state(engine),
+    }
+
+
 __all__ = [
     "AmbiguousOcrMatchError",
     "ContradictoryOcrEvidenceError",
@@ -49,6 +101,7 @@ __all__ = [
     "phash_distance",
     "phash_png",
     "pixels_changed",
+    "program_predicate_contract",
     "text_present",
     "upscale_png",
     "wait_settled",

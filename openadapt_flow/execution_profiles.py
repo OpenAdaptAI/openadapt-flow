@@ -1377,14 +1377,55 @@ def classify_execution_outcome(
                 or terminal_result.intent != "program halt"
                 or terminal_result.ok
                 or not terminal_result.safety_halt
+                or terminal_result.skipped
+                or terminal_result.exception_handled
+                or terminal_result.resolution is not None
+                or terminal_result.drag_end_resolution is not None
+                or terminal_result.identity is not None
+                or terminal_result.input_verified is not None
+                or terminal_result.input_retried
+                or terminal_result.postconditions_ok is not None
+                or terminal_result.interstitial_actions
+                or terminal_result.effect_verified is not None
+                or terminal_result.effect_approved_unverified
+                or terminal_result.effect_results
+                or terminal_result.effect_evidence
+                or terminal_result.effect_contract_hashes
+                or terminal_result.failure_category is not None
+                or terminal_result.actuation is not None
+                or terminal_result.program_scope
+                or terminal_result.delivery_receipt is not None
+                or terminal_result.delivery_attempted is not None
+                or terminal_result.delivery_uncertainty is not None
+                or terminal_result.safety_refusal_evidence is not None
+                or terminal_result.starting_state_settled is not None
+                or terminal_result.postcondition_drift_rescues
+                or terminal_result.drift_oracle_calls
+                or terminal_result.heal is not None
+                or terminal_result.before_png is not None
+                or terminal_result.after_png is not None
             ):
                 return ExecutionOutcome.COMPLETED_UNVERIFIED
             action_results = action_results[:-1]
+            fault_target_result = action_results[-1] if action_results else None
             if (
-                not action_results
-                or action_results[-1].ok
-                or action_results[-1].error is None
-                or terminal_result.error != action_results[-1].error
+                fault_target_result is None
+                or fault_target_result.ok
+                or not fault_target_result.safety_halt
+                or fault_target_result.failure_category
+                not in {"governed_refusal", "safety_halt"}
+                or fault_target_result.delivery_attempted is not False
+                or fault_target_result.actuation is not None
+                or fault_target_result.delivery_receipt is not None
+                or fault_target_result.delivery_uncertainty is not None
+                or fault_target_result.effect_verified is True
+                or fault_target_result.effect_approved_unverified
+                or fault_target_result.input_verified is not None
+                or fault_target_result.input_retried
+                or fault_target_result.postconditions_ok is not None
+                or fault_target_result.after_png is not None
+                or fault_target_result.error is None
+                or terminal_result.error != fault_target_result.error
             ):
                 return ExecutionOutcome.COMPLETED_UNVERIFIED
         if len(action_results) != len(expected_action_trace):

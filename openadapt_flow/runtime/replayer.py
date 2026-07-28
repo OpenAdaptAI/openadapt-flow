@@ -2158,6 +2158,19 @@ class Replayer:
                 run_dir=run_dir,
             )
             return target
+        evaluator_contract_sha256: Optional[str] = None
+        if any(self._program_guard_uses_frame(t.guard) for t in transitions):
+            try:
+                evaluator_contract_sha256 = program_predicate_evaluator_contract_sha256(
+                    self.vision
+                )
+            except ValueError as exc:
+                raise _ProgramHalt(
+                    "halt",
+                    "visual program predicate evaluator has no exact semantic "
+                    f"contract ({exc}) — run aborted",
+                    safety=True,
+                ) from exc
         frame = self.vision.wait_settled(self.backend)
         evaluations: list[tuple[int, bool]] = []
         for transition_index, t in enumerate(transitions):
@@ -2175,6 +2188,7 @@ class Replayer:
                     bundle_dir=bundle_dir,
                     report=report,
                     run_dir=run_dir,
+                    evaluator_contract_sha256=evaluator_contract_sha256,
                 )
                 return t.target
         self._retain_program_transition_evidence(
@@ -2185,6 +2199,7 @@ class Replayer:
             bundle_dir=bundle_dir,
             report=report,
             run_dir=run_dir,
+            evaluator_contract_sha256=evaluator_contract_sha256,
         )
         if allow_unmatched:
             return None
@@ -2216,6 +2231,7 @@ class Replayer:
         bundle_dir: Path,
         report: Optional[RunReport],
         run_dir: Optional[Path],
+        evaluator_contract_sha256: Optional[str] = None,
     ) -> None:
         """Retain the exact ordered evidence used to select one transition."""
 
@@ -2234,7 +2250,6 @@ class Replayer:
         viewport: Optional[tuple[int, int]] = None
         context_sha256: Optional[str] = None
         context_ref: Optional[str] = None
-        evaluator_contract_sha256: Optional[str] = None
         if any(
             self._program_guard_uses_frame(state.transitions[index].guard)
             for index, _verdict in evaluations
@@ -2260,9 +2275,13 @@ class Replayer:
                     f"({type(exc).__name__}) — run aborted",
                     safety=True,
                 ) from exc
-            evaluator_contract_sha256 = program_predicate_evaluator_contract_sha256(
-                self.vision
-            )
+            if evaluator_contract_sha256 is None:
+                raise _ProgramHalt(
+                    "halt",
+                    "visual program transition has no exact evaluator contract — "
+                    "run aborted",
+                    safety=True,
+                )
             context_payload = json.dumps(
                 {
                     "schema_version": 1,

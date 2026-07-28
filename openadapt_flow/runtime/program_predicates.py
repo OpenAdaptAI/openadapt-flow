@@ -25,6 +25,13 @@ from openadapt_flow.ir import Predicate, PredicateKind
 from openadapt_flow.runtime.resolver import resolve
 
 PROGRAM_PREDICATE_EVALUATOR_ID = "openadapt.program-predicate-evaluator/v2"
+_VISION_CALLABLES = (
+    "find_structural_template",
+    "find_template",
+    "find_text",
+    "ocr",
+    "text_present",
+)
 
 
 def _source_sha256(value: Any) -> str:
@@ -53,11 +60,44 @@ def _evaluator_contract_for_implementation(vision_type: Hashable) -> str:
     """
 
     versions: dict[str, str] = {}
-    for distribution in ("numpy", "opencv-python", "pillow", "pytesseract"):
+    for distribution in (
+        "numpy",
+        "onnxruntime",
+        "opencv-python",
+        "pillow",
+        "rapidocr-onnxruntime",
+    ):
         try:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             versions[distribution] = "absent"
+    artifact_hashes: dict[str, dict[str, str]] = {}
+    for distribution in ("rapidocr-onnxruntime", "onnxruntime"):
+        files: dict[str, str] = {}
+        try:
+            candidates = importlib.metadata.files(distribution) or ()
+        except importlib.metadata.PackageNotFoundError:
+            candidates = ()
+        for candidate in candidates:
+            path = Path(str(candidate))
+            if path.suffix.lower() not in {
+                ".dll",
+                ".dylib",
+                ".onnx",
+                ".so",
+                ".yaml",
+                ".yml",
+            }:
+                continue
+            located = Path(candidate.locate())
+            if located.is_file():
+                files[str(candidate)] = hashlib.sha256(located.read_bytes()).hexdigest()
+        artifact_hashes[distribution] = files
+    vision_callables = {
+        name: _source_sha256(callable_value)
+        for name in _VISION_CALLABLES
+        if callable(callable_value := getattr(vision_type, name, None))
+    }
     payload = {
         "contract": PROGRAM_PREDICATE_EVALUATOR_ID,
         "python": platform.python_version(),
@@ -71,7 +111,9 @@ def _evaluator_contract_for_implementation(vision_type: Hashable) -> str:
             f"{getattr(vision_type, '__qualname__', getattr(vision_type, '__name__', ''))}"
         ),
         "vision_source_sha256": _source_sha256(vision_type),
+        "vision_callable_source_sha256": vision_callables,
         "dependencies": versions,
+        "dependency_artifact_sha256": artifact_hashes,
     }
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -80,10 +122,37 @@ def _evaluator_contract_for_implementation(vision_type: Hashable) -> str:
 
 
 def program_predicate_evaluator_contract_sha256(vision: Any) -> str:
-    """Return the cached exact contract for one vision implementation."""
+    """Return the exact code and configuration contract for an evaluator.
+
+    Every evaluator must expose ``program_predicate_contract()``. This prevents
+    two differently configured instances of the same class from sharing a proof
+    contract merely because their class source is identical.
+    """
 
     vision_type = vision if inspect.ismodule(vision) else type(vision)
-    return _evaluator_contract_for_implementation(cast(Hashable, vision_type))
+    implementation = _evaluator_contract_for_implementation(cast(Hashable, vision_type))
+    contract = getattr(vision, "program_predicate_contract", None)
+    if not callable(contract):
+        raise ValueError(
+            "a program predicate evaluator must declare its exact semantic "
+            "configuration"
+        )
+    configuration: Any = contract()
+    try:
+        canonical = json.dumps(
+            {
+                "implementation_sha256": implementation,
+                "configuration": configuration,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "program predicate evaluator configuration is not canonical JSON"
+        ) from exc
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def exact_png_size(frame_png: bytes) -> tuple[int, int]:

@@ -73,6 +73,24 @@ class FakeVision:
         self.pixels_changed_results: list = []
         self.pixels_changed_calls: list = []
 
+    def program_predicate_contract(self):
+        """Bind the scripted outputs that can decide a Program transition."""
+
+        return {
+            "template_presence": [bool(item) for item in self.template_results],
+            "structural_template_presence": [
+                bool(item) for item in self.structural_template_results
+            ],
+            "text_presence": {
+                str(text): (
+                    [bool(item) for item in result]
+                    if isinstance(result, list)
+                    else bool(result)
+                )
+                for text, result in sorted(self.text_results.items())
+            },
+        }
+
     def find_template(
         self,
         screen_png,

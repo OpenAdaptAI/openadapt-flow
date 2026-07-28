@@ -142,6 +142,13 @@ class _TieredVerifier:
 
 
 class _ReadyVision(FakeVision):
+    def program_predicate_contract(self):
+        return {
+            "present_texts": sorted(
+                text for text, result in self.text_results.items() if result
+            )
+        }
+
     def find_template(
         self,
         screen_png,
@@ -1068,6 +1075,7 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
                 intent="submit",
                 ok=False,
                 safety_halt=True,
+                failure_category="governed_refusal",
                 delivery_attempted=False,
                 error="target ambiguity refused before delivery",
                 program_scope=scope,
@@ -1121,6 +1129,37 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
                 ]
             }
         ),
+        report.model_copy(
+            update={
+                "results": [
+                    *report.results[:-1],
+                    report.results[-1].model_copy(
+                        update={
+                            "delivery_attempted": True,
+                            "actuation": "api",
+                            "before_png": "forged-before.png",
+                            "effect_verified": True,
+                        }
+                    ),
+                ]
+            }
+        ),
+        report.model_copy(
+            update={
+                "results": [
+                    report.results[0],
+                    report.results[1].model_copy(
+                        update={
+                            "safety_halt": False,
+                            "failure_category": "runtime_failure",
+                            "delivery_attempted": True,
+                            "actuation": "guarded_keyboard",
+                        }
+                    ),
+                    report.results[2],
+                ]
+            }
+        ),
     ):
         assert (
             classify_execution_outcome(
@@ -1129,7 +1168,7 @@ def test_program_fault_prefix_requires_exact_trace_and_prior_delivery():
                 ExecutionProfile.STANDARD,
                 _qualification_fault_target_step_id="submit",
             )
-            is ExecutionOutcome.COMPLETED_UNVERIFIED
+            is not ExecutionOutcome.VERIFIED
         )
 
 

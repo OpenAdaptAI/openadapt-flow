@@ -30,6 +30,13 @@ from tests.test_replayer import FakeBackend, FakeVision, make_png
 
 
 class _SettledVision(FakeVision):
+    def program_predicate_contract(self):
+        return {
+            "present_texts": sorted(
+                text for text, result in self.text_results.items() if result
+            )
+        }
+
     def wait_settled_result(self, backend, **kwargs):
         del kwargs
         return SimpleNamespace(png=backend.screenshot(), settled=True)
@@ -322,6 +329,18 @@ def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):
             ExecutionProfile.STANDARD,
             transition_evidence_root=run_dir,
             transition_predicate_vision=_SettledVision(),
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+    opposite_vision = _SettledVision()
+    opposite_vision.text_results["Use first path"] = object()
+    assert (
+        classify_execution_outcome(
+            forged_path,
+            workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=run_dir,
+            transition_predicate_vision=opposite_vision,
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )

@@ -211,11 +211,9 @@ class NoteVerifyResult(BaseModel):
     """Outcome of the OpenEMR saved-note check.
 
     Attributes:
-        success: True iff the note evidence was found on the final screen.
+        success: True iff the note evidence was found in a saved message row.
         matched_ratio: Fraction of the note's squashed characters that OCR
-            matched somewhere in the frame's squashed text (diagnostic
-            only — non-contiguous matches accumulate from unrelated text
-            on a dense screen, so this never decides success).
+            matched in the best eligible saved-row OCR line (diagnostic only).
         longest_run: Longest contiguous matched character run (this is
             the criterion).
     """

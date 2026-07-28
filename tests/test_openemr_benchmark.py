@@ -7,6 +7,7 @@ OCR differences between operating systems cannot change the row contract.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -412,6 +413,22 @@ class TestOpenemrOrchestrator:
         assert a["cost_usd_total"] == 5.0
         assert results["model"] == agent_baseline.MODEL
         assert results["target"].startswith("https://demo.openemr.io")
+        assert results["success_contract"]["kind"] == "screen_saved_message_row"
+
+    def test_committed_result_preserves_oracle_adjudication(self) -> None:
+        path = Path(__file__).resolve().parents[1] / "benchmark/openemr/results.json"
+        results = json.loads(path.read_text())
+        compiled = results["arms"]["compiled"]
+        agent = results["arms"]["agent"]
+        assert (compiled["success_count"], compiled["n"]) == (19, 20)
+        assert (agent["success_count"], agent["n"]) == (10, 10)
+        assert compiled["wall_s_p50"] == 39.170917561999886
+        assert agent["wall_s_p50"] == 70.44607112499943
+        assert results["oracle_adjudication"]["denominators_changed"] is False
+        corrected = results["runs"]["compiled"][19]
+        assert corrected["success"] is False
+        assert corrected["legacy_screen_success"] is True
+        assert corrected["i"] == 19
 
     def test_markdown_names_anchor_and_caveats(self) -> None:
         md = render_openemr_markdown(self.make_results())
@@ -443,7 +460,7 @@ class TestOpenemrOrchestrator:
         results = aggregate_openemr_results(compiled, [agent_row(i) for i in range(10)])
         results["pace_s"] = 30.0
         md = render_openemr_markdown(results)
-        assert "100% (20/20)" in md  # headline unchanged
+        assert f"100% ({len(compiled)}/{len(compiled)})" in md
         assert "self-flagged" in md
         assert "compiled run 20" in md
         assert "step_017" in md
@@ -453,8 +470,6 @@ class TestOpenemrOrchestrator:
         assert "self-flagged" not in render_openemr_markdown(self.make_results())
 
     def test_write_outputs(self, tmp_path: Path) -> None:
-        import json
-
         write_openemr_outputs(self.make_results(), tmp_path)
         loaded = json.loads((tmp_path / "results.json").read_text())
         assert loaded["arms"]["agent"]["success_count"] == 8

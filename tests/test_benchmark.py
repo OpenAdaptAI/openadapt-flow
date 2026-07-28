@@ -392,25 +392,36 @@ class TestCostAndConfig:
 # -- verify -------------------------------------------------------------------
 
 
-def put_line(img: np.ndarray, text: str, y: int) -> None:
+def put_line(img: np.ndarray, text: str, y: int, scale: float = 0.7) -> None:
     cv2.putText(
         img,
         text,
         (40, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
+        scale,
         (0, 0, 0),
         2,
         cv2.LINE_AA,
     )
 
 
+def make_encounter_screen(*lines: str, scale: float = 0.7) -> bytes:
+    """A synthetic MockMed final frame carrying ``lines``.
+
+    ``scale`` shrinks the Hershey render so a long line still fits the
+    1280px frame; at the 0.7 default rapidocr drops a ~60-character row
+    entirely, which is a property of this synthetic renderer and not of
+    the browser-rendered frames the verifier faces in production.
+    """
+    img = np.full((800, 1280, 3), 245, dtype=np.uint8)
+    for i, line in enumerate(lines):
+        put_line(img, line, 200 + i * 60, scale)
+    return to_png(img)
+
+
 class TestVerify:
     def make_screen(self, *lines: str) -> bytes:
-        img = np.full((800, 1280, 3), 245, dtype=np.uint8)
-        for i, line in enumerate(lines):
-            put_line(img, line, 200 + i * 60)
-        return to_png(img)
+        return make_encounter_screen(*lines)
 
     def test_saved_state_passes(self) -> None:
         # cv2 Hershey fonts have no em dash; the fuzzy ratio absorbs the
@@ -437,10 +448,12 @@ class TestVerify:
 
     def test_note_in_form_without_banner_fails(self) -> None:
         # The typed note is visible on the encounter form BEFORE saving;
-        # without the banner that must not count as success.
+        # without the banner that must not count as success. The form also
+        # carries no encounter ROW (only the note in a textarea), so the
+        # row check fails independently of the banner check.
         screen = self.make_screen("Note", NOTE[:40], "Save Encounter")
         verdict = verify_encounter_saved(screen, NOTE)
-        assert verdict.note_found
+        assert not verdict.note_found
         assert not verdict.banner_found
         assert not verdict.success
 
@@ -464,6 +477,97 @@ class TestVerify:
         )
         verdict = verify_encounter_saved(screen, NOTE)
         assert not verdict.success
+
+
+# -- verify: the encounter TYPE is categorical and must not be outvoted --------
+
+# Notes of increasing length. The defect this guards against is
+# length-dependent: one fuzzy ratio over the whole ``<type> — <note>`` row
+# is decided by whichever field contributes more characters, so a long
+# correct note hides a short wrong type. Similarity of a ``Consult`` row
+# against the expected ``Triage`` row form, by note length, against the
+# 0.8 threshold: 11 chars -> 0.7317 (caught), 22 -> 0.8254 (MISSED),
+# 33 -> 0.8706 (MISSED), 60 -> 0.9209 (MISSED). The benchmark's own note
+# is 32 characters, in the missed band.
+NOTE_LENGTHS = [
+    "BP recheck.",
+    "BP recheck; see chart.",
+    "Follow-up in 2 weeks; BP recheck.",
+    "Follow-up in 2 weeks; BP recheck and repeat basic labs then.",
+]
+
+
+class TestVerifyEncounterType:
+    """The categorical type field must decide on its own terms."""
+
+    def make_screen(self, *lines: str) -> bytes:
+        # 0.6 rather than the 0.7 default: the longest note here renders
+        # past what rapidocr reads back at 0.7 in this synthetic frame.
+        return make_encounter_screen(*lines, scale=0.6)
+
+    @pytest.mark.parametrize("note", NOTE_LENGTHS)
+    def test_right_type_passes_at_every_note_length(self, note: str) -> None:
+        # The over-halt guard: a genuinely correct save must pass at every
+        # note length. A check strict enough to trip on OCR noise would
+        # make a working system look broken, which is worse than the
+        # over-count it replaces.
+        screen = self.make_screen(
+            f"Encounter saved - {note[:40]}",
+            f"Triage - {note[:60]}",
+        )
+        verdict = verify_encounter_saved(screen, note)
+        assert verdict.banner_found
+        assert verdict.note_found
+        assert not verdict.wrong_type_row
+        assert verdict.success
+
+    @pytest.mark.parametrize("note", NOTE_LENGTHS)
+    def test_wrong_type_fails_at_every_note_length(self, note: str) -> None:
+        # The regression: the note is correct and the banner is present,
+        # but the encounter was saved as Consult. That is a wrong-target
+        # write, not a success, however long the note is.
+        screen = self.make_screen(
+            f"Encounter saved - {note[:40]}",
+            f"Consult - {note[:60]}",
+        )
+        verdict = verify_encounter_saved(screen, note)
+        assert verdict.banner_found
+        assert not verdict.note_found
+        assert verdict.wrong_type_row
+        assert not verdict.success
+
+    def test_wrong_type_row_beside_right_row_fails(self) -> None:
+        # A correct row does not excuse a second row carrying the same
+        # note under a different type: the run mutated the wrong target.
+        screen = self.make_screen(
+            f"Encounter saved - {NOTE[:40]}",
+            f"Triage - {NOTE[:60]}",
+            f"Consult - {NOTE[:60]}",
+        )
+        verdict = verify_encounter_saved(screen, NOTE)
+        assert verdict.note_found
+        assert verdict.wrong_type_row
+        assert not verdict.success
+
+    def test_bare_note_line_is_not_an_encounter_row(self) -> None:
+        # The banner's note line carries no type at all. It must never
+        # stand in for the encounter row -- accepting it was the second
+        # path by which a wrong type went unchecked.
+        screen = self.make_screen("Encounter saved -", NOTE[:40])
+        verdict = verify_encounter_saved(screen, NOTE)
+        assert verdict.banner_found
+        assert not verdict.note_found
+        assert not verdict.success
+
+    def test_unlisted_requested_type_is_still_checked(self) -> None:
+        # A caller may ask for a type outside the default enumeration; it
+        # is added to the choice set rather than silently unmatchable.
+        screen = self.make_screen(
+            f"Encounter saved - {NOTE[:40]}",
+            f"Referral - {NOTE[:60]}",
+        )
+        assert verify_encounter_saved(screen, NOTE, encounter_type="Referral").success
+        assert not verify_encounter_saved(screen, NOTE).success
 
 
 # -- orchestrator aggregation --------------------------------------------------

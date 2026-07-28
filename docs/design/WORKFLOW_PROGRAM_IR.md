@@ -235,11 +235,12 @@ API call that performs the step's write without the GUI. When a step carries a
 binding and the run configures an `ApiActuator`, the runtime performs the write by
 calling the API deterministically (zero cost, zero model calls), confirms it with
 the same `EffectVerifier` that gates a GUI write, and skips the GUI resolve and
-act for that step. The binding is REST/JSON first but shaped so a FHIR, MCP, or
-tool call fits the same model (`kind` selects the substrate). It is additive: a
-bundle with no binding, or a binding with no actuator configured, actuates through
-the GUI ladder exactly as before. The API tier is an optimization whose safe
-fallback is the GUI, never a gate that can block a runnable step.
+act for that step. REST and FHIR use the native HTTP dispatcher. MCP and generic
+tool bindings are extension-only. They name a versioned `external_executor`
+contract, and a governed run refuses before actuation unless the deployment
+injects the exact executor. A governed run never converts an absent or
+unavailable MCP/tool executor into GUI actuation. REST/FHIR preserve the
+existing before-send GUI fallback.
 
 ---
 
@@ -616,7 +617,8 @@ zero-call property.
 - Effects with `record_written` and `field_equals`, `ValueExpr` param binding,
   the duplicate and collateral-loss guards, the on-screen read-back oracle, and
   the placeholder-halts-until-confirmed rule.
-- `api_binding` and the API actuator tier, with the GUI as the safe fallback.
+- `api_binding` and the API actuator tier. REST/FHIR can use the demonstrated
+  GUI path only when no request was sent. MCP/tool never use GUI fallback.
 - The disambiguation, multi-trace induction, held-out validation, and quarantine
   stages.
 - The tiered runtime: bounded local recovery and durable checkpoint, pause, and

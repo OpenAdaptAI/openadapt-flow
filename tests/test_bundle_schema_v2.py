@@ -19,6 +19,7 @@ from openadapt_flow.ir import (
     TEMPLATE_AAD,
     ActionKind,
     Anchor,
+    ApiBinding,
     Landmark,
     LoopSpec,
     Predicate,
@@ -318,6 +319,47 @@ def test_v2_round_trips_with_stable_digest(tmp_path):
     loaded.save(b)
     reloaded = Workflow.load(b)
     assert reloaded.manifest.content_digest == dig
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_digest"),
+    [
+        ("rest", "ecc354c1b269e17d1770dbb5617032b51ff9221f8e5b67fb12fa1832da185e59"),
+        ("fhir", "e18150dcc580568100fa69f75ccbd1ef43997824c3113f206aa070a3849644ef"),
+    ],
+)
+def test_native_api_binding_preserves_pre_executor_sealed_digest(
+    tmp_path, kind, expected_digest
+):
+    """The extension contract must not invalidate sealed REST/FHIR bundles."""
+
+    bundle = _write_bundle_dir(tmp_path, template=False)
+    workflow = Workflow(
+        name=f"legacy-{kind}",
+        created_at="2026-07-28T00:00:00+00:00",
+        steps=[
+            Step(
+                id="s",
+                intent=f"{kind.upper()} write",
+                action=ActionKind.CLICK,
+                api_binding=ApiBinding(
+                    kind=kind,
+                    method="POST",
+                    url_template="/records",
+                ),
+            )
+        ],
+    )
+
+    serialized = workflow.steps[0].api_binding.model_dump(mode="json")
+    assert "external_executor" not in serialized
+    workflow.save(bundle)
+    assert workflow.manifest is not None
+    assert workflow.manifest.content_digest == expected_digest
+
+    loaded = Workflow.load(bundle)
+    assert loaded.manifest is not None
+    assert loaded.manifest.content_digest == expected_digest
 
 
 @pytest.mark.parametrize("shape", ["linear", "program"])

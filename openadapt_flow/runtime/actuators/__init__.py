@@ -13,26 +13,34 @@ a ``TransitionContract``): when a step carries an
 :class:`~openadapt_flow.ir.ApiBinding`, perform the write by CALLING the API
 deterministically -- $0, zero model calls -- and confirm it with the same
 :class:`~openadapt_flow.runtime.effects.EffectVerifier` that gates a GUI write.
-The GUI resolution ladder is then SKIPPED for that step. A step with no binding
-(or with no actuator configured) behaves EXACTLY as before -- the API tier is
-additive and falls through to the structural -> visual ladder.
+The GUI resolution ladder is then SKIPPED for that step. A REST/FHIR step with
+no actuator preserves the existing structural -> visual path. A governed
+MCP/tool step requires its exact deployment-owned executor and never silently
+becomes GUI actuation.
 
 Public surface:
 
-- :class:`ApiActuator` -- the REST/JSON actuator (and the shape a FHIR/MCP/tool
-  actuator slots into).
+- :class:`ApiActuator` -- native REST/FHIR dispatch plus a typed, injected
+  MCP/tool executor boundary.
 - :class:`ApiActuationResult`, :class:`ActuationStatus` -- the fail-safe
   outcome of an actuation attempt (the no-double-write contract).
+- :class:`ExternalActuationRequest`, :class:`ExternalExecutor` -- the public
+  extension contract. Missing external executors refuse before governed
+  actuation and never silently fall through to GUI.
 """
 
 from openadapt_flow.runtime.actuators.api import (  # noqa: F401
     ActuationStatus,
     ApiActuationResult,
     ApiActuator,
+    ExternalActuationRequest,
+    ExternalExecutor,
 )
 
 __all__ = [
     "ApiActuator",
     "ApiActuationResult",
     "ActuationStatus",
+    "ExternalActuationRequest",
+    "ExternalExecutor",
 ]

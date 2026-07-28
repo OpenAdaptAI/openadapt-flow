@@ -43,10 +43,11 @@ runtime package) stays cheap and model-free.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Mapping, Optional, Protocol, cast, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from openadapt_flow.ir import ApiBinding
 
@@ -68,6 +69,8 @@ class ActuationStatus(str, Enum):
 
 class ApiActuationResult(BaseModel):
     """Outcome of one :meth:`ApiActuator.actuate` call."""
+
+    model_config = ConfigDict(frozen=True)
 
     status: ActuationStatus
     substrate: str = "rest"
@@ -126,6 +129,38 @@ def _fill_body(node: Any, params: dict[str, str]) -> Any:
     return node
 
 
+@dataclass(frozen=True, slots=True)
+class ExternalActuationRequest:
+    """A fully rendered invocation for a deployment-owned MCP/tool adapter.
+
+    Values can contain sensitive workflow parameters.  Their fields are absent
+    from ``repr`` so accidental exception or debug output does not echo them.
+    """
+
+    contract_version: Literal[1]
+    executor_id: str
+    kind: Literal["mcp", "tool"]
+    operation: str
+    target: str = field(repr=False)
+    body: dict[str, Any] = field(repr=False)
+    query: dict[str, str] = field(repr=False)
+    headers: dict[str, str] = field(repr=False)
+    timeout_s: float
+    request_summary: str
+
+
+@runtime_checkable
+class ExternalExecutor(Protocol):
+    """Deployment-owned dispatcher for one external executor id.
+
+    The adapter must return the shared no-double-write result.  ``UNAVAILABLE``
+    means that it proved no delivery occurred.  The runtime still converts that
+    result to a refusal for MCP/tool bindings; it never falls through to GUI.
+    """
+
+    def actuate(self, request: ExternalActuationRequest) -> ApiActuationResult: ...
+
+
 class ApiActuator:
     """Perform a step's write via its :class:`~openadapt_flow.ir.ApiBinding`.
 
@@ -144,6 +179,8 @@ class ApiActuator:
         session: Optional ``requests``-style session (auth headers / test
             injection); a module-level default is created lazily when omitted.
         timeout_s: Default per-request timeout when the binding sets none.
+        external_executors: Explicit executor-id to MCP/tool adapter map. The
+            workflow stores only the typed id and contract version.
     """
 
     substrate = "rest"
@@ -154,10 +191,23 @@ class ApiActuator:
         *,
         session: Any = None,
         timeout_s: float = 5.0,
+        external_executors: Optional[Mapping[str, ExternalExecutor]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.default_timeout_s = timeout_s
         self._session = session
+        self._external_executors = dict(external_executors or {})
+
+    def supports(self, binding: ApiBinding) -> bool:
+        """Return whether this actuator has an exact dispatcher for ``binding``."""
+
+        if binding.kind in ("rest", "fhir"):
+            return True
+        contract = binding.external_executor
+        if contract is None:
+            return False
+        executor = self._external_executors.get(contract.executor_id)
+        return isinstance(executor, ExternalExecutor)
 
     def _get_session(self) -> Any:
         if self._session is None:
@@ -183,6 +233,9 @@ class ApiActuator:
         """
         summary = f"{binding.method} {binding.url_template}"
 
+        if binding.kind in ("mcp", "tool"):
+            return self._actuate_external(binding, params, summary)
+
         # -- build the request (a before-send problem is UNAVAILABLE) ---------
         try:
             url = self._resolve_url(_fill(binding.url_template, params))
@@ -192,7 +245,7 @@ class ApiActuator:
         except _MissingParam as exc:
             return ApiActuationResult(
                 status=ActuationStatus.UNAVAILABLE,
-                substrate=self.substrate,
+                substrate=binding.kind,
                 reason=(
                     f"binding for {summary} references param {exc} not supplied "
                     "by the run -- API tier unavailable, falling through to GUI"
@@ -218,7 +271,7 @@ class ApiActuator:
             # to fall through to the GUI ladder for this step.
             return ApiActuationResult(
                 status=ActuationStatus.UNAVAILABLE,
-                substrate=self.substrate,
+                substrate=binding.kind,
                 reason=(
                     f"endpoint unreachable ({type(exc).__name__}) -- request "
                     "not sent, API tier unavailable, falling through to GUI"
@@ -230,7 +283,7 @@ class ApiActuator:
             # the write. Outcome unknown -> HALT (never GUI-write it again).
             return ApiActuationResult(
                 status=ActuationStatus.HALT,
-                substrate=self.substrate,
+                substrate=binding.kind,
                 reason=(
                     f"request sent but timed out awaiting the response "
                     f"({type(exc).__name__}) -- the write may have landed; HALT "
@@ -243,7 +296,7 @@ class ApiActuator:
             # unknown effect on the server -> HALT rather than risk a duplicate.
             return ApiActuationResult(
                 status=ActuationStatus.HALT,
-                substrate=self.substrate,
+                substrate=binding.kind,
                 reason=(
                     f"request failed after being sent ({type(exc).__name__}) -- "
                     "outcome unknown; HALT (never double-write via the GUI)"
@@ -258,7 +311,7 @@ class ApiActuator:
         if ok:
             return ApiActuationResult(
                 status=ActuationStatus.ACTUATED,
-                substrate=self.substrate,
+                substrate=binding.kind,
                 reason=f"{summary} -> {resp.status_code}",
                 http_status=resp.status_code,
                 request_summary=summary,
@@ -268,11 +321,133 @@ class ApiActuator:
         # re-driving the same write through the GUI risks a duplicate -> HALT.
         return ApiActuationResult(
             status=ActuationStatus.HALT,
-            substrate=self.substrate,
+            substrate=binding.kind,
             reason=(
                 f"{summary} returned {resp.status_code} (not success) -- the "
                 "write was attempted; HALT (never double-write via the GUI)"
             ),
             http_status=resp.status_code,
             request_summary=summary,
+        )
+
+    def _actuate_external(
+        self,
+        binding: ApiBinding,
+        params: dict[str, str],
+        summary: str,
+    ) -> ApiActuationResult:
+        """Invoke a registered MCP/tool adapter without a GUI fallback."""
+
+        contract = binding.external_executor
+        if contract is None:  # Defensive for callers that bypass model validation.
+            return ApiActuationResult(
+                status=ActuationStatus.HALT,
+                substrate=binding.kind,
+                reason=(
+                    f"{binding.kind} binding has no external executor contract; "
+                    "refusing dispatch and GUI fallback"
+                ),
+                request_summary=summary,
+            )
+        executor = self._external_executors.get(contract.executor_id)
+        if executor is None:
+            return ApiActuationResult(
+                status=ActuationStatus.HALT,
+                substrate=binding.kind,
+                reason=(
+                    f"no registered external executor matches "
+                    f"{contract.executor_id!r}; refusing dispatch and GUI fallback"
+                ),
+                request_summary=summary,
+            )
+        try:
+            kind = cast(Literal["mcp", "tool"], binding.kind)
+            request = ExternalActuationRequest(
+                contract_version=contract.contract_version,
+                executor_id=contract.executor_id,
+                kind=kind,
+                operation=binding.method,
+                target=_fill(binding.url_template, params),
+                body=_fill_body(binding.body_template, params),
+                query={k: _fill(v, params) for k, v in binding.query.items()},
+                headers={k: _fill(v, params) for k, v in binding.headers.items()},
+                timeout_s=binding.timeout_s or self.default_timeout_s,
+                request_summary=summary,
+            )
+        except _MissingParam as exc:
+            return ApiActuationResult(
+                status=ActuationStatus.HALT,
+                substrate=binding.kind,
+                reason=(
+                    f"external executor binding for {summary} references param "
+                    f"{exc} not supplied by the run; refusing dispatch and GUI fallback"
+                ),
+                request_summary=summary,
+            )
+        try:
+            result = executor.actuate(request)
+        except Exception as exc:  # noqa: BLE001 - trusted deployment boundary
+            return ApiActuationResult(
+                status=ActuationStatus.HALT,
+                substrate=binding.kind,
+                reason=(
+                    "external executor raised after delivery may have begun "
+                    f"({type(exc).__name__}); outcome requires reconciliation"
+                ),
+                request_summary=summary,
+            )
+        if not isinstance(result, ApiActuationResult):
+            return ApiActuationResult(
+                status=ActuationStatus.HALT,
+                substrate=binding.kind,
+                reason=(
+                    "external executor returned an invalid result; outcome requires "
+                    "reconciliation"
+                ),
+                request_summary=summary,
+            )
+        try:
+            # Extension implementations can bypass normal construction with
+            # ``model_construct``. Revalidate at the trust boundary so a raw
+            # string or unknown status can never reach the GUI-fallback branch.
+            result = ApiActuationResult.model_validate(
+                {
+                    name: getattr(result, name)
+                    for name in ApiActuationResult.model_fields
+                }
+            )
+        except (AttributeError, ValidationError):
+            return ApiActuationResult(
+                status=ActuationStatus.HALT,
+                substrate=binding.kind,
+                reason=(
+                    "external executor returned an invalid result; outcome requires "
+                    "reconciliation"
+                ),
+                request_summary=summary,
+            )
+        if result.status is ActuationStatus.UNAVAILABLE:
+            return ApiActuationResult(
+                status=ActuationStatus.HALT,
+                substrate=binding.kind,
+                reason=(
+                    "external executor reported no delivery; the qualified external "
+                    "path is unavailable, so GUI fallback is refused"
+                ),
+                request_summary=summary,
+            )
+        receipt = (
+            "acknowledged delivery"
+            if result.status is ActuationStatus.ACTUATED
+            else "reported an uncertain or refused delivery"
+        )
+        return result.model_copy(
+            update={
+                "substrate": binding.kind,
+                "reason": (
+                    f"external executor {contract.executor_id!r} {receipt}; "
+                    "adapter details are excluded from the portable report"
+                ),
+                "request_summary": summary,
+            }
         )

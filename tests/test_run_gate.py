@@ -24,6 +24,7 @@ from openadapt_flow.ir import (
     Anchor,
     ApiBinding,
     BackendHints,
+    ExternalExecutorBinding,
     Interstitial,
     Postcondition,
     PostconditionKind,
@@ -43,6 +44,7 @@ from openadapt_flow.qualification import (
     workflow_contract_sha256,
 )
 from openadapt_flow.run_gate import (
+    GATE_ACTUATION,
     GATE_APPROVAL,
     GATE_CERTIFICATION,
     GATE_EFFECT,
@@ -54,6 +56,7 @@ from openadapt_flow.run_gate import (
     evaluate_run_gate,
     is_consequential,
 )
+from openadapt_flow.runtime.actuators import ApiActuationResult, ApiActuator
 from openadapt_flow.runtime.effects import Effect, EffectKind
 
 _KEY = "correct horse battery staple"
@@ -506,6 +509,49 @@ def test_direct_api_write_cannot_use_unverified_approval(tmp_path):
     gate = report.gate(GATE_APPROVAL)
     assert gate is not None and not gate.passed
     assert "direct API write" in gate.detail
+
+
+class _InstalledExternalExecutor:
+    def actuate(self, request):
+        return ApiActuationResult(status="actuated")
+
+
+def _add_external_binding(workflow: Workflow) -> None:
+    write = workflow.steps[1]
+    write.api_binding = ApiBinding(
+        kind="mcp",
+        external_executor=ExternalExecutorBinding(executor_id="customer.crm"),
+        method="create_record",
+        url_template="crm://records/{patient_id}",
+        body_template={"patient_id": "{patient_id}"},
+        effects=list(write.effects),
+    )
+
+
+def test_run_gate_refuses_external_binding_without_exact_executor(tmp_path):
+    wf = _good_workflow("external_missing")
+    _add_external_binding(wf)
+    wf, bundle = _seal(wf, tmp_path)
+
+    report = _run(wf, bundle)
+
+    gate = report.gate(GATE_ACTUATION)
+    assert gate is not None and not gate.passed
+    assert gate.offenders == ["s1"]
+
+
+def test_run_gate_admits_external_binding_with_exact_executor(tmp_path):
+    wf = _good_workflow("external_installed")
+    _add_external_binding(wf)
+    wf, bundle = _seal(wf, tmp_path)
+    actuator = ApiActuator(
+        external_executors={"customer.crm": _InstalledExternalExecutor()}
+    )
+
+    report = _run(wf, bundle, api_actuator=actuator)
+
+    gate = report.gate(GATE_ACTUATION)
+    assert gate is not None and gate.passed
 
 
 def test_api_only_effect_never_creates_gui_unverified_write_approval(tmp_path):

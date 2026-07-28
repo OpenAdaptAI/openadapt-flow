@@ -501,6 +501,18 @@ class ApiIdentityBinding(BaseModel):
         return pointers
 
 
+class ExternalExecutorBinding(BaseModel):
+    """A closed reference to a deployment-owned MCP or tool executor.
+
+    The workflow declares only the public adapter contract.  A deployment must
+    inject the matching executor implementation before governed admission.  The
+    bundle never carries executor code, credentials, or a remote transport.
+    """
+
+    contract_version: Literal[1] = 1
+    executor_id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+
+
 class ApiBinding(BaseModel):
     """A declarative API/tool call that performs a step's write WITHOUT the GUI.
 
@@ -518,10 +530,11 @@ class ApiBinding(BaseModel):
     backend-specific implementation.
 
     ADDITIVE and back-compatible: the field is optional and defaults absent, so a
-    bundle carrying no binding replays EXACTLY as today (GUI actuation). A binding
-    present with no actuator configured also falls through to the GUI ladder --
-    the API tier is an OPTIMIZATION whose safe fallback is the GUI, never a gate
-    that can block a runnable step.
+    bundle carrying no binding replays EXACTLY as today (GUI actuation). REST and
+    FHIR bindings retain the existing before-send GUI fallback. MCP and generic
+    tool bindings are extension-only: they require a typed executor reference
+    and governed admission refuses the workflow unless the deployment injects
+    the matching executor. They never silently become GUI writes.
 
     Fields are REST/JSON-first but shaped so a FHIR / MCP / tool binding fits the
     same model (``kind`` selects the substrate; a FHIR resource POST, an MCP tool
@@ -534,6 +547,13 @@ class ApiBinding(BaseModel):
     kind: Literal["rest", "fhir", "mcp", "tool"] = Field(
         default="rest",
         description="Substrate: 'rest'/'fhir' HTTP, or an 'mcp'/'tool' call",
+    )
+    external_executor: Optional[ExternalExecutorBinding] = Field(
+        default=None,
+        description=(
+            "Required deployment-owned executor reference for 'mcp'/'tool'; "
+            "forbidden for native REST/FHIR dispatch"
+        ),
     )
     method: str = Field(
         default="POST",
@@ -587,6 +607,29 @@ class ApiBinding(BaseModel):
             "template and an effect selector before the request may be sent."
         ),
     )
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Keep native HTTP bindings byte-compatible with existing seals."""
+
+        data: dict[str, Any] = handler(self)
+        if self.external_executor is None:
+            data.pop("external_executor", None)
+        return data
+
+    @model_validator(mode="after")
+    def _validate_external_executor_contract(self) -> "ApiBinding":
+        external = self.kind in ("mcp", "tool")
+        if external and self.external_executor is None:
+            raise ValueError(
+                f"api_binding.kind {self.kind!r} requires external_executor; "
+                "MCP/tool execution is extension-only"
+            )
+        if not external and self.external_executor is not None:
+            raise ValueError(
+                "external_executor is only valid for api_binding.kind 'mcp' or 'tool'"
+            )
+        return self
 
     @model_validator(mode="after")
     def _unique_identity_bindings(self) -> "ApiBinding":
@@ -969,8 +1012,9 @@ class Step(BaseModel):
     # $0, no model), confirms it with the EffectVerifier, and SKIPS the GUI
     # resolve/act for this step (see openadapt_flow.runtime.replayer). Additive
     # and back-compatible: None (default) means the step actuates through the
-    # GUI resolution ladder EXACTLY as today; a binding present with no actuator
-    # configured also falls through to the GUI (the API tier's safe fallback).
+    # GUI resolution ladder EXACTLY as today. REST/FHIR bindings preserve the
+    # before-send GUI fallback. Governed MCP/tool bindings require their exact
+    # deployment-owned executor and refuse when it is absent.
     api_binding: Optional[ApiBinding] = None
     risk: Literal["reversible", "irreversible"] = "reversible"
     risk_explanation: Optional[str] = Field(

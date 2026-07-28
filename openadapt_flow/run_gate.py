@@ -90,6 +90,7 @@ DEFAULT_POLICY: str = "clinical-write"
 GATE_CERTIFICATION = "certification"
 GATE_PROFILE = "execution_profile"
 GATE_IDENTITY = "identity_coverage"
+GATE_ACTUATION = "actuation_dispatch"
 GATE_EFFECT = "effect_coverage"
 GATE_APPROVAL = "approval_fallback"
 GATE_INTERSTITIALS = "interstitial_admission"
@@ -101,6 +102,7 @@ GATE_ORDER = (
     GATE_PROFILE,
     GATE_CERTIFICATION,
     GATE_IDENTITY,
+    GATE_ACTUATION,
     GATE_EFFECT,
     GATE_APPROVAL,
     GATE_INTERSTITIALS,
@@ -112,6 +114,7 @@ _GATE_TITLES = {
     GATE_PROFILE: "Execution profile",
     GATE_CERTIFICATION: "Certification passed",
     GATE_IDENTITY: "Identity coverage",
+    GATE_ACTUATION: "Actuation dispatch",
     GATE_EFFECT: "Effect coverage",
     GATE_APPROVAL: "Approval fallback",
     GATE_INTERSTITIALS: "Interstitial admission",
@@ -394,6 +397,7 @@ def evaluate_run_gate(
         require_current_risk_certification=require_current_risk_cert,
         certifying_policy=certifying_policy,
     )
+    actuation_gate = _gate_actuation(steps, api_actuator)
     interstitial_gate = _gate_interstitials(workflow, interstitials)
     gates = []
     if profile_contract is not None:
@@ -429,6 +433,7 @@ def evaluate_run_gate(
                 or profile_contract.require_identity_coverage
                 else _not_required(GATE_IDENTITY, "not required by the Demo profile")
             ),
+            actuation_gate,
             (
                 _gate_effect(
                     workflow,
@@ -715,6 +720,51 @@ def _gate_effect(
         f"{len(offenders)}/{total} consequential write(s) lack an adequate "
         "effect contract: " + "; ".join(parts),
         offenders,
+    )
+
+
+def _gate_actuation(steps: list[Step], api_actuator: object | None) -> GateResult:
+    """Refuse an extension binding unless its exact executor is installed.
+
+    REST/FHIR preserve their established optional top-rung behavior: when no
+    HTTP actuator is configured, the demonstrated GUI path remains available.
+    MCP/tool bindings name a different executor and can never silently become a
+    GUI action.
+    """
+
+    external = [
+        step
+        for step in steps
+        if step.api_binding is not None and step.api_binding.kind in ("mcp", "tool")
+    ]
+    unsupported: list[Step] = []
+    for step in external:
+        binding = step.api_binding
+        assert binding is not None
+        supports = getattr(api_actuator, "supports", None)
+        try:
+            installed = bool(callable(supports) and supports(binding))
+        except Exception:  # noqa: BLE001 - deployment adapter boundary
+            installed = False
+        if api_actuator is None or not installed:
+            unsupported.append(step)
+    if unsupported:
+        return _result(
+            GATE_ACTUATION,
+            False,
+            f"{len(unsupported)} MCP/tool binding(s) lack their exact registered "
+            "external executor; GUI fallback is refused",
+            [step.id for step in unsupported],
+        )
+    return _result(
+        GATE_ACTUATION,
+        True,
+        (
+            f"all {len(external)} MCP/tool binding(s) have an exact registered "
+            "external executor"
+            if external
+            else "no extension-only MCP/tool bindings declared"
+        ),
     )
 
 

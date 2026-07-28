@@ -3,8 +3,8 @@
 The ladder walks from the STRONGEST, most drift-tolerant evidence down to
 progressively weaker (but more widely available) evidence. The full capability
 hierarchy is API -> tool/MCP -> DOM/UIA -> geometry -> OCR -> template -> VLM
--> human; the API and tool/MCP rungs are future placeholders, so the rungs
-implemented here are:
+-> human. The replayer dispatches qualified API and external-executor bindings
+before target resolution. This module implements the remaining GUI rungs:
 
 0. ``structural``       — DETERMINISTIC. Re-find the recorded target as a
    DOM/UIA *element* via ``backend.locate_structural`` (a stable selector /
@@ -521,7 +521,7 @@ def resolve(
     # the SAME click path as any visual rung, so the identity and risk gates
     # still fire on it; structural sits ABOVE ``ocr`` in RUNG_ORDER, so an
     # irreversible step MAY act on it (it is the strongest evidence, not the
-    # weakest). Future API and tool/MCP rungs sit above this one.
+    # weakest). API and tool/MCP dispatch occurs before this resolver runs.
     if structural is not None and anchor.structural is not None:
         locate = getattr(structural, "locate_structural", None)
         if locate is not None:

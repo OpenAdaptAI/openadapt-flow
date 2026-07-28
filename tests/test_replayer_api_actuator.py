@@ -22,18 +22,28 @@ The theses these pin (RFC ``docs/design/WORKFLOW_PROGRAM_IR.md`` section 4, the
 
 from __future__ import annotations
 
+from typing import Literal
+
+import pytest
 import requests
+from pydantic import ValidationError
 
 from openadapt_flow.ir import (
     ActionKind,
     ApiBinding,
+    ExternalExecutorBinding,
     Postcondition,
     PostconditionKind,
     Step,
     Workflow,
 )
 from openadapt_flow.mockmed.fault_server import serve as fault_serve
-from openadapt_flow.runtime.actuators import ActuationStatus, ApiActuator
+from openadapt_flow.runtime.actuators import (
+    ActuationStatus,
+    ApiActuationResult,
+    ApiActuator,
+    ExternalActuationRequest,
+)
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
@@ -498,3 +508,152 @@ def test_actuator_halts_on_non_2xx():
         assert res.should_halt is True
     finally:
         stop()
+
+
+class _ExternalRecorder:
+    def __init__(self, status: ActuationStatus = ActuationStatus.ACTUATED):
+        self.status = status
+        self.requests: list[ExternalActuationRequest] = []
+
+    def actuate(self, request: ExternalActuationRequest) -> ApiActuationResult:
+        self.requests.append(request)
+        return ApiActuationResult(status=self.status, reason="adapter receipt")
+
+
+class _ConstructedStatusExecutor:
+    def __init__(self, status: str):
+        self.status = status
+
+    def actuate(self, request: ExternalActuationRequest) -> ApiActuationResult:
+        return ApiActuationResult.model_construct(status=self.status)
+
+
+def _external_binding(kind: Literal["mcp", "tool"] = "mcp") -> ApiBinding:
+    return ApiBinding(
+        kind=kind,
+        external_executor=ExternalExecutorBinding(executor_id="customer.crm"),
+        method="create_record",
+        url_template="crm://records/{record_id}",
+        body_template={"note": "{note}"},
+    )
+
+
+def test_external_binding_requires_a_typed_executor_reference():
+    with pytest.raises(ValueError, match="requires external_executor"):
+        ApiBinding(kind="mcp", method="create", url_template="crm://records")
+
+    with pytest.raises(ValueError, match="only valid"):
+        ApiBinding(
+            kind="rest",
+            external_executor=ExternalExecutorBinding(executor_id="customer.crm"),
+            url_template="/records",
+        )
+
+
+def test_registered_external_executor_receives_rendered_invocation():
+    recorder = _ExternalRecorder()
+    actuator = ApiActuator(external_executors={"customer.crm": recorder})
+
+    result = actuator.actuate(
+        _external_binding(),
+        {"record_id": "r-42", "note": "private note"},
+    )
+
+    assert result.status is ActuationStatus.ACTUATED
+    assert result.substrate == "mcp"
+    assert result.reason.startswith("external executor 'customer.crm' acknowledged")
+    assert "adapter receipt" not in result.reason
+    assert len(recorder.requests) == 1
+    request = recorder.requests[0]
+    assert request.target == "crm://records/r-42"
+    assert request.body == {"note": "private note"}
+    assert "private note" not in repr(request)
+
+
+def test_external_binding_never_falls_through_to_gui():
+    binding = _external_binding("tool")
+
+    missing = ApiActuator().actuate(binding, {"record_id": "r-42", "note": "n"})
+    assert missing.status is ActuationStatus.HALT
+    assert missing.should_fall_through is False
+
+    recorder = _ExternalRecorder(ActuationStatus.UNAVAILABLE)
+    unavailable = ApiActuator(external_executors={"customer.crm": recorder}).actuate(
+        binding, {"record_id": "r-42", "note": "n"}
+    )
+    assert unavailable.status is ActuationStatus.HALT
+    assert unavailable.should_fall_through is False
+
+    class _MissingStatusExecutor:
+        def actuate(self, request):
+            return ApiActuationResult.model_construct()
+
+    malformed = ApiActuator(
+        external_executors={"customer.crm": _MissingStatusExecutor()}
+    ).actuate(binding, {"record_id": "r-42", "note": "n"})
+    assert malformed.status is ActuationStatus.HALT
+    assert malformed.should_fall_through is False
+
+
+def test_actuation_receipt_status_is_immutable():
+    receipt = ApiActuationResult(status=ActuationStatus.ACTUATED)
+    with pytest.raises(ValidationError):
+        receipt.status = ActuationStatus.UNAVAILABLE
+
+
+@pytest.mark.parametrize("raw_status", ["unavailable", "unknown"])
+def test_invalid_external_receipt_never_reaches_gui_fallback(tmp_path, raw_status):
+    url, db, stop = _fault_server()
+    try:
+        backend = GuiWritingBackend(url)
+        workflow = _api_save_workflow(effects=[_record_written()])
+        binding = _external_binding()
+        binding.effects = [_record_written()]
+        workflow.steps[0].api_binding = binding
+        bundle, run_dir = _dirs(tmp_path)
+        executor = _ConstructedStatusExecutor(raw_status)
+        replayer = Replayer(
+            backend,
+            vision=_vision_that_confirms_saved(),
+            effect_verifier=RestRecordVerifier(url),
+            api_actuator=ApiActuator(external_executors={"customer.crm": executor}),
+            poll_interval_s=0.01,
+        )
+
+        report = replayer.run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+        assert report.success is False
+        assert report.results[0].actuation == "api"
+        assert backend.actions == []
+        assert db.snapshot()["records"] == []
+    finally:
+        stop()
+
+
+def test_fhir_binding_keeps_native_http_dispatch():
+    class _Response:
+        status_code = 201
+
+    class _Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            return _Response()
+
+    session = _Session()
+    binding = ApiBinding(
+        kind="fhir",
+        method="POST",
+        url_template="/Patient/{patient_id}",
+        body_template={"resourceType": "Patient"},
+    )
+
+    result = ApiActuator("https://fhir.example", session=session).actuate(
+        binding, {"patient_id": "p1"}
+    )
+
+    assert result.status is ActuationStatus.ACTUATED
+    assert result.substrate == "fhir"
+    assert session.calls[0][0:2] == ("POST", "https://fhir.example/Patient/p1")

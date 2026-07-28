@@ -249,6 +249,36 @@ def test_same_path_restore_cannot_erase_acknowledged_progress(tmp_path: Path) ->
         DurableAuthority(run_dir, CheckpointStore(run_dir)).validate(manifest)
 
 
+def test_one_owned_continuation_can_fence_multiple_input_edges(
+    tmp_path: Path,
+) -> None:
+    """Focus, typing, and later edges share one exact continuation owner."""
+
+    _run_dir, store, manifest, authority = _fresh_run(tmp_path)
+    pending = _pause(store, manifest, authority)
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    owner = _acquire(
+        authority,
+        manifest,
+        pending,
+        attempt="multi-edge-attempt",
+        now=now,
+    )
+
+    for _edge in range(3):
+        authority.before_delivery(
+            manifest,
+            attempt_id="multi-edge-attempt",
+            owner_nonce_sha256=owner,
+        )
+
+    with authority._transaction() as connection:  # noqa: SLF001
+        record = authority._read(connection)  # noqa: SLF001
+    assert record is not None
+    assert record.attempt_phase == "delivery_started"
+    assert record.delivery_sequence == 3
+
+
 def test_observation_only_progress_does_not_require_a_delivery_edge(
     tmp_path: Path,
 ) -> None:

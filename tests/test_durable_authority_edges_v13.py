@@ -121,6 +121,29 @@ def test_configured_authority_ancestor_symlink_cannot_reenter_run_directory(
     assert not (authority_target / "authority.sqlite3").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation needs privilege")
+def test_authority_rejects_ancestor_retargeted_after_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = tmp_path / "external" / "ancestor" / "parent" / "authority.sqlite3"
+    configured.parent.mkdir(parents=True)
+    monkeypatch.setenv(AUTHORITY_DB_ENV, str(configured))
+    run_dir, store, manifest = _manifest(tmp_path)
+    authority = DurableAuthority(run_dir, store)
+
+    admitted_ancestor = tmp_path / "external" / "ancestor"
+    admitted_ancestor.rename(tmp_path / "external" / "admitted-ancestor")
+    redirected_parent = run_dir / "redirect" / "parent"
+    redirected_parent.mkdir(parents=True)
+    admitted_ancestor.symlink_to(run_dir / "redirect", target_is_directory=True)
+
+    with pytest.raises(DurableAuthorityBusy, match="ancestor changed"):
+        authority.claim(manifest)
+
+    assert not (redirected_parent / "authority.sqlite3").exists()
+
+
 def test_unexpected_existing_sqlite_schema_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -302,6 +302,13 @@ class ContinuationCoordinator:
                     "the exact durable pause was rejected or changed before delivery"
                 )
             if record.phase == "delivery_started":
+                self._write(
+                    record.model_copy(
+                        update={
+                            "delivery_sequence": record.delivery_sequence + 1,
+                        }
+                    )
+                )
                 return
             if record.phase != "validating":
                 raise ContinuationBusy(
@@ -459,6 +466,29 @@ class ContinuationCoordinator:
                 owner_nonce_sha256=self._nonce_digest(token.owner_nonce),
                 status=status,
                 report_success=report_success,
+                source_pause_binding=source_pause_binding,
+            )
+        except StateDiverged as exc:
+            raise ContinuationBusy(str(exc)) from exc
+
+    def prove_executor_outcome(
+        self,
+        token: ContinuationToken,
+        *,
+        source_pause_binding: str,
+    ) -> Optional[tuple[Literal["completed", "refused", "halted"], bool]]:
+        """Recover an exact result after the executor transport fails."""
+
+        manifest = self.store.read_manifest()
+        if manifest is None:
+            raise ContinuationBusy(
+                "the durable manifest disappeared before outcome recovery"
+            )
+        try:
+            return self.authority.prove_executor_outcome(
+                manifest,
+                attempt_id=token.attempt_id,
+                owner_nonce_sha256=self._nonce_digest(token.owner_nonce),
                 source_pause_binding=source_pause_binding,
             )
         except StateDiverged as exc:

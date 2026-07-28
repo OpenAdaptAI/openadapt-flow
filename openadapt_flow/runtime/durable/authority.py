@@ -104,29 +104,47 @@ class DurableAuthority:
     def __init__(self, run_dir: Path | str, store: Any) -> None:
         self.run_dir = Path(run_dir).resolve()
         self.store = store
-        self.db_path = _default_db_path()
+        self._configured_db_path = _default_db_path()
         try:
             # Resolve the parent only. This catches an ancestor symlink that
             # redirects the database back into the rollback-capable run tree,
             # while preserving the final lexical path so `_connect` can reject
             # a database-file symlink without following it.
-            effective_db_path = self.db_path.parent.resolve() / self.db_path.name
+            effective_db_path = (
+                self._configured_db_path.parent.resolve()
+                / self._configured_db_path.name
+            )
         except OSError as exc:
             raise DurableAuthorityBusy(
                 "the external durable authority path is unavailable"
             ) from exc
         if (
-            self.db_path == self.run_dir
-            or self.run_dir in self.db_path.parents
-            or effective_db_path == self.run_dir
+            effective_db_path == self.run_dir
             or self.run_dir in effective_db_path.parents
         ):
             raise DurableAuthorityBusy(
                 "the external durable authority must be outside the run directory"
             )
+        # Retain the resolved parent selected during construction. The final
+        # component stays lexical so `_connect` can still reject a database-file
+        # symlink without following it.
+        self.db_path = effective_db_path
         self.path_key = _path_key(self.run_dir)
 
     def _connect(self) -> sqlite3.Connection:
+        try:
+            current_db_path = (
+                self._configured_db_path.parent.resolve()
+                / self._configured_db_path.name
+            )
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority path is unavailable"
+            ) from exc
+        if current_db_path != self.db_path:
+            raise DurableAuthorityBusy(
+                "the external durable authority ancestor changed after admission"
+            )
         parent_existed = self.db_path.parent.exists()
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -993,7 +1011,10 @@ class DurableAuthority:
     ) -> None:
         with self._transaction() as connection:
             record = self._owned(connection, manifest, attempt_id, owner_nonce_sha256)
-            if record.reject_requested or record.attempt_phase != "validating":
+            if record.reject_requested or record.attempt_phase not in {
+                "validating",
+                "delivery_started",
+            }:
                 raise DurableAuthorityBusy(
                     "the continuation was rejected or is not eligible for delivery"
                 )
@@ -1111,6 +1132,68 @@ class DurableAuthority:
                 attempt_phase="reconciliation_required",
             )
 
+    def prove_executor_outcome(
+        self,
+        manifest: Any,
+        *,
+        attempt_id: str,
+        owner_nonce_sha256: str,
+        source_pause_binding: str,
+    ) -> Optional[tuple[Literal["completed", "refused", "halted"], bool]]:
+        """Derive an executor result from durable state, not its transport value."""
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy("durable authority identity changed")
+            digest = self.store.continuation_state_digest()
+            pending = self.store.read_pending()
+            if record.phase == "completed":
+                report_path = self.run_dir / "report.json"
+                try:
+                    report_sha256 = (
+                        "sha256:" + hashlib.sha256(report_path.read_bytes()).hexdigest()
+                    )
+                except OSError:
+                    return None
+                if (
+                    record.pause_binding_sha256 == source_pause_binding
+                    and record.attempt_phase == "none"
+                    and not record.attempt_id
+                    and pending is None
+                    and record.progress_digest == digest
+                    and bool(record.report_sha256)
+                    and record.report_sha256 == report_sha256
+                ):
+                    return "completed", True
+                return None
+
+            owned = (
+                record.attempt_id == attempt_id
+                and record.owner_nonce_sha256 == owner_nonce_sha256
+            )
+            if not owned or record.progress_digest != digest:
+                return None
+            if (
+                record.phase == "paused"
+                and record.attempt_phase == "validating"
+                and pending is not None
+                and pending.status == "pending"
+                and approval_pause_digest(pending) != source_pause_binding
+            ):
+                return "halted", False
+            if (
+                record.phase == "continuing"
+                and record.pause_binding_sha256 == source_pause_binding
+                and record.attempt_phase == "validating"
+                and record.delivery_sequence == 0
+                and pending is not None
+                and pending.status == "pending"
+                and approval_pause_digest(pending) == source_pause_binding
+            ):
+                return "refused", False
+            return None
+
     def attest_executor_outcome(
         self,
         manifest: Any,
@@ -1122,65 +1205,16 @@ class DurableAuthority:
         source_pause_binding: str,
     ) -> None:
         """Derive an attended executor outcome from monotonic durable state."""
-
-        with self._transaction() as connection:
-            record = self._read(connection)
-            if record is None or not self._identity_matches(record, manifest):
-                raise DurableAuthorityBusy("durable authority identity changed")
-            digest = self.store.continuation_state_digest()
-            pending = self.store.read_pending()
-            if status == "completed":
-                report_path = self.run_dir / "report.json"
-                try:
-                    report_sha256 = (
-                        "sha256:" + hashlib.sha256(report_path.read_bytes()).hexdigest()
-                    )
-                except OSError as exc:
-                    raise DurableAuthorityBusy(
-                        "the executor completion has no persisted report"
-                    ) from exc
-                valid = (
-                    report_success is True
-                    and record.phase == "completed"
-                    and record.attempt_phase == "none"
-                    and not record.attempt_id
-                    and pending is None
-                    and record.progress_digest == digest
-                    and bool(record.report_sha256)
-                    and record.report_sha256 == report_sha256
-                )
-            else:
-                owned = (
-                    record.attempt_id == attempt_id
-                    and record.owner_nonce_sha256 == owner_nonce_sha256
-                )
-                if status == "refused":
-                    valid = (
-                        report_success is False
-                        and owned
-                        and record.phase == "continuing"
-                        and record.attempt_phase == "validating"
-                        and record.delivery_sequence == 0
-                        and record.progress_digest == digest
-                        and pending is not None
-                        and pending.status == "pending"
-                        and approval_pause_digest(pending) == source_pause_binding
-                    )
-                else:
-                    valid = (
-                        report_success is False
-                        and owned
-                        and record.phase == "paused"
-                        and record.attempt_phase == "validating"
-                        and record.progress_digest == digest
-                        and pending is not None
-                        and pending.status == "pending"
-                        and approval_pause_digest(pending) != source_pause_binding
-                    )
-            if not valid:
-                raise DurableAuthorityBusy(
-                    "the executor receipt has no matching durable authority proof"
-                )
+        proven = self.prove_executor_outcome(
+            manifest,
+            attempt_id=attempt_id,
+            owner_nonce_sha256=owner_nonce_sha256,
+            source_pause_binding=source_pause_binding,
+        )
+        if proven != (status, report_success):
+            raise DurableAuthorityBusy(
+                "the executor receipt has no matching durable authority proof"
+            )
 
     def prepare_terminal(
         self,

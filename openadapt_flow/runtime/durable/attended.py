@@ -2258,6 +2258,7 @@ def execute_attended_action(
         )
         actions.append(started)
         executor_returned = False
+        coordinator = ContinuationCoordinator(run_dir, key=key)
         try:
             raw_result = (
                 executor.continue_run(run_dir, capability, approval)
@@ -2266,41 +2267,64 @@ def execute_attended_action(
             )
             executor_returned = True
             result = AttendedExecutionResult.model_validate(raw_result)
-            ContinuationCoordinator(run_dir, key=key).attest_executor_outcome(
+            coordinator.attest_executor_outcome(
                 continuation_token,
                 status=result.status,
                 report_success=result.report_success,
                 source_pause_binding=capability.pause_digest,
             )
         except Exception as exc:
-            try:
-                ContinuationCoordinator(run_dir, key=key).mark_executor_uncertain(
-                    continuation_token
-                )
-            except Exception as fence_exc:
-                raise AttendedActionRefused(
-                    "the executor outcome was invalid and its continuation "
-                    "authority could not be fenced"
-                ) from fence_exc
-            uncertain = started.model_copy(
-                update={
-                    "decision_id": secrets.token_hex(16),
-                    "status": "delivery_uncertain",
-                    "message": (
-                        "the deployment-bound action did not return a terminal "
-                        "receipt; reconcile live state before any retry"
-                    ),
-                    "created_at": _iso(_now()),
-                }
+            proven = coordinator.prove_executor_outcome(
+                continuation_token,
+                source_pause_binding=capability.pause_digest,
             )
-            actions.append(uncertain)
-            if not executor_returned:
-                raise
-            if isinstance(exc, AttendedActionRefused):
-                raise
-            raise AttendedActionRefused(
-                "the executor did not return an outcome proven by durable state"
-            ) from exc
+            if proven is not None and proven[0] in {"completed", "halted"}:
+                proven_status, proven_success = proven
+                result = AttendedExecutionResult(
+                    status=proven_status,
+                    message=(
+                        "The durable run completed and its exact report was "
+                        "verified after the executor transport failed."
+                        if proven_status == "completed"
+                        else (
+                            "The durable continuation halted at a new exact pause; "
+                            "the executor transport did not carry its valid receipt."
+                            if proven_status == "halted"
+                            else "The durable state proves that no continuation "
+                            "delivery was admitted."
+                        )
+                    ),
+                    report_success=proven_success,
+                    resumed_from=capability.step_id,
+                    next_transition=capability.expected_next_transition,
+                )
+            else:
+                try:
+                    coordinator.mark_executor_uncertain(continuation_token)
+                except Exception as fence_exc:
+                    raise AttendedActionRefused(
+                        "the executor outcome was invalid and its continuation "
+                        "authority could not be fenced"
+                    ) from fence_exc
+                uncertain = started.model_copy(
+                    update={
+                        "decision_id": secrets.token_hex(16),
+                        "status": "delivery_uncertain",
+                        "message": (
+                            "the deployment-bound action did not return a terminal "
+                            "receipt; reconcile live state before any retry"
+                        ),
+                        "created_at": _iso(_now()),
+                    }
+                )
+                actions.append(uncertain)
+                if not executor_returned:
+                    raise
+                if isinstance(exc, AttendedActionRefused):
+                    raise
+                raise AttendedActionRefused(
+                    "the executor did not return an outcome proven by durable state"
+                ) from exc
         decision = AttendedDecision(
             pause_id=capability.pause_id,
             capability_digest=capability.digest,

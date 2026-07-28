@@ -93,21 +93,188 @@ def fault_detector_contract_error(
     ]
     if report.execution_outcome != "HALTED" or len(detector_refusals) != 1:
         return "fault_detector_refusal_not_observed"
-    if any(
-        not result.safety_halt or result.delivery_attempted is not False
-        for result in detector_refusals
-    ):
+    refusal = detector_refusals[0]
+    if not refusal.safety_halt or refusal.delivery_attempted is not False:
         return "fault_detector_delivery_boundary_crossed"
-    refusal_index = report.results.index(detector_refusals[0])
+    if _fault_refusal_shape_error(refusal, receipt) is not None:
+        return "fault_detector_refusal_shape_invalid"
+    refusal_index = report.results.index(refusal)
     trailing_results = report.results[refusal_index + 1 :]
-    if trailing_results and not (
-        len(trailing_results) == 1
-        and trailing_results[0].step_id == "<terminal>"
-        and not trailing_results[0].ok
-        and trailing_results[0].safety_halt
-        and getattr(report, "terminal_outcome", None) in {"halt", "escalate"}
+    if trailing_results:
+        if len(trailing_results) != 1 or trailing_results[0].step_id != "<terminal>":
+            return "fault_detector_refusal_not_terminal"
+        terminal_outcome = getattr(report, "terminal_outcome", None)
+        if (
+            _program_terminal_shape_error(
+                trailing_results[0], terminal_outcome=terminal_outcome
+            )
+            is not None
+        ):
+            return "fault_detector_terminal_shape_invalid"
+    return None
+
+
+def _fault_refusal_shape_error(
+    result: Any,
+    receipt: "FaultMutationReceipt",
+) -> str | None:
+    """Require the exact pre-delivery shape emitted by a fault detector.
+
+    A signed mutation and a typed detector record prove which input changed and
+    which gate refused it.  They do not make unrelated success-shaped fields
+    trustworthy.  Keep the negative effect artifacts that the runtime emits for
+    the two effect faults, but reject any claimed delivery, confirmation,
+    reconciliation, repair, or interstitial action.
+    """
+
+    if (
+        result.ok
+        or result.skipped
+        or result.exception_handled
+        or not result.safety_halt
+        or result.delivery_attempted is not False
+        or result.delivery_receipt is not None
+        or result.delivery_uncertainty is not None
+        or result.actuation is not None
+        or result.drag_end_resolution is not None
+        or result.input_verified is not None
+        or result.input_retried
+        or result.postconditions_ok is not None
+        or result.postcondition_drift_rescues
+        or result.interstitial_actions
+        or result.effect_approved_unverified
+        or result.effect_evidence
+        or result.heal is not None
+        or result.drift_oracle_calls != 0
+        or not result.error
     ):
-        return "fault_detector_refusal_not_terminal"
+        return "unrelated_or_success_evidence"
+
+    if receipt.fault_kind == "ambiguity":
+        if (
+            receipt.actuation_path != "gui"
+            or result.failure_category != "safety_halt"
+            or result.resolution is not None
+            or result.identity is not None
+            or result.effect_verified is not None
+            or result.effect_results
+            or result.effect_contract_hashes
+            or result.starting_state_settled is not True
+        ):
+            return "target_resolution_shape"
+        return None
+
+    if receipt.fault_kind == "wrong_identity":
+        if (
+            receipt.actuation_path != "gui"
+            or result.failure_category != "governed_refusal"
+            or result.resolution is None
+            or result.identity is None
+            or result.identity.status != "mismatch"
+            or result.effect_verified is not None
+            or result.effect_results
+            or result.effect_contract_hashes
+            or result.starting_state_settled is not True
+        ):
+            return "identity_refusal_shape"
+        return None
+
+    if receipt.fault_kind == "stale_identity":
+        if (
+            receipt.actuation_path != "gui"
+            or result.failure_category != "governed_refusal"
+            or result.identity is None
+            or result.effect_verified is not None
+            or result.effect_results
+            or result.starting_state_settled is not True
+        ):
+            return "actuation_revalidation_shape"
+        return None
+
+    if result.failure_category != "governed_refusal":
+        return "effect_refusal_category"
+    if receipt.actuation_path == "gui":
+        if (
+            result.resolution is None
+            or result.identity is None
+            or result.identity.status != "verified"
+            or result.starting_state_settled is not True
+        ):
+            return "gui_effect_refusal_shape"
+    elif receipt.actuation_path == "api":
+        if (
+            result.resolution is not None
+            or result.identity is None
+            or result.identity.status != "verified"
+            or result.starting_state_settled is not None
+        ):
+            return "api_effect_refusal_shape"
+    else:  # The receipt model currently closes this enum; keep the check local.
+        return "unknown_actuation_path"
+
+    if (
+        result.effect_verified is not False
+        or len(result.effect_results) != 1
+        or any(not isinstance(item, str) or not item for item in result.effect_results)
+    ):
+        return "negative_effect_evidence_missing"
+    if receipt.fault_kind == "weak_effect":
+        if not result.effect_contract_hashes:
+            return "weak_effect_contract_missing"
+    elif receipt.fault_kind == "missing_effect":
+        if result.effect_contract_hashes:
+            return "missing_effect_claims_contract"
+    return None
+
+
+def _program_terminal_shape_error(
+    result: Any,
+    *,
+    terminal_outcome: Any,
+) -> str | None:
+    """Require the synthetic terminal record that ``Replayer`` can emit."""
+
+    if terminal_outcome not in {"halt", "escalate"}:
+        return "terminal_outcome"
+    if (
+        result.step_id != "<terminal>"
+        or result.intent != f"program {terminal_outcome}"
+        or result.ok
+        or not result.safety_halt
+        or not result.error
+        or result.risk != "reversible"
+        or result.risk_explanation is not None
+        or result.risk_review_required
+        or result.skipped
+        or result.exception_handled
+        or result.resolution is not None
+        or result.drag_end_resolution is not None
+        or result.identity is not None
+        or result.input_verified is not None
+        or result.input_retried
+        or result.postconditions_ok is not None
+        or result.interstitial_actions
+        or result.effect_verified is not None
+        or result.effect_approved_unverified
+        or result.effect_results
+        or result.effect_evidence
+        or result.failure_category is not None
+        or result.effect_contract_hashes
+        or result.actuation is not None
+        or result.program_scope
+        or result.delivery_receipt is not None
+        or result.delivery_attempted is not None
+        or result.delivery_uncertainty is not None
+        or result.safety_refusal_evidence is not None
+        or result.starting_state_settled is not None
+        or result.postcondition_drift_rescues
+        or result.drift_oracle_calls != 0
+        or result.heal is not None
+        or result.before_png is not None
+        or result.after_png is not None
+        or result.elapsed_ms != 0.0
+    ):
+        return "terminal_fields"
     return None
 
 

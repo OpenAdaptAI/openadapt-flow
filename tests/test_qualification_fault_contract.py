@@ -29,6 +29,7 @@ from openadapt_flow.ir import (
     Anchor,
     ApiBinding,
     ApiIdentityBinding,
+    EffectVerificationEvidence,
     SafetyRefusalEvidence,
     Step,
     StepResult,
@@ -919,7 +920,10 @@ def test_detector_receipt_rejects_any_result_after_the_fault_refusal() -> None:
         intent="Submit",
         ok=False,
         safety_halt=True,
+        failure_category="safety_halt",
         delivery_attempted=False,
+        starting_state_settled=True,
+        error="two submit controls match",
         safety_refusal_evidence=SafetyRefusalEvidence(
             stage="target_resolution",
             code="target_ambiguous",
@@ -950,6 +954,7 @@ def test_detector_receipt_rejects_any_result_after_the_fault_refusal() -> None:
         intent="program halt",
         ok=False,
         safety_halt=True,
+        error="the target-resolution detector refused the changed input",
     )
     program_report = SimpleNamespace(
         execution_outcome="HALTED",
@@ -958,6 +963,87 @@ def test_detector_receipt_rejects_any_result_after_the_fault_refusal() -> None:
         governed_qualification_case_action_paths={"submit": "gui"},
     )
     assert fault_detector_contract_error(program_report, receipt) is None
+
+    for update in (
+        {"delivery_attempted": True},
+        {
+            "delivery_receipt": ActionDeliveryReceipt(
+                receipt_id="terminal-forgery",
+                operation="click",
+                native=False,
+                delivered_at="2026-07-28T00:00:00Z",
+            )
+        },
+    ):
+        forged_terminal = program_terminal.model_copy(update=update)
+        program_report.results = [refusal, forged_terminal]
+        assert (
+            fault_detector_contract_error(program_report, receipt)
+            == "fault_detector_terminal_shape_invalid"
+        )
+
+
+def test_detector_receipt_rejects_success_fields_on_the_refusal(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.AMBIGUITY)
+    report, _backend = _run_fault(
+        tmp_path,
+        QualificationCaseKind.AMBIGUITY,
+        driver,
+    )
+    receipt = report.qualification_fault_mutations[0]
+
+    for update in (
+        {"ok": True},
+        {
+            "effect_verified": True,
+            "effect_contract_hashes": ["sha256:" + "1" * 64],
+            "effect_results": ["a forged confirmed effect"],
+            "effect_evidence": [
+                EffectVerificationEvidence(
+                    effect_contract_hash="sha256:" + "1" * 64,
+                    substrate="forged-system-of-record",
+                    verification_tier=1,
+                    initial_verdict="confirmed",
+                    final_verdict="confirmed",
+                    observed_effect="present",
+                )
+            ],
+        },
+    ):
+        forged = report.model_copy(deep=True)
+        forged.results[0] = forged.results[0].model_copy(update=update)
+        assert (
+            fault_detector_contract_error(forged, receipt)
+            == "fault_detector_refusal_shape_invalid"
+        )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [QualificationCaseKind.WEAK_EFFECT, QualificationCaseKind.MISSING_EFFECT],
+)
+def test_detector_receipt_accepts_runtime_api_effect_refusal_shape(
+    tmp_path: Path,
+    kind: QualificationCaseKind,
+) -> None:
+    driver = _FaultDriver(kind)
+    report, _backend = _run_fault(
+        tmp_path,
+        kind,
+        driver,
+        api_effect_only=True,
+        api_actuator=_UnavailableApiActuator(),
+    )
+
+    assert (
+        fault_detector_contract_error(
+            report,
+            report.qualification_fault_mutations[0],
+        )
+        is None
+    )
 
 
 def test_fault_receipt_signature_rejects_wrong_key_and_tampering() -> None:

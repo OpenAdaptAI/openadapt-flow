@@ -26,6 +26,7 @@ from openadapt_flow.ir import (
     IdentityCheck,
     Postcondition,
     PostconditionKind,
+    Resolution,
     RunReport,
     SafetyRefusalEvidence,
     Step,
@@ -204,6 +205,11 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         )
         for case in project.cases
     ]
+    required_actions_for_cases, _required_identity_for_cases = (
+        qualification_action_requirements(workflow)
+    )
+    if action_id not in required_actions_for_cases:
+        project.cases = []
     add_case(
         workflow,
         QualificationCase(
@@ -412,6 +418,20 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             ),
             private_key=_RUNNER_PRIVATE_BYTES,
         )
+        reached_target = case.kind is not QualificationCaseKind.AMBIGUITY
+        reached_effect_gate = case.kind in {
+            QualificationCaseKind.WEAK_EFFECT,
+            QualificationCaseKind.MISSING_EFFECT,
+        }
+        effect_contract_hashes = (
+            [effect.contract_hash() for effect in resolved_action_effects]
+            if case.kind
+            in {
+                QualificationCaseKind.STALE_IDENTITY,
+                QualificationCaseKind.WEAK_EFFECT,
+            }
+            else []
+        )
         report = RunReport(
             workflow_name=workflow.name,
             run_id_sha256=run_sha256,
@@ -461,7 +481,55 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                     intent=action.intent,
                     ok=False,
                     safety_halt=True,
+                    failure_category=(
+                        "safety_halt"
+                        if case.kind is QualificationCaseKind.AMBIGUITY
+                        else "governed_refusal"
+                    ),
                     delivery_attempted=False,
+                    resolution=(
+                        Resolution(
+                            rung="template",
+                            point=(30, 20),
+                            confidence=1.0,
+                            elapsed_ms=0.0,
+                        )
+                        if reached_target
+                        and case.kind is not QualificationCaseKind.STALE_IDENTITY
+                        else None
+                    ),
+                    identity=(
+                        IdentityCheck(
+                            status=(
+                                "mismatch"
+                                if case.kind is QualificationCaseKind.WRONG_IDENTITY
+                                else "verified"
+                            ),
+                            mode="structured",
+                            coverage=(
+                                0.0
+                                if case.kind is QualificationCaseKind.WRONG_IDENTITY
+                                else 1.0
+                            ),
+                            expected="record identity",
+                            observed=(
+                                "other record"
+                                if case.kind is QualificationCaseKind.WRONG_IDENTITY
+                                else "record identity"
+                            ),
+                        )
+                        if reached_target
+                        else None
+                    ),
+                    effect_verified=False if reached_effect_gate else None,
+                    effect_results=(
+                        ["effect verifier refused before actuation"]
+                        if reached_effect_gate
+                        else []
+                    ),
+                    effect_contract_hashes=effect_contract_hashes,
+                    starting_state_settled=True,
+                    error="the qualification fault detector refused before actuation",
                     safety_refusal_evidence=SafetyRefusalEvidence(
                         stage=gate,
                         code=code,

@@ -2071,7 +2071,10 @@ def build_outcome_envelope(
                             verdict=_postcondition_verdict(result.postconditions_ok),
                         )
                     )
-                if step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}:
+                if (
+                    result.actuation != "human_attended"
+                    and step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}
+                ):
                     contract_kind: Literal["intrinsic_input_readback"] = (
                         "intrinsic_input_readback"
                     )

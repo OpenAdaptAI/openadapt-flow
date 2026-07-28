@@ -182,6 +182,7 @@ def _decision(detail, *, action="continue", key="mobile-decision-key-01"):
     disposition = {
         "continue": "completed_by_operator",
         "skip": "not_applicable",
+        "reject": "rejected_by_operator",
         "teach": "teach_requested",
         "escalate": "needs_assistance",
     }[action]
@@ -237,7 +238,12 @@ def test_halt_to_mobile_task_to_verified_continue_returns_a_terminal_receipt(
     assert task["schema_version"] == "openadapt.human-decision-task/v1"
     assert task["capability_digest"] == capability.digest
     assert task["required_authn"] == "local_session"
-    assert task["allowed_actions"] == ["verify_and_resume", "teach", "escalate"]
+    assert task["allowed_actions"] == [
+        "verify_and_resume",
+        "reject",
+        "teach",
+        "escalate",
+    ]
     assert AttendedActionStore(run).verify_human_decision_task(task)
     _assert_phi_free(json.dumps(detail), extra=(str(run), str(bundle)))
 
@@ -441,8 +447,8 @@ def test_portable_and_engine_action_vocabularies_translate_without_a_gap():
     exactly where an "outside allowed_actions" check can pass while admitting
     something the task never authorized, so pin both directions.
     """
-    engine_actions = {"continue", "skip", "teach", "escalate"}
-    portable_actions = {"verify_and_resume", "skip", "teach", "escalate"}
+    engine_actions = {"continue", "skip", "reject", "teach", "escalate"}
+    portable_actions = {"verify_and_resume", "skip", "reject", "teach", "escalate"}
     assert set(human_decisions._ACTION_MAP) == engine_actions
     assert set(human_decisions._ACTION_MAP.values()) == portable_actions
     # Injective: no two engine actions may collapse onto one portable name.
@@ -1143,3 +1149,193 @@ def test_a_pre_admission_refusal_is_not_a_receipt(tmp_path, monkeypatch):
     assert isinstance(stale.json()["detail"], str)
     assert "state" not in stale.json() and "reason_code" not in stale.json()
     assert not backend.actions
+
+
+# ---------------------------------------------------------------------------
+# Reject: the run ENDS, and the run report is what proves it
+# ---------------------------------------------------------------------------
+
+
+def test_reject_terminates_the_run_and_the_run_report_says_so(tmp_path, monkeypatch):
+    """A rejection must end the run, provably, from the durable report.
+
+    The UI can render whatever it likes; the question this test asks is what
+    the engine wrote down. Three artifacts have to agree afterwards: the
+    decision journal records a terminal ``rejected``, the pause is marked
+    ``rejected`` rather than deleted (so the audit keeps WHY), and
+    ``report.json`` carries a terminal ``transaction_outcome`` -- here
+    ``CANCELED``, because this halt never actuated anything, so every
+    consequential step is positively proven effect-free.
+
+    Nothing may be actuated on the way: no live session is even provided.
+    """
+    _wf, bundles, runs, _bundle, run, _capability = _halt(tmp_path)
+    _app, client = _phone(bundles, runs, monkeypatch)
+    item, detail = _open_task(client)
+    assert "reject" in detail["task"]["allowed_actions"]
+
+    before = data._load_report(run)[0]
+    assert before.execution_outcome == "HALTED"
+    assert before.canceled is False
+
+    response = _post(
+        client, item, _decision(detail, action="reject", key="reject-decision-key-01")
+    )
+    assert response.status_code == 200
+    receipt = HumanDecisionReceiptV1.model_validate(response.json())
+    assert receipt.action.value == "reject"
+    assert receipt.state.value == "rejected"
+    assert receipt.reason_code.value == "rejected_by_operator"
+    assert receipt.succeeded is False
+    assert receipt.report_success is None
+    _assert_phi_free(json.dumps(response.json()))
+
+    # -- the run report, not the UI, is the proof --------------------------
+    after = data._load_report(run)[0]
+    assert after.canceled is True
+    assert after.transaction_outcome == "CANCELED"
+    assert after.transaction_billable is False
+    assert after.transaction_platform_fault is False
+    # The coarse lifecycle is NOT rewritten: the run really did halt, and
+    # `transaction_outcome` refines what is known about the business effect
+    # without replacing the outcome every existing consumer already reads.
+    assert after.execution_outcome == "HALTED"
+
+    # -- the pause is terminal, and retained -------------------------------
+    pending = CheckpointStore(run).read_pending()
+    assert pending is not None, "the audit record of what was rejected was deleted"
+    assert pending.status == "rejected"
+
+
+def test_a_rejected_run_cannot_be_resumed_or_answered_again(tmp_path, monkeypatch):
+    """Terminal means enforced, not merely reported.
+
+    Two doors have to stay shut: a second attended answer (a stale phone tab, a
+    retried relay, a different operator) and an ordinary approved resume. The
+    resume refusal is a distinct ``RunRejected``, not ``ApprovalRequired``,
+    because an operator told "approval required" would reasonably go and create
+    one.
+    """
+    from openadapt_flow.runtime.durable.approval import ApprovalRecord, RunRejected
+    from openadapt_flow.runtime.durable.resume import resume
+
+    _wf, bundles, runs, bundle, run, _capability = _halt(tmp_path)
+    _app, client = _phone(bundles, runs, monkeypatch)
+    item, detail = _open_task(client)
+    assert (
+        _post(
+            client, item, _decision(detail, action="reject", key="reject-once-key-0001")
+        ).status_code
+        == 200
+    )
+
+    for action, key in (
+        ("reject", "reject-twice-key-000001"),
+        ("escalate", "escalate-after-reject-01"),
+        ("continue", "continue-after-reject-01"),
+    ):
+        again = _post(client, item, _decision(detail, action=action, key=key))
+        assert again.status_code == 409, action
+        assert "terminal" in again.json()["detail"], action
+
+    approval = ApprovalRecord(
+        approver="supervisor",
+        resolution="resume anyway",
+        bundle_version="",
+        workflow_name=WORKFLOW_NAME,
+        run_dir=str(run),
+    )
+    with pytest.raises(RunRejected):
+        resume(
+            run,
+            Replayer(FakeBackend(), vision=FakeVision(), poll_interval_s=0.0),
+            bundle_dir=bundle,
+            approval=approval,
+        )
+
+
+def test_reject_is_withheld_where_a_write_may_already_have_landed(
+    tmp_path, monkeypatch
+):
+    """An uncertain delivery is the one pause reject must not be offered on.
+
+    Ending the run there cannot un-send the action, and it would take away the
+    pause that is the operator's handle for reconciling it. Escalate is the
+    correct answer, and it survives.
+
+    This covers the case the sealed capability CANNOT: the pause was issued
+    with `reject` allowed and the delivery became uncertain afterwards, so the
+    signed action set still carries it. `execute_attended_action` refuses from
+    the live decision journal, and the refusal names the correct next step
+    rather than saying the run cannot be stopped. (`_allowed_actions`
+    withholding reject at issue time, for a pause that already carried a
+    recorded delivery uncertainty, is covered in `test_attended_actions.py`.)
+
+    The gate reads recorded uncertainty, never `delivery_state == "unknown"`.
+    That value is the fail-closed default for most halts -- including this one
+    at the moment it is created -- and keying on it would withhold reject
+    almost everywhere.
+    """
+    from openadapt_flow.runtime.durable.attended import AttendedActionRequest
+
+    _wf, bundles, runs, _bundle, run, capability = _halt(tmp_path)
+    assert "reject" in capability.allowed_actions
+
+    # Make the delivery genuinely uncertain the way it becomes uncertain in
+    # production: a continue whose deployment-bound executor never returns a
+    # terminal receipt. No test backdoor -- the journal records what really
+    # happened, and that journal is what the gate reads.
+
+    class _Crashes:
+        def continue_run(self, run_dir, capability, approval):
+            raise RuntimeError("the deployment-bound action never returned")
+
+        def skip_run(self, run_dir, capability, approval):
+            return self.continue_run(run_dir, capability, approval)
+
+    with pytest.raises(RuntimeError):
+        execute_attended_action(
+            run,
+            AttendedActionRequest(
+                capability_digest=capability.digest,
+                idempotency_key="continue-that-crashes-01",
+                action="continue",
+                disposition="completed_by_operator",
+            ),
+            operator="front-desk",
+            executor=_Crashes(),
+        )
+    assert AttendedActionStore(run).unresolved_delivery(capability.pause_id) is not None
+
+    # The projected task still advertises reject -- `allowed_actions` is inside
+    # the signed payload, and withdrawing one action mid-flight would change
+    # the task digest and turn every request the phone already holds into "the
+    # task changed" instead of the specific refusal below.
+    _app, client = _phone(bundles, runs, monkeypatch)
+    item, detail = _open_task(client)
+    assert detail["task"]["delivery_state"] == "unknown"
+    assert "reject" in detail["task"]["allowed_actions"]
+
+    # The refusal an operator actually gets, through the phone's own route: it
+    # names the uncertainty and the correct next step.
+    refused = _post(
+        client, item, _decision(detail, action="reject", key="reject-uncertain-http-1")
+    )
+    assert refused.status_code == 409
+    assert "may already have been delivered" in refused.json()["detail"]
+    assert "Escalate it instead" in refused.json()["detail"]
+
+    # And the engine refuses it directly, bypassing the console entirely.
+    with pytest.raises(AttendedActionRefused, match="may already have been delivered"):
+        execute_attended_action(
+            run,
+            AttendedActionRequest(
+                capability_digest=capability.digest,
+                idempotency_key="reject-uncertain-key-01",
+                action="reject",
+                disposition="rejected_by_operator",
+            ),
+            operator="front-desk",
+        )
+    assert data._load_report(run)[0].canceled is False
+    assert CheckpointStore(run).read_pending().status == "pending"

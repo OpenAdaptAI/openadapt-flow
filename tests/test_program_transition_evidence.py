@@ -192,7 +192,7 @@ def _governed_report(workflow: Workflow, root):
         admitted_policy_name="permissive",
         execution_profile="standard",
         minimum_effect_tier=int(VerificationTier.PERSISTED_STATE_REACQUISITION),
-        required_identity_step_ids=(),
+        required_identity_step_ids=("submit",),
     )
     run_dir = root / "run"
     report = Replayer(

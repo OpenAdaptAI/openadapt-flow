@@ -672,6 +672,7 @@ def test_replayer_records_native_delivery_separately_from_outcome(tmp_path) -> N
         workflow=Workflow(name="wf", steps=[step]),
         step_index=0,
         bundle_dir=tmp_path,
+        run_dir=tmp_path / "run-native-delivery",
         before_png=make_png(),
         result=result,
     )

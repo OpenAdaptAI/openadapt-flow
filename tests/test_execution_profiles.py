@@ -863,6 +863,7 @@ def test_api_verified_outcome_requires_runtime_delivery_attempt_shape(action):
     workflow.steps[0].api_binding = ApiBinding(
         method="POST",
         url_template="/records",
+        on_unavailable="halt",
         body_template={"record_id": "{record_id}"},
         effects=[api_effect],
         identity=[
@@ -874,6 +875,9 @@ def test_api_verified_outcome_requires_runtime_delivery_attempt_shape(action):
             )
         ],
     )
+    workflow.steps[0].expect = []
+    workflow.steps[0].anchor = None
+    workflow.steps[0].identity_armed = False
     report = _verified_production_report(workflow)
     report.params = {"record_id": "synthetic-1"}
     report.results[0].actuation = "api"

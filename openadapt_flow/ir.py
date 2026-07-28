@@ -523,9 +523,10 @@ class ApiBinding(BaseModel):
 
     ADDITIVE and back-compatible: the field is optional and defaults absent, so a
     bundle carrying no binding replays EXACTLY as today (GUI actuation). A binding
-    present with no actuator configured also falls through to the GUI ladder --
-    the API tier is an OPTIMIZATION whose safe fallback is the GUI, never a gate
-    that can block a runnable step.
+    also defaults to GUI fallback when the API tier is unavailable before
+    delivery. A workflow can instead set ``on_unavailable="halt"`` to declare an
+    API-only action. That mode refuses before GUI resolution or input rather than
+    inventing a second, unqualified actuation path.
 
     Fields are REST/JSON-first but shaped so a FHIR / MCP / tool binding fits the
     same model (``kind`` selects the substrate; a FHIR resource POST, an MCP tool
@@ -538,6 +539,15 @@ class ApiBinding(BaseModel):
     kind: Literal["rest", "fhir", "mcp", "tool"] = Field(
         default="rest",
         description="Substrate: 'rest'/'fhir' HTTP, or an 'mcp'/'tool' call",
+    )
+    on_unavailable: Literal["gui", "halt"] = Field(
+        default="gui",
+        description=(
+            "Pre-delivery API-unavailability policy. 'gui' preserves the "
+            "back-compatible GUI fallback; 'halt' declares this step API-only "
+            "and refuses without GUI input when no actuator is configured or "
+            "the actuator proves that no request was sent."
+        ),
     )
     method: str = Field(
         default="POST",
@@ -2441,6 +2451,7 @@ class SafetyRefusalEvidence(BaseModel):
         "target_resolution",
         "identity_verification",
         "actuation_revalidation",
+        "api_admission",
         "effect_strength",
         "effect_verifier",
     ]
@@ -2449,6 +2460,7 @@ class SafetyRefusalEvidence(BaseModel):
         "identity_conflict",
         "identity_unverifiable",
         "actuation_observation_changed",
+        "api_path_unavailable",
         "effect_strength_insufficient",
         "effect_verifier_missing",
     ]

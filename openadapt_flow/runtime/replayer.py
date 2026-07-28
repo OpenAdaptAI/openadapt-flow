@@ -4796,25 +4796,38 @@ class Replayer:
                 )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
-            if qualification_path == "api" and (
-                step.api_binding is None or self.api_actuator is None
-            ):
+            if qualification_path == "api" and step.api_binding is None:
                 result.safety_halt = True
                 result.failure_category = "governed_refusal"
                 result.error = (
                     "qualification case requires the API actuation path, but its "
-                    "binding or actuator is unavailable"
+                    "binding is unavailable"
                 )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
+        if (
+            qualification_path != "gui"
+            and step.api_binding is not None
+            and self.api_actuator is None
+            and (
+                qualification_path == "api" or step.api_binding.on_unavailable == "halt"
+            )
+        ):
+            self._set_api_unavailable_refusal(
+                step,
+                result,
+                reason="no API actuator is configured for this deployment",
+            )
+            result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+            return result
         # API/tool tier -- the TOP of the capability ladder. When the step
         # carries an api_binding and an ApiActuator is configured, PERFORM the
         # write via the API (deterministic, $0, no GUI), CONFIRM it with the
         # EffectVerifier, and SKIP the GUI resolve/act entirely. Returns True
         # when the API tier took responsibility (actuated+verified, or HALTed);
-        # returns False (API tier unavailable -- endpoint unreachable / no
-        # binding param) to fall through to the GUI ladder below with NO write
-        # yet performed (the no-double-write contract). See
+        # returns False only when the API tier is unavailable AND the binding
+        # permits GUI fallback. API-only bindings return a typed pre-delivery
+        # halt with NO write performed (the no-double-write contract). See
         # openadapt_flow.runtime.actuators.
         api_effect_verifier = self.effect_verifier
         api_effects: tuple[Any, ...] = ()
@@ -5979,8 +5992,8 @@ class Replayer:
           effect contract, or no verifier) -- an unverifiable consequential
           write never proceeds;
         - snapshot the system of record, then actuate ONCE;
-        - UNAVAILABLE (request never sent) -> return False so the caller falls
-          through to the GUI ladder; nothing was written, so no double-write;
+        - UNAVAILABLE (request never sent) -> use the binding's configured GUI
+          fallback or typed pre-delivery halt; nothing was written;
         - HALT (request sent, outcome unknown / rejected) -> stop the run; the
           write may have landed, so it is NEVER re-done through the GUI;
         - ACTUATED (2xx) -> CONFIRM with the EffectVerifier; a non-CONFIRMED
@@ -5988,8 +6001,8 @@ class Replayer:
 
         Returns True when the API tier took responsibility for the step (the
         result is final -- actuated+verified, HALTed, or a config-error HALT),
-        False when the API tier is UNAVAILABLE and the caller must fall through
-        to the GUI resolution ladder.
+        False only when the API tier is UNAVAILABLE and the binding permits the
+        caller to fall through to the GUI resolution ladder.
         """
         binding = step.api_binding
         assert binding is not None  # guaranteed by the caller
@@ -6160,14 +6173,20 @@ class Replayer:
         from openadapt_flow.runtime.actuators import ActuationStatus
 
         if outcome.status == ActuationStatus.UNAVAILABLE:
-            # The request was NEVER sent -- nothing was written. Fall through to
-            # the GUI ladder for this step (no double-write risk). The GUI path
-            # populates the result. Remove the unused API-path contracts before
-            # that path binds its own effects: the result must describe exactly
+            # The request was NEVER sent -- nothing was written. Remove the
+            # unused API-path contracts before applying the binding's exact
+            # unavailability policy. A GUI fallback result must describe only
             # the path responsible for delivery, never both alternatives.
             result.delivery_attempted = False
             del result.effect_contract_hashes[api_hash_start:]
             result.effect_results.append(f"[api] {outcome.reason}")
+            if binding.on_unavailable == "halt":
+                self._set_api_unavailable_refusal(
+                    step,
+                    result,
+                    reason=outcome.reason,
+                )
+                return True
             return False
 
         # From here the request WAS attempted -- this step is API-tier and is
@@ -6216,6 +6235,45 @@ class Replayer:
         result.ok = error is None
         result.error = error
         return True
+
+    @staticmethod
+    def _set_api_unavailable_refusal(
+        step: Step,
+        result: StepResult,
+        *,
+        reason: str,
+    ) -> None:
+        """Record an exact pre-delivery API-only refusal.
+
+        The caller invokes this only when no request was sent. The typed
+        evidence distinguishes that state from an attempted or uncertain API
+        delivery and prevents any GUI fallback.
+        """
+
+        binding = step.api_binding
+        assert binding is not None
+        detector_input = json.dumps(
+            {
+                "binding": binding.model_dump(mode="json"),
+                "reason_sha256": hashlib.sha256(reason.encode("utf-8")).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        result.ok = False
+        result.delivery_attempted = False
+        result.safety_halt = True
+        result.failure_category = "governed_refusal"
+        result.effect_verified = False
+        result.error = (
+            f"API-only step '{step.id}' ({step.intent}) is unavailable before "
+            "delivery; refusing GUI fallback — run aborted"
+        )
+        result.safety_refusal_evidence = SafetyRefusalEvidence(
+            stage="api_admission",
+            code="api_path_unavailable",
+            detector_input_sha256=hashlib.sha256(detector_input).hexdigest(),
+        )
 
     # -- system-of-record effect verification -----------------------------------
 

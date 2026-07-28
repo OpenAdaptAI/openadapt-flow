@@ -30,6 +30,7 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     ApiBinding,
+    ApiIdentityBinding,
     BundleManifest,
     EffectVerificationEvidence,
     IdentityCheck,
@@ -61,6 +62,7 @@ from openadapt_flow.qualification import (
     QualificationCaseKind,
     QualificationCaseResult,
     QualificationCertification,
+    QualificationError,
     QualificationOutcome,
     QualificationRefusalCode,
     RequalificationCondition,
@@ -172,6 +174,118 @@ def _environment() -> EnvironmentBoundary:
         runtime_version="1.20.2",
         required_capabilities=["pixel_observation", "effect_verification"],
     )
+
+
+def test_api_only_qualification_uses_only_executable_targets() -> None:
+    effect = Effect(
+        kind=EffectKind.FIELD_EQUALS,
+        match={"id": ValueExpr(param="record_id")},
+        field="note",
+        value=ValueExpr(param="note"),
+        idempotency_key=ValueExpr(param="record_id"),
+        risk="irreversible",
+    )
+    step = Step(
+        id="save",
+        intent="Save the record",
+        action=ActionKind.KEY,
+        key="Enter",
+        risk="irreversible",
+        api_binding=ApiBinding(
+            url_template="/records",
+            body_template={
+                "id": "{record_id}",
+                "note": "{note}",
+            },
+            on_unavailable="halt",
+            effects=[effect],
+            identity=[
+                ApiIdentityBinding(
+                    key="record_id",
+                    param="record_id",
+                    effect_field="id",
+                    request_pointers=["/body/id"],
+                )
+            ],
+        ),
+    )
+    workflow = Workflow(
+        name="api-only-qualified",
+        params={"record_id": "example", "note": "example"},
+        steps=[step],
+    )
+    init_project(workflow, environment=_environment())
+    set_action_classification(
+        workflow,
+        ActionRiskClassification(
+            step_id="save",
+            classification=ActionRiskClass.IRREVERSIBLE,
+            explanation="Saving changes the source-of-record state",
+            operator_confirmed=True,
+        ),
+    )
+    set_identity_policy(
+        workflow,
+        IdentityPolicy(
+            step_id="save",
+            enforcement=IdentityEnforcement.SIGNAL_QUORUM,
+            signals=[
+                IdentitySignalPolicy(
+                    key="record_id",
+                    source="structured",
+                    extract_pattern=r"^(?P<value>.+)$",
+                )
+            ],
+            quorum=1,
+        ),
+    )
+    set_effect_policy(
+        workflow,
+        step_id="save",
+        effect_index=0,
+        tier=VerificationTier.INDEPENDENT_SYSTEM,
+        actuation_path="api",
+    )
+    runtime_digest = runtime_inputs_digest(workflow, None, None)
+    for case_id in ("fault-weak-effect", "fault-missing-effect"):
+        set_case_scope(
+            workflow,
+            case_id=case_id,
+            runtime_input_sha256=runtime_digest,
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="api")
+            ],
+        )
+    add_case(
+        workflow,
+        QualificationCase(
+            id="representative-api",
+            kind=QualificationCaseKind.REPRESENTATIVE,
+            runtime_input_sha256=runtime_digest,
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="api")
+            ],
+            expected_outcome=QualificationOutcome.VERIFIED,
+        ),
+    )
+
+    with pytest.raises(QualificationError, match="non-executable"):
+        set_case_scope(
+            workflow,
+            case_id="fault-weak-effect",
+            runtime_input_sha256=runtime_digest,
+            action_targets=[
+                QualificationActionTarget(step_id="save", actuation_path="gui")
+            ],
+        )
+
+    report = evaluate_qualification(workflow)
+    assert report.identity_covered_action_count == 1
+    assert report.effect_covered_action_count == 1
+    refusal_codes = {item.code for item in report.refusals}
+    assert QualificationRefusalCode.STEP_IDENTITY_UNARMED not in refusal_codes
+    assert QualificationRefusalCode.EFFECT_CONTRACT_MISSING not in refusal_codes
+    assert QualificationRefusalCode.CASE_TARGET_INVALID not in refusal_codes
 
 
 def _configure(workflow: Workflow, *, tier: VerificationTier) -> None:

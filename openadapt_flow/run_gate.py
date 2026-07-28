@@ -69,6 +69,7 @@ from openadapt_flow.ir import (
 from openadapt_flow.policy import (
     Policy,
     all_effect_paths_covered,
+    executable_actuation_paths,
     has_postcondition_contract,
     has_screen_postcondition,
     has_system_effect,
@@ -77,6 +78,7 @@ from openadapt_flow.policy import (
     is_identity_armed,
     iter_effect_paths,
     missing_effect_paths,
+    path_requires_gui_contracts,
     policy_contract_sha256,
     project_step_safety,
     step_tags,
@@ -657,14 +659,14 @@ def _gate_identity(
             certifying_policy=certifying_policy,
         )
     ]
-    unarmed = [
-        step
-        for step in must_arm
-        if (
-            not is_identity_armed(step)
-            or (step.api_binding is not None and not step.api_binding.identity)
-        )
-    ]
+    unarmed = []
+    for step in must_arm:
+        paths = executable_actuation_paths(step)
+        if ("gui" in paths and not is_identity_armed(step)) or (
+            "api" in paths
+            and (step.api_binding is None or not step.api_binding.identity)
+        ):
+            unarmed.append(step)
     total = len(must_arm)
     if not unarmed:
         return _result(
@@ -707,13 +709,16 @@ def _gate_effect(
             certifying_policy=certifying_policy,
         )
     ]
-    # ApiBinding is an optional top rung: an unavailable pre-dispatch API call
-    # falls through to GUI actuation.  Binding-local effects therefore cannot
-    # cover the GUI path; the canonical step effects must cover that fallback.
+    # Each executable path needs its own exact effect contract. API-only
+    # bindings omit GUI from the canonical path projection.
     screen_only = [s for s in writes if not all_effect_paths_covered(s)]
     unconfirmed = [s for s in writes if has_unconfirmed_effect_binding(s)]
     missing_postconditions = (
-        [s for s in writes if not has_postcondition_contract(s)]
+        [
+            s
+            for s in writes
+            if path_requires_gui_contracts(s) and not has_postcondition_contract(s)
+        ]
         if require_postconditions
         else []
     )

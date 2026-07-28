@@ -1665,7 +1665,7 @@ def classify_execution_outcome(
             continue
         from openadapt_flow.policy import has_postcondition_contract
 
-        if not has_postcondition_contract(step):
+        if not api_actuation and not has_postcondition_contract(step):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if result.effect_approved_unverified or result.effect_verified is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED

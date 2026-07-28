@@ -21,7 +21,11 @@ from openadapt_flow.ir import (
     StepResult,
     Workflow,
 )
-from openadapt_flow.runtime.actuators import ActuationStatus, ApiActuationResult
+from openadapt_flow.runtime.actuators import (
+    ActuationStatus,
+    ApiActuationResult,
+    ApiActuator,
+)
 from openadapt_flow.runtime.effects import Verdict
 from openadapt_flow.runtime.effects.effect import (
     Effect,
@@ -876,7 +880,9 @@ def _path_effect(name: str) -> Effect:
     )
 
 
-def _api_or_gui_workflow() -> tuple[Workflow, Effect, Effect]:
+def _api_or_gui_workflow(
+    *, on_unavailable: str = "gui"
+) -> tuple[Workflow, Effect, Effect]:
     gui_effect = _path_effect("gui")
     api_effect = _path_effect("api")
     workflow = Workflow(
@@ -892,11 +898,81 @@ def _api_or_gui_workflow() -> tuple[Workflow, Effect, Effect]:
                     method="POST",
                     url_template="/save",
                     effects=[api_effect],
+                    on_unavailable=on_unavailable,
                 ),
             )
         ],
     )
     return workflow, gui_effect, api_effect
+
+
+def test_api_only_binding_without_actuator_halts_before_gui_delivery(tmp_path):
+    workflow, _gui_effect, _api_effect = _api_or_gui_workflow(on_unavailable="halt")
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+    ).run(workflow, bundle_dir=tmp_path / "bundle", run_dir=tmp_path / "run")
+
+    result = report.results[0]
+    assert report.success is False
+    assert result.delivery_attempted is False
+    assert result.actuation is None
+    assert result.safety_halt is True
+    assert result.safety_refusal_evidence is not None
+    assert result.safety_refusal_evidence.stage == "api_admission"
+    assert result.safety_refusal_evidence.code == "api_path_unavailable"
+    assert backend.actions == []
+
+
+@pytest.mark.parametrize(
+    "actuator",
+    [
+        _PathActuator(ActuationStatus.UNAVAILABLE),
+        ApiActuator(),
+    ],
+)
+def test_api_only_pre_delivery_unavailable_never_falls_through_to_gui(
+    tmp_path, actuator
+):
+    workflow, _gui_effect, _api_effect = _api_or_gui_workflow(on_unavailable="halt")
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+        api_actuator=actuator,
+    ).run(workflow, bundle_dir=tmp_path / "bundle", run_dir=tmp_path / "run")
+
+    result = report.results[0]
+    assert report.success is False
+    assert result.delivery_attempted is False
+    assert result.safety_halt is True
+    assert result.safety_refusal_evidence is not None
+    assert result.safety_refusal_evidence.code == "api_path_unavailable"
+    assert backend.actions == []
+
+
+def test_api_only_attempted_halt_never_falls_through_to_gui(tmp_path):
+    workflow, _gui_effect, _api_effect = _api_or_gui_workflow(on_unavailable="halt")
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+        api_actuator=_PathActuator(ActuationStatus.HALT),
+    ).run(workflow, bundle_dir=tmp_path / "bundle", run_dir=tmp_path / "run")
+
+    result = report.results[0]
+    assert report.success is False
+    assert result.delivery_attempted is True
+    assert result.actuation == "api"
+    assert result.safety_refusal_evidence is None
+    assert backend.actions == []
 
 
 @pytest.mark.parametrize(

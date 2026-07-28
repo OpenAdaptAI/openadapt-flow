@@ -1136,8 +1136,18 @@ def identity_policy_independence_errors(policy: IdentityPolicy) -> list[str]:
 def identity_signal_runtime_available(
     step: "Step",
     signal: IdentitySignalPolicy,
+    *,
+    actuation_path: Literal["gui", "api"] = "gui",
 ) -> bool:
     """Whether the shipped runtime can compare this exact retained signal."""
+
+    if actuation_path == "api":
+        binding = step.api_binding
+        return bool(
+            binding is not None
+            and binding.identity
+            and signal.key.value in {item.key for item in binding.identity}
+        )
 
     anchor = step.anchor
     if anchor is None:
@@ -1275,6 +1285,11 @@ def set_identity_policy(
     step = _steps_by_id(workflow).get(policy.step_id)
     if step is None:
         raise QualificationError(f"unknown step id {policy.step_id!r}")
+    from openadapt_flow.policy import executable_actuation_paths
+
+    executable_paths = executable_actuation_paths(step)
+    gui_required = "gui" in executable_paths
+    api_required = "api" in executable_paths
     available = available_identity_sources(step)
     pending_hashes: list[tuple["IdentityTemplate", str, str]] = []
     if policy.enforcement is IdentityEnforcement.CANONICAL_LADDER:
@@ -1284,7 +1299,12 @@ def set_identity_policy(
             )
         from openadapt_flow.policy import is_identity_armed
 
-        if not is_identity_armed(step) or not available:
+        if api_required and not gui_required:
+            raise QualificationError(
+                "API actuation requires a signal-quorum identity policy bound "
+                "to the request and effect"
+            )
+        if gui_required and (not is_identity_armed(step) or not available):
             raise QualificationError(
                 "canonical identity ladder is not armed with retained evidence"
             )
@@ -1295,9 +1315,13 @@ def set_identity_policy(
                 "identity quorum signals are not independent: "
                 + "; ".join(independence_errors)
             )
-        unavailable = sorted(
-            {signal.source for signal in policy.signals} - available,
-            key=lambda source: source.value,
+        unavailable = (
+            sorted(
+                {signal.source for signal in policy.signals} - available,
+                key=lambda source: source.value,
+            )
+            if gui_required
+            else []
         )
         if unavailable:
             raise QualificationError(
@@ -1314,6 +1338,8 @@ def set_identity_policy(
                     f"identity signal {signal.key.value!r} references unknown "
                     "workflow parameter(s): " + ", ".join(unknown_params)
                 )
+            if not gui_required:
+                continue
             anchor = step.anchor
             assert anchor is not None
             recorded = (
@@ -1395,30 +1421,49 @@ def set_identity_policy(
                 "recorded identity values were supplied for signals that do not "
                 "need a PHI-free binding: " + ", ".join(unused_value_keys)
             )
-        runtime_unavailable = []
-        for signal in policy.signals:
-            if identity_signal_runtime_available(step, signal):
+        runtime_unavailable: list[tuple[str, IdentitySignalPolicy]] = []
+        for actuation_path in executable_paths:
+            if actuation_path == "api":
+                # Qualification is an editing surface. Permit the operator to
+                # save the intended semantic policy before the request/effect
+                # binding is complete; evaluate_qualification still refuses
+                # certification until the exact API binding exists.
                 continue
-            anchor = step.anchor
-            assert anchor is not None
-            template = anchor.identity_template
-            pending_key = signal_hash_key(
-                signal.source,
-                signal.match,
-                signal.normalizers,
-                extract_pattern=signal.extract_pattern,
-                parameter_names=signal.params,
-            )
-            if template is not None and (id(template), pending_key) in pending_keys:
-                continue
-            runtime_unavailable.append(signal)
+            for signal in policy.signals:
+                if identity_signal_runtime_available(
+                    step,
+                    signal,
+                    actuation_path=actuation_path,
+                ):
+                    continue
+                if actuation_path == "gui":
+                    anchor = step.anchor
+                    assert anchor is not None
+                    template = anchor.identity_template
+                    pending_key = signal_hash_key(
+                        signal.source,
+                        signal.match,
+                        signal.normalizers,
+                        extract_pattern=signal.extract_pattern,
+                        parameter_names=signal.params,
+                    )
+                    if (
+                        template is not None
+                        and (
+                            id(template),
+                            pending_key,
+                        )
+                        in pending_keys
+                    ):
+                        continue
+                runtime_unavailable.append((actuation_path, signal))
         if runtime_unavailable:
             raise QualificationError(
                 "identity policy references retained evidence without the "
                 "requested executable comparison: "
                 + ", ".join(
-                    f"{signal.key.value} ({signal.source.value})"
-                    for signal in runtime_unavailable
+                    f"{signal.key.value} ({signal.source.value}, {actuation_path})"
+                    for actuation_path, signal in runtime_unavailable
                 )
             )
     hashes_changed = any(
@@ -1561,13 +1606,17 @@ def set_effect_policy(
     step = _steps_by_id(workflow).get(step_id)
     if step is None:
         raise QualificationError(f"unknown step id {step_id!r}")
+    from openadapt_flow.policy import executable_actuation_paths
+
+    if actuation_path not in executable_actuation_paths(step):
+        raise QualificationError(
+            f"step {step_id!r} has no executable {actuation_path} actuation path"
+        )
     effects = (
         step.effects
         if actuation_path == "gui"
         else (step.api_binding.effects if step.api_binding is not None else [])
     )
-    if actuation_path == "api" and step.api_binding is None:
-        raise QualificationError(f"step {step_id!r} has no API actuation path")
     if effect_index < 0 or effect_index >= len(effects):
         raise QualificationError(
             f"effect index {effect_index} is outside {actuation_path} path "
@@ -1645,6 +1694,8 @@ def set_case_scope(
     if case is None:
         raise QualificationError(f"unknown qualification case {case_id!r}")
     steps = _steps_by_id(workflow)
+    from openadapt_flow.policy import executable_actuation_paths
+
     targets = list(action_targets)
     target_step_ids = [target.step_id for target in targets]
     unknown = sorted(set(target_step_ids).difference(steps))
@@ -1661,6 +1712,17 @@ def set_case_scope(
         raise QualificationError(
             "qualification case targets missing API paths: "
             + ", ".join(invalid_api_targets)
+        )
+    invalid_targets = sorted(
+        f"{target.step_id}:{target.actuation_path}"
+        for target in targets
+        if target.actuation_path
+        not in executable_actuation_paths(steps[target.step_id])
+    )
+    if invalid_targets:
+        raise QualificationError(
+            "qualification case targets non-executable paths: "
+            + ", ".join(invalid_targets)
         )
     if case.kind is QualificationCaseKind.REPRESENTATIVE:
         if not targets:
@@ -3837,15 +3899,32 @@ def evaluate_qualification(
         for binding in project.effect_policies
     }
 
+    from openadapt_flow.policy import executable_actuation_paths
+
     for step in consequential_steps:
+        executable_paths = executable_actuation_paths(step)
+        gui_required = "gui" in executable_paths
+        api_required = "api" in executable_paths
+        gui_armed = not gui_required or is_identity_armed(step)
+        api_armed = not api_required or bool(
+            step.api_binding is not None and step.api_binding.identity
+        )
         identity_policy = project.identity_policies.get(step.id)
-        if not is_identity_armed(step):
+        if not gui_armed or not api_armed:
+            missing_paths = []
+            if not gui_armed:
+                missing_paths.append("gui")
+            if not api_armed:
+                missing_paths.append("api")
             refusals.append(
                 QualificationRefusal(
                     code=QualificationRefusalCode.STEP_IDENTITY_UNARMED,
                     path=f"steps.{step.id}.identity_armed",
                     step_id=step.id,
-                    message="consequential action is not identity-armed",
+                    message=(
+                        "consequential action has no exact identity contract for "
+                        "executable path(s): " + ", ".join(missing_paths)
+                    ),
                 )
             )
         if identity_policy is None:
@@ -3859,7 +3938,19 @@ def evaluate_qualification(
             )
         elif identity_policy.enforcement is IdentityEnforcement.CANONICAL_LADDER:
             available = available_identity_sources(step)
-            if not available:
+            if api_required:
+                refusals.append(
+                    QualificationRefusal(
+                        code=QualificationRefusalCode.IDENTITY_SIGNAL_UNAVAILABLE,
+                        path=f"qualification.identity_policies.{step.id}",
+                        step_id=step.id,
+                        message=(
+                            "API actuation requires an explicit signal-quorum "
+                            "identity policy bound to the request and effect"
+                        ),
+                    )
+                )
+            if gui_required and not available:
                 refusals.append(
                     QualificationRefusal(
                         code=QualificationRefusalCode.IDENTITY_SIGNAL_UNAVAILABLE,
@@ -3868,7 +3959,7 @@ def evaluate_qualification(
                         message="canonical identity ladder has no retained evidence",
                     )
                 )
-            elif is_identity_armed(step):
+            elif gui_required and gui_armed and not api_required:
                 identity_covered += 1
         else:
             independence_errors = identity_policy_independence_errors(identity_policy)
@@ -3886,23 +3977,46 @@ def evaluate_qualification(
                         details={"error_count": len(independence_errors)},
                     )
                 )
-            unavailable_signals = [
-                signal
-                for signal in identity_policy.signals
-                if not identity_signal_runtime_available(step, signal)
-            ]
-            for signal in unavailable_signals:
+            unavailable_signals: list[tuple[str, IdentitySignalPolicy]] = []
+            for identity_path in executable_paths:
+                unavailable_signals.extend(
+                    (identity_path, signal)
+                    for signal in identity_policy.signals
+                    if not identity_signal_runtime_available(
+                        step,
+                        signal,
+                        actuation_path=identity_path,
+                    )
+                )
+            api_key_mismatch = False
+            if api_required and step.api_binding is not None:
+                api_key_mismatch = [item.key for item in step.api_binding.identity] != [
+                    signal.key.value for signal in identity_policy.signals
+                ]
+                if api_key_mismatch:
+                    refusals.append(
+                        QualificationRefusal(
+                            code=QualificationRefusalCode.IDENTITY_SIGNAL_UNAVAILABLE,
+                            path=f"qualification.identity_policies.{step.id}",
+                            step_id=step.id,
+                            message=(
+                                "API identity bindings do not match the exact "
+                                "qualified signal set and order"
+                            ),
+                        )
+                    )
+            for actuation_path, signal in unavailable_signals:
                 refusals.append(
                     QualificationRefusal(
                         code=QualificationRefusalCode.IDENTITY_SIGNAL_UNAVAILABLE,
                         path=(
                             f"qualification.identity_policies.{step.id}."
-                            f"signals.{signal.key.value}"
+                            f"signals.{signal.key.value}.{actuation_path}"
                         ),
                         step_id=step.id,
                         message=(
                             "qualified identity signal has no executable retained "
-                            "comparison"
+                            f"comparison on the {actuation_path} path"
                         ),
                         details={
                             "signal": signal.key.value,
@@ -3911,9 +4025,11 @@ def evaluate_qualification(
                     )
                 )
             if (
-                is_identity_armed(step)
+                gui_armed
+                and api_armed
                 and not independence_errors
                 and not unavailable_signals
+                and not api_key_mismatch
             ):
                 identity_covered += 1
 
@@ -4008,16 +4124,27 @@ def evaluate_qualification(
         if step_effects_covered:
             effect_covered += 1
 
+    required_gui_action_steps = [
+        step
+        for step in effect_required_steps
+        if "gui" in executable_actuation_paths(step)
+    ]
+    required_gui_consequential_steps = [
+        step
+        for step in consequential_steps
+        if "gui" in executable_actuation_paths(step)
+    ]
     required_kinds: set[QualificationCaseKind] = set()
     if effect_required_steps:
         required_kinds.update(
             {
-                QualificationCaseKind.AMBIGUITY,
                 QualificationCaseKind.WEAK_EFFECT,
                 QualificationCaseKind.MISSING_EFFECT,
             }
         )
-    if consequential_steps:
+    if required_gui_action_steps:
+        required_kinds.add(QualificationCaseKind.AMBIGUITY)
+    if required_gui_consequential_steps:
         required_kinds.update(
             {
                 QualificationCaseKind.WRONG_IDENTITY,
@@ -4058,12 +4185,14 @@ def evaluate_qualification(
         )
     ]
     required_gui_targets: set[tuple[str, Literal["gui", "api"]]] = {
-        (step.id, "gui") for step in effect_required_steps
+        (step.id, "gui") for step in required_gui_action_steps
     }
     required_api_targets: set[tuple[str, Literal["gui", "api"]]] = {
         (step.id, "api")
         for step in effect_required_steps
-        if step.api_binding is not None and bool(step.api_binding.effects)
+        if "api" in executable_actuation_paths(step)
+        and step.api_binding is not None
+        and bool(step.api_binding.effects)
     }
     required_representative_targets = required_gui_targets | required_api_targets
     required_actions, _required_identity_steps = qualification_action_requirements(
@@ -4081,10 +4210,10 @@ def evaluate_qualification(
             set(required_gui_targets) | set(required_api_targets)
         ),
         QualificationCaseKind.WRONG_IDENTITY: {
-            (step_id, "gui") for step_id in consequential_ids
+            (step.id, "gui") for step in required_gui_consequential_steps
         },
         QualificationCaseKind.STALE_IDENTITY: {
-            (step_id, "gui") for step_id in consequential_ids
+            (step.id, "gui") for step in required_gui_consequential_steps
         },
     }
     for case in required_cases:
@@ -4106,7 +4235,7 @@ def evaluate_qualification(
         valid_path_targets = {
             (step.id, path)
             for step in steps
-            for path in (("gui", "api") if step.api_binding is not None else ("gui",))
+            for path in executable_actuation_paths(step)
         }
         if case.kind is QualificationCaseKind.REPRESENTATIVE:
             invalid_targets = not targets or len(targets) != len(case.action_targets)
@@ -4117,12 +4246,15 @@ def evaluate_qualification(
                 if fault_target is not None
                 else None
             )
-            allowed_fault_scope = {(step_id, "gui") for step_id in required_actions} | {
-                (step.id, "api")
+            allowed_fault_scope = {
+                (step.id, path)
                 for step in steps
                 if step.id in required_actions
-                and step.api_binding is not None
-                and bool(step.api_binding.effects)
+                for path in executable_actuation_paths(step)
+                if (
+                    path == "gui"
+                    or (step.api_binding is not None and bool(step.api_binding.effects))
+                )
             }
             invalid_targets = (
                 not targets

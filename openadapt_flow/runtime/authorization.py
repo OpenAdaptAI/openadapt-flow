@@ -414,6 +414,7 @@ class GovernedRunAuthorization(BaseModel):
         }
         if self.qualification_case_action_paths != case_action_paths:
             return "qualification-run action paths do not match the case contract"
+        from openadapt_flow.policy import executable_actuation_paths
         from openadapt_flow.traversal import iter_workflow_steps
 
         workflow_steps = {step.id: step for step in iter_workflow_steps(workflow)}
@@ -423,6 +424,8 @@ class GovernedRunAuthorization(BaseModel):
                 return "qualification case targets an unknown workflow action"
             if actuation_path == "api" and step.api_binding is None:
                 return "qualification case targets a missing API actuation path"
+            if actuation_path not in executable_actuation_paths(step):
+                return "qualification case targets a non-executable actuation path"
         if case.kind.value == "representative":
             target_steps = set(case_action_paths)
             if not target_steps:

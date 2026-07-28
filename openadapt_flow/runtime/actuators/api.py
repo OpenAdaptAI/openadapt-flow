@@ -18,9 +18,9 @@ the server*:
 - :attr:`ActuationStatus.UNAVAILABLE` -- the request was **never sent** (the
   TCP connection was never established: connection refused, DNS failure,
   connect-timeout) or the binding could not even be built (a param the URL/body
-  needs was not supplied). Nothing was written, so it is SAFE for the caller to
-  fall through to the GUI ladder for this step. This is the "reachable
-  ApiBinding" gate: an unreachable endpoint simply is not actuated.
+  needs was not supplied). Nothing was written. The binding's configured
+  unavailability policy can therefore use GUI fallback or halt without risking
+  a duplicate write.
 - :attr:`ActuationStatus.ACTUATED` -- the request was sent and the server
   returned success (2xx, or an explicitly-allowed status). The write was
   performed; the caller MUST now confirm it with the EffectVerifier and MUST
@@ -58,8 +58,8 @@ class ActuationStatus(str, Enum):
     #: caller confirms it with the EffectVerifier and SKIPS the GUI.
     ACTUATED = "actuated"
     #: The request was never sent (endpoint unreachable, or the binding could
-    #: not be built) -> nothing was written; SAFE to fall through to the GUI
-    #: ladder for this step.
+    #: not be built) -> nothing was written; apply the binding's configured
+    #: GUI-fallback or halt policy.
     UNAVAILABLE = "unavailable"
     #: The request WAS sent but its outcome is unknown or a rejection -> the
     #: write may have landed; HALT (never accept, never GUI-write it again).
@@ -86,8 +86,10 @@ class ApiActuationResult(BaseModel):
 
     @property
     def should_fall_through(self) -> bool:
-        """True when the caller may safely fall through to the GUI ladder
-        (the request was never sent, so nothing was written)."""
+        """True when no request was sent and GUI fallback is physically safe.
+
+        The binding can still require a fail-closed halt instead.
+        """
         return self.status is ActuationStatus.UNAVAILABLE
 
     @property
@@ -109,8 +111,8 @@ def _fill(template: str, params: dict[str, str]) -> str:
 
     Raises :class:`_MissingParam` when the template references a key that is
     not in ``params`` -- the binding cannot be built, so the actuator reports
-    UNAVAILABLE (a before-send problem: nothing is written, GUI fallback is
-    safe) rather than sending a half-formed request.
+    UNAVAILABLE (a before-send problem: nothing is written) rather than sending
+    a half-formed request. The caller applies the binding's fallback policy.
     """
     return template.format_map(_StrictMap(params))
 
@@ -177,9 +179,10 @@ class ApiActuator:
         """Perform ``binding``'s write, substituting ``params``; classify safely.
 
         Returns an :class:`ApiActuationResult` whose :attr:`status` tells the
-        caller exactly one safe next move: confirm-and-skip-GUI (ACTUATED),
-        fall-through-to-GUI (UNAVAILABLE, nothing was written), or HALT
-        (attempted, outcome unknown -- never double-write). Never raises.
+        caller the delivery state for one safe next move: confirm-and-skip-GUI
+        (ACTUATED), apply the binding's configured pre-delivery unavailability
+        policy (UNAVAILABLE), or HALT (attempted, outcome unknown -- never
+        double-write). Never raises.
         """
         summary = f"{binding.method} {binding.url_template}"
 
@@ -195,7 +198,18 @@ class ApiActuator:
                 substrate=self.substrate,
                 reason=(
                     f"binding for {summary} references param {exc} not supplied "
-                    "by the run -- API tier unavailable, falling through to GUI"
+                    "by the run -- request not sent; API tier unavailable"
+                ),
+                request_summary=summary,
+            )
+        if not url.startswith(("http://", "https://")):
+            return ApiActuationResult(
+                status=ActuationStatus.UNAVAILABLE,
+                substrate=self.substrate,
+                reason=(
+                    f"no API base URL is configured for relative endpoint "
+                    f"{binding.url_template!r} -- request not sent, API tier "
+                    "unavailable"
                 ),
                 request_summary=summary,
             )
@@ -214,14 +228,14 @@ class ApiActuator:
             )
         except requests.exceptions.ConnectionError as exc:
             # Connection never established (refused / DNS / connect-timeout):
-            # the request was NEVER sent, so nothing was written -> it is safe
-            # to fall through to the GUI ladder for this step.
+            # the request was NEVER sent, so nothing was written. The caller
+            # applies the binding's GUI-fallback or halt policy.
             return ApiActuationResult(
                 status=ActuationStatus.UNAVAILABLE,
                 substrate=self.substrate,
                 reason=(
                     f"endpoint unreachable ({type(exc).__name__}) -- request "
-                    "not sent, API tier unavailable, falling through to GUI"
+                    "not sent; API tier unavailable"
                 ),
                 request_summary=summary,
             )

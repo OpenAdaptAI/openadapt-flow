@@ -203,7 +203,12 @@ def program_predicate_evaluator_contract_sha256(vision: Any) -> str:
             "a program predicate evaluator must declare its exact semantic "
             "configuration"
         )
-    configuration: Any = contract()
+    try:
+        configuration: Any = contract()
+    except Exception as exc:
+        raise ValueError(
+            "program predicate evaluator semantic configuration failed"
+        ) from exc
     try:
         canonical = json.dumps(
             {

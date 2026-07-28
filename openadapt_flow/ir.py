@@ -2631,6 +2631,124 @@ OutcomeEvidenceClass = Literal[
 ]
 
 
+PostconditionEvidenceKind = Literal[
+    "explicit_predicate",
+    "intrinsic_input_readback",
+]
+
+
+def postcondition_step_contract_sha256(
+    *,
+    workflow_contract_sha256: str,
+    step_index: int,
+    action_kind: ActionKind | str,
+) -> str:
+    """Bind a step position and action to an exact workflow contract."""
+
+    action = action_kind.value if isinstance(action_kind, ActionKind) else action_kind
+    payload = {
+        "domain": "openadapt.postcondition-step/v1",
+        "workflow_contract_sha256": workflow_contract_sha256,
+        "step_index": step_index,
+        "action_kind": action,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def postcondition_contract_sha256(
+    *,
+    workflow_contract_sha256: str,
+    step_contract_sha256: str,
+    action_kind: ActionKind | str,
+    contract_kind: PostconditionEvidenceKind,
+    contract_index: int,
+) -> str:
+    """Bind one predicate/readback position without retaining its content."""
+
+    action = action_kind.value if isinstance(action_kind, ActionKind) else action_kind
+    payload = {
+        "domain": "openadapt.postcondition-contract/v1",
+        "workflow_contract_sha256": workflow_contract_sha256,
+        "step_contract_sha256": step_contract_sha256,
+        "action_kind": action,
+        "actuation_path": "gui",
+        "contract_kind": contract_kind,
+        "contract_index": contract_index,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class PostconditionContractEvidence(BaseModel):
+    """PHI-free proof for one postcondition contract on one result.
+
+    ``result_index`` binds the proof to the exact retained result occurrence,
+    including repeated executions of the same program step.  The two digests
+    bind it to the executable workflow and exact step contract without placing
+    the step id, predicate text, typed value, or other record-bearing content in
+    the control-plane envelope.
+
+    An explicit predicate and intrinsic TYPE/SELECT_OPTION readback are
+    intentionally different contract kinds.  A successful input readback can
+    therefore never be counted as proof for a CLICK predicate.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    result_index: int = Field(ge=0)
+    workflow_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    step_index: int = Field(ge=0)
+    step_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    action_kind: ActionKind
+    actuation_path: Literal["gui"] = "gui"
+    contract_kind: PostconditionEvidenceKind
+    contract_index: int = Field(ge=0)
+    contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    verdict: Literal["passed", "refuted", "unverifiable"]
+
+    @model_validator(mode="after")
+    def _validate_contract_kind(self) -> "PostconditionContractEvidence":
+        if self.contract_kind == "intrinsic_input_readback":
+            if self.action_kind not in {ActionKind.TYPE, ActionKind.SELECT_OPTION}:
+                raise ValueError(
+                    "intrinsic input readback is valid only for TYPE or SELECT_OPTION"
+                )
+            if self.contract_index != 0:
+                raise ValueError("intrinsic input readback uses contract index zero")
+        expected_step = postcondition_step_contract_sha256(
+            workflow_contract_sha256=self.workflow_contract_sha256,
+            step_index=self.step_index,
+            action_kind=self.action_kind,
+        )
+        if self.step_contract_sha256 != expected_step:
+            raise ValueError(
+                "postcondition evidence step digest does not match its binding"
+            )
+        expected_contract = postcondition_contract_sha256(
+            workflow_contract_sha256=self.workflow_contract_sha256,
+            step_contract_sha256=self.step_contract_sha256,
+            action_kind=self.action_kind,
+            contract_kind=self.contract_kind,
+            contract_index=self.contract_index,
+        )
+        if self.contract_sha256 != expected_contract:
+            raise ValueError(
+                "postcondition evidence contract digest does not match its binding"
+            )
+        return self
+
+
 class ExecutionOutcomeEnvelope(BaseModel):
     """Versioned, PHI-free execution result shared with control planes.
 
@@ -2658,6 +2776,21 @@ class ExecutionOutcomeEnvelope(BaseModel):
     passed_contracts: OutcomeContractCounts = Field(
         default_factory=OutcomeContractCounts
     )
+    workflow_contract_sha256: Optional[str] = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+        description=(
+            "Exact executable workflow contract that owns the retained "
+            "postcondition evidence."
+        ),
+    )
+    postcondition_evidence: list[PostconditionContractEvidence] = Field(
+        default_factory=list,
+        description=(
+            "One typed, result-bound record for every required explicit or "
+            "intrinsic GUI postcondition contract."
+        ),
+    )
     evidence_classes: list[OutcomeEvidenceClass] = Field(default_factory=list)
     model_calls: int = Field(default=0, ge=0)
     external_network_calls: Literal["none", "observed", "unknown"] = "unknown"
@@ -2678,6 +2811,49 @@ class ExecutionOutcomeEnvelope(BaseModel):
             )
         if len(self.evidence_classes) != len(set(self.evidence_classes)):
             raise ValueError("evidence classes must be unique")
+        postcondition_evidence = self.postcondition_evidence
+        if len(postcondition_evidence) != required["postcondition"]:
+            raise ValueError(
+                "postcondition evidence cardinality must equal the required "
+                "postcondition count"
+            )
+        passed_postconditions = sum(
+            item.verdict == "passed" for item in postcondition_evidence
+        )
+        if passed_postconditions != passed["postcondition"]:
+            raise ValueError(
+                "passed postcondition evidence must equal the passed "
+                "postcondition count"
+            )
+        if postcondition_evidence and self.workflow_contract_sha256 is None:
+            raise ValueError(
+                "postcondition evidence requires an exact workflow contract"
+            )
+        if any(
+            item.workflow_contract_sha256 != self.workflow_contract_sha256
+            for item in postcondition_evidence
+        ):
+            raise ValueError(
+                "postcondition evidence must bind the envelope workflow contract"
+            )
+        evidence_keys = [
+            (item.result_index, item.contract_kind, item.contract_index)
+            for item in postcondition_evidence
+        ]
+        if len(evidence_keys) != len(set(evidence_keys)):
+            raise ValueError("postcondition evidence contract keys must be unique")
+        result_contracts = [
+            (item.result_index, item.contract_sha256) for item in postcondition_evidence
+        ]
+        if len(result_contracts) != len(set(result_contracts)):
+            raise ValueError(
+                "postcondition evidence contract digests must be unique per result"
+            )
+        has_postcondition_class = "postcondition" in self.evidence_classes
+        if has_postcondition_class != bool(passed["postcondition"]):
+            raise ValueError(
+                "postcondition evidence class and passed contract count disagree"
+            )
         if self.outcome == "VERIFIED":
             if passed != required:
                 raise ValueError("VERIFIED requires every declared contract to pass")
@@ -2721,6 +2897,10 @@ class ExecutionOutcomeEnvelope(BaseModel):
         data: dict[str, Any] = handler(self)
         if not self.qualification_evidence_only:
             data.pop("qualification_evidence_only", None)
+        if self.workflow_contract_sha256 is None:
+            data.pop("workflow_contract_sha256", None)
+        if not self.postcondition_evidence:
+            data.pop("postcondition_evidence", None)
         return data
 
 

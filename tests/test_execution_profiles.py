@@ -11,6 +11,7 @@ from openadapt_flow.deployment import DeploymentConfig, PolicySection, RuntimeSe
 from openadapt_flow.execution_profiles import (
     ExecutionOutcome,
     ExecutionProfile,
+    build_outcome_envelope,
     classify_execution_outcome,
     execution_profile_contract,
     qualified_effect_requirements,
@@ -1865,6 +1866,89 @@ def test_missing_declared_postcondition_is_completed_unverified_not_an_envelope_
     assert report.outcome_envelope is not None
     assert report.outcome_envelope.required_contracts.postcondition == 1
     assert report.outcome_envelope.passed_contracts.postcondition == 0
+    assert len(report.outcome_envelope.postcondition_evidence) == 1
+    assert report.outcome_envelope.postcondition_evidence[0].verdict == "unverifiable"
+
+
+def test_outcome_envelope_retains_exact_explicit_and_intrinsic_contracts():
+    workflow = Workflow(
+        name="typed-postcondition-proof",
+        steps=[
+            Step(
+                id="type-note",
+                intent="type note",
+                action=ActionKind.TYPE,
+                text="synthetic",
+                expect=[
+                    Postcondition(kind=PostconditionKind.TEXT_PRESENT, text="Saved"),
+                    Postcondition(kind=PostconditionKind.TEXT_ABSENT, text="Draft"),
+                ],
+            )
+        ],
+    )
+    report = _bind_report_to_workflow(
+        RunReport(
+            workflow_name=workflow.name,
+            started_at="2026-07-28T00:00:00Z",
+            execution_profile="standard",
+            execution_outcome="VERIFIED",
+            execution_completed=True,
+            production_eligible=True,
+            success=True,
+            governed_authorization_id="authorization-1",
+            governed_runtime_inputs_digest="a" * 64,
+            results=[
+                StepResult(
+                    step_id="type-note",
+                    intent="type note",
+                    ok=True,
+                    postconditions_ok=True,
+                    input_verified=True,
+                    starting_state_settled=True,
+                    delivery_attempted=True,
+                    actuation="guarded_keyboard",
+                )
+            ],
+        ),
+        workflow,
+    )
+
+    envelope = build_outcome_envelope(report, workflow)
+
+    assert envelope.workflow_contract_sha256 == workflow_contract_sha256(workflow)
+    assert envelope.required_contracts.postcondition == 3
+    assert envelope.passed_contracts.postcondition == 3
+    assert [item.contract_kind for item in envelope.postcondition_evidence] == [
+        "explicit_predicate",
+        "explicit_predicate",
+        "intrinsic_input_readback",
+    ]
+    assert [item.contract_index for item in envelope.postcondition_evidence] == [
+        0,
+        1,
+        0,
+    ]
+    assert {item.action_kind for item in envelope.postcondition_evidence} == {
+        ActionKind.TYPE
+    }
+    assert {item.actuation_path for item in envelope.postcondition_evidence} == {"gui"}
+    assert len({item.contract_sha256 for item in envelope.postcondition_evidence}) == 3
+
+
+def test_outcome_envelope_preserves_api_postcondition_bypass() -> None:
+    workflow = _workflow()
+    report = _verified_production_report(workflow)
+    report.execution_profile = "standard"
+    report.execution_outcome = "VERIFIED"
+    report.production_eligible = True
+    report.results[0].actuation = "api"
+    report.results[0].postconditions_ok = None
+
+    envelope = build_outcome_envelope(report, workflow)
+
+    assert envelope.required_contracts.postcondition == 0
+    assert envelope.passed_contracts.postcondition == 0
+    assert envelope.postcondition_evidence == []
 
 
 def test_verified_envelope_requires_production_profile_eligibility_and_authorization():

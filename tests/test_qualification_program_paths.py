@@ -405,6 +405,7 @@ def test_representative_program_refuses_unbound_outcome_envelope(
                     update={
                         "required_contracts": weakened_counts,
                         "passed_contracts": weakened_counts,
+                        "postcondition_evidence": [],
                         "evidence_classes": ["authorization"],
                     }
                 )

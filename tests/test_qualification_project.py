@@ -1494,6 +1494,7 @@ def test_signed_representative_claim_cannot_replace_exact_step_evidence(
             "postcondition": 0,
             "effect": 0,
         }
+        payload["outcome_envelope"]["postcondition_evidence"] = []
         payload["outcome_envelope"]["evidence_classes"] = ["authorization"]
     else:
         payload["results"][0]["effect_evidence"] = []

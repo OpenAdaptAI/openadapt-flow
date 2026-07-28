@@ -26,9 +26,12 @@ from openadapt_flow.ir import (
     IdentityCheck,
     IdentitySignalEvidence,
     OutcomeContractCounts,
+    PostconditionContractEvidence,
     RunReport,
     StepResult,
     UnarmedStep,
+    postcondition_contract_sha256,
+    postcondition_step_contract_sha256,
 )
 from openadapt_flow.receipt import (
     RECEIPT_SCHEMA,
@@ -77,6 +80,39 @@ ALLOWED_FIELDS = {
 }
 
 
+def _postcondition_evidence(
+    *,
+    result_index: int = 0,
+    step_index: int = 0,
+    action_kind: str = "click",
+    contract_kind: str = "explicit_predicate",
+) -> PostconditionContractEvidence:
+    workflow_contract = "e" * 64
+    step_contract = postcondition_step_contract_sha256(
+        workflow_contract_sha256=workflow_contract,
+        step_index=step_index,
+        action_kind=action_kind,
+    )
+    contract = postcondition_contract_sha256(
+        workflow_contract_sha256=workflow_contract,
+        step_contract_sha256=step_contract,
+        action_kind=action_kind,
+        contract_kind=contract_kind,  # type: ignore[arg-type]
+        contract_index=0,
+    )
+    return PostconditionContractEvidence(
+        result_index=result_index,
+        workflow_contract_sha256=workflow_contract,
+        step_index=step_index,
+        step_contract_sha256=step_contract,
+        action_kind=action_kind,
+        contract_kind=contract_kind,
+        contract_index=0,
+        contract_sha256=contract,
+        verdict="passed",
+    )
+
+
 def _report(**overrides: object) -> RunReport:
     """A VERIFIED report whose every free-text field is a tracer value."""
 
@@ -94,6 +130,7 @@ def _report(**overrides: object) -> RunReport:
         "execution_origin": "http://records.example.internal",
         "execution_entry_url": "http://records.example.internal/?patient=SECRET-MRN",
         "bundle_content_digest": "a" * 64,
+        "workflow_contract_sha256": "e" * 64,
         "governed_authorization_id": "authorization-1",
         "governed_approval_source": "openadapt-flow-tutorial",
         "governed_runtime_inputs_digest": "c" * 64,
@@ -160,6 +197,8 @@ def _report(**overrides: object) -> RunReport:
             passed_contracts=OutcomeContractCounts(
                 authorization=1, identity=1, postcondition=1, effect=1
             ),
+            workflow_contract_sha256="e" * 64,
+            postcondition_evidence=[_postcondition_evidence()],
             evidence_classes=[
                 "authorization",
                 "effect_tier_1",
@@ -207,6 +246,7 @@ def _api_verified_report() -> RunReport:
                 for item in report.outcome_envelope.evidence_classes
                 if item != "postcondition"
             ],
+            "postcondition_evidence": [],
         }
     )
     journal = [
@@ -569,8 +609,16 @@ def test_receipt_refuses_effect_evidence_swapped_between_steps() -> None:
     )
     envelope = _report().outcome_envelope
     assert envelope is not None
+    second_postcondition = _postcondition_evidence(result_index=1, step_index=1)
     envelope = envelope.model_copy(
-        update={"required_contracts": complete, "passed_contracts": complete}
+        update={
+            "required_contracts": complete,
+            "passed_contracts": complete,
+            "postcondition_evidence": [
+                *envelope.postcondition_evidence,
+                second_postcondition,
+            ],
+        }
     )
     journal = [
         _report().effect_journal[0],
@@ -598,7 +646,7 @@ def test_receipt_refuses_effect_evidence_swapped_between_steps() -> None:
 
 def test_receipt_refuses_missing_retained_postcondition_evidence() -> None:
     result = _report().results[0].model_copy(update={"postconditions_ok": None})
-    with pytest.raises(ReceiptError, match="retained postcondition evidence"):
+    with pytest.raises(ReceiptError, match="postcondition evidence"):
         build_receipt(_report(results=[result]))
 
 
@@ -610,8 +658,65 @@ def test_receipt_requires_postcondition_on_the_effect_step_not_a_decoy() -> None
         ok=True,
         postconditions_ok=True,
     )
-    with pytest.raises(ReceiptError, match="postcondition coverage"):
+    with pytest.raises(ReceiptError, match="postcondition evidence|own exact"):
         build_receipt(_report(results=[effect, decoy]))
+
+
+def test_receipt_refuses_nonzero_partial_postcondition_cardinality() -> None:
+    """One retained pass cannot satisfy an envelope that claims two passes."""
+
+    report = _report()
+    report.results.append(StepResult(step_id="read-only", intent="read", ok=True))
+    assert report.outcome_envelope is not None
+    report.outcome_envelope.required_contracts.postcondition = 2
+    report.outcome_envelope.passed_contracts.postcondition = 2
+
+    with pytest.raises(ReceiptError, match="typed JSON revalidation|cardinality"):
+        build_receipt(report)
+
+
+def test_click_input_verified_cannot_impersonate_explicit_postcondition() -> None:
+    """TYPE/SELECT_OPTION readback never proves a CLICK predicate."""
+
+    result = (
+        _report()
+        .results[0]
+        .model_copy(update={"postconditions_ok": None, "input_verified": True})
+    )
+    with pytest.raises(ReceiptError, match="postcondition evidence"):
+        build_receipt(_report(results=[result]))
+
+
+def test_intrinsic_input_evidence_refuses_click_action_kind() -> None:
+    with pytest.raises(ValidationError, match="TYPE or SELECT_OPTION"):
+        _postcondition_evidence(contract_kind="intrinsic_input_readback")
+
+
+def test_envelope_refuses_duplicate_postcondition_contract_evidence() -> None:
+    evidence = _postcondition_evidence()
+    complete = OutcomeContractCounts(
+        authorization=1,
+        identity=1,
+        postcondition=2,
+        effect=1,
+    )
+    with pytest.raises(ValidationError, match="must be unique"):
+        ExecutionOutcomeEnvelope(
+            outcome="VERIFIED",
+            profile="standard",
+            production_eligible=True,
+            execution_completed=True,
+            required_contracts=complete,
+            passed_contracts=complete,
+            workflow_contract_sha256="e" * 64,
+            postcondition_evidence=[evidence, evidence],
+            evidence_classes=[
+                "authorization",
+                "identity",
+                "postcondition",
+                "effect_tier_1",
+            ],
+        )
 
 
 def test_receipt_refuses_effect_verified_false() -> None:
@@ -794,7 +899,10 @@ def test_receipt_refuses_equal_length_transaction_effect_result_swap() -> None:
         )
     ]
 
-    with pytest.raises(ReceiptError, match="transaction-consequential"):
+    with pytest.raises(
+        ReceiptError,
+        match="transaction-consequential|non-executed result",
+    ):
         build_receipt(
             _report(
                 results=[skipped_effect, unaccounted_write],

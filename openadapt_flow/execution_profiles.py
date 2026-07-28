@@ -1828,6 +1828,16 @@ def _completed_compensation_actions(report: RunReport) -> int:
     )
 
 
+def _postcondition_verdict(
+    value: bool | None,
+) -> Literal["passed", "refuted", "unverifiable"]:
+    if value is True:
+        return "passed"
+    if value is False:
+        return "refuted"
+    return "unverifiable"
+
+
 def build_outcome_envelope(
     report: RunReport,
     workflow: Workflow,
@@ -1846,13 +1856,19 @@ def build_outcome_envelope(
         ExecutionOutcomeEnvelope,
         OutcomeContractCounts,
         OutcomeEvidenceClass,
+        PostconditionContractEvidence,
+        postcondition_contract_sha256,
+        postcondition_step_contract_sha256,
     )
+    from openadapt_flow.qualification import workflow_contract_sha256
     from openadapt_flow.traversal import iter_workflow_steps
 
     if report.execution_outcome is None:
         raise ValueError("execution outcome must be classified before enveloping")
 
-    steps_by_id = {step.id: step for step in iter_workflow_steps(workflow)}
+    ordered_steps = list(iter_workflow_steps(workflow))
+    steps_by_id = {step.id: step for step in ordered_steps}
+    step_index_by_id = {step.id: index for index, step in enumerate(ordered_steps)}
     production = report.execution_profile in {"standard", "regulated"}
 
     required_authorization = 1 if production else 0
@@ -1880,8 +1896,8 @@ def build_outcome_envelope(
         for result in identity_results
     )
 
-    required_postconditions = 0
-    passed_postconditions = 0
+    workflow_contract = workflow_contract_sha256(workflow)
+    postcondition_evidence: list[PostconditionContractEvidence] = []
     required_effects = 0
     passed_effects = 0
     evidence_classes: set[OutcomeEvidenceClass] = set()
@@ -1927,27 +1943,63 @@ def build_outcome_envelope(
         return scoped
 
     compensation_actions = _completed_compensation_actions(report)
-    for result in report.results:
+    for result_index, result in enumerate(report.results):
         if result.skipped or result.exception_handled:
             continue
         step = steps_by_id.get(result.step_id)
         bound_effect_tiers: set[int] = set()
         if step is not None:
             api_actuation = result.actuation == "api"
-            explicit_postconditions = (
-                0 if result.actuation == "api" else len(step.expect)
-            )
-            intrinsic_input_postcondition = int(
-                result.actuation != "api"
-                and step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}
-            )
-            required_postconditions += (
-                explicit_postconditions + intrinsic_input_postcondition
-            )
-            if result.postconditions_ok is True:
-                passed_postconditions += explicit_postconditions
-            if result.input_verified is True:
-                passed_postconditions += intrinsic_input_postcondition
+            if not api_actuation:
+                step_index = step_index_by_id[result.step_id]
+                step_contract = postcondition_step_contract_sha256(
+                    workflow_contract_sha256=workflow_contract,
+                    step_index=step_index,
+                    action_kind=step.action,
+                )
+                for contract_index in range(len(step.expect)):
+                    postcondition_evidence.append(
+                        PostconditionContractEvidence(
+                            result_index=result_index,
+                            workflow_contract_sha256=workflow_contract,
+                            step_index=step_index,
+                            step_contract_sha256=step_contract,
+                            action_kind=step.action,
+                            contract_kind="explicit_predicate",
+                            contract_index=contract_index,
+                            contract_sha256=postcondition_contract_sha256(
+                                workflow_contract_sha256=workflow_contract,
+                                step_contract_sha256=step_contract,
+                                action_kind=step.action,
+                                contract_kind="explicit_predicate",
+                                contract_index=contract_index,
+                            ),
+                            verdict=_postcondition_verdict(result.postconditions_ok),
+                        )
+                    )
+                if step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}:
+                    contract_kind: Literal["intrinsic_input_readback"] = (
+                        "intrinsic_input_readback"
+                    )
+                    postcondition_evidence.append(
+                        PostconditionContractEvidence(
+                            result_index=result_index,
+                            workflow_contract_sha256=workflow_contract,
+                            step_index=step_index,
+                            step_contract_sha256=step_contract,
+                            action_kind=step.action,
+                            contract_kind=contract_kind,
+                            contract_index=0,
+                            contract_sha256=postcondition_contract_sha256(
+                                workflow_contract_sha256=workflow_contract,
+                                step_contract_sha256=step_contract,
+                                action_kind=step.action,
+                                contract_kind=contract_kind,
+                                contract_index=0,
+                            ),
+                            verdict=_postcondition_verdict(result.input_verified),
+                        )
+                    )
             from openadapt_flow.policy import effects_for_actuation
 
             effects = effects_for_actuation(step, result.actuation)
@@ -2038,18 +2090,6 @@ def build_outcome_envelope(
                             passed_effects += 1
         if result.identity is not None and result.identity.status == "verified":
             evidence_classes.add("identity")
-        if (
-            step is not None
-            and result.actuation != "api"
-            and (
-                (result.postconditions_ok is True and bool(step.expect))
-                or (
-                    result.input_verified is True
-                    and step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}
-                )
-            )
-        ):
-            evidence_classes.add("postcondition")
         for evidence in result.effect_evidence:
             if evidence.verification_tier in bound_effect_tiers:
                 evidence_class = effect_class_by_tier.get(evidence.verification_tier)
@@ -2061,6 +2101,13 @@ def build_outcome_envelope(
                 and evidence.final_verdict == "confirmed"
             ):
                 evidence_classes.add("compensation")
+
+    required_postconditions = len(postcondition_evidence)
+    passed_postconditions = sum(
+        item.verdict == "passed" for item in postcondition_evidence
+    )
+    if passed_postconditions:
+        evidence_classes.add("postcondition")
 
     required = OutcomeContractCounts(
         authorization=required_authorization,
@@ -2087,6 +2134,8 @@ def build_outcome_envelope(
         execution_completed=bool(report.execution_completed),
         required_contracts=required,
         passed_contracts=passed,
+        workflow_contract_sha256=workflow_contract,
+        postcondition_evidence=postcondition_evidence,
         evidence_classes=sorted(evidence_classes),
         model_calls=report.model_calls,
         external_network_calls=report.external_network_calls,

@@ -106,11 +106,15 @@ def fault_detector_contract_error(
         terminal_outcome = getattr(report, "terminal_outcome", None)
         if (
             _program_terminal_shape_error(
-                trailing_results[0], terminal_outcome=terminal_outcome
+                trailing_results[0],
+                terminal_outcome=terminal_outcome,
+                refusal_error=refusal.error,
             )
             is not None
         ):
             return "fault_detector_terminal_shape_invalid"
+    elif getattr(report, "terminal_outcome", None) is not None:
+        return "fault_detector_terminal_shape_invalid"
     return None
 
 
@@ -231,17 +235,19 @@ def _program_terminal_shape_error(
     result: Any,
     *,
     terminal_outcome: Any,
+    refusal_error: Any,
 ) -> str | None:
     """Require the synthetic terminal record that ``Replayer`` can emit."""
 
-    if terminal_outcome not in {"halt", "escalate"}:
+    if terminal_outcome != "halt":
         return "terminal_outcome"
     if (
         result.step_id != "<terminal>"
-        or result.intent != f"program {terminal_outcome}"
+        or result.intent != "program halt"
         or result.ok
         or not result.safety_halt
-        or not result.error
+        or not refusal_error
+        or result.error != refusal_error
         or result.risk != "reversible"
         or result.risk_explanation is not None
         or result.risk_review_required

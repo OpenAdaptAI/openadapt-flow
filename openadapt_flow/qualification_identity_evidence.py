@@ -35,8 +35,9 @@ def _quorum_shape_error(
     *,
     required: int,
     expected_signals: Sequence[tuple[str, str, str]],
+    expected_status: str = "verified",
 ) -> Optional[str]:
-    """Validate one exact GUI signal-quorum result."""
+    """Validate one exact signal-quorum result, including a refusal."""
 
     if check.mode != "signal_quorum":
         return "retained identity mode does not match signal_quorum policy"
@@ -50,13 +51,20 @@ def _quorum_shape_error(
         for item in check.signal_evidence
     ):
         return "retained identity evidence class does not match its source"
-    if any(item.verdict == "conflict" for item in check.signal_evidence):
-        return "retained identity evidence contains a conflicting signal"
+    conflicts = sum(item.verdict == "conflict" for item in check.signal_evidence)
     verified = sum(item.verdict == "verified" for item in check.signal_evidence)
+    runtime_status = (
+        "mismatch"
+        if conflicts
+        else "verified"
+        if verified >= required
+        else "unreadable"
+    )
     if (
         check.quorum_required != required
         or check.quorum_verified != verified
-        or verified < required
+        or check.status != runtime_status
+        or check.status != expected_status
     ):
         return "retained identity quorum does not match the exact qualified policy"
     expected_coverage = verified / len(check.signal_evidence)
@@ -103,8 +111,9 @@ def _canonical_ladder_error(
     step: Step,
     runtime_params: Mapping[str, str],
     recorded_params: Mapping[str, str],
-    evidence_root: Optional[Path],
-    recorded_asset_sha256: Optional[str],
+    expected_status: str = "verified",
+    evidence_root: Optional[Path] = None,
+    recorded_asset_sha256: Optional[str] = None,
 ) -> Optional[str]:
     """Validate a canonical-ladder result against one runtime-emittable shape."""
 
@@ -157,7 +166,7 @@ def _canonical_ladder_error(
         if pixel_result is None:
             return "pixel identity crop evidence does not reproduce a verdict"
         pixel_result.pixel_evidence = evidence
-        if pixel_result.status != "verified" or pixel_result != check:
+        if pixel_result.status != expected_status or pixel_result != check:
             return "pixel identity crop evidence does not reproduce the runtime verdict"
         return None
 
@@ -215,7 +224,7 @@ def _canonical_ladder_error(
     except (TypeError, ValueError):
         return "canonical ladder evidence could not be reproduced"
 
-    if expected is None or expected.status != "verified" or expected != check:
+    if expected is None or expected.status != expected_status or expected != check:
         return "canonical ladder evidence does not reproduce the runtime verdict"
     return None
 
@@ -301,6 +310,62 @@ def qualification_identity_evidence_error(
         step=step,
         runtime_params=runtime_params or {},
         recorded_params=recorded_params or {},
+        evidence_root=evidence_root,
+        recorded_asset_sha256=recorded_asset_sha256,
+    )
+
+
+def qualification_identity_refusal_evidence_error(
+    *,
+    policy: "IdentityPolicy",
+    check: Optional[IdentityCheck],
+    step: Step,
+    actuation_path: str,
+    runtime_params: Optional[Mapping[str, str]] = None,
+    recorded_params: Optional[Mapping[str, str]] = None,
+    evidence_root: Optional[Path] = None,
+    recorded_asset_sha256: Optional[str] = None,
+) -> Optional[str]:
+    """Validate the exact mismatch shape emitted by a qualified identity gate."""
+
+    if check is None or check.status != "mismatch":
+        return "fault target lacks an exact identity-mismatch verdict"
+    if actuation_path != "gui":
+        return "wrong-identity qualification requires GUI actuation"
+
+    enforcement = policy.enforcement.value
+    if enforcement == "signal_quorum":
+        from openadapt_flow.qualification import (
+            identity_policy_independence_errors,
+            identity_signal_runtime_available,
+        )
+
+        if identity_policy_independence_errors(policy):
+            return "qualified identity policy reuses a correlated signal"
+        if any(
+            not identity_signal_runtime_available(step, signal)
+            for signal in policy.signals
+        ):
+            return "qualified identity signal is not executable for this action"
+        expected = [
+            (signal.key.value, signal.source.value, signal.match.value)
+            for signal in policy.signals
+        ]
+        return _quorum_shape_error(
+            check,
+            required=policy.quorum,
+            expected_signals=expected,
+            expected_status="mismatch",
+        )
+
+    if enforcement != "canonical_ladder":
+        return "qualified identity policy uses an unknown enforcement mode"
+    return _canonical_ladder_error(
+        check,
+        step=step,
+        runtime_params=runtime_params or {},
+        recorded_params=recorded_params or {},
+        expected_status="mismatch",
         evidence_root=evidence_root,
         recorded_asset_sha256=recorded_asset_sha256,
     )

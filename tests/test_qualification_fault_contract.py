@@ -24,6 +24,7 @@ from openadapt_flow.execution_profiles import (
     ExecutionOutcome,
     ExecutionProfile,
     classify_execution_outcome,
+    qualified_effect_requirements,
 )
 from openadapt_flow.ir import (
     ActionDeliveryReceipt,
@@ -324,7 +325,7 @@ class _ObservedBackend:
         self.actions.append(("structural", *handle.point))
         return ActionDeliveryReceipt(
             receipt_id=f"fixture-{len(self.actions)}",
-            operation="invoke",
+            operation="uia_invoke",
             native=True,
             target_fingerprint=handle.target_fingerprint,
             delivered_at=datetime.now(timezone.utc).isoformat(),
@@ -708,41 +709,32 @@ def _fault_workflow(
         identity_armed=True,
         risk="irreversible",
     )
-    if kind in {
-        QualificationCaseKind.WEAK_EFFECT,
-        QualificationCaseKind.MISSING_EFFECT,
-    }:
-        effects = [
-            Effect(
-                kind=EffectKind.RECORD_WRITTEN,
-                match={"record_id": ValueExpr(param="record_id")},
-                risk="irreversible",
-            )
-        ]
-        if api_effect_only:
-            step.api_binding = ApiBinding(
-                method="POST",
-                url_template="/synthetic-records/{record_id}",
-                effects=effects,
-                identity=[
-                    ApiIdentityBinding(
-                        key="record_id",
-                        param="record_id",
-                        effect_field="record_id",
-                        request_pointers=["/url/record_id"],
-                    )
-                ],
-            )
-        else:
-            step.effects = effects
+    effects = [
+        Effect(
+            kind=EffectKind.RECORD_WRITTEN,
+            match={"record_id": ValueExpr(param="record_id")},
+            risk="irreversible",
+        )
+    ]
+    step.effects = effects
+    if api_effect_only:
+        step.api_binding = ApiBinding(
+            method="POST",
+            url_template="/synthetic-records/{record_id}",
+            effects=effects,
+            identity=[
+                ApiIdentityBinding(
+                    key="record_id",
+                    param="record_id",
+                    effect_field="record_id",
+                    request_pointers=["/url/record_id"],
+                )
+            ],
+        )
     backend = _ObservedBackend()
     observer = BackendQualificationEnvironmentObserver(backend)
     workflow = Workflow(name=f"fault-{kind.value}", surface="web", steps=[step])
-    if api_effect_only or kind in {
-        QualificationCaseKind.WEAK_EFFECT,
-        QualificationCaseKind.MISSING_EFFECT,
-    }:
-        workflow.params["record_id"] = "synthetic-1"
+    workflow.params["record_id"] = "synthetic-1"
     init_project(
         workflow,
         environment=EnvironmentBoundary(
@@ -790,17 +782,15 @@ def _fault_workflow(
             quorum=1 if actuation_path == "api" else 0,
         ),
     )
-    if (actuation_path == "gui" and step.effects) or (
-        actuation_path == "api"
-        and step.api_binding is not None
-        and step.api_binding.effects
-    ):
+    for qualified_path in ("gui", "api"):
+        if qualified_path == "api" and step.api_binding is None:
+            continue
         set_effect_policy(
             workflow,
             step_id="submit",
             effect_index=0,
             tier=VerificationTier.INDEPENDENT_SYSTEM,
-            actuation_path=actuation_path,
+            actuation_path=qualified_path,
         )
     add_case(
         workflow,
@@ -865,6 +855,9 @@ def _fault_authorization(
         admitted_policy_contract_sha256="e" * 64,
         execution_profile="standard",
         minimum_effect_tier=3,
+        qualified_effect_requirements=qualified_effect_requirements(
+            workflow, ExecutionProfile.STANDARD
+        ),
         required_identity_step_ids=required_identity_step_ids,
         approval_source="qualification-campaign",
         qualification_project_id=workflow.qualification.project_id,
@@ -2508,7 +2501,7 @@ def test_detector_receipt_rejects_any_result_after_the_fault_refusal() -> None:
         intent="program halt",
         ok=False,
         safety_halt=True,
-        error="the target-resolution detector refused the changed input",
+        error=refusal.error,
     )
     program_report = SimpleNamespace(
         execution_outcome="HALTED",
@@ -2705,21 +2698,6 @@ def test_declined_fault_cannot_cross_the_bound_input_edge(tmp_path: Path) -> Non
     )
 
 
-def test_inactive_api_path_does_not_consume_a_fault_mutation(tmp_path: Path) -> None:
-    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
-    report, backend = _run_fault(
-        tmp_path,
-        QualificationCaseKind.MISSING_EFFECT,
-        driver,
-        api_effect_only=True,
-    )
-
-    assert report.execution_outcome == "HALTED"
-    assert driver.calls == 0
-    assert report.qualification_fault_mutations == []
-    assert backend.actions == []
-
-
 def test_api_fault_mutation_cannot_fall_through_to_gui_when_api_is_unavailable(
     tmp_path: Path,
 ) -> None:
@@ -2766,6 +2744,14 @@ def test_gui_qualification_path_bypasses_a_configured_api_tier(
     workflow.steps[0].api_binding = ApiBinding(
         method="POST",
         url_template="/synthetic-submit",
+        effects=list(workflow.steps[0].effects),
+    )
+    set_effect_policy(
+        workflow,
+        step_id="submit",
+        effect_index=0,
+        tier=VerificationTier.INDEPENDENT_SYSTEM,
+        actuation_path="api",
     )
     workflow.save(bundle)
     workflow = Workflow.load(bundle)
@@ -2841,6 +2827,9 @@ def test_qualification_run_halts_before_an_undeclared_write(tmp_path: Path) -> N
         admitted_policy_contract_sha256="e" * 64,
         execution_profile="standard",
         minimum_effect_tier=3,
+        qualified_effect_requirements=qualified_effect_requirements(
+            workflow, ExecutionProfile.STANDARD
+        ),
         required_identity_step_ids=("submit",),
         approval_source="qualification-campaign",
         qualification_project_id=workflow.qualification.project_id,
@@ -2975,6 +2964,13 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
                 ),
                 identity_armed=True,
                 risk="irreversible",
+                effects=[
+                    Effect(
+                        kind=EffectKind.RECORD_WRITTEN,
+                        match={"record_id": ValueExpr(literal="submit")},
+                        risk="irreversible",
+                    )
+                ],
             )
         ],
     )
@@ -2999,6 +2995,19 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
             explanation="qualification environment target changes business state",
             operator_confirmed=True,
         ),
+    )
+    set_identity_policy(
+        workflow,
+        IdentityPolicy(
+            step_id="submit",
+            enforcement=IdentityEnforcement.CANONICAL_LADDER,
+        ),
+    )
+    set_effect_policy(
+        workflow,
+        step_id="submit",
+        effect_index=0,
+        tier=VerificationTier.INDEPENDENT_SYSTEM,
     )
     input_sha256 = runtime_inputs_digest(workflow, None, None)
     add_case(
@@ -3025,6 +3034,9 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
         admitted_policy_contract_sha256="5" * 64,
         execution_profile="standard",
         minimum_effect_tier=3,
+        qualified_effect_requirements=qualified_effect_requirements(
+            workflow, ExecutionProfile.STANDARD
+        ),
         required_identity_step_ids=("submit",),
         approval_source="qualification-campaign",
         qualification_project_id=workflow.qualification.project_id,
@@ -3042,6 +3054,7 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
     report = Replayer(
         backend,
         vision=_Vision(),
+        effect_verifier=_StrongEffectVerifier(),
         governed_authorization=authorization,
         qualification_environment_observer=observer,
         durable=True,

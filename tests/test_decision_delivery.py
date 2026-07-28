@@ -34,6 +34,7 @@ from openadapt_flow.console.halt_detail import (
 from openadapt_flow.console.human_decisions import (
     RemoteAttendedActionRequest,
     RemoteDecisionPrincipal,
+    _remote_delivery_tier,
     portable_remote_decision_task,
 )
 from openadapt_flow.decision_delivery import (
@@ -393,6 +394,33 @@ def test_an_unprofiled_deployment_takes_the_strictest_profile(tmp_path):
     regulated = execution_profile_contract("regulated").max_remote_decision_tier
     demo = execution_profile_contract("demo").max_remote_decision_tier
     assert max(regulated, demo) == regulated
+
+
+def test_the_ceiling_follows_the_profile_the_run_actually_executed_under(tmp_path):
+    """A dispatch-time profile the deployment file never named still binds.
+
+    A hosted runner receives its execution profile with the dispatch, so the
+    local ``deployment.yaml`` is not the only authority on it. Reading only the
+    deployment would let a run executed under a stricter profile be projected
+    under a looser ceiling.
+    """
+    run, item = _halted_run(tmp_path)
+    deployment = _deployment()
+    deployment.runtime.profile = "demo"
+
+    class _Report:
+        execution_profile = "regulated"
+
+    strict = _remote_delivery_tier(deployment, _Report())
+    lenient = _remote_delivery_tier(deployment, None)
+    ceilings = {
+        profile: execution_profile_contract(profile).max_remote_decision_tier
+        for profile in ("demo", "regulated")
+    }
+    # Whatever the two profiles permit, the run's own profile is consulted and
+    # the weaker of the two ceilings wins.
+    assert strict == max(ceilings["demo"], ceilings["regulated"])
+    assert lenient >= ceilings["demo"]
 
 
 def test_a_replayed_decision_still_admits_after_the_pause_closed(tmp_path):

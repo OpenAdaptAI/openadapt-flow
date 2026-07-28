@@ -21,11 +21,21 @@ from one taken with it, and the system should be able to say which it got.
 
 Lower is stronger, matching `VerificationTier`, so the two read alike.
 
-Two independent ceilings apply to a remote projection and the weaker wins: the
-deployment's `human_decisions.remote.context_tier`, and the active execution
-profile's `max_remote_decision_tier`. Neither can widen the other. `local_full`
-is not reachable as a remote tier under any configuration —
-`effective_remote_tier` refuses it by name.
+Three independent ceilings apply to a remote projection and the weakest wins:
+the deployment's `human_decisions.remote.context_tier`, the profile named in
+`deployment.runtime.profile`, and the profile the run was **actually executed
+under**, read from its report. The third matters because a governed dispatch
+carries its own execution profile, which the local `deployment.yaml` need not
+name. None of them can widen another. `local_full` is not reachable as a remote
+tier under any configuration — `effective_remote_tier` refuses it by name.
+
+Today every profile permits `remote_closed_context`, because that tier adds only
+closed enums, bounded integers and booleans — it widens what a remote operator
+*knows* without widening what the envelope can *represent*. So
+`max_remote_decision_tier` is not yet doing discriminating work, and it is worth
+being clear about that rather than implying otherwise. It becomes load-bearing
+the moment a tier exists that some profile must refuse — which is exactly where
+a scrubbed tier would sit.
 
 Every projection records the tier it **actually delivered**, not the one it
 intended. An engine that could not build a context reports

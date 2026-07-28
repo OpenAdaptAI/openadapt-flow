@@ -342,20 +342,37 @@ def _remote_scope(
     return True, remote.tenant_id, remote.runner_id
 
 
-def _remote_delivery_tier(deployment: DeploymentConfig) -> DecisionDeliveryTier:
-    """How much context this deployment's remote projection may carry.
+def _remote_delivery_tier(
+    deployment: DeploymentConfig, report: Any = None
+) -> DecisionDeliveryTier:
+    """How much context this pause's remote projection may carry.
 
-    Two independent ceilings apply and the weaker wins: the deployment's own
-    ``human_decisions.remote.context_tier`` and the active execution profile's
-    ``max_remote_decision_tier``. An unprofiled deployment takes ``regulated``,
-    matching :func:`~openadapt_flow.execution_profiles.resolve_execution_profile`'s
+    Three independent ceilings apply and the weakest wins:
+
+    * the deployment's own ``human_decisions.remote.context_tier``;
+    * the profile named in ``deployment.runtime.profile``; and
+    * the profile the RUN was actually executed under, recorded on its report.
+
+    The third matters because a governed dispatch can carry an execution
+    profile the local deployment file does not name — a hosted runner is given
+    its authorization at dispatch time. Reading only the deployment would let a
+    run executed as ``regulated`` be projected under a ``demo`` ceiling. An
+    unprofiled deployment and a report with no profile both take ``regulated``,
+    matching
+    :func:`~openadapt_flow.execution_profiles.resolve_execution_profile`'s
     default — the strictest posture, never the most permissive.
     """
-    contract = execution_profile_contract(deployment.runtime.profile or "regulated")
+    profiles = [
+        getattr(report, "execution_profile", None) or "regulated",
+        deployment.runtime.profile or "regulated",
+    ]
+    ceiling = max(
+        execution_profile_contract(profile).max_remote_decision_tier
+        for profile in profiles
+    )
     try:
         return effective_remote_tier(
-            deployment.human_decisions.remote.context_tier,
-            contract.max_remote_decision_tier,
+            deployment.human_decisions.remote.context_tier, ceiling
         )
     except ValueError as exc:
         raise AttendedActionRefused(str(exc)) from exc
@@ -573,7 +590,8 @@ def portable_remote_decision_task(
     # question, the gated control label inside `halt` -- is still discarded.
     # Only the closed-vocabulary re-projection of `halt` may cross, and only at
     # the tier that permits it.
-    tier = _remote_delivery_tier(deployment)
+    report, _ = data._load_report(run_dir)
+    tier = _remote_delivery_tier(deployment, report)
     halt_context = (
         remote_halt_context(presentation.get("halt"))
         if tier is DecisionDeliveryTier.REMOTE_CLOSED_CONTEXT

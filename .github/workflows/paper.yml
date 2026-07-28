@@ -17,6 +17,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: paper-${{ github.workflow }}-${{ github.ref }}
+  # A superseded PR build has no external effect. A main build publishes the
+  # release asset and sends a web refresh, so an in-flight main build finishes.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest

@@ -2,7 +2,7 @@ name: CI
 
 # Triggers are deliberately asymmetric to keep PR feedback fast while still
 # blocking the merge on every gate a reviewer cares about:
-#   - pull_request: run the FULL REQUIRED GATE on every PR --
+#   - pull_request: run the FULL REQUIRED GATE on runtime-relevant PRs --
 #       lint (ruff + lenient whole-package mypy),
 #       python-compatibility (lower-bound install + consistency tests),
 #       mypy-strict-safety (strict types on the safety path),
@@ -16,6 +16,10 @@ name: CI
 #       linux-atspi-x11 (real GTK/AT-SPI actuation inside Xvfb + session D-Bus),
 #       wheel (clean-venv wheel install + CLI smoke),
 #       windows-mock (non-injecting Win32 ABI + fake behavior contract).
+#     A strict paper/**-only diff takes a light path. The named runtime jobs
+#     skip but still report their required contexts. The separate Paper and
+#     Validate claims workflows still run. A mixed, empty, malformed, or
+#     unclassifiable diff runs the full runtime path.
 #     The separate Validate claims workflow contributes its required CheckRun
 #     context named `gate`, bringing the app-pinned routine total to 13.
 #   - push to main: re-run the same required safety, unit, browser, packaging,
@@ -71,6 +75,8 @@ jobs:
   # protection, whose required context is exactly `test`). Add `lint` as its
   # own required context in branch protection if you want it to block merges.
   lint:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,6 +105,8 @@ jobs:
   # before merge. This specifically prevents Python 3.11-only stdlib imports or
   # dependency metadata drift from reaching PyPI unnoticed.
   python-compatibility:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -137,6 +145,8 @@ jobs:
   # globs; keep the three in sync. `disambiguation.py` and `effects/_common.py`
   # stay on the tracked-debt list (base config `ignore_errors`) and are omitted.
   mypy-strict-safety:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -197,8 +207,23 @@ jobs:
   # Its own required context (previously only an inline step in `test`).
   docs-consistency:
     runs-on: ubuntu-latest
+    outputs:
+      run_runtime: ${{ steps.classify.outputs.run_runtime }}
+      paper_only: ${{ steps.classify.outputs.paper_only }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify exact changed paths
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python .github/scripts/classify_changes.py
+          --event "${GITHUB_EVENT_NAME}"
+          --base "${BASE_SHA}"
+          --head "${HEAD_SHA}"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -214,6 +239,8 @@ jobs:
   # source-availability boundary self-check that keeps crown-jewel material out
   # of the artifact.
   effectbench-standalone:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -254,6 +281,8 @@ jobs:
   # user install stays valid; without the explicit import assertion, CI could
   # silently skip the entire boundary while reporting green.
   interop-types:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -285,6 +314,8 @@ jobs:
   # for a non-empty anchor.context_text / structured_identity or a
   # contains_phi=true manifest. See scripts/check_bundle_phi.py.
   phi-guard:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -305,6 +336,8 @@ jobs:
   # `test-matrix`. Keeps PR feedback quick while enforcing the safety coverage
   # floor (see the "Coverage floor" step).
   test:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -398,6 +431,8 @@ jobs:
   # step and is deselected from the directory run, so the core loop answers
   # first without costing a second run of it.
   e2e-browser:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -468,6 +503,8 @@ jobs:
   # locator refusals, and three stale-handle refusals. This is scoped evidence
   # for the in-tree GTK fixture, not a claim about arbitrary Linux apps.
   linux-atspi-x11:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -520,11 +557,12 @@ jobs:
   # Python 3.13 remains outside the supported boundary until the validated
   # rapidocr-onnxruntime identity path can be safely migrated and requalified.
   test-matrix:
+    needs: docs-consistency
     if: >-
-      ${{
+      ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' && (
         github.event_name == 'schedule' ||
         github.event_name == 'workflow_dispatch'
-      }}
+      ) }}
     strategy:
       fail-fast: false
       matrix:
@@ -597,6 +635,8 @@ jobs:
   # identity through the typed loopback endpoint; every actuation behavior test
   # uses fakes. Nothing opens a window or calls SendInput.
   windows-mock:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -636,6 +676,8 @@ jobs:
   # Runs on PRs now so packaging/CLI breakage blocks the merge instead of
   # surfacing post-merge.
   wheel:
+    needs: docs-consistency
+    if: ${{ always() && !cancelled() && needs.docs-consistency.outputs.run_runtime != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -89,7 +89,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "a08139d37b3324f4683e5e342d1174b6782912f9a3b60adb6792dff2dc79d81d"
+      "sha256": "908cdf73d413523b428a68b0ba1764e3bf2615b9c9e043bc252100d63ee1ad75"
     },
     {
       "path": ".github/workflows/citrix-workspace-standin.yml",
@@ -101,7 +101,7 @@
     },
     {
       "path": ".github/workflows/paper.yml",
-      "sha256": "bb94d80c8aa12ebeac953743c5bed514d29ebf6106d7af8e5ab7ad007423ca21"
+      "sha256": "6493e2ef8f1295b6ec2df20fe8628eadf5bca318131ac84971a87873464f34c9"
     },
     {
       "path": ".github/workflows/quickstart-lifecycle.yml",

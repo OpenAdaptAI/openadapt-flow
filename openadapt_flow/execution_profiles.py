@@ -445,6 +445,7 @@ def _program_action_trace(
     expected_evidence_decision_index = 0
     actions: list[_ProgramActionOccurrence] = []
     halted_at_requested_action = False
+    evaluator_contract_sha256: str | None = None
 
     class _RequestedActionHalt(Exception):
         """The retained trace ended exactly at the requested action."""
@@ -570,6 +571,7 @@ def _program_action_trace(
         scope: tuple[Any, ...],
         current_params: Mapping[str, str],
     ) -> str | None:
+        nonlocal evaluator_contract_sha256
         group = _matching_evidence_group(
             graph_id=graph_id,
             state=state,
@@ -613,11 +615,14 @@ def _program_action_trace(
             if recomputed is not None and item.guard_verdict != recomputed:
                 raise ValueError("transition evidence guard verdict differs")
             if uses_frame:
-                if (
-                    item.guard_evaluator_contract_sha256
-                    != program_predicate_evaluator_contract_sha256(
-                        transition_predicate_vision
+                if evaluator_contract_sha256 is None:
+                    evaluator_contract_sha256 = (
+                        program_predicate_evaluator_contract_sha256(
+                            transition_predicate_vision
+                        )
                     )
+                if (
+                    item.guard_evaluator_contract_sha256 != evaluator_contract_sha256
                     or item.observed_frame_inventory_ref is None
                     or item.observed_frame_sha256 is None
                     or item.observed_viewport is None
@@ -1423,7 +1428,6 @@ def classify_execution_outcome(
                 or fault_target_result.input_verified is not None
                 or fault_target_result.input_retried
                 or fault_target_result.postconditions_ok is not None
-                or fault_target_result.after_png is not None
                 or fault_target_result.error is None
                 or terminal_result.error != fault_target_result.error
             ):

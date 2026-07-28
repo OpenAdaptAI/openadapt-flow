@@ -59,6 +59,11 @@ def test_builtin_evaluator_contract_binds_nested_ocr_threshold(monkeypatch):
 
     assert program_predicate_evaluator_contract_sha256(vision) != before
 
+    engine.text_cls.cls_thresh = 0.9
+    before = program_predicate_evaluator_contract_sha256(vision)
+    engine.text_rec.postprocess_op.character[1] = "FORGED_CHARACTER"
+    assert program_predicate_evaluator_contract_sha256(vision) != before
+
 
 def test_builtin_evaluator_contract_normalizes_cache_and_binds_live_helper(monkeypatch):
     import openadapt_flow.vision as vision
@@ -139,6 +144,43 @@ def _prefixed_visual_branch_workflow() -> Workflow:
     return workflow
 
 
+def _pre_delivery_fault_workflow() -> Workflow:
+    return Workflow(
+        name="real-program-fault-prefix",
+        program=ProgramGraph(
+            entry="prepare",
+            states={
+                "prepare": State(
+                    id="prepare",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="prepare",
+                        intent="prepare",
+                        action=ActionKind.KEY,
+                        key="P",
+                    ),
+                    transitions=[Transition(target="submit")],
+                ),
+                "submit": State(
+                    id="submit",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="submit",
+                        intent="submit",
+                        action=ActionKind.CLICK,
+                    ),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(
+                    id="done",
+                    kind=StateKind.TERMINAL,
+                    outcome="success",
+                ),
+            },
+        ),
+    )
+
+
 def _governed_report(workflow: Workflow, root):
     bundle_dir = root / "bundle"
     workflow.save(bundle_dir)
@@ -202,6 +244,31 @@ def test_runtime_retains_exact_ordered_visual_transition_evidence(tmp_path):
 
     restored = RunReport.model_validate_json(report.model_dump_json())
     assert restored.program_transition_evidence == report.program_transition_evidence
+
+
+def test_real_program_fault_prefix_accepts_retained_pre_delivery_frames(tmp_path):
+    workflow, run_dir, report = _governed_report(
+        _pre_delivery_fault_workflow(), tmp_path
+    )
+
+    assert report.execution_outcome == ExecutionOutcome.HALTED.value
+    target = report.results[-2]
+    assert target.step_id == "submit"
+    assert target.safety_halt
+    assert target.delivery_attempted is False
+    assert target.before_png is not None
+    assert target.after_png is not None
+    assert (
+        classify_execution_outcome(
+            report,
+            workflow,
+            ExecutionProfile.STANDARD,
+            transition_evidence_root=run_dir,
+            transition_predicate_vision=_SettledVision(),
+            _qualification_fault_target_step_id="submit",
+        )
+        is ExecutionOutcome.VERIFIED
+    )
 
 
 def test_visual_transition_requires_exact_retained_frame_bytes(tmp_path):

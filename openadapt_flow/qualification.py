@@ -2814,21 +2814,6 @@ def _case_run_report_integrity_error(
                 QualificationRefusalCode.CASE_ATTESTATION_INVALID,
                 "fault case executed an action outside its authorized path map",
             )
-        prior_contract_outcome = classify_execution_outcome(
-            report,
-            workflow,
-            ExecutionProfile.STANDARD,
-            runtime_worklists=case_worklists,
-            transition_evidence_root=run_evidence_root,
-            transition_predicate_vision=transition_predicate_vision,
-            _qualification_fault_target_step_id=fault_target.step_id,
-        ).value
-        if prior_contract_outcome != "VERIFIED":
-            return (
-                QualificationRefusalCode.CASE_NOT_PASSED,
-                "fault case prior actions lack complete production evidence",
-            )
-
         # The profile classifier proves the ordered action trace and the broad
         # production outcome. Qualification also proves the exact compiled
         # action, path, identity policy, and resolved effect contracts.
@@ -2916,6 +2901,21 @@ def _case_run_report_integrity_error(
                         QualificationRefusalCode.CASE_NOT_PASSED,
                         f"fault case prior action effect is not exact: {effect_error}",
                     )
+
+        prior_contract_outcome = classify_execution_outcome(
+            report,
+            workflow,
+            ExecutionProfile.STANDARD,
+            runtime_worklists=case_worklists,
+            transition_evidence_root=run_evidence_root,
+            transition_predicate_vision=transition_predicate_vision,
+            _qualification_fault_target_step_id=fault_target.step_id,
+        ).value
+        if prior_contract_outcome != "VERIFIED":
+            return (
+                QualificationRefusalCode.CASE_NOT_PASSED,
+                "fault case prior actions lack complete production evidence",
+            )
 
         if not action_results:
             return (

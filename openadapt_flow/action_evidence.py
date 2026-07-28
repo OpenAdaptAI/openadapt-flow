@@ -188,7 +188,8 @@ def _delivery_receipt_error(
 
     source_fingerprint = _resolution_fingerprint(step, result.resolution)
     if (
-        result.actuation in {"uia", "dom"}
+        step.action is not ActionKind.DRAG
+        and result.actuation in {"uia", "dom"}
         and result.resolution is not None
         and result.resolution.rung == "structural"
     ):
@@ -207,6 +208,11 @@ def _delivery_receipt_error(
             return "remote delivery receipt does not bind the resolved target"
 
     if step.action is ActionKind.DRAG:
+        if (
+            source_fingerprint is None
+            or receipt.target_fingerprint != source_fingerprint
+        ):
+            return "delivery receipt does not bind the resolved drag source"
         destination = _resolution_fingerprint(
             step,
             result.drag_end_resolution,

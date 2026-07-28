@@ -181,7 +181,12 @@ def _pre_delivery_fault_workflow() -> Workflow:
     )
 
 
-def _governed_report(workflow: Workflow, root):
+def _governed_report(
+    workflow: Workflow,
+    root,
+    *,
+    required_identity_step_ids: tuple[str, ...] = (),
+):
     bundle_dir = root / "bundle"
     workflow.save(bundle_dir)
     workflow = Workflow.load(bundle_dir)
@@ -192,7 +197,7 @@ def _governed_report(workflow: Workflow, root):
         admitted_policy_name="permissive",
         execution_profile="standard",
         minimum_effect_tier=int(VerificationTier.PERSISTED_STATE_REACQUISITION),
-        required_identity_step_ids=("submit",),
+        required_identity_step_ids=required_identity_step_ids,
     )
     run_dir = root / "run"
     report = Replayer(
@@ -248,7 +253,9 @@ def test_runtime_retains_exact_ordered_visual_transition_evidence(tmp_path):
 
 def test_real_program_fault_prefix_accepts_retained_pre_delivery_frames(tmp_path):
     workflow, run_dir, report = _governed_report(
-        _pre_delivery_fault_workflow(), tmp_path
+        _pre_delivery_fault_workflow(),
+        tmp_path,
+        required_identity_step_ids=("submit",),
     )
 
     assert report.execution_outcome == ExecutionOutcome.HALTED.value

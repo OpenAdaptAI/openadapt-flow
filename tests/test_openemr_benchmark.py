@@ -153,9 +153,7 @@ class TestVerifyNoteSaved:
                         region=(420, 480, 240, 20),
                         confidence=1.0,
                     ),
-                    OcrLine(
-                        text="New", region=(900, 480, 40, 20), confidence=1.0
-                    ),
+                    OcrLine(text="New", region=(900, 480, 40, 20), confidence=1.0),
                 ),
             ],
         )

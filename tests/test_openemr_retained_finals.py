@@ -20,9 +20,7 @@ from openadapt_flow.benchmark.verify import verify_note_saved
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_RETAINED_FINALS = os.environ.get("OPENADAPT_OPENEMR_FINALS_DIR")
-FINALS_DIR = Path(
-    RUN_RETAINED_FINALS or REPO_ROOT / "benchmark" / "openemr" / "finals"
-)
+FINALS_DIR = Path(RUN_RETAINED_FINALS or REPO_ROOT / "benchmark" / "openemr" / "finals")
 RESULTS_PATH = REPO_ROOT / "benchmark" / "openemr" / "results.json"
 RETAINED_FALSE_SUCCESS_SHA256 = (
     "8c504ba15bab9cdca8b5987dd1d1ab7b0ba7ae77f67fac5e93ba8481492ae18f"
@@ -35,11 +33,7 @@ pytestmark = pytest.mark.skipif(
 
 def test_retained_final_frames_reproduce_corrected_result() -> None:
     results = json.loads(RESULTS_PATH.read_text())
-    rows = [
-        row
-        for arm in ("compiled", "agent")
-        for row in results["runs"][arm]
-    ]
+    rows = [row for arm in ("compiled", "agent") for row in results["runs"][arm]]
     assert len(results["runs"]["compiled"]) == 20
     assert len(results["runs"]["agent"]) == 10
     assert len(rows) == 30

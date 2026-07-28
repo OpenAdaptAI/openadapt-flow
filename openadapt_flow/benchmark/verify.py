@@ -283,14 +283,8 @@ def _saved_message_note_lines(lines: list[OcrLine]) -> list[OcrLine]:
                 for lx, ly, lw, lh in (line.region,)
                 if ly > header_bottom
                 and (
-                    (
-                        _squash(line.text) == "new"
-                        and lx + lw / 2 >= sx - sw
-                    )
-                    or (
-                        _squash(line.text).endswith("new")
-                        and lx + lw >= sx
-                    )
+                    (_squash(line.text) == "new" and lx + lw / 2 >= sx - sw)
+                    or (_squash(line.text).endswith("new") and lx + lw >= sx)
                 )
             ]
             for line in lines:
@@ -302,8 +296,7 @@ def _saved_message_note_lines(lines: list[OcrLine]) -> list[OcrLine]:
                 if not (content_center_x - cw <= line_center_x < status_center_x):
                     continue
                 if any(
-                    abs(line_center_y - row_status_center_y)
-                    <= 2 * max(lh, status_h)
+                    abs(line_center_y - row_status_center_y) <= 2 * max(lh, status_h)
                     for row_status_center_y, status_h in row_status_bands
                 ):
                     candidates.append(line)

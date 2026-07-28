@@ -13,6 +13,7 @@ import importlib.metadata
 import inspect
 import io
 import json
+import marshal
 import platform
 from collections.abc import Hashable
 from functools import lru_cache
@@ -34,18 +35,77 @@ _VISION_CALLABLES = (
 )
 
 
+def _module_identity(value: Any) -> str:
+    return f"{getattr(value, '__module__', '')}.{getattr(value, '__qualname__', getattr(value, '__name__', ''))}"
+
+
+def _live_implementation_contract(vision: Any) -> dict[str, Any]:
+    """Bind loaded helper callables and exact first-party source bytes."""
+
+    callables = [evaluate_program_predicate, resolve]
+    callables.extend(
+        value
+        for name in _VISION_CALLABLES
+        if callable(value := getattr(vision, name, None))
+    )
+    modules = {
+        module
+        for value in callables
+        if (module := inspect.getmodule(value)) is not None
+    }
+    live_modules: dict[str, Any] = {}
+    source_files: dict[str, str] = {}
+    for module in sorted(modules, key=lambda item: item.__name__):
+        module_path = getattr(module, "__file__", None)
+        if module_path is not None:
+            path = Path(module_path)
+            if path.is_file():
+                source_files[module.__name__] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+        live_modules[module.__name__] = {
+            name: {
+                "identity": _module_identity(value),
+                "source_sha256": _source_sha256(value),
+            }
+            for name, value in sorted(vars(module).items())
+            if not name.startswith("__")
+            and (inspect.isfunction(value) or inspect.isclass(value))
+        }
+    vision_root = Path(__file__).resolve().parents[1] / "vision"
+    for path in sorted(vision_root.glob("*.py")):
+        source_files[f"openadapt_flow.vision.{path.stem}"] = hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    resolver_path = Path(inspect.getsourcefile(resolve) or "")
+    if resolver_path.is_file():
+        source_files["openadapt_flow.runtime.resolver"] = hashlib.sha256(
+            resolver_path.read_bytes()
+        ).hexdigest()
+    source_files["openadapt_flow.runtime.program_predicates"] = hashlib.sha256(
+        Path(__file__).read_bytes()
+    ).hexdigest()
+    return {
+        "live_modules": live_modules,
+        "first_party_source_sha256": source_files,
+    }
+
+
 def _source_sha256(value: Any) -> str:
     """Hash the installed implementation behind one evaluator dependency."""
 
     try:
         source = inspect.getsource(value).encode("utf-8")
     except (OSError, TypeError):
+        code = getattr(value, "__code__", None)
+        if code is not None:
+            return hashlib.sha256(marshal.dumps(code)).hexdigest()
         module = inspect.getmodule(value)
         module_path = getattr(module, "__file__", None)
-        if module_path is None:
-            source = repr(value).encode("utf-8")
-        else:
+        if module_path is not None and Path(module_path).is_file():
             source = Path(module_path).read_bytes()
+        else:
+            source = _module_identity(value).encode("utf-8")
     return hashlib.sha256(source).hexdigest()
 
 
@@ -72,7 +132,13 @@ def _evaluator_contract_for_implementation(vision_type: Hashable) -> str:
         except importlib.metadata.PackageNotFoundError:
             versions[distribution] = "absent"
     artifact_hashes: dict[str, dict[str, str]] = {}
-    for distribution in ("rapidocr-onnxruntime", "onnxruntime"):
+    for distribution in (
+        "numpy",
+        "onnxruntime",
+        "opencv-python",
+        "pillow",
+        "rapidocr-onnxruntime",
+    ):
         files: dict[str, str] = {}
         try:
             candidates = importlib.metadata.files(distribution) or ()
@@ -142,6 +208,7 @@ def program_predicate_evaluator_contract_sha256(vision: Any) -> str:
         canonical = json.dumps(
             {
                 "implementation_sha256": implementation,
+                "live_implementation": _live_implementation_contract(vision),
                 "configuration": configuration,
             },
             sort_keys=True,

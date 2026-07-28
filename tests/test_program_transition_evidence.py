@@ -60,6 +60,20 @@ def test_builtin_evaluator_contract_binds_nested_ocr_threshold(monkeypatch):
     assert program_predicate_evaluator_contract_sha256(vision) != before
 
 
+def test_builtin_evaluator_contract_normalizes_cache_and_binds_live_helper(monkeypatch):
+    import openadapt_flow.vision as vision
+
+    ocr_module = __import__(vision.ocr.__module__, fromlist=["_engine", "ocr"])
+    monkeypatch.setattr(ocr_module, "_engine", None)
+    before = program_predicate_evaluator_contract_sha256(vision)
+
+    assert not vision.text_present(make_png((32, 32)), "Use first path")
+    assert program_predicate_evaluator_contract_sha256(vision) == before
+
+    monkeypatch.setattr(ocr_module, "ocr", lambda *_args, **_kwargs: [])
+    assert program_predicate_evaluator_contract_sha256(vision) != before
+
+
 def _visual_branch_workflow() -> Workflow:
     return Workflow(
         name="retained-visual-branch",

@@ -36,6 +36,11 @@ from openadapt_flow.vision.settle import (
     wait_settled_result,
 )
 
+_PROGRAM_PREDICATE_RUNTIME_STATE = {
+    "preprocess_op",
+    "session",
+}
+
 
 def _contract_state(value: Any, *, depth: int = 0) -> Any:
     """Return stable behavior-affecting state for the built-in OCR engine."""
@@ -59,6 +64,7 @@ def _contract_state(value: Any, *, depth: int = 0) -> Any:
         str(key): _contract_state(item, depth=depth + 1)
         for key, item in sorted(attributes.items())
         if not str(key).startswith("_")
+        and str(key) not in _PROGRAM_PREDICATE_RUNTIME_STATE
     }
     return {
         "type": f"{type(value).__module__}.{type(value).__qualname__}",

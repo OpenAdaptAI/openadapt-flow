@@ -1120,13 +1120,19 @@ def _terminate_rejected_run(
     terminated by the pause status either way, and refusing to let an operator
     stop a run because its report is unreadable would be the wrong failure.
     """
-    from openadapt_flow.console import data as _data
+    from openadapt_flow.ir import RunReport
     from openadapt_flow.transaction import classify_transaction_outcome
 
     checkpoints.write_pending(pending.model_copy(update={"status": "rejected"}))
 
-    report, _error = _data._load_report(run_dir)
-    if report is None:
+    # Read the report directly rather than through the console's loader: the
+    # console is an optional extra and a presentation layer, and the runtime
+    # must not acquire a dependency on it to end a run.
+    try:
+        report = RunReport.model_validate_json(
+            (run_dir / "report.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
         return None
     report.canceled = True
     outcome = classify_transaction_outcome(report)

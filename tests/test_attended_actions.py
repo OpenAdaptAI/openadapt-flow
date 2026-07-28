@@ -2314,3 +2314,34 @@ def test_reject_admission_refuses_every_mutation_of_its_preconditions(tmp_path):
 
     # Nothing above may have ended the original run.
     assert CheckpointStore(run).read_pending().status == "pending"
+
+
+def test_a_rejection_still_ends_the_run_when_the_report_is_unreadable(tmp_path):
+    """An unreadable report must not prevent an operator from stopping a run.
+
+    The report is where the terminal transaction outcome is recorded, so a
+    rejection over a corrupt one loses that record. It does not lose the
+    TERMINATION: the pause status is the enforcement point, and refusing to let
+    an operator stop a run because a JSON file will not parse would be the
+    wrong failure to choose. The decision message says the outcome is
+    unrecorded rather than implying one was written.
+    """
+    _wf, _bundle, run, store, capability = _paused(tmp_path / "corrupt")
+    (run / "report.json").write_text("{not json", encoding="utf-8")
+
+    decision = execute_attended_action(
+        run,
+        AttendedActionRequest(
+            capability_digest=capability.digest,
+            idempotency_key="reject-corrupt-report-01",
+            action="reject",
+            disposition="rejected_by_operator",
+        ),
+        operator="staff",
+    )
+    assert decision.status == "rejected"
+    assert "unrecorded" in decision.message
+    assert store.read_pending().status == "rejected"
+    # And the corrupt file was not overwritten with a partial report.
+    assert (run / "report.json").read_text(encoding="utf-8") == "{not json"
+    assert not list(run.glob("*.rejecting"))

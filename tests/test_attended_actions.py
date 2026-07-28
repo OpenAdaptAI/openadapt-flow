@@ -75,6 +75,7 @@ from openadapt_flow.runtime.durable.checkpoint import (
 from openadapt_flow.runtime.durable.program_checkpoint import ProgramCheckpoint
 from openadapt_flow.runtime.effects import Effect, EffectKind, EffectState
 from openadapt_flow.runtime.replayer import Replayer
+from openadapt_flow.verification import VerificationTier
 from tests.test_replayer import (
     FakeBackend,
     FakeVision,
@@ -641,6 +642,133 @@ def _run_attended_program_to_pause(tmp_path, workflow, *, optional_visible=False
         CheckpointStore(run),
         AttendedActionStore(run).read(),
     )
+
+
+def _attended_effect_program() -> Workflow:
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"id": "row-1"},
+        forbid_collateral_loss=False,
+    )
+    return Workflow(
+        name="attended-effect-program",
+        program=ProgramGraph(
+            entry="human",
+            states={
+                "human": State(
+                    id="human",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="human-step",
+                        intent="save record",
+                        action=ActionKind.KEY,
+                        key="A",
+                        effects=[effect],
+                    ),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+    )
+
+
+def test_linear_attended_verification_uses_admitted_postconditions(tmp_path):
+    workflow = Workflow(
+        name="linear-attended-snapshot",
+        steps=[
+            Step(
+                id="human-step",
+                intent="save record",
+                action=ActionKind.KEY,
+                key="A",
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT,
+                        text="ORIGINAL_REQUIRED_RESULT",
+                        timeout_s=0.01,
+                    )
+                ],
+            )
+        ],
+    )
+
+    class MutatingVision(FakeVision):
+        def wait_settled(self, backend, **kwargs):
+            workflow.steps[0].expect[0].text = "EASY_REPLACEMENT"
+            return super().wait_settled(backend, **kwargs)
+
+    vision = MutatingVision()
+    vision.text_results["EASY_REPLACEMENT"] = Match((1, 1), (0, 0, 2, 2))
+    result = Replayer(FakeBackend(), vision=vision).revalidate_attended_completion(
+        workflow,
+        step_index=0,
+        params={},
+        bundle_dir=tmp_path,
+        run_dir=tmp_path / "run",
+        run_id="run-linear",
+        transition_baseline=TransitionObservation(),
+        transition_digest=lambda field, value: f"{field}:{value}",
+    )
+
+    assert result.ok is False
+    assert result.postconditions_ok is False
+
+
+@pytest.mark.parametrize("mutate_authorization", [False, True])
+def test_program_attended_verification_keeps_the_admitted_effect_tier(
+    tmp_path, mutate_authorization
+):
+    workflow = _attended_effect_program()
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest="a" * 64,
+        runtime_inputs_digest="b" * 64,
+        admitted_policy_name="test",
+        execution_profile="standard",
+        minimum_effect_tier=int(VerificationTier.INDEPENDENT_SYSTEM),
+    )
+
+    class CurrentRecords:
+        substrate = "test"
+        verification_tier = (
+            VerificationTier.INDEPENDENT_SYSTEM
+            if mutate_authorization
+            else VerificationTier.IMMEDIATE_SCREEN
+        )
+
+        def capture_pre_state(self, context=None):
+            if mutate_authorization:
+                object.__setattr__(
+                    authorization,
+                    "minimum_effect_tier",
+                    int(VerificationTier.IMMEDIATE_SCREEN),
+                )
+            return EffectState(
+                substrate=self.substrate,
+                reachable=True,
+                records=[{"id": "row-1"}],
+            )
+
+    result, target = Replayer(
+        FakeBackend(),
+        vision=FakeVision(),
+        effect_verifier=CurrentRecords(),
+        governed_authorization=authorization,
+    ).revalidate_attended_program_completion(
+        workflow,
+        graph_id="__program__",
+        state_id="human",
+        params={},
+        bundle_dir=tmp_path,
+        run_dir=tmp_path / "run",
+        run_id="run-program",
+        transition_baseline=TransitionObservation(),
+        transition_digest=lambda field, value: f"{field}:{value}",
+    )
+
+    assert result.ok is False
+    assert result.safety_halt is True
+    assert target is None
 
 
 def test_program_continue_commits_exact_receipt_without_reactuating_source(tmp_path):

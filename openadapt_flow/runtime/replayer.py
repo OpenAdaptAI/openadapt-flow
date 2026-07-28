@@ -817,25 +817,7 @@ class Replayer:
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
-        self._execution_snapshot_required = True
-        self._execution_workflow_source = workflow
-        try:
-            self._execution_workflow_snapshot = workflow.model_copy(deep=True)
-        except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
-            self._execution_workflow_snapshot = None
-        self._governed_authorization_source = self.governed_authorization
-        self._governed_authorization_snapshot_error = None
-        if self.governed_authorization is not None:
-            try:
-                self.governed_authorization = self.governed_authorization.model_copy(
-                    deep=True
-                )
-            except Exception as exc:  # noqa: BLE001 - caller-owned boundary
-                self.governed_authorization = None
-                self._governed_authorization_snapshot_error = (
-                    "governed authorization could not be snapshotted before "
-                    f"execution ({type(exc).__name__})"
-                )
+        self._install_execution_snapshots(workflow)
         # Snapshot bundle declarations before authorization validation and
         # before the first backend/vision callback.  Execution uses only this
         # deep copy; the caller-owned workflow remains available solely for a
@@ -935,6 +917,22 @@ class Replayer:
             ),
             idempotency_key=idempotency_key,
         )
+        snapshot_refusal = self._workflow_snapshot_refusal(workflow)
+        if snapshot_refusal is None:
+            snapshot_refusal = self._governed_authorization_snapshot_refusal()
+        if snapshot_refusal is not None:
+            report.results.append(
+                StepResult(
+                    step_id="<authorization>",
+                    intent="snapshot governed execution admission",
+                    ok=False,
+                    safety_halt=True,
+                    failure_category="governed_refusal",
+                    error=snapshot_refusal,
+                )
+            )
+            report.success = False
+            return self._finalize_report(report, workflow, run_dir)
         self._begin_control_overlay(report.execution_profile)
         # At-most-once idempotency (Section 3): a repeat under an already-seen
         # key is SUPPRESSED before any actuation. A durable RESUME carries the
@@ -2571,13 +2569,13 @@ class Replayer:
         # the same exact semantic snapshot before its first vision/effect
         # callback so a callback cannot rewrite an outgoing edge and then have
         # that edge committed into the attended transition receipt.
-        self._execution_snapshot_required = True
-        self._execution_workflow_source = workflow
-        try:
-            self._execution_workflow_snapshot = workflow.model_copy(deep=True)
-        except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
-            self._execution_workflow_snapshot = None
+        self._install_execution_snapshots(workflow)
         execution_workflow = self._execution_workflow_snapshot or workflow
+        snapshot_refusal = self._workflow_snapshot_refusal(execution_workflow)
+        if snapshot_refusal is None:
+            snapshot_refusal = self._governed_authorization_snapshot_refusal()
+        if snapshot_refusal is not None:
+            raise StateDiverged(snapshot_refusal)
         graph = self._resolve_graph(execution_workflow, graph_id)
         state = graph.states.get(state_id)
         if state is None or state.kind is not StateKind.ACTION or state.step is None:
@@ -2599,8 +2597,18 @@ class Replayer:
             run_id=run_id,
             transition_baseline=transition_baseline,
             transition_digest=transition_digest,
+            _preserve_execution_snapshot=True,
         )
         if not result.ok:
+            return result, None
+        snapshot_refusal = self._workflow_snapshot_refusal(execution_workflow)
+        if snapshot_refusal is None:
+            snapshot_refusal = self._governed_authorization_snapshot_refusal()
+        if snapshot_refusal is not None:
+            result.ok = False
+            result.safety_halt = True
+            result.failure_category = "governed_refusal"
+            result.error = snapshot_refusal
             return result, None
         target = self.select_attended_program_transition(
             execution_workflow,
@@ -2609,6 +2617,7 @@ class Replayer:
             params=params,
             bundle_dir=bundle_dir,
         )
+        self._raise_on_workflow_snapshot_mutation(execution_workflow)
         return result, target
 
     def select_attended_program_transition(
@@ -2622,12 +2631,7 @@ class Replayer:
     ) -> Optional[str]:
         """Select and prove one exact successor for an attended action state."""
         if not self._execution_snapshot_required:
-            self._execution_snapshot_required = True
-            self._execution_workflow_source = workflow
-            try:
-                self._execution_workflow_snapshot = workflow.model_copy(deep=True)
-            except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
-                self._execution_workflow_snapshot = None
+            self._install_execution_snapshots(workflow)
         execution_workflow = self._execution_workflow_snapshot or workflow
         graph = self._resolve_graph(execution_workflow, graph_id)
         state = graph.states.get(state_id)
@@ -2684,6 +2688,7 @@ class Replayer:
                     raise StateDiverged(
                         "the exact attended program successor identity did not verify"
                     )
+        self._raise_on_workflow_snapshot_mutation(execution_workflow)
         return target
 
     def revalidate_attended_completion(
@@ -2697,6 +2702,7 @@ class Replayer:
         run_id: str,
         transition_baseline: Any,
         transition_digest: Callable[[str, str], str],
+        _preserve_execution_snapshot: bool = False,
     ) -> StepResult:
         """Verify a human-completed linear step without actuating it.
 
@@ -2720,6 +2726,14 @@ class Replayer:
         from openadapt_flow.runtime.effects import EffectState
         from openadapt_flow.runtime.effects._common import judge_records
 
+        if not _preserve_execution_snapshot:
+            self._install_execution_snapshots(workflow)
+            workflow = self._execution_workflow_snapshot or workflow
+        snapshot_refusal = self._workflow_snapshot_refusal(workflow)
+        if snapshot_refusal is None:
+            snapshot_refusal = self._governed_authorization_snapshot_refusal()
+        if snapshot_refusal is not None:
+            raise StateDiverged(snapshot_refusal)
         if not (0 <= step_index < len(workflow.steps)):
             raise StateDiverged("the attended pause references no workflow step")
         step = workflow.steps[step_index]
@@ -2827,7 +2841,49 @@ class Replayer:
                     run_dir, step.id, "attended-after", frame
                 )
                 return result
+            effects = self._resolve_effects(attended_effects, params)
+            profile_workflow = self._execution_workflow_snapshot or workflow
+            tier_refusal = self._profile_effect_tier_refusal(
+                profile_workflow,
+                effects,
+                self.effect_verifier,
+            )
+            if tier_refusal is not None:
+                result.effect_verified = False
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = tier_refusal
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
             current = self.effect_verifier.capture_pre_state()
+            tier_refusal = self._profile_effect_tier_refusal(
+                profile_workflow,
+                effects,
+                self.effect_verifier,
+            )
+            if tier_refusal is not None:
+                result.effect_verified = False
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = tier_refusal
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
+            snapshot_refusal = self._workflow_snapshot_refusal(profile_workflow)
+            if snapshot_refusal is None:
+                snapshot_refusal = self._governed_authorization_snapshot_refusal()
+            if snapshot_refusal is not None:
+                result.effect_verified = False
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = snapshot_refusal
+                result.after_png = self._save_step_png(
+                    run_dir, step.id, "attended-after", frame
+                )
+                return result
             if not current.reachable:
                 result.effect_verified = False
                 result.error = (
@@ -2838,7 +2894,6 @@ class Replayer:
                     run_dir, step.id, "attended-after", frame
                 )
                 return result
-            effects = self._resolve_effects(attended_effects, params)
             for effect in effects:
                 if effect.needs_operator_confirmation:
                     result.effect_verified = False
@@ -2936,6 +2991,19 @@ class Replayer:
                         )
                         return result
 
+        snapshot_refusal = self._workflow_snapshot_refusal(
+            self._execution_workflow_snapshot or workflow
+        )
+        if snapshot_refusal is None:
+            snapshot_refusal = self._governed_authorization_snapshot_refusal()
+        if snapshot_refusal is not None:
+            result.safety_halt = True
+            result.failure_category = "governed_refusal"
+            result.error = snapshot_refusal
+            result.after_png = self._save_step_png(
+                run_dir, step.id, "attended-after", frame
+            )
+            return result
         result.ok = True
         result.postconditions_ok = True if step.expect else None
         result.after_png = self._save_step_png(
@@ -5759,6 +5827,29 @@ class Replayer:
         if frame_refusal is not None:
             return frame_refusal
         return self._governed_asset_mutation
+
+    def _install_execution_snapshots(self, workflow: Workflow) -> None:
+        """Copy caller-owned workflow and authorization before any callback."""
+
+        self._execution_snapshot_required = True
+        self._execution_workflow_source = workflow
+        try:
+            self._execution_workflow_snapshot = workflow.model_copy(deep=True)
+        except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
+            self._execution_workflow_snapshot = None
+        self._governed_authorization_source = self.governed_authorization
+        self._governed_authorization_snapshot_error = None
+        if self.governed_authorization is not None:
+            try:
+                self.governed_authorization = self.governed_authorization.model_copy(
+                    deep=True
+                )
+            except Exception as exc:  # noqa: BLE001 - caller-owned boundary
+                self.governed_authorization = None
+                self._governed_authorization_snapshot_error = (
+                    "governed authorization could not be snapshotted before "
+                    f"execution ({type(exc).__name__})"
+                )
 
     def _workflow_snapshot_refusal(self, workflow: Workflow) -> Optional[str]:
         """Refuse a caller-owned workflow change after run admission."""

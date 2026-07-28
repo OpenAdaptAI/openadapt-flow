@@ -16,6 +16,8 @@ network, no model call. The theses these pin:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from openadapt_flow.ir import (
@@ -315,6 +317,36 @@ def test_resume_refuses_a_checkpoint_added_after_the_pause(tmp_path):
     )
     backend = FakeBackend()
     with pytest.raises(StateDiverged, match="checkpoint history"):
+        resume(
+            run_dir,
+            Replayer(backend, vision=_vision_ok(), effect_verifier=verifier),
+            approval=_approval(bundle),
+        )
+    assert backend.actions == []
+
+
+def test_attended_checkpoint_must_follow_the_active_pause(tmp_path):
+    _report, run_dir, bundle, _backend, verifier = _run_to_halt(tmp_path)
+    store = CheckpointStore(run_dir)
+    pending = store.read_pending()
+    assert pending is not None
+    before_pause = (
+        datetime.fromisoformat(pending.created_at) - timedelta(hours=1)
+    ).isoformat()
+    store.write_checkpoint(
+        RunCheckpoint(
+            workflow_name="durable-demo",
+            step_index=2,
+            step_id="s2",
+            next_step_index=3,
+            params={"who": "alice"},
+            actuation="human_attended",
+            created_at=before_pause,
+        )
+    )
+    store.write_pending(pending.model_copy(update={"status": "approved"}))
+    backend = FakeBackend()
+    with pytest.raises(StateDiverged, match="history changed"):
         resume(
             run_dir,
             Replayer(backend, vision=_vision_ok(), effect_verifier=verifier),

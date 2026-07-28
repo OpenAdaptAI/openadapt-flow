@@ -78,6 +78,17 @@ def _created_no_later(checkpoint_created_at: str, pause_created_at: str) -> bool
         return False
 
 
+def _created_later(checkpoint_created_at: str, pause_created_at: str) -> bool:
+    """Return whether an attended checkpoint follows its retained pause."""
+
+    try:
+        return datetime.fromisoformat(checkpoint_created_at) > datetime.fromisoformat(
+            pause_created_at
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _linear_resume_checkpoint(
     *,
     checkpoints: list[RunCheckpoint],
@@ -112,9 +123,12 @@ def _linear_resume_checkpoint(
                 "the linear checkpoint history does not match the workflow"
             )
         is_attended_tail = attended and index == len(checkpoints) - 1
-        if not is_attended_tail and not _created_no_later(
-            checkpoint.created_at, pending.created_at
-        ):
+        valid_time = (
+            _created_later(checkpoint.created_at, pending.created_at)
+            if is_attended_tail
+            else _created_no_later(checkpoint.created_at, pending.created_at)
+        )
+        if not valid_time:
             raise StateDiverged(
                 "the linear checkpoint history changed after the durable pause"
             )
@@ -376,6 +390,7 @@ def _resume_program(
         and pending.status == "approved"
         and checkpoint.seq == pending.program_checkpoint_seq + 1
         and checkpoint.verified_state_id == (pending.state_id or pending.step_id)
+        and _created_later(checkpoint.created_at, pending.created_at)
     )
     if checkpoint is None:
         if (

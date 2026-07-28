@@ -506,7 +506,9 @@ class TestVerifyEncounterType:
         return make_encounter_screen(*lines, scale=0.6)
 
     @pytest.mark.parametrize("note", NOTE_LENGTHS)
-    def test_right_type_passes_at_every_note_length(self, note: str) -> None:
+    def test_right_type_passes_at_every_note_length(
+        self, note: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # The over-halt guard: a genuinely correct save must pass at every
         # note length. A check strict enough to trip on OCR noise would
         # make a working system look broken, which is worse than the
@@ -515,6 +517,14 @@ class TestVerifyEncounterType:
             f"Encounter saved - {note[:40]}",
             f"Triage - {note[:60]}",
         )
+        # Keep the field-separation regression independent of rapidocr's
+        # platform-specific segmentation of the longest synthetic Hershey
+        # line. TestVerify above retains a real-OCR smoke for the benchmark's
+        # actual 32-character note; these four cases pin the verifier logic.
+        monkeypatch.setattr(
+            "openadapt_flow.benchmark.verify.ocr",
+            lambda _screen: [SimpleNamespace(text=f"Triage - {note[:60]}")],
+        )
         verdict = verify_encounter_saved(screen, note)
         assert verdict.banner_found
         assert verdict.note_found
@@ -522,13 +532,19 @@ class TestVerifyEncounterType:
         assert verdict.success
 
     @pytest.mark.parametrize("note", NOTE_LENGTHS)
-    def test_wrong_type_fails_at_every_note_length(self, note: str) -> None:
+    def test_wrong_type_fails_at_every_note_length(
+        self, note: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # The regression: the note is correct and the banner is present,
         # but the encounter was saved as Consult. That is a wrong-target
         # write, not a success, however long the note is.
         screen = self.make_screen(
             f"Encounter saved - {note[:40]}",
             f"Consult - {note[:60]}",
+        )
+        monkeypatch.setattr(
+            "openadapt_flow.benchmark.verify.ocr",
+            lambda _screen: [SimpleNamespace(text=f"Consult - {note[:60]}")],
         )
         verdict = verify_encounter_saved(screen, note)
         assert verdict.banner_found

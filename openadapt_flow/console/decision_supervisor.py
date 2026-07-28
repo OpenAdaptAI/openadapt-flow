@@ -239,9 +239,14 @@ class DecisionSupervisor:
         """The open pause this decision was minted from, or ``None``.
 
         Both the relayed ``task_id`` and the relayed ``capability_digest`` must
-        match. The digest alone would be sufficient today, and requiring both
-        means a future change that decouples the two surfaces as a mismatch
-        rather than silently picking one.
+        match. The digest alone would be sufficient today; requiring both means
+        that if a future change ever decouples the two, it shows up as a
+        decision that resolves to nothing rather than as a silent guess.
+
+        That failure direction is deliberate. A supervisor that cannot resolve
+        a decision acknowledges it ``stale`` and executes nothing, which is an
+        outage. A supervisor that resolves it to the wrong open pause executes
+        a real answer against a real record. The first is recoverable.
         """
         relay = decision.relay
         task_id = relay.get("task_id")

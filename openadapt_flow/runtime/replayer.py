@@ -2714,6 +2714,96 @@ class Replayer:
                 "halt",
                 "the durable interpreter cursor does not match its verified state",
             )
+        # Validate the complete retained control path before appending or
+        # changing any live frame.  Checkpoints are normally written only after
+        # an ACTION state verifies.  Treating a LOOP, SUBFLOW_CALL, BRANCH, or
+        # TERMINAL as the verified leaf would skip that control state's work and
+        # could continue at a later input edge.
+        parent_state: Optional[State] = None
+        expected_params = dict(self._governed_base_params or {})
+        leaf_state: Optional[State] = None
+        for index, frame in enumerate(checkpoint.frames):
+            graph = self._resolve_graph(workflow, frame.graph_id)
+            state = graph.states.get(frame.state_id)
+            if state is None or state.id != frame.state_id:
+                raise _ProgramHalt(
+                    "halt",
+                    "the durable interpreter cursor references an undefined "
+                    "program state",
+                )
+            if index == 0:
+                if frame.graph_id != TOP_GRAPH_ID or frame.loop is not None:
+                    raise _ProgramHalt(
+                        "halt",
+                        "the durable interpreter cursor has an invalid root frame",
+                    )
+            elif frame.loop is not None:
+                loop = parent_state.loop if parent_state is not None else None
+                cursor = frame.loop
+                if (
+                    parent_state is None
+                    or parent_state.kind is not StateKind.LOOP
+                    or loop is None
+                    or parent_state.id != cursor.loop_state_id
+                    or cursor.relation != loop.relation
+                    or frame.graph_id != loop.body
+                ):
+                    raise _ProgramHalt(
+                        "halt",
+                        "the durable interpreter loop cursor does not match its "
+                        "parent loop state",
+                    )
+                source_rows = (
+                    worklists[loop.relation]
+                    if loop.relation in worklists
+                    else (
+                        workflow.data_sources[loop.relation].rows
+                        if loop.relation in workflow.data_sources
+                        else None
+                    )
+                )
+                if (
+                    source_rows is None
+                    or cursor.rows != source_rows
+                    or cursor.row_index < 0
+                    or cursor.row_index >= len(source_rows)
+                ):
+                    raise _ProgramHalt(
+                        "halt",
+                        "the durable interpreter loop cursor does not match its "
+                        "authorized worklist",
+                    )
+                expected_params.update(source_rows[cursor.row_index])
+            elif (
+                parent_state is None
+                or parent_state.kind is not StateKind.SUBFLOW_CALL
+                or parent_state.subflow != frame.graph_id
+            ):
+                raise _ProgramHalt(
+                    "halt",
+                    "the durable interpreter child frame does not match its "
+                    "parent subflow call",
+                )
+            if frame.params != expected_params:
+                raise _ProgramHalt(
+                    "halt",
+                    "the durable interpreter frame parameters do not match the "
+                    "authorized control path",
+                )
+            parent_state = state
+            leaf_state = state
+        if (
+            leaf_state is None
+            or leaf_state.kind is not StateKind.ACTION
+            or leaf_state.step is None
+            or (checkpoint.step_id and checkpoint.step_id != leaf_state.step.id)
+            or checkpoint.bound_params != checkpoint.frames[-1].params
+        ):
+            raise _ProgramHalt(
+                "halt",
+                "the durable interpreter verified leaf does not match an exact "
+                "action state",
+            )
         receipt = checkpoint.attended_transition
         if receipt is not None:
             if (

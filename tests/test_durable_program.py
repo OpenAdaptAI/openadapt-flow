@@ -50,6 +50,7 @@ from openadapt_flow.runtime.durable import (
 )
 from openadapt_flow.runtime.durable.program_checkpoint import (
     GraphFrame,
+    LoopCursor,
     ProgramCheckpoint,
 )
 from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
@@ -143,6 +144,138 @@ def test_program_resume_rejects_a_constructed_empty_cursor(tmp_path):
         )
 
     assert backend.actions == []
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        StateKind.BRANCH,
+        StateKind.LOOP,
+        StateKind.SUBFLOW_CALL,
+        StateKind.TERMINAL,
+    ],
+)
+def test_program_resume_rejects_non_action_verified_leaf_before_input(tmp_path, kind):
+    later = State(
+        id="later",
+        kind=StateKind.ACTION,
+        step=Step(id="later-key", intent="later", action=ActionKind.KEY, key="A"),
+    )
+    control = State(
+        id="control",
+        kind=kind,
+        transitions=[Transition(target="later")],
+        loop=(
+            LoopSpec(relation="queue", body="body") if kind is StateKind.LOOP else None
+        ),
+        subflow=("body" if kind is StateKind.SUBFLOW_CALL else None),
+        outcome=("success" if kind is StateKind.TERMINAL else None),
+    )
+    workflow = Workflow(
+        name="w",
+        program=ProgramGraph(
+            entry="control",
+            states={"control": control, "later": later},
+        ),
+        subflows={
+            "body": ProgramGraph(
+                entry="body-action",
+                states={
+                    "body-action": State(
+                        id="body-action",
+                        kind=StateKind.ACTION,
+                        step=Step(
+                            id="body-key",
+                            intent="body",
+                            action=ActionKind.KEY,
+                            key="B",
+                        ),
+                    )
+                },
+            )
+        },
+        data_sources={"queue": Relation(name="queue", rows=[{"record": "1"}])},
+    )
+    checkpoint = ProgramCheckpoint(
+        workflow_name="w",
+        seq=1,
+        verified_state_id="control",
+        step_id="control",
+        frames=[GraphFrame(graph_id="__program__", state_id="control")],
+        bound_params={},
+    )
+    backend = FakeBackend()
+
+    report = Replayer(backend, vision=FakeVision()).run(
+        workflow,
+        params={},
+        bundle_dir=tmp_path / "bundle",
+        run_dir=tmp_path / "run",
+        resume_program=checkpoint,
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert "verified leaf" in (report.results[-1].error or "")
+
+
+def test_program_resume_rejects_malformed_loop_ancestry_before_input(tmp_path):
+    body_action = State(
+        id="body-action",
+        kind=StateKind.ACTION,
+        step=Step(id="body-key", intent="body", action=ActionKind.KEY, key="B"),
+    )
+    workflow = Workflow(
+        name="w",
+        program=ProgramGraph(
+            entry="call",
+            states={
+                "call": State(
+                    id="call",
+                    kind=StateKind.SUBFLOW_CALL,
+                    subflow="body",
+                )
+            },
+        ),
+        subflows={
+            "body": ProgramGraph(
+                entry="body-action", states={"body-action": body_action}
+            )
+        },
+    )
+    checkpoint = ProgramCheckpoint(
+        workflow_name="w",
+        seq=1,
+        verified_state_id="body-action",
+        step_id="body-key",
+        frames=[
+            GraphFrame(graph_id="__program__", state_id="call"),
+            GraphFrame(
+                graph_id="body",
+                state_id="body-action",
+                loop=LoopCursor(
+                    loop_state_id="call",
+                    relation="missing",
+                    row_index=0,
+                    rows=[{}],
+                ),
+            ),
+        ],
+        bound_params={},
+    )
+    backend = FakeBackend()
+
+    report = Replayer(backend, vision=FakeVision()).run(
+        workflow,
+        params={},
+        bundle_dir=tmp_path / "bundle",
+        run_dir=tmp_path / "run",
+        resume_program=checkpoint,
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert "loop cursor" in (report.results[-1].error or "")
 
 
 def _patient_effect() -> Effect:

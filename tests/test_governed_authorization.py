@@ -9,6 +9,7 @@ from openadapt_flow.ir import (
     Anchor,
     Guard,
     Interstitial,
+    LoopSpec,
     Postcondition,
     PostconditionKind,
     Predicate,
@@ -528,6 +529,132 @@ def test_parameter_and_worklist_changes_are_refused(tmp_path):
 
     assert report.success is False
     assert "different runtime parameters or worklists" in (
+        report.results[0].error or ""
+    )
+
+
+def _governed_loop_workflow() -> Workflow:
+    body = ProgramGraph(
+        entry="type-row",
+        states={
+            "type-row": State(
+                id="type-row",
+                kind=StateKind.ACTION,
+                step=Step(
+                    id="type-row",
+                    intent="type the authorized row value",
+                    action=ActionKind.TYPE,
+                    param="patient",
+                ),
+                transitions=[Transition(target="body-done")],
+            ),
+            "body-done": State(
+                id="body-done",
+                kind=StateKind.TERMINAL,
+                outcome="success",
+            ),
+        },
+    )
+    program = ProgramGraph(
+        entry="loop",
+        states={
+            "loop": State(
+                id="loop",
+                kind=StateKind.LOOP,
+                loop=LoopSpec(relation="queue", body="body", var="patient"),
+                transitions=[Transition(target="done")],
+            ),
+            "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+        },
+    )
+    return Workflow(
+        name="governed-loop",
+        params={"tenant": "alpha"},
+        program=program,
+        subflows={"body": body},
+    )
+
+
+def test_governed_program_loop_authorizes_each_active_row_once(tmp_path):
+    workflow, bundle = _seal(tmp_path, _governed_loop_workflow())
+    worklists = {"queue": [{"patient": "A"}, {"patient": "B"}]}
+    authorization = _authorization(workflow, worklists=worklists)
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        governed_authorization=authorization,
+    ).run(
+        workflow,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=tmp_path / "governed-loop-run",
+    )
+
+    assert report.success is True
+    assert backend.actions == [("type", "A"), ("type", "B")]
+
+
+def test_governed_program_loop_refuses_late_iteration_param_mutation(tmp_path):
+    class LateIterationMutationReplayer(Replayer):
+        def _act(self, step, resolution, params, **kwargs):
+            params["patient"] = "B"
+            return super()._act(step, resolution, params, **kwargs)
+
+    workflow, bundle = _seal(tmp_path, _governed_loop_workflow())
+    worklists = {"queue": [{"patient": "A"}]}
+    authorization = _authorization(workflow, worklists=worklists)
+    backend = FakeBackend()
+
+    report = LateIterationMutationReplayer(
+        backend,
+        vision=FakeVision(),
+        governed_authorization=authorization,
+    ).run(
+        workflow,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=tmp_path / "mutated-loop-run",
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].safety_halt is True
+    assert "parameters no longer derive" in (report.results[0].error or "")
+
+
+def test_governed_program_loop_refuses_a_tampered_cursor_copy(tmp_path):
+    class CursorMutationReplayer(Replayer):
+        def _act(self, step, resolution, params, **kwargs):
+            cursor = self._frame_stack[-1]["loop"]
+            assert cursor is not None
+            cursor.rows[cursor.row_index]["patient"] = "B"
+            params["patient"] = "B"
+            return super()._act(step, resolution, params, **kwargs)
+
+    workflow, bundle = _seal(tmp_path, _governed_loop_workflow())
+    worklists = {"queue": [{"patient": "A"}]}
+    authorization = _authorization(workflow, worklists=worklists)
+    backend = FakeBackend()
+
+    report = CursorMutationReplayer(
+        backend,
+        vision=FakeVision(),
+        governed_authorization=authorization,
+    ).run(
+        workflow,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=tmp_path / "tampered-loop-cursor-run",
+    )
+
+    assert report.success is False
+    assert backend.actions == []
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].safety_halt is True
+    assert "cursor no longer matches its authorized worklist" in (
         report.results[0].error or ""
     )
 

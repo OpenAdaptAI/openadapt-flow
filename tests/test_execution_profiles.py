@@ -841,7 +841,7 @@ def test_halt_and_infrastructure_failure_remain_distinct():
     )
 
 
-def test_backend_exception_is_failed_even_when_halt_observation_is_emitted(tmp_path):
+def test_backend_exception_can_verify_only_from_the_complete_effect_contract(tmp_path):
     workflow = _key_workflow("backend-failure", with_effect=True)
     workflow, bundle = _sealed(tmp_path, workflow, encrypted=False)
     gate = _gate(
@@ -866,9 +866,14 @@ def test_backend_exception_is_failed_even_when_halt_observation_is_emitted(tmp_p
         require_settled=True,
     ).run(workflow, bundle_dir=bundle, run_dir=tmp_path / "backend-run")
 
-    assert report.halt is not None
-    assert report.execution_outcome == ExecutionOutcome.FAILED.value
-    assert report.results[0].failure_category == "runtime_failure"
+    result = report.results[0]
+    assert report.halt is None
+    assert report.execution_outcome == ExecutionOutcome.VERIFIED.value
+    assert result.delivery_uncertainty is not None
+    assert result.delivery_uncertainty.resolved_by_contract is True
+    assert result.postconditions_ok is True
+    assert result.effect_verified is True
+    assert result.failure_category is None
 
 
 def test_standard_rechecks_settled_requirement_at_actuation_boundary(tmp_path):

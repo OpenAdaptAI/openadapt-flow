@@ -450,7 +450,10 @@ class Replayer:
         self._governed_asset_hashes: dict[str, str] = {}
         self._governed_plaintext_assets = False
         self._governed_asset_mutation: Optional[str] = None
+        self._governed_base_params: Optional[dict[str, str]] = None
         self._active_runtime_worklists: Optional[dict[str, list[dict[str, str]]]] = None
+        self._active_delivery_resolution: Optional[Resolution] = None
+        self._active_delivery_region: Optional[Region] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -689,6 +692,12 @@ class Replayer:
                 merged.setdefault(pname, spec.example)
         merged.update(params or {})
         params = merged
+        # Keep the admitted base parameter scope separate from row-derived
+        # program-loop bindings. Last-edge authorization hashes this base scope
+        # together with the caller-owned worklist, then proves the active
+        # iteration scope from the exact loop cursor below. Hashing ``params``
+        # inside a loop would count each row twice and reject valid runs.
+        self._governed_base_params = dict(params)
         # Preserve the exact caller-owned worklist object for last-common-point
         # authorization checks.  A callback that mutates it after admission
         # must invalidate the authorization before any reacquired input edge.
@@ -3257,6 +3266,8 @@ class Replayer:
                             )
                             break
                     try:
+                        self._active_delivery_resolution = resolution
+                        self._active_delivery_region = matched_region
                         error = self._act(
                             step,
                             resolution,
@@ -3303,8 +3314,8 @@ class Replayer:
                                 exc,
                                 step=step,
                                 workflow=workflow,
-                                resolution=resolution,
-                                matched_region=matched_region,
+                                resolution=self._active_delivery_resolution,
+                                matched_region=self._active_delivery_region,
                                 retried=can_retry,
                                 attempt=len(result.fresh_actuation_events) + 1,
                             )
@@ -3427,6 +3438,12 @@ class Replayer:
                         # permission to assume delivery. Success now requires
                         # the complete configured contract.
                         error = None
+                    except StructuralResolutionRefused:
+                        # This typed refusal proves that the current delivery
+                        # boundary did not emit input. Preserve its exact safety
+                        # semantics even when an earlier focus edge in the same
+                        # composite step already crossed.
+                        raise
                     except Exception as exc:
                         if result.delivery_attempted is not True:
                             raise
@@ -4917,6 +4934,13 @@ class Replayer:
                 self._cancel_guarded_keyboard()
             if error is not None and focused_element_backend:
                 self._cancel_guarded_keyboard()
+        # Retain the exact observation that authorizes the next input edge.
+        # Composite TYPE/SELECT_OPTION and retry paths can re-resolve inside
+        # ``_act`` after the outer scope captured its initial geometry. A typed
+        # zero-input mismatch must describe this live edge, not the stale
+        # pre-focus target.
+        self._active_delivery_resolution = fresh_resolution
+        self._active_delivery_region = fresh_region
         return fresh_resolution, fresh_region, fresh_png, error
 
     def _resolve_step(
@@ -5046,16 +5070,16 @@ class Replayer:
     ) -> _DeliveryResultT:
         """Call one backend delivery boundary with exact attempt reporting.
 
-        A typed fresh-frame mismatch proves that this call emitted no input
-        edge, so it preserves the step's prior delivery state. Every other
-        exception is conservative: the boundary may have been crossed and the
-        step must not enter the pre-delivery retry loop.
+        A typed fresh-frame mismatch or structural refusal proves that this
+        call emitted no input edge, so it preserves the step's prior delivery
+        state. Every other exception is conservative: the boundary may have
+        been crossed and the step must not enter the pre-delivery retry loop.
         """
 
         attempted_before = result.delivery_attempted
         try:
             delivered = call()
-        except FreshActuationRequired:
+        except (FreshActuationRequired, StructuralResolutionRefused):
             result.delivery_attempted = attempted_before
             raise
         except Exception:
@@ -5177,9 +5201,12 @@ class Replayer:
             authorization_refusal = authorization.validate_workflow(workflow)
             if authorization_refusal is not None:
                 return authorization_refusal
+            base_params = self._governed_base_params
+            if base_params is None:
+                return "governed run authorization lost its admitted parameter scope"
             actual_inputs = runtime_inputs_digest(
                 workflow,
-                params,
+                base_params,
                 self._active_runtime_worklists,
                 interstitials=list(self._interstitials),
             )
@@ -5187,6 +5214,70 @@ class Replayer:
                 return (
                     "governed run authorization no longer matches the current "
                     "runtime inputs"
+                )
+            expected_params = dict(base_params)
+            frames = getattr(self, "_frame_stack", ())
+            for index, frame in enumerate(frames):
+                cursor = frame.get("loop")
+                if cursor is not None:
+                    if index == 0:
+                        return (
+                            "governed program loop has no sealed parent state "
+                            "for its active iteration"
+                        )
+                    parent = frames[index - 1]
+                    parent_graph_id = parent.get("graph_id")
+                    parent_graph = (
+                        workflow.program
+                        if parent_graph_id == TOP_GRAPH_ID
+                        else workflow.subflows.get(str(parent_graph_id))
+                    )
+                    loop_state = (
+                        parent_graph.states.get(cursor.loop_state_id)
+                        if parent_graph is not None
+                        else None
+                    )
+                    loop = loop_state.loop if loop_state is not None else None
+                    if (
+                        loop_state is None
+                        or loop_state.kind is not StateKind.LOOP
+                        or loop is None
+                        or parent.get("state_id") != cursor.loop_state_id
+                        or cursor.relation != loop.relation
+                        or frame.get("graph_id") != loop.body
+                    ):
+                        return (
+                            "governed program loop cursor no longer matches its "
+                            "sealed loop state"
+                        )
+                    source_rows: Optional[list[dict[str, str]]]
+                    if (
+                        self._active_runtime_worklists is not None
+                        and loop.relation in self._active_runtime_worklists
+                    ):
+                        source_rows = self._active_runtime_worklists[loop.relation]
+                    else:
+                        relation = workflow.data_sources.get(loop.relation)
+                        source_rows = relation.rows if relation is not None else None
+                    if source_rows is None or cursor.rows != source_rows:
+                        return (
+                            "governed program loop cursor no longer matches its "
+                            "authorized worklist"
+                        )
+                    if cursor.row_index < 0 or cursor.row_index >= len(source_rows):
+                        return (
+                            "governed program loop lost its authorized iteration cursor"
+                        )
+                    expected_params.update(source_rows[cursor.row_index])
+                if frame.get("params") != expected_params:
+                    return (
+                        "governed program frame parameters no longer derive from "
+                        "the authorized base inputs and active worklist rows"
+                    )
+            if params != expected_params:
+                return (
+                    "governed program iteration parameters no longer derive "
+                    "from the authorized base inputs and active worklist row"
                 )
         return self._governed_asset_mutation
 
@@ -5257,11 +5348,16 @@ class Replayer:
                 refusal = self._delivery_authorization_refusal(workflow, params, result)
                 if refusal is not None:
                     return refusal
-                result.delivery_attempted = True
-                delivery_receipt = native_act(
-                    step.anchor.structural,
-                    resolution.structural_handle,
-                    double=step.action is ActionKind.DOUBLE_CLICK,
+                structural_locator = step.anchor.structural
+                structural_handle = resolution.structural_handle
+                structural_act = cast(Callable[..., Any], native_act)
+                delivery_receipt = self._deliver_backend_call(
+                    result,
+                    lambda: structural_act(
+                        structural_locator,
+                        structural_handle,
+                        double=step.action is ActionKind.DOUBLE_CLICK,
+                    ),
                 )
                 result.delivery_receipt = delivery_receipt
                 result.actuation = "uia" if delivery_receipt.native else "dom"
@@ -5287,14 +5383,19 @@ class Replayer:
                         )
                         if refusal is not None:
                             return refusal
-                        result.delivery_attempted = True
-                        result.delivery_receipt = self.backend.act_guarded_coordinate(
-                            x,
-                            y,
-                            expected_frame_sha256=hashlib.sha256(
-                                before_png
-                            ).hexdigest(),
-                            double=step.action is ActionKind.DOUBLE_CLICK,
+                        coordinate_backend = cast(
+                            GuardedCoordinateActionBackend, self.backend
+                        )
+                        result.delivery_receipt = self._deliver_backend_call(
+                            result,
+                            lambda: coordinate_backend.act_guarded_coordinate(
+                                x,
+                                y,
+                                expected_frame_sha256=hashlib.sha256(
+                                    before_png
+                                ).hexdigest(),
+                                double=step.action is ActionKind.DOUBLE_CLICK,
+                            ),
                         )
                         result.actuation = "guarded_coordinate"
                     else:
@@ -5365,12 +5466,19 @@ class Replayer:
                     )
                     if refusal is not None:
                         return refusal
-                    result.delivery_attempted = True
-                    result.delivery_receipt = self.backend.act_guarded_coordinate(
-                        x,
-                        y,
-                        expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
-                        button="right",
+                    coordinate_backend = cast(
+                        GuardedCoordinateActionBackend, self.backend
+                    )
+                    result.delivery_receipt = self._deliver_backend_call(
+                        result,
+                        lambda: coordinate_backend.act_guarded_coordinate(
+                            x,
+                            y,
+                            expected_frame_sha256=hashlib.sha256(
+                                before_png
+                            ).hexdigest(),
+                            button="right",
+                        ),
                     )
                     result.actuation = "guarded_coordinate"
                 else:
@@ -5431,12 +5539,19 @@ class Replayer:
                 refusal = self._delivery_authorization_refusal(workflow, params, result)
                 if refusal is not None:
                     return refusal
-                result.delivery_attempted = True
-                result.delivery_receipt = structural_drag(
-                    step.anchor.structural,
-                    resolution.structural_handle,
-                    step.drag_end_anchor.structural,
-                    drag_end.structural_handle,
+                source_locator = step.anchor.structural
+                source_handle = resolution.structural_handle
+                destination_locator = step.drag_end_anchor.structural
+                destination_handle = drag_end.structural_handle
+                structural_drag_act = cast(Callable[..., Any], structural_drag)
+                result.delivery_receipt = self._deliver_backend_call(
+                    result,
+                    lambda: structural_drag_act(
+                        source_locator,
+                        source_handle,
+                        destination_locator,
+                        destination_handle,
+                    ),
                 )
                 result.actuation = "dom"
             elif requires_atomic_identity and not isinstance(
@@ -5484,13 +5599,16 @@ class Replayer:
                 refusal = self._delivery_authorization_refusal(workflow, params, result)
                 if refusal is not None:
                     return refusal
-                result.delivery_attempted = True
-                result.delivery_receipt = self.backend.drag_guarded(
-                    x,
-                    y,
-                    end_x,
-                    end_y,
-                    expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                drag_backend = cast(GuardedDragActionBackend, self.backend)
+                result.delivery_receipt = self._deliver_backend_call(
+                    result,
+                    lambda: drag_backend.drag_guarded(
+                        x,
+                        y,
+                        end_x,
+                        end_y,
+                        expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                    ),
                 )
                 result.actuation = "guarded_coordinate"
             elif isinstance(self.backend, RichPointerActionBackend):
@@ -5594,10 +5712,15 @@ class Replayer:
                     )
                     if refusal is not None:
                         return refusal
-                    result.delivery_attempted = True
-                    result.delivery_receipt = native_act(
-                        step.anchor.structural,
-                        resolution.structural_handle,
+                    structural_locator = step.anchor.structural
+                    structural_handle = resolution.structural_handle
+                    structural_act = cast(Callable[..., Any], native_act)
+                    result.delivery_receipt = self._deliver_backend_call(
+                        result,
+                        lambda: structural_act(
+                            structural_locator,
+                            structural_handle,
+                        ),
                     )
                     result.actuation = "uia"
                 else:
@@ -5611,13 +5734,18 @@ class Replayer:
                         )
                         if refusal is not None:
                             return refusal
-                        result.delivery_attempted = True
-                        result.delivery_receipt = self.backend.act_guarded_coordinate(
-                            x,
-                            y,
-                            expected_frame_sha256=hashlib.sha256(
-                                before_png
-                            ).hexdigest(),
+                        coordinate_backend = cast(
+                            GuardedCoordinateActionBackend, self.backend
+                        )
+                        result.delivery_receipt = self._deliver_backend_call(
+                            result,
+                            lambda: coordinate_backend.act_guarded_coordinate(
+                                x,
+                                y,
+                                expected_frame_sha256=hashlib.sha256(
+                                    before_png
+                                ).hexdigest(),
+                            ),
                         )
                         result.actuation = "guarded_coordinate"
                     elif requires_atomic_identity and not isinstance(
@@ -5743,12 +5871,14 @@ class Replayer:
                 refusal = self._delivery_authorization_refusal(workflow, params, result)
                 if refusal is not None:
                     return refusal
-                result.delivery_attempted = True
-                result.delivery_receipt = cast(
-                    GuardedKeyboardActionBackend, self.backend
-                ).type_text_guarded(
-                    text,
-                    expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                result.delivery_receipt = self._deliver_backend_call(
+                    result,
+                    lambda: cast(
+                        GuardedKeyboardActionBackend, self.backend
+                    ).type_text_guarded(
+                        text,
+                        expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                    ),
                 )
                 result.actuation = "guarded_keyboard"
             elif requires_atomic_keyboard and not isinstance(
@@ -5807,12 +5937,14 @@ class Replayer:
                 refusal = self._delivery_authorization_refusal(workflow, params, result)
                 if refusal is not None:
                     return refusal
-                result.delivery_attempted = True
-                result.delivery_receipt = cast(
-                    GuardedKeyboardActionBackend, self.backend
-                ).press_guarded(
-                    key,
-                    expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                result.delivery_receipt = self._deliver_backend_call(
+                    result,
+                    lambda: cast(
+                        GuardedKeyboardActionBackend, self.backend
+                    ).press_guarded(
+                        key,
+                        expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                    ),
                 )
                 result.actuation = "guarded_keyboard"
             elif requires_atomic_keyboard and not isinstance(

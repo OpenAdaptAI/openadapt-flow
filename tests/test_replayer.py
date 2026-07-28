@@ -2469,9 +2469,10 @@ class SelectRemoteBackend(RemoteLeaseBackend):
 class FreshMismatchAfterFocusSelectBackend(SelectRemoteBackend):
     """A selection whose focus click lands before a zero-keyboard mismatch."""
 
-    def __init__(self):
+    def __init__(self, *, changed_bbox=(110, 105, 1, 1)):
         super().__init__(selected_value="Massachusetts")
         self.select_attempts = 0
+        self.changed_bbox = changed_bbox
 
     def select_option(self, text: str, commit_key: str) -> None:
         del text, commit_key
@@ -2479,7 +2480,7 @@ class FreshMismatchAfterFocusSelectBackend(SelectRemoteBackend):
         raise FreshActuationRequired(
             operation="remote_select_option",
             changed_pixel_count=1,
-            changed_bbox=(110, 105, 1, 1),
+            changed_bbox=self.changed_bbox,
             frame_size=self.viewport,
         )
 
@@ -2556,6 +2557,36 @@ def test_remote_selection_does_not_retry_after_the_focus_input_edge(bundle, run_
     assert len(result.fresh_actuation_events) == 1
     assert result.fresh_actuation_events[0].retried is False
     assert "an earlier input edge crossed" in (result.error or "")
+
+
+def test_remote_selection_mismatch_uses_post_focus_live_geometry(bundle, run_dir):
+    vision = FakeVision()
+    initial = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    shifted = Match(point=(118, 105), region=(108, 100, 50, 20), confidence=0.95)
+    vision.template_results = [initial, initial, shifted]
+    workflow = _remote_selection_workflow()
+    step = workflow.steps[0]
+    assert step.anchor is not None
+    step.anchor = step.anchor.model_copy(
+        update={"identifier_region": (145, 100, 5, 10)}
+    )
+    backend = FreshMismatchAfterFocusSelectBackend(changed_bbox=(154, 105, 2, 2))
+
+    report = Replayer(backend, vision=vision).run(
+        workflow,
+        params={"state": "Massachusetts"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert backend.actions == [("click", 110, 105, False)]
+    assert len(result.fresh_actuation_events) == 1
+    event = result.fresh_actuation_events[0]
+    assert event.retried is False
+    assert event.target_intersection is True
+    assert event.identity_intersection is True
 
 
 def test_remote_selection_post_focus_uses_landmarks_not_duplicated_value(

@@ -2581,6 +2581,7 @@ class RunReport(BaseModel):
     governed_qualification_fault_step_id_sha256: Optional[str] = Field(
         default=None, pattern="^[a-f0-9]{64}$"
     )
+    qualification_evidence_only: bool = False
     qualification_fault_mutations: list[FaultMutationReceipt] = Field(
         default_factory=list
     )
@@ -2654,6 +2655,16 @@ class RunReport(BaseModel):
         mutable from the local report that produced it.
         """
 
+        expected_qualification_only = bool(self.governed_qualification_case_id_sha256)
+        if "qualification_evidence_only" not in self.model_fields_set:
+            # Normalize reports written before the typed marker existed from
+            # their already-retained qualification-case binding.
+            self.qualification_evidence_only = expected_qualification_only
+        elif self.qualification_evidence_only != expected_qualification_only:
+            raise ValueError(
+                "qualification-only status does not match the typed case binding"
+            )
+
         envelope = self.outcome_envelope
         if envelope is None:
             return self
@@ -2667,12 +2678,9 @@ class RunReport(BaseModel):
             )
         if (
             "qualification_evidence_only" in envelope.model_fields_set
-            and envelope.qualification_evidence_only
-            != (self.governed_approval_source == "qualification-campaign")
+            and envelope.qualification_evidence_only != self.qualification_evidence_only
         ):
-            raise ValueError(
-                "qualification-only status does not match the governed approval"
-            )
+            raise ValueError("qualification-only status does not match the run report")
         if self.execution_completed is None or (
             self.execution_completed != envelope.execution_completed
         ):

@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 
 from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+from openadapt_flow.deployment import build_replayer
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
@@ -380,9 +381,10 @@ def _fault_authorization(
 ) -> GovernedRunAuthorization:
     assert workflow.manifest is not None and workflow.qualification is not None
     case_id = f"fault-{kind.value.replace('_', '-')}"
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
     return GovernedRunAuthorization(
         bundle_content_digest=workflow.manifest.content_digest,
-        runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+        runtime_inputs_digest=input_sha256,
         admitted_policy_name="clinical-write",
         admitted_policy_contract_sha256="e" * 64,
         execution_profile="standard",
@@ -395,7 +397,7 @@ def _fault_authorization(
         ),
         qualification_case_id=case_id,
         qualification_campaign_id_sha256=sha256_bytes(b"campaign"),
-        qualification_case_input_sha256=sha256_bytes(b"{}"),
+        qualification_case_input_sha256=input_sha256,
         qualification_run_id_sha256=sha256_bytes(run_id.encode("utf-8")),
         qualification_case_kind=kind.value,
         qualification_fault_driver_id=driver._driver_id,
@@ -593,6 +595,31 @@ def test_fault_receipt_signature_rejects_wrong_key_and_tampering() -> None:
     )
 
 
+def test_qualification_authorization_rejects_caller_supplied_case_input_digest(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.AMBIGUITY)
+    workflow, _bundle = _fault_workflow(
+        tmp_path,
+        QualificationCaseKind.AMBIGUITY,
+        driver,
+    )
+    authorization = _fault_authorization(
+        workflow,
+        QualificationCaseKind.AMBIGUITY,
+        driver,
+        run_id="exact-input-run",
+    )
+
+    with pytest.raises(ValueError, match="exact governed runtime-input digest"):
+        GovernedRunAuthorization.model_validate(
+            {
+                **authorization.model_dump(mode="json"),
+                "qualification_case_input_sha256": "0" * 64,
+            }
+        )
+
+
 @pytest.mark.parametrize("field", ["id", "contract", "key"])
 def test_driver_binding_change_is_rejected_before_mutation(
     tmp_path: Path, field: str
@@ -730,9 +757,10 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
     workflow = Workflow.load(bundle)
     assert workflow.manifest is not None and workflow.qualification is not None
     run_id = f"environment-{surface}-{change_field}"
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
     authorization = GovernedRunAuthorization(
         bundle_content_digest=workflow.manifest.content_digest,
-        runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+        runtime_inputs_digest=input_sha256,
         admitted_policy_name="clinical-write",
         admitted_policy_contract_sha256="5" * 64,
         execution_profile="standard",
@@ -745,7 +773,7 @@ def test_external_observer_rechecks_every_environment_signal_before_input(
         ),
         qualification_case_id="representative-1",
         qualification_campaign_id_sha256="1" * 64,
-        qualification_case_input_sha256="2" * 64,
+        qualification_case_input_sha256=input_sha256,
         qualification_run_id_sha256=sha256_bytes(run_id.encode("utf-8")),
         qualification_case_kind="representative",
     )
@@ -786,3 +814,24 @@ def test_playwright_external_observer_does_not_require_target_owned_meta_tags() 
 
     assert observed.application_identity == "third-party-app"
     assert observed.environment_digest == "7" * 64
+
+
+def test_real_deployment_constructor_wires_backend_environment_observer() -> None:
+    backend = _ObservedBackend()
+    replayer = build_replayer(
+        backend,
+        allow_egress=False,
+        effect_verifier=None,
+        api_actuator=None,
+        durable=True,
+        use_structural=False,
+        governed_authorization=SimpleNamespace(
+            qualification_case_id="case-1",
+            execution_profile=None,
+        ),
+    )
+
+    assert isinstance(
+        replayer.qualification_environment_observer,
+        BackendQualificationEnvironmentObserver,
+    )

@@ -1654,6 +1654,11 @@ class PlaywrightBackend:
                     "guarded DOM target or context changed after the "
                     "pre-dispatch actionability trial"
                 )
+            # This is the last no-input boundary.  The externally supplied
+            # qualification observer can cover context that the target page
+            # cannot declare (for example a browser inside a managed remote
+            # session), so the DOM guard alone is not sufficient.
+            self._assert_qualification_environment_current()
             try:
                 if double:
                     token_locator.dblclick(timeout=1000)
@@ -1761,6 +1766,7 @@ class PlaywrightBackend:
                 ) from exc
             source = current_token_locator(source_locator, source_guard)
             destination = current_token_locator(destination_locator, destination_guard)
+            self._assert_qualification_environment_current()
             try:
                 source.drag_to(destination, timeout=1000)
             except Exception as exc:
@@ -1961,6 +1967,7 @@ class PlaywrightBackend:
                     "visual target, frame, record, or context changed after the "
                     "pre-dispatch actionability trial"
                 )
+            self._assert_qualification_environment_current()
             try:
                 if double:
                     token_locator.dblclick(position=position, timeout=1000)
@@ -2120,6 +2127,7 @@ class PlaywrightBackend:
                     "focused keyboard target, frame, record, or context changed "
                     "before delivery"
                 )
+            self._assert_qualification_environment_current()
             try:
                 deliver(token_locator)
             except Exception as exc:
@@ -2191,8 +2199,8 @@ class PlaywrightBackend:
     def right_click(self, x: int, y: int) -> None:
         """Open the context menu at a resolved point."""
 
+        self._assert_qualification_environment_current()
         try:
-            self._assert_qualification_environment_current()
             self.page.mouse.click(x, y, button="right")
         except Exception as exc:
             raise ActionDeliveryUncertain(
@@ -2208,6 +2216,7 @@ class PlaywrightBackend:
         self.page.mouse.move(x, y)
         down_attempted = False
         try:
+            self._assert_qualification_environment_current()
             down_attempted = True
             self.page.mouse.down(button="left")
             self.page.mouse.move(end_x, end_y)
@@ -2264,6 +2273,7 @@ class PlaywrightBackend:
             down_attempted = False
             try:
                 self.page.mouse.move(*point)
+                self._assert_qualification_environment_current()
                 down_attempted = True
                 self.page.mouse.down(button="left")
                 self.page.mouse.move(int(end_x), int(end_y))

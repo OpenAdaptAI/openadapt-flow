@@ -38,14 +38,15 @@ def effective_runtime_params(
     return merged
 
 
-def runtime_inputs_digest(
+def runtime_inputs_bytes(
     workflow: Workflow,
     params: dict[str, str] | None,
     worklists: dict[str, list[dict[str, str]]] | None,
     *,
     interstitials: list[Interstitial] | None = None,
-) -> str:
-    """Hash the exact effective runtime inputs without persisting their values."""
+) -> bytes:
+    """Return the canonical exact bytes that a governed run authorizes."""
+
     payload: dict[str, object] = {
         "params": effective_runtime_params(workflow, params),
         "worklists": worklists or {},
@@ -61,7 +62,26 @@ def runtime_inputs_digest(
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical.encode("utf-8")
+
+
+def runtime_inputs_digest(
+    workflow: Workflow,
+    params: dict[str, str] | None,
+    worklists: dict[str, list[dict[str, str]]] | None,
+    *,
+    interstitials: list[Interstitial] | None = None,
+) -> str:
+    """Hash the canonical exact runtime-input bytes without retaining values."""
+
+    return hashlib.sha256(
+        runtime_inputs_bytes(
+            workflow,
+            params,
+            worklists,
+            interstitials=interstitials,
+        )
+    ).hexdigest()
 
 
 def interstitial_declarations_digest(
@@ -224,6 +244,14 @@ class GovernedRunAuthorization(BaseModel):
             raise ValueError(
                 "qualification cases require the Standard profile and the "
                 "qualification-campaign approval source"
+            )
+        if (
+            self.qualification_case_id is not None
+            and self.qualification_case_input_sha256 != self.runtime_inputs_digest
+        ):
+            raise ValueError(
+                "qualification case input must be the exact governed runtime-input "
+                "digest"
             )
         return self
 

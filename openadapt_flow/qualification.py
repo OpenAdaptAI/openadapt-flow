@@ -381,6 +381,9 @@ class EvidenceRef(BaseModel):
         "run_report",
         "identity",
         "effect",
+        "case_input",
+        "fault_receipt",
+        "fault_mutation",
         "fault_campaign",
         "other",
     ]
@@ -415,11 +418,28 @@ class QualificationCaseResult(BaseModel):
     runner_capabilities: list[str] = Field(default_factory=list)
     status: Literal["passed", "failed", "blocked"]
     observed_outcome: QualificationOutcome
+    campaign_id_sha256: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    case_input_sha256: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    run_id_sha256: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     evidence: list[EvidenceRef] = Field(default_factory=list)
     detail_code: Optional[str] = Field(default=None, max_length=128)
     completed_at: str = Field(default_factory=_now)
     attestation_key_id: str = Field(min_length=1, max_length=128)
     attestation_signature: str = ""
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Keep existing signed result payloads byte-stable."""
+
+        data: dict[str, Any] = handler(self)
+        for field in (
+            "campaign_id_sha256",
+            "case_input_sha256",
+            "run_id_sha256",
+        ):
+            if data.get(field) is None:
+                data.pop(field, None)
+        return data
 
     @model_validator(mode="after")
     def _passed_needs_evidence(self) -> "QualificationCaseResult":
@@ -574,6 +594,9 @@ class QualificationCertification(BaseModel):
     policy_contract: Optional[dict[str, Any]] = None
     passed: bool
     report_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    case_evidence_contract_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
     certified_at: str = Field(default_factory=_now)
 
 
@@ -1346,6 +1369,33 @@ def set_trusted_runner_key(
     return project
 
 
+def set_trusted_fault_driver_key(
+    workflow: "Workflow",
+    *,
+    key_id: str,
+    public_key_base64: str,
+) -> QualificationProject:
+    """Trust one environment-owned qualification fault-driver key."""
+
+    project = workflow.qualification
+    if project is None:
+        raise QualificationError(
+            "initialize qualification before trusting a fault driver"
+        )
+    candidate = dict(project.trusted_fault_driver_keys)
+    candidate[key_id] = public_key_base64
+    QualificationProject.model_validate(
+        {**project.model_dump(mode="json"), "trusted_fault_driver_keys": candidate}
+    )
+    if project.trusted_fault_driver_keys.get(key_id) == public_key_base64:
+        return project
+    previous = project.revision_digest()
+    project.trusted_fault_driver_keys = candidate
+    _touch(project, previous)
+    _invalidate_certification(workflow)
+    return project
+
+
 def set_effect_policy(
     workflow: "Workflow",
     *,
@@ -1458,12 +1508,372 @@ def sign_case_result(
     )
 
 
+def _read_evidence_bytes(
+    *,
+    root: Path,
+    evidence: EvidenceRef,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Read one exact hash-bound file without following a symlink."""
+
+    parts = PurePosixPath(evidence.relative_path).parts
+    candidate = root.joinpath(*parts)
+    cursor = root
+    for part in parts:
+        cursor /= part
+        if cursor.is_symlink():
+            return None, f"evidence path contains a symlink: {evidence.relative_path}"
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None, f"evidence file is missing: {evidence.relative_path}"
+    if not resolved.is_relative_to(root) or candidate.is_symlink():
+        return None, f"evidence path leaves its root: {evidence.relative_path}"
+    if not resolved.is_file():
+        return None, f"evidence is not a regular file: {evidence.relative_path}"
+    try:
+        payload = resolved.read_bytes()
+    except OSError:
+        return None, f"evidence file is unreadable: {evidence.relative_path}"
+    if hashlib.sha256(payload).hexdigest() != evidence.sha256:
+        return None, f"evidence hash mismatch: {evidence.relative_path}"
+    return payload, None
+
+
+def _one_evidence(
+    result: QualificationCaseResult,
+    kind: str,
+) -> tuple[Optional[EvidenceRef], Optional[str]]:
+    matches = [item for item in result.evidence if item.kind == kind]
+    if len(matches) != 1:
+        return None, f"qualification case requires exactly one {kind} evidence artifact"
+    return matches[0], None
+
+
+def _case_run_report_integrity_error(
+    *,
+    workflow: "Workflow",
+    project: QualificationProject,
+    case: QualificationCase,
+    result: QualificationCaseResult,
+    evidence_root: Optional[Path],
+    policy: Optional["Policy"] = None,
+) -> Optional[tuple[QualificationRefusalCode, str]]:
+    """Bind one signed case result to its exact retained run and input bytes."""
+
+    from openadapt_flow.ir import RunReport
+    from openadapt_flow.qualification_environment import (
+        qualification_environment_binding_sha256,
+    )
+    from openadapt_flow.qualification_faults import sha256_bytes
+
+    if evidence_root is None:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "qualification certification requires the local evidence root",
+        )
+    if None in (
+        result.campaign_id_sha256,
+        result.case_input_sha256,
+        result.run_id_sha256,
+    ):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case result lacks its campaign, input, or run binding",
+        )
+
+    root = evidence_root.resolve()
+    report_ref, report_ref_error = _one_evidence(result, "run_report")
+    input_ref, input_ref_error = _one_evidence(result, "case_input")
+    if report_ref_error is not None or report_ref is None:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            report_ref_error or "case has no exact run report",
+        )
+    if input_ref_error is not None or input_ref is None:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            input_ref_error or "case has no exact input artifact",
+        )
+    report_bytes, report_error = _read_evidence_bytes(
+        root=root,
+        evidence=report_ref,
+    )
+    input_bytes, input_error = _read_evidence_bytes(
+        root=root,
+        evidence=input_ref,
+    )
+    if report_error is not None or report_bytes is None:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            report_error or "case run report is unreadable",
+        )
+    if input_error is not None or input_bytes is None:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            input_error or "case input is unreadable",
+        )
+    if (
+        input_ref.sha256 != result.case_input_sha256
+        or hashlib.sha256(input_bytes).hexdigest() != result.case_input_sha256
+    ):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case-input bytes do not match the signed case-result binding",
+        )
+    try:
+        report = RunReport.model_validate_json(report_bytes)
+    except ValueError:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "case contains an invalid run report",
+        )
+
+    expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
+    expected_outcome = result.observed_outcome.value.upper()
+    expected_bindings = (
+        report.workflow_name == workflow.name,
+        report.governed_qualification_project_id == project.project_id,
+        report.governed_qualification_project_revision == project.revision,
+        report.governed_qualification_project_contract_sha256
+        == project.contract_sha256(),
+        report.governed_qualification_campaign_id_sha256
+        == result.campaign_id_sha256,
+        report.governed_qualification_case_id_sha256 == expected_case_sha256,
+        report.governed_qualification_case_input_sha256
+        == result.case_input_sha256,
+        report.governed_runtime_inputs_digest == result.case_input_sha256,
+        report.governed_qualification_run_id_sha256 == result.run_id_sha256,
+        report.governed_qualification_case_kind == case.kind.value,
+        report.execution_outcome == expected_outcome,
+        report.execution_profile == "standard",
+        report.governed_minimum_effect_tier == int(project.minimum_effect_tier),
+    )
+    if not all(expected_bindings):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case report, input, signed result, and project bindings differ",
+        )
+    if policy is not None:
+        from openadapt_flow.policy import policy_contract_sha256
+
+        if (
+            report.governed_policy_name != policy.name
+            or report.governed_policy_contract_sha256
+            != policy_contract_sha256(policy)
+        ):
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "case report was not governed by the certification policy",
+            )
+
+    environment_values = (
+        report.execution_target_kind,
+        report.observed_application_sha256,
+        report.observed_application_version_sha256,
+        report.observed_session_sha256,
+        report.observed_environment_digest,
+        report.qualification_environment_observer_id,
+        report.qualification_environment_observer_contract_sha256,
+    )
+    if any(value is None for value in environment_values):
+        return (
+            QualificationRefusalCode.CASE_ENVIRONMENT_CHANGED,
+            "case report lacks its exact environment observation",
+        )
+    assert report.execution_target_kind is not None
+    assert report.observed_application_sha256 is not None
+    assert report.observed_application_version_sha256 is not None
+    assert report.observed_session_sha256 is not None
+    assert report.observed_environment_digest is not None
+    assert report.qualification_environment_observer_id is not None
+    assert report.qualification_environment_observer_contract_sha256 is not None
+    observed_binding = qualification_environment_binding_sha256(
+        target_kind=report.execution_target_kind,
+        observer_id=report.qualification_environment_observer_id,
+        observer_contract_sha256=(
+            report.qualification_environment_observer_contract_sha256
+        ),
+        application_identity_sha256=report.observed_application_sha256,
+        application_version_sha256=report.observed_application_version_sha256,
+        environment_digest=report.observed_environment_digest,
+        session_identity_sha256=report.observed_session_sha256,
+    )
+    expected_application_identity = project.environment.expected_application_identity
+    if (
+        report.execution_target_kind != project.environment.target_kind
+        or expected_application_identity is None
+        or report.observed_application_sha256
+        != hashlib.sha256(expected_application_identity.encode("utf-8")).hexdigest()
+        or report.observed_application_version_sha256
+        != hashlib.sha256(
+            project.environment.application_version.encode("utf-8")
+        ).hexdigest()
+        or report.observed_environment_digest != project.environment.environment_digest
+        or report.qualification_environment_observer_id
+        != project.environment.environment_observer_id
+        or report.qualification_environment_observer_contract_sha256
+        != project.environment.environment_observer_contract_sha256
+        or report.observed_environment_binding_sha256 != observed_binding
+    ):
+        return (
+            QualificationRefusalCode.CASE_ENVIRONMENT_CHANGED,
+            "case report environment binding does not match the project",
+        )
+
+    if (
+        not report.qualification_evidence_only
+        or report.production_eligible
+        or (case.kind is QualificationCaseKind.REPRESENTATIVE and not report.success)
+        or (case.kind is not QualificationCaseKind.REPRESENTATIVE and report.success)
+    ):
+        return (
+            QualificationRefusalCode.CASE_NOT_PASSED,
+            "case report outcome is inconsistent with a qualification-only run",
+        )
+    if (
+        case.kind is QualificationCaseKind.REPRESENTATIVE
+        and report.qualification_fault_mutations
+    ):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "representative case report contains a qualification fault mutation",
+        )
+    return None
+
+
+def _fault_case_integrity_error(
+    *,
+    project: QualificationProject,
+    case: QualificationCase,
+    result: QualificationCaseResult,
+    evidence_root: Optional[Path],
+) -> Optional[tuple[QualificationRefusalCode, str]]:
+    """Verify the signed receipt, detector refusal, and exact case artifacts."""
+
+    from openadapt_flow.ir import RunReport
+    from openadapt_flow.qualification_faults import (
+        FaultMutationReceipt,
+        fault_detector_contract_error,
+        sha256_bytes,
+        verify_fault_mutation_receipt,
+    )
+
+    if evidence_root is None:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "fault-case certification requires the local evidence root",
+        )
+    root = evidence_root.resolve()
+    refs: dict[str, EvidenceRef] = {}
+    payloads: dict[str, bytes] = {}
+    for kind in ("run_report", "fault_receipt", "fault_mutation"):
+        ref, error = _one_evidence(result, kind)
+        if error is not None or ref is None:
+            return QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED, error or kind
+        payload, read_error = _read_evidence_bytes(root=root, evidence=ref)
+        if read_error is not None or payload is None:
+            return (
+                QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+                read_error or f"evidence is unreadable: {ref.relative_path}",
+            )
+        refs[kind] = ref
+        payloads[kind] = payload
+
+    try:
+        report = RunReport.model_validate_json(payloads["run_report"])
+        receipt = FaultMutationReceipt.model_validate_json(payloads["fault_receipt"])
+    except ValueError:
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "fault case contains an invalid run report or mutation receipt",
+        )
+    if payloads["fault_receipt"] != receipt.artifact_bytes():
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "fault mutation receipt is not in its canonical signed form",
+        )
+    if report.qualification_fault_mutations != [receipt]:
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "run report does not contain the exact signed fault receipt",
+        )
+
+    expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
+    expected_bindings = (
+        report.governed_qualification_campaign_id_sha256
+        == result.campaign_id_sha256
+        == receipt.campaign_id_sha256,
+        report.governed_qualification_case_id_sha256
+        == expected_case_sha256
+        == receipt.case_id_sha256,
+        report.governed_qualification_case_input_sha256
+        == result.case_input_sha256
+        == receipt.case_input_sha256,
+        report.governed_qualification_run_id_sha256
+        == result.run_id_sha256
+        == receipt.run_id_sha256,
+        report.governed_qualification_fault_driver_id == receipt.driver_id,
+        report.governed_qualification_fault_driver_contract_sha256
+        == receipt.driver_contract_sha256,
+        report.governed_qualification_fault_driver_key_id == receipt.attestation_key_id,
+        report.governed_qualification_fault_step_id_sha256 == receipt.step_id_sha256,
+    )
+    if not all(expected_bindings):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "fault case report, receipt, input, and signed result bindings differ",
+        )
+    if (
+        receipt.project_id != project.project_id
+        or receipt.project_revision != project.revision
+        or receipt.project_contract_sha256 != project.contract_sha256()
+    ):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "fault mutation receipt is bound to another qualification project",
+        )
+
+    trusted_key = project.trusted_fault_driver_keys.get(receipt.attestation_key_id)
+    if trusted_key is None or not verify_fault_mutation_receipt(
+        receipt,
+        trusted_public_key_base64=trusted_key,
+    ):
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "fault mutation receipt signature is invalid or untrusted",
+        )
+    if refs["fault_receipt"].sha256 != receipt.receipt_sha256():
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "fault receipt evidence digest does not match its exact bytes",
+        )
+    if (
+        refs["fault_mutation"].sha256 != receipt.mutation_artifact_sha256
+        or hashlib.sha256(payloads["fault_mutation"]).hexdigest()
+        != receipt.mutation_artifact_sha256
+    ):
+        return (
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+            "fault mutation artifact bytes do not match the signed receipt",
+        )
+
+    detector_error = fault_detector_contract_error(report, receipt)
+    if detector_error is not None:
+        return (
+            QualificationRefusalCode.CASE_NOT_PASSED,
+            f"fault detector contract failed: {detector_error}",
+        )
+    return None
+
+
 def _case_result_integrity_error(
     workflow: "Workflow",
     project: QualificationProject,
     result: QualificationCaseResult,
     *,
     evidence_root: Optional[Path],
+    evidence_preverified: bool = False,
+    policy: Optional["Policy"] = None,
 ) -> Optional[tuple[QualificationRefusalCode, str]]:
     """Return the first fail-closed attestation/evidence error."""
 
@@ -1535,42 +1945,64 @@ def _case_result_integrity_error(
     # actual bytes.  Later admission can independently recompute the exact
     # qualification decision from the signed, hash-bound references without
     # copying sensitive evidence into the portable bundle.
+    case = next((item for item in project.cases if item.id == result.case_id), None)
+    if case is None:
+        return (
+            QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+            "case result references an unknown qualification case",
+        )
+    if not evidence_preverified:
+        report_error = _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=case,
+            result=result,
+            evidence_root=evidence_root,
+            policy=policy,
+        )
+        if report_error is not None:
+            return report_error
+    if case.kind is not QualificationCaseKind.REPRESENTATIVE and not evidence_preverified:
+        fault_error = _fault_case_integrity_error(
+            project=project,
+            case=case,
+            result=result,
+            evidence_root=evidence_root,
+        )
+        if fault_error is not None:
+            return fault_error
     if evidence_root is None:
         return None
     root = evidence_root.resolve()
     for evidence in result.evidence:
-        candidate = root.joinpath(*PurePosixPath(evidence.relative_path).parts)
-        cursor = root
-        for part in PurePosixPath(evidence.relative_path).parts:
-            cursor /= part
-            if cursor.is_symlink():
-                return (
-                    QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
-                    f"evidence path contains a symlink: {evidence.relative_path}",
-                )
-        try:
-            resolved = candidate.resolve(strict=True)
-        except OSError:
+        _payload, error = _read_evidence_bytes(root=root, evidence=evidence)
+        if error is not None:
             return (
                 QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
-                f"evidence file is missing: {evidence.relative_path}",
-            )
-        if not resolved.is_relative_to(root) or candidate.is_symlink():
-            return (
-                QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
-                f"evidence path leaves its root: {evidence.relative_path}",
-            )
-        if not resolved.is_file():
-            return (
-                QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
-                f"evidence is not a regular file: {evidence.relative_path}",
-            )
-        if hashlib.sha256(resolved.read_bytes()).hexdigest() != evidence.sha256:
-            return (
-                QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
-                f"evidence hash mismatch: {evidence.relative_path}",
+                error,
             )
     return None
+
+
+def _case_evidence_contract_sha256(project: QualificationProject) -> str:
+    """Digest the exact signed current case results and their evidence refs."""
+
+    payload = []
+    for case in sorted(project.cases, key=lambda item: item.id):
+        if not case.required:
+            continue
+        result = _latest_result(case, project.revision)
+        payload.append(
+            {
+                "case_id": case.id,
+                "result": (
+                    result.model_dump(mode="json") if result is not None else None
+                ),
+            }
+        )
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def record_case_results(
@@ -1676,6 +2108,7 @@ def evaluate_qualification(
     *,
     policy: Optional["Policy"] = None,
     evidence_root: Optional[Path | str] = None,
+    _certified_evidence_contract_sha256: Optional[str] = None,
 ) -> QualificationReport:
     """Evaluate qualification coverage without mutating or executing a workflow."""
 
@@ -1994,6 +2427,12 @@ def evaluate_qualification(
 
     passed_cases = 0
     required_cases = [case for case in project.cases if case.required]
+    evidence_preverified = bool(
+        evidence_root is None
+        and _certified_evidence_contract_sha256 is not None
+        and _certified_evidence_contract_sha256
+        == _case_evidence_contract_sha256(project)
+    )
     for case in required_cases:
         result = _latest_result(case, project.revision)
         if result is None or result.status != "passed":
@@ -2011,6 +2450,8 @@ def evaluate_qualification(
             project,
             result,
             evidence_root=Path(evidence_root) if evidence_root is not None else None,
+            evidence_preverified=evidence_preverified,
+            policy=policy,
         )
         if integrity_error is not None:
             refusals.append(
@@ -2112,6 +2553,7 @@ def certify_project(
             policy_contract=policy.model_dump(mode="json"),
             passed=report.passed,
             report_sha256=report.report_sha256(),
+            case_evidence_contract_sha256=_case_evidence_contract_sha256(project),
         )
     workflow.stamp_certification(
         policy_name=policy.name,
@@ -2174,7 +2616,15 @@ def current_certification_matches(
     ):
         return False
 
-    report = evaluate_qualification(workflow, policy=effective_policy)
+    if certification.case_evidence_contract_sha256 is None:
+        return False
+    report = evaluate_qualification(
+        workflow,
+        policy=effective_policy,
+        _certified_evidence_contract_sha256=(
+            certification.case_evidence_contract_sha256
+        ),
+    )
     return bool(
         report.passed
         and certification.project_revision == project.revision

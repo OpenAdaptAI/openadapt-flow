@@ -291,10 +291,13 @@ def stamp_execution_outcome(
     outcome = classify_execution_outcome(report, workflow, resolved)
     report.execution_profile = resolved.value
     report.execution_outcome = outcome.value
+    report.qualification_evidence_only = bool(
+        report.governed_qualification_case_id_sha256
+    )
     report.production_eligible = bool(
         execution_profile_contract(resolved).production
         and outcome is ExecutionOutcome.VERIFIED
-        and report.governed_approval_source != "qualification-campaign"
+        and not report.qualification_evidence_only
     )
     if execution_profile_contract(resolved).production:
         report.success = outcome is ExecutionOutcome.VERIFIED
@@ -459,9 +462,7 @@ def build_outcome_envelope(report: RunReport, workflow: Workflow):
         outcome=report.execution_outcome,
         profile=report.execution_profile,
         production_eligible=report.production_eligible,
-        qualification_evidence_only=(
-            report.governed_approval_source == "qualification-campaign"
-        ),
+        qualification_evidence_only=report.qualification_evidence_only,
         execution_completed=bool(report.execution_completed),
         required_contracts=required,
         passed_contracts=passed,

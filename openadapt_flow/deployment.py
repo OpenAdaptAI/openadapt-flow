@@ -681,6 +681,7 @@ def build_replayer(
     phi_mode: Optional[bool] = None,
     checkpoint_key: Optional[str] = None,
     qualification_fault_driver: Any = None,
+    qualification_environment_observer: Any = None,
 ) -> Any:
     """Wire one deployment-qualified backend into the governed Replayer.
 
@@ -806,6 +807,22 @@ def build_replayer(
         require_settled = (
             require_settled or execution_profile_contract(profile_name).require_settled
         )
+    if (
+        qualification_environment_observer is None
+        and getattr(governed_authorization, "qualification_case_id", None) is not None
+    ):
+        # Real deployment construction must not omit the observer merely
+        # because a test or embedding caller did not inject one.  Backends
+        # with the atomic tuple4 contract use the public adapter.  A project
+        # that declares another observer id/contract still fails closed in the
+        # Replayer and must pass that environment-owned observer explicitly.
+        from openadapt_flow.qualification_environment import (
+            BackendQualificationEnvironmentObserver,
+        )
+
+        qualification_environment_observer = BackendQualificationEnvironmentObserver(
+            backend
+        )
     return Replayer(
         backend,
         grounder=grounder,
@@ -821,6 +838,7 @@ def build_replayer(
         checkpoint_key=checkpoint_key,
         require_settled=require_settled,
         qualification_fault_driver=qualification_fault_driver,
+        qualification_environment_observer=qualification_environment_observer,
     )
 
 

@@ -663,6 +663,7 @@ def test_verified_qualification_run_is_evidence_not_production_authority():
         governed_authorization_id="authorization-qualification",
         governed_approval_source="qualification-campaign",
         governed_runtime_inputs_digest="f" * 64,
+        governed_qualification_case_id_sha256="a" * 64,
     )
 
     stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
@@ -675,6 +676,24 @@ def test_verified_qualification_run_is_evidence_not_production_authority():
     restored = RunReport.model_validate(report.model_dump(mode="json"))
     assert restored.outcome_envelope is not None
     assert restored.outcome_envelope.qualification_evidence_only is True
+
+
+def test_approval_source_text_cannot_spoof_qualification_only_status() -> None:
+    workflow = Workflow(name="ordinary-standard-run", steps=[])
+    report = RunReport(
+        workflow_name=workflow.name,
+        started_at="2026-07-28T00:00:00Z",
+        success=True,
+        execution_completed=True,
+        governed_authorization_id="ordinary-authorization",
+        governed_approval_source="qualification-campaign",
+        governed_runtime_inputs_digest="f" * 64,
+    )
+
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+
+    assert report.qualification_evidence_only is False
+    assert report.production_eligible is True
 
 
 def test_report_separates_network_observation_from_screenshot_egress(tmp_path):

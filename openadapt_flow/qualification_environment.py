@@ -14,6 +14,33 @@ BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256 = hashlib.sha256(
 ).hexdigest()
 
 
+def qualification_environment_binding_sha256(
+    *,
+    target_kind: str,
+    observer_id: str,
+    observer_contract_sha256: str,
+    application_identity_sha256: str,
+    application_version_sha256: str,
+    environment_digest: str,
+    session_identity_sha256: str,
+) -> str:
+    """Bind an observer and the exact PHI-free digests retained in a report."""
+
+    payload = {
+        "schema": "openadapt.qualification-environment-binding/v1",
+        "target_kind": target_kind,
+        "observer_id": observer_id,
+        "observer_contract_sha256": observer_contract_sha256,
+        "application_identity_sha256": application_identity_sha256,
+        "application_version_sha256": application_version_sha256,
+        "environment_digest": environment_digest,
+        "session_identity_sha256": session_identity_sha256,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 class QualificationEnvironmentObservation(BaseModel):
     """One PHI-free application, version, and session observation."""
 
@@ -33,23 +60,19 @@ class QualificationEnvironmentObservation(BaseModel):
     ) -> str:
         """Bind the observer and every exact run-environment signal."""
 
-        payload = {
-            "schema": "openadapt.qualification-environment-binding/v1",
-            "target_kind": self.target_kind,
-            "observer_id": observer_id,
-            "observer_contract_sha256": observer_contract_sha256,
-            "application_identity_sha256": hashlib.sha256(
+        return qualification_environment_binding_sha256(
+            target_kind=self.target_kind,
+            observer_id=observer_id,
+            observer_contract_sha256=observer_contract_sha256,
+            application_identity_sha256=hashlib.sha256(
                 self.application_identity.encode("utf-8")
             ).hexdigest(),
-            "application_version_sha256": hashlib.sha256(
+            application_version_sha256=hashlib.sha256(
                 self.application_version.encode("utf-8")
             ).hexdigest(),
-            "environment_digest": self.environment_digest,
-            "session_identity_sha256": self.session_identity_sha256,
-        }
-        return hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+            environment_digest=self.environment_digest,
+            session_identity_sha256=self.session_identity_sha256,
+        )
 
 
 @runtime_checkable

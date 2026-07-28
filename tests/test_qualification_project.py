@@ -7,6 +7,7 @@ the existing policy/certification seam.  They do not pin CLI prose or UI copy.
 from __future__ import annotations
 
 import hashlib
+import json
 from base64 import b64encode
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from openadapt_flow.ir import (
     ApiBinding,
     Postcondition,
     PostconditionKind,
+    RunReport,
+    SafetyRefusalEvidence,
     Step,
+    StepResult,
     Workflow,
 )
 from openadapt_flow.policy import (
@@ -56,12 +60,23 @@ from openadapt_flow.qualification import (
     set_effect_policy,
     set_identity_policy,
     set_minimum_effect_tier,
+    set_trusted_fault_driver_key,
     set_trusted_runner_key,
     sign_case_result,
     workflow_contract_sha256,
 )
+from openadapt_flow.qualification_environment import (
+    qualification_environment_binding_sha256,
+)
+from openadapt_flow.qualification_faults import (
+    FaultMutationReceipt,
+    expected_fault_detector,
+    sha256_bytes,
+    sign_fault_mutation_receipt,
+)
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
+    runtime_inputs_bytes,
     runtime_inputs_digest,
 )
 from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
@@ -123,7 +138,10 @@ def _environment() -> EnvironmentBoundary:
     return EnvironmentBoundary(
         target_kind="citrix",
         application="Qualified application",
+        application_identity="qualified-app",
         application_version="1",
+        environment_observer_id="fixture-observer",
+        environment_observer_contract_sha256="c" * 64,
         environment_digest="b" * 64,
         runtime_version="1.20.2",
         required_capabilities=["pixel_observation", "effect_verification"],
@@ -168,41 +186,252 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             expected_outcome=QualificationOutcome.VERIFIED,
         ),
     )
+    set_trusted_fault_driver_key(
+        workflow,
+        key_id="test-fault-driver",
+        public_key_base64=_RUNNER_PUBLIC_BASE64,
+    )
+    project = workflow.qualification
+    assert project is not None
     evidence_root.mkdir(parents=True, exist_ok=True)
-    evidence_bytes = b'{"outcome":"verified"}'
-    (evidence_root / "report.json").write_bytes(evidence_bytes)
-    evidence = [
-        EvidenceRef(
-            kind="run_report",
-            sha256=hashlib.sha256(evidence_bytes).hexdigest(),
-            relative_path="report.json",
-        )
-    ]
-    results = [
-        sign_case_result(
-            QualificationCaseResult(
-                case_id=case.id,
+    case_input = runtime_inputs_bytes(workflow, None, None)
+    case_input_sha256 = hashlib.sha256(case_input).hexdigest()
+    campaign_sha256 = sha256_bytes(b"qualification-campaign")
+    observed_application_sha256 = sha256_bytes(b"qualified-app")
+    observed_version_sha256 = sha256_bytes(b"1")
+    observed_session_sha256 = "3" * 64
+    observed_binding = qualification_environment_binding_sha256(
+        target_kind="citrix",
+        observer_id="fixture-observer",
+        observer_contract_sha256="c" * 64,
+        application_identity_sha256=observed_application_sha256,
+        application_version_sha256=observed_version_sha256,
+        environment_digest=project.environment.environment_digest,
+        session_identity_sha256=observed_session_sha256,
+    )
+    qualification_policy = load_policy("clinical-write")
+    results: list[QualificationCaseResult] = []
+    for case in project.cases:
+        run_sha256 = sha256_bytes(f"run:{case.id}".encode())
+        if case.kind is QualificationCaseKind.REPRESENTATIVE:
+            report = RunReport(
+                workflow_name=workflow.name,
+                started_at="2026-07-28T00:00:00Z",
+                execution_profile="standard",
+                execution_outcome="VERIFIED",
+                production_eligible=False,
+                execution_completed=True,
+                execution_target_kind="citrix",
+                governed_policy_name=qualification_policy.name,
+                governed_policy_contract_sha256=policy_contract_sha256(
+                    qualification_policy
+                ),
+                governed_minimum_effect_tier=int(project.minimum_effect_tier),
+                governed_runtime_inputs_digest=case_input_sha256,
+                governed_qualification_project_id=project.project_id,
+                governed_qualification_project_revision=project.revision,
+                governed_qualification_project_contract_sha256=(
+                    project.contract_sha256()
+                ),
+                governed_qualification_campaign_id_sha256=campaign_sha256,
+                governed_qualification_case_id_sha256=sha256_bytes(
+                    case.id.encode()
+                ),
+                governed_qualification_case_input_sha256=case_input_sha256,
+                governed_qualification_run_id_sha256=run_sha256,
+                governed_qualification_case_kind=case.kind.value,
+                qualification_evidence_only=True,
+                observed_application_sha256=observed_application_sha256,
+                observed_application_version_sha256=observed_version_sha256,
+                observed_session_sha256=observed_session_sha256,
+                observed_environment_digest=project.environment.environment_digest,
+                observed_environment_binding_sha256=observed_binding,
+                qualification_environment_observer_id="fixture-observer",
+                qualification_environment_observer_contract_sha256="c" * 64,
+                success=True,
+            )
+            representative_bytes = report.model_dump_json().encode()
+            representative_input_path = "representative-input.json"
+            (evidence_root / "representative-report.json").write_bytes(
+                representative_bytes
+            )
+            (evidence_root / representative_input_path).write_bytes(case_input)
+            representative_evidence = [
+                EvidenceRef(
+                    kind="run_report",
+                    sha256=hashlib.sha256(representative_bytes).hexdigest(),
+                    relative_path="representative-report.json",
+                ),
+                EvidenceRef(
+                    kind="case_input",
+                    sha256=case_input_sha256,
+                    relative_path=representative_input_path,
+                ),
+            ]
+            results.append(
+                sign_case_result(
+                    QualificationCaseResult(
+                        case_id=case.id,
+                        project_id=project.project_id,
+                        project_revision=project.revision,
+                        project_contract_sha256=project.contract_sha256(),
+                        workflow_contract_sha256=workflow_contract_sha256(workflow),
+                        environment_contract_sha256=(
+                            project.environment.contract_sha256()
+                        ),
+                        environment_digest=project.environment.environment_digest,
+                        runtime_version=project.environment.runtime_version,
+                        runner_id="test-runner",
+                        runner_capabilities=[
+                            "pixel_observation",
+                            "effect_verification",
+                        ],
+                        status="passed",
+                        observed_outcome=case.expected_outcome,
+                        campaign_id_sha256=campaign_sha256,
+                        case_input_sha256=case_input_sha256,
+                        run_id_sha256=run_sha256,
+                        evidence=representative_evidence,
+                        attestation_key_id="test-runner",
+                    ),
+                    private_key=_RUNNER_PRIVATE_BYTES,
+                )
+            )
+            continue
+
+        gate, code = expected_fault_detector(case.kind.value)
+        mutation_bytes = f"mutation:{case.kind.value}".encode()
+        receipt = sign_fault_mutation_receipt(
+            FaultMutationReceipt(
                 project_id=project.project_id,
                 project_revision=project.revision,
                 project_contract_sha256=project.contract_sha256(),
-                workflow_contract_sha256=workflow_contract_sha256(workflow),
-                environment_contract_sha256=project.environment.contract_sha256(),
-                environment_digest=project.environment.environment_digest,
-                runtime_version=project.environment.runtime_version,
-                runner_id="test-runner",
-                runner_capabilities=[
-                    "pixel_observation",
-                    "effect_verification",
-                ],
-                status="passed",
-                observed_outcome=case.expected_outcome,
-                evidence=evidence,
-                attestation_key_id="test-runner",
+                campaign_id_sha256=campaign_sha256,
+                case_id_sha256=sha256_bytes(case.id.encode()),
+                case_input_sha256=case_input_sha256,
+                run_id_sha256=run_sha256,
+                step_id_sha256=sha256_bytes(b"save"),
+                fault_kind=case.kind.value,
+                gate=gate,
+                driver_id="fixture-driver",
+                driver_contract_sha256="d" * 64,
+                before_input_sha256="1" * 64,
+                after_input_sha256="2" * 64,
+                mutation_artifact_sha256=hashlib.sha256(mutation_bytes).hexdigest(),
+                attestation_key_id="test-fault-driver",
             ),
             private_key=_RUNNER_PRIVATE_BYTES,
         )
-        for case in project.cases
-    ]
+        report = RunReport(
+            workflow_name=workflow.name,
+            started_at="2026-07-28T00:00:00Z",
+            execution_profile="standard",
+            execution_outcome="HALTED",
+            production_eligible=False,
+            execution_completed=False,
+            execution_target_kind="citrix",
+            governed_policy_name=qualification_policy.name,
+            governed_policy_contract_sha256=policy_contract_sha256(
+                qualification_policy
+            ),
+            governed_minimum_effect_tier=int(project.minimum_effect_tier),
+            governed_runtime_inputs_digest=case_input_sha256,
+            governed_qualification_project_id=project.project_id,
+            governed_qualification_project_revision=project.revision,
+            governed_qualification_project_contract_sha256=(project.contract_sha256()),
+            governed_qualification_campaign_id_sha256=campaign_sha256,
+            governed_qualification_case_id_sha256=sha256_bytes(case.id.encode()),
+            governed_qualification_case_input_sha256=case_input_sha256,
+            governed_qualification_run_id_sha256=run_sha256,
+            governed_qualification_case_kind=case.kind.value,
+            governed_qualification_fault_driver_id="fixture-driver",
+            governed_qualification_fault_driver_contract_sha256="d" * 64,
+            governed_qualification_fault_driver_key_id="test-fault-driver",
+            governed_qualification_fault_step_id_sha256=sha256_bytes(b"save"),
+            qualification_evidence_only=True,
+            qualification_fault_mutations=[receipt],
+            observed_application_sha256=observed_application_sha256,
+            observed_application_version_sha256=observed_version_sha256,
+            observed_session_sha256=observed_session_sha256,
+            observed_environment_digest=project.environment.environment_digest,
+            observed_environment_binding_sha256=observed_binding,
+            qualification_environment_observer_id="fixture-observer",
+            qualification_environment_observer_contract_sha256="c" * 64,
+            results=[
+                StepResult(
+                    step_id="save",
+                    intent="Save the record",
+                    ok=False,
+                    safety_halt=True,
+                    delivery_attempted=False,
+                    safety_refusal_evidence=SafetyRefusalEvidence(
+                        stage=gate,
+                        code=code,
+                        detector_input_sha256=receipt.after_input_sha256,
+                    ),
+                )
+            ],
+        )
+        report_bytes = report.model_dump_json().encode()
+        receipt_bytes = receipt.artifact_bytes()
+        prefix = case.id
+        artifacts = {
+            f"{prefix}.report.json": report_bytes,
+            f"{prefix}.input.json": case_input,
+            f"{prefix}.receipt.json": receipt_bytes,
+            f"{prefix}.mutation.bin": mutation_bytes,
+        }
+        for relative_path, payload in artifacts.items():
+            (evidence_root / relative_path).write_bytes(payload)
+        evidence = [
+            EvidenceRef(
+                kind="run_report",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                relative_path=f"{prefix}.report.json",
+            ),
+            EvidenceRef(
+                kind="case_input",
+                sha256=case_input_sha256,
+                relative_path=f"{prefix}.input.json",
+            ),
+            EvidenceRef(
+                kind="fault_receipt",
+                sha256=receipt.receipt_sha256(),
+                relative_path=f"{prefix}.receipt.json",
+            ),
+            EvidenceRef(
+                kind="fault_mutation",
+                sha256=receipt.mutation_artifact_sha256,
+                relative_path=f"{prefix}.mutation.bin",
+            ),
+        ]
+        results.append(
+            sign_case_result(
+                QualificationCaseResult(
+                    case_id=case.id,
+                    project_id=project.project_id,
+                    project_revision=project.revision,
+                    project_contract_sha256=project.contract_sha256(),
+                    workflow_contract_sha256=workflow_contract_sha256(workflow),
+                    environment_contract_sha256=project.environment.contract_sha256(),
+                    environment_digest=project.environment.environment_digest,
+                    runtime_version=project.environment.runtime_version,
+                    runner_id="test-runner",
+                    runner_capabilities=[
+                        "pixel_observation",
+                        "effect_verification",
+                    ],
+                    status="passed",
+                    observed_outcome=case.expected_outcome,
+                    campaign_id_sha256=campaign_sha256,
+                    case_input_sha256=case_input_sha256,
+                    run_id_sha256=run_sha256,
+                    evidence=evidence,
+                    attestation_key_id="test-runner",
+                ),
+                private_key=_RUNNER_PRIVATE_BYTES,
+            )
+        )
     record_case_results(workflow, results, evidence_root=evidence_root)
 
 
@@ -592,9 +821,9 @@ def test_tampered_or_missing_evidence_cannot_certify(
     evidence_root = tmp_path / "evidence"
     _record_passing_campaign(workflow, evidence_root)
     if mutation == "tampered":
-        (evidence_root / "report.json").write_text("tampered")
+        (evidence_root / "representative-report.json").write_text("tampered")
     else:
-        (evidence_root / "report.json").unlink()
+        (evidence_root / "representative-report.json").unlink()
     report = certify_project(
         workflow,
         policy=load_policy("clinical-write"),
@@ -643,6 +872,112 @@ def test_fabricated_attestation_cannot_be_recorded(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="case_attestation_invalid"):
         record_case_results(workflow, [result], evidence_root=evidence_root)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("signed_detector_mismatch", QualificationRefusalCode.CASE_NOT_PASSED),
+        (
+            "signed_mutation_artifact_swap",
+            QualificationRefusalCode.CASE_EVIDENCE_UNVERIFIED,
+        ),
+    ],
+)
+def test_signed_passed_status_cannot_bypass_fault_artifact_verification(
+    tmp_path: Path,
+    mutation: str,
+    expected_code: QualificationRefusalCode,
+) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == "fault-ambiguity")
+    result = case.results[-1]
+
+    if mutation == "signed_detector_mismatch":
+        path = evidence_root / "fault-ambiguity.report.json"
+        payload = json.loads(path.read_text())
+        payload["results"][0]["safety_refusal_evidence"]["detector_input_sha256"] = (
+            "9" * 64
+        )
+        changed_bytes = json.dumps(payload, separators=(",", ":")).encode()
+        path.write_bytes(changed_bytes)
+        changed_kind = "run_report"
+    else:
+        path = evidence_root / "fault-ambiguity.mutation.bin"
+        changed_bytes = b"different signed-run mutation artifact"
+        path.write_bytes(changed_bytes)
+        changed_kind = "fault_mutation"
+
+    changed_digest = hashlib.sha256(changed_bytes).hexdigest()
+    changed_refs = [
+        ref.model_copy(update={"sha256": changed_digest})
+        if ref.kind == changed_kind
+        else ref
+        for ref in result.evidence
+    ]
+    case.results[-1] = sign_case_result(
+        result.model_copy(
+            update={"evidence": changed_refs, "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+    assert not report.passed
+    assert expected_code in {refusal.code for refusal in report.refusals}
+
+
+def test_signed_passed_status_cannot_disagree_with_representative_run(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == "representative-1")
+    result = case.results[-1]
+
+    path = evidence_root / "representative-report.json"
+    payload = json.loads(path.read_text())
+    payload["execution_outcome"] = "HALTED"
+    payload["execution_completed"] = False
+    payload["success"] = False
+    changed_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    path.write_bytes(changed_bytes)
+    changed_digest = hashlib.sha256(changed_bytes).hexdigest()
+    changed_refs = [
+        ref.model_copy(update={"sha256": changed_digest})
+        if ref.kind == "run_report"
+        else ref
+        for ref in result.evidence
+    ]
+    case.results[-1] = sign_case_result(
+        result.model_copy(
+            update={"evidence": changed_refs, "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+    assert not report.passed
+    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
+        refusal.code for refusal in report.refusals
+    }
 
 
 def test_requalification_condition_advances_version_and_invalidates_certification() -> (
@@ -819,8 +1154,8 @@ def test_persisted_certification_is_recomputed_and_policy_digest_bound(
     assert same_name_mutation.name == policy.name
     assert not current_certification_matches(workflow, policy=same_name_mutation)
 
-    # Even a self-consistent rewrite of the mutable bundle-local policy and
-    # certification hashes cannot appoint itself as production authority.
+    # The exact case runs are policy-bound. A mutable bundle-local policy
+    # rewrite therefore fails before it can appoint itself as authority.
     forged_policy = Policy.model_validate(policy.model_dump(mode="json"))
     forged_policy.description += " (mutated bundle-local policy)"
     forged_report = evaluate_qualification(
@@ -828,7 +1163,10 @@ def test_persisted_certification_is_recomputed_and_policy_digest_bound(
         policy=forged_policy,
         evidence_root=evidence_root,
     )
-    assert forged_report.passed
+    assert not forged_report.passed
+    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
+        refusal.code for refusal in forged_report.refusals
+    }
     project.last_certification = original.model_copy(deep=True)
     project.last_certification.policy_contract = forged_policy.model_dump(mode="json")
     project.last_certification.policy_contract_sha256 = policy_contract_sha256(

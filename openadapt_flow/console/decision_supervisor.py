@@ -92,6 +92,11 @@ DEFAULT_POLL_WAIT_S = 25.0
 BACKOFF_BASE_S = 2.0
 BACKOFF_CAP_S = 120.0
 
+#: Pause after a governed refusal. Not a backoff -- a refusal is an answer, and
+#: the transport is healthy -- but a re-delivered decision returns from the poll
+#: instantly, so without a floor the loop would spin on one it always refuses.
+REFUSAL_PAUSE_S = 1.0
+
 
 @dataclass(frozen=True)
 class OpenPause:
@@ -457,10 +462,19 @@ class DecisionSupervisorThread:
                 report = self._supervisor.serve_once(wait_s=self._wait_s)
             except AttendedActionRefused as exc:
                 # A governed refusal was already acknowledged as ``refused``.
-                # It is an answer, not a transport failure, so it does not back
-                # the loop off.
+                # It is an answer, not a transport failure, so it does not raise
+                # the backoff level -- a refusal must not slow the lane down for
+                # everyone else.
+                #
+                # It does take one short pause, because the acknowledgement can
+                # itself be uncertain. In that case the decision stays leased
+                # server-side and is re-delivered immediately, and a poll with a
+                # decision waiting returns at once: without this pause the loop
+                # would spin at full speed on a decision it will refuse every
+                # time.
                 self.stats.decisions_refused += 1
                 self.stats.last_error = type(exc).__name__
+                self._sleep(REFUSAL_PAUSE_S)
                 continue
             except RelayRefused as exc:
                 self.stats.consecutive_failures += 1

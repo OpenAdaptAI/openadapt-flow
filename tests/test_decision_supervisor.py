@@ -562,9 +562,21 @@ def test_a_relay_refusal_backs_the_loop_off_instead_of_spinning():
 
 
 def test_a_governed_refusal_is_an_answer_not_an_outage():
-    """A refused decision must not back the transport off; nothing is wrong."""
+    """A refused decision must not back the transport off; nothing is wrong.
+
+    It does take one short pause. An acknowledgement can itself be uncertain,
+    which leaves the decision leased and re-delivered at once, and a poll with a
+    decision waiting returns immediately -- so the loop would otherwise spin at
+    full speed on a decision it refuses every time.
+    """
     slept: list[float] = []
-    stub = _StubSupervisor([AttendedActionRefused("revalidation failed"), _cycle()])
+    stub = _StubSupervisor(
+        [
+            AttendedActionRefused("revalidation failed"),
+            AttendedActionRefused("again"),
+            _cycle(),
+        ]
+    )
     thread = DecisionSupervisorThread(stub, wait_s=0.0, sleep=slept.append)
 
     def on_cycle(_report: Any) -> None:
@@ -573,8 +585,10 @@ def test_a_governed_refusal_is_an_answer_not_an_outage():
     thread._on_cycle = on_cycle
     thread.run()
 
-    assert slept == []
-    assert thread.stats.decisions_refused == 1
+    # A flat floor, not a doubling backoff: the transport is healthy.
+    assert slept == [1.0, 1.0]
+    assert thread.stats.decisions_refused == 2
+    assert thread.stats.consecutive_failures == 0
 
 
 def test_the_loop_never_dies_on_an_unexpected_error():

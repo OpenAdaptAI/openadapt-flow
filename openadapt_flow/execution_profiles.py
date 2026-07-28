@@ -175,6 +175,63 @@ def required_effect_tier(
     return required
 
 
+def qualified_effect_requirements(
+    workflow: Workflow,
+    profile: ExecutionProfile | str,
+) -> tuple[Any, ...]:
+    """Return exact per-effect strength requirements from the qualified project.
+
+    The global profile/project minimum remains the fallback for workflows that
+    do not carry a qualification project.  Once a project assigns a stronger
+    tier to one effect, that exact step/path/index contract becomes the
+    production requirement instead of being weakened back to the global floor.
+    """
+
+    resolved = resolve_execution_profile(profile)
+    if not execution_profile_contract(resolved).production:
+        return ()
+    project = workflow.qualification
+    if project is None:
+        return ()
+
+    from openadapt_flow.ir import QualifiedEffectRequirement
+    from openadapt_flow.policy import iter_effect_paths
+    from openadapt_flow.traversal import iter_workflow_steps
+
+    steps = {step.id: step for step in iter_workflow_steps(workflow)}
+    global_minimum = required_effect_tier(workflow, resolved)
+    requirements: list[QualifiedEffectRequirement] = []
+    for binding in sorted(
+        project.effect_policies,
+        key=lambda item: (item.step_id, item.actuation_path, item.effect_index),
+    ):
+        step = steps.get(binding.step_id)
+        if step is None:
+            raise ValueError("qualified effect requirement references an unknown step")
+        paths = dict(iter_effect_paths(step))
+        effects = paths.get(binding.actuation_path)
+        if effects is None or binding.effect_index >= len(effects):
+            raise ValueError(
+                "qualified effect requirement references a missing actuation effect"
+            )
+        effect = effects[binding.effect_index]
+        if effect.contract_hash() != binding.effect_contract_hash:
+            raise ValueError("qualified effect contract changed after qualification")
+        required = VerificationTier(binding.tier)
+        if global_minimum is not None and int(global_minimum) < int(required):
+            required = global_minimum
+        requirements.append(
+            QualifiedEffectRequirement(
+                step_id=binding.step_id,
+                actuation_path=binding.actuation_path,
+                effect_index=binding.effect_index,
+                effect_contract_hash=binding.effect_contract_hash,
+                minimum_tier=int(required),
+            )
+        )
+    return tuple(requirements)
+
+
 @dataclass(frozen=True)
 class _ProgramActionOccurrence:
     """One structurally proven action occurrence in a program trace."""
@@ -709,6 +766,16 @@ def classify_execution_outcome(
 
     if report.workflow_contract_sha256 != workflow_contract_sha256(workflow):
         return ExecutionOutcome.COMPLETED_UNVERIFIED
+    try:
+        expected_qualified_requirements = qualified_effect_requirements(
+            workflow, resolved
+        )
+    except ValueError:
+        return ExecutionOutcome.COMPLETED_UNVERIFIED
+    if tuple(report.governed_qualified_effect_requirements) != (
+        expected_qualified_requirements
+    ):
+        return ExecutionOutcome.COMPLETED_UNVERIFIED
 
     qualification_review_context = bool(
         report.qualification_evidence_only
@@ -907,6 +974,8 @@ def classify_execution_outcome(
             and result.delivery_attempted is not True
         ):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if result.actuation == "api" and result.delivery_attempted is not True:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
         if result.identity is not None and result.identity.status != "verified":
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if any(
@@ -960,7 +1029,6 @@ def classify_execution_outcome(
             or item.reconciliation_completed
             or item.reconciliation_actions
             or item.verification_tier is None
-            or not VerificationTier(item.verification_tier).satisfies(minimum)
             for item in result.effect_evidence
         ):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
@@ -969,6 +1037,53 @@ def classify_execution_outcome(
         )
         if not expected_hashes or evidence_hashes != expected_hashes:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
+        actuation_path = "api" if result.actuation == "api" else "gui"
+        requirement_by_index = {
+            item.effect_index: item
+            for item in expected_qualified_requirements
+            if item.step_id == step.id and item.actuation_path == actuation_path
+        }
+        if requirement_by_index and set(requirement_by_index) != set(
+            range(len(effects))
+        ):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        required_tiers_by_hash: dict[str, list[VerificationTier]] = {}
+        for index, effect in enumerate(effects):
+            requirement = requirement_by_index.get(index)
+            if requirement is not None and (
+                requirement.effect_contract_hash != effect.contract_hash()
+            ):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
+            required_tier = (
+                VerificationTier(requirement.minimum_tier)
+                if requirement is not None
+                else minimum
+            )
+            try:
+                effect_hash = effect.resolved_contract_hash(
+                    scoped_params,
+                    opaque_param_sha256=opaque,
+                )
+            except ValueError:
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
+            required_tiers_by_hash.setdefault(effect_hash, []).append(required_tier)
+        observed_tiers_by_hash: dict[str, list[VerificationTier]] = {}
+        for evidence in result.effect_evidence:
+            assert evidence.verification_tier is not None
+            observed_tiers_by_hash.setdefault(evidence.effect_contract_hash, []).append(
+                VerificationTier(evidence.verification_tier)
+            )
+        for effect_hash, required_tiers in required_tiers_by_hash.items():
+            observed_tiers = observed_tiers_by_hash.get(effect_hash, [])
+            if len(observed_tiers) != len(required_tiers):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
+            required_tiers.sort(key=int)
+            observed_tiers.sort(key=int)
+            if any(
+                not observed.satisfies(required)
+                for observed, required in zip(observed_tiers, required_tiers)
+            ):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
     return ExecutionOutcome.VERIFIED
 
 
@@ -1096,6 +1211,14 @@ def build_outcome_envelope(
         if report.execution_profile is not None
         else None
     )
+    try:
+        envelope_requirements = (
+            qualified_effect_requirements(workflow, report.execution_profile)
+            if report.execution_profile is not None
+            else ()
+        )
+    except ValueError:
+        envelope_requirements = ()
     compensation_actions = _completed_compensation_actions(report)
     for result in report.results:
         if result.skipped or result.exception_handled:
@@ -1111,23 +1234,40 @@ def build_outcome_envelope(
             effects = effects_for_actuation(step, result.actuation)
             required_effects += len(effects)
         if result.effect_verified is True:
-            sufficient_evidence = Counter(
-                evidence.effect_contract_hash
-                for evidence in result.effect_evidence
-                if evidence.final_verdict == "confirmed"
-                and (
-                    minimum_effect_tier is None
-                    or (
-                        evidence.verification_tier is not None
-                        and VerificationTier(evidence.verification_tier).satisfies(
-                            minimum_effect_tier
-                        )
-                    )
+            actuation_path = "api" if result.actuation == "api" else "gui"
+            requirement_by_index = {
+                item.effect_index: item
+                for item in envelope_requirements
+                if item.step_id == result.step_id
+                and item.actuation_path == actuation_path
+            }
+            required_by_hash: dict[str, list[VerificationTier]] = {}
+            for index, effect_hash in enumerate(result.effect_contract_hashes):
+                requirement = requirement_by_index.get(index)
+                required_tier = (
+                    VerificationTier(requirement.minimum_tier)
+                    if requirement is not None
+                    else minimum_effect_tier
                 )
-            )
-            passed_effects += sum(
-                (sufficient_evidence & Counter(result.effect_contract_hashes)).values()
-            )
+                if required_tier is not None:
+                    required_by_hash.setdefault(effect_hash, []).append(required_tier)
+            observed_by_hash: dict[str, list[VerificationTier]] = {}
+            for evidence in result.effect_evidence:
+                if (
+                    evidence.final_verdict == "confirmed"
+                    and evidence.verification_tier is not None
+                ):
+                    observed_by_hash.setdefault(
+                        evidence.effect_contract_hash, []
+                    ).append(VerificationTier(evidence.verification_tier))
+            for effect_hash, required_tiers in required_by_hash.items():
+                observed_tiers = observed_by_hash.get(effect_hash, [])
+                required_tiers.sort(key=int)
+                observed_tiers.sort(key=int)
+                passed_effects += sum(
+                    observed.satisfies(required_tier)
+                    for observed, required_tier in zip(observed_tiers, required_tiers)
+                )
         if result.identity is not None and result.identity.status == "verified":
             evidence_classes.add("identity")
         if result.postconditions_ok is True and step is not None and step.expect:

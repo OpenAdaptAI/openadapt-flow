@@ -57,9 +57,16 @@ from openadapt_flow import crypto
 from openadapt_flow.deployment import DeploymentConfig
 from openadapt_flow.execution_profiles import (
     ExecutionProfileContract,
+    qualified_effect_requirements,
     required_effect_tier,
 )
-from openadapt_flow.ir import ActionKind, Interstitial, Step, Workflow
+from openadapt_flow.ir import (
+    ActionKind,
+    Interstitial,
+    QualifiedEffectRequirement,
+    Step,
+    Workflow,
+)
 from openadapt_flow.policy import (
     Policy,
     all_effect_paths_covered,
@@ -250,6 +257,9 @@ class RunGateReport(BaseModel):
     required_identity_step_ids: list[str] = Field(default_factory=list)
     effect_verifier_configured: bool = False
     minimum_effect_tier: Optional[int] = Field(default=None, ge=1, le=4)
+    qualified_effect_requirements: list[QualifiedEffectRequirement] = Field(
+        default_factory=list
+    )
     api_actuator_configured: bool = False
     unverified_write_approval_granted: bool = False
     admitted_interstitials_digest: Optional[str] = Field(
@@ -360,6 +370,15 @@ def evaluate_run_gate(
         if profile_contract is not None
         else None
     )
+    qualified_requirements: tuple[QualifiedEffectRequirement, ...] = ()
+    qualified_requirements_error: str | None = None
+    if profile_contract is not None:
+        try:
+            qualified_requirements = qualified_effect_requirements(
+                workflow, profile_contract.profile
+            )
+        except ValueError as exc:
+            qualified_requirements_error = str(exc)
     # Production admission requires the completed qualification campaign.
     # Demo and legacy qualification harnesses may bind a typed operator review
     # through this policy decision plus the exact sealed manifest.
@@ -385,6 +404,8 @@ def evaluate_run_gate(
         api_actuator,
         approval_available,
         minimum_effect_tier=minimum_effect_tier,
+        qualified_effect_requirements=qualified_requirements,
+        qualified_effect_requirements_error=qualified_requirements_error,
         require_approval=(
             profile_contract.require_approval_for_unverified_effects
             if profile_contract is not None
@@ -498,6 +519,7 @@ def evaluate_run_gate(
         minimum_effect_tier=(
             int(minimum_effect_tier) if minimum_effect_tier is not None else None
         ),
+        qualified_effect_requirements=list(qualified_requirements),
         api_actuator_configured=api_actuator is not None,
         unverified_write_approval_granted=(
             effect_verifier is None
@@ -730,6 +752,8 @@ def _gate_approval(
     approval_available: bool,
     *,
     minimum_effect_tier: Optional[VerificationTier] = None,
+    qualified_effect_requirements: tuple[QualifiedEffectRequirement, ...] = (),
+    qualified_effect_requirements_error: str | None = None,
     require_approval: bool = True,
     allow_approval: bool = True,
     require_current_risk_certification: bool,
@@ -742,6 +766,17 @@ def _gate_approval(
     unchecked). It is admitted ONLY under explicit operator approval; otherwise
     the run halts. Writes that DO have a verifier need nothing here.
     """
+    if qualified_effect_requirements_error is not None:
+        return _result(
+            GATE_APPROVAL,
+            False,
+            "qualified effect requirements are invalid: "
+            f"{qualified_effect_requirements_error}",
+        )
+    requirement_by_ref = {
+        (item.step_id, item.actuation_path, item.effect_index): item
+        for item in qualified_effect_requirements
+    }
     writes = [
         step
         for step in steps
@@ -757,18 +792,26 @@ def _gate_approval(
         weak: list[str] = []
         untyped: list[str] = []
         observed: list[VerificationTier] = []
+        required_observed: list[VerificationTier] = []
         for step in writes:
-            for _path, effects in iter_effect_paths(step):
-                for effect in effects:
+            for path, effects in iter_effect_paths(step):
+                for index, effect in enumerate(effects):
                     tier = verifier_effect_tier(effect_verifier, effect)
+                    requirement = requirement_by_ref.get((step.id, path, index))
+                    required_tier = (
+                        VerificationTier(requirement.minimum_tier)
+                        if requirement is not None
+                        else minimum_effect_tier
+                    )
                     if tier is None:
                         untyped.append(step.id)
-                    elif minimum_effect_tier is not None and not tier.satisfies(
-                        minimum_effect_tier
+                    elif required_tier is not None and not tier.satisfies(
+                        required_tier
                     ):
                         weak.append(step.id)
                         observed.append(tier)
-        if untyped and minimum_effect_tier is not None:
+                        required_observed.append(required_tier)
+        if untyped and (minimum_effect_tier is not None or requirement_by_ref):
             return _result(
                 GATE_APPROVAL,
                 False,
@@ -777,15 +820,19 @@ def _gate_approval(
                 sorted(set(untyped)),
             )
         if weak:
-            assert minimum_effect_tier is not None
             tiers = ", ".join(
                 sorted({tier.name.lower().replace("_", "-") for tier in observed})
+            )
+            required_names = ", ".join(
+                sorted(
+                    {tier.name.lower().replace("_", "-") for tier in required_observed}
+                )
             )
             return _result(
                 GATE_APPROVAL,
                 False,
                 f"{len(set(weak))} consequential write(s) have {tiers} evidence; "
-                f"this profile requires {minimum_effect_tier.name.lower().replace('_', '-')}",
+                f"their qualified effects require {required_names}",
                 sorted(set(weak)),
             )
         return _result(
@@ -1012,6 +1059,7 @@ def build_runtime_authorization(
         admitted_policy_contract_sha256=report.policy_contract_sha256,
         execution_profile=report.execution_profile,
         minimum_effect_tier=report.minimum_effect_tier,
+        qualified_effect_requirements=tuple(report.qualified_effect_requirements),
         required_identity_step_ids=tuple(report.required_identity_step_ids),
         unverified_write_approvals=tuple(approvals),
         approval_source=approval_source,

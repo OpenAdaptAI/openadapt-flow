@@ -839,6 +839,9 @@ class Replayer:
             report.governed_minimum_effect_tier = (
                 self.governed_authorization.minimum_effect_tier
             )
+            report.governed_qualified_effect_requirements = list(
+                self.governed_authorization.qualified_effect_requirements
+            )
             report.governed_runtime_inputs_digest = (
                 self.governed_authorization.runtime_inputs_digest
             )
@@ -3945,6 +3948,8 @@ class Replayer:
                     )
                     error = self._profile_effect_tier_refusal(
                         workflow,
+                        step,
+                        "gui",
                         resolved_effects,
                         active_verifier,
                     )
@@ -3952,6 +3957,8 @@ class Replayer:
                         effect_pre_state = active_verifier.capture_pre_state()
                         error = self._profile_effect_tier_refusal(
                             workflow,
+                            step,
+                            "gui",
                             resolved_effects,
                             active_verifier,
                         )
@@ -4017,6 +4024,8 @@ class Replayer:
                 if resolved_effects is not None and active_verifier is not None:
                     error = self._profile_effect_tier_refusal(
                         workflow,
+                        step,
+                        "gui",
                         resolved_effects,
                         active_verifier,
                     )
@@ -4610,6 +4619,8 @@ class Replayer:
         )
         refusal = self._profile_effect_tier_refusal(
             workflow,
+            step,
+            "api",
             effects,
             effect_verifier,
         )
@@ -4649,6 +4660,8 @@ class Replayer:
             return True
         refusal = self._profile_effect_tier_refusal(
             workflow,
+            step,
+            "api",
             effects,
             effect_verifier,
         )
@@ -4788,6 +4801,8 @@ class Replayer:
     def _profile_effect_tier_refusal(
         self,
         workflow: Workflow,
+        step: Step,
+        actuation_path: Literal["gui", "api"],
         effects: list["Effect"],
         verifier: object,
     ) -> Optional[str]:
@@ -4806,10 +4821,37 @@ class Replayer:
         )
         if minimum is None:
             return None
+        requirements = authorization.effect_requirements(step.id, actuation_path)
+        if requirements:
+            from openadapt_flow.policy import effects_for_actuation
+
+            declared = effects_for_actuation(
+                step, "api" if actuation_path == "api" else "guarded_coordinate"
+            )
+            if len(requirements) != len(declared) or len(effects) != len(declared):
+                return (
+                    "Qualified effect requirements changed after admission — "
+                    "refusing to actuate; run aborted"
+                )
+            for index, requirement in enumerate(requirements):
+                if (
+                    requirement.effect_index != index
+                    or requirement.effect_contract_hash
+                    != declared[index].contract_hash()
+                ):
+                    return (
+                        "Qualified effect contract changed after admission — "
+                        "refusing to actuate; run aborted"
+                    )
         weak = []
-        for effect in effects:
+        for index, effect in enumerate(effects):
+            required = (
+                VerificationTier(requirements[index].minimum_tier)
+                if requirements
+                else minimum
+            )
             actual = verifier_effect_tier(verifier, effect)
-            if actual is None or not actual.satisfies(minimum):
+            if actual is None or not actual.satisfies(required):
                 weak.append("untyped" if actual is None else actual.name.lower())
         if not weak:
             return None
@@ -4817,7 +4859,7 @@ class Replayer:
         return (
             "Effect verifier strength changed after admission: "
             f"{observed} evidence cannot satisfy the required "
-            f"{minimum.name.lower()} tier — refusing to actuate; run aborted"
+            "qualified effect tier — refusing to actuate; run aborted"
         )
 
     def _all_default_readback(self, effects: list["Effect"]) -> bool:

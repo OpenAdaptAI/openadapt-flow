@@ -13,6 +13,7 @@ from openadapt_flow.execution_profiles import (
     ExecutionProfile,
     classify_execution_outcome,
     execution_profile_contract,
+    qualified_effect_requirements,
     stamp_execution_outcome,
 )
 from openadapt_flow.ir import (
@@ -42,6 +43,7 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.qualification import (
+    EffectVerificationPolicy,
     EnvironmentBoundary,
     QualificationProject,
     workflow_contract_sha256,
@@ -662,6 +664,144 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
             classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
+
+
+def test_qualified_per_effect_tier_is_required_for_verified_outcome():
+    workflow = _workflow()
+    workflow.qualification = QualificationProject(
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="fixture",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+        effect_policies=[
+            EffectVerificationPolicy(
+                step_id="save",
+                actuation_path="gui",
+                effect_index=0,
+                effect_contract_hash=workflow.steps[0].effects[0].contract_hash(),
+                tier=VerificationTier.INDEPENDENT_SYSTEM,
+            )
+        ],
+    )
+    strong = _verified_production_report(workflow)
+    strong.governed_qualified_effect_requirements = list(
+        qualified_effect_requirements(workflow, ExecutionProfile.STANDARD)
+    )
+    weak = strong.model_copy(deep=True)
+    weak.results[0].effect_evidence[
+        0
+    ].verification_tier = VerificationTier.PERSISTED_STATE_REACQUISITION
+    omitted_binding = strong.model_copy(deep=True)
+    omitted_binding.governed_qualified_effect_requirements = []
+
+    assert (
+        classify_execution_outcome(strong, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.VERIFIED
+    )
+    for report in (weak, omitted_binding):
+        assert (
+            classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
+
+
+def test_qualified_per_effect_tier_is_enforced_at_gate_and_runtime(tmp_path):
+    class _PersistedVerifier(_TieredVerifier):
+        verification_tier = VerificationTier.PERSISTED_STATE_REACQUISITION
+
+    workflow = _workflow()
+    workflow.qualification = QualificationProject(
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="fixture",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+        effect_policies=[
+            EffectVerificationPolicy(
+                step_id="save",
+                actuation_path="gui",
+                effect_index=0,
+                effect_contract_hash=workflow.steps[0].effects[0].contract_hash(),
+                tier=VerificationTier.INDEPENDENT_SYSTEM,
+            )
+        ],
+    )
+    workflow, bundle = _sealed(tmp_path, workflow, encrypted=False)
+    requirements = qualified_effect_requirements(workflow, ExecutionProfile.STANDARD)
+
+    gate = _gate(
+        workflow,
+        bundle,
+        ExecutionProfile.STANDARD,
+        verifier=_PersistedVerifier(),
+        durable=True,
+    )
+    assert gate.gate(GATE_APPROVAL).passed is False
+
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, None),
+        admitted_policy_name="permissive",
+        execution_profile="standard",
+        minimum_effect_tier=int(VerificationTier.PERSISTED_STATE_REACQUISITION),
+        qualified_effect_requirements=requirements,
+    )
+    replayer = Replayer(
+        FakeBackend(),
+        vision=_ReadyVision(),
+        governed_authorization=authorization,
+        durable=True,
+        require_settled=True,
+    )
+    assert (
+        replayer._profile_effect_tier_refusal(
+            workflow,
+            workflow.steps[0],
+            "gui",
+            workflow.steps[0].effects,
+            _PersistedVerifier(),
+        )
+        is not None
+    )
+    assert (
+        replayer._profile_effect_tier_refusal(
+            workflow,
+            workflow.steps[0],
+            "gui",
+            workflow.steps[0].effects,
+            _TieredVerifier(),
+        )
+        is None
+    )
+
+
+def test_api_verified_outcome_requires_runtime_delivery_attempt_shape():
+    workflow = _workflow()
+    workflow.steps[0].api_binding = ApiBinding(
+        method="POST",
+        url_template="/records",
+        effects=[workflow.steps[0].effects[0].model_copy(deep=True)],
+    )
+    report = _verified_production_report(workflow)
+    report.results[0].actuation = "api"
+    report.results[0].delivery_attempted = True
+    _bind_report_to_workflow(report, workflow)
+    not_delivered = report.model_copy(deep=True)
+    not_delivered.results[0].delivery_attempted = False
+
+    assert (
+        classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.VERIFIED
+    )
+    assert (
+        classify_execution_outcome(not_delivered, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
 
 
 def test_program_outcome_requires_exact_ordered_action_trace():

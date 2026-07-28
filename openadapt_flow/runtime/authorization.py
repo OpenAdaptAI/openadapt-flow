@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openadapt_flow.ir import Interstitial, Step, Workflow
+from openadapt_flow.ir import Interstitial, QualifiedEffectRequirement, Step, Workflow
 from openadapt_flow.traversal import iter_workflow_steps
 
 _CONSUMED_IDS: set[str] = set()
@@ -214,6 +214,9 @@ class GovernedRunAuthorization(BaseModel):
     )
     execution_profile: Literal["demo", "standard", "regulated"] | None = None
     minimum_effect_tier: int | None = Field(default=None, ge=1, le=4)
+    qualified_effect_requirements: tuple[QualifiedEffectRequirement, ...] = Field(
+        default_factory=tuple
+    )
     required_identity_step_ids: tuple[str, ...] = Field(default_factory=tuple)
     unverified_write_approvals: tuple[UnverifiedWriteApproval, ...] = Field(
         default_factory=tuple
@@ -265,6 +268,14 @@ class GovernedRunAuthorization(BaseModel):
 
     @model_validator(mode="after")
     def _qualification_binding_is_complete(self) -> "GovernedRunAuthorization":
+        requirement_refs = [
+            (item.step_id, item.actuation_path, item.effect_index)
+            for item in self.qualified_effect_requirements
+        ]
+        if len(requirement_refs) != len(set(requirement_refs)):
+            raise ValueError("qualified effect requirements must be unique")
+        if requirement_refs != sorted(requirement_refs):
+            raise ValueError("qualified effect requirements must be ordered")
         values = (
             self.qualification_project_id,
             self.qualification_project_revision,
@@ -506,6 +517,22 @@ class GovernedRunAuthorization(BaseModel):
         )
         if production_qualification and self.admitted_policy_contract_sha256 is None:
             return "production qualification authorization has no exact policy digest"
+        if production_qualification:
+            from openadapt_flow.execution_profiles import (
+                qualified_effect_requirements,
+            )
+
+            assert self.execution_profile is not None
+            try:
+                expected_requirements = qualified_effect_requirements(
+                    workflow, self.execution_profile
+                )
+            except ValueError:
+                return "workflow qualified effect requirements are invalid"
+            if self.qualified_effect_requirements != expected_requirements:
+                return (
+                    "governed run authorization qualified effect requirements changed"
+                )
         if production_qualification and not qualification_campaign:
             assert self.admitted_policy_contract_sha256 is not None
             from openadapt_flow.qualification import current_certification_matches
@@ -686,4 +713,17 @@ class GovernedRunAuthorization(BaseModel):
             approval.step_id == step.id
             and sorted(approval.effect_contract_hashes) == expected
             for approval in self.unverified_write_approvals
+        )
+
+    def effect_requirements(
+        self,
+        step_id: str,
+        actuation_path: Literal["gui", "api"],
+    ) -> tuple[QualifiedEffectRequirement, ...]:
+        """Return the exact ordered requirements admitted for one path."""
+
+        return tuple(
+            item
+            for item in self.qualified_effect_requirements
+            if item.step_id == step_id and item.actuation_path == actuation_path
         )

@@ -18,6 +18,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from openadapt_flow.__main__ import main
+from openadapt_flow.execution_profiles import (
+    ExecutionProfile,
+    qualified_effect_requirements,
+)
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
@@ -253,6 +257,9 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         for binding in project.effect_policies
         if binding.step_id == action_id and binding.actuation_path == "gui"
     }
+    governed_effect_requirements = list(
+        qualified_effect_requirements(workflow, ExecutionProfile.STANDARD)
+    )
     results: list[QualificationCaseResult] = []
     for case in project.cases:
         run_sha256 = sha256_bytes(f"run:{case.id}".encode())
@@ -272,6 +279,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                     qualification_policy
                 ),
                 governed_minimum_effect_tier=int(project.minimum_effect_tier),
+                governed_qualified_effect_requirements=governed_effect_requirements,
                 governed_authorization_id="qualification-representative",
                 governed_runtime_inputs_digest=case_input_sha256,
                 required_identity_step_ids=sorted(required_identity),
@@ -447,6 +455,7 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 qualification_policy
             ),
             governed_minimum_effect_tier=int(project.minimum_effect_tier),
+            governed_qualified_effect_requirements=governed_effect_requirements,
             governed_authorization_id="qualification-fault",
             governed_runtime_inputs_digest=case_input_sha256,
             required_identity_step_ids=sorted(required_identity),
@@ -1392,7 +1401,7 @@ def test_duplicate_effect_hashes_require_one_evidence_tier_per_policy_index(
     )
 
     assert not report.passed
-    assert QualificationRefusalCode.CASE_NOT_PASSED in {
+    assert QualificationRefusalCode.CASE_ATTESTATION_INVALID in {
         refusal.code for refusal in report.refusals
     }
 
@@ -2005,6 +2014,9 @@ def test_full_campaign_certifies_through_existing_policy_and_round_trips(
         admitted_policy_name=policy.name,
         admitted_policy_contract_sha256=policy_digest,
         execution_profile="standard",
+        qualified_effect_requirements=qualified_effect_requirements(
+            loaded, ExecutionProfile.STANDARD
+        ),
     )
     assert authorization.validate_workflow(loaded) is None
     assert "no exact policy digest" in (

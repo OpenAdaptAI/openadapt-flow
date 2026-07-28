@@ -2168,6 +2168,18 @@ class EffectVerificationEvidence(BaseModel):
     observed_effect: Literal["present", "absent", "conflicting", "unknown"] = "unknown"
 
 
+class QualifiedEffectRequirement(BaseModel):
+    """One exact qualified effect-strength requirement admitted for a run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    step_id: str
+    actuation_path: Literal["gui", "api"]
+    effect_index: int = Field(ge=0)
+    effect_contract_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    minimum_tier: int = Field(ge=1, le=4)
+
+
 class SafetyRefusalEvidence(BaseModel):
     """Typed detector output for one fail-closed pre-action refusal."""
 
@@ -2678,6 +2690,9 @@ class RunReport(BaseModel):
         default=None, pattern="^[a-f0-9]{64}$"
     )
     governed_minimum_effect_tier: Optional[int] = Field(default=None, ge=1, le=4)
+    governed_qualified_effect_requirements: list[QualifiedEffectRequirement] = Field(
+        default_factory=list
+    )
     governed_runtime_inputs_digest: Optional[str] = Field(
         default=None, pattern="^[a-f0-9]{64}$"
     )

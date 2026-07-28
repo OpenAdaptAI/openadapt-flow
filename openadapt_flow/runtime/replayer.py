@@ -4042,6 +4042,11 @@ class Replayer:
             current_step=overlay_current,
             total_steps=overlay_total,
         )
+        refusal = self._delivery_authorization_refusal(workflow, params, step, result)
+        if refusal is not None:
+            result.ok = False
+            result.error = refusal
+            return True
         # This transition is the explicit delivery boundary. Set it BEFORE the
         # call because an exception/timeout may occur after the request left the
         # process but before the actuator can return a receipt-like outcome.
@@ -6269,6 +6274,7 @@ class Replayer:
 
     def _handle_interstitials(
         self,
+        step: Step,
         before_png: bytes,
         bundle_dir: Path,
         params: dict[str, str],
@@ -6440,6 +6446,12 @@ class Replayer:
             mutation_error = self._interstitial_declaration_mutation(workflow)
             if mutation_error is not None:
                 return before_png, mutation_error
+            if workflow is not None:
+                authorization_error = self._fresh_actuation_authorization_refusal(
+                    workflow, params, step
+                )
+                if authorization_error is not None:
+                    return before_png, authorization_error
 
             # Append BEFORE delivery: a backend exception can never create an
             # unreported key/click attempt. The event carries the exact admitted
@@ -6595,7 +6607,12 @@ class Replayer:
 
         # (2) Interstitials: dismiss a KNOWN overlay, or HALT gracefully.
         before_png, interstitial_error = self._handle_interstitials(
-            before_png, bundle_dir, params, result.interstitial_actions, workflow
+            step,
+            before_png,
+            bundle_dir,
+            params,
+            result.interstitial_actions,
+            workflow,
         )
         if interstitial_error is not None:
             # An interstitial refusal is a state-safety halt, not an ordinary

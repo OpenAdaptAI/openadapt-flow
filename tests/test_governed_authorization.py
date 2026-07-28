@@ -7,6 +7,7 @@ import pytest
 from openadapt_flow.ir import (
     ActionKind,
     Anchor,
+    ApiBinding,
     Guard,
     Interstitial,
     LoopSpec,
@@ -21,6 +22,7 @@ from openadapt_flow.ir import (
     Transition,
     Workflow,
 )
+from openadapt_flow.runtime.actuators import ActuationStatus, ApiActuationResult
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     UnverifiedWriteApproval,
@@ -32,7 +34,13 @@ from openadapt_flow.runtime.durable import (
     bundle_version,
     resume,
 )
-from openadapt_flow.runtime.effects import Effect, EffectKind
+from openadapt_flow.runtime.effects import (
+    Effect,
+    EffectKind,
+    EffectState,
+    EffectVerdict,
+    Verdict,
+)
 from openadapt_flow.runtime.replayer import Replayer
 from tests.test_replayer import (
     FakeBackend,
@@ -723,6 +731,141 @@ def test_demo_program_refuses_a_tampered_active_frame_path(tmp_path):
     assert report.results[0].delivery_attempted is False
     assert report.results[0].safety_halt is True
     assert "leaf frame" in (report.results[0].error or "")
+
+
+def test_program_api_actuation_rechecks_frame_after_overlay_callback(tmp_path):
+    class ConfirmingVerifier:
+        substrate = "test"
+
+        def __init__(self):
+            self.verify_calls = 0
+
+        def capture_pre_state(self):
+            return EffectState(substrate=self.substrate, reachable=True)
+
+        def verify(self, effect, before):
+            del before
+            self.verify_calls += 1
+            return EffectVerdict(
+                verdict=Verdict.CONFIRMED,
+                kind=effect.kind,
+                substrate=self.substrate,
+            )
+
+    class RecordingActuator:
+        def __init__(self):
+            self.calls = 0
+
+        def actuate(self, binding, params):
+            del binding, params
+            self.calls += 1
+            return ApiActuationResult(
+                status=ActuationStatus.ACTUATED,
+                reason="synthetic actuation",
+            )
+
+    class OverlayMutationReplayer(Replayer):
+        mutated = False
+
+        def _emit_control_overlay_phase(self, phase, **kwargs):
+            if phase == "executing" and self._frame_stack and not self.mutated:
+                self.mutated = True
+                self._frame_stack[-1]["state_id"] = "done"
+            return super()._emit_control_overlay_phase(phase, **kwargs)
+
+    effect = Effect(kind=EffectKind.RECORD_WRITTEN, match={"record": "A"})
+    api_step = Step(
+        id="api-write",
+        intent="write through the API",
+        action=ActionKind.KEY,
+        key="Enter",
+        api_binding=ApiBinding(
+            method="POST",
+            url_template="/records",
+            effects=[effect],
+        ),
+    )
+    workflow, bundle = _seal(
+        tmp_path,
+        Workflow(
+            name="program-api-frame",
+            program=ProgramGraph(
+                entry="write",
+                states={
+                    "write": State(
+                        id="write",
+                        kind=StateKind.ACTION,
+                        step=api_step,
+                        transitions=[Transition(target="done")],
+                    ),
+                    "done": State(
+                        id="done", kind=StateKind.TERMINAL, outcome="success"
+                    ),
+                },
+            ),
+        ),
+    )
+    actuator = RecordingActuator()
+    verifier = ConfirmingVerifier()
+
+    report = OverlayMutationReplayer(
+        FakeBackend(),
+        vision=FakeVision(),
+        effect_verifier=verifier,
+        api_actuator=actuator,
+    ).run(workflow, bundle_dir=bundle, run_dir=tmp_path / "program-api-frame-run")
+
+    assert report.success is False
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].safety_halt is True
+    assert "leaf frame" in (report.results[0].error or "")
+    assert actuator.calls == 0
+    assert verifier.verify_calls == 0
+
+
+def test_program_interstitial_dismissal_rechecks_frame_after_detection(tmp_path):
+    class DetectionMutationReplayer(Replayer):
+        mutated = False
+
+        def _predicate_holds(self, predicate, *args, **kwargs):
+            if predicate.text == "release note" and not self.mutated:
+                self.mutated = True
+                self._frame_stack[-1]["state_id"] = "body-done"
+            return super()._predicate_holds(predicate, *args, **kwargs)
+
+    workflow = _governed_loop_workflow()
+    workflow.interstitials = [
+        Interstitial(
+            name="release note",
+            detect=Predicate(kind=PredicateKind.TEXT_PRESENT, text="release note"),
+            dismiss_key="Escape",
+            risk="reversible",
+            consequential=False,
+            clearance=Predicate(
+                kind=PredicateKind.TEXT_ABSENT,
+                text="release note",
+            ),
+        )
+    ]
+    workflow, bundle = _seal(tmp_path, workflow)
+    vision = FakeVision()
+    vision.text_results = {
+        "release note": Match(point=(10, 10), region=(0, 0, 5, 5), confidence=1.0)
+    }
+    backend = FakeBackend()
+
+    report = DetectionMutationReplayer(backend, vision=vision).run(
+        workflow,
+        worklists={"queue": [{"patient": "A"}]},
+        bundle_dir=bundle,
+        run_dir=tmp_path / "program-interstitial-frame-run",
+    )
+
+    assert report.success is False
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].safety_halt is True
+    assert "leaf frame" in (report.results[0].error or "")
+    assert backend.actions == []
 
 
 def test_program_exception_handler_cannot_catch_governed_identity_halt(tmp_path):

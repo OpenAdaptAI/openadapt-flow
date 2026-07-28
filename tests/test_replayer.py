@@ -675,7 +675,10 @@ def test_remote_post_delivery_timeout_is_never_retried(bundle, run_dir):
     )
 
     assert report.success is False
-    assert "delivery outcome uncertain" in report.results[0].error
+    result = report.results[0]
+    assert "Action delivery was uncertain and was not retried" in (result.error or "")
+    assert result.delivery_uncertainty is not None
+    assert result.delivery_uncertainty.cause_type == "TimeoutError"
     assert backend.acquire_count == 1
     assert backend.click_attempts == 1
     assert backend.actions == [("click", 110, 105, False)]
@@ -1067,6 +1070,68 @@ def test_remote_preedge_retry_rechecks_inputs_at_keyboard_delivery_boundary(
     assert backend.reset_count == 1
     assert result.delivery_attempted is False
     assert [event.retried for event in result.fresh_actuation_events] == [True]
+    assert "authorization no longer matches the current runtime inputs" in (
+        result.error or ""
+    )
+
+
+class _LateVerificationMutatingTypeBackend(RemoteLeaseBackend):
+    def __init__(self, worklists):
+        frame = make_png()
+        super().__init__(initial_frame=frame, fresh_frame=frame)
+        self.worklists = worklists
+        self._type_accept_results = [False, True]
+        self.mutated = False
+
+    def focused_text_value(self):
+        if self.actions == [("type", "hello")] and not self.mutated:
+            self.worklists["cases"].append({"id": "late"})
+            self.mutated = True
+        return super().focused_text_value()
+
+
+def test_typed_recovery_refuses_inputs_changed_during_verification(bundle, run_dir):
+    worklists = {"cases": [{"id": "1"}]}
+    workflow = Workflow(
+        name="governed-type-recovery",
+        surface="rdp",
+        execution_mode="external",
+        steps=[
+            Step(
+                id="type1",
+                intent="type governed value",
+                action=ActionKind.TYPE,
+                text="hello",
+                risk="irreversible",
+            )
+        ],
+    )
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    assert workflow.manifest is not None
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, worklists),
+        admitted_policy_name="test",
+    )
+    backend = _LateVerificationMutatingTypeBackend(worklists)
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        governed_authorization=authorization,
+    ).run(
+        workflow,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert backend.actions == [("type", "hello")]
+    assert result.input_retried is True
+    assert result.input_verified is False
     assert "authorization no longer matches the current runtime inputs" in (
         result.error or ""
     )
@@ -1786,6 +1851,29 @@ def test_closed_loop_scroll_budget_exhaustion_fails_loudly(bundle, run_dir):
     # Budget 2.5 x 400px allows exactly two 400px gestures, both upward
     # (direction comes from the recorded delta).
     assert backend.actions == [("scroll", 0, -400), ("scroll", 0, -400)]
+
+
+def test_consequential_remote_scroll_reacquires_each_wheel_edge(bundle, run_dir):
+    frame = make_png()
+    backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+    step = scroll_step(dy=-400)
+    step.risk = "irreversible"
+    workflow = Workflow(
+        name="remote-scroll",
+        surface="rdp",
+        execution_mode="external",
+        steps=[step, click_step(step_id="target")],
+    )
+
+    report = Replayer(backend, vision=FakeVision()).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is False
+    assert backend.actions == [("scroll", 0, -400), ("scroll", 0, -400)]
+    assert backend.acquire_count == 3  # outer preflight plus one per wheel edge
 
 
 def test_consecutive_scroll_steps_share_the_loop(bundle, run_dir):

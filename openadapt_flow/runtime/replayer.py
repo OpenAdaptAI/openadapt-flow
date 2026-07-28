@@ -3427,6 +3427,31 @@ class Replayer:
                         # permission to assume delivery. Success now requires
                         # the complete configured contract.
                         error = None
+                    except Exception as exc:
+                        if result.delivery_attempted is not True:
+                            raise
+                        # An untyped backend exception after a delivery boundary
+                        # is conservative uncertainty, not proof of no input.
+                        # Do not retain its message because it can contain page
+                        # or record data.  Continue through the same postcondition
+                        # and independent-effect reconciliation as the typed path.
+                        delivery_uncertain = True
+                        target_fingerprint = None
+                        if (
+                            resolution is not None
+                            and resolution.structural_handle is not None
+                        ):
+                            target_fingerprint = (
+                                resolution.structural_handle.target_fingerprint
+                            )
+                        result.delivery_uncertainty = ActionDeliveryUncertainty(
+                            operation=step.action.value,
+                            native=result.actuation == "uia",
+                            target_fingerprint=target_fingerprint,
+                            observed_at=datetime.now(timezone.utc).isoformat(),
+                            cause_type=type(exc).__name__,
+                        )
+                        error = None
                     if self._governed_asset_mutation is not None:
                         error = self._governed_asset_mutation
                         result.safety_halt = True
@@ -5749,6 +5774,10 @@ class Replayer:
                 field_point,
                 before_png,
                 result,
+                workflow=workflow,
+                params=params,
+                bundle_dir=bundle_dir,
+                resolution=resolution,
                 field_region=field_region,
                 baseline_field_value=baseline_field_value,
                 allow_masked=step.secret,
@@ -7451,6 +7480,10 @@ class Replayer:
         baseline_png: bytes,
         result: StepResult,
         *,
+        workflow: Workflow,
+        params: dict[str, str],
+        bundle_dir: Path,
+        resolution: Optional[Resolution],
         field_region: Optional[Region] = None,
         baseline_field_value: Optional[str] = None,
         allow_masked: bool = False,
@@ -7499,18 +7532,128 @@ class Replayer:
                 "confirmed change; refusing an unleased refocus/retype retry"
             )
         result.input_retried = True
+        retry_resolution = resolution
+        retry_region = field_region
+        retry_frame = baseline_png
+        needs_revalidation = self._step_needs_consequential_revalidation(step, workflow)
         if field_point is not None:
-            self.backend.click(*field_point)
+            if needs_revalidation:
+                (
+                    retry_resolution,
+                    retry_region,
+                    retry_frame,
+                    retry_error,
+                ) = self._revalidate_consequential_actuation(
+                    step,
+                    retry_resolution,
+                    retry_region,
+                    retry_frame,
+                    params,
+                    workflow,
+                    bundle_dir,
+                    result,
+                )
+                if retry_error is not None:
+                    result.input_verified = False
+                    return retry_error
+                if retry_resolution is None:
+                    result.input_verified = False
+                    return (
+                        f"Typed input retry for step '{step.id}' ({step.intent}) "
+                        "could not freshly resolve its field; run aborted"
+                    )
+                field_point = retry_resolution.point
+            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            if refusal is not None:
+                result.input_verified = False
+                return refusal
+            self._deliver_backend_call(
+                result,
+                lambda: self.backend.click(*field_point),
+            )
             # Replace, don't append: if the first attempt DID land but was
             # not visible to the diff/OCR, retyping raw would double it.
-            self.backend.press("ControlOrMeta+a")
-        retry_baseline = self.backend.screenshot()
-        self.backend.type_text(text)
+            if needs_revalidation:
+                (
+                    retry_resolution,
+                    retry_region,
+                    retry_frame,
+                    retry_error,
+                ) = self._revalidate_consequential_actuation(
+                    step,
+                    retry_resolution,
+                    retry_region,
+                    retry_frame,
+                    params,
+                    workflow,
+                    bundle_dir,
+                    result,
+                    arm_keyboard=True,
+                )
+                if retry_error is not None:
+                    result.input_verified = False
+                    return retry_error
+                if retry_resolution is None or retry_resolution.point != field_point:
+                    self._cancel_guarded_keyboard()
+                    result.input_verified = False
+                    return (
+                        f"Typed input retry for step '{step.id}' ({step.intent}) "
+                        "resolved to a different field after refocus; run aborted"
+                    )
+            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            if refusal is not None:
+                result.input_verified = False
+                return refusal
+            self._deliver_backend_call(
+                result,
+                lambda: self.backend.press("ControlOrMeta+a"),
+            )
+
+        # The refocus click and select-all key each consume an opaque remote
+        # lease.  Acquire and validate one more exact frame for the retype edge.
+        if needs_revalidation:
+            (
+                retry_resolution,
+                retry_region,
+                retry_baseline,
+                retry_error,
+            ) = self._revalidate_consequential_actuation(
+                step,
+                retry_resolution,
+                retry_region,
+                retry_frame,
+                params,
+                workflow,
+                bundle_dir,
+                result,
+                arm_keyboard=True,
+            )
+            if retry_error is not None:
+                result.input_verified = False
+                return retry_error
+        else:
+            retry_baseline = self.backend.screenshot()
+        if (
+            needs_revalidation
+            and field_point is not None
+            and (retry_resolution is None or retry_resolution.point != field_point)
+        ):
+            self._cancel_guarded_keyboard()
+            result.input_verified = False
+            return (
+                f"Typed input retry for step '{step.id}' ({step.intent}) "
+                "resolved to a different field before retyping; run aborted"
+            )
+        refusal = self._delivery_authorization_refusal(workflow, params, result)
+        if refusal is not None:
+            result.input_verified = False
+            return refusal
+        self._deliver_backend_call(result, lambda: self.backend.type_text(text))
         landed, _changed = self._typed_input_landed(
             text,
             field_point,
             retry_baseline,
-            field_region=field_region,
+            field_region=retry_region,
             # Select-all means the retry's expected exact value is ``text``
             # regardless of what the field contained before replacement.
             baseline_field_value="" if baseline_field_value is not None else None,
@@ -7868,6 +8011,30 @@ class Replayer:
         budget = SCROLL_BUDGET_FACTOR * increment
         scrolled = 0.0
         while scrolled + increment <= budget:
+            # Readiness callbacks run after the outer step preflight.  Bind
+            # every wheel edge to a new exact remote frame and repeat the
+            # context/identity checks after those callbacks.  This also avoids
+            # reusing the one-shot lease consumed by the prior wheel edge.
+            if self._step_needs_consequential_revalidation(step, workflow):
+                (
+                    _scroll_resolution,
+                    _scroll_region,
+                    fresh_scroll_frame,
+                    scroll_error,
+                ) = self._revalidate_consequential_actuation(
+                    step,
+                    None,
+                    None,
+                    before_png,
+                    params,
+                    workflow,
+                    bundle_dir,
+                    result,
+                )
+                if scroll_error is not None:
+                    return scroll_error
+                if readiness_holds(fresh_scroll_frame):
+                    return None
             refusal = self._delivery_authorization_refusal(workflow, params, result)
             if refusal is not None:
                 return refusal
@@ -7877,6 +8044,7 @@ class Replayer:
             )
             scrolled += increment
             frame = self.vision.wait_settled(self.backend)
+            before_png = frame
             holds = readiness_holds(frame)
             if self._governed_asset_mutation is not None:
                 return self._governed_asset_mutation

@@ -5738,6 +5738,10 @@
     {
       "path": "tests/fixtures/theme-region-stable-overhalt-v1.16.1.json",
       "sha256": "4bf055e6c11f837ed6daa4a5b89ab28dd431a7eccd2ce3044758ba260eed52cd"
+    },
+    {
+      "path": "tests/golden/human_decision_tasks.json",
+      "sha256": "014185bf6af272aa66374406ef24e6a3a6707eba7dafdab683f570583bb3c82b"
     }
   ]
 }

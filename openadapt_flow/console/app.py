@@ -607,17 +607,24 @@ def create_app(
                     "the attention item is no longer current; reload the queue"
                 )
             request = human_decisions.admit_console_action(run_dir, item, payload)
+            # A person answered on the console or the paired phone: the
+            # operator identity is server-derived from the local OS session and
+            # the request arrived through a browser. Asserted explicitly rather
+            # than left to default, because `unknown` is reserved for a caller
+            # that genuinely did not say.
             decision = (
                 attended_service.execute(
                     run_dir,
                     request,
                     operator=operator,
+                    decided_by="human",
                 )
                 if attended_service is not None
                 else execute_attended_action(
                     run_dir,
                     request,
                     operator=operator,
+                    decided_by="human",
                 )
             )
         except (AttendedActionRefused, ResumeRefused) as exc:

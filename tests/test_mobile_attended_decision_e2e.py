@@ -138,11 +138,20 @@ class _Service:
     def __init__(self, executor):
         self.executor = executor
         self.calls = 0
+        self.deciders = []
 
-    def execute(self, run_dir, request, *, operator):
+    def execute(self, run_dir, request, *, operator, decided_by="unknown"):
         self.calls += 1
+        # Recorded, not defaulted: the console must state that a person
+        # decided, and a fake that quietly accepted `unknown` would hide a
+        # console that stopped saying so.
+        self.deciders.append(decided_by)
         return execute_attended_action(
-            run_dir, request, operator=operator, executor=self.executor
+            run_dir,
+            request,
+            operator=operator,
+            decided_by=decided_by,
+            executor=self.executor,
         )
 
 
@@ -1470,4 +1479,159 @@ def test_rejecting_a_run_that_already_wrote_stays_reconciliation_required(
                 disposition="completed_by_operator",
             ),
             operator="front-desk",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Who decided: separating a person's answer from a model's
+# ---------------------------------------------------------------------------
+
+
+def _journal(run):
+    """Every decision the engine wrote for this run, oldest first."""
+    return AttendedActionStore(run)._read_log().decisions
+
+
+def test_a_human_answer_and_an_automated_answer_are_told_apart_in_the_journal(
+    tmp_path, monkeypatch
+):
+    """An agreement rate must be computable over PEOPLE alone.
+
+    ``operator`` could never support that. It is the local OS account, and the
+    MCP bridge in ``openadapt-agent`` derives it from the same
+    ``_local_operator_identity()`` the console does -- so a model's answer and a
+    person's answer from one machine carried an IDENTICAL operator string. The
+    two populations were mixed with no way to separate them afterwards, which
+    makes every rate drawn from this journal a claim nobody can qualify.
+
+    This drives both answers into one journal with the SAME operator, and then
+    does the thing an analyst would actually do: filter to human decisions. If
+    the filter cannot exclude the model's answer, the field is decoration.
+    """
+    from openadapt_flow.runtime.durable.attended import AttendedActionRequest
+
+    _wf, bundles, runs, _bundle, run, capability = _halt(tmp_path, name="mixed")
+    _app, client = _phone(bundles, runs, monkeypatch)
+    item, detail = _open_task(client)
+
+    # (1) A person answers through the phone route.
+    human = _post(
+        client, item, _decision(detail, action="escalate", key="human-escalate-0001")
+    )
+    assert human.status_code == 200
+
+    # (2) An automated caller answers the same pause, asserting its own nature
+    #     the way the MCP bridge does -- and deliberately claiming the SAME
+    #     operator identity, because that is exactly what it does today.
+    execute_attended_action(
+        run,
+        AttendedActionRequest(
+            capability_digest=capability.digest,
+            idempotency_key="automation-escalate-001",
+            action="escalate",
+            disposition="needs_assistance",
+        ),
+        operator="front-desk",
+        decided_by="automation",
+    )
+
+    decisions = _journal(run)
+    assert len(decisions) == 2
+
+    # The identity field cannot tell them apart. This is the defect, pinned so
+    # nobody later "simplifies" the new field away by pointing at this one.
+    assert len({d.operator for d in decisions}) == 1, (
+        "the premise of this test is that operator is identical for both"
+    )
+
+    # The provenance field can.
+    assert {d.decided_by for d in decisions} == {"human", "automation"}
+
+    # -- the measurement consequence, stated as the query itself --------------
+    human_only = [d for d in decisions if d.decided_by == "human"]
+    assert len(human_only) == 1
+    assert all(d.decided_by == "human" for d in human_only)
+    # And the automated answer is genuinely excluded, not merely labelled.
+    assert "automation-escalate-001" not in {d.idempotency_key for d in human_only}
+
+
+def test_an_undeclared_caller_is_excluded_from_a_human_rate_not_counted_into_it(
+    tmp_path,
+):
+    """The default is the whole safety property of this field.
+
+    Had it defaulted to ``human``, every caller that forgot to declare -- and
+    every decision written before the field existed -- would be counted as a
+    person, which re-creates the same bias one level down and is invisible.
+    ``unknown`` is the honest value: we do not know, so the record says so and
+    a human rate leaves it out.
+    """
+    from openadapt_flow.runtime.durable.attended import AttendedActionRequest
+
+    _wf, _bundles, _runs, _bundle, run, capability = _halt(tmp_path, name="silent")
+
+    execute_attended_action(
+        run,
+        AttendedActionRequest(
+            capability_digest=capability.digest,
+            idempotency_key="undeclared-escalate-01",
+            action="escalate",
+            disposition="needs_assistance",
+        ),
+        operator="front-desk",
+    )
+
+    decision = _journal(run)[-1]
+    assert decision.decided_by == "unknown", (
+        "an undeclared caller must never be silently attributed to a person"
+    )
+    assert [d for d in _journal(run) if d.decided_by == "human"] == []
+
+
+def test_the_console_and_the_phone_route_assert_a_person_decided(tmp_path, monkeypatch):
+    """The default is ``unknown``, so the human paths must SAY they are human.
+
+    This is the half of the contract the default cannot provide. If the console
+    ever stopped asserting it, every genuine operator answer would silently
+    fall out of the human population and the rate would quietly measure a
+    shrinking sample -- a failure that looks like nothing at all.
+
+    Both branches are covered: the live-executor branch through the injected
+    service, and the direct branch through the journal.
+    """
+    _wf, bundles, runs, _bundle, run, _capability = _halt(tmp_path, name="asserts")
+    backend, executor = _completed_live_session()
+    service = _Service(executor)
+    _app, client = _phone(bundles, runs, monkeypatch, service=service)
+    item, detail = _open_task(client)
+
+    assert (
+        _post(
+            client, item, _decision(detail, action="continue", key="console-human-0001")
+        ).status_code
+        == 200
+    )
+    assert service.deciders == ["human"], service.deciders
+    assert _journal(run)[-1].decided_by == "human"
+    assert backend.actions, "the live branch was not the one exercised"
+
+
+def test_a_submitter_cannot_describe_its_own_nature(tmp_path):
+    """``decided_by`` is asserted by the trusted caller, never sent in the request.
+
+    ``AttendedActionRequest`` is what a relay or an MCP client puts on the
+    wire, and ``request_digest`` commits to it. If provenance lived there, the
+    party whose nature is in question would be the party declaring it. It sits
+    beside ``operator`` instead, which is asserted the same way and for the
+    same reason.
+    """
+    from openadapt_flow.runtime.durable.attended import AttendedActionRequest
+
+    with pytest.raises(ValidationError):
+        AttendedActionRequest(
+            capability_digest="sha256:" + "0" * 64,
+            idempotency_key="forged-provenance-0001",
+            action="escalate",
+            disposition="needs_assistance",
+            decided_by="human",
         )

@@ -640,10 +640,14 @@ def execute_remote_attended_action(
         deployment=deployment,
         principal=principal,
     )
+    # A remote person answered. The relay admits a decision only against an
+    # authenticated principal whose assurance the control plane raised to AAL2,
+    # so this path cannot carry a model's answer.
     return execute_attended_action(
         run_dir,
         engine_request,
         operator=principal.subject,
+        decided_by="human",
         executor=executor,
         key=key,
     )

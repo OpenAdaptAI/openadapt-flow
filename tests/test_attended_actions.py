@@ -1882,11 +1882,12 @@ def test_attended_http_action_requires_auth_csrf_and_exact_capability(
     executor = _ResultExecutor()
 
     class Service:
-        def execute(self, run_dir, request, *, operator):
+        def execute(self, run_dir, request, *, operator, decided_by="unknown"):
             return execute_attended_action(
                 run_dir,
                 request,
                 operator=operator,
+                decided_by=decided_by,
                 executor=executor,
             )
 

@@ -241,6 +241,36 @@ class AttendedDecision(BaseModel):
     idempotency_key: str
     action: Literal["continue", "skip", "reject", "teach", "escalate"]
     operator: str
+    #: WHAT KIND of decider produced this answer, as distinct from ``operator``,
+    #: which records WHICH IDENTITY it was attributed to. These are different
+    #: questions and only one of them was answerable before this field.
+    #:
+    #: ``operator`` is the local OS account or the authenticated remote
+    #: subject. The MCP bridge in ``openadapt-agent`` derives it from the same
+    #: ``_local_operator_identity()`` a person's own console does, so a
+    #: decision a MODEL submitted and one a PERSON submitted from the same
+    #: machine carried an IDENTICAL ``operator`` string. Any rate computed over
+    #: this journal therefore mixed the two populations with no way to separate
+    #: them afterwards.
+    #:
+    #: That matters most for the exact measurement the attended vocabulary
+    #: exists to produce. An agreement rate is a claim about what PEOPLE
+    #: concluded when they read the evidence. A model's answers are a different
+    #: population, and averaging them together answers neither question.
+    #:
+    #: Caller-asserted, exactly like ``operator``, and deliberately NOT a field
+    #: on :class:`AttendedActionRequest`: the request is what a relay or an MCP
+    #: client sends and ``request_digest`` commits to it, so a submitter must
+    #: never be able to describe its own nature. The trusted caller that
+    #: already asserts ``operator`` asserts this beside it.
+    #:
+    #: The default is ``unknown``, and that is deliberate. A caller that does
+    #: not declare is EXCLUDED from a human rate rather than silently counted
+    #: into it, and every decision written before this field existed reads back
+    #: as ``unknown`` -- which is the truth, because the bridge predates it.
+    #: Defaulting to ``human`` would have re-created the same bias one level
+    #: down. A closed enum, never free text; a new member is additive.
+    decided_by: Literal["human", "automation", "unknown"] = "unknown"
     disposition: Optional[str] = None
     status: Literal[
         "prepared",
@@ -1171,11 +1201,18 @@ def execute_attended_action(
     request: AttendedActionRequest,
     *,
     operator: str,
+    decided_by: Literal["human", "automation", "unknown"] = "unknown",
     executor: Optional[AttendedActionExecutor] = None,
     key: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> AttendedDecision:
-    """Admit and execute one attended decision under exact binding."""
+    """Admit and execute one attended decision under exact binding.
+
+    ``decided_by`` records WHAT KIND of decider this is, beside ``operator``,
+    which records WHICH identity. See :class:`AttendedDecision` for why the two
+    are separate questions and why the default is ``unknown`` rather than
+    ``human``.
+    """
     from openadapt_flow import crypto as _crypto
 
     key = _crypto.resolve_key(key)
@@ -1269,6 +1306,7 @@ def execute_attended_action(
                 idempotency_key=request.idempotency_key,
                 action=request.action,
                 operator=operator,
+                decided_by=decided_by,
                 disposition=request.disposition or "rejected_by_operator",
                 status="rejected",
                 message=(
@@ -1293,6 +1331,7 @@ def execute_attended_action(
                 idempotency_key=request.idempotency_key,
                 action=request.action,
                 operator=operator,
+                decided_by=decided_by,
                 disposition=request.disposition or "teach_requested",
                 status="needs_demonstration",
                 message=(
@@ -1314,6 +1353,7 @@ def execute_attended_action(
                 idempotency_key=request.idempotency_key,
                 action=request.action,
                 operator=operator,
+                decided_by=decided_by,
                 disposition=request.disposition or "needs_assistance",
                 status="escalated",
                 message=(
@@ -1346,6 +1386,7 @@ def execute_attended_action(
             idempotency_key=request.idempotency_key,
             action=request.action,
             operator=operator,
+            decided_by=decided_by,
             disposition=request.disposition,
             status="prepared",
             message="request admitted; no delivery attempted",
@@ -1392,6 +1433,7 @@ def execute_attended_action(
             idempotency_key=request.idempotency_key,
             action=request.action,
             operator=operator,
+            decided_by=decided_by,
             disposition=request.disposition,
             status=result.status,
             message=result.message,

@@ -353,14 +353,22 @@ class AttendedActionService:
         request: AttendedActionRequest,
         *,
         operator: str,
+        decided_by: Literal["human", "automation", "unknown"] = "unknown",
     ) -> AttendedDecision:
-        """Admit and execute one exact attended decision on the live session."""
+        """Admit and execute one exact attended decision on the live session.
+
+        ``decided_by`` is relayed unchanged. This service owns the live
+        executor, not the question of who decided, and inventing an answer here
+        would attribute a decision on behalf of a caller that never made the
+        claim.
+        """
         if not self._entered:
             raise RuntimeError("attended action service is not open")
         return execute_attended_action(
             run_dir,
             request,
             operator=operator,
+            decided_by=decided_by,
             executor=self._owner,
             key=self._key,
         )

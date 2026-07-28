@@ -184,7 +184,7 @@ class ProgramCheckpoint(BaseModel):
     intent: str = ""
     #: The interpreter's graph/subflow/loop stack, OUTER -> INNER (see
     #: :class:`GraphFrame`). ``frames[-1]`` is the leaf (the verified state).
-    frames: list[GraphFrame] = Field(default_factory=list)
+    frames: list[GraphFrame] = Field(min_length=1)
     #: The parameter bindings in scope at the leaf (resume re-binds these).
     bound_params: dict[str, str] = Field(default_factory=dict)
     #: Contract hashes (``Effect.contract_hash``) of the effects CONFIRMED AT
@@ -239,7 +239,7 @@ class ProgramCheckpoint(BaseModel):
     def _leaf_matches_verified_state(self) -> "ProgramCheckpoint":
         """Reject a checkpoint whose durable cursor contradicts its verdict."""
 
-        if self.frames and self.frames[-1].state_id != self.verified_state_id:
+        if self.frames[-1].state_id != self.verified_state_id:
             raise ValueError(
                 "the leaf program frame must match the verified checkpoint state"
             )

@@ -733,7 +733,16 @@ def test_demo_program_refuses_a_tampered_active_frame_path(tmp_path):
     assert "leaf frame" in (report.results[0].error or "")
 
 
-def test_program_api_actuation_rechecks_frame_after_overlay_callback(tmp_path):
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    (
+        ("frame", "leaf frame"),
+        ("api_binding", "workflow semantics"),
+    ),
+)
+def test_program_api_actuation_rechecks_program_after_overlay_callback(
+    tmp_path, mutation, expected_error
+):
     class ConfirmingVerifier:
         substrate = "test"
 
@@ -770,7 +779,12 @@ def test_program_api_actuation_rechecks_frame_after_overlay_callback(tmp_path):
         def _emit_control_overlay_phase(self, phase, **kwargs):
             if phase == "executing" and self._frame_stack and not self.mutated:
                 self.mutated = True
-                self._frame_stack[-1]["state_id"] = "done"
+                if mutation == "frame":
+                    self._frame_stack[-1]["state_id"] = "done"
+                else:
+                    step = workflow.program.states["write"].step
+                    assert step is not None and step.api_binding is not None
+                    step.api_binding.url_template = "/wrong-record"
             return super()._emit_control_overlay_phase(phase, **kwargs)
 
     effect = Effect(kind=EffectKind.RECORD_WRITTEN, match={"record": "A"})
@@ -818,7 +832,7 @@ def test_program_api_actuation_rechecks_frame_after_overlay_callback(tmp_path):
     assert report.success is False
     assert report.results[0].delivery_attempted is False
     assert report.results[0].safety_halt is True
-    assert "leaf frame" in (report.results[0].error or "")
+    assert expected_error in (report.results[0].error or "")
     assert actuator.calls == 0
     assert verifier.verify_calls == 0
 

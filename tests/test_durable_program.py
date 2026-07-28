@@ -72,6 +72,16 @@ def test_program_checkpoint_rejects_a_leaf_that_is_not_the_verified_state():
         )
 
 
+def test_program_checkpoint_rejects_an_empty_control_cursor():
+    with pytest.raises(ValueError, match="at least 1 item"):
+        ProgramCheckpoint(
+            workflow_name="w",
+            seq=1,
+            verified_state_id="verified",
+            frames=[],
+        )
+
+
 def test_program_resume_rejects_a_constructed_inconsistent_leaf(tmp_path):
     action = State(
         id="verified",
@@ -100,6 +110,39 @@ def test_program_resume_rejects_a_constructed_inconsistent_leaf(tmp_path):
             report=RunReport(workflow_name="w", started_at="now"),
             new_crops={},
         )
+
+
+def test_program_resume_rejects_a_constructed_empty_cursor(tmp_path):
+    action = State(
+        id="verified",
+        kind=StateKind.ACTION,
+        step=Step(id="type", intent="type", action=ActionKind.TYPE, text="A"),
+    )
+    workflow = Workflow(
+        name="w",
+        program=ProgramGraph(entry="verified", states={"verified": action}),
+    )
+    checkpoint = ProgramCheckpoint.model_construct(
+        workflow_name="w",
+        seq=1,
+        verified_state_id="verified",
+        frames=[],
+        bound_params={},
+    )
+    backend = FakeBackend()
+
+    with pytest.raises(_ProgramHalt, match="cursor does not match"):
+        Replayer(backend, vision=FakeVision())._resume_program_state(
+            checkpoint,
+            workflow=workflow,
+            worklists={},
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run",
+            report=RunReport(workflow_name="w", started_at="now"),
+            new_crops={},
+        )
+
+    assert backend.actions == []
 
 
 def _patient_effect() -> Effect:

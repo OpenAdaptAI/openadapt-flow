@@ -455,6 +455,7 @@ class Replayer:
         self._active_delivery_resolution: Optional[Resolution] = None
         self._active_delivery_region: Optional[Region] = None
         self._current_graph_id: Optional[str] = None
+        self._execution_workflow_snapshot: Optional[Workflow] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -655,6 +656,10 @@ class Replayer:
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
+        try:
+            self._execution_workflow_snapshot = workflow.model_copy(deep=True)
+        except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
+            self._execution_workflow_snapshot = None
         # Snapshot bundle declarations before authorization validation and
         # before the first backend/vision callback.  Execution uses only this
         # deep copy; the caller-owned workflow remains available solely for a
@@ -1746,6 +1751,7 @@ class Replayer:
         ``on_exception`` (recorded as handled) or HALTs the run."""
         if state.step is None:
             raise _ProgramHalt("halt", f"action state '{state.id}' carries no step")
+        action_step = state.step
         # Idempotency (RFC §5): on a RESUME, an action whose declared effects were
         # ALL already CONFIRMED in the pre-pause leg is NOT re-executed -- a
         # confirmed consequential write is never re-performed. Keyed on the
@@ -1759,7 +1765,7 @@ class Replayer:
         # cursor instead of serializing that corrupted state.
         pre_action_frames = [self._frame_to_model(frame) for frame in self._frame_stack]
         result = self._run_step(
-            state.step,
+            action_step,
             workflow=workflow,
             step_index=0,
             params=params,
@@ -1768,6 +1774,28 @@ class Replayer:
             new_crops=new_crops,
             graph_ctx=ctx,
         )
+        if result.ok:
+            post_action_refusal = self._active_program_frame_refusal(
+                workflow,
+                params,
+                action_step,
+                self._governed_base_params or {},
+            )
+            if post_action_refusal is None:
+                post_action_refusal = self._workflow_snapshot_refusal(workflow)
+            if post_action_refusal is not None:
+                result.ok = False
+                result.safety_halt = True
+                result.failure_category = (
+                    "governed_refusal"
+                    if self.governed_authorization is not None
+                    else "safety_halt"
+                )
+                result.error = (
+                    f"{post_action_refusal}; the action result was checked, "
+                    "but the program changed during delivery; no later state "
+                    "was executed"
+                )
         report.results.append(result)
         self._account_result(report, result)
         if self._program_durable is not None:
@@ -1776,7 +1804,7 @@ class Replayer:
         # click-to-focus heuristic. A SKIPPED step (guard on_unmet="skip") did
         # not act, so it leaves the previous action / click point untouched.
         if not result.skipped:
-            self._prev_action = state.step.action
+            self._prev_action = action_step.action
 
         if not result.ok:
             # A skipped guard is ok=True; only a genuine failure lands here.
@@ -2675,8 +2703,9 @@ class Replayer:
         mid-loop pause finishes the in-progress row and runs the remaining rows.
         """
         assert workflow.program is not None
-        if checkpoint.frames and (
-            not isinstance(checkpoint.frames[-1], GraphFrame)
+        if (
+            not checkpoint.frames
+            or not isinstance(checkpoint.frames[-1], GraphFrame)
             or checkpoint.frames[-1].state_id != checkpoint.verified_state_id
         ):
             raise _ProgramHalt(
@@ -2718,22 +2747,6 @@ class Replayer:
                     "the attended interpreter transition receipt names an "
                     "undeclared successor",
                 )
-        if not checkpoint.frames:
-            # Nothing verified pre-pause (halted on the very first state): there
-            # is no interpreter state to restore, so re-walk from the top.
-            self._walk_graph(
-                workflow.program,
-                graph_id=TOP_GRAPH_ID,
-                workflow=workflow,
-                params=dict(checkpoint.bound_params),
-                worklists=worklists,
-                bundle_dir=bundle_dir,
-                run_dir=run_dir,
-                report=report,
-                new_crops=new_crops,
-                depth=0,
-            )
-            return
         self._resume_descend(
             checkpoint.frames,
             0,
@@ -5245,7 +5258,8 @@ class Replayer:
                     "governed program control frame no longer matches a sealed "
                     "graph and state"
                 )
-
+            if state.id != str(state_id):
+                return "program state identity changed after action admission"
             cursor = frame.get("loop")
             if index == 0:
                 if graph_id != TOP_GRAPH_ID or cursor is not None:
@@ -5328,6 +5342,9 @@ class Replayer:
     ) -> Optional[str]:
         """Recheck exact governed authority and inputs before fresh input."""
 
+        snapshot_refusal = self._workflow_snapshot_refusal(workflow)
+        if snapshot_refusal is not None:
+            return snapshot_refusal
         profile_refusal = self._profile_runtime_refusal(workflow)
         if profile_refusal is not None:
             return profile_refusal
@@ -5364,6 +5381,28 @@ class Replayer:
         if frame_refusal is not None:
             return frame_refusal
         return self._governed_asset_mutation
+
+    def _workflow_snapshot_refusal(self, workflow: Workflow) -> Optional[str]:
+        """Refuse a caller-owned workflow change after run admission."""
+
+        snapshot = self._execution_workflow_snapshot
+        if snapshot is None:
+            if self.governed_authorization is not None or workflow.program is not None:
+                return "workflow semantics could not be snapshotted before execution"
+            # Preserve the private direct-_act compatibility seam for a linear
+            # Demo step. Public run() always installs a snapshot first.
+            return None
+        try:
+            current = workflow.model_dump(mode="json")
+            admitted = snapshot.model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - mutated model boundary
+            return (
+                "workflow semantic validation failed closed before input "
+                f"({type(exc).__name__})"
+            )
+        if current != admitted:
+            return "workflow semantics changed after run admission"
+        return None
 
     def _delivery_authorization_refusal(
         self,
@@ -8669,9 +8708,50 @@ class Replayer:
         outcome = healing_mod.govern_heal(step, event, run_dir=run_dir)
         if outcome.promoted:
             heal_mod.apply_heal(workflow, event)
+            self._accept_healed_anchor_in_workflow_snapshot(workflow, event)
             heal_mod.persist_heal(event, crop_png, frame_png, run_dir)
             new_crops[step.id] = crop_png
         return outcome
+
+    def _accept_healed_anchor_in_workflow_snapshot(
+        self,
+        workflow: Workflow,
+        event: Any,
+    ) -> None:
+        """Update only the governed heal's anchor in the admitted snapshot."""
+
+        snapshot = self._execution_workflow_snapshot
+        if snapshot is None:
+            return
+
+        for live_step, admitted_step in zip(workflow.steps, snapshot.steps):
+            if (
+                live_step.id == event.step_id
+                and admitted_step.id == event.step_id
+                and live_step.anchor == event.new_anchor
+            ):
+                admitted_step.anchor = event.new_anchor.model_copy(deep=True)
+
+        live_graphs: dict[str, ProgramGraph] = dict(workflow.subflows)
+        admitted_graphs: dict[str, ProgramGraph] = dict(snapshot.subflows)
+        if workflow.program is not None and snapshot.program is not None:
+            live_graphs[TOP_GRAPH_ID] = workflow.program
+            admitted_graphs[TOP_GRAPH_ID] = snapshot.program
+        for graph_id, live_graph in live_graphs.items():
+            admitted_graph = admitted_graphs.get(graph_id)
+            if admitted_graph is None:
+                continue
+            for state_id, live_state in live_graph.states.items():
+                admitted_state = admitted_graph.states.get(state_id)
+                if (
+                    admitted_state is not None
+                    and live_state.step is not None
+                    and admitted_state.step is not None
+                    and live_state.step.id == event.step_id
+                    and admitted_state.step.id == event.step_id
+                    and live_state.step.anchor == event.new_anchor
+                ):
+                    admitted_state.step.anchor = event.new_anchor.model_copy(deep=True)
 
     # -- io ----------------------------------------------------------------------
 

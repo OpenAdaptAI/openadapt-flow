@@ -1374,3 +1374,100 @@ def test_reject_is_withheld_where_a_write_may_already_have_landed(
         )
     assert data._load_report(run)[0].canceled is False
     assert CheckpointStore(run).read_pending().status == "pending"
+
+
+def _workflow_with_an_earlier_write() -> Workflow:
+    """A workflow whose FIRST step actuates an irreversible write.
+
+    The second step is the same human step every other test halts on, so the
+    only difference from :func:`_workflow` is that a consequential action
+    already ran and was never verified by the time the operator sees the pause.
+    """
+    return Workflow(
+        name=WORKFLOW_NAME,
+        steps=[
+            Step(
+                id="write",
+                intent="submit the claim to the payer",
+                action=ActionKind.KEY,
+                key="C",
+                risk="irreversible",
+                risk_explanation="submits a claim that cannot be unsent",
+            ),
+            *_workflow().steps,
+        ],
+    )
+
+
+def test_rejecting_a_run_that_already_wrote_stays_reconciliation_required(
+    tmp_path, monkeypatch
+):
+    """Rejection states an intent. It must never manufacture an absence claim.
+
+    This is the load-bearing safety property of the whole action, and it is
+    the case the CANCELED test cannot reach: an earlier step in the SAME run
+    actuated an irreversible write, nothing verified it, and only then did the
+    run halt for a human. Nothing about the operator's tap can un-send that
+    write.
+
+    So the rejection is accepted -- refusing to let an operator stop a run
+    because it already wrote would be the wrong failure -- but the terminal
+    ``transaction_outcome`` stays ``RECONCILIATION_REQUIRED``. The alternative,
+    forcing ``CANCELED`` because a human said stop, would hand the customer a
+    clean bill of health over an unreconciled write in their system of record.
+
+    Note this is NOT the withheld case. ``reject`` is withheld only where the
+    runtime positively recorded that THIS step's delivery is uncertain. Here
+    delivery of the earlier step is not in doubt; what is unknown is its
+    effect, and the operator can still legitimately end the run.
+    """
+    _wf, bundles, runs, _bundle, run, capability = _halt(
+        tmp_path, name="wrote", workflow=_workflow_with_an_earlier_write()
+    )
+    before = data._load_report(run)[0]
+    assert before.execution_outcome == "HALTED"
+    # The precondition this test exists for: a consequential step actuated and
+    # no verifier settled what it did.
+    wrote = next(r for r in before.results if r.step_id == "write")
+    assert wrote.risk == "irreversible" and wrote.ok is True
+    assert not wrote.effect_evidence
+
+    _app, client = _phone(bundles, runs, monkeypatch)
+    item, detail = _open_task(client)
+    assert "reject" in detail["task"]["allowed_actions"], (
+        "reject must stay offered: the operator can still end a run that wrote"
+    )
+
+    response = _post(
+        client, item, _decision(detail, action="reject", key="reject-after-write-01")
+    )
+    assert response.status_code == 200
+    receipt = HumanDecisionReceiptV1.model_validate(response.json())
+    assert receipt.state.value == "rejected"
+
+    after = data._load_report(run)[0]
+    assert after.canceled is True
+    assert after.transaction_outcome == "RECONCILIATION_REQUIRED", (
+        "an operator tapping stop must not convert an unreconciled write into "
+        "a clean bill of health"
+    )
+    assert after.transaction_billable is False
+    assert after.transaction_platform_fault is False
+    assert after.execution_outcome == "HALTED"
+    assert CheckpointStore(run).read_pending().status == "rejected"
+
+    # And the run is over either way: reconciliation is a task for a human, not
+    # a licence to resume this run.
+    from openadapt_flow.runtime.durable.attended import AttendedActionRequest
+
+    with pytest.raises(AttendedActionRefused, match="terminal"):
+        execute_attended_action(
+            run,
+            AttendedActionRequest(
+                capability_digest=capability.digest,
+                idempotency_key="continue-after-write-reject",
+                action="continue",
+                disposition="completed_by_operator",
+            ),
+            operator="front-desk",
+        )

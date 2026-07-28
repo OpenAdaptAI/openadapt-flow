@@ -1436,6 +1436,29 @@ def test_read_only_prior_remote_click_has_exact_fault_prefix_proof(
     assert error is not None
     assert "resolved target" in error[1]
 
+    forged_identity = report.model_copy(deep=True)
+    prior_identity = forged_identity.results[0].identity
+    assert prior_identity is not None
+    forged_identity.results[0].identity = prior_identity.model_copy(
+        update={"coverage": 0.0}
+    )
+    forged_identity_root = tmp_path / "evidence-read-only-remote-identity-forged"
+    forged_identity_case, forged_identity_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=forged_identity,
+        evidence_root=forged_identity_root,
+        run_dir=run_dir,
+    )
+    forged_identity_error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=forged_identity_case,
+        result=forged_identity_result,
+        evidence_root=forged_identity_root,
+    )
+    assert forged_identity_error is not None
+    assert "prior action identity is not exact" in forged_identity_error[1]
+
 
 @pytest.mark.parametrize(
     ("action", "operation", "mutation"),
@@ -2357,6 +2380,26 @@ def test_stale_identity_integrity_accepts_both_runtime_emittable_shapes(
         )
         assert forged_resolution_error is not None
         assert "resolution" in forged_resolution_error[1]
+
+        impossible_cross = report.model_copy(deep=True)
+        impossible_cross.results[0] = target.model_copy(update={"resolution": None})
+        impossible_cross_root = tmp_path / "evidence-stale-impossible-cross"
+        impossible_cross_case, impossible_cross_result = _fault_case_integrity_result(
+            workflow=workflow,
+            report=impossible_cross,
+            evidence_root=impossible_cross_root,
+            run_dir=run_dir,
+            case_id="fault-stale-identity",
+        )
+        impossible_cross_error = _case_run_report_integrity_error(
+            workflow=workflow,
+            project=workflow.qualification,
+            case=impossible_cross_case,
+            result=impossible_cross_result,
+            evidence_root=impossible_cross_root,
+        )
+        assert impossible_cross_error is not None
+        assert "required to observe" in impossible_cross_error[1]
 
 
 @pytest.mark.parametrize("delivery_attempted", [None, True])

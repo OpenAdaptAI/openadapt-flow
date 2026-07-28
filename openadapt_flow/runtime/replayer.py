@@ -42,7 +42,7 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, TypeVar, cast
 from urllib.parse import urlsplit
 
 from openadapt_flow.backend import (
@@ -50,6 +50,7 @@ from openadapt_flow.backend import (
     Backend,
     BrowserPresentationGeometryBackend,
     FocusedElementActuationLeaseBackend,
+    FreshActuationRequired,
     GuardedCoordinateActionBackend,
     GuardedDragActionBackend,
     GuardedKeyboardActionBackend,
@@ -71,6 +72,7 @@ from openadapt_flow.ir import (
     ApiBinding,
     EffectVerificationEvidence,
     ExecutionTargetKind,
+    FreshActuationEvent,
     HaltObservation,
     IdentityCheck,
     IdentitySignalEvidence,
@@ -123,6 +125,9 @@ from openadapt_flow.runtime.effects import (
 from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
 from openadapt_flow.verification import verifier_effect_tier
 from openadapt_flow.vision.ocr import OcrResolutionRefused
+
+_DeliveryResultT = TypeVar("_DeliveryResultT")
+_MAX_FRESH_ACTUATION_REACQUISITIONS = 2
 
 if TYPE_CHECKING:
     from openadapt_flow.runtime.control_overlay import RuntimeControlOverlayEmitter
@@ -3204,56 +3209,160 @@ class Replayer:
                 self._cancel_guarded_keyboard()
 
             if error is None:
-                # Structural postconditions compare against the final observed
-                # state immediately before action delivery.  Readiness gates,
-                # interstitial dismissal, target resolution, identity checks,
-                # and effect pre-state capture can all cross backend or time
-                # boundaries; none of their state changes may be credited to
-                # the workflow action as URL_CHANGED, TITLE_CHANGED, or
-                # NEW_TAB_OPENED.
-                start_state = self._structural_state()
-                overlay_target = self._control_overlay_browser_target(
-                    step,
-                    resolution,
-                    matched_region,
-                    before_png,
-                )
-                self._emit_control_overlay_phase(
-                    "executing",
-                    current_step=overlay_current,
-                    total_steps=overlay_total,
-                    target_tracking=overlay_target,
-                    observation_png=before_png,
-                )
-                try:
-                    error = self._act(
+                fresh_reacquisitions = 0
+                while True:
+                    # Structural postconditions compare against the final
+                    # observed state immediately before action delivery.
+                    # Readiness gates, target resolution, identity checks, and
+                    # effect pre-state capture can cross backend or time
+                    # boundaries; none of their state changes may be credited
+                    # to the workflow action.
+                    start_state = self._structural_state()
+                    overlay_target = self._control_overlay_browser_target(
                         step,
                         resolution,
-                        params,
-                        workflow=workflow,
-                        step_index=step_index,
-                        bundle_dir=bundle_dir,
-                        before_png=before_png,
-                        result=result,
-                        graph_ctx=graph_ctx,
+                        matched_region,
+                        before_png,
                     )
-                except ActionDeliveryUncertain as exc:
-                    delivery_uncertain = True
-                    result.delivery_uncertainty = ActionDeliveryUncertainty(
-                        operation=exc.operation,
-                        native=exc.native,
-                        target_fingerprint=exc.target_fingerprint,
-                        observed_at=datetime.now(timezone.utc).isoformat(),
-                        cause_type=exc.cause_type,
+                    self._emit_control_overlay_phase(
+                        "executing",
+                        current_step=overlay_current,
+                        total_steps=overlay_total,
+                        target_tracking=overlay_target,
+                        observation_png=before_png,
                     )
-                    # Continue to settled-state, postcondition, and independent
-                    # effect verification.  This is not permission to assume
-                    # delivery; it is the exact opposite: success now requires
-                    # the full configured contract.
-                    error = None
-                if self._governed_asset_mutation is not None:
-                    error = self._governed_asset_mutation
-                    result.safety_halt = True
+                    try:
+                        error = self._act(
+                            step,
+                            resolution,
+                            params,
+                            workflow=workflow,
+                            step_index=step_index,
+                            bundle_dir=bundle_dir,
+                            before_png=before_png,
+                            result=result,
+                            graph_ctx=graph_ctx,
+                        )
+                    except FreshActuationRequired as exc:
+                        can_retry = (
+                            result.delivery_attempted is False
+                            and fresh_reacquisitions
+                            < _MAX_FRESH_ACTUATION_REACQUISITIONS
+                        )
+                        result.fresh_actuation_events.append(
+                            self._fresh_actuation_event(
+                                exc,
+                                step=step,
+                                workflow=workflow,
+                                matched_region=matched_region,
+                                retried=can_retry,
+                                attempt=len(result.fresh_actuation_events) + 1,
+                            )
+                        )
+                        self._cancel_guarded_coordinate()
+                        self._cancel_guarded_keyboard()
+                        if not can_retry:
+                            if result.delivery_attempted is False:
+                                retry_detail = (
+                                    "the bounded fresh-frame reacquisition "
+                                    "limit was exhausted"
+                                )
+                            else:
+                                retry_detail = (
+                                    "an earlier input edge crossed for this step, "
+                                    "so replay cannot retry it"
+                                )
+                            error = f"{exc}; {retry_detail}"
+                            result.safety_halt = True
+                            result.failure_category = (
+                                "governed_refusal"
+                                if self.governed_authorization is not None
+                                else "safety_halt"
+                            )
+                            break
+
+                        fresh_reacquisitions += 1
+                        error = self._fresh_actuation_authorization_refusal(workflow)
+                        if error is None:
+                            (
+                                resolution,
+                                matched_region,
+                                before_png,
+                                error,
+                            ) = self._revalidate_consequential_actuation(
+                                step,
+                                resolution,
+                                matched_region,
+                                before_png,
+                                params,
+                                workflow,
+                                bundle_dir,
+                                result,
+                                arm_keyboard=step.action
+                                in (ActionKind.KEY, ActionKind.HOTKEY),
+                            )
+                            result.resolution = resolution
+                            if before_png is not last_frame:
+                                result.before_png = self._save_step_png(
+                                    run_dir, step.id, "before", before_png
+                                )
+                                last_frame = before_png
+
+                        # The verifier pre-state belongs to the exact target,
+                        # identity, application, session, and workflow-state
+                        # observation that authorizes the next input attempt.
+                        effect_refresh_error: Optional[str] = None
+                        if (
+                            error is None
+                            and resolved_effects is not None
+                            and active_verifier is not None
+                        ):
+                            effect_refresh_error = self._profile_effect_tier_refusal(
+                                workflow,
+                                resolved_effects,
+                                active_verifier,
+                            )
+                            if effect_refresh_error is None:
+                                effect_pre_state = active_verifier.capture_pre_state()
+                                effect_refresh_error = (
+                                    self._profile_effect_tier_refusal(
+                                        workflow,
+                                        resolved_effects,
+                                        active_verifier,
+                                    )
+                                )
+                            error = effect_refresh_error
+
+                        if error is not None:
+                            result.safety_halt = True
+                            result.failure_category = (
+                                "governed_refusal"
+                                if self.governed_authorization is not None
+                                else "safety_halt"
+                            )
+                            if effect_refresh_error is not None:
+                                result.effect_verified = False
+                                result.effect_results.append(effect_refresh_error)
+                            break
+                        continue
+                    except ActionDeliveryUncertain as exc:
+                        delivery_uncertain = True
+                        result.delivery_uncertainty = ActionDeliveryUncertainty(
+                            operation=exc.operation,
+                            native=exc.native,
+                            target_fingerprint=exc.target_fingerprint,
+                            observed_at=datetime.now(timezone.utc).isoformat(),
+                            cause_type=exc.cause_type,
+                        )
+                        # Continue to settled-state, postcondition, and
+                        # independent effect verification. This is not
+                        # permission to assume delivery. Success now requires
+                        # the complete configured contract.
+                        error = None
+                    if self._governed_asset_mutation is not None:
+                        error = self._governed_asset_mutation
+                        result.safety_halt = True
+                    break
 
             if error is None:
                 try:
@@ -4837,6 +4946,114 @@ class Replayer:
         )
         return resolution, error
 
+    @staticmethod
+    def _deliver_backend_call(
+        result: StepResult,
+        call: Callable[[], _DeliveryResultT],
+    ) -> _DeliveryResultT:
+        """Call one backend delivery boundary with exact attempt reporting.
+
+        A typed fresh-frame mismatch proves that this call emitted no input
+        edge, so it preserves the step's prior delivery state. Every other
+        exception is conservative: the boundary may have been crossed and the
+        step must not enter the pre-delivery retry loop.
+        """
+
+        attempted_before = result.delivery_attempted
+        try:
+            delivered = call()
+        except FreshActuationRequired:
+            result.delivery_attempted = attempted_before
+            raise
+        except Exception:
+            result.delivery_attempted = True
+            raise
+        result.delivery_attempted = True
+        return delivered
+
+    @staticmethod
+    def _regions_intersect(left: Region, right: Region) -> bool:
+        left_x, left_y, left_width, left_height = left
+        right_x, right_y, right_width, right_height = right
+        return not (
+            left_x + left_width <= right_x
+            or right_x + right_width <= left_x
+            or left_y + left_height <= right_y
+            or right_y + right_height <= left_y
+        )
+
+    @staticmethod
+    def _fresh_actuation_identity_regions(
+        step: Step,
+        workflow: Workflow,
+    ) -> list[Region]:
+        regions: list[Region] = []
+        if step.anchor is not None and step.anchor.identifier_region is not None:
+            regions.append(step.anchor.identifier_region)
+        if workflow.qualification is not None:
+            policy = workflow.qualification.identity_policies.get(step.id)
+            if policy is not None:
+                regions.extend(
+                    signal.region
+                    for signal in policy.signals
+                    if signal.region is not None
+                )
+        return regions
+
+    def _fresh_actuation_event(
+        self,
+        exc: FreshActuationRequired,
+        *,
+        step: Step,
+        workflow: Workflow,
+        matched_region: Optional[Region],
+        retried: bool,
+        attempt: int,
+    ) -> FreshActuationEvent:
+        target_region = matched_region
+        if target_region is None and step.anchor is not None:
+            target_region = step.anchor.region
+        target_intersection = (
+            self._regions_intersect(exc.changed_bbox, target_region)
+            if target_region is not None
+            else None
+        )
+        identity_regions = self._fresh_actuation_identity_regions(step, workflow)
+        identity_intersection = (
+            any(
+                self._regions_intersect(exc.changed_bbox, region)
+                for region in identity_regions
+            )
+            if identity_regions
+            else None
+        )
+        return FreshActuationEvent(
+            attempt=attempt,
+            operation=exc.operation,
+            changed_pixel_count=exc.changed_pixel_count,
+            changed_bbox=exc.changed_bbox,
+            frame_size=exc.frame_size,
+            target_intersection=target_intersection,
+            identity_intersection=identity_intersection,
+            retried=retried,
+        )
+
+    def _fresh_actuation_authorization_refusal(
+        self,
+        workflow: Workflow,
+    ) -> Optional[str]:
+        """Recheck the same governed authority before a fresh input attempt."""
+
+        profile_refusal = self._profile_runtime_refusal(workflow)
+        if profile_refusal is not None:
+            return profile_refusal
+        authorization = self.governed_authorization
+        if authorization is not None:
+            authorization_refusal = authorization.validate_workflow(workflow)
+            if authorization_refusal is not None:
+                return authorization_refusal
+        return self._governed_asset_mutation
+
     def _act(
         self,
         step: Step,
@@ -4892,11 +5109,13 @@ class Replayer:
             else:
                 if requires_atomic_identity:
                     if isinstance(self.backend, RemoteActuationBackend):
-                        result.delivery_attempted = True
-                        self.backend.click(
-                            x,
-                            y,
-                            double=step.action is ActionKind.DOUBLE_CLICK,
+                        self._deliver_backend_call(
+                            result,
+                            lambda: self.backend.click(
+                                x,
+                                y,
+                                double=step.action is ActionKind.DOUBLE_CLICK,
+                            ),
                         )
                     elif isinstance(self.backend, GuardedCoordinateActionBackend):
                         result.delivery_attempted = True
@@ -4919,11 +5138,13 @@ class Replayer:
                             "— refusing raw coordinate delivery; run aborted"
                         )
                 else:
-                    result.delivery_attempted = True
-                    self.backend.click(
-                        x,
-                        y,
-                        double=step.action is ActionKind.DOUBLE_CLICK,
+                    self._deliver_backend_call(
+                        result,
+                        lambda: self.backend.click(
+                            x,
+                            y,
+                            double=step.action is ActionKind.DOUBLE_CLICK,
+                        ),
                     )
             self._last_click_point = (x, y)
             # Only a STRUCTURAL handle reports the element's own bounds. A
@@ -4953,8 +5174,12 @@ class Replayer:
                             "click, but this backend has no bounded right-click "
                             "operation"
                         )
-                    result.delivery_attempted = True
-                    self.backend.right_click(x, y)
+                    self._deliver_backend_call(
+                        result,
+                        lambda: cast(
+                            RichPointerActionBackend, self.backend
+                        ).right_click(x, y),
+                    )
                 elif isinstance(self.backend, GuardedCoordinateActionBackend):
                     result.delivery_attempted = True
                     result.delivery_receipt = self.backend.act_guarded_coordinate(
@@ -4973,8 +5198,12 @@ class Replayer:
                         "identity verification to delivery; run aborted"
                     )
             elif isinstance(self.backend, RichPointerActionBackend):
-                result.delivery_attempted = True
-                self.backend.right_click(x, y)
+                self._deliver_backend_call(
+                    result,
+                    lambda: cast(RichPointerActionBackend, self.backend).right_click(
+                        x, y
+                    ),
+                )
             else:
                 return (
                     f"Step '{step.id}' ({step.intent}) requires a right click, "
@@ -5072,8 +5301,12 @@ class Replayer:
                 )
                 result.actuation = "guarded_coordinate"
             elif isinstance(self.backend, RichPointerActionBackend):
-                result.delivery_attempted = True
-                self.backend.drag(x, y, end_x, end_y)
+                self._deliver_backend_call(
+                    result,
+                    lambda: cast(RichPointerActionBackend, self.backend).drag(
+                        x, y, end_x, end_y
+                    ),
+                )
             else:
                 return (
                     f"Step '{step.id}' ({step.intent}) requires a drag, but "
@@ -5194,8 +5427,9 @@ class Replayer:
                             "delivery; run aborted"
                         )
                     else:
-                        result.delivery_attempted = True
-                        self.backend.click(x, y)
+                        self._deliver_backend_call(
+                            result, lambda: self.backend.click(x, y)
+                        )
                 field_point = (x, y)
                 # See ``_last_click_region``: a visual rung's matched region is
                 # the anchor template's live position, not the field's bounds.
@@ -5264,6 +5498,7 @@ class Replayer:
             if baseline_field_value is None:
                 baseline_field_value = self._text_value_at(None)
             if step.selection_commit_key is not None:
+                selection_commit_key = step.selection_commit_key
                 assert step.selection_region is not None
                 assert isinstance(self.backend, SelectOptionBackend)
                 assert step.anchor is not None
@@ -5278,8 +5513,12 @@ class Replayer:
                         "selection"
                     )
                 assert field_region is not None
-                result.delivery_attempted = True
-                self.backend.select_option(text, step.selection_commit_key)
+                self._deliver_backend_call(
+                    result,
+                    lambda: cast(SelectOptionBackend, self.backend).select_option(
+                        text, selection_commit_key
+                    ),
+                )
                 return None
             guarded_type = (
                 requires_atomic_keyboard
@@ -5306,8 +5545,7 @@ class Replayer:
                     "run aborted"
                 )
             else:
-                result.delivery_attempted = True
-                self.backend.type_text(text)
+                self._deliver_backend_call(result, lambda: self.backend.type_text(text))
             if not text:
                 return None  # nothing typed, nothing to verify
             return self._verify_typed_input(
@@ -5361,8 +5599,7 @@ class Replayer:
                     "run aborted"
                 )
             else:
-                result.delivery_attempted = True
-                self.backend.press(key)
+                self._deliver_backend_call(result, lambda: self.backend.press(key))
             return None
 
         if step.action is ActionKind.WAIT:
@@ -7393,8 +7630,10 @@ class Replayer:
                 intent=next_step.intent,
             )
         if stop_pred is None or (dx == 0 and dy == 0):
-            result.delivery_attempted = True
-            self.backend.scroll(dx, dy)
+            self._deliver_backend_call(
+                result,
+                lambda: self.backend.scroll(dx, dy),
+            )
             return None
 
         def readiness_holds(frame_png: bytes) -> bool:
@@ -7425,8 +7664,10 @@ class Replayer:
         budget = SCROLL_BUDGET_FACTOR * increment
         scrolled = 0.0
         while scrolled + increment <= budget:
-            result.delivery_attempted = True
-            self.backend.scroll(dx, dy)
+            self._deliver_backend_call(
+                result,
+                lambda: self.backend.scroll(dx, dy),
+            )
             scrolled += increment
             frame = self.vision.wait_settled(self.backend)
             holds = readiness_holds(frame)

@@ -22,6 +22,7 @@ from PIL import Image
 from openadapt_flow.backend import (
     Backend,
     ExecutionContextIdentityBackend,
+    FreshActuationRequired,
     IdentityBackend,
     PreparedPointerActuationBackend,
     StructuralActionBackend,
@@ -467,10 +468,14 @@ def test_bound_actuation_refuses_same_window_content_change_before_input() -> No
     # valid. Only the remote pixels changed after resolution.
     client.frame_color = (11, 22, 34)
 
-    with pytest.raises(RemoteDisplayError, match="frame content changed"):
+    with pytest.raises(FreshActuationRequired) as raised:
         backend.click(100, 100)
 
     assert not any(call[0] == "mouse" for call in client.calls)
+    assert raised.value.operation == "remote_click"
+    assert raised.value.changed_pixel_count == client.px[0] * client.px[1]
+    assert raised.value.changed_bbox == (0, 0, client.px[0], client.px[1])
+    assert raised.value.frame_size == client.px
 
 
 def test_bound_actuation_accepts_same_pixels_with_different_png_encoding() -> None:

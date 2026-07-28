@@ -1925,6 +1925,37 @@ class ActionDeliveryUncertainty(BaseModel):
     resolved_by_contract: bool = False
 
 
+class FreshActuationEvent(BaseModel):
+    """PHI-free evidence for one pre-input actuation-frame mismatch.
+
+    The runtime records only the number and geometry of changed pixels.  It
+    does not retain the rejected frame or its pixel values.  ``retried`` is
+    true only when no earlier input edge crossed for this workflow step and a
+    bounded reacquisition remained available.
+    """
+
+    attempt: int = Field(ge=1)
+    operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    changed_pixel_count: int = Field(ge=1)
+    changed_bbox: Region
+    frame_size: tuple[int, int]
+    target_intersection: Optional[bool] = None
+    identity_intersection: Optional[bool] = None
+    retried: bool
+
+    @model_validator(mode="after")
+    def _valid_geometry(self) -> "FreshActuationEvent":
+        frame_width, frame_height = self.frame_size
+        x, y, width, height = self.changed_bbox
+        if frame_width <= 0 or frame_height <= 0:
+            raise ValueError("fresh-actuation frame size must be positive")
+        if x < 0 or y < 0 or width <= 0 or height <= 0:
+            raise ValueError("fresh-actuation bounding box must be positive")
+        if x + width > frame_width or y + height > frame_height:
+            raise ValueError("fresh-actuation bounding box exceeds the frame")
+        return self
+
+
 class IdentitySignalEvidence(BaseModel):
     """PHI-free audit evidence for one qualified identity signal."""
 
@@ -2131,12 +2162,18 @@ class StepResult(BaseModel):
     # recorded in ``postconditions_ok`` / ``effect_verified``.
     delivery_receipt: Optional[ActionDeliveryReceipt] = None
     # Explicit state-machine proof of whether this workflow step crossed an
-    # action-delivery boundary. ``False`` is written when a live step begins,
-    # then changed to ``True`` immediately before the backend/API is invoked.
-    # ``None`` means a legacy or synthesized result did not retain this fact;
-    # callers must treat that as unknown rather than infer non-delivery from a
-    # failure category or error string.
+    # action-delivery boundary. ``False`` is written when a live step begins.
+    # A typed fresh-frame mismatch keeps it false only when the backend proves
+    # no input edge occurred. Successful delivery, uncertain delivery, and an
+    # untyped backend exception all change it to True. ``None`` means a legacy
+    # or synthesized result did not retain this fact; callers must treat that
+    # as unknown rather than infer non-delivery from a failure category or
+    # error string.
     delivery_attempted: Optional[bool] = None
+    # Bounded, PHI-free diagnostics for pre-input actuation-frame mismatches.
+    # No rejected screenshot or pixel value is retained. A terminal mismatch
+    # is present with ``retried=False``.
+    fresh_actuation_events: list[FreshActuationEvent] = Field(default_factory=list)
     # The action API raised after delivery may have begun.  This is neither a
     # receipt nor an ordinary backend failure: the runtime never retries and
     # can proceed only when the complete independent outcome contract proves

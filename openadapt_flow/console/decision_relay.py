@@ -141,7 +141,26 @@ _RELAY_KEYS = frozenset(
     }
 )
 
-_ENGINE_ACTIONS = frozenset({"continue", "skip", "teach", "escalate"})
+#: The engine action each relayed answer names, mapped to the disposition
+#: ``execute_attended_action`` requires for it. The engine refuses a mismatched
+#: pair by design, so a single hardcoded disposition silently reduces this lane
+#: to Continue only -- every other answer a phone can give would be refused
+#: after it was taken. Deriving the disposition from the action is what keeps
+#: the relayed vocabulary equal to the local one.
+#:
+#: ``reject`` TERMINATES the run and ``escalate`` PARKS it; they are separate
+#: members for that reason, and a phone that offers Reject must be able to
+#: deliver it or the answer distribution loses the disagreement signal the
+#: action exists to record.
+_ENGINE_DISPOSITION: dict[str, str] = {
+    "continue": "completed_by_operator",
+    "skip": "not_applicable",
+    "reject": "rejected_by_operator",
+    "teach": "teach_requested",
+    "escalate": "cannot_complete",
+}
+
+_ENGINE_ACTIONS = frozenset(_ENGINE_DISPOSITION)
 
 #: The four terminal words the control plane accepts on acknowledgement.
 _ACK_RESULTS = frozenset({"accepted", "refused", "stale", "expired"})
@@ -527,7 +546,7 @@ class DecisionRelay:
             capability_digest=str(relay["capability_digest"]),
             idempotency_key=str(relay["idempotency_key"]),
             action=str(relay["action"]),  # type: ignore[arg-type]
-            disposition="completed_by_operator",
+            disposition=_ENGINE_DISPOSITION[str(relay["action"])],  # type: ignore[arg-type]
             task_digest=str(relay["task_digest"]),
             task_signature=str(relay["task_signature"]),
             tenant_id=self._tenant_id,

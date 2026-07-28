@@ -437,6 +437,59 @@ def test_a_relayed_decision_runs_the_normal_governed_path(tmp_path):
     assert ack_body["relay_digest"].startswith("sha256:")
 
 
+@pytest.mark.parametrize(
+    "action,disposition",
+    [
+        ("continue", "completed_by_operator"),
+        ("skip", "not_applicable"),
+        ("reject", "rejected_by_operator"),
+        ("teach", "teach_requested"),
+        ("escalate", "cannot_complete"),
+    ],
+)
+def test_every_action_a_phone_can_give_carries_the_disposition_the_engine_wants(
+    action, disposition
+):
+    """A single hardcoded disposition would silently reduce this lane to Continue.
+
+    ``execute_attended_action`` refuses a mismatched (action, disposition) pair
+    by design. So an answer of Skip, Reject, Teach or Escalate taken on a phone
+    would have been refused AFTER the operator gave it, with a message about a
+    disposition they never chose.
+    """
+    from openadapt_flow.console.decision_relay import _ENGINE_DISPOSITION
+
+    assert _ENGINE_DISPOSITION[action] == disposition
+
+
+def test_the_relayed_vocabulary_is_the_engine_vocabulary():
+    """A phone must not be able to offer an action the relay cannot deliver."""
+    from openadapt_flow.console.decision_relay import _ENGINE_ACTIONS
+    from openadapt_flow.runtime.durable.attended import AttendedActionRequest
+
+    engine = set(AttendedActionRequest.model_fields["action"].annotation.__args__)
+    assert set(_ENGINE_ACTIONS) == engine
+
+
+def test_a_relayed_reject_reaches_the_engine_as_a_reject(tmp_path):
+    """`reject` terminates the run; `escalate` parks it. Not interchangeable."""
+    run, item = _halted_run(tmp_path)
+    deployment = _deployment()
+    payload = _bound_relay_payload(run, item, deployment)
+    payload["action"] = "reject"
+    payload["decision_action"] = "reject"
+    relay, transport = _relay(
+        deployment=deployment,
+        poll=(200, {"decision": _sign(payload)}),
+        ack=(200, {"accepted": True}),
+    )
+    outcome = relay.serve_once(run, item, wait_s=0.0, executor=_ResultExecutor())
+
+    assert outcome is not None
+    assert outcome.action == "reject"
+    assert transport.calls[-1][1]["result"] == "accepted"
+
+
 def test_a_governed_refusal_is_acknowledged_rather_than_swallowed(tmp_path):
     """The operator must learn their answer was refused, not see silence."""
     run, item = _halted_run(tmp_path)

@@ -244,6 +244,29 @@ class _ScriptedTransport(FakeTransport):
         return super().post(path, payload, timeout_s=timeout_s)
 
 
+class _SequencedTransport(FakeTransport):
+    """Script repeated polls and acknowledgements across supervisor cycles."""
+
+    def __init__(self, *, polls: list[Any], acknowledgements: list[Any]) -> None:
+        super().__init__()
+        self.polls = list(polls)
+        self.acknowledgements = list(acknowledgements)
+
+    def post(self, path, payload, *, timeout_s):
+        self.calls.append((path, payload))
+        if path.endswith("/tasks"):
+            return 200, {"accepted": True, "created": True, "task_id": "task_x"}
+        if path.endswith("/poll"):
+            response = self.polls.pop(0)
+        elif path.endswith("/ack"):
+            response = self.acknowledgements.pop(0)
+        else:  # pragma: no cover - the relay has only these paths
+            response = (204, {})
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 def test_one_refused_pause_does_not_silence_the_others(tmp_path):
     """The failure that would leave a whole practice's halts unreachable."""
     runs = tmp_path / "runs"
@@ -369,6 +392,106 @@ def test_one_cycle_publishes_executes_and_acknowledges_without_a_caller(tmp_path
     ack_path, ack_body = transport.calls[-1]
     assert ack_path.endswith("/ack")
     assert ack_body["result"] == "accepted"
+
+
+@pytest.mark.parametrize(
+    ("action", "decision_action", "expected_status", "executor_calls"),
+    [
+        ("continue", "verify_and_resume", "completed", 1),
+        ("reject", "reject", "rejected", 0),
+    ],
+)
+def test_a_lost_ack_reacknowledges_the_exact_decision_without_a_second_action(
+    tmp_path,
+    action,
+    decision_action,
+    expected_status,
+    executor_calls,
+):
+    """A completed action does not become stale when its first ack is lost.
+
+    Continue proves the live-resume path. Reject proves a terminal action that
+    removes the pause from the open queue. Both re-deliver the exact signed
+    relay and its original idempotency key.
+    """
+    runs = tmp_path / "runs"
+    run, item = _halted_run(runs, tmp_path / "bundles", action)
+    deployment = _deployment()
+    executor = _ResultExecutor()
+    relay_body = _relayed_for(
+        run,
+        item,
+        deployment,
+        action=action,
+        decision_action=decision_action,
+    )
+    transport = _SequencedTransport(
+        polls=[
+            (200, {"decision": relay_body}),
+            (200, {"decision": relay_body}),
+        ],
+        acknowledgements=[
+            RelayUncertain("the engine result reached an uncertain ack"),
+            (200, {"accepted": True}),
+        ],
+    )
+    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
+    supervisor = DecisionSupervisor(
+        runs, relay=relay, deployment=deployment, executor=executor
+    )
+
+    first = supervisor.serve_once(wait_s=0.0)
+    second = supervisor.serve_once(wait_s=0.0)
+
+    assert first.acknowledged == "accepted"
+    assert first.reacknowledged is False
+    assert first.outcome is not None
+    assert first.outcome.status == expected_status
+    assert second.acknowledged == "accepted"
+    assert second.reacknowledged is True
+    assert second.outcome == first.outcome
+    assert executor.calls == executor_calls
+    acknowledgements = [body for path, body in transport.calls if path.endswith("/ack")]
+    assert [body["result"] for body in acknowledgements] == [
+        "accepted",
+        "accepted",
+    ]
+
+
+def test_lost_ack_recovery_refuses_a_changed_signed_or_idempotency_binding(tmp_path):
+    """A repeated decision id cannot select an earlier local outcome."""
+    runs = tmp_path / "runs"
+    run, item = _halted_run(runs, tmp_path / "bundles", "one")
+    deployment = _deployment()
+    executor = _ResultExecutor()
+    relay_body = _relayed_for(run, item, deployment)
+    changed = {
+        key: value
+        for key, value in relay_body.items()
+        if key not in {"relay_digest", "relay_signature"}
+    }
+    changed["idempotency_key"] = "relay-idempotency-key-CHANGED-0002"
+    changed_relay = _sign(changed)
+    transport = _SequencedTransport(
+        polls=[
+            (200, {"decision": relay_body}),
+            (200, {"decision": changed_relay}),
+        ],
+        acknowledgements=[
+            RelayUncertain("the first ack response was lost"),
+        ],
+    )
+    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
+    supervisor = DecisionSupervisor(
+        runs, relay=relay, deployment=deployment, executor=executor
+    )
+
+    supervisor.serve_once(wait_s=0.0)
+    with pytest.raises(RelayRefused, match="exact signed or idempotency binding"):
+        supervisor.serve_once(wait_s=0.0)
+
+    assert executor.calls == 1
+    assert len([path for path, _ in transport.calls if path.endswith("/ack")]) == 1
 
 
 def test_a_reject_from_a_phone_ends_the_right_run(tmp_path):

@@ -157,6 +157,58 @@ class CycleReport:
     acknowledged: Optional[str] = None
     #: The engine decision, when one was executed.
     outcome: Optional[AttendedDecision] = None
+    #: True when this cycle only repeated an acknowledgement for an exact
+    #: signed decision whose engine outcome was already retained in memory.
+    #: The action is never executed a second time on this path.
+    reacknowledged: bool = False
+
+
+@dataclass(frozen=True)
+class _PendingAcknowledgement:
+    """One completed engine decision whose hosted acknowledgement is uncertain.
+
+    ``relay_digest`` already binds every signed relay field.  The explicit
+    signature and idempotency fields make the recovery invariant visible here:
+    a re-delivery must be the exact signed decision, not merely the same opaque
+    decision id.
+    """
+
+    relay_digest: str
+    relay_signature: str
+    idempotency_key: str
+    capability_digest: str
+    action: str
+    result: str
+    outcome: AttendedDecision
+
+    @classmethod
+    def completed(
+        cls,
+        decision: RelayedDecision,
+        *,
+        result: str,
+        outcome: AttendedDecision,
+    ) -> "_PendingAcknowledgement":
+        relay = decision.relay
+        return cls(
+            relay_digest=decision.relay_digest,
+            relay_signature=decision.relay_signature,
+            idempotency_key=str(relay["idempotency_key"]),
+            capability_digest=str(relay["capability_digest"]),
+            action=str(relay["action"]),
+            result=result,
+            outcome=outcome,
+        )
+
+    def matches(self, decision: RelayedDecision) -> bool:
+        relay = decision.relay
+        return (
+            self.relay_digest == decision.relay_digest
+            and self.relay_signature == decision.relay_signature
+            and self.idempotency_key == str(relay["idempotency_key"])
+            and self.capability_digest == str(relay["capability_digest"])
+            and self.action == str(relay["action"])
+        )
 
 
 def _parse_rfc3339(value: object) -> Optional[datetime]:
@@ -201,6 +253,11 @@ class DecisionSupervisor:
         #: supervisor republishes, which is idempotent, rather than trusting a
         #: file to say a remote surface still holds something.
         self._confirmed: set[tuple[str, str]] = set()
+        #: Completed local outcomes whose acknowledgement may not have reached
+        #: the control plane.  This is deliberately process-local: it closes
+        #: the ordinary lost-response/re-delivery loop without minting a second
+        #: durable authority beside the engine's existing decision journal.
+        self._pending_acknowledgements: dict[str, _PendingAcknowledgement] = {}
 
     # -- scanning ---------------------------------------------------------
 
@@ -346,6 +403,24 @@ class DecisionSupervisor:
         if decision is None:
             return CycleReport(publishes=publishes)
 
+        pending_ack = self._pending_acknowledgements.get(decision.decision_id)
+        if pending_ack is not None:
+            if not pending_ack.matches(decision):
+                raise RelayRefused(
+                    "a re-delivered decision changed its exact signed or "
+                    "idempotency binding"
+                )
+            confirmed = self._relay.acknowledge(decision, pending_ack.result)
+            if confirmed:
+                self._pending_acknowledgements.pop(decision.decision_id, None)
+            return CycleReport(
+                publishes=publishes,
+                decision_id=decision.decision_id,
+                acknowledged=pending_ack.result,
+                outcome=pending_ack.outcome,
+                reacknowledged=True,
+            )
+
         expires_at = _parse_rfc3339(decision.relay.get("expires_at"))
         if expires_at is None or expires_at <= self._now():
             self._relay.acknowledge(decision, "expired")
@@ -372,7 +447,22 @@ class DecisionSupervisor:
             self._relay.acknowledge(decision, "refused")
             raise
         result = "accepted" if outcome.status != "refused" else "refused"
-        self._relay.acknowledge(decision, result)
+        # Record the completed local result BEFORE the network acknowledgement.
+        # If that response is lost, the control plane re-delivers the decision.
+        # Continue, Skip, and Reject can close the pause, so resolving only from
+        # the current open queue would then misreport a real completed action as
+        # stale.  The next cycle instead re-acknowledges this exact signed relay
+        # without executing it again.
+        self._pending_acknowledgements[decision.decision_id] = (
+            _PendingAcknowledgement.completed(
+                decision,
+                result=result,
+                outcome=outcome,
+            )
+        )
+        confirmed = self._relay.acknowledge(decision, result)
+        if confirmed:
+            self._pending_acknowledgements.pop(decision.decision_id, None)
         return CycleReport(
             publishes=publishes,
             decision_id=decision.decision_id,
@@ -494,7 +584,7 @@ class DecisionSupervisorThread:
         self.stats.cycles += 1
         self.stats.consecutive_failures = 0
         self.stats.publish_unknown += len(report.publishes.unknown)
-        if report.acknowledged == "accepted":
+        if report.acknowledged == "accepted" and not report.reacknowledged:
             self.stats.decisions_executed += 1
         elif report.acknowledged == "refused":
             self.stats.decisions_refused += 1

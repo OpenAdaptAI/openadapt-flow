@@ -24,6 +24,9 @@ from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     runtime_inputs_digest,
 )
+from openadapt_flow.runtime.program_predicates import (
+    program_predicate_evaluator_contract_sha256,
+)
 from openadapt_flow.runtime.replayer import Replayer
 from openadapt_flow.verification import VerificationTier
 from tests.test_replayer import FakeBackend, FakeVision, make_png
@@ -40,6 +43,21 @@ class _SettledVision(FakeVision):
     def wait_settled_result(self, backend, **kwargs):
         del kwargs
         return SimpleNamespace(png=backend.screenshot(), settled=True)
+
+
+def test_builtin_evaluator_contract_binds_nested_ocr_threshold(monkeypatch):
+    from rapidocr_onnxruntime import RapidOCR
+
+    import openadapt_flow.vision as vision
+
+    ocr_module = __import__(vision.ocr.__module__, fromlist=["_engine"])
+    engine = RapidOCR()
+    monkeypatch.setattr(ocr_module, "_engine", engine)
+    before = program_predicate_evaluator_contract_sha256(vision)
+
+    engine.text_cls.cls_thresh = 0.01
+
+    assert program_predicate_evaluator_contract_sha256(vision) != before
 
 
 def _visual_branch_workflow() -> Workflow:

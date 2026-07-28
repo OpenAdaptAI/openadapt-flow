@@ -51,13 +51,14 @@ def _contract_state(value: Any, *, depth: int = 0) -> Any:
             str(key): _contract_state(item, depth=depth + 1)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         }
+    try:
+        attributes = vars(value)
+    except TypeError:
+        attributes = {}
     state = {
         str(key): _contract_state(item, depth=depth + 1)
-        for key, item in sorted(vars(value).items())
+        for key, item in sorted(attributes.items())
         if not str(key).startswith("_")
-        and (
-            item is None or isinstance(item, (bool, float, int, str, list, tuple, dict))
-        )
     }
     return {
         "type": f"{type(value).__module__}.{type(value).__qualname__}",

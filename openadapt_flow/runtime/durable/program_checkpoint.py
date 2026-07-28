@@ -212,6 +212,9 @@ class ProgramCheckpoint(BaseModel):
     #: outcome classification closed instead of being invented.
     step_id: str = ""
     identity: Optional[IdentityCheck] = None
+    input_verified: Optional[bool] = None
+    starting_state_settled: Optional[bool] = None
+    delivery_attempted: Optional[bool] = None
     postconditions_ok: Optional[bool] = None
     skipped: bool = False
     actuation: Optional[str] = None
@@ -227,6 +230,10 @@ class ProgramCheckpoint(BaseModel):
     expected_texts: list[str] = Field(default_factory=list)
     #: Rolling digest of the visited-state history up to and including this state.
     transition_history_hash: str = ""
+    #: Exact PHI-free state-id suffix since the preceding checkpoint. The
+    #: ordered deltas reconstruct one complete graph trace without O(N^2)
+    #: checkpoint prefixes.
+    visited_states_delta: list[str] = Field(default_factory=list)
     #: Present only when staff completed/skipped the action represented by this
     #: checkpoint. Resume consumes its exact target instead of re-evaluating a
     #: guarded edge or re-actuating the source action.

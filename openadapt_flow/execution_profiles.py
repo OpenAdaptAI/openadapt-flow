@@ -14,13 +14,13 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 from openadapt_flow.decision_delivery import DecisionDeliveryTier
 from openadapt_flow.verification import VerificationTier
 
 if TYPE_CHECKING:
-    from openadapt_flow.ir import RunReport, State, Workflow
+    from openadapt_flow.ir import RunReport, Workflow
 
 
 class ExecutionProfile(str, Enum):
@@ -39,6 +39,12 @@ class ExecutionOutcome(str, Enum):
     HALTED = "HALTED"
     FAILED = "FAILED"
     ROLLED_BACK = "ROLLED_BACK"
+
+
+AUTOMATED_GUI_ACTUATIONS = frozenset(
+    {"uia", "dom", "guarded_coordinate", "guarded_keyboard"}
+)
+HUMAN_ATTENDED_ACTUATIONS = frozenset({"human_attended", "human_attended_skip"})
 
 
 @dataclass(frozen=True)
@@ -168,45 +174,165 @@ def required_effect_tier(
     return required
 
 
+@dataclass(frozen=True)
+class _ProgramActionOccurrence:
+    """One structurally proven action occurrence in a program trace."""
+
+    state_id: str
+    step: Any
+    program_scope: tuple[Any, ...]
+    exception_edge: bool = False
+
+
 def _program_action_trace(
     workflow: Workflow,
     visited_states: list[str],
-) -> list[str] | None:
-    """Project an unambiguous visited-state trace to its action step ids.
+    *,
+    runtime_worklists: Mapping[str, list[dict[str, str]]] | None = None,
+) -> list[_ProgramActionOccurrence] | None:
+    """Validate one complete graph walk and return its action occurrences.
 
-    The state trace preserves loop multiplicity and subflow order.  A state id
-    that is absent or reused across graphs is not sufficient audit evidence,
-    so production classification fails closed instead of guessing which state
-    executed.
+    This proves entry, declared transitions, nested subflow returns, exact loop
+    iteration counts, and a successful top-level terminal or declared fall-off.
+    State and step identifiers must be globally unique so no weaker action
+    contract can replace another one during report classification.
     """
 
     if not visited_states or workflow.program is None:
         return None
-    from openadapt_flow.ir import StateKind
+    from openadapt_flow.ir import ProgramExecutionScopeFrame, StateKind
 
-    states_by_id: dict[str, State] = {}
-    graphs = [workflow.program, *workflow.subflows.values()]
-    for graph in graphs:
-        for state in graph.states.values():
-            if state.id in states_by_id:
+    graphs = {"__program__": workflow.program, **workflow.subflows}
+    state_owner: dict[str, str] = {}
+    action_step_ids: set[str] = set()
+    for graph_id, graph in graphs.items():
+        for key, state in graph.states.items():
+            if key != state.id or state.id in state_owner:
                 return None
-            states_by_id[state.id] = state
-    action_trace: list[str] = []
-    for state_id in visited_states:
-        visited_state = states_by_id.get(state_id)
-        if visited_state is None:
+            state_owner[state.id] = graph_id
+            if state.kind is StateKind.ACTION:
+                if state.step is None or state.step.id in action_step_ids:
+                    return None
+                action_step_ids.add(state.step.id)
+
+    cursor = 0
+    actions: list[_ProgramActionOccurrence] = []
+
+    def _rows(relation: str) -> list[dict[str, str]] | None:
+        if runtime_worklists is not None and relation in runtime_worklists:
+            return list(runtime_worklists[relation])
+        declared = workflow.data_sources.get(relation)
+        return None if declared is None else list(declared.rows)
+
+    def _next_state(state: Any, graph: Any, occurrence_index: int | None) -> str | None:
+        nonlocal cursor
+        if not state.transitions and state.on_exception is None:
             return None
-        if visited_state.kind is StateKind.ACTION:
-            if visited_state.step is None:
-                return None
-            action_trace.append(visited_state.step.id)
-    return action_trace
+        if cursor >= len(visited_states):
+            raise ValueError("program trace ended before a declared successor")
+        candidate = visited_states[cursor]
+        normal_targets = {transition.target for transition in state.transitions}
+        if candidate in normal_targets:
+            return candidate
+        if state.on_exception is not None and candidate == state.on_exception:
+            if occurrence_index is not None:
+                previous = actions[occurrence_index]
+                actions[occurrence_index] = _ProgramActionOccurrence(
+                    state_id=previous.state_id,
+                    step=previous.step,
+                    program_scope=previous.program_scope,
+                    exception_edge=True,
+                )
+            return candidate
+        raise ValueError("program trace crossed an undeclared transition")
+
+    def _consume_graph(
+        graph_id: str,
+        scope: tuple[Any, ...],
+        *,
+        depth: int,
+    ) -> None:
+        nonlocal cursor
+        if depth > 64:
+            raise ValueError("program trace nesting is not bounded")
+        graph = graphs.get(graph_id)
+        if graph is None:
+            raise ValueError("program trace references an unknown graph")
+        state_id: str | None = graph.entry
+        while state_id is not None:
+            if cursor >= len(visited_states) or visited_states[cursor] != state_id:
+                raise ValueError("program trace does not follow the graph entry")
+            state = graph.states.get(state_id)
+            if state is None or state_owner.get(state_id) != graph_id:
+                raise ValueError("program trace references an unknown state")
+            cursor += 1
+            occurrence_index: int | None = None
+            if state.kind is StateKind.ACTION:
+                if state.step is None:
+                    raise ValueError("action state has no step")
+                occurrence_index = len(actions)
+                actions.append(
+                    _ProgramActionOccurrence(
+                        state_id=state.id,
+                        step=state.step,
+                        program_scope=scope,
+                    )
+                )
+            if state.kind is StateKind.TERMINAL:
+                if (state.outcome or "success") != "success":
+                    raise ValueError("successful trace reached a non-success terminal")
+                return
+            if state.kind is StateKind.SUBFLOW_CALL:
+                if state.subflow is None or state.subflow not in graphs:
+                    raise ValueError("subflow call target is missing")
+                _consume_graph(
+                    state.subflow,
+                    (*scope, ProgramExecutionScopeFrame(graph_id=state.subflow)),
+                    depth=depth + 1,
+                )
+            elif state.kind is StateKind.LOOP:
+                if state.loop is None or state.loop.body not in graphs:
+                    raise ValueError("loop body is missing")
+                rows = _rows(state.loop.relation)
+                if rows is None or len(rows) > state.loop.max_iterations:
+                    raise ValueError(
+                        "loop worklist is unavailable or outside its bound"
+                    )
+                for row_index in range(len(rows)):
+                    _consume_graph(
+                        state.loop.body,
+                        (
+                            *scope,
+                            ProgramExecutionScopeFrame(
+                                graph_id=state.loop.body,
+                                loop_state_id=state.id,
+                                relation=state.loop.relation,
+                                row_index=row_index,
+                            ),
+                        ),
+                        depth=depth + 1,
+                    )
+            state_id = _next_state(state, graph, occurrence_index)
+
+    try:
+        _consume_graph(
+            "__program__",
+            (ProgramExecutionScopeFrame(graph_id="__program__"),),
+            depth=0,
+        )
+    except ValueError:
+        return None
+    if cursor != len(visited_states):
+        return None
+    return actions
 
 
 def classify_execution_outcome(
     report: RunReport,
     workflow: Workflow,
     profile: ExecutionProfile | str,
+    *,
+    runtime_worklists: Mapping[str, list[dict[str, str]]] | None = None,
 ) -> ExecutionOutcome:
     """Classify a completed report without changing legacy ``success``.
 
@@ -238,6 +364,14 @@ def classify_execution_outcome(
     ):
         return ExecutionOutcome.HALTED
     if execution_completed and report.terminal_outcome in {"failed", "failure"}:
+        return ExecutionOutcome.FAILED
+    if any(
+        result.failure_category == "runtime_failure"
+        and (result.ok or not result.exception_handled)
+        for result in report.results
+    ):
+        return ExecutionOutcome.FAILED
+    if any(result.ok and result.error is not None for result in report.results):
         return ExecutionOutcome.FAILED
     if not execution_completed:
         refusal_step_ids = {"<authorization>", "<params>", "<profile>"}
@@ -276,8 +410,12 @@ def classify_execution_outcome(
         return ExecutionOutcome.FAILED
 
     # Import lazily: run_gate imports this module for the profile contract.
+    from openadapt_flow.qualification import workflow_contract_sha256
     from openadapt_flow.run_gate import is_consequential
     from openadapt_flow.traversal import iter_workflow_steps
+
+    if report.workflow_contract_sha256 != workflow_contract_sha256(workflow):
+        return ExecutionOutcome.COMPLETED_UNVERIFIED
 
     qualification_review_context = bool(
         report.qualification_evidence_only
@@ -289,9 +427,12 @@ def classify_execution_outcome(
         and report.governed_qualification_project_contract_sha256
         == workflow.qualification.contract_sha256()
     )
+    all_steps = list(iter_workflow_steps(workflow))
+    if len({step.id for step in all_steps}) != len(all_steps):
+        return ExecutionOutcome.COMPLETED_UNVERIFIED
     consequential = {
         step.id
-        for step in iter_workflow_steps(workflow)
+        for step in all_steps
         if is_consequential(
             step,
             workflow,
@@ -299,52 +440,34 @@ def classify_execution_outcome(
             certifying_policy_sha256=report.governed_policy_contract_sha256,
         )
     }
-    steps_by_id = {step.id: step for step in iter_workflow_steps(workflow)}
+    paired_results: list[tuple[Any, Any]] = []
     if workflow.program is None:
-        expected_results = Counter(step.id for step in workflow.steps)
-        pseudo_step_ids = {"<authorization>", "<params>", "<profile>", "<terminal>"}
-        if any(
-            result.step_id not in expected_results
-            and result.step_id not in pseudo_step_ids
-            for result in report.results
-        ):
+        if [result.step_id for result in report.results] != [
+            step.id for step in workflow.steps
+        ]:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        observed_results = Counter(
-            result.step_id
-            for result in report.results
-            if result.step_id in expected_results
-        )
-        if observed_results != expected_results:
-            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        paired_results = list(zip(report.results, workflow.steps))
     else:
         if report.terminal_outcome != "success":
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         expected_action_trace = _program_action_trace(
             workflow,
             report.visited_states,
+            runtime_worklists=runtime_worklists,
         )
         if expected_action_trace is None:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        program_step_ids = {
-            state.step.id
-            for graph in [workflow.program, *workflow.subflows.values()]
-            for state in graph.states.values()
-            if state.step is not None
-        }
-        pseudo_step_ids = {"<authorization>", "<params>", "<profile>", "<terminal>"}
-        if any(
-            result.step_id not in program_step_ids
-            and result.step_id not in pseudo_step_ids
-            for result in report.results
-        ):
+        if len(report.results) != len(expected_action_trace):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        observed_action_trace = [
-            result.step_id
-            for result in report.results
-            if result.step_id in program_step_ids
-        ]
-        if observed_action_trace != expected_action_trace:
-            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        for result, occurrence in zip(report.results, expected_action_trace):
+            if (
+                result.step_id != occurrence.step.id
+                or tuple(result.program_scope) != occurrence.program_scope
+                or occurrence.exception_edge
+                != bool(result.exception_handled and not result.ok)
+            ):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
+            paired_results.append((result, occurrence.step))
     required_identity_ids = set(report.required_identity_step_ids)
     if any(
         result.identity is None or result.identity.status != "verified"
@@ -358,7 +481,26 @@ def classify_execution_outcome(
         return ExecutionOutcome.COMPLETED_UNVERIFIED
     minimum = required_effect_tier(workflow, resolved)
     assert minimum is not None
-    for result in report.results:
+    from openadapt_flow.ir import ActionKind
+
+    def _scoped_params(result: Any) -> dict[str, str] | None:
+        scoped = dict(report.params)
+        for frame in result.program_scope:
+            if frame.relation is None:
+                continue
+            if runtime_worklists is not None and frame.relation in runtime_worklists:
+                rows = runtime_worklists[frame.relation]
+            else:
+                relation = workflow.data_sources.get(frame.relation)
+                if relation is None:
+                    return None
+                rows = relation.rows
+            if frame.row_index is None or frame.row_index >= len(rows):
+                return None
+            scoped.update(rows[frame.row_index])
+        return scoped
+
+    for result, step in paired_results:
         if result.skipped or result.exception_handled:
             if (
                 result.delivery_attempted is not False
@@ -370,12 +512,43 @@ def classify_execution_outcome(
             ):
                 return ExecutionOutcome.COMPLETED_UNVERIFIED
             continue
-        step = steps_by_id.get(result.step_id)
-        if step is None:
-            continue
         if not result.ok:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        if result.input_verified is False or result.starting_state_settled is False:
+        is_consequential_result = result.step_id in consequential
+        if step.action is ActionKind.WAIT:
+            if result.actuation is not None:
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
+        elif result.actuation is None:
+            # Older local, non-consequential keyboard/mouse delivery did not
+            # label its actuation path. It still carries settle and delivery
+            # proof. A consequential result must name a closed path unless a
+            # typed uncertain-delivery record proves that the GUI dispatch was
+            # attempted. That record still needs the complete postcondition and
+            # effect contract below before it can verify.
+            if is_consequential_result and result.delivery_uncertainty is None:
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
+        elif result.actuation not in {
+            "api",
+            *AUTOMATED_GUI_ACTUATIONS,
+            *HUMAN_ATTENDED_ACTUATIONS,
+        }:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        automated_gui = result.actuation in AUTOMATED_GUI_ACTUATIONS or (
+            result.actuation is None and step.action is not ActionKind.WAIT
+        )
+        if automated_gui and result.starting_state_settled is not True:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if (
+            automated_gui
+            and step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}
+            and result.input_verified is not True
+        ):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if (
+            automated_gui
+            and step.action is not ActionKind.WAIT
+            and result.delivery_attempted is not True
+        ):
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if result.identity is not None and result.identity.status != "verified":
             return ExecutionOutcome.COMPLETED_UNVERIFIED
@@ -396,14 +569,32 @@ def classify_execution_outcome(
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if step.expect and result.postconditions_ok is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        if result.step_id not in consequential:
+        if not is_consequential_result:
             continue
         if result.effect_approved_unverified or result.effect_verified is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         from openadapt_flow.policy import effects_for_actuation
 
         effects = effects_for_actuation(step, result.actuation)
-        if len(result.effect_contract_hashes) != len(effects):
+        scoped_params = _scoped_params(result)
+        if scoped_params is None:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        opaque = (
+            {"__run_id__": report.run_id_sha256}
+            if report.run_id_sha256 is not None
+            else {}
+        )
+        try:
+            expected_hashes = Counter(
+                effect.resolved_contract_hash(
+                    scoped_params,
+                    opaque_param_sha256=opaque,
+                )
+                for effect in effects
+            )
+        except ValueError:
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
+        if Counter(result.effect_contract_hashes) != expected_hashes:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if any(
             item.initial_verdict != "confirmed"
@@ -419,9 +610,7 @@ def classify_execution_outcome(
         evidence_hashes = Counter(
             item.effect_contract_hash for item in result.effect_evidence
         )
-        if not result.effect_contract_hashes or evidence_hashes != Counter(
-            result.effect_contract_hashes
-        ):
+        if not expected_hashes or evidence_hashes != expected_hashes:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
     return ExecutionOutcome.VERIFIED
 
@@ -430,6 +619,8 @@ def stamp_execution_outcome(
     report: RunReport,
     workflow: Workflow,
     profile: ExecutionProfile | str,
+    *,
+    runtime_worklists: Mapping[str, list[dict[str, str]]] | None = None,
 ) -> ExecutionOutcome:
     """Write the profile and precise outcome into ``report``."""
 
@@ -440,7 +631,12 @@ def stamp_execution_outcome(
     report.qualification_evidence_only = bool(
         report.governed_qualification_case_id_sha256
     )
-    outcome = classify_execution_outcome(report, workflow, resolved)
+    outcome = classify_execution_outcome(
+        report,
+        workflow,
+        resolved,
+        runtime_worklists=runtime_worklists,
+    )
     report.execution_profile = resolved.value
     report.execution_outcome = outcome.value
     report.production_eligible = bool(

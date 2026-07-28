@@ -74,12 +74,24 @@ class ValueExpr(BaseModel):
     substrate matchers behave BYTE-FOR-BYTE identically for a literal.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     #: A static value baked into the contract (the v1 form). ``None`` when the
     #: value comes from a run param instead.
     literal: Optional[str] = None
     #: Name of a run parameter to resolve against at run time (``Workflow.params``
     #: overlaid by the caller's values). ``None`` for a literal.
     param: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "ValueExpr":
+        """Require one unambiguous source for every contract value."""
+
+        if (self.literal is None) == (self.param is None):
+            raise ValueError("exactly one of literal or param must be set")
+        if self.param == "":
+            raise ValueError("effect parameter name must not be empty")
+        return self
 
     def resolve(self, params: Mapping[str, str]) -> Optional[str]:
         """Resolve to a concrete string against ``params``.
@@ -332,6 +344,7 @@ class Effect(BaseModel):
     readback: Optional[ReadbackSpec] = None
 
     _contract_hash_override: Optional[str] = PrivateAttr(default=None)
+    _contract_semantics_sha256: Optional[str] = PrivateAttr(default=None)
 
     # -- back-compat coercion: accept the v1 plain-string JSON form ----------
     @staticmethod
@@ -387,6 +400,7 @@ class Effect(BaseModel):
         is why an old bundle behaves identically.
         """
         resolved = self.model_copy(
+            deep=True,
             update={
                 "match": {k: v.resolved(params) for k, v in self.match.items()},
                 "value": None if self.value is None else self.value.resolved(params),
@@ -395,12 +409,13 @@ class Effect(BaseModel):
                     if self.idempotency_key is None
                     else self.idempotency_key.resolved(params)
                 ),
-            }
+            },
         )
         resolved._contract_hash_override = self.resolved_contract_hash(
             params,
             opaque_param_sha256=opaque_param_sha256,
         )
+        resolved._contract_semantics_sha256 = resolved._semantic_contract_sha256()
         return resolved
 
     def resolved_contract_hash(
@@ -424,6 +439,14 @@ class Effect(BaseModel):
                 char not in "0123456789abcdef" for char in digest
             ):
                 raise ValueError(f"opaque parameter {name!r} has an invalid digest")
+            if (
+                name in params
+                and hashlib.sha256(str(params[name]).encode("utf-8")).hexdigest()
+                != digest
+            ):
+                raise ValueError(
+                    f"opaque parameter {name!r} digest does not match its value"
+                )
         missing = self.referenced_params().difference(params).difference(opaque)
         if missing:
             raise ValueError("effect contract references an unavailable parameter")
@@ -475,8 +498,22 @@ class Effect(BaseModel):
         exposing the underlying value (e.g. a patient identifier).
         """
         if self._contract_hash_override is not None:
+            if (
+                self._contract_semantics_sha256 is None
+                or self._semantic_contract_sha256() != self._contract_semantics_sha256
+            ):
+                raise ValueError("resolved effect contract changed after binding")
             return self._contract_hash_override
-        payload = {
+        payload = self._contract_payload()
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return f"sha256:{digest}"
+
+    def _contract_payload(self) -> dict[str, object]:
+        """Return the exact public semantics bound by :meth:`contract_hash`."""
+
+        payload: dict[str, object] = {
             "kind": self.kind.value,
             "match": {k: str(v) for k, v in sorted(self.match.items())},
             "field": self.field,
@@ -493,10 +530,18 @@ class Effect(BaseModel):
         # its hash — PR #129) keeps its exact digest.
         if self.count_new_only:
             payload["count_new_only"] = True
-        digest = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return payload
+
+    def _semantic_contract_sha256(self) -> str:
+        """Digest current semantics without consulting a retained override."""
+
+        return hashlib.sha256(
+            json.dumps(
+                self._contract_payload(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
         ).hexdigest()
-        return f"sha256:{digest}"
 
 
 class EffectState(BaseModel):

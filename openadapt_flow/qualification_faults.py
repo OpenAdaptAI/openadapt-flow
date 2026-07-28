@@ -98,6 +98,9 @@ def fault_detector_contract_error(
         for result in detector_refusals
     ):
         return "fault_detector_delivery_boundary_crossed"
+    refusal_index = report.results.index(detector_refusals[0])
+    if refusal_index != len(report.results) - 1:
+        return "fault_detector_refusal_not_terminal"
     return None
 
 

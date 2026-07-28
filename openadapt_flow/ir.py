@@ -2575,6 +2575,14 @@ class RunReport(BaseModel):
     governed_runtime_inputs_digest: Optional[str] = Field(
         default=None, pattern="^[a-f0-9]{64}$"
     )
+    run_id_sha256: Optional[str] = Field(
+        default=None,
+        pattern="^[a-f0-9]{64}$",
+        description=(
+            "One-way binding to the exact runtime identity used by resolved "
+            "effect contracts; the raw run identity is never retained here."
+        ),
+    )
     governed_qualification_project_id: Optional[str] = None
     governed_qualification_project_revision: Optional[int] = Field(default=None, ge=1)
     governed_qualification_project_contract_sha256: Optional[str] = Field(

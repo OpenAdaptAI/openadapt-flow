@@ -34,6 +34,7 @@ from pydantic import (
     model_validator,
 )
 
+from openadapt_flow.execution_profiles import AUTOMATED_GUI_ACTUATIONS
 from openadapt_flow.identity_signals import (
     canonical_normalizers,
     parameterize_identity_text,
@@ -52,6 +53,18 @@ QUALIFICATION_SCHEMA: Final[Literal["openadapt.qualification-project/v1"]] = (
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _PARAM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+
+
+def _qualification_actuation_path(
+    value: Optional[str],
+) -> Optional[Literal["gui", "api"]]:
+    """Project one closed runtime actuation receipt onto a qualified path."""
+
+    if value == "api":
+        return "api"
+    if value in AUTOMATED_GUI_ACTUATIONS:
+        return "gui"
+    return None
 
 
 def _valid_application_identity(value: str) -> bool:
@@ -479,6 +492,7 @@ class QualificationCase(BaseModel):
     input_ref: Optional[str] = Field(default=None, max_length=256)
     runtime_input_sha256: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     action_targets: list[QualificationActionTarget] = Field(default_factory=list)
+    fault_target: Optional[QualificationActionTarget] = None
     expected_outcome: QualificationOutcome
     required: bool = True
     results: list[QualificationCaseResult] = Field(default_factory=list)
@@ -502,13 +516,30 @@ class QualificationCase(BaseModel):
             key=lambda item: (item.step_id, item.actuation_path),
         )
         if self.kind is QualificationCaseKind.REPRESENTATIVE:
+            if self.fault_target is not None:
+                raise ValueError("a representative case cannot bind a fault target")
             step_ids = [item.step_id for item in targets]
             if len(step_ids) != len(set(step_ids)):
                 raise ValueError(
                     "a representative case can exercise only one path per step"
                 )
-        elif len(targets) > 1:
-            raise ValueError("a fault case can bind at most one action target")
+        else:
+            step_ids = [item.step_id for item in targets]
+            if len(step_ids) != len(set(step_ids)):
+                raise ValueError("a fault case can permit only one path per step")
+            if self.fault_target is None and len(targets) == 1:
+                # Projects created before fault_target used the sole permitted
+                # action as both the execution scope and mutation target.
+                self.fault_target = targets[0]
+            elif self.fault_target is None and len(targets) > 1:
+                raise ValueError(
+                    "a fault case with multiple permitted actions requires one "
+                    "exact fault target"
+                )
+            if self.fault_target is not None and self.fault_target not in targets:
+                raise ValueError(
+                    "a fault target must be inside the permitted action scope"
+                )
         self.action_targets = targets
         return self
 
@@ -521,7 +552,25 @@ class QualificationCase(BaseModel):
             data.pop("runtime_input_sha256", None)
         if not self.action_targets:
             data.pop("action_targets", None)
+        if self.fault_target is None or (
+            len(self.action_targets) == 1
+            and self.fault_target == self.action_targets[0]
+        ):
+            # Preserve the legacy single-target project contract. The validator
+            # reconstructs the implied target when it loads the project.
+            data.pop("fault_target", None)
         return data
+
+    def resolved_fault_target(self) -> Optional[QualificationActionTarget]:
+        """Return the explicit target or the legacy sole permitted action."""
+
+        if self.kind is QualificationCaseKind.REPRESENTATIVE:
+            return None
+        if self.fault_target is not None:
+            return self.fault_target
+        if len(self.action_targets) == 1:
+            return self.action_targets[0]
+        return None
 
 
 class EnvironmentBoundary(BaseModel):
@@ -1573,6 +1622,7 @@ def set_case_scope(
     case_id: str,
     runtime_input_sha256: str,
     action_targets: Iterable[QualificationActionTarget],
+    fault_target: Optional[QualificationActionTarget] = None,
 ) -> QualificationProject:
     """Bind a qualification case to its approved input and action scope."""
 
@@ -1608,13 +1658,23 @@ def set_case_scope(
                 "a representative case can exercise only one path per step"
             )
     else:
-        if len(targets) != 1:
-            raise QualificationError("fault cases require one action target")
+        if fault_target is None:
+            if len(targets) != 1:
+                raise QualificationError(
+                    "fault cases with multiple permitted actions require one exact "
+                    "fault target"
+                )
+            fault_target = targets[0]
+        if fault_target not in targets:
+            raise QualificationError(
+                "fault target must be inside the permitted action scope"
+            )
     updated = QualificationCase.model_validate(
         case.model_copy(
             update={
                 "runtime_input_sha256": runtime_input_sha256,
                 "action_targets": targets,
+                "fault_target": fault_target,
             }
         ).model_dump(mode="python")
     )
@@ -1852,6 +1912,7 @@ def _case_run_report_integrity_error(
         report,
         workflow,
         ExecutionProfile.STANDARD,
+        runtime_worklists=case_worklists,
     ).value
     if (
         recomputed_outcome != report.execution_outcome
@@ -1951,6 +2012,10 @@ def _case_run_report_integrity_error(
         )
         declared_targets = expected_action_paths
         steps = _steps_by_id(workflow)
+        effect_policies = {
+            (binding.step_id, binding.actuation_path, binding.effect_index): binding
+            for binding in project.effect_policies
+        }
         if not declared_targets or not set(declared_targets).issubset(steps):
             return (
                 QualificationRefusalCode.CASE_ATTESTATION_INVALID,
@@ -1968,7 +2033,7 @@ def _case_run_report_integrity_error(
                 if item.step_id == step_id
                 and not item.skipped
                 and not item.exception_handled
-                and ("api" if item.actuation == "api" else "gui") == actuation_path
+                and _qualification_actuation_path(item.actuation) == actuation_path
             ]
             if not step_results:
                 return (
@@ -1978,8 +2043,12 @@ def _case_run_report_integrity_error(
                 )
             step = steps[step_id]
             from openadapt_flow.policy import effects_for_actuation
+            from openadapt_flow.qualification_identity_evidence import (
+                qualification_identity_evidence_error,
+            )
 
             minimum_tier = VerificationTier(project.minimum_effect_tier)
+            identity_policy = project.identity_policies.get(step_id)
 
             def result_has_sufficient_effect_evidence(item: Any) -> bool:
                 if step_id not in required_actions:
@@ -1994,30 +2063,81 @@ def _case_run_report_integrity_error(
                 if resolved_params is None:
                     return False
                 try:
-                    expected_hashes = Counter(
-                        effect.resolved_contract_hash(
-                            resolved_params,
-                            opaque_param_sha256={
-                                "__run_id__": result.run_id_sha256 or ""
-                            },
+                    expected_effects = [
+                        (
+                            index,
+                            effect.resolved_contract_hash(
+                                resolved_params,
+                                opaque_param_sha256={
+                                    "__run_id__": result.run_id_sha256 or ""
+                                },
+                            ),
+                            effect_policies.get((step_id, actuation_path, index)),
                         )
-                        for effect in effects
-                    )
+                        for index, effect in enumerate(effects)
+                    ]
                 except ValueError:
                     return False
+                if not expected_effects or any(
+                    binding is None
+                    for _index, _effect_hash, binding in expected_effects
+                ):
+                    return False
+                if any(
+                    binding is None
+                    or binding.effect_contract_hash != effects[index].contract_hash()
+                    for index, _effect_hash, binding in expected_effects
+                ):
+                    return False
+                expected_hashes = Counter(
+                    effect_hash for _index, effect_hash, _binding in expected_effects
+                )
                 retained_hashes = Counter(item.effect_contract_hashes)
-                evidence_hashes = Counter(
-                    evidence.effect_contract_hash
-                    for evidence in item.effect_evidence
-                    if evidence.final_verdict == "confirmed"
-                    and evidence.verification_tier is not None
-                    and VerificationTier(evidence.verification_tier).satisfies(
-                        minimum_tier
+                if retained_hashes != expected_hashes:
+                    return False
+
+                # Evidence carries the resolved contract hash, not its list
+                # index.  For duplicate contracts, exact one-to-one binding is
+                # therefore a multiset match by hash and strength.  Pair the
+                # strongest required tier with the strongest observed tier;
+                # this accepts exactly when a valid bijection exists.
+                required_tiers_by_hash: dict[str, list[VerificationTier]] = {}
+                for _index, effect_hash, binding in expected_effects:
+                    assert binding is not None
+                    required_tiers_by_hash.setdefault(effect_hash, []).append(
+                        min(binding.tier, minimum_tier)
                     )
-                )
-                return bool(expected_hashes) and (
-                    retained_hashes == expected_hashes == evidence_hashes
-                )
+
+                observed_tiers_by_hash: dict[str, list[VerificationTier]] = {}
+                for evidence in item.effect_evidence:
+                    if (
+                        evidence.final_verdict != "confirmed"
+                        or evidence.initial_verdict != "confirmed"
+                        or evidence.observed_effect != "present"
+                        or evidence.verification_tier is None
+                    ):
+                        return False
+                    try:
+                        observed_tier = VerificationTier(evidence.verification_tier)
+                    except ValueError:
+                        return False
+                    observed_tiers_by_hash.setdefault(
+                        evidence.effect_contract_hash, []
+                    ).append(observed_tier)
+
+                if set(observed_tiers_by_hash) != set(required_tiers_by_hash):
+                    return False
+                for effect_hash, required_tiers in required_tiers_by_hash.items():
+                    observed_tiers = observed_tiers_by_hash[effect_hash]
+                    if len(observed_tiers) != len(required_tiers):
+                        return False
+                    for observed_tier, required_tier in zip(
+                        sorted(observed_tiers),
+                        sorted(required_tiers),
+                    ):
+                        if not observed_tier.satisfies(required_tier):
+                            return False
+                return True
 
             if any(
                 not item.ok
@@ -2033,7 +2153,16 @@ def _case_run_report_integrity_error(
                 )
                 or (
                     step_id in required_identity
-                    and (item.identity is None or item.identity.status != "verified")
+                    and (
+                        identity_policy is None
+                        or qualification_identity_evidence_error(
+                            policy=identity_policy,
+                            check=item.identity,
+                            step=step,
+                            actuation_path=actuation_path,
+                        )
+                        is not None
+                    )
                 )
                 for item in step_results
             ):
@@ -2047,7 +2176,7 @@ def _case_run_report_integrity_error(
                 and not item.skipped
                 and not item.exception_handled
                 and expected_action_paths.get(item.step_id)
-                != ("api" if item.actuation == "api" else "gui")
+                != _qualification_actuation_path(item.actuation)
             ):
                 return (
                     QualificationRefusalCode.CASE_ATTESTATION_INVALID,
@@ -2115,13 +2244,13 @@ def _fault_case_integrity_error(
         )
 
     expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
-    target = case.action_targets[0] if len(case.action_targets) == 1 else None
+    target = case.resolved_fault_target()
     expected_target_sha256 = (
         sha256_bytes(target.step_id.encode("utf-8")) if target is not None else None
     )
-    expected_action_paths = (
-        {target.step_id: target.actuation_path} if target is not None else {}
-    )
+    expected_action_paths = {
+        action.step_id: action.actuation_path for action in case.action_targets
+    }
     expected_bindings = (
         receipt.fault_kind == case.kind.value,
         report.governed_qualification_case_kind == case.kind.value,
@@ -2792,6 +2921,9 @@ def evaluate_qualification(
         if step.api_binding is not None and bool(step.api_binding.effects)
     }
     required_representative_targets = required_gui_targets | required_api_targets
+    required_actions, _required_identity_steps = qualification_action_requirements(
+        workflow
+    )
     required_fault_targets: dict[
         QualificationCaseKind,
         set[tuple[str, Literal["gui", "api"]]],
@@ -2834,8 +2966,26 @@ def evaluate_qualification(
         if case.kind is QualificationCaseKind.REPRESENTATIVE:
             invalid_targets = not targets or len(targets) != len(case.action_targets)
         else:
-            invalid_targets = len(targets) != 1 or not targets.issubset(
-                required_fault_targets[case.kind]
+            fault_target = case.resolved_fault_target()
+            fault_key = (
+                (fault_target.step_id, fault_target.actuation_path)
+                if fault_target is not None
+                else None
+            )
+            allowed_fault_scope = {(step_id, "gui") for step_id in required_actions} | {
+                (step.id, "api")
+                for step in steps
+                if step.id in required_actions
+                and step.api_binding is not None
+                and bool(step.api_binding.effects)
+            }
+            invalid_targets = (
+                not targets
+                or len(targets) != len(case.action_targets)
+                or fault_key is None
+                or fault_key not in targets
+                or fault_key not in required_fault_targets[case.kind]
+                or not targets.issubset(allowed_fault_scope)
             )
         invalid_targets = invalid_targets or not targets.issubset(valid_path_targets)
         if invalid_targets:
@@ -2877,12 +3027,13 @@ def evaluate_qualification(
                 details={"actuation_path": target_path},
             )
         )
-    fault_coverage = {
-        (case.kind, target.step_id, target.actuation_path)
-        for case in required_cases
-        if case.kind is not QualificationCaseKind.REPRESENTATIVE
-        for target in case.action_targets
-    }
+    fault_coverage: set[tuple[QualificationCaseKind, str, Literal["gui", "api"]]] = (
+        set()
+    )
+    for case in required_cases:
+        target = case.resolved_fault_target()
+        if target is not None:
+            fault_coverage.add((case.kind, target.step_id, target.actuation_path))
     for kind in sorted(required_kinds, key=lambda item: item.value):
         for step_id, target_path in sorted(required_fault_targets[kind]):
             if (kind, step_id, target_path) not in fault_coverage:

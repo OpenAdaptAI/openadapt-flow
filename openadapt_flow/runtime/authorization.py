@@ -103,6 +103,20 @@ def parse_runtime_inputs_bytes(
     interstitials = payload.get("interstitials")
     if interstitials is not None and not isinstance(interstitials, list):
         raise ValueError("runtime-input artifact has invalid interstitials")
+    if interstitials is not None:
+        try:
+            validated_interstitials = [
+                Interstitial.model_validate(item) for item in interstitials
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "runtime-input artifact has invalid interstitials"
+            ) from exc
+        if [
+            interstitial.model_dump(mode="json")
+            for interstitial in validated_interstitials
+        ] != interstitials:
+            raise ValueError("runtime-input artifact has non-canonical interstitials")
     canonical = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -307,10 +321,10 @@ class GovernedRunAuthorization(BaseModel):
                 "weak_effect",
                 "missing_effect",
             }
-            and len(self.qualification_case_action_paths) != 1
+            and not self.qualification_case_action_paths
         ):
             raise ValueError(
-                "qualification fault cases require exactly one actuation path"
+                "qualification fault cases require a permitted actuation path"
             )
         if self.qualification_case_kind == "representative" and any(
             value is not None for value in driver_values
@@ -404,10 +418,14 @@ class GovernedRunAuthorization(BaseModel):
             if self.qualification_fault_step_id_sha256 is not None:
                 return "representative qualification case binds a fault target"
         else:
-            if len(case.action_targets) != 1:
+            target = case.resolved_fault_target()
+            if target is None:
                 return "qualification fault case has no target action"
-            target = case.action_targets[0]
             target_id = target.step_id
+            if case_action_paths.get(target_id) != target.actuation_path:
+                return (
+                    "qualification fault target is outside its permitted action scope"
+                )
             if target.actuation_path == "api" and case.kind.value not in {
                 "weak_effect",
                 "missing_effect",

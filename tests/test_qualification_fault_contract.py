@@ -19,6 +19,7 @@ from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
 from openadapt_flow.deployment import build_replayer
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionKind,
     Anchor,
     ApiBinding,
@@ -63,7 +64,14 @@ from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     runtime_inputs_digest,
 )
-from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
+from openadapt_flow.runtime.effects import (
+    Effect,
+    EffectKind,
+    EffectState,
+    EffectVerdict,
+    ValueExpr,
+    Verdict,
+)
 from openadapt_flow.verification import VerificationTier
 
 _SESSION = "a" * 64
@@ -89,6 +97,30 @@ def test_unbound_environment_and_empty_fault_store_preserve_legacy_shape() -> No
     assert "application_identity" not in dumped["environment"]
     assert "environment_observer_id" not in dumped["environment"]
     assert "environment_observer_contract_sha256" not in dumped["environment"]
+
+
+def test_multi_action_fault_case_requires_one_explicit_fault_target() -> None:
+    actions = [
+        QualificationActionTarget(step_id="prepare", actuation_path="gui"),
+        QualificationActionTarget(step_id="submit", actuation_path="gui"),
+    ]
+
+    with pytest.raises(ValueError, match="requires one exact fault target"):
+        QualificationCase(
+            id="fault-later-write",
+            kind=QualificationCaseKind.MISSING_EFFECT,
+            action_targets=actions,
+            expected_outcome=QualificationOutcome.HALTED,
+        )
+
+    case = QualificationCase(
+        id="fault-later-write",
+        kind=QualificationCaseKind.MISSING_EFFECT,
+        action_targets=actions,
+        fault_target=actions[1],
+        expected_outcome=QualificationOutcome.HALTED,
+    )
+    assert case.resolved_fault_target() == actions[1]
 
 
 def _screen_png(*, ambiguous: bool = False, wrong_identity: bool = False) -> bytes:
@@ -140,10 +172,22 @@ class _ObservedBackend:
         self._guard()
         self.actions.append(("click", x, y))
 
-    def act_structural(self, handle: StructuralHandle, *_args: Any, **_kwargs: Any):
+    def act_structural(
+        self,
+        _locator: StructuralLocator,
+        handle: StructuralHandle,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> ActionDeliveryReceipt:
         self._guard()
         self.actions.append(("structural", *handle.point))
-        return None
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="invoke",
+            native=True,
+            target_fingerprint=handle.target_fingerprint,
+            delivered_at="2026-07-28T00:00:00+00:00",
+        )
 
     def structured_text_at(self, _x: int, _y: int) -> str:
         return "Wrong record" if self.wrong_identity else "Synthetic record"
@@ -169,10 +213,23 @@ class _Vision:
 
 
 class _StrongEffectVerifier:
+    substrate = "test"
     verification_tier = VerificationTier.INDEPENDENT_SYSTEM
 
-    def capture_pre_state(self) -> object:
-        return object()
+    def capture_pre_state(self, _context: Any = None) -> EffectState:
+        return EffectState(substrate=self.substrate, reachable=True)
+
+    def verify(
+        self,
+        effect: Effect,
+        _before: EffectState,
+        _context: Any = None,
+    ) -> EffectVerdict:
+        return EffectVerdict(
+            verdict=Verdict.CONFIRMED,
+            kind=effect.kind,
+            substrate=self.substrate,
+        )
 
 
 class _WeakEffectVerifier:
@@ -447,6 +504,9 @@ def _fault_authorization(
     *,
     run_id: str,
     actuation_path: Literal["gui", "api"] = "gui",
+    action_paths: dict[str, Literal["gui", "api"]] | None = None,
+    required_identity_step_ids: tuple[str, ...] = ("submit",),
+    fault_step_id: str = "submit",
 ) -> GovernedRunAuthorization:
     assert workflow.manifest is not None and workflow.qualification is not None
     case_id = f"fault-{kind.value.replace('_', '-')}"
@@ -458,7 +518,7 @@ def _fault_authorization(
         admitted_policy_contract_sha256="e" * 64,
         execution_profile="standard",
         minimum_effect_tier=3,
-        required_identity_step_ids=("submit",),
+        required_identity_step_ids=required_identity_step_ids,
         approval_source="qualification-campaign",
         qualification_project_id=workflow.qualification.project_id,
         qualification_project_revision=workflow.qualification.revision,
@@ -470,11 +530,11 @@ def _fault_authorization(
         qualification_case_input_sha256=input_sha256,
         qualification_run_id_sha256=sha256_bytes(run_id.encode("utf-8")),
         qualification_case_kind=kind.value,
-        qualification_case_action_paths={"submit": actuation_path},
+        qualification_case_action_paths=(action_paths or {"submit": actuation_path}),
         qualification_fault_driver_id=driver._driver_id,
         qualification_fault_driver_contract_sha256=driver._contract_sha256,
         qualification_fault_driver_key_id=driver.key_id,
-        qualification_fault_step_id_sha256=sha256_bytes(b"submit"),
+        qualification_fault_step_id_sha256=sha256_bytes(fault_step_id.encode("utf-8")),
     )
 
 
@@ -520,6 +580,184 @@ def _run_fault(
         execution_target_kind="web",
     )
     return report, backend
+
+
+def _two_write_fault_workflow(
+    tmp_path: Path,
+    driver: _FaultDriver,
+) -> tuple[Workflow, Path]:
+    bundle = tmp_path / "bundle-two-write-fault"
+    (bundle / "templates").mkdir(parents=True)
+    (bundle / "templates" / "button.png").write_bytes(_screen_png())
+
+    def write_step(step_id: str) -> Step:
+        return Step(
+            id=step_id,
+            intent=f"Write {step_id}",
+            action=ActionKind.CLICK,
+            anchor=Anchor(
+                template="templates/button.png",
+                structural=StructuralLocator(selector=f"#{step_id}"),
+                region=(5, 5, 6, 6),
+                click_point=(8, 8),
+                structured_identity="Synthetic record",
+            ),
+            identity_armed=True,
+            risk="irreversible",
+            effects=[
+                Effect(
+                    kind=EffectKind.RECORD_WRITTEN,
+                    match={"record_id": ValueExpr(literal=step_id)},
+                    risk="irreversible",
+                )
+            ],
+        )
+
+    backend = _ObservedBackend()
+    observer = BackendQualificationEnvironmentObserver(backend)
+    workflow = Workflow(
+        name="two-write-fault",
+        surface="web",
+        steps=[write_step("prepare"), write_step("submit")],
+    )
+    init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="Fixture application",
+            application_identity="https://fixture.example",
+            application_version="1",
+            environment_observer_id=observer.observer_id,
+            environment_observer_contract_sha256=(
+                BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256
+            ),
+            environment_digest=_ENVIRONMENT,
+            runtime_version="test",
+        ),
+    )
+    for step_id in ("prepare", "submit"):
+        set_action_classification(
+            workflow,
+            ActionRiskClassification(
+                step_id=step_id,
+                classification=ActionRiskClass.IRREVERSIBLE,
+                explanation="qualification fixture changes business state",
+                operator_confirmed=True,
+            ),
+        )
+    add_case(
+        workflow,
+        QualificationCase(
+            id="representative-1",
+            kind=QualificationCaseKind.REPRESENTATIVE,
+            expected_outcome=QualificationOutcome.VERIFIED,
+        ),
+    )
+    input_sha256 = runtime_inputs_digest(workflow, None, None)
+    paths = [
+        QualificationActionTarget(step_id="prepare", actuation_path="gui"),
+        QualificationActionTarget(step_id="submit", actuation_path="gui"),
+    ]
+    fault_target = QualificationActionTarget(
+        step_id="submit",
+        actuation_path="gui",
+    )
+    assert workflow.qualification is not None
+    workflow.qualification.cases = [
+        case.model_copy(
+            update={
+                "runtime_input_sha256": input_sha256,
+                "action_targets": paths,
+                "fault_target": (
+                    None
+                    if case.kind is QualificationCaseKind.REPRESENTATIVE
+                    else fault_target
+                ),
+            }
+        )
+        for case in workflow.qualification.cases
+    ]
+    workflow.qualification.trusted_fault_driver_keys[driver.key_id] = (
+        driver.public_key_base64
+    )
+    workflow.save(bundle)
+    return Workflow.load(bundle), bundle
+
+
+def test_later_fault_target_allows_prior_required_write_then_halts(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(tmp_path, driver)
+    run_id = "two-write-later-fault"
+    backend = _ObservedBackend()
+    report = Replayer(
+        backend,
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+            action_paths={"prepare": "gui", "submit": "gui"},
+            required_identity_step_ids=("prepare", "submit"),
+            fault_step_id="submit",
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=tmp_path / "run-two-write-later-fault",
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+
+    assert report.execution_outcome == "HALTED"
+    assert [result.step_id for result in report.results] == ["prepare", "submit"]
+    assert report.results[0].ok is True
+    assert report.results[0].delivery_attempted is True
+    assert report.results[0].effect_verified is True
+    assert report.results[1].safety_halt is True
+    assert report.results[1].delivery_attempted is False
+    assert len(backend.actions) == 1
+    assert len(report.qualification_fault_mutations) == 1
+    receipt = report.qualification_fault_mutations[0]
+    assert receipt.step_id_sha256 == sha256_bytes(b"submit")
+    assert fault_detector_contract_error(report, receipt) is None
+
+
+def test_authorization_rejects_fault_target_removed_from_permitted_scope(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(tmp_path, driver)
+    assert workflow.qualification is not None
+    case = next(
+        item
+        for item in workflow.qualification.cases
+        if item.kind is QualificationCaseKind.MISSING_EFFECT
+    )
+    case.action_targets = [
+        QualificationActionTarget(step_id="prepare", actuation_path="gui")
+    ]
+    workflow.save(bundle)
+    authorization = _fault_authorization(
+        workflow,
+        QualificationCaseKind.MISSING_EFFECT,
+        driver,
+        run_id="fault-target-outside-scope",
+        action_paths={"prepare": "gui"},
+        required_identity_step_ids=("prepare", "submit"),
+        fault_step_id="submit",
+    )
+
+    assert authorization.validate_workflow(workflow) == (
+        "qualification fault target is outside its permitted action scope"
+    )
 
 
 @pytest.mark.parametrize(
@@ -621,6 +859,58 @@ def test_detector_receipt_rejects_unknown_or_attempted_delivery(
     assert (
         fault_detector_contract_error(report, receipt)
         == "fault_detector_delivery_boundary_crossed"
+    )
+
+
+def test_detector_receipt_rejects_any_result_after_the_fault_refusal() -> None:
+    receipt = FaultMutationReceipt(
+        project_id="project",
+        project_revision=1,
+        project_contract_sha256="a" * 64,
+        campaign_id_sha256="b" * 64,
+        case_id_sha256="c" * 64,
+        case_input_sha256="d" * 64,
+        run_id_sha256="e" * 64,
+        step_id_sha256=sha256_bytes(b"submit"),
+        actuation_path="gui",
+        fault_kind="ambiguity",
+        gate="target_resolution",
+        driver_id="driver",
+        driver_contract_sha256="f" * 64,
+        before_input_sha256="1" * 64,
+        after_input_sha256="2" * 64,
+        mutation_artifact_sha256="3" * 64,
+        attestation_key_id="key",
+    )
+    refusal = StepResult(
+        step_id="submit",
+        intent="Submit",
+        ok=False,
+        safety_halt=True,
+        delivery_attempted=False,
+        safety_refusal_evidence=SafetyRefusalEvidence(
+            stage="target_resolution",
+            code="target_ambiguous",
+            detector_input_sha256="2" * 64,
+        ),
+    )
+    later_action = StepResult(
+        step_id="later-write",
+        intent="Later write",
+        ok=True,
+        delivery_attempted=True,
+        effect_verified=True,
+        effect_results=["later effect was reported as verified"],
+    )
+    report = SimpleNamespace(
+        execution_outcome="HALTED",
+        results=[refusal, later_action],
+        governed_qualification_case_action_paths={"submit": "gui"},
+    )
+
+    assert (
+        fault_detector_contract_error(report, receipt)
+        == "fault_detector_refusal_not_terminal"
     )
 
 

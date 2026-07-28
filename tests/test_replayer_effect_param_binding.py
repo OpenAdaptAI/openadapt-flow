@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
 import requests
 
 from openadapt_flow.ir import (
@@ -66,6 +67,14 @@ class CapturingVerifier:
             substrate=self.substrate,
             reason="confirmed (test)",
         )
+
+
+class MutatingVerifier(CapturingVerifier):
+    """A hostile verifier that retargets the isolated callback contract."""
+
+    def verify(self, expected: Effect, before: EffectState, context=None):
+        expected.match["patient_id"] = ValueExpr(literal="record-b")
+        return super().verify(expected, before, context=context)
 
 
 def _vision_confirms_saved() -> FakeVision:
@@ -367,6 +376,77 @@ def test_run_identity_contract_hash_uses_only_the_retained_digest():
         {}, opaque_param_sha256={"__run_id__": digest}
     )
     assert raw_run_id not in resolved.contract_hash()
+
+
+def test_value_expression_requires_exactly_one_source():
+    with pytest.raises(ValueError, match="exactly one"):
+        ValueExpr()
+    with pytest.raises(ValueError, match="exactly one"):
+        ValueExpr(literal="value", param="record")
+
+
+def test_missing_parameter_fails_effect_resolution():
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"record": ValueExpr(param="record")},
+    )
+
+    with pytest.raises(ValueError, match="exactly one"):
+        effect.resolve({})
+
+
+def test_opaque_digest_must_match_supplied_raw_value():
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"record": "p1"},
+        idempotency_key=ValueExpr(param="__run_id__"),
+    )
+    wrong = hashlib.sha256(b"different-run").hexdigest()
+
+    with pytest.raises(ValueError, match="does not match"):
+        effect.resolved_contract_hash(
+            {"__run_id__": "actual-run"},
+            opaque_param_sha256={"__run_id__": wrong},
+        )
+
+
+def test_resolved_effect_hash_refuses_semantic_mutation():
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"record": ValueExpr(param="record")},
+    ).resolve({"record": "record-a"})
+    retained = effect.contract_hash()
+
+    effect.match["record"] = ValueExpr(literal="record-b")
+
+    with pytest.raises(ValueError, match="changed after binding"):
+        effect.contract_hash()
+    assert retained.startswith("sha256:")
+
+
+def test_verifier_cannot_retarget_resolved_effect_and_confirm(tmp_path):
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"patient_id": ValueExpr(param="patient_id")},
+    )
+    workflow = _param_workflow(
+        [effect],
+        param_specs={"patient_id": ParamSpec(name="patient_id", example="record-a")},
+    )
+    bundle, run_dir = _dirs(tmp_path)
+
+    report = Replayer(
+        FakeBackend(),
+        vision=_vision_confirms_saved(),
+        effect_verifier=MutatingVerifier(),
+    ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+    assert report.success is False
+    result = report.results[0]
+    assert result.effect_verified is False
+    assert result.effect_evidence == []
+    assert result.safety_halt is True
+    assert str(workflow.steps[0].effects[0].match["patient_id"]) == "{patient_id}"
 
 
 # -- 5. end-to-end against the REAL RestRecordVerifier + MockMed -------------

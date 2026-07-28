@@ -146,6 +146,9 @@ class RunCheckpoint(BaseModel):
     effect_contract_hashes: list[str] = Field(default_factory=list)
     effect_evidence: list[EffectVerificationEvidence] = Field(default_factory=list)
     identity: Optional[IdentityCheck] = None
+    input_verified: Optional[bool] = None
+    starting_state_settled: Optional[bool] = None
+    delivery_attempted: Optional[bool] = None
     governed_authorization_id: Optional[str] = None
     governed_approval_source: Optional[str] = None
     postconditions_ok: Optional[bool] = None
@@ -222,6 +225,9 @@ class PendingEscalation(BaseModel):
     program_checkpoint_seq: int = Field(default=0, ge=0)
     #: Rolling visited-state digest captured at the halt, for audit continuity.
     program_history_hash: str = ""
+    #: Exact PHI-free trace suffix since the last verified program checkpoint.
+    #: An attended completion copies this suffix into its new checkpoint.
+    program_history_delta: list[str] = Field(default_factory=list)
     #: Exact, PHI-free record that this step may already have actuated.  Resume
     #: must not re-enter it automatically: a human-completed verification
     #: checkpoint or a fresh explicit uncertain-retry authorization is needed.

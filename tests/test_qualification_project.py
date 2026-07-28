@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 from base64 import b64encode
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -240,6 +242,11 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
     required_actions, required_identity = qualification_action_requirements(workflow)
     case_params = effective_runtime_params(workflow, None)
     resolved_action_effects = [effect.resolve(case_params) for effect in action.effects]
+    effect_tiers = {
+        binding.effect_index: binding.tier
+        for binding in project.effect_policies
+        if binding.step_id == action_id and binding.actuation_path == "gui"
+    }
     results: list[QualificationCaseResult] = []
     for case in project.cases:
         run_sha256 = sha256_bytes(f"run:{case.id}".encode())
@@ -292,11 +299,15 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                                 status="verified",
                                 mode="structured",
                                 coverage=1.0,
+                                expected="record identity",
+                                observed="record identity",
                             )
                             if action_id in required_identity
                             else None
                         ),
                         postconditions_ok=True,
+                        actuation="guarded_coordinate",
+                        starting_state_settled=True,
                         effect_verified=(
                             True if action_id in required_actions else None
                         ),
@@ -313,12 +324,12 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                                 EffectVerificationEvidence(
                                     effect_contract_hash=effect.contract_hash(),
                                     substrate="fixture-system-of-record",
-                                    verification_tier=int(project.minimum_effect_tier),
+                                    verification_tier=int(effect_tiers[index]),
                                     initial_verdict="confirmed",
                                     final_verdict="confirmed",
                                     observed_effect="present",
                                 )
-                                for effect in resolved_action_effects
+                                for index, effect in enumerate(resolved_action_effects)
                             ]
                             if action_id in required_actions
                             else []
@@ -516,6 +527,37 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             )
         )
     record_case_results(workflow, results, evidence_root=evidence_root)
+
+
+def _replace_representative_report(
+    workflow: Workflow,
+    evidence_root: Path,
+    mutate: Callable[[dict[str, Any]], None],
+) -> None:
+    """Replace and re-sign the retained representative report after mutation."""
+
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == "representative-1")
+    result = case.results[-1]
+    path = evidence_root / "representative-report.json"
+    payload = json.loads(path.read_text())
+    mutate(payload)
+    changed_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    path.write_bytes(changed_bytes)
+    changed_digest = hashlib.sha256(changed_bytes).hexdigest()
+    changed_refs = [
+        ref.model_copy(update={"sha256": changed_digest})
+        if ref.kind == "run_report"
+        else ref
+        for ref in result.evidence
+    ]
+    case.results[-1] = sign_case_result(
+        result.model_copy(
+            update={"evidence": changed_refs, "attestation_signature": ""}
+        ),
+        private_key=_RUNNER_PRIVATE_BYTES,
+    )
 
 
 def test_identity_normalization_is_explicit_and_quorum_is_bounded() -> None:
@@ -1070,6 +1112,7 @@ def test_signed_passed_status_cannot_disagree_with_representative_run(
         "workflow_contract_swap",
         "delivery_missing",
         "identity_missing",
+        "identity_policy_mode_swap",
         "effect_evidence_missing",
         "actuation_path_swap",
         "authorization_path_map_swap",
@@ -1097,6 +1140,26 @@ def test_signed_representative_claim_cannot_replace_exact_step_evidence(
         payload["results"][0]["delivery_attempted"] = False
     elif mutation == "identity_missing":
         payload["results"][0]["identity"] = None
+    elif mutation == "identity_policy_mode_swap":
+        payload["results"][0]["identity"] = {
+            "status": "verified",
+            "mode": "signal_quorum",
+            "coverage": 1.0,
+            "expected": "",
+            "observed": "",
+            "param": None,
+            "signal_evidence": [
+                {
+                    "signal": "record_id",
+                    "source": "structured",
+                    "verdict": "verified",
+                    "evidence_class": "application_structured_text",
+                    "match": "exact",
+                }
+            ],
+            "quorum_required": 1,
+            "quorum_verified": 1,
+        }
     elif mutation == "actuation_path_swap":
         payload["results"][0]["actuation"] = "api"
     elif mutation == "authorization_path_map_swap":
@@ -1128,10 +1191,78 @@ def test_signed_representative_claim_cannot_replace_exact_step_evidence(
     assert not report.passed
     expected_code = (
         QualificationRefusalCode.CASE_NOT_PASSED
-        if mutation == "delivery_missing"
+        if mutation == "identity_policy_mode_swap"
         else QualificationRefusalCode.CASE_ATTESTATION_INVALID
     )
     assert expected_code in {refusal.code for refusal in report.refusals}
+
+
+@pytest.mark.parametrize(
+    "actuation",
+    [None, "human_attended", "human_attended_skip", "future_driver"],
+)
+def test_representative_case_rejects_non_automated_gui_actuation(
+    tmp_path: Path,
+    actuation: str | None,
+) -> None:
+    workflow = _workflow()
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+    _replace_representative_report(
+        workflow,
+        evidence_root,
+        lambda payload: payload["results"][0].__setitem__("actuation", actuation),
+    )
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert not report.passed
+    assert {
+        QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+        QualificationRefusalCode.CASE_NOT_PASSED,
+    }.intersection(refusal.code for refusal in report.refusals)
+
+
+def test_duplicate_effect_hashes_require_one_evidence_tier_per_policy_index(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow()
+    workflow.steps[0].effects.append(workflow.steps[0].effects[0].model_copy(deep=True))
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    set_effect_policy(
+        workflow,
+        step_id="save",
+        effect_index=1,
+        tier=VerificationTier.PERSISTED_STATE_REACQUISITION,
+    )
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+
+    # Both effect instances have the same resolved contract hash. A Tier 3
+    # evidence record cannot be reused as the Tier 1 proof required by index 0.
+    _replace_representative_report(
+        workflow,
+        evidence_root,
+        lambda payload: payload["results"][0]["effect_evidence"][0].__setitem__(
+            "verification_tier", 3
+        ),
+    )
+
+    report = evaluate_qualification(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert not report.passed
+    assert QualificationRefusalCode.CASE_NOT_PASSED in {
+        refusal.code for refusal in report.refusals
+    }
 
 
 def test_case_scope_setter_versions_and_invalidates_certification() -> None:

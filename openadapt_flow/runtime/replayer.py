@@ -40,6 +40,7 @@ import os
 import re
 import time
 import uuid
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, cast
@@ -138,7 +139,11 @@ from openadapt_flow.runtime.effects import (
     reconcile_or_escalate,
 )
 from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
-from openadapt_flow.verification import verifier_effect_tier
+from openadapt_flow.verification import (
+    EffectContractMutationError,
+    verifier_effect_tier,
+    verify_effect_without_mutation,
+)
 from openadapt_flow.vision.ocr import OcrResolutionRefused
 
 if TYPE_CHECKING:
@@ -719,6 +724,7 @@ class Replayer:
                 merged.setdefault(pname, spec.example)
         merged.update(params or {})
         params = merged
+        self._outcome_worklists = deepcopy(worklists or {})
 
         from openadapt_flow.qualification import workflow_contract_sha256
 
@@ -745,6 +751,7 @@ class Replayer:
                 else None
             ),
             parameter_schema_sha256=(compute_parameter_schema_digest(workflow)),
+            run_id_sha256=hashlib.sha256(self._run_id.encode("utf-8")).hexdigest(),
             params=params,
             model_calls=prior_model_calls,
             external_network_calls=prior_external_network_calls,
@@ -1096,8 +1103,7 @@ class Replayer:
 
         return self._finalize_report(report, workflow, run_dir)
 
-    @staticmethod
-    def _stamp_execution_outcome(report: RunReport, workflow: Workflow) -> None:
+    def _stamp_execution_outcome(self, report: RunReport, workflow: Workflow) -> None:
         """Apply the named profile's evidence contract before persistence."""
 
         if report.execution_profile is None:
@@ -1108,6 +1114,7 @@ class Replayer:
             report,
             workflow,
             report.execution_profile,
+            runtime_worklists=self._outcome_worklists,
         )
 
     def _begin_control_overlay(self, profile: Optional[str]) -> None:
@@ -1551,25 +1558,30 @@ class Replayer:
             self._bundle_version = _bundle_version(bundle_dir)
             if resume_checkpoint is not None:
                 prior_checkpoints = store.program_checkpoints()
-                resumed_results = self._resumed_program_results(
-                    prior_checkpoints, workflow
-                )
-                report.visited_states.extend(
-                    checkpoint.verified_state_id for checkpoint in prior_checkpoints
-                )
-                report.results.extend(resumed_results)
-                for result in resumed_results:
-                    self._account_result(report, result, account_model_calls=False)
-                report.model_calls = max(
-                    report.model_calls,
-                    sum(self._result_model_calls(result) for result in resumed_results),
-                )
+                prior_history = self._program_checkpoint_history(prior_checkpoints)
+                if prior_history is not None:
+                    resumed_results = self._resumed_program_results(
+                        prior_checkpoints, workflow
+                    )
+                    report.visited_states.extend(prior_history)
+                    report.results.extend(resumed_results)
+                    for result in resumed_results:
+                        self._account_result(report, result, account_model_calls=False)
+                    report.model_calls = max(
+                        report.model_calls,
+                        sum(
+                            self._result_model_calls(result)
+                            for result in resumed_results
+                        ),
+                    )
+            self._program_checkpoint_history_len = len(report.visited_states)
         else:
             self._program_seq = 0
             self._completed_effect_keys = []
             self._completed_effect_evidence = []
             self._completed_unverified_effect_keys = []
             self._bundle_version = ""
+            self._program_checkpoint_history_len = 0
         try:
             if resume_checkpoint is not None:
                 # RESTORE the interpreter state and continue from the pause.
@@ -2138,6 +2150,26 @@ class Replayer:
         return True
 
     @staticmethod
+    def _program_checkpoint_history(
+        checkpoints: list[ProgramCheckpoint],
+    ) -> Optional[list[str]]:
+        """Reconstruct one contiguous, hash-bound pre-resume state trace."""
+
+        history: list[str] = []
+        for expected_seq, checkpoint in enumerate(checkpoints, start=1):
+            delta = checkpoint.visited_states_delta
+            if (
+                checkpoint.seq != expected_seq
+                or not delta
+                or delta[-1] != checkpoint.verified_state_id
+            ):
+                return None
+            history.extend(delta)
+            if checkpoint.transition_history_hash != _history_hash(history):
+                return None
+        return history
+
+    @staticmethod
     def _resumed_program_results(
         checkpoints: list[ProgramCheckpoint],
         workflow: Workflow,
@@ -2180,6 +2212,9 @@ class Replayer:
                     effect_contract_hashes=verified_keys or unverified_keys,
                     effect_evidence=list(checkpoint.new_effect_evidence),
                     identity=checkpoint.identity,
+                    input_verified=checkpoint.input_verified,
+                    starting_state_settled=checkpoint.starting_state_settled,
+                    delivery_attempted=checkpoint.delivery_attempted,
                     postconditions_ok=checkpoint.postconditions_ok,
                     actuation=checkpoint.actuation,
                     delivery_uncertainty=checkpoint.delivery_uncertainty,
@@ -2279,6 +2314,9 @@ class Replayer:
             else []
         )
         self._program_seq += 1
+        visited_states_delta = report.visited_states[
+            self._program_checkpoint_history_len :
+        ]
         checkpoint = ProgramCheckpoint(
             workflow_name=durable.workflow_name,
             seq=self._program_seq,
@@ -2293,6 +2331,9 @@ class Replayer:
             new_unverified_effects=(resolved_effects if new_unverified_keys else []),
             step_id=step.id if step is not None else state.id,
             identity=result.identity,
+            input_verified=result.input_verified,
+            starting_state_settled=result.starting_state_settled,
+            delivery_attempted=result.delivery_attempted,
             postconditions_ok=result.postconditions_ok,
             skipped=result.skipped,
             actuation=result.actuation,
@@ -2312,9 +2353,11 @@ class Replayer:
             ),
             expected_texts=expected,
             transition_history_hash=_history_hash(report.visited_states),
+            visited_states_delta=visited_states_delta,
             bundle_version=self._bundle_version,
         )
         durable.record_program_checkpoint(checkpoint)
+        self._program_checkpoint_history_len = len(report.visited_states)
 
     def _record_program_pause(
         self, halt: "_ProgramHalt", report: RunReport, *, workflow: Workflow
@@ -2348,6 +2391,9 @@ class Replayer:
             program_frames=halt.program_frames,
             program_checkpoint_seq=self._program_seq,
             program_history_hash=halt.program_history_hash,
+            program_history_delta=report.visited_states[
+                self._program_checkpoint_history_len :
+            ],
         )
 
     def revalidate_program_checkpoint(
@@ -2386,7 +2432,17 @@ class Replayer:
                     effect = Effect.model_validate(dump)
                 except Exception:
                     continue
-                verdict = self.effect_verifier.verify(effect, before)
+                try:
+                    verdict = verify_effect_without_mutation(
+                        self.effect_verifier,
+                        effect,
+                        before,
+                    )
+                except EffectContractMutationError as exc:
+                    raise StateDiverged(
+                        "the effect verifier changed an already-confirmed "
+                        "contract during resume revalidation"
+                    ) from exc
                 if not verdict.confirmed:
                     raise StateDiverged(
                         "an already-confirmed effect no longer holds "
@@ -4654,8 +4710,21 @@ class Replayer:
                     "be completed by an operator before this consequential "
                     "write can run — run aborted"
                 )
-            verdict = verifier.verify(effect, before)
-            tier = verifier_effect_tier(verifier, effect)
+            try:
+                verdict = verify_effect_without_mutation(verifier, effect, before)
+                tier = verifier_effect_tier(verifier, effect)
+            except EffectContractMutationError:
+                result.effect_verified = False
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.effect_results.append(
+                    "effect verifier changed the resolved effect contract; HALT"
+                )
+                return (
+                    f"Effect verifier changed the resolved contract for step "
+                    f"'{step.id}' — refusing mutable verification evidence; "
+                    "run aborted"
+                )
             if verdict.confirmed:
                 result.effect_evidence.append(
                     EffectVerificationEvidence(

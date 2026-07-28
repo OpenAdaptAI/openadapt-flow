@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from openadapt_flow.ir import (
     OutcomeContractCounts,
     Postcondition,
     PostconditionKind,
+    ProgramExecutionScopeFrame,
     ProgramGraph,
     Relation,
     Resolution,
@@ -36,7 +38,11 @@ from openadapt_flow.ir import (
     Transition,
     Workflow,
 )
-from openadapt_flow.qualification import EnvironmentBoundary, QualificationProject
+from openadapt_flow.qualification import (
+    EnvironmentBoundary,
+    QualificationProject,
+    workflow_contract_sha256,
+)
 from openadapt_flow.report import render_run_report
 from openadapt_flow.run_gate import (
     GATE_APPROVAL,
@@ -68,6 +74,13 @@ from tests.test_durable_runtime import FakeSoRVerifier, _approval
 from tests.test_replayer import FakeBackend, FakeVision, make_png
 
 _KEY = "profile-test-key"
+
+
+def _bind_report_to_workflow(report: RunReport, workflow: Workflow) -> RunReport:
+    report.workflow_contract_sha256 = workflow_contract_sha256(workflow)
+    run_id = report.governed_authorization_id or "profile-test-run"
+    report.run_id_sha256 = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    return report
 
 
 class _TieredVerifier:
@@ -454,6 +467,9 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
     verified.governed_authorization_id = "authorization-1"
     verified.governed_runtime_inputs_digest = "a" * 64
     verified.results[0].postconditions_ok = True
+    verified.results[0].starting_state_settled = True
+    verified.results[0].delivery_attempted = True
+    verified.results[0].actuation = "guarded_coordinate"
     verified.results[0].effect_verified = True
     effect_hash = _effect().contract_hash()
     verified.results[0].effect_contract_hashes = [effect_hash]
@@ -467,6 +483,7 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
             observed_effect="present",
         )
     ]
+    _bind_report_to_workflow(verified, workflow)
     persisted = verified.model_copy(deep=True)
     persisted.results[0].effect_evidence[
         0
@@ -475,6 +492,9 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
     immediate.results[0].effect_evidence[
         0
     ].verification_tier = VerificationTier.IMMEDIATE_SCREEN
+    arbitrary = verified.model_copy(deep=True)
+    arbitrary.results[0].effect_contract_hashes = ["f" * 64]
+    arbitrary.results[0].effect_evidence[0].effect_contract_hash = "f" * 64
 
     for profile in (ExecutionProfile.STANDARD, ExecutionProfile.REGULATED):
         assert (
@@ -491,6 +511,10 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
         )
         assert (
             classify_execution_outcome(immediate, workflow, profile)
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
+        assert (
+            classify_execution_outcome(arbitrary, workflow, profile)
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
     duplicated = verified.model_copy(deep=True)
@@ -525,33 +549,39 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
 
 def _verified_production_report(workflow: Workflow) -> RunReport:
     effect_hash = workflow.steps[0].effects[0].contract_hash()
-    return RunReport(
-        workflow_name=workflow.name,
-        started_at="2026-07-28T00:00:00Z",
-        success=True,
-        execution_completed=True,
-        governed_authorization_id="authorization-1",
-        governed_runtime_inputs_digest="a" * 64,
-        results=[
-            StepResult(
-                step_id="save",
-                intent="save",
-                ok=True,
-                postconditions_ok=True,
-                effect_verified=True,
-                effect_contract_hashes=[effect_hash],
-                effect_evidence=[
-                    EffectVerificationEvidence(
-                        effect_contract_hash=effect_hash,
-                        substrate="test",
-                        verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
-                        initial_verdict="confirmed",
-                        final_verdict="confirmed",
-                        observed_effect="present",
-                    )
-                ],
-            )
-        ],
+    return _bind_report_to_workflow(
+        RunReport(
+            workflow_name=workflow.name,
+            started_at="2026-07-28T00:00:00Z",
+            success=True,
+            execution_completed=True,
+            governed_authorization_id="authorization-1",
+            governed_runtime_inputs_digest="a" * 64,
+            results=[
+                StepResult(
+                    step_id="save",
+                    intent="save",
+                    ok=True,
+                    starting_state_settled=True,
+                    delivery_attempted=True,
+                    actuation="guarded_coordinate",
+                    postconditions_ok=True,
+                    effect_verified=True,
+                    effect_contract_hashes=[effect_hash],
+                    effect_evidence=[
+                        EffectVerificationEvidence(
+                            effect_contract_hash=effect_hash,
+                            substrate="test",
+                            verification_tier=VerificationTier.INDEPENDENT_SYSTEM,
+                            initial_verdict="confirmed",
+                            final_verdict="confirmed",
+                            observed_effect="present",
+                        )
+                    ],
+                )
+            ],
+        ),
+        workflow,
     )
 
 
@@ -581,6 +611,12 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
     disguised_delivery = verified.model_copy(deep=True)
     disguised_delivery.results[0].skipped = True
     disguised_delivery.results[0].delivery_attempted = True
+    unknown_actuation = verified.model_copy(deep=True)
+    unknown_actuation.results[0].actuation = "invented_driver"
+    runtime_failure = verified.model_copy(deep=True)
+    runtime_failure.results[0].failure_category = "runtime_failure"
+    contradictory_error = verified.model_copy(deep=True)
+    contradictory_error.results[0].error = "delivery failed"
 
     assert (
         classify_execution_outcome(canceled, workflow, ExecutionProfile.STANDARD)
@@ -590,7 +626,18 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
         classify_execution_outcome(failed, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.FAILED
     )
-    for report in (bad_effect, uncertain, unknown_action, disguised_delivery):
+    for report in (runtime_failure, contradictory_error):
+        assert (
+            classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+            is ExecutionOutcome.FAILED
+        )
+    for report in (
+        bad_effect,
+        uncertain,
+        unknown_action,
+        disguised_delivery,
+        unknown_actuation,
+    ):
         assert (
             classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
             is ExecutionOutcome.COMPLETED_UNVERIFIED
@@ -622,8 +669,19 @@ def test_program_outcome_requires_exact_ordered_action_trace():
         visited_states=["write", "done"],
         governed_authorization_id="authorization-1",
         governed_runtime_inputs_digest="b" * 64,
-        results=[StepResult(step_id="write", intent="write", ok=True)],
+        results=[
+            StepResult(
+                step_id="write",
+                intent="write",
+                ok=True,
+                starting_state_settled=True,
+                delivery_attempted=True,
+                actuation="guarded_keyboard",
+                program_scope=[ProgramExecutionScopeFrame(graph_id="__program__")],
+            )
+        ],
     )
+    _bind_report_to_workflow(report, workflow)
     assert (
         classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.VERIFIED
@@ -764,6 +822,7 @@ def test_native_run_network_state_remains_unknown_without_instrumentation():
         governed_authorization_id="authorization-1",
         governed_runtime_inputs_digest="d" * 64,
     )
+    _bind_report_to_workflow(report, workflow)
 
     stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
 
@@ -784,6 +843,7 @@ def test_verified_qualification_run_is_evidence_not_production_authority():
         governed_runtime_inputs_digest="f" * 64,
         governed_qualification_case_id_sha256="a" * 64,
     )
+    _bind_report_to_workflow(report, workflow)
 
     stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
 
@@ -808,6 +868,7 @@ def test_approval_source_text_cannot_spoof_qualification_only_status() -> None:
         governed_approval_source="qualification-campaign",
         governed_runtime_inputs_digest="f" * 64,
     )
+    _bind_report_to_workflow(report, workflow)
 
     stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
 

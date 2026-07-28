@@ -2252,6 +2252,9 @@ class BoundAttendedExecutor:
             # the already human-actuated source. Do not mislabel it as source
             # identity evidence.
             identity=None,
+            input_verified=result.input_verified,
+            starting_state_settled=result.starting_state_settled,
+            delivery_attempted=result.delivery_attempted,
             postconditions_ok=result.postconditions_ok,
             skipped=skipped,
             actuation="human_attended_skip" if skipped else "human_attended",
@@ -2267,6 +2270,7 @@ class BoundAttendedExecutor:
             ),
             expected_texts=expected_texts,
             transition_history_hash=pending.program_history_hash,
+            visited_states_delta=list(pending.program_history_delta),
             bundle_version=capability.bundle_version,
             attended_transition=receipt,
             created_at=capability.issued_at,

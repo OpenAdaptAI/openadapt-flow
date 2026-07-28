@@ -326,6 +326,9 @@ class DurableRun:
                     effect_contract_hashes=list(result.effect_contract_hashes),
                     effect_evidence=list(result.effect_evidence),
                     identity=result.identity,
+                    input_verified=result.input_verified,
+                    starting_state_settled=result.starting_state_settled,
+                    delivery_attempted=result.delivery_attempted,
                     governed_authorization_id=(
                         self.governed_authorization.authorization_id
                         if self.governed_authorization is not None
@@ -405,6 +408,7 @@ class DurableRun:
         program_frames: Optional[list[GraphFrame]] = None,
         program_checkpoint_seq: int = 0,
         program_history_hash: str = "",
+        program_history_delta: Optional[list[str]] = None,
     ) -> None:
         """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
 
@@ -433,6 +437,7 @@ class DurableRun:
             program_frames=list(program_frames or []),
             program_checkpoint_seq=program_checkpoint_seq,
             program_history_hash=program_history_hash,
+            program_history_delta=list(program_history_delta or []),
             delivery_uncertainty=result.delivery_uncertainty,
         )
         self.store.write_pending(pending)
@@ -499,6 +504,17 @@ def resumed_step_results(
                     list(checkpoint.effect_evidence) if checkpoint is not None else []
                 ),
                 identity=checkpoint.identity if checkpoint is not None else None,
+                input_verified=(
+                    checkpoint.input_verified if checkpoint is not None else None
+                ),
+                starting_state_settled=(
+                    checkpoint.starting_state_settled
+                    if checkpoint is not None
+                    else None
+                ),
+                delivery_attempted=(
+                    checkpoint.delivery_attempted if checkpoint is not None else None
+                ),
                 postconditions_ok=(
                     checkpoint.postconditions_ok if checkpoint is not None else None
                 ),

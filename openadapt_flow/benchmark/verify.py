@@ -23,7 +23,7 @@ import difflib
 
 from pydantic import BaseModel
 
-from openadapt_flow.vision import find_text, normalize_text, ocr, upscale_png
+from openadapt_flow.vision import OcrLine, find_text, normalize_text, ocr, upscale_png
 
 BANNER_PREFIX = "Encounter saved"
 #: MockMed truncation limits (static/app.js): banner shows note[:40], the
@@ -250,6 +250,68 @@ def _score_note(hay: str, needle: str) -> NoteVerifyResult:
     )
 
 
+def _saved_message_note_lines(lines: list[OcrLine]) -> list[OcrLine]:
+    """Return OCR lines that occupy a saved Patient Messages table row.
+
+    OpenEMR renders the saved note in the ``Content`` column and renders a
+    ``New`` status in the adjacent ``Status`` column. OCR can return that
+    status separately or merge it onto the content line. A wrapped continuation
+    can sit one text line below the status. The entry form is above the table,
+    so its textarea does not satisfy this geometric row contract.
+
+    The contract uses only pixels and OCR geometry. It does not read the DOM or
+    trust the runner's internal result.
+    """
+    content_headers = [line for line in lines if _squash(line.text) == "content"]
+    status_headers = [line for line in lines if _squash(line.text) == "status"]
+    candidates: list[OcrLine] = []
+    for content in content_headers:
+        cx, cy, cw, ch = content.region
+        content_center_x = cx + cw / 2
+        content_center_y = cy + ch / 2
+        for status in status_headers:
+            sx, sy, sw, sh = status.region
+            status_center_x = sx + sw / 2
+            status_center_y = sy + sh / 2
+            if status_center_x <= content_center_x:
+                continue
+            if abs(status_center_y - content_center_y) > 2 * max(ch, sh):
+                continue
+
+            header_bottom = max(cy + ch, sy + sh)
+            row_status_bands = [
+                (ly + lh / 2, lh)
+                for line in lines
+                for lx, ly, lw, lh in (line.region,)
+                if ly > header_bottom
+                and (
+                    (
+                        _squash(line.text) == "new"
+                        and lx + lw / 2 >= sx - sw
+                    )
+                    or (
+                        _squash(line.text).endswith("new")
+                        and lx + lw >= sx
+                    )
+                )
+            ]
+            for line in lines:
+                lx, ly, lw, lh = line.region
+                line_center_x = lx + lw / 2
+                line_center_y = ly + lh / 2
+                if ly <= header_bottom:
+                    continue
+                if not (content_center_x - cw <= line_center_x < status_center_x):
+                    continue
+                if any(
+                    abs(line_center_y - row_status_center_y)
+                    <= 2 * max(lh, status_h)
+                    for row_status_center_y, status_h in row_status_bands
+                ):
+                    candidates.append(line)
+    return candidates
+
+
 def verify_note_saved(
     screen_png: bytes,
     note_text: str,
@@ -258,11 +320,12 @@ def verify_note_saved(
 ) -> NoteVerifyResult:
     """Check a final-state screenshot for the saved OpenEMR note.
 
-    The message list embeds the note inside a longer line (``<timestamp>
-    (admin to admin) <note>``) and wraps it, so whole-line fuzzy matching
-    misses; and rapidocr drops some dense table lines entirely at
-    1280x800, so when the raw frame does not pass, the frame is retried
-    at 2x resolution, which recovers most dropped lines.
+    The message list embeds the note in the ``Content`` column of a saved
+    table row and wraps it. A valid evidence line must be below the table's
+    ``Content``/``Status`` headers and aligned with that row's ``New`` status.
+    Thus, the same note in the unsaved entry form does not pass. RapidOCR drops
+    some dense table lines entirely at 1280x800, so when the raw frame does not
+    pass, the frame is retried at 2x resolution.
 
     The criterion is a **contiguous** matched run of at least ``min_run``
     squashed characters between the note and the frame's OCR text. A
@@ -293,17 +356,17 @@ def verify_note_saved(
 
     best = NoteVerifyResult(success=False, matched_ratio=0.0, longest_run=0)
     for png in (screen_png, upscale_png(screen_png)):
-        hay = _squash(" ".join(line.text for line in ocr(png)))
-        result = _score_note(hay, needle)
-        if result.success or result.longest_run >= min_run:
-            return NoteVerifyResult(
-                success=True,
-                matched_ratio=result.matched_ratio,
-                longest_run=result.longest_run,
-            )
-        if (result.longest_run, result.matched_ratio) > (
-            best.longest_run,
-            best.matched_ratio,
-        ):
-            best = result
+        for line in _saved_message_note_lines(ocr(png)):
+            result = _score_note(_squash(line.text), needle)
+            if result.success or result.longest_run >= min_run:
+                return NoteVerifyResult(
+                    success=True,
+                    matched_ratio=result.matched_ratio,
+                    longest_run=result.longest_run,
+                )
+            if (result.longest_run, result.matched_ratio) > (
+                best.longest_run,
+                best.matched_ratio,
+            ):
+                best = result
     return best

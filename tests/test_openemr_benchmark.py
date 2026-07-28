@@ -1,8 +1,8 @@
 """Unit tests for the OpenEMR benchmark pieces (no network anywhere).
 
-The Anthropic client and backend are faked, the orchestrator's run helpers
-are monkeypatched, and ``verify_note_saved`` runs real OCR on synthetic
-cv2-rendered screenshots — the same testing style as ``test_benchmark.py``.
+The Anthropic client and backend are faked, and the orchestrator's run helpers
+are monkeypatched. Saved-note tests use exact OCR text and geometry so font and
+OCR differences between operating systems cannot change the row contract.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+import openadapt_flow.benchmark.verify as benchmark_verify
 from openadapt_flow.benchmark import agent_baseline, openemr_benchmark
 from openadapt_flow.benchmark.agent_baseline import (
     openemr_task_prompt,
@@ -27,6 +28,7 @@ from openadapt_flow.benchmark.openemr_benchmark import (
     write_openemr_outputs,
 )
 from openadapt_flow.benchmark.verify import verify_note_saved
+from openadapt_flow.vision import OcrLine
 
 NOTE = "Insurance card copied and coverage verified by phone."
 
@@ -60,48 +62,127 @@ def make_screen(*lines: str, thickness: int = 2) -> bytes:
 
 
 class TestVerifyNoteSaved:
-    def test_note_embedded_in_message_row_passes(self) -> None:
-        # OpenEMR shows the note inside a longer list line (timestamp +
-        # "(admin to admin)" prefix). Rendered at thickness=1 (thin strokes,
-        # like real anti-aliased browser text) rather than the helper's
-        # bold thickness=2 default: rapidocr's angle classifier mis-detects
-        # the BOLD cv2-Hershey render of this long, digit-prefixed line as
-        # 180°-rotated and flips it, garbling the OCR. That is a synthetic-
-        # render artifact of the blocky bold font — it does NOT occur on the
-        # real browser-rendered OpenEMR row (which verifies at 100%). The row
-        # content, the note, and the criterion below are all unchanged; only
-        # the incidental stroke weight is thinned so OCR reads the frame the
-        # verifier actually faces in production.
-        screen = make_screen(
-            "Patient Messages",
-            f"2026-07-08 (admin to admin) {NOTE}",
-            thickness=1,
+    @staticmethod
+    def _patch_ocr(monkeypatch: Any, lines: list[OcrLine]) -> None:
+        monkeypatch.setattr(benchmark_verify, "ocr", lambda _png: lines)
+        monkeypatch.setattr(benchmark_verify, "upscale_png", lambda png: png)
+
+    @staticmethod
+    def _table(*rows: OcrLine) -> list[OcrLine]:
+        return [
+            OcrLine(text="Content", region=(420, 420, 70, 20), confidence=1.0),
+            OcrLine(text="Status", region=(900, 420, 60, 20), confidence=1.0),
+            *rows,
+        ]
+
+    def test_note_embedded_in_message_row_passes(self, monkeypatch: Any) -> None:
+        self._patch_ocr(
+            monkeypatch,
+            self._table(
+                OcrLine(
+                    text=f"2026-07-08 (admin to admin) {NOTE}",
+                    region=(330, 480, 550, 20),
+                    confidence=1.0,
+                ),
+                OcrLine(text="New", region=(900, 480, 40, 20), confidence=1.0),
+            ),
         )
+        screen = BLANK_PNG
         verdict = verify_note_saved(screen, NOTE)
         assert verdict.success
         assert verdict.longest_run >= 16
 
-    def test_wrapped_fragment_passes(self) -> None:
-        # A wrapped note where OCR only captured one distinctive fragment
-        # of at least 16 contiguous characters still counts.
-        screen = make_screen("coverage verified by")
-        verdict = verify_note_saved(screen, NOTE)
+    def test_wrapped_fragment_passes(self, monkeypatch: Any) -> None:
+        # A continuation line can sit below the row's status line.
+        self._patch_ocr(
+            monkeypatch,
+            self._table(
+                OcrLine(
+                    text="coverage verified by",
+                    region=(420, 505, 180, 20),
+                    confidence=1.0,
+                ),
+                OcrLine(text="New", region=(900, 480, 40, 20), confidence=1.0),
+            ),
+        )
+        verdict = verify_note_saved(BLANK_PNG, NOTE)
         assert verdict.success
         assert verdict.longest_run >= 16
+
+    def test_status_merged_onto_content_line_passes(self, monkeypatch: Any) -> None:
+        # RapidOCR can merge the adjacent New cell onto a long content line.
+        self._patch_ocr(
+            monkeypatch,
+            self._table(
+                OcrLine(
+                    text="2026-07-08 (admin to admin) "
+                    "Travel vaccine consult booked beforeNew",
+                    region=(330, 480, 610, 20),
+                    confidence=1.0,
+                ),
+            ),
+        )
+        verdict = verify_note_saved(
+            BLANK_PNG,
+            "Travel vaccine consult booked before the June trip.",
+        )
+        assert verdict.success
+        assert verdict.longest_run >= 16
+
+    def test_note_in_unsaved_entry_form_fails(self, monkeypatch: Any) -> None:
+        # The exact note is visible in the textarea, but no saved row contains
+        # it. This is the retained compiled_019 false-success shape.
+        self._patch_ocr(
+            monkeypatch,
+            [
+                OcrLine(
+                    text="Patient Message",
+                    region=(420, 280, 160, 20),
+                    confidence=1.0,
+                ),
+                OcrLine(text=NOTE, region=(460, 340, 440, 20), confidence=1.0),
+                OcrLine(
+                    text="Save as new message",
+                    region=(460, 380, 180, 20),
+                    confidence=1.0,
+                ),
+                *self._table(
+                    OcrLine(
+                        text="A different saved message.",
+                        region=(420, 480, 240, 20),
+                        confidence=1.0,
+                    ),
+                    OcrLine(
+                        text="New", region=(900, 480, 40, 20), confidence=1.0
+                    ),
+                ),
+            ],
+        )
+        verdict = verify_note_saved(BLANK_PNG, NOTE)
+        assert not verdict.success
+        assert verdict.longest_run < 16
 
     def test_blank_screen_fails(self) -> None:
         verdict = verify_note_saved(BLANK_PNG, NOTE)
         assert not verdict.success
         assert verdict.longest_run < 16
 
-    def test_wrong_note_fails(self) -> None:
+    def test_wrong_note_fails(self, monkeypatch: Any) -> None:
         # A different run's note visible on screen must not satisfy this
         # run's check (contiguous-run criterion, dissimilar note texts).
-        screen = make_screen(
-            "2026-07-08 (admin to admin) "
-            "Dermatology biopsy site healing cleanly, no drainage.",
+        self._patch_ocr(
+            monkeypatch,
+            self._table(
+                OcrLine(
+                    text="2026-07-08 (admin to admin) "
+                    "Dermatology biopsy site healing cleanly, no drainage.",
+                    region=(330, 480, 550, 20),
+                    confidence=1.0,
+                ),
+                OcrLine(text="New", region=(900, 480, 40, 20), confidence=1.0),
+            ),
         )
-        verdict = verify_note_saved(screen, NOTE)
+        verdict = verify_note_saved(BLANK_PNG, NOTE)
         assert not verdict.success
 
     def test_empty_note_fails(self) -> None:

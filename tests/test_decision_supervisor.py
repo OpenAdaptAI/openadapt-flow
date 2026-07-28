@@ -46,8 +46,13 @@ from openadapt_flow.runtime.durable.attended import (
     AttendedActionBusy,
     AttendedActionRefused,
     AttendedActionStore,
+    AttendedDecision,
+    AttendedDecisionLog,
     AttendedRelayAcknowledgement,
+    attended_decision_payload,
 )
+from openadapt_flow.runtime.durable.authority import DurableAuthority
+from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 from openadapt_flow.runtime.replayer import Replayer
 from tests.test_attended_actions import _ResultExecutor
 from tests.test_decision_relay import (
@@ -571,6 +576,71 @@ def test_a_lost_ack_survives_restart_without_a_second_action(
             decision_id=str(relay_body["decision_id"]), relay=relay_body
         ).durable_binding()
     )
+    assert retained is not None
+    assert retained[0].confirmed is True
+
+
+def test_v1_unicode_lost_ack_replays_from_external_authority(tmp_path):
+    """A v1 outcome survives restart without a local projection or redispatch."""
+    runs = tmp_path / "runs"
+    run, item = _halted_run(runs, tmp_path / "bundles", "v1-unicode")
+    deployment = _deployment()
+    executor = _ResultExecutor()
+    relay_body = _relayed_for(run, item, deployment)
+    relayed = RelayedDecision(
+        decision_id=str(relay_body["decision_id"]), relay=relay_body
+    )
+    binding = relayed.durable_binding()
+    store = AttendedActionStore(run)
+    capability = store.read()
+    legacy = AttendedDecision(
+        schema_version=1,
+        decision_id="0123456789abcdef0123456789abcdef",
+        pause_id=capability.pause_id,
+        capability_digest=binding.capability_digest,
+        request_digest="sha256:" + "b" * 64,
+        idempotency_key=binding.idempotency_key,
+        action=binding.action,
+        operator="José",
+        status="completed",
+        message="vérifié",
+        report_success=True,
+    )
+    record = store._relay_acknowledgement(binding, legacy)  # noqa: SLF001
+    assert record.retained_decision_digest == _plain_digest(
+        attended_decision_payload(legacy)
+    )
+    log = AttendedDecisionLog(
+        decisions=[legacy], relay_acknowledgements=[record]
+    ).model_dump_json(indent=2)
+    assert "decided_by" not in json.loads(log)["decisions"][0]
+    authority = DurableAuthority(run, CheckpointStore(run))
+    _snapshot, head = authority.read_attended_snapshot(
+        expected_run_id=capability.run_id
+    )
+    authority.append_attended_snapshot(
+        expected_run_id=capability.run_id,
+        expected_head_digest=head,
+        snapshot_json=log,
+    )
+    assert not store.decisions_path.exists()
+
+    transport = _SequencedTransport(
+        polls=[(200, {"decision": relay_body})],
+        acknowledgements=[(200, {"accepted": True})],
+    )
+    report = DecisionSupervisor(
+        runs,
+        relay=DecisionRelay(transport, token=TOKEN, deployment=deployment),
+        deployment=deployment,
+        executor=executor,
+    ).serve_once(wait_s=0.0)
+
+    assert report.reacknowledged is True
+    assert report.outcome == legacy
+    assert executor.calls == 0
+    assert store.decisions_path.is_file()
+    retained = store.relay_acknowledgement(binding)
     assert retained is not None
     assert retained[0].confirmed is True
 

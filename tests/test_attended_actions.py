@@ -19,6 +19,7 @@ from openadapt_flow.console.attention import attention_item
 from openadapt_flow.console.human_decisions import (
     RemoteAttendedActionRequest,
     RemoteDecisionPrincipal,
+    decision_receipt,
     execute_remote_attended_action,
     portable_remote_decision_task,
 )
@@ -68,8 +69,10 @@ from openadapt_flow.runtime.durable.attended import (
     AttendedActionRefused,
     AttendedActionRequest,
     AttendedActionStore,
+    AttendedDecision,
     BoundAttendedExecutor,
     TransitionObservation,
+    attended_decision_payload,
     execute_attended_action,
     issue_attended_capability,
     validate_attended_program_receipt,
@@ -100,6 +103,77 @@ from tests.test_replayer import (
     click_step,
     make_png,
 )
+
+
+def _digest_fixture_decision(
+    *,
+    schema_version: int = 2,
+    decided_by: str = "unknown",
+) -> AttendedDecision:
+    return AttendedDecision(
+        schema_version=schema_version,
+        decision_id="0123456789abcdef0123456789abcdef",
+        pause_id="fedcba9876543210fedcba9876543210",
+        capability_digest="sha256:" + "a" * 64,
+        request_digest="sha256:" + "b" * 64,
+        idempotency_key="digest-fixture-key-0001",
+        action="continue",
+        operator="José",
+        decided_by=decided_by,
+        status="completed",
+        message="vérifié",
+        created_at="2026-07-01T00:00:00+00:00",
+        report_success=True,
+    )
+
+
+def test_v1_unicode_decision_keeps_exact_engine_and_portable_payloads():
+    current = _digest_fixture_decision(decided_by="unknown")
+    legacy_wire = current.model_dump(mode="json")
+    legacy_wire["schema_version"] = 1
+    legacy_wire.pop("decided_by")
+    legacy = AttendedDecision.model_validate(legacy_wire)
+
+    assert legacy.decided_by == "unknown"
+    assert attended_decision_payload(legacy) == legacy_wire
+    portable = json.dumps(
+        legacy_wire, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    assert decision_receipt(legacy).decision_digest == (
+        "sha256:" + hashlib.sha256(portable).hexdigest()
+    )
+    engine = json.dumps(
+        legacy_wire, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    assert engine != portable
+
+
+def test_v2_decision_digest_commits_to_trusted_provenance():
+    human = _digest_fixture_decision(decided_by="human")
+    automated = _digest_fixture_decision(decided_by="automation")
+
+    assert human.schema_version == automated.schema_version == 2
+    assert attended_decision_payload(human)["decided_by"] == "human"
+    assert attended_decision_payload(automated)["decided_by"] == "automation"
+    assert (
+        decision_receipt(human).decision_digest
+        != decision_receipt(automated).decision_digest
+    )
+
+
+def test_v1_cannot_claim_provenance_and_untrusted_request_cannot_supply_it():
+    with pytest.raises(ValidationError, match="schema v1"):
+        _digest_fixture_decision(schema_version=1, decided_by="human")
+    with pytest.raises(ValidationError):
+        AttendedActionRequest.model_validate(
+            {
+                "capability_digest": "sha256:" + "0" * 64,
+                "idempotency_key": "forged-provenance-0001",
+                "action": "escalate",
+                "disposition": "needs_assistance",
+                "decided_by": "human",
+            }
+        )
 
 
 def _step(step_id: str, key: str, *, expect: str | None = None) -> Step:
@@ -1702,9 +1776,25 @@ def test_same_request_is_idempotent_and_conflicting_reuse_refuses(tmp_path):
     _workflow, _bundle, run, _store, capability = _paused(tmp_path)
     executor = _ResultExecutor()
     request = _request(capability)
-    first = execute_attended_action(run, request, operator="staff", executor=executor)
-    second = execute_attended_action(run, request, operator="staff", executor=executor)
+    first = execute_attended_action(
+        run,
+        request,
+        operator="staff",
+        decided_by="human",
+        executor=executor,
+    )
+    second = execute_attended_action(
+        run,
+        request,
+        operator="staff",
+        decided_by="automation",
+        executor=executor,
+    )
     assert first == second
+    assert first.decided_by == "human"
+    assert {
+        item.decided_by for item in AttendedActionStore(run)._read_log().decisions
+    } == {"human"}
     assert executor.calls == 1
     conflict = request.model_copy(
         update={"action": "skip", "disposition": "not_applicable"}
@@ -1724,14 +1814,17 @@ def test_crash_after_delivery_started_becomes_uncertain_and_never_retries(tmp_pa
     executor = Explodes()
     request = _request(capability)
     with pytest.raises(RuntimeError):
-        execute_attended_action(run, request, operator="staff", executor=executor)
-    statuses = [
-        item["status"]
-        for item in json.loads((run / "attended_decisions.json").read_text())[
-            "decisions"
-        ]
-    ]
+        execute_attended_action(
+            run,
+            request,
+            operator="staff",
+            decided_by="automation",
+            executor=executor,
+        )
+    journal = json.loads((run / "attended_decisions.json").read_text())["decisions"]
+    statuses = [item["status"] for item in journal]
     assert statuses == ["prepared", "delivery_started", "delivery_uncertain"]
+    assert {item["decided_by"] for item in journal} == {"automation"}
     with pytest.raises(AttendedActionRefused, match="automatic retry"):
         execute_attended_action(run, request, operator="staff", executor=executor)
     with pytest.raises(AttendedActionRefused, match="another request"):
@@ -1742,6 +1835,36 @@ def test_crash_after_delivery_started_becomes_uncertain_and_never_retries(tmp_pa
             executor=executor,
         )
     assert executor.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "disposition", "status"),
+    [
+        ("teach", "teach_requested", "needs_demonstration"),
+        ("escalate", "needs_assistance", "escalated"),
+        ("reject", "rejected_by_operator", "rejected"),
+    ],
+)
+def test_non_actuating_and_reject_decisions_keep_trusted_provenance(
+    tmp_path, action, disposition, status
+):
+    _workflow, _bundle, run, _store, capability = _paused(tmp_path)
+    request = AttendedActionRequest(
+        capability_digest=capability.digest,
+        idempotency_key=f"{action}-provenance-key-0001",
+        action=action,
+        disposition=disposition,
+    )
+
+    decision = execute_attended_action(
+        run,
+        request,
+        operator="staff",
+        decided_by="human",
+    )
+
+    assert decision.status == status
+    assert decision.decided_by == "human"
 
 
 def test_challenge_payload_has_no_answer_code_or_raw_path_surface():
@@ -2415,11 +2538,15 @@ def test_attended_http_action_requires_auth_csrf_and_exact_capability(
     executor = _ResultExecutor()
 
     class Service:
-        def execute(self, run_dir, request, *, operator):
+        decided_by: list[str] = []
+
+        def execute(self, run_dir, request, *, operator, decided_by="unknown"):
+            self.decided_by.append(decided_by)
             return execute_attended_action(
                 run_dir,
                 request,
                 operator=operator,
+                decided_by=decided_by,
                 executor=executor,
             )
 
@@ -2482,6 +2609,7 @@ def test_attended_http_action_requires_auth_csrf_and_exact_capability(
     assert receipt["action"] == "verify_and_resume"
     assert "message" not in receipt and "operator" not in receipt
     assert executor.calls == 1
+    assert Service.decided_by == ["human"]
 
     wrong_path = client.post(
         f"/api/attention/{item['id']}/actions/skip",
@@ -2603,6 +2731,7 @@ def test_remote_decision_is_idempotent_and_resumes_through_fresh_remote_actuatio
     )
 
     assert first == second
+    assert first.decided_by == "human"
     assert first.status == "completed"
     assert backend.acquire_count == 1
     assert ("press", "A") not in backend.actions
@@ -2622,10 +2751,12 @@ def test_public_attended_service_executes_exact_request_on_owner(tmp_path, monke
             run,
             _request(capability, key="request-key-public-service"),
             operator="staff",
+            decided_by="automation",
         )
         owner_thread = service._owner.owner_thread_id
 
     assert decision.status == "completed"
+    assert decision.decided_by == "automation"
     assert executor.calls == 1
     assert owner_thread is not None
 

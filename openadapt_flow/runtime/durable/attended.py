@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from openadapt_flow.ir import (
     AttendedProgramTransitionEvidence,
@@ -265,7 +265,7 @@ class AttendedExecutionResult(BaseModel):
 class AttendedDecision(BaseModel):
     """Append-only audit record for an admitted or refused operator decision."""
 
-    schema_version: int = 1
+    schema_version: Literal[1, 2] = 2
     decision_id: str = Field(default_factory=lambda: secrets.token_hex(16))
     pause_id: str
     capability_digest: str
@@ -273,6 +273,11 @@ class AttendedDecision(BaseModel):
     idempotency_key: str
     action: Literal["continue", "skip", "reject", "teach", "escalate"]
     operator: str
+    #: Trusted route attribution. This is separate from ``operator``, which
+    #: identifies the principal but not the class of decider attributed by the
+    #: route. It is not proof of physical human presence. Legacy and undeclared
+    #: decisions remain ``unknown`` and must not count as human decisions.
+    decided_by: Literal["human", "automation", "unknown"] = "unknown"
     disposition: Optional[str] = None
     status: Literal[
         "prepared",
@@ -290,6 +295,33 @@ class AttendedDecision(BaseModel):
     report_success: Optional[bool] = None
     next_transition: Optional[str] = None
     transition_receipt_digest: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _schema_matches_provenance(self) -> "AttendedDecision":
+        if self.schema_version == 1 and self.decided_by != "unknown":
+            raise ValueError(
+                "attended decision schema v1 cannot assert decider provenance"
+            )
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_schema(self, handler: Any) -> dict[str, Any]:
+        """Keep schema-v1 journal entries byte-semantically compatible."""
+        payload: dict[str, Any] = handler(self)
+        if self.schema_version == 1:
+            payload.pop("decided_by", None)
+        return payload
+
+
+def attended_decision_payload(decision: AttendedDecision) -> dict[str, Any]:
+    """Return the canonical payload for the decision's declared schema."""
+    payload = decision.model_dump(mode="json")
+    if decision.schema_version == 1:
+        # Pydantic supplies the safe ``unknown`` default when a v1 record is
+        # read. The field was not part of v1, so it must not change that
+        # record's existing engine or portable digest.
+        payload.pop("decided_by", None)
+    return payload
 
 
 class AttendedRelayBinding(BaseModel):
@@ -1395,7 +1427,7 @@ class AttendedActionStore:
             bundle_version=capability.bundle_version,
             pause_id=capability.pause_id,
             retained_decision_id=decision.decision_id,
-            retained_decision_digest=_digest(decision),
+            retained_decision_digest=_digest(attended_decision_payload(decision)),
             retained_request_digest=decision.request_digest,
             retained_status=cast(RelayOutcomeStatus, decision.status),
             record_mac="hmac-sha256:" + ("0" * 64),
@@ -1531,7 +1563,8 @@ class AttendedActionStore:
             )
         outcome = retained[0]
         if (
-            _digest(outcome) != record.retained_decision_digest
+            _digest(attended_decision_payload(outcome))
+            != record.retained_decision_digest
             or outcome.request_digest != record.retained_request_digest
             or outcome.idempotency_key != record.idempotency_key
             or outcome.capability_digest != record.capability_digest
@@ -1974,6 +2007,7 @@ def _audit_only_decision(
     request: AttendedActionRequest,
     *,
     operator: str,
+    decided_by: Literal["human", "automation", "unknown"],
 ) -> AttendedDecision:
     """Create a non-actuating decision that leaves the live pause intact."""
 
@@ -1985,6 +2019,7 @@ def _audit_only_decision(
             idempotency_key=request.idempotency_key,
             action=request.action,
             operator=operator,
+            decided_by=decided_by,
             disposition=request.disposition or "teach_requested",
             status="needs_demonstration",
             message=(
@@ -2003,6 +2038,7 @@ def _audit_only_decision(
             idempotency_key=request.idempotency_key,
             action=request.action,
             operator=operator,
+            decided_by=decided_by,
             disposition=request.disposition or "needs_assistance",
             status="escalated",
             message=(
@@ -2019,12 +2055,17 @@ def execute_attended_action(
     request: AttendedActionRequest,
     *,
     operator: str,
+    decided_by: Literal["human", "automation", "unknown"] = "unknown",
     executor: Optional[AttendedActionExecutor] = None,
     relay_binding: Optional[AttendedRelayBinding] = None,
     key: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> AttendedDecision:
-    """Admit and execute one attended decision under exact binding."""
+    """Admit and execute one attended decision under exact binding.
+
+    ``decided_by`` is trusted caller provenance. An undeclared caller remains
+    ``unknown``. The untrusted request cannot supply this value.
+    """
     from openadapt_flow import crypto as _crypto
 
     key = _crypto.resolve_key(key)
@@ -2082,6 +2123,7 @@ def execute_attended_action(
                 capability,
                 request,
                 operator=operator,
+                decided_by=decided_by,
             )
             actions.append(decision, relay_binding=relay_binding, key=key)
             return decision
@@ -2186,6 +2228,7 @@ def execute_attended_action(
                 idempotency_key=request.idempotency_key,
                 action=request.action,
                 operator=operator,
+                decided_by=decided_by,
                 disposition=request.disposition or "rejected_by_operator",
                 status="rejected",
                 message=(
@@ -2207,6 +2250,7 @@ def execute_attended_action(
                 capability,
                 request,
                 operator=operator,
+                decided_by=decided_by,
             )
             actions.append(decision, relay_binding=relay_binding, key=key)
             return decision
@@ -2250,6 +2294,7 @@ def execute_attended_action(
             idempotency_key=request.idempotency_key,
             action=request.action,
             operator=operator,
+            decided_by=decided_by,
             disposition=request.disposition,
             status="prepared",
             message="request admitted; no delivery attempted",
@@ -2344,6 +2389,7 @@ def execute_attended_action(
             idempotency_key=request.idempotency_key,
             action=request.action,
             operator=operator,
+            decided_by=decided_by,
             disposition=request.disposition,
             status=result.status,
             message=result.message,

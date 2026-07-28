@@ -137,11 +137,17 @@ class _Service:
     def __init__(self, executor):
         self.executor = executor
         self.calls = 0
+        self.deciders = []
 
-    def execute(self, run_dir, request, *, operator):
+    def execute(self, run_dir, request, *, operator, decided_by="unknown"):
         self.calls += 1
+        self.deciders.append(decided_by)
         return execute_attended_action(
-            run_dir, request, operator=operator, executor=self.executor
+            run_dir,
+            request,
+            operator=operator,
+            decided_by=decided_by,
+            executor=self.executor,
         )
 
 
@@ -599,13 +605,10 @@ def test_uncertain_delivery_is_reported_as_uncertain_and_survives_a_fresh_key(
     assert receipt.reason_code == "delivery_uncertain"
     assert receipt.report_success is None
 
-    statuses = [
-        entry["status"]
-        for entry in json.loads((run / "attended_decisions.json").read_text())[
-            "decisions"
-        ]
-    ]
+    journal = json.loads((run / "attended_decisions.json").read_text())["decisions"]
+    statuses = [entry["status"] for entry in journal]
     assert statuses == ["prepared", "delivery_started", "delivery_uncertain"]
+    assert {entry["decided_by"] for entry in journal} == {"human"}
 
     # A fresh idempotency key must not launder the uncertainty away.
     fresh = _post(client, item, _decision(detail, key="uncertain-key-000002"))

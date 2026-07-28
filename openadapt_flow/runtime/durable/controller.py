@@ -33,6 +33,7 @@ import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
+from openadapt_flow.bundle_validation import BundleIntegrityError
 from openadapt_flow.ir import (
     ProgramExceptionEvidence,
     ProgramTransitionEvidence,
@@ -512,14 +513,20 @@ class DurableRun:
                 issue_attended_capability,
             )
 
-            issue_attended_capability(
-                self.store.run_dir,
-                store=self.store,
-                pending=pending,
-                workflow=workflow,
-                result=result,
-                transition_observation=transition_observation,
-            )
+            try:
+                issue_attended_capability(
+                    self.store.run_dir,
+                    store=self.store,
+                    pending=pending,
+                    workflow=workflow,
+                    result=result,
+                    transition_observation=transition_observation,
+                )
+            except BundleIntegrityError:
+                # The pause is still the safe terminal state for this leg. Do
+                # not turn a detected bundle mutation into a runtime crash, and
+                # do not mint new operator authority for the mutated bundle.
+                pass
         self._sync_authority()
 
     # -- Phase-2 program (state-machine) durability --------------------------
@@ -611,14 +618,19 @@ class DurableRun:
                 issue_attended_capability,
             )
 
-            issue_attended_capability(
-                self.store.run_dir,
-                store=self.store,
-                pending=pending,
-                workflow=workflow,
-                result=result,
-                transition_observation=transition_observation,
-            )
+            try:
+                issue_attended_capability(
+                    self.store.run_dir,
+                    store=self.store,
+                    pending=pending,
+                    workflow=workflow,
+                    result=result,
+                    transition_observation=transition_observation,
+                )
+            except BundleIntegrityError:
+                # Preserve the durable halt, but never issue attended mutation
+                # authority against a bundle that no longer matches its seal.
+                pass
         self._sync_authority()
 
     def complete(self) -> None:

@@ -2430,7 +2430,10 @@ class Replayer:
             new_crops=new_crops,
             graph_ctx=ctx,
         )
-        result.program_scope = self._program_execution_scope()
+        # Report the exact cursor that was validated before callbacks. The live
+        # frame stack is mutable backend-facing state and can no longer be
+        # trusted after an action callback starts.
+        result.program_scope = self._program_scope_from_frames(pre_action_frames)
         try:
             post_action_refusal = self._active_program_frame_refusal(
                 workflow,
@@ -2986,18 +2989,26 @@ class Replayer:
     def _program_execution_scope(self) -> list[ProgramExecutionScopeFrame]:
         """Return graph and loop cursors without retaining worklist values."""
 
-        scope: list[ProgramExecutionScopeFrame] = []
-        for frame in getattr(self, "_frame_stack", []):
-            loop = frame.get("loop")
-            scope.append(
-                ProgramExecutionScopeFrame(
-                    graph_id=frame["graph_id"],
-                    loop_state_id=(loop.loop_state_id if loop is not None else None),
-                    relation=(loop.relation if loop is not None else None),
-                    row_index=(loop.row_index if loop is not None else None),
-                )
+        frames = [self._frame_to_model(frame) for frame in self._frame_stack]
+        return self._program_scope_from_frames(frames)
+
+    @staticmethod
+    def _program_scope_from_frames(
+        frames: list[GraphFrame],
+    ) -> list[ProgramExecutionScopeFrame]:
+        """Project a previously validated cursor into privacy-safe evidence."""
+
+        return [
+            ProgramExecutionScopeFrame(
+                graph_id=frame.graph_id,
+                loop_state_id=(
+                    frame.loop.loop_state_id if frame.loop is not None else None
+                ),
+                relation=(frame.loop.relation if frame.loop is not None else None),
+                row_index=(frame.loop.row_index if frame.loop is not None else None),
             )
-        return scope
+            for frame in frames
+        ]
 
     def _skip_completed_effect_state(
         self, state: State, params: dict[str, str], report: RunReport

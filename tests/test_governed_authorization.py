@@ -1139,6 +1139,9 @@ def test_durable_resume_restores_governed_authorization(tmp_path):
     resumed_backend = FakeBackend()
     resumed_vision = resolving_vision()
     resumed_vision.ocr_lines = []
+    resumed_vision.text_results = {
+        "Saved": Match(point=(1, 1), region=(0, 0, 2, 2), confidence=0.99)
+    }
     resumed = resume(
         run_dir,
         Replayer(resumed_backend, vision=resumed_vision, poll_interval_s=0.0),

@@ -214,8 +214,6 @@ class RunReceipt(BaseModel):
             raise ValueError(
                 "VERIFIED receipt requires exactly one governed authorization"
             )
-        if self.postconditions_required < 1:
-            raise ValueError("VERIFIED receipt requires postcondition evidence")
         if self.identity_armed != self.identity_applicable:
             raise ValueError("VERIFIED receipt requires complete identity arming")
         if self.steps_ok != self.steps_total:
@@ -512,7 +510,9 @@ def _build_receipt(
             "VERIFIED receipt found a failed, halted, or refuted retained step"
         )
     postcondition_results = sum(
-        result.postconditions_ok is True for result in report.results
+        int(result.postconditions_ok is True) + int(result.input_verified is True)
+        for result in report.results
+        if result.actuation != "api"
     )
     if int(required.postcondition) > 0 and postcondition_results == 0:
         raise ReceiptError("VERIFIED receipt requires retained postcondition evidence")
@@ -620,7 +620,11 @@ def _build_receipt(
         )
     if any(
         result.step_id not in required_identity_ids
-        or result.postconditions_ok is not True
+        or (
+            result.actuation != "api"
+            and result.postconditions_ok is not True
+            and result.input_verified is not True
+        )
         for result in effect_results
     ):
         raise ReceiptError(

@@ -59,6 +59,7 @@ class ExecutionProfileContract:
     production: bool
     require_certification: bool
     require_identity_coverage: bool
+    require_consequential_postconditions: bool
     require_effect_contracts: bool
     minimum_effect_tier: VerificationTier | None
     require_approval_for_unverified_effects: bool
@@ -86,6 +87,7 @@ _CONTRACTS = {
         production=False,
         require_certification=False,
         require_identity_coverage=False,
+        require_consequential_postconditions=False,
         require_effect_contracts=False,
         minimum_effect_tier=None,
         require_approval_for_unverified_effects=True,
@@ -102,6 +104,7 @@ _CONTRACTS = {
         production=True,
         require_certification=True,
         require_identity_coverage=True,
+        require_consequential_postconditions=True,
         require_effect_contracts=True,
         minimum_effect_tier=VerificationTier.PERSISTED_STATE_REACQUISITION,
         require_approval_for_unverified_effects=False,
@@ -118,6 +121,7 @@ _CONTRACTS = {
         production=True,
         require_certification=True,
         require_identity_coverage=True,
+        require_consequential_postconditions=True,
         require_effect_contracts=True,
         minimum_effect_tier=VerificationTier.PERSISTED_STATE_REACQUISITION,
         require_approval_for_unverified_effects=False,
@@ -1659,6 +1663,10 @@ def classify_execution_outcome(
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if not is_consequential_result:
             continue
+        from openadapt_flow.policy import has_postcondition_contract
+
+        if not has_postcondition_contract(step):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
         if result.effect_approved_unverified or result.effect_verified is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         scoped_params = _scoped_params(result)
@@ -1834,6 +1842,7 @@ def build_outcome_envelope(
     """
 
     from openadapt_flow.ir import (
+        ActionKind,
         ExecutionOutcomeEnvelope,
         OutcomeContractCounts,
         OutcomeEvidenceClass,
@@ -1925,10 +1934,20 @@ def build_outcome_envelope(
         bound_effect_tiers: set[int] = set()
         if step is not None:
             api_actuation = result.actuation == "api"
-            postcondition_count = 0 if api_actuation else len(step.expect)
-            required_postconditions += postcondition_count
+            explicit_postconditions = (
+                0 if result.actuation == "api" else len(step.expect)
+            )
+            intrinsic_input_postcondition = int(
+                result.actuation != "api"
+                and step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}
+            )
+            required_postconditions += (
+                explicit_postconditions + intrinsic_input_postcondition
+            )
             if result.postconditions_ok is True:
-                passed_postconditions += postcondition_count
+                passed_postconditions += explicit_postconditions
+            if result.input_verified is True:
+                passed_postconditions += intrinsic_input_postcondition
             from openadapt_flow.policy import effects_for_actuation
 
             effects = effects_for_actuation(step, result.actuation)
@@ -2020,10 +2039,15 @@ def build_outcome_envelope(
         if result.identity is not None and result.identity.status == "verified":
             evidence_classes.add("identity")
         if (
-            result.postconditions_ok is True
-            and step is not None
+            step is not None
             and result.actuation != "api"
-            and step.expect
+            and (
+                (result.postconditions_ok is True and bool(step.expect))
+                or (
+                    result.input_verified is True
+                    and step.action in {ActionKind.TYPE, ActionKind.SELECT_OPTION}
+                )
+            )
         ):
             evidence_classes.add("postcondition")
         for evidence in result.effect_evidence:

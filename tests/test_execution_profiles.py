@@ -550,6 +550,8 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
     arbitrary = verified.model_copy(deep=True)
     arbitrary.results[0].effect_contract_hashes = ["f" * 64]
     arbitrary.results[0].effect_evidence[0].effect_contract_hash = "f" * 64
+    missing_identity = verified.model_copy(deep=True)
+    missing_identity.results[0].identity = None
 
     for profile in (ExecutionProfile.STANDARD, ExecutionProfile.REGULATED):
         assert (
@@ -572,6 +574,20 @@ def test_production_profiles_never_verify_screen_only_consequential_result():
             classify_execution_outcome(arbitrary, workflow, profile)
             is ExecutionOutcome.COMPLETED_UNVERIFIED
         )
+        assert (
+            classify_execution_outcome(missing_identity, workflow, profile)
+            is ExecutionOutcome.COMPLETED_UNVERIFIED
+        )
+    missing_postcondition = workflow.model_copy(deep=True)
+    missing_postcondition.steps[0].expect = []
+    assert (
+        classify_execution_outcome(
+            verified,
+            missing_postcondition,
+            ExecutionProfile.STANDARD,
+        )
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
     duplicated = verified.model_copy(deep=True)
     duplicated.results[0].effect_contract_hashes.append(effect_hash)
     assert (
@@ -834,8 +850,12 @@ def test_qualified_per_effect_tier_is_enforced_at_gate_and_runtime(tmp_path):
     )
 
 
-def test_api_verified_outcome_requires_runtime_delivery_attempt_shape():
+@pytest.mark.parametrize("action", [ActionKind.CLICK, ActionKind.TYPE])
+def test_api_verified_outcome_requires_runtime_delivery_attempt_shape(action):
     workflow = _workflow()
+    workflow.steps[0].action = action
+    if action is ActionKind.TYPE:
+        workflow.steps[0].text = "{record_id}"
     workflow.params["record_id"] = "synthetic-1"
     api_effect = workflow.steps[0].effects[0].model_copy(deep=True)
     api_effect.match["record_id"] = ValueExpr(param="record_id")
@@ -901,6 +921,10 @@ def test_api_verified_outcome_requires_runtime_delivery_attempt_shape():
         classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.VERIFIED
     )
+    stamp_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.required_contracts.postcondition == 0
+    assert report.outcome_envelope.passed_contracts.postcondition == 0
     for invalid in (not_delivered, mixed_gui_api, status_only_identity):
         assert (
             classify_execution_outcome(invalid, workflow, ExecutionProfile.STANDARD)
@@ -2473,6 +2497,13 @@ def _governed_loop_workflow() -> Workflow:
                         context_text="Synthetic record",
                     ),
                     identity_armed=True,
+                    expect=[
+                        Postcondition(
+                            kind=PostconditionKind.REGION_STABLE,
+                            region=(0, 0, 10, 10),
+                            phash="aa",
+                        )
+                    ],
                     effects=[effect],
                 ),
                 transitions=[Transition(target="row-done")],

@@ -81,13 +81,13 @@ def is_identity_applicable(step: Step) -> bool:
 def is_identity_armed(step: Step) -> bool:
     """True when the step's pre-click identity check will actually run.
 
-    Prefers the compiler-written ``identity_armed`` audit flag; falls back to
-    the ground truth the replayer keys on (structured/context identity,
-    identity template, or identifier crop) for bundles compiled before that
-    flag existed.
+    The compiler-written ``identity_armed`` field is an audit flag, not the
+    identity evidence. An explicit false remains a refusal. Otherwise require
+    the ground truth the replayer uses: structured/context identity, an
+    identity template, or an identifier crop.
     """
-    if step.identity_armed is not None:
-        return step.identity_armed
+    if step.identity_armed is False:
+        return False
     a = step.anchor
     return a is not None and bool(
         a.context_text
@@ -145,6 +145,19 @@ def has_screen_postcondition(step: Step) -> bool:
     should look like. A weak oracle: it cannot see a partial / phantom /
     duplicate write to the system of record (``docs/LIMITS.md``)."""
     return bool(step.expect)
+
+
+def has_postcondition_contract(step: Step) -> bool:
+    """Whether replay can prove the immediate result of this exact action.
+
+    Typed input and option selection have intrinsic read-back contracts in the
+    replayer. Other consequential actions require an explicit postcondition.
+    """
+
+    return bool(step.expect) or step.action in {
+        ActionKind.TYPE,
+        ActionKind.SELECT_OPTION,
+    }
 
 
 def has_system_effect(step: Step) -> bool:

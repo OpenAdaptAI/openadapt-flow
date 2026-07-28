@@ -175,6 +175,11 @@ class TestCertify:
         step.anchor.identifier_crop = "templates/identifiers/step_000.png"
         assert is_identity_armed(step)
 
+    def test_identity_audit_flag_cannot_replace_retained_evidence(self):
+        step = _click("step_000", "click 'Remote row'", armed=False)
+        step.identity_armed = True
+        assert not is_identity_armed(step)
+
     def test_strict_fails_bundle_with_unarmed_clicks(self):
         report = evaluate_policy(_gappy_workflow(), STRICT)
         assert not report.passed

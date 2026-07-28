@@ -950,14 +950,22 @@ def _steps_by_id(workflow: "Workflow") -> dict[str, "Step"]:
 
 def _inferred_action_classification(step: "Step") -> ActionRiskClassification:
     from openadapt_flow.ir import ActionKind
+    from openadapt_flow.risk import infer_step_risk
 
     effects = _declared_effects(step)
+    runtime_inference = infer_step_risk(step)
     if step.risk_review_required:
         classification = ActionRiskClass.UNKNOWN
         explanation = step.risk_explanation or "compiled Flow risk requires review"
+    elif runtime_inference.requires_review:
+        classification = ActionRiskClass.UNKNOWN
+        explanation = runtime_inference.explanation
     elif step.risk == "irreversible":
         classification = ActionRiskClass.IRREVERSIBLE
         explanation = step.risk_explanation or "compiled Flow risk is irreversible"
+    elif runtime_inference.risk == "irreversible":
+        classification = ActionRiskClass.IRREVERSIBLE
+        explanation = runtime_inference.explanation
     elif effects:
         classification = ActionRiskClass.STATE_CHANGING
         explanation = "step declares a business-effect contract"

@@ -885,6 +885,49 @@ def test_legacy_workflow_serialization_omits_empty_qualification() -> None:
     assert "qualification" not in payload
 
 
+def test_qualification_uses_current_risk_inference_for_old_bundle_fields() -> None:
+    workflow = Workflow(
+        name="current-risk-inference",
+        steps=[
+            Step(
+                id="external",
+                intent="invoke configured operation",
+                action=ActionKind.WAIT,
+                api_binding=ApiBinding(
+                    kind="mcp",
+                    method="invoke",
+                    url_template="configured.operation",
+                ),
+            ),
+            Step(
+                id="shortcut",
+                intent="press F2",
+                action=ActionKind.KEY,
+                key="F2",
+            ),
+            Step(
+                id="retained-review",
+                intent="open the next view",
+                action=ActionKind.CLICK,
+                risk_review_required=True,
+                risk_explanation="retained application-specific review reason",
+            ),
+        ],
+    )
+
+    project = init_project(workflow, environment=_environment())
+
+    assert project.action_classifications["external"].classification is (
+        ActionRiskClass.IRREVERSIBLE
+    )
+    assert project.action_classifications["shortcut"].classification is (
+        ActionRiskClass.UNKNOWN
+    )
+    retained = project.action_classifications["retained-review"]
+    assert retained.classification is ActionRiskClass.UNKNOWN
+    assert retained.explanation == "retained application-specific review reason"
+
+
 def test_consequential_coverage_and_tier_four_fail_closed() -> None:
     workflow = _workflow()
     init_project(workflow, environment=_environment(), minimum_effect_tier=4)
@@ -2245,15 +2288,21 @@ def test_forged_passed_bit_cannot_turn_a_failed_campaign_into_certification(
     tmp_path: Path,
 ) -> None:
     workflow = _workflow()
-    workflow.steps[0].expect = []
     _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
     evidence_root = tmp_path / "evidence"
     _record_passing_campaign(workflow, evidence_root)
+    project = workflow.qualification
+    assert project is not None
+    representative = next(
+        case
+        for case in project.cases
+        if case.kind is QualificationCaseKind.REPRESENTATIVE
+    )
+    representative.results = []
     policy = load_policy("clinical-write")
 
     report = certify_project(workflow, policy=policy, evidence_root=evidence_root)
     assert not report.passed
-    project = workflow.qualification
     assert project is not None and project.last_certification is not None
     project.last_certification.passed = True
 

@@ -61,7 +61,6 @@ from openadapt_flow.execution_profiles import (
     required_effect_tier,
 )
 from openadapt_flow.ir import (
-    ActionKind,
     Interstitial,
     QualifiedEffectRequirement,
     Step,
@@ -70,6 +69,7 @@ from openadapt_flow.ir import (
 from openadapt_flow.policy import (
     Policy,
     all_effect_paths_covered,
+    has_postcondition_contract,
     has_screen_postcondition,
     has_system_effect,
     has_unconfirmed_effect_binding,
@@ -172,30 +172,22 @@ def must_be_identity_armed(
 ) -> bool:
     """Whether the pre-click identity check MUST be armed on ``step``.
 
-    The entity-sensitive / consequential surface: an identity-applicable step
-    (anchored click / double-click / TYPE) that either commits a write or lands
-    on a specific on-screen entity (the wrong-entity surface). These are the
-    steps that must never act without a verified target identity.
+    Every consequential action requires identity. An action without a target
+    identity contract is an identity-coverage defect, not an exemption. An
+    identity-applicable entity-navigation action also requires identity.
     """
-    if step.action in (ActionKind.KEY, ActionKind.HOTKEY) and is_consequential(
+    consequential = is_consequential(
         step,
         workflow,
         require_current_risk_certification=require_current_risk_certification,
         certifying_policy=certifying_policy,
         certifying_policy_sha256=certifying_policy_sha256,
-    ):
-        # A consequential keyboard submission with no retained anchor is an
-        # identity-coverage defect, not a reason to exempt the action.
+    )
+    if consequential:
         return True
     if not is_identity_applicable(step):
         return False
-    return is_consequential(
-        step,
-        workflow,
-        require_current_risk_certification=require_current_risk_certification,
-        certifying_policy=certifying_policy,
-        certifying_policy_sha256=certifying_policy_sha256,
-    ) or "entity_navigation" in step_tags(
+    return "entity_navigation" in step_tags(
         step,
         workflow,
         require_current_certification=require_current_risk_certification,
@@ -458,6 +450,11 @@ def evaluate_run_gate(
                 _gate_effect(
                     workflow,
                     steps,
+                    require_postconditions=(
+                        profile_contract.require_consequential_postconditions
+                        if profile_contract is not None
+                        else False
+                    ),
                     require_current_risk_certification=require_current_risk_cert,
                     certifying_policy=certifying_policy,
                 )
@@ -660,7 +657,14 @@ def _gate_identity(
             certifying_policy=certifying_policy,
         )
     ]
-    unarmed = [s for s in must_arm if not is_identity_armed(s)]
+    unarmed = [
+        step
+        for step in must_arm
+        if (
+            not is_identity_armed(step)
+            or (step.api_binding is not None and not step.api_binding.identity)
+        )
+    ]
     total = len(must_arm)
     if not unarmed:
         return _result(
@@ -681,16 +685,17 @@ def _gate_effect(
     workflow: Workflow,
     steps: list[Step],
     *,
+    require_postconditions: bool,
     require_current_risk_certification: bool,
     certifying_policy: Optional[Policy],
 ) -> GateResult:
-    """Gate 3: every consequential write DECLARES a (confirmed) effect contract.
+    """Gate 3: every consequential write declares outcome contracts.
 
     A write with no declared system-of-record effect would be verified by the
     SCREEN only; a write whose effect binding was not derivable from the demo
     (``needs_operator_confirmation``) carries a fabricated/unconfirmed contract.
-    Both are bundle-level defects and refuse here (they cannot be waived by
-    deployment approval -- gate 4 only covers a verifier that is missing).
+    Production profiles also require an immediate postcondition contract. These
+    are bundle-level defects and cannot be waived by deployment approval.
     """
     writes = [
         step
@@ -707,14 +712,23 @@ def _gate_effect(
     # cover the GUI path; the canonical step effects must cover that fallback.
     screen_only = [s for s in writes if not all_effect_paths_covered(s)]
     unconfirmed = [s for s in writes if has_unconfirmed_effect_binding(s)]
-    offenders = sorted({s.id for s in screen_only} | {s.id for s in unconfirmed})
+    missing_postconditions = (
+        [s for s in writes if not has_postcondition_contract(s)]
+        if require_postconditions
+        else []
+    )
+    offenders = sorted(
+        {s.id for s in screen_only}
+        | {s.id for s in unconfirmed}
+        | {s.id for s in missing_postconditions}
+    )
     total = len(writes)
     if not offenders:
         return _result(
             GATE_EFFECT,
             True,
-            f"{total}/{total} consequential write(s) declare a confirmed "
-            "system-of-record effect contract",
+            f"{total}/{total} consequential write(s) declare the required "
+            "postcondition and confirmed system-of-record effect contracts",
         )
     parts = []
     if screen_only:
@@ -734,6 +748,10 @@ def _gate_effect(
         parts.append(
             f"{len(unconfirmed)} carry an UNCONFIRMED effect binding "
             "(not derivable from the demonstration)"
+        )
+    if missing_postconditions:
+        parts.append(
+            f"{len(missing_postconditions)} have no immediate postcondition contract"
         )
     return _result(
         GATE_EFFECT,

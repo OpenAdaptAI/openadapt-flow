@@ -186,6 +186,41 @@ def _report(**overrides: object) -> RunReport:
     return RunReport.model_validate(defaults)
 
 
+def _api_verified_report() -> RunReport:
+    """Return the base VERIFIED fixture with API-path evidence semantics."""
+
+    report = _report()
+    result = report.results[0].model_copy(
+        update={"actuation": "api", "postconditions_ok": None}
+    )
+    assert report.outcome_envelope is not None
+    envelope = report.outcome_envelope.model_copy(
+        update={
+            "required_contracts": report.outcome_envelope.required_contracts.model_copy(
+                update={"postcondition": 0}
+            ),
+            "passed_contracts": report.outcome_envelope.passed_contracts.model_copy(
+                update={"postcondition": 0}
+            ),
+            "evidence_classes": [
+                item
+                for item in report.outcome_envelope.evidence_classes
+                if item != "postcondition"
+            ],
+        }
+    )
+    journal = [
+        report.effect_journal[0].model_copy(update={"attempt_state": "actuated_api"})
+    ]
+    return report.model_copy(
+        update={
+            "results": [result],
+            "effect_journal": journal,
+            "outcome_envelope": envelope,
+        }
+    )
+
+
 def test_receipt_field_set_is_exactly_the_allow_list() -> None:
     assert set(RunReceipt.model_fields) == ALLOWED_FIELDS
 
@@ -234,6 +269,14 @@ def test_receipt_reports_the_evidence_it_claims() -> None:
     assert receipt.rung_histogram == {"structural": 4}
     assert receipt.bundle_digest == "a" * 64
     assert receipt.provenance == "production"
+
+
+def test_receipt_accepts_api_effect_without_gui_postcondition() -> None:
+    receipt = build_receipt(_api_verified_report())
+
+    assert receipt.outcome == "VERIFIED"
+    assert receipt.postconditions_required == 0
+    assert receipt.postconditions_confirmed == 0
 
 
 def test_generated_at_is_truncated_to_the_hour() -> None:
@@ -818,16 +861,13 @@ def test_receipt_refuses_unresolved_uncertain_delivery() -> None:
 
 
 def test_receipt_binds_api_attempt_state_to_the_transaction_classifier() -> None:
-    result = _report().results[0].model_copy(update={"actuation": "api"})
-    with pytest.raises(ReceiptError, match="transaction journal"):
-        build_receipt(_report(results=[result]))
-    journal = [
-        _report().effect_journal[0].model_copy(update={"attempt_state": "actuated_api"})
+    report = _api_verified_report()
+    wrong_journal = [
+        report.effect_journal[0].model_copy(update={"attempt_state": "delivered"})
     ]
-    assert (
-        build_receipt(_report(results=[result], effect_journal=journal)).outcome
-        == "VERIFIED"
-    )
+    with pytest.raises(ReceiptError, match="transaction journal"):
+        build_receipt(report.model_copy(update={"effect_journal": wrong_journal}))
+    assert build_receipt(report).outcome == "VERIFIED"
 
 
 def test_receipt_refuses_uncertainty_hidden_as_delivered() -> None:

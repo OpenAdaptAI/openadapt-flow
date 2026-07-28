@@ -989,6 +989,89 @@ def test_remote_preedge_retry_rechecks_runtime_inputs_after_observation(
     )
 
 
+class _LateWorklistMutatingTypeBackend(RemoteLeaseBackend):
+    """Mutate governed inputs after retry observation but before keyboard input."""
+
+    def __init__(self, worklists):
+        frame = make_png()
+        super().__init__(initial_frame=frame, fresh_frame=frame)
+        self.worklists = worklists
+        self.type_attempts = 0
+        self.reset_count = 0
+        self.mutated = False
+
+    def reset_fresh_actuation_state(self) -> None:
+        self.reset_count += 1
+
+    def type_text(self, text):
+        self.type_attempts += 1
+        if self.type_attempts == 1:
+            raise FreshActuationRequired(
+                operation="remote_type_text",
+                changed_pixel_count=1,
+                changed_bbox=(0, 0, 1, 1),
+                frame_size=self.viewport,
+            )
+        super().type_text(text)
+
+    def focused_text_value(self):
+        if self.type_attempts == 1 and not self.mutated:
+            self.worklists["cases"].append({"id": "late"})
+            self.mutated = True
+        return super().focused_text_value()
+
+
+def test_remote_preedge_retry_rechecks_inputs_at_keyboard_delivery_boundary(
+    bundle, run_dir
+):
+    worklists = {"cases": [{"id": "1"}]}
+    workflow = Workflow(
+        name="governed-type-retry",
+        surface="rdp",
+        execution_mode="external",
+        steps=[
+            Step(
+                id="type1",
+                intent="type governed value",
+                action=ActionKind.TYPE,
+                text="hello",
+                risk="irreversible",
+            )
+        ],
+    )
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    assert workflow.manifest is not None
+    authorization = GovernedRunAuthorization(
+        bundle_content_digest=workflow.manifest.content_digest,
+        runtime_inputs_digest=runtime_inputs_digest(workflow, None, worklists),
+        admitted_policy_name="test",
+    )
+    backend = _LateWorklistMutatingTypeBackend(worklists)
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        governed_authorization=authorization,
+    ).run(
+        workflow,
+        worklists=worklists,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert backend.type_attempts == 1
+    assert backend.actions == []
+    assert backend.reset_count == 1
+    assert result.delivery_attempted is False
+    assert [event.retried for event in result.fresh_actuation_events] == [True]
+    assert "authorization no longer matches the current runtime inputs" in (
+        result.error or ""
+    )
+
+
 class _CountingEffectVerifier:
     substrate = "test-store"
 

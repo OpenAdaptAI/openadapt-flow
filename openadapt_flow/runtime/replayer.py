@@ -5165,6 +5165,26 @@ class Replayer:
                 )
         return self._governed_asset_mutation
 
+    def _delivery_authorization_refusal(
+        self,
+        workflow: Workflow,
+        params: dict[str, str],
+        result: StepResult,
+    ) -> Optional[str]:
+        """Recheck exact authority at the last point before input delivery."""
+
+        refusal = self._fresh_actuation_authorization_refusal(workflow, params)
+        if refusal is not None:
+            self._cancel_guarded_coordinate()
+            self._cancel_guarded_keyboard()
+            result.safety_halt = True
+            result.failure_category = (
+                "governed_refusal"
+                if self.governed_authorization is not None
+                else "safety_halt"
+            )
+        return refusal
+
     def _act(
         self,
         step: Step,
@@ -5209,6 +5229,9 @@ class Replayer:
                         "fresh actuation fingerprint — refusing raw coordinate "
                         "delivery; run aborted"
                     )
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 result.delivery_attempted = True
                 delivery_receipt = native_act(
                     step.anchor.structural,
@@ -5220,6 +5243,11 @@ class Replayer:
             else:
                 if requires_atomic_identity:
                     if isinstance(self.backend, RemoteActuationBackend):
+                        refusal = self._delivery_authorization_refusal(
+                            workflow, params, result
+                        )
+                        if refusal is not None:
+                            return refusal
                         self._deliver_backend_call(
                             result,
                             lambda: self.backend.click(
@@ -5229,6 +5257,11 @@ class Replayer:
                             ),
                         )
                     elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                        refusal = self._delivery_authorization_refusal(
+                            workflow, params, result
+                        )
+                        if refusal is not None:
+                            return refusal
                         result.delivery_attempted = True
                         result.delivery_receipt = self.backend.act_guarded_coordinate(
                             x,
@@ -5249,6 +5282,11 @@ class Replayer:
                             "— refusing raw coordinate delivery; run aborted"
                         )
                 else:
+                    refusal = self._delivery_authorization_refusal(
+                        workflow, params, result
+                    )
+                    if refusal is not None:
+                        return refusal
                     self._deliver_backend_call(
                         result,
                         lambda: self.backend.click(
@@ -5285,6 +5323,11 @@ class Replayer:
                             "click, but this backend has no bounded right-click "
                             "operation"
                         )
+                    refusal = self._delivery_authorization_refusal(
+                        workflow, params, result
+                    )
+                    if refusal is not None:
+                        return refusal
                     self._deliver_backend_call(
                         result,
                         lambda: cast(
@@ -5292,6 +5335,11 @@ class Replayer:
                         ).right_click(x, y),
                     )
                 elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                    refusal = self._delivery_authorization_refusal(
+                        workflow, params, result
+                    )
+                    if refusal is not None:
+                        return refusal
                     result.delivery_attempted = True
                     result.delivery_receipt = self.backend.act_guarded_coordinate(
                         x,
@@ -5309,6 +5357,9 @@ class Replayer:
                         "identity verification to delivery; run aborted"
                     )
             elif isinstance(self.backend, RichPointerActionBackend):
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 self._deliver_backend_call(
                     result,
                     lambda: cast(RichPointerActionBackend, self.backend).right_click(
@@ -5352,6 +5403,9 @@ class Replayer:
                 and step.drag_end_anchor.structural is not None
                 and callable(structural_drag)
             ):
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 result.delivery_attempted = True
                 result.delivery_receipt = structural_drag(
                     step.anchor.structural,
@@ -5402,6 +5456,9 @@ class Replayer:
                         f"Step '{step.id}' ({step.intent}) could not bind its "
                         f"freshly resolved drag source: {detail}; run aborted"
                     )
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 result.delivery_attempted = True
                 result.delivery_receipt = self.backend.drag_guarded(
                     x,
@@ -5412,6 +5469,9 @@ class Replayer:
                 )
                 result.actuation = "guarded_coordinate"
             elif isinstance(self.backend, RichPointerActionBackend):
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 self._deliver_backend_call(
                     result,
                     lambda: cast(RichPointerActionBackend, self.backend).drag(
@@ -5504,6 +5564,11 @@ class Replayer:
                     and step.anchor.structural is not None
                     and callable(native_act)
                 ):
+                    refusal = self._delivery_authorization_refusal(
+                        workflow, params, result
+                    )
+                    if refusal is not None:
+                        return refusal
                     result.delivery_attempted = True
                     result.delivery_receipt = native_act(
                         step.anchor.structural,
@@ -5516,6 +5581,11 @@ class Replayer:
                         and not isinstance(self.backend, RemoteActuationBackend)
                         and isinstance(self.backend, GuardedCoordinateActionBackend)
                     ):
+                        refusal = self._delivery_authorization_refusal(
+                            workflow, params, result
+                        )
+                        if refusal is not None:
+                            return refusal
                         result.delivery_attempted = True
                         result.delivery_receipt = self.backend.act_guarded_coordinate(
                             x,
@@ -5538,6 +5608,11 @@ class Replayer:
                             "delivery; run aborted"
                         )
                     else:
+                        refusal = self._delivery_authorization_refusal(
+                            workflow, params, result
+                        )
+                        if refusal is not None:
+                            return refusal
                         self._deliver_backend_call(
                             result, lambda: self.backend.click(x, y)
                         )
@@ -5624,6 +5699,9 @@ class Replayer:
                         "selection"
                     )
                 assert field_region is not None
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 self._deliver_backend_call(
                     result,
                     lambda: cast(SelectOptionBackend, self.backend).select_option(
@@ -5637,6 +5715,9 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_type:
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 result.delivery_attempted = True
                 result.delivery_receipt = cast(
                     GuardedKeyboardActionBackend, self.backend
@@ -5656,6 +5737,9 @@ class Replayer:
                     "run aborted"
                 )
             else:
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 self._deliver_backend_call(result, lambda: self.backend.type_text(text))
             if not text:
                 return None  # nothing typed, nothing to verify
@@ -5691,6 +5775,9 @@ class Replayer:
                 and isinstance(self.backend, GuardedKeyboardActionBackend)
             )
             if guarded_key:
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 result.delivery_attempted = True
                 result.delivery_receipt = cast(
                     GuardedKeyboardActionBackend, self.backend
@@ -5710,6 +5797,9 @@ class Replayer:
                     "run aborted"
                 )
             else:
+                refusal = self._delivery_authorization_refusal(workflow, params, result)
+                if refusal is not None:
+                    return refusal
                 self._deliver_backend_call(result, lambda: self.backend.press(key))
             return None
 
@@ -7741,6 +7831,9 @@ class Replayer:
                 intent=next_step.intent,
             )
         if stop_pred is None or (dx == 0 and dy == 0):
+            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            if refusal is not None:
+                return refusal
             self._deliver_backend_call(
                 result,
                 lambda: self.backend.scroll(dx, dy),
@@ -7775,6 +7868,9 @@ class Replayer:
         budget = SCROLL_BUDGET_FACTOR * increment
         scrolled = 0.0
         while scrolled + increment <= budget:
+            refusal = self._delivery_authorization_refusal(workflow, params, result)
+            if refusal is not None:
+                return refusal
             self._deliver_backend_call(
                 result,
                 lambda: self.backend.scroll(dx, dy),

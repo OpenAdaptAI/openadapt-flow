@@ -14,7 +14,11 @@ opens two and answers the second.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -39,8 +43,10 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.runtime.durable.attended import (
+    AttendedActionBusy,
     AttendedActionRefused,
     AttendedActionStore,
+    AttendedRelayAcknowledgement,
 )
 from openadapt_flow.runtime.replayer import Replayer
 from tests.test_attended_actions import _ResultExecutor
@@ -173,8 +179,6 @@ def test_nothing_protected_reaches_the_wire_from_the_whole_queue(tmp_path):
     )
     supervisor.publish_open_pauses()
 
-    import json
-
     body = json.dumps([payload for _, payload in transport.calls])
     assert PROTECTED_VALUE not in body
     assert "supervisor-one" not in body
@@ -265,6 +269,78 @@ class _SequencedTransport(FakeTransport):
         if isinstance(response, Exception):
             raise response
         return response
+
+
+def _journaled_lost_ack(tmp_path: Path, name: str):
+    """Execute Continue once and retain its exact ACK record without confirming."""
+    runs = tmp_path / "runs"
+    run, item = _halted_run(runs, tmp_path / "bundles", name)
+    deployment = _deployment()
+    executor = _ResultExecutor()
+    relay_body = _relayed_for(run, item, deployment)
+    transport = _SequencedTransport(
+        polls=[(200, {"decision": relay_body})],
+        acknowledgements=[RelayUncertain("the first ack response was lost")],
+    )
+    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
+    report = DecisionSupervisor(
+        runs, relay=relay, deployment=deployment, executor=executor
+    ).serve_once(wait_s=0.0)
+    assert report.outcome is not None
+    return runs, run, deployment, executor, relay_body, report.outcome
+
+
+def _assert_retained_recovery_refuses(
+    runs: Path,
+    deployment: Any,
+    executor: Any,
+    relay_body: dict[str, Any],
+) -> None:
+    transport = _SequencedTransport(
+        polls=[(200, {"decision": relay_body})], acknowledgements=[]
+    )
+    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
+    supervisor = DecisionSupervisor(
+        runs, relay=relay, deployment=deployment, executor=executor
+    )
+    with pytest.raises(RelayRefused):
+        supervisor.serve_once(wait_s=0.0)
+    assert executor.calls == 1
+    assert not any(path.endswith("/ack") for path, _ in transport.calls)
+
+
+def _read_decision_log(run: Path) -> dict[str, Any]:
+    return json.loads(AttendedActionStore(run).decisions_path.read_text())
+
+
+def _write_decision_log(run: Path, payload: dict[str, Any]) -> None:
+    AttendedActionStore(run).decisions_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True)
+    )
+
+
+def _plain_digest(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _resign_relay_ack_record(
+    store: AttendedActionStore,
+    payload: dict[str, Any],
+    **updates: Any,
+) -> dict[str, Any]:
+    """Build a MAC-valid hostile record to test the independent bindings."""
+    record = AttendedRelayAcknowledgement.model_validate(payload).model_copy(
+        update={
+            **updates,
+            "record_mac": "hmac-sha256:" + ("0" * 64),
+        }
+    )
+    return record.model_copy(
+        update={"record_mac": store._relay_ack_mac(record)}
+    ).model_dump(mode="json")
 
 
 def test_one_refused_pause_does_not_silence_the_others(tmp_path):
@@ -401,7 +477,7 @@ def test_one_cycle_publishes_executes_and_acknowledges_without_a_caller(tmp_path
         ("reject", "reject", "rejected", 0),
     ],
 )
-def test_a_lost_ack_reacknowledges_the_exact_decision_without_a_second_action(
+def test_a_lost_ack_survives_restart_without_a_second_action(
     tmp_path,
     action,
     decision_action,
@@ -425,23 +501,27 @@ def test_a_lost_ack_reacknowledges_the_exact_decision_without_a_second_action(
         action=action,
         decision_action=decision_action,
     )
-    transport = _SequencedTransport(
-        polls=[
-            (200, {"decision": relay_body}),
-            (200, {"decision": relay_body}),
-        ],
-        acknowledgements=[
-            RelayUncertain("the engine result reached an uncertain ack"),
-            (200, {"accepted": True}),
-        ],
+    first_transport = _SequencedTransport(
+        polls=[(200, {"decision": relay_body})],
+        acknowledgements=[RelayUncertain("the engine result reached an uncertain ack")],
     )
-    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
-    supervisor = DecisionSupervisor(
-        runs, relay=relay, deployment=deployment, executor=executor
+    first_relay = DecisionRelay(first_transport, token=TOKEN, deployment=deployment)
+    first_supervisor = DecisionSupervisor(
+        runs, relay=first_relay, deployment=deployment, executor=executor
     )
 
-    first = supervisor.serve_once(wait_s=0.0)
-    second = supervisor.serve_once(wait_s=0.0)
+    first = first_supervisor.serve_once(wait_s=0.0)
+
+    # A new relay and supervisor prove that no process-local cache is needed.
+    second_transport = _SequencedTransport(
+        polls=[(200, {"decision": relay_body})],
+        acknowledgements=[(200, {"accepted": True})],
+    )
+    second_relay = DecisionRelay(second_transport, token=TOKEN, deployment=deployment)
+    second_supervisor = DecisionSupervisor(
+        runs, relay=second_relay, deployment=deployment, executor=executor
+    )
+    second = second_supervisor.serve_once(wait_s=0.0)
 
     assert first.acknowledged == "accepted"
     assert first.reacknowledged is False
@@ -451,11 +531,23 @@ def test_a_lost_ack_reacknowledges_the_exact_decision_without_a_second_action(
     assert second.reacknowledged is True
     assert second.outcome == first.outcome
     assert executor.calls == executor_calls
-    acknowledgements = [body for path, body in transport.calls if path.endswith("/ack")]
+    acknowledgements = [
+        body
+        for transport in (first_transport, second_transport)
+        for path, body in transport.calls
+        if path.endswith("/ack")
+    ]
     assert [body["result"] for body in acknowledgements] == [
         "accepted",
         "accepted",
     ]
+    retained = AttendedActionStore(run).relay_acknowledgement(
+        RelayedDecision(
+            decision_id=str(relay_body["decision_id"]), relay=relay_body
+        ).durable_binding()
+    )
+    assert retained is not None
+    assert retained[0].confirmed is True
 
 
 def test_lost_ack_recovery_refuses_a_changed_signed_or_idempotency_binding(tmp_path):
@@ -472,26 +564,286 @@ def test_lost_ack_recovery_refuses_a_changed_signed_or_idempotency_binding(tmp_p
     }
     changed["idempotency_key"] = "relay-idempotency-key-CHANGED-0002"
     changed_relay = _sign(changed)
-    transport = _SequencedTransport(
-        polls=[
-            (200, {"decision": relay_body}),
-            (200, {"decision": changed_relay}),
-        ],
+    first_transport = _SequencedTransport(
+        polls=[(200, {"decision": relay_body})],
         acknowledgements=[
             RelayUncertain("the first ack response was lost"),
         ],
     )
-    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
-    supervisor = DecisionSupervisor(
-        runs, relay=relay, deployment=deployment, executor=executor
+    first_relay = DecisionRelay(first_transport, token=TOKEN, deployment=deployment)
+    first_supervisor = DecisionSupervisor(
+        runs, relay=first_relay, deployment=deployment, executor=executor
     )
 
-    supervisor.serve_once(wait_s=0.0)
+    first_supervisor.serve_once(wait_s=0.0)
+
+    second_transport = _SequencedTransport(
+        polls=[(200, {"decision": changed_relay})],
+        acknowledgements=[],
+    )
+    second_relay = DecisionRelay(second_transport, token=TOKEN, deployment=deployment)
+    second_supervisor = DecisionSupervisor(
+        runs, relay=second_relay, deployment=deployment, executor=executor
+    )
+
     with pytest.raises(RelayRefused, match="exact signed or idempotency binding"):
-        supervisor.serve_once(wait_s=0.0)
+        second_supervisor.serve_once(wait_s=0.0)
 
     assert executor.calls == 1
-    assert len([path for path, _ in transport.calls if path.endswith("/ack")]) == 1
+    assert (
+        len(
+            [
+                path
+                for transport in (first_transport, second_transport)
+                for path, _ in transport.calls
+                if path.endswith("/ack")
+            ]
+        )
+        == 1
+    )
+
+
+def test_recovery_refuses_an_outcome_and_plain_digest_changed_together(tmp_path):
+    """A plain SHA beside mutable JSON cannot replace the per-run HMAC."""
+    runs, run, deployment, executor, relay_body, _outcome = _journaled_lost_ack(
+        tmp_path, "plain-digest-tamper"
+    )
+    log = _read_decision_log(run)
+    record = log["relay_acknowledgements"][0]
+    outcome = next(
+        item
+        for item in log["decisions"]
+        if item["decision_id"] == record["retained_decision_id"]
+    )
+    outcome["status"] = "refused"
+    record["retained_status"] = "refused"
+    record["engine_ack_result"] = "refused"
+    record["retained_decision_digest"] = _plain_digest(outcome)
+    _write_decision_log(run, log)
+
+    _assert_retained_recovery_refuses(runs, deployment, executor, relay_body)
+
+
+def test_recovery_refuses_a_fabricated_accepted_outcome(tmp_path):
+    runs, run, deployment, executor, relay_body, _outcome = _journaled_lost_ack(
+        tmp_path, "fabricated-outcome"
+    )
+    log = _read_decision_log(run)
+    record = log["relay_acknowledgements"][0]
+    original = next(
+        item
+        for item in log["decisions"]
+        if item["decision_id"] == record["retained_decision_id"]
+    )
+    fabricated = {
+        **original,
+        "decision_id": "f" * 32,
+        "status": "completed",
+        "message": "fabricated local success",
+    }
+    log["decisions"].append(fabricated)
+    record["retained_decision_id"] = fabricated["decision_id"]
+    record["retained_decision_digest"] = _plain_digest(fabricated)
+    record["retained_status"] = "completed"
+    record["engine_ack_result"] = "accepted"
+    _write_decision_log(run, log)
+
+    _assert_retained_recovery_refuses(runs, deployment, executor, relay_body)
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("run_id", "changed-run-id"),
+        ("bundle_version", "sha256:" + ("0" * 64)),
+        ("pause_id", "0" * 32),
+        ("workflow_digest", "hmac-sha256:" + ("0" * 64)),
+        ("capability_digest", "sha256:" + ("0" * 64)),
+        ("event_sequence", None),
+    ],
+)
+def test_recovery_refuses_a_mac_valid_changed_run_or_pause_binding(
+    tmp_path,
+    field,
+    changed,
+):
+    """The record MAC is necessary but not sufficient execution evidence."""
+    runs, run, deployment, executor, relay_body, _outcome = _journaled_lost_ack(
+        tmp_path, f"changed-{field}"
+    )
+    log = _read_decision_log(run)
+    record = log["relay_acknowledgements"][0]
+    if field == "event_sequence":
+        changed = int(record[field]) + 1
+    log["relay_acknowledgements"][0] = _resign_relay_ack_record(
+        AttendedActionStore(run), record, **{field: changed}
+    )
+    _write_decision_log(run, log)
+
+    _assert_retained_recovery_refuses(runs, deployment, executor, relay_body)
+
+
+def test_recovery_refuses_a_replaced_per_run_key(tmp_path):
+    runs, run, deployment, executor, relay_body, _outcome = _journaled_lost_ack(
+        tmp_path, "replaced-key"
+    )
+    store = AttendedActionStore(run)
+    store.key_path.write_bytes(b"x" * 32)
+    if os.name != "nt":
+        os.chmod(store.key_path, 0o600)
+
+    _assert_retained_recovery_refuses(runs, deployment, executor, relay_body)
+
+
+@pytest.mark.parametrize("damage", ["truncate", "delete", "duplicate"])
+def test_recovery_refuses_a_damaged_or_missing_ack_record(tmp_path, damage):
+    runs, run, deployment, executor, relay_body, _outcome = _journaled_lost_ack(
+        tmp_path, f"record-{damage}"
+    )
+    store = AttendedActionStore(run)
+    if damage == "truncate":
+        store.decisions_path.write_text("{")
+    else:
+        log = _read_decision_log(run)
+        if damage == "delete":
+            log["relay_acknowledgements"] = []
+        else:
+            log["relay_acknowledgements"].append(dict(log["relay_acknowledgements"][0]))
+        _write_decision_log(run, log)
+
+    _assert_retained_recovery_refuses(runs, deployment, executor, relay_body)
+
+
+def test_recovery_refuses_when_the_signed_capability_is_missing(tmp_path):
+    runs, run, deployment, executor, relay_body, _outcome = _journaled_lost_ack(
+        tmp_path, "missing-capability"
+    )
+    store = AttendedActionStore(run)
+    store.capability_path.unlink()
+    assert not store.capability_history_path.exists()
+
+    _assert_retained_recovery_refuses(runs, deployment, executor, relay_body)
+
+
+def test_recovery_refuses_a_journal_moved_to_another_run(tmp_path):
+    runs, run, deployment, executor, relay_body, _outcome = _journaled_lost_ack(
+        tmp_path, "moved-source"
+    )
+    other, _item = _halted_run(runs, tmp_path / "bundles", "moved-destination")
+    source = AttendedActionStore(run).decisions_path
+    destination = AttendedActionStore(other).decisions_path
+    source.replace(destination)
+
+    _assert_retained_recovery_refuses(runs, deployment, executor, relay_body)
+
+
+def test_relay_ack_record_contains_only_closed_or_opaque_context(tmp_path):
+    _runs, run, _deployment_cfg, _executor, _relay, _outcome = _journaled_lost_ack(
+        tmp_path, "secret-free-record"
+    )
+    record = _read_decision_log(run)["relay_acknowledgements"][0]
+    encoded = json.dumps(record, sort_keys=True)
+
+    assert PROTECTED_VALUE not in encoded
+    assert "supervisor-secret-free-record" not in encoded
+    assert str(run) not in encoded
+    assert set(record).isdisjoint(
+        {
+            "actor_id",
+            "operator",
+            "workflow_name",
+            "task",
+            "task_content",
+            "screenshot",
+            "ocr_text",
+            "path",
+            "message",
+        }
+    )
+
+
+def test_confirm_and_append_are_serialized_without_a_lost_write(
+    tmp_path,
+    monkeypatch,
+):
+    _runs, run, _deployment_cfg, _executor, relay_body, outcome = _journaled_lost_ack(
+        tmp_path, "serialized-journal"
+    )
+    store = AttendedActionStore(run)
+    binding = RelayedDecision(
+        decision_id=str(relay_body["decision_id"]), relay=relay_body
+    ).durable_binding()
+    extra = outcome.model_copy(update={"decision_id": "e" * 32})
+    append_entered = threading.Event()
+    release_append = threading.Event()
+    failures: list[BaseException] = []
+    original_atomic_write = AttendedActionStore._atomic_write
+
+    def slow_append(path, payload, *, mode=0o600):
+        if threading.current_thread().name == "append-worker":
+            append_entered.set()
+            assert release_append.wait(timeout=2.0)
+        return original_atomic_write(path, payload, mode=mode)
+
+    monkeypatch.setattr(AttendedActionStore, "_atomic_write", staticmethod(slow_append))
+
+    def append_worker():
+        try:
+            store.append(extra)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    def confirm_worker():
+        try:
+            store.confirm_relay_acknowledgement(binding)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    append_thread = threading.Thread(target=append_worker, name="append-worker")
+    confirm_thread = threading.Thread(target=confirm_worker, name="confirm-worker")
+    append_thread.start()
+    assert append_entered.wait(timeout=2.0)
+    confirm_thread.start()
+    time.sleep(0.05)
+    assert confirm_thread.is_alive()
+    release_append.set()
+    append_thread.join(timeout=2.0)
+    confirm_thread.join(timeout=2.0)
+
+    assert failures == []
+    assert not append_thread.is_alive()
+    assert not confirm_thread.is_alive()
+    log = _read_decision_log(run)
+    assert any(item["decision_id"] == extra.decision_id for item in log["decisions"])
+    assert log["relay_acknowledgements"][0]["confirmed"] is True
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows prevents replacement while the owner handle stays open",
+)
+def test_a_lock_owner_never_deletes_a_replacement_lock(tmp_path):
+    store = AttendedActionStore(tmp_path / "run")
+    replacement_nonce = b"replacement-lock-owner"
+
+    with pytest.raises(AttendedActionBusy, match="lock changed while owned"):
+        with store._decision_log_lock():
+            store.decisions_lock_path.unlink()
+            replacement_fd = os.open(
+                store.decisions_lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+            try:
+                os.write(replacement_fd, replacement_nonce)
+                os.fsync(replacement_fd)
+            finally:
+                os.close(replacement_fd)
+
+    assert store.decisions_lock_path.read_bytes() == replacement_nonce
+    with pytest.raises(AttendedActionBusy):
+        with store._decision_log_lock(timeout_s=0.0):
+            raise AssertionError("a third writer acquired the replacement lock")
 
 
 def test_a_reject_from_a_phone_ends_the_right_run(tmp_path):

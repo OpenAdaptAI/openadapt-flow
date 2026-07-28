@@ -574,6 +574,13 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
         observed_at="2026-07-28T00:00:01Z",
         cause_type="ActionDeliveryUncertain",
     )
+    unknown_action = verified.model_copy(deep=True)
+    unknown_action.results.append(
+        StepResult(step_id="undeclared-write", intent="write", ok=True)
+    )
+    disguised_delivery = verified.model_copy(deep=True)
+    disguised_delivery.results[0].skipped = True
+    disguised_delivery.results[0].delivery_attempted = True
 
     assert (
         classify_execution_outcome(canceled, workflow, ExecutionProfile.STANDARD)
@@ -583,7 +590,7 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
         classify_execution_outcome(failed, workflow, ExecutionProfile.STANDARD)
         is ExecutionOutcome.FAILED
     )
-    for report in (bad_effect, uncertain):
+    for report in (bad_effect, uncertain, unknown_action, disguised_delivery):
         assert (
             classify_execution_outcome(report, workflow, ExecutionProfile.STANDARD)
             is ExecutionOutcome.COMPLETED_UNVERIFIED

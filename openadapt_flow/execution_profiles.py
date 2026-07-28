@@ -302,6 +302,13 @@ def classify_execution_outcome(
     steps_by_id = {step.id: step for step in iter_workflow_steps(workflow)}
     if workflow.program is None:
         expected_results = Counter(step.id for step in workflow.steps)
+        pseudo_step_ids = {"<authorization>", "<params>", "<profile>", "<terminal>"}
+        if any(
+            result.step_id not in expected_results
+            and result.step_id not in pseudo_step_ids
+            for result in report.results
+        ):
+            return ExecutionOutcome.COMPLETED_UNVERIFIED
         observed_results = Counter(
             result.step_id
             for result in report.results
@@ -353,6 +360,15 @@ def classify_execution_outcome(
     assert minimum is not None
     for result in report.results:
         if result.skipped or result.exception_handled:
+            if (
+                result.delivery_attempted is not False
+                or result.delivery_receipt is not None
+                or result.delivery_uncertainty is not None
+                or result.effect_verified is not None
+                or result.effect_contract_hashes
+                or result.effect_evidence
+            ):
+                return ExecutionOutcome.COMPLETED_UNVERIFIED
             continue
         step = steps_by_id.get(result.step_id)
         if step is None:

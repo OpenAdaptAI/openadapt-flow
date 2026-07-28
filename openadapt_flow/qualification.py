@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from base64 import b64decode, b64encode
 from collections import Counter
@@ -1877,6 +1878,751 @@ def _case_run_report_integrity_error(
             "case contains an invalid run report",
         )
     run_evidence_root = (root / report_ref.relative_path).resolve().parent
+    steps_by_id = _steps_by_id(workflow)
+    required_actions, required_identity = qualification_action_requirements(workflow)
+    effect_policies = {
+        (binding.step_id, binding.actuation_path, binding.effect_index): binding
+        for binding in project.effect_policies
+    }
+    minimum_tier = VerificationTier(project.minimum_effect_tier)
+
+    def exact_step_metadata_error(item: Any, step: "Step") -> Optional[str]:
+        """Bind a retained action row to the exact compiled step contract."""
+
+        if (
+            item.intent != step.intent
+            or item.risk != step.risk
+            or item.risk_explanation != step.risk_explanation
+            or item.risk_review_required != step.risk_review_required
+        ):
+            return "action intent or qualified risk metadata differs from the workflow"
+        return None
+
+    def retained_before_frame_size(
+        item: Any,
+    ) -> tuple[Optional[tuple[int, int]], Optional[str], Optional[str]]:
+        """Read the exact hash-bound pre-action frame for one GUI result."""
+
+        if not item.before_png or "\\" in item.before_png:
+            return None, None, "GUI resolution lacks its retained pre-action frame"
+        relative = PurePosixPath(item.before_png)
+        if relative.is_absolute() or ".." in relative.parts:
+            return None, None, "GUI pre-action frame path is not run-relative"
+        report_parent = PurePosixPath(report_ref.relative_path).parent
+        evidence_path = (report_parent / relative).as_posix()
+        matches = [
+            evidence
+            for evidence in result.evidence
+            if evidence.kind == "other" and evidence.relative_path == evidence_path
+        ]
+        if len(matches) != 1:
+            return None, None, "GUI pre-action frame is not exact hash-bound evidence"
+        payload, error = _read_evidence_bytes(root=root, evidence=matches[0])
+        if error is not None or payload is None:
+            return None, None, error or "GUI pre-action frame is unreadable"
+        try:
+            from io import BytesIO
+
+            from PIL import Image, UnidentifiedImageError
+
+            with Image.open(BytesIO(payload)) as image:
+                if image.format != "PNG":
+                    return None, None, "GUI pre-action frame is not a PNG"
+                width, height = image.size
+        except (OSError, UnidentifiedImageError):
+            return None, None, "GUI pre-action frame is not a valid image"
+        if width < 1 or height < 1:
+            return None, None, "GUI pre-action frame has invalid dimensions"
+        expected_path = (run_evidence_root / relative).resolve()
+        if expected_path != (root / evidence_path).resolve():
+            return None, None, "GUI pre-action frame is outside its run evidence root"
+        return (width, height), hashlib.sha256(payload).hexdigest(), None
+
+    def retained_run_artifact(
+        relative_path: str,
+        expected_sha256: str,
+        *,
+        label: str,
+    ) -> tuple[Optional[bytes], Optional[str]]:
+        """Read one exact signed artifact relative to the retained run report."""
+
+        if "\\" in relative_path:
+            return None, f"{label} path is not run-relative"
+        relative = PurePosixPath(relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            return None, f"{label} path is not run-relative"
+        report_parent = PurePosixPath(report_ref.relative_path).parent
+        evidence_path = (report_parent / relative).as_posix()
+        matches = [
+            evidence
+            for evidence in result.evidence
+            if evidence.kind == "other"
+            and evidence.relative_path == evidence_path
+            and evidence.sha256 == expected_sha256
+        ]
+        if len(matches) != 1:
+            return None, f"{label} is not exact hash-bound evidence"
+        payload, error = _read_evidence_bytes(root=root, evidence=matches[0])
+        if error is not None or payload is None:
+            return None, error or f"{label} is unreadable"
+        if hashlib.sha256(payload).hexdigest() != expected_sha256:
+            return None, f"{label} bytes do not match their digest"
+        expected_path = (run_evidence_root / relative).resolve()
+        if expected_path != (root / evidence_path).resolve():
+            return None, f"{label} is outside its run evidence root"
+        return payload, None
+
+    def exact_visual_resolution_error(
+        resolution: Any,
+        anchor: Any,
+        *,
+        step: "Step",
+    ) -> Optional[str]:
+        """Re-run one visual resolve from its exact signed runtime inputs."""
+
+        evidence = resolution.visual_evidence
+        if evidence is None:
+            return "visual resolution lacks independently reproducible evidence"
+        from openadapt_flow import vision as vision_module
+        from openadapt_flow.runtime.resolver import (
+            resolve as resolve_target,
+        )
+        from openadapt_flow.runtime.resolver import (
+            visual_resolution_evaluator_contract_sha256,
+        )
+
+        if (
+            evidence.evaluator_contract_sha256
+            != visual_resolution_evaluator_contract_sha256()
+        ):
+            return "visual resolution used a different evaluator contract"
+        from openadapt_flow.runtime.resolver import (
+            visual_resolution_anchor_contract_sha256,
+        )
+
+        if evidence.anchor_contract_sha256 != visual_resolution_anchor_contract_sha256(
+            anchor,
+            template_sha256=evidence.template_sha256,
+            allow_target_ocr=evidence.allow_target_ocr,
+        ):
+            return "visual resolution differs from the compiled anchor contract"
+        frame_png, frame_error = retained_run_artifact(
+            evidence.frame_inventory_ref,
+            evidence.frame_sha256,
+            label="visual resolution frame",
+        )
+        template_png, template_error = retained_run_artifact(
+            evidence.template_inventory_ref,
+            evidence.template_sha256,
+            label="visual resolution template",
+        )
+        if frame_error is not None or frame_png is None:
+            return frame_error or "visual resolution frame is unavailable"
+        if template_error is not None or template_png is None:
+            return template_error or "visual resolution template is unavailable"
+        if (
+            workflow.manifest is None
+            or workflow.manifest.file_hashes.get(anchor.template)
+            != evidence.template_sha256
+        ):
+            return "visual resolution template differs from the compiled bundle"
+        try:
+            reproduced = resolve_target(
+                anchor,
+                frame_png,
+                vision_module,
+                None,
+                step.intent,
+                template_png=template_png,
+                structural=None,
+                allow_target_ocr=evidence.allow_target_ocr,
+            )
+        except Exception as exc:  # the retained proof must reproduce cleanly
+            return (
+                "visual resolution evaluator refused retained inputs: "
+                f"{type(exc).__name__}"
+            )
+        if reproduced is None:
+            return "visual resolution does not reproduce from retained inputs"
+        actual, matched_region = reproduced
+        if (
+            actual.rung != resolution.rung
+            or actual.point != resolution.point
+            or abs(actual.confidence - resolution.confidence) > 1e-9
+            or matched_region != evidence.matched_region
+        ):
+            return "visual resolution differs from exact evaluator output"
+        return None
+
+    def one_resolution_error(
+        resolution: Any,
+        anchor: Any,
+        *,
+        frame_size: tuple[int, int],
+        step: "Step",
+    ) -> Optional[str]:
+        """Validate one target resolution against its anchor and exact frame."""
+
+        width, height = frame_size
+        x, y = resolution.point
+        if (
+            not math.isfinite(resolution.confidence)
+            or not 0.0 < resolution.confidence <= 1.0
+            or not math.isfinite(resolution.elapsed_ms)
+            or resolution.elapsed_ms < 0.0
+            or resolution.elapsed_ms > (step.timeout_s * 1000.0 + 1000.0)
+            or not (0 <= x < width and 0 <= y < height)
+        ):
+            return "resolution values are outside the exact retained frame"
+
+        if resolution.rung == "structural":
+            handle = resolution.structural_handle
+            if (
+                anchor.structural is None
+                or handle is None
+                or resolution.visual_evidence is not None
+                or handle.candidate_count != 1
+                or resolution.point != handle.point
+                or abs(resolution.confidence - handle.confidence) > 1e-9
+            ):
+                return "structural resolution does not match its exact target handle"
+            if handle.region is not None:
+                hx, hy = handle.point
+                rx, ry, rw, rh = handle.region
+                if (
+                    rw < 1
+                    or rh < 1
+                    or rx < 0
+                    or ry < 0
+                    or rx + rw > width
+                    or ry + rh > height
+                    or not (rx <= hx < rx + rw and ry <= hy < ry + rh)
+                ):
+                    return "structural target handle is outside the exact frame"
+            return None
+
+        if resolution.structural_handle is not None:
+            return "visual resolution contains an incompatible structural handle"
+        visual_error = exact_visual_resolution_error(
+            resolution,
+            anchor,
+            step=step,
+        )
+        if visual_error is not None:
+            return visual_error
+        if resolution.rung in {"template", "template_global"}:
+            from openadapt_flow.runtime.resolver import TEMPLATE_THRESHOLD
+
+            if anchor.template is None or resolution.confidence < TEMPLATE_THRESHOLD:
+                return "template resolution is not supported by the compiled anchor"
+            if resolution.rung == "template":
+                rx, ry, rw, rh = anchor.region
+                pad = anchor.search_pad
+                if not (
+                    max(0, rx - pad) <= x < min(width, rx + rw + pad)
+                    and max(0, ry - pad) <= y < min(height, ry + rh + pad)
+                ):
+                    return "local template resolution lies outside its search region"
+            return None
+        if resolution.rung == "ocr":
+            from openadapt_flow.runtime.resolver import OCR_MIN_RATIO
+
+            if anchor.ocr_text is None or resolution.confidence < OCR_MIN_RATIO:
+                return "OCR resolution is not supported by the compiled anchor"
+            return None
+        if resolution.rung == "geometry":
+            if not anchor.landmarks or resolution.confidence > 0.9:
+                return "geometry resolution is not supported by retained landmarks"
+            return None
+        if resolution.rung == "grounder":
+            if report.model_calls < 1:
+                return "grounder resolution lacks its exact model-call accounting"
+            return None
+        return "GUI action uses an unknown resolution rung"
+
+    def resolution_shape_error(
+        item: Any,
+        step: "Step",
+        *,
+        actuation_path: Literal["gui", "api"],
+        require_resolution: bool,
+        require_drag_end: bool,
+        allow_optional_resolution: bool = False,
+    ) -> Optional[str]:
+        """Reject resolution records that the selected runtime path cannot emit."""
+
+        from openadapt_flow.ir import ActionKind
+
+        if actuation_path == "api":
+            if (
+                item.resolution is not None
+                or item.drag_end_resolution is not None
+                or item.starting_state_settled is not None
+            ):
+                return "API action contains GUI resolution or settling evidence"
+            return None
+
+        if item.starting_state_settled is not True:
+            return "GUI action lacks the exact settled-state observation"
+        resolution = item.resolution
+        if require_resolution and resolution is None:
+            return "GUI action lacks its required target resolution"
+        if (
+            not require_resolution
+            and resolution is not None
+            and not allow_optional_resolution
+        ):
+            return (
+                "GUI refusal claims a target resolution that its detector cannot emit"
+            )
+        if resolution is None:
+            if item.drag_end_resolution is not None:
+                return "GUI action has a drag endpoint without a source resolution"
+            return None
+
+        anchor = step.anchor
+        if anchor is None:
+            return "GUI action claims a resolution for an anchorless step"
+        frame_size, before_frame_sha256, frame_error = retained_before_frame_size(item)
+        if frame_error is not None or frame_size is None:
+            return frame_error or "GUI action lacks its exact pre-action frame"
+        if resolution.rung != "structural":
+            visual = resolution.visual_evidence
+            if visual is None:
+                return "GUI action lacks exact visual resolution evidence"
+            allowed_observation_hashes = {before_frame_sha256}
+            if (
+                report.qualification_fault_mutations
+                and report.qualification_fault_mutations[0].step_id_sha256
+                == sha256_bytes(step.id.encode("utf-8"))
+            ):
+                allowed_observation_hashes.add(
+                    report.qualification_fault_mutations[0].before_input_sha256
+                )
+            if visual.frame_sha256 not in allowed_observation_hashes:
+                return "visual resolution frame is not bound to the fault sequence"
+        source_error = one_resolution_error(
+            resolution,
+            anchor,
+            frame_size=frame_size,
+            step=step,
+        )
+        if source_error is not None:
+            return source_error
+
+        if step.action is not ActionKind.DRAG:
+            if item.drag_end_resolution is not None:
+                return "non-drag action contains a drag endpoint resolution"
+            return None
+        if not require_drag_end:
+            if item.drag_end_resolution is not None:
+                return "pre-delivery drag refusal contains an unreached endpoint"
+            return None
+        if item.drag_end_resolution is None or step.drag_end_anchor is None:
+            return "drag action lacks its independently resolved endpoint"
+        endpoint_error = one_resolution_error(
+            item.drag_end_resolution,
+            step.drag_end_anchor,
+            frame_size=frame_size,
+            step=step,
+        )
+        if endpoint_error is not None:
+            return f"drag endpoint: {endpoint_error}"
+        return None
+
+    def delivery_receipt_error(item: Any, step: "Step") -> Optional[str]:
+        """Bind one GUI delivery receipt to its exact action and resolution."""
+
+        from openadapt_flow.ir import ActionKind
+
+        receipt = item.delivery_receipt
+        if receipt is None:
+            return "GUI action lacks its exact delivery receipt"
+        allowed_receipts = {
+            ("uia", ActionKind.CLICK): {
+                ("uia_invoke", True),
+                ("uia_focus", True),
+                ("uia_toggle", True),
+                ("uia_select", True),
+                ("atspi_invoke", True),
+                ("atspi_focus", True),
+                ("atspi_toggle", True),
+                ("atspi_select", True),
+            },
+            ("dom", ActionKind.CLICK): {
+                ("dom_click", False),
+                ("physical_click", False),
+            },
+            ("guarded_coordinate", ActionKind.CLICK): {
+                ("guarded_coordinate_click", False),
+                ("physical_click", False),
+            },
+            ("dom", ActionKind.DOUBLE_CLICK): {
+                ("dom_double_click", False),
+                ("physical_double_click", False),
+            },
+            ("guarded_coordinate", ActionKind.DOUBLE_CLICK): {
+                ("guarded_coordinate_double_click", False),
+                ("physical_double_click", False),
+            },
+            ("guarded_coordinate", ActionKind.RIGHT_CLICK): {
+                ("guarded_coordinate_right_click", False),
+                ("physical_right_click", False),
+            },
+            ("remote_guarded", ActionKind.CLICK): {
+                ("rdp_click", False),
+                ("remote_click", False),
+            },
+            ("remote_guarded", ActionKind.DOUBLE_CLICK): {
+                ("rdp_double_click", False),
+                ("remote_double_click", False),
+            },
+            ("remote_guarded", ActionKind.RIGHT_CLICK): {
+                ("rdp_right_click", False),
+                ("remote_right_click", False),
+            },
+            ("dom", ActionKind.DRAG): {
+                ("guarded_dom_drag", False),
+            },
+            ("guarded_coordinate", ActionKind.DRAG): {
+                ("guarded_coordinate_drag", False),
+                ("physical_drag", False),
+            },
+            ("remote_guarded", ActionKind.DRAG): {
+                ("rdp_drag", False),
+                ("remote_drag", False),
+            },
+            ("guarded_keyboard", ActionKind.TYPE): {
+                ("guarded_dom_type", False),
+                ("guarded_atspi_type", True),
+                ("physical_type_text", False),
+            },
+            ("remote_guarded", ActionKind.SELECT_OPTION): {
+                ("rdp_select_option", False),
+                ("remote_select_option", False),
+            },
+            ("guarded_keyboard", ActionKind.SELECT_OPTION): {
+                ("guarded_select_option", False),
+            },
+            ("guarded_keyboard", ActionKind.KEY): {
+                ("guarded_dom_key", False),
+                ("guarded_atspi_key", False),
+                ("physical_press", False),
+            },
+            ("guarded_keyboard", ActionKind.HOTKEY): {
+                ("guarded_dom_key", False),
+                ("guarded_atspi_key", False),
+                ("physical_press", False),
+            },
+        }.get((item.actuation, step.action), set())
+        if (receipt.operation, receipt.native) not in allowed_receipts:
+            return "delivery receipt operation conflicts with the compiled action"
+
+        source_handle = (
+            item.resolution.structural_handle
+            if item.resolution is not None and item.resolution.rung == "structural"
+            else None
+        )
+        if (
+            step.action is not ActionKind.DRAG
+            and item.actuation in {"uia", "dom"}
+            and source_handle is not None
+        ):
+            if (
+                source_handle.target_fingerprint is None
+                or receipt.target_fingerprint != source_handle.target_fingerprint
+            ):
+                return "delivery receipt does not bind the resolved structural target"
+
+        if (
+            step.action
+            in {
+                ActionKind.CLICK,
+                ActionKind.DOUBLE_CLICK,
+                ActionKind.RIGHT_CLICK,
+            }
+            and item.actuation == "remote_guarded"
+        ):
+            source = item.resolution
+            if source is None or source.visual_evidence is None:
+                return "remote delivery receipt lacks exact visual target proof"
+            from openadapt_flow.runtime.resolver import (
+                visual_resolution_point_fingerprint,
+            )
+
+            expected_target = visual_resolution_point_fingerprint(
+                source.visual_evidence.frame_sha256,
+                source.point,
+            )
+            if receipt.target_fingerprint != expected_target:
+                return "remote delivery receipt does not bind the resolved target"
+
+        if step.action is ActionKind.DRAG:
+            from openadapt_flow.runtime.resolver import (
+                structural_resolution_fingerprint,
+                visual_resolution_point_fingerprint,
+            )
+
+            source = item.resolution
+            if source is None or step.anchor is None:
+                return "drag delivery receipt lacks its resolved source"
+            if source.rung == "structural":
+                source_observation = source.structural_handle
+                source_locator = step.anchor.structural
+                if source_observation is None or source_locator is None:
+                    return "drag delivery receipt lacks exact structural source proof"
+                expected_source = structural_resolution_fingerprint(
+                    source_locator,
+                    source_observation,
+                )
+            else:
+                source_visual = source.visual_evidence
+                if source_visual is None:
+                    return "drag delivery receipt lacks exact visual source proof"
+                expected_source = visual_resolution_point_fingerprint(
+                    source_visual.frame_sha256,
+                    source.point,
+                )
+            if receipt.target_fingerprint != expected_source:
+                return "delivery receipt does not bind the resolved drag source"
+            endpoint = item.drag_end_resolution
+            if endpoint is None:
+                return "drag delivery receipt lacks its resolved destination"
+            if endpoint.rung == "structural":
+                endpoint_handle = endpoint.structural_handle
+                endpoint_locator = (
+                    step.drag_end_anchor.structural
+                    if step.drag_end_anchor is not None
+                    else None
+                )
+                expected_destination = (
+                    structural_resolution_fingerprint(
+                        endpoint_locator,
+                        endpoint_handle,
+                    )
+                    if endpoint_handle is not None and endpoint_locator is not None
+                    else None
+                )
+            else:
+                visual = endpoint.visual_evidence
+                if visual is None:
+                    return "drag delivery receipt lacks exact visual destination proof"
+                expected_destination = visual_resolution_point_fingerprint(
+                    visual.frame_sha256,
+                    endpoint.point,
+                )
+            if (
+                expected_destination is None
+                or receipt.destination_fingerprint != expected_destination
+            ):
+                return "delivery receipt does not bind the resolved drag destination"
+        elif receipt.destination_fingerprint is not None:
+            return "non-drag delivery receipt contains a destination fingerprint"
+
+        if step.action is not ActionKind.SELECT_OPTION and (
+            receipt.selection_value_sha256 is not None
+            or receipt.selection_commit_key is not None
+        ):
+            return "non-selection delivery receipt contains selection metadata"
+        if step.action is ActionKind.SELECT_OPTION:
+            scoped = scoped_case_params(item)
+            if scoped is None:
+                return "selection delivery receipt lacks exact parameter scope"
+            selected_value = (
+                scoped.get(step.param) if step.param is not None else step.text
+            )
+            if selected_value is None or step.selection_commit_key is None:
+                return "selection delivery receipt lacks its compiled input contract"
+            if (
+                receipt.selection_value_sha256
+                != hashlib.sha256(selected_value.encode("utf-8")).hexdigest()
+                or receipt.selection_commit_key != step.selection_commit_key
+            ):
+                return "selection delivery receipt differs from the compiled input"
+            selection_resolution = item.resolution
+            if selection_resolution is None or step.anchor is None:
+                return "selection delivery receipt lacks its resolved target"
+            if selection_resolution.rung == "structural":
+                selection_handle = selection_resolution.structural_handle
+                selection_locator = step.anchor.structural
+                if selection_handle is None or selection_locator is None:
+                    return "selection delivery receipt lacks structural target proof"
+                from openadapt_flow.runtime.resolver import (
+                    structural_resolution_fingerprint,
+                )
+
+                expected_target = structural_resolution_fingerprint(
+                    selection_locator,
+                    selection_handle,
+                )
+            else:
+                selection_visual = selection_resolution.visual_evidence
+                if selection_visual is None:
+                    return "selection delivery receipt lacks visual target proof"
+                from openadapt_flow.runtime.resolver import (
+                    visual_resolution_point_fingerprint,
+                )
+
+                expected_target = visual_resolution_point_fingerprint(
+                    selection_visual.frame_sha256,
+                    selection_resolution.point,
+                )
+            if receipt.target_fingerprint != expected_target:
+                return "selection delivery receipt does not bind its resolved target"
+
+        try:
+            delivered_at = datetime.fromisoformat(receipt.delivered_at)
+            report_started = datetime.fromisoformat(report.started_at)
+            result_completed = datetime.fromisoformat(result.completed_at)
+        except ValueError:
+            return "delivery receipt timestamp is not an exact ISO instant"
+        if (
+            delivered_at.tzinfo is None
+            or report_started.tzinfo is None
+            or result_completed.tzinfo is None
+            or delivered_at < report_started
+            or delivered_at > result_completed
+        ):
+            return "delivery receipt timestamp is outside the exact run interval"
+        return None
+
+    def identity_evidence_error(
+        item: Any,
+        step: "Step",
+        *,
+        actuation_path: Literal["gui", "api"],
+        expected_status: Literal["verified", "mismatch"],
+    ) -> Optional[str]:
+        identity_policy = project.identity_policies.get(step.id)
+        scoped = scoped_case_params(item)
+        if identity_policy is None or scoped is None:
+            return "action lacks its exact qualified identity policy or parameter scope"
+        from openadapt_flow.qualification_identity_evidence import (
+            qualification_identity_evidence_error,
+            qualification_identity_refusal_evidence_error,
+        )
+
+        recorded_asset_sha256 = (
+            workflow.manifest.file_hashes.get(step.anchor.identifier_crop)
+            if workflow.manifest is not None
+            and step.anchor is not None
+            and step.anchor.identifier_crop is not None
+            else None
+        )
+
+        if expected_status == "mismatch":
+            return qualification_identity_refusal_evidence_error(
+                policy=identity_policy,
+                check=item.identity,
+                step=step,
+                actuation_path=actuation_path,
+                runtime_params=scoped,
+                recorded_params=workflow.params,
+                evidence_root=run_evidence_root,
+                recorded_asset_sha256=recorded_asset_sha256,
+            )
+        return qualification_identity_evidence_error(
+            policy=identity_policy,
+            check=item.identity,
+            step=step,
+            actuation_path=actuation_path,
+            runtime_params=scoped,
+            recorded_params=workflow.params,
+            evidence_root=run_evidence_root,
+            recorded_asset_sha256=recorded_asset_sha256,
+        )
+
+    def resolved_effect_contracts(
+        item: Any,
+        step: "Step",
+        *,
+        actuation_path: Literal["gui", "api"],
+    ) -> Optional[list[tuple[int, str, Any]]]:
+        from openadapt_flow.policy import effects_for_actuation
+
+        runtime_actuation = "api" if actuation_path == "api" else None
+        effects = effects_for_actuation(step, runtime_actuation)
+        scoped = scoped_case_params(item)
+        if not effects or scoped is None:
+            return None
+        if any(
+            effect.referenced_params().intersection(workflow.secret_params)
+            for effect in effects
+        ):
+            return None
+        try:
+            resolved = [
+                (
+                    index,
+                    effect.resolved_contract_hash(
+                        scoped,
+                        opaque_param_sha256={"__run_id__": result.run_id_sha256 or ""},
+                    ),
+                    effect_policies.get((step.id, actuation_path, index)),
+                )
+                for index, effect in enumerate(effects)
+            ]
+        except ValueError:
+            return None
+        if any(
+            binding is None
+            or binding.effect_contract_hash != effects[index].contract_hash()
+            for index, _effect_hash, binding in resolved
+        ):
+            return None
+        return resolved
+
+    def exact_confirmed_effect_error(
+        item: Any,
+        step: "Step",
+        *,
+        actuation_path: Literal["gui", "api"],
+    ) -> Optional[str]:
+        resolved = resolved_effect_contracts(
+            item,
+            step,
+            actuation_path=actuation_path,
+        )
+        if resolved is None:
+            return "action effects do not match the exact qualified contracts"
+        expected_hashes = Counter(effect_hash for _index, effect_hash, _ in resolved)
+        if Counter(item.effect_contract_hashes) != expected_hashes:
+            return "action effect hashes do not match the exact resolved contracts"
+
+        required_by_hash: dict[str, list[VerificationTier]] = {}
+        for _index, effect_hash, binding in resolved:
+            assert binding is not None
+            required_by_hash.setdefault(effect_hash, []).append(
+                min(binding.tier, minimum_tier)
+            )
+        observed_by_hash: dict[str, list[VerificationTier]] = {}
+        for evidence in item.effect_evidence:
+            if (
+                evidence.initial_verdict != "confirmed"
+                or evidence.final_verdict != "confirmed"
+                or evidence.observed_effect != "present"
+                or evidence.reconciliation_completed
+                or evidence.reconciliation_actions
+                or evidence.verification_tier is None
+            ):
+                return "action contains non-confirming effect evidence"
+            try:
+                tier = VerificationTier(evidence.verification_tier)
+            except ValueError:
+                return "action contains an invalid effect evidence tier"
+            observed_by_hash.setdefault(evidence.effect_contract_hash, []).append(tier)
+        if set(observed_by_hash) != set(required_by_hash):
+            return "action effect evidence does not cover the exact contract multiset"
+        for effect_hash, required_tiers in required_by_hash.items():
+            observed_tiers = observed_by_hash[effect_hash]
+            if len(observed_tiers) != len(required_tiers) or any(
+                not observed.satisfies(required)
+                for observed, required in zip(
+                    sorted(observed_tiers), sorted(required_tiers), strict=True
+                )
+            ):
+                return "action effect evidence is weaker than its qualified contract"
+        return None
 
     expected_case_sha256 = sha256_bytes(case.id.encode("utf-8"))
     expected_action_paths = {
@@ -1967,10 +2713,10 @@ def _case_run_report_integrity_error(
                     QualificationRefusalCode.CASE_ATTESTATION_INVALID,
                     "linear fault case reports an inconsistent terminal outcome",
                 )
-        elif report.terminal_outcome not in {"halt", "escalate"}:
+        elif report.terminal_outcome != "halt":
             return (
                 QualificationRefusalCode.CASE_ATTESTATION_INVALID,
-                "program fault case did not terminate at a refusal outcome",
+                "program fault case did not terminate at the detector halt",
             )
         if report.halt is not None and report.halt.outcome != (
             report.terminal_outcome or "halt"
@@ -2010,6 +2756,284 @@ def _case_run_report_integrity_error(
             return (
                 QualificationRefusalCode.CASE_NOT_PASSED,
                 "fault case prior actions lack complete production evidence",
+            )
+
+        # The profile classifier proves the ordered action trace and the broad
+        # production outcome. Qualification also proves the exact compiled
+        # action, path, identity policy, and resolved effect contracts.
+        for item in prior_action_results:
+            step = steps_by_id.get(item.step_id)
+            actuation_path = expected_action_paths.get(item.step_id)
+            if step is None or actuation_path is None:
+                return (
+                    QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                    "fault case prior action is outside its exact qualified scope",
+                )
+            metadata_error = exact_step_metadata_error(item, step)
+            if metadata_error is not None:
+                return (
+                    QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                    f"fault case prior action {item.step_id!r}: {metadata_error}",
+                )
+            if actuation_path == "api":
+                path_shape_invalid = (
+                    item.actuation != "api"
+                    or item.delivery_receipt is not None
+                    or item.delivery_uncertainty is not None
+                )
+                delivery_error = None
+            else:
+                path_shape_invalid = (
+                    item.actuation not in AUTOMATED_GUI_ACTUATIONS
+                    or item.delivery_uncertainty is not None
+                )
+                delivery_error = delivery_receipt_error(item, step)
+            resolution_error = resolution_shape_error(
+                item,
+                step,
+                actuation_path=actuation_path,
+                require_resolution=(
+                    actuation_path == "gui" and step.anchor is not None
+                ),
+                require_drag_end=True,
+            )
+            if (
+                path_shape_invalid
+                or delivery_error is not None
+                or resolution_error is not None
+                or not item.ok
+                or item.safety_halt
+                or item.failure_category is not None
+                or item.error is not None
+                or item.delivery_attempted is not True
+                or item.safety_refusal_evidence is not None
+            ):
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    "fault case prior action lacks its exact delivery and resolution "
+                    f"proof: {delivery_error or resolution_error or item.step_id}",
+                )
+            if (
+                item.step_id in required_identity
+                or item.step_id in project.identity_policies
+            ):
+                identity_error = identity_evidence_error(
+                    item,
+                    step,
+                    actuation_path=actuation_path,
+                    expected_status="verified",
+                )
+                if identity_error is not None:
+                    return (
+                        QualificationRefusalCode.CASE_NOT_PASSED,
+                        "fault case prior action identity is not exact: "
+                        f"{identity_error}",
+                    )
+            if item.step_id in required_actions:
+                if item.effect_verified is not True or item.effect_approved_unverified:
+                    return (
+                        QualificationRefusalCode.CASE_NOT_PASSED,
+                        "fault case prior action did not confirm its required effect",
+                    )
+                effect_error = exact_confirmed_effect_error(
+                    item,
+                    step,
+                    actuation_path=actuation_path,
+                )
+                if effect_error is not None:
+                    return (
+                        QualificationRefusalCode.CASE_NOT_PASSED,
+                        f"fault case prior action effect is not exact: {effect_error}",
+                    )
+
+        if not action_results:
+            return (
+                QualificationRefusalCode.CASE_NOT_PASSED,
+                "fault case contains no refusal target result",
+            )
+        target_result = action_results[-1]
+        target_step = steps_by_id.get(fault_target.step_id)
+        if target_step is None or target_result.step_id != fault_target.step_id:
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                "fault refusal row does not match the exact qualified target",
+            )
+        metadata_error = exact_step_metadata_error(target_result, target_step)
+        if metadata_error is not None:
+            return (
+                QualificationRefusalCode.CASE_ATTESTATION_INVALID,
+                f"fault refusal target: {metadata_error}",
+            )
+        target_resolution_required = (
+            fault_target.actuation_path == "gui"
+            and case.kind
+            in {
+                QualificationCaseKind.WRONG_IDENTITY,
+                QualificationCaseKind.WEAK_EFFECT,
+                QualificationCaseKind.MISSING_EFFECT,
+            }
+        )
+        target_resolution_error = resolution_shape_error(
+            target_result,
+            target_step,
+            actuation_path=fault_target.actuation_path,
+            require_resolution=target_resolution_required,
+            allow_optional_resolution=(
+                fault_target.actuation_path == "gui"
+                and case.kind is QualificationCaseKind.STALE_IDENTITY
+            ),
+            require_drag_end=False,
+        )
+        if target_resolution_error is not None:
+            return (
+                QualificationRefusalCode.CASE_NOT_PASSED,
+                "fault refusal target resolution is not exact: "
+                f"{target_resolution_error}",
+            )
+
+        if case.kind is QualificationCaseKind.AMBIGUITY:
+            if target_result.identity is not None:
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    "ambiguity refusal contains identity evidence from an unreached gate",
+                )
+        elif case.kind is QualificationCaseKind.WRONG_IDENTITY:
+            identity_error = identity_evidence_error(
+                target_result,
+                target_step,
+                actuation_path=fault_target.actuation_path,
+                expected_status="mismatch",
+            )
+            if identity_error is not None:
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    f"wrong-identity refusal is not exact: {identity_error}",
+                )
+        elif case.kind is QualificationCaseKind.STALE_IDENTITY:
+            status = (
+                target_result.identity.status
+                if target_result.identity is not None
+                else None
+            )
+            if status not in {"verified", "mismatch"}:
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    "stale-identity refusal lacks an exact definitive identity verdict",
+                )
+            if status == "mismatch" and target_result.resolution is None:
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    "stale-identity refusal claims an identity mismatch without "
+                    "the target resolution required to observe it",
+                )
+            stale_status: Literal["verified", "mismatch"] = (
+                "mismatch" if status == "mismatch" else "verified"
+            )
+            identity_error = identity_evidence_error(
+                target_result,
+                target_step,
+                actuation_path=fault_target.actuation_path,
+                expected_status=stale_status,
+            )
+            if identity_error is not None:
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    f"stale-identity refusal is not exact: {identity_error}",
+                )
+        else:
+            identity_error = identity_evidence_error(
+                target_result,
+                target_step,
+                actuation_path=fault_target.actuation_path,
+                expected_status="verified",
+            )
+            if identity_error is not None:
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    f"fault refusal target identity is not exact: {identity_error}",
+                )
+
+        if case.kind is QualificationCaseKind.WEAK_EFFECT:
+            resolved = resolved_effect_contracts(
+                target_result,
+                target_step,
+                actuation_path=fault_target.actuation_path,
+            )
+            expected_hashes = (
+                Counter(effect_hash for _index, effect_hash, _binding in resolved)
+                if resolved is not None
+                else None
+            )
+            if (
+                expected_hashes is None
+                or Counter(target_result.effect_contract_hashes) != expected_hashes
+                or target_result.effect_verified is not False
+                or target_result.effect_approved_unverified
+                or target_result.effect_evidence
+                or target_result.effect_results != [target_result.error]
+            ):
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    "weak-effect refusal does not bind the exact resolved effect set",
+                )
+        elif case.kind is QualificationCaseKind.MISSING_EFFECT:
+            resolved = resolved_effect_contracts(
+                target_result,
+                target_step,
+                actuation_path=fault_target.actuation_path,
+            )
+            expected_message = (
+                "API binding present but no EffectVerifier is configured to confirm "
+                "the write (fail-safe HALT)"
+                if fault_target.actuation_path == "api"
+                else "no EffectVerifier configured for a step that declares effects "
+                "(fail-safe HALT)"
+            )
+            if (
+                resolved is None
+                or target_result.effect_contract_hashes
+                or target_result.effect_verified is not False
+                or target_result.effect_approved_unverified
+                or target_result.effect_evidence
+                or target_result.effect_results != [expected_message]
+            ):
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    "missing-effect refusal does not bind its exact negative artifact",
+                )
+        elif case.kind is QualificationCaseKind.STALE_IDENTITY:
+            resolved = resolved_effect_contracts(
+                target_result,
+                target_step,
+                actuation_path=fault_target.actuation_path,
+            )
+            expected_hashes = (
+                Counter(effect_hash for _index, effect_hash, _binding in resolved)
+                if resolved is not None
+                else None
+            )
+            if (
+                expected_hashes is None
+                or Counter(target_result.effect_contract_hashes) != expected_hashes
+                or target_result.effect_verified is not None
+                or target_result.effect_approved_unverified
+                or target_result.effect_results
+                or target_result.effect_evidence
+            ):
+                return (
+                    QualificationRefusalCode.CASE_NOT_PASSED,
+                    "stale-identity refusal does not bind its exact pre-actuation "
+                    "effect contracts",
+                )
+        elif (
+            target_result.effect_verified is not None
+            or target_result.effect_results
+            or target_result.effect_contract_hashes
+            or target_result.effect_evidence
+        ):
+            return (
+                QualificationRefusalCode.CASE_NOT_PASSED,
+                "pre-effect fault refusal contains evidence from an unreached gate",
             )
     if policy is not None:
         from openadapt_flow.policy import policy_contract_sha256

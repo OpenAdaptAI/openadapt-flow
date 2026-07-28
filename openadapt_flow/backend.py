@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_flow.ir import (
         ActionDeliveryReceipt,
+        Point,
         StructuralHandle,
         StructuralLocator,
     )
@@ -499,6 +500,22 @@ class SelectOptionBackend(Protocol):
 
 
 @runtime_checkable
+class GuardedSelectOptionBackend(Protocol):
+    """Exact option selection bound to a fresh target/frame observation."""
+
+    def select_option_guarded(
+        self,
+        text: str,
+        commit_key: str,
+        *,
+        target_point: "Point",
+        expected_frame_sha256: str,
+    ) -> "ActionDeliveryReceipt":
+        """Deliver text+commit and return a typed delivery-only receipt."""
+        ...
+
+
+@runtime_checkable
 class RemoteActuationBackend(Protocol):
     """Optional two-phase actuation seam for opaque remote surfaces.
 
@@ -564,6 +581,43 @@ class RichPointerActionBackend(Protocol):
 @runtime_checkable
 class GuardedDragActionBackend(Protocol):
     """Consume a pre-identity coordinate lease for one exact drag."""
+
+    def drag_guarded(
+        self,
+        x: int,
+        y: int,
+        end_x: int,
+        end_y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> "ActionDeliveryReceipt": ...
+
+
+@runtime_checkable
+class GuardedRemotePointerActionBackend(Protocol):
+    """Consume one exact remote frame lease for a pointer gesture.
+
+    The receipt proves which freshly observed frame and point received the
+    input. It does not prove the workflow outcome. Postconditions and effect
+    verification remain authoritative.
+    """
+
+    def click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+        double: bool = False,
+    ) -> "ActionDeliveryReceipt": ...
+
+    def right_click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> "ActionDeliveryReceipt": ...
 
     def drag_guarded(
         self,

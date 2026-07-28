@@ -20,6 +20,7 @@ import pytest
 from PIL import Image
 
 from openadapt_flow.backend import (
+    ActionDeliveryUncertain,
     Backend,
     ExecutionContextIdentityBackend,
     FreshActuationRequired,
@@ -27,6 +28,7 @@ from openadapt_flow.backend import (
     PreparedPointerActuationBackend,
     StructuralActionBackend,
     StructuralBackend,
+    StructuralResolutionRefused,
 )
 from openadapt_flow.backends.remote_display import (
     RemoteDisplayBackend,
@@ -35,6 +37,7 @@ from openadapt_flow.backends.remote_display import (
     _split_chord,
     resolve_mac_key,
 )
+from openadapt_flow.runtime.resolver import visual_resolution_point_fingerprint
 
 
 class FakeClient:
@@ -409,6 +412,174 @@ def test_rich_pointer_actions_share_the_remote_frame_lease() -> None:
         ("left", True),
         ("left", False),
     ]
+
+
+@pytest.mark.parametrize(
+    ("action", "operation", "destination"),
+    [
+        ("click", "remote_click", None),
+        ("double_click", "remote_double_click", None),
+        ("right_click", "remote_right_click", None),
+        ("drag", "remote_drag", (200, 150)),
+    ],
+)
+def test_guarded_pointer_actions_return_exact_delivery_receipts(
+    action: str,
+    operation: str,
+    destination: tuple[int, int] | None,
+) -> None:
+    backend, _client = _backend()
+    source = (100, 100)
+    backend.screenshot()
+    backend.prepare_pointer_actuation(*source)
+    frame = backend.acquire_actuation_frame()
+    frame_sha256 = hashlib.sha256(frame).hexdigest()
+
+    if action == "click":
+        receipt = backend.click_guarded(*source, expected_frame_sha256=frame_sha256)
+    elif action == "double_click":
+        receipt = backend.click_guarded(
+            *source,
+            expected_frame_sha256=frame_sha256,
+            double=True,
+        )
+    elif action == "right_click":
+        receipt = backend.right_click_guarded(
+            *source,
+            expected_frame_sha256=frame_sha256,
+        )
+    else:
+        assert destination is not None
+        receipt = backend.drag_guarded(
+            *source,
+            *destination,
+            expected_frame_sha256=frame_sha256,
+        )
+
+    assert receipt.operation == operation
+    assert receipt.native is False
+    assert receipt.target_fingerprint == visual_resolution_point_fingerprint(
+        frame_sha256,
+        source,
+    )
+    assert receipt.destination_fingerprint == (
+        visual_resolution_point_fingerprint(frame_sha256, destination)
+        if destination is not None
+        else None
+    )
+
+
+@pytest.mark.parametrize("action", ["click", "double_click", "right_click", "drag"])
+@pytest.mark.parametrize("refusal", ["wrong_hash", "invalidated"])
+def test_guarded_pointer_actions_refuse_without_the_exact_live_lease(
+    action: str,
+    refusal: str,
+) -> None:
+    backend, client = _backend()
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
+    frame = backend.acquire_actuation_frame()
+    frame_sha256 = hashlib.sha256(frame).hexdigest()
+    if refusal == "wrong_hash":
+        frame_sha256 = "0" * 64
+    else:
+        backend.screenshot()
+
+    with pytest.raises(StructuralResolutionRefused, match="fresh-frame lease"):
+        if action == "click":
+            backend.click_guarded(100, 100, expected_frame_sha256=frame_sha256)
+        elif action == "double_click":
+            backend.click_guarded(
+                100,
+                100,
+                expected_frame_sha256=frame_sha256,
+                double=True,
+            )
+        elif action == "right_click":
+            backend.right_click_guarded(
+                100,
+                100,
+                expected_frame_sha256=frame_sha256,
+            )
+        else:
+            backend.drag_guarded(
+                100,
+                100,
+                200,
+                150,
+                expected_frame_sha256=frame_sha256,
+            )
+
+    assert not any(call[0] == "mouse" for call in client.calls)
+
+
+@pytest.mark.parametrize(
+    ("action", "operation"),
+    [
+        ("click", "remote_click"),
+        ("double_click", "remote_double_click"),
+        ("right_click", "remote_right_click"),
+        ("drag", "remote_drag"),
+    ],
+)
+def test_guarded_pointer_actions_never_receipt_uncertain_delivery(
+    action: str,
+    operation: str,
+) -> None:
+    class FailingPointerClient(FakeClient):
+        fail_pointer = False
+
+        def mouse(self, x, y, *, button, down, click_count):
+            if self.fail_pointer:
+                raise RuntimeError("pointer transport failed")
+            super().mouse(
+                x,
+                y,
+                button=button,
+                down=down,
+                click_count=click_count,
+            )
+
+    client = FailingPointerClient()
+    backend = RemoteDisplayBackend(client=client, settle_s=0.0)
+    backend.screenshot()
+    backend.prepare_pointer_actuation(100, 100)
+    frame = backend.acquire_actuation_frame()
+    frame_sha256 = hashlib.sha256(frame).hexdigest()
+    client.fail_pointer = True
+    receipt = None
+
+    with pytest.raises(ActionDeliveryUncertain) as raised:
+        if action == "click":
+            receipt = backend.click_guarded(
+                100,
+                100,
+                expected_frame_sha256=frame_sha256,
+            )
+        elif action == "double_click":
+            receipt = backend.click_guarded(
+                100,
+                100,
+                expected_frame_sha256=frame_sha256,
+                double=True,
+            )
+        elif action == "right_click":
+            receipt = backend.right_click_guarded(
+                100,
+                100,
+                expected_frame_sha256=frame_sha256,
+            )
+        else:
+            receipt = backend.drag_guarded(
+                100,
+                100,
+                200,
+                150,
+                expected_frame_sha256=frame_sha256,
+            )
+
+    assert raised.value.operation == operation
+    assert receipt is None
 
 
 def test_click_refuses_point_outside_captured_frame() -> None:

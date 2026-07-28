@@ -44,6 +44,7 @@ from openadapt_flow.runtime.effects import (
     Verdict,
 )
 from openadapt_flow.runtime.replayer import Replayer
+from openadapt_flow.runtime.resolver import visual_resolution_point_fingerprint
 from openadapt_flow.vision.ocr import AmbiguousOcrMatchError
 
 VIEWPORT = (300, 200)
@@ -360,6 +361,67 @@ class RemoteLeaseBackend(FakeBackend):
         self.actions.append(("click", x, y, double))
         if self.raise_after_click:
             raise TimeoutError("delivery outcome uncertain")
+
+    def click_guarded(
+        self,
+        x,
+        y,
+        *,
+        expected_frame_sha256,
+        double=False,
+    ):
+        assert hashlib.sha256(self._frame).hexdigest() == expected_frame_sha256
+        self.click(x, y, double=double)
+        return ActionDeliveryReceipt(
+            receipt_id="test-remote-click",
+            operation="remote_double_click" if double else "remote_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (int(x), int(y)),
+            ),
+            delivered_at="2026-07-25T00:00:00+00:00",
+        )
+
+    def right_click_guarded(self, x, y, *, expected_frame_sha256):
+        assert hashlib.sha256(self._frame).hexdigest() == expected_frame_sha256
+        self.right_click(x, y)
+        return ActionDeliveryReceipt(
+            receipt_id="test-remote-right-click",
+            operation="remote_right_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (int(x), int(y)),
+            ),
+            delivered_at="2026-07-25T00:00:00+00:00",
+        )
+
+    def drag_guarded(
+        self,
+        x,
+        y,
+        end_x,
+        end_y,
+        *,
+        expected_frame_sha256,
+    ):
+        assert hashlib.sha256(self._frame).hexdigest() == expected_frame_sha256
+        self.drag(x, y, end_x, end_y)
+        return ActionDeliveryReceipt(
+            receipt_id="test-remote-drag",
+            operation="remote_drag",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (int(x), int(y)),
+            ),
+            destination_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (int(end_x), int(end_y)),
+            ),
+            delivered_at="2026-07-25T00:00:00+00:00",
+        )
 
 
 class FreshMismatchRemoteBackend(RemoteLeaseBackend):
@@ -2483,6 +2545,28 @@ class SelectRemoteBackend(RemoteLeaseBackend):
         self.actions.append(("select_option", text, commit_key))
         self._text_value = self.selected_value
 
+    def select_option_guarded(
+        self,
+        text: str,
+        commit_key: str,
+        *,
+        target_point,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        self.select_option(text, commit_key)
+        return ActionDeliveryReceipt(
+            receipt_id="test-remote-select",
+            operation="remote_select_option",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                target_point,
+            ),
+            selection_value_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            selection_commit_key=commit_key,
+            delivered_at="2026-07-25T00:00:00+00:00",
+        )
+
 
 class FreshMismatchAfterFocusSelectBackend(SelectRemoteBackend):
     """A selection whose focus click lands before a zero-keyboard mismatch."""
@@ -2663,6 +2747,9 @@ def test_remote_selection_verifies_committed_value_in_live_resolved_region(
         ("select_option", "Massachusetts", "Enter"),
     ]
     assert report.results[0].input_verified is True
+    assert report.results[0].actuation == "remote_guarded"
+    assert report.results[0].delivery_receipt is not None
+    assert report.results[0].delivery_receipt.operation == "remote_select_option"
 
 
 def test_remote_selection_does_not_retry_after_the_focus_input_edge(bundle, run_dir):

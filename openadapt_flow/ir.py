@@ -27,7 +27,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Iterator, Literal, Optional
 
 from pydantic import (
@@ -1898,6 +1898,46 @@ class Resolution(BaseModel):
     confidence: float
     elapsed_ms: float
     structural_handle: Optional[StructuralHandle] = None
+    visual_evidence: Optional["VisualResolutionEvidence"] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.visual_evidence is None:
+            data.pop("visual_evidence", None)
+        return data
+
+
+class VisualResolutionEvidence(BaseModel):
+    """Exact retained inputs for an independently reproducible visual resolve.
+
+    A visual result in a JSON report is only a claim.  Qualification uses this
+    record to load the exact frame and compiled template from the signed case
+    evidence, re-run the shipped deterministic resolver, and compare its rung,
+    point, confidence, and matched region.  The evidence remains local to the
+    qualification boundary; the portable bundle carries only its hashes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    frame_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    frame_inventory_ref: str = Field(min_length=1, max_length=512)
+    template_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    template_inventory_ref: str = Field(min_length=1, max_length=512)
+    evaluator_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    anchor_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    matched_region: Region
+    allow_target_ocr: bool = True
+
+    @field_validator("frame_inventory_ref", "template_inventory_ref")
+    @classmethod
+    def _relative_only(cls, value: str) -> str:
+        if "\\" in value:
+            raise ValueError("resolution evidence path must use POSIX separators")
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("resolution evidence path must be run-relative")
+        return path.as_posix()
 
 
 class ActionDeliveryReceipt(BaseModel):
@@ -1909,13 +1949,47 @@ class ActionDeliveryReceipt(BaseModel):
     responsibility. ``outcome_verified`` is therefore fixed False here.
     """
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     status: Literal["delivered"] = "delivered"
     receipt_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
     operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     native: bool
     target_fingerprint: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    destination_fingerprint: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "DRAG only: fingerprint of the independently resolved destination. "
+            "The source remains target_fingerprint."
+        ),
+    )
+    selection_value_sha256: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        description=(
+            "SELECT_OPTION only: SHA-256 of the exact option text dispatched "
+            "without retaining the possibly sensitive value."
+        ),
+    )
+    selection_commit_key: Optional[Literal["Enter", "Tab"]] = Field(
+        default=None,
+        description="SELECT_OPTION only: exact key dispatched after the value.",
+    )
     delivered_at: str = Field(min_length=20, max_length=64)
     outcome_verified: Literal[False] = False
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        for field in (
+            "destination_fingerprint",
+            "selection_value_sha256",
+            "selection_commit_key",
+        ):
+            if data.get(field) is None:
+                data.pop(field, None)
+        return data
 
 
 class ActionDeliveryUncertainty(BaseModel):

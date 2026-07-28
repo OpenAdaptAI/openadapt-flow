@@ -57,6 +57,8 @@ from openadapt_flow.backend import (
     GuardedCoordinateActionBackend,
     GuardedDragActionBackend,
     GuardedKeyboardActionBackend,
+    GuardedRemotePointerActionBackend,
+    GuardedSelectOptionBackend,
     PreparedPointerActuationBackend,
     RemoteActuationBackend,
     RichPointerActionBackend,
@@ -102,6 +104,7 @@ from openadapt_flow.ir import (
     Step,
     StepResult,
     UnarmedStep,
+    VisualResolutionEvidence,
     Workflow,
     predicate_contract_sha256,
 )
@@ -158,7 +161,13 @@ from openadapt_flow.runtime.program_predicates import (
     predicate_uses_frame,
     program_predicate_evaluator_contract_sha256,
 )
-from openadapt_flow.runtime.resolver import is_below_ocr, pad_region, resolve
+from openadapt_flow.runtime.resolver import (
+    is_below_ocr,
+    pad_region,
+    resolve,
+    visual_resolution_anchor_contract_sha256,
+    visual_resolution_evaluator_contract_sha256,
+)
 from openadapt_flow.verification import (
     EffectContractMutationError,
     verifier_effect_tier,
@@ -4974,6 +4983,17 @@ class Replayer:
                 resolution, matched_region, error = self._resolve_step(
                     step, before_png, bundle_dir, workflow
                 )
+            if resolution is not None and matched_region is not None:
+                assert step.anchor is not None
+                resolution = self._retain_visual_resolution_evidence(
+                    workflow=workflow,
+                    anchor=step.anchor,
+                    resolution=resolution,
+                    matched_region=matched_region,
+                    frame_png=before_png,
+                    bundle_dir=bundle_dir,
+                    run_dir=run_dir,
+                )
             result.resolution = resolution
             if error is None and resolution is not None:
                 before_png = self._apply_screen_fault_mutation(
@@ -5158,6 +5178,17 @@ class Replayer:
                     run_dir=run_dir,
                     arm_keyboard=step.action in (ActionKind.KEY, ActionKind.HOTKEY),
                 )
+                if resolution is not None and matched_region is not None:
+                    assert step.anchor is not None
+                    resolution = self._retain_visual_resolution_evidence(
+                        workflow=workflow,
+                        anchor=step.anchor,
+                        resolution=resolution,
+                        matched_region=matched_region,
+                        frame_png=before_png,
+                        bundle_dir=bundle_dir,
+                        run_dir=run_dir,
+                    )
                 result.resolution = resolution
                 if before_png is not last_frame:
                     result.before_png = self._save_step_png(
@@ -5363,6 +5394,17 @@ class Replayer:
                                 arm_keyboard=step.action
                                 in (ActionKind.KEY, ActionKind.HOTKEY),
                             )
+                            if resolution is not None and matched_region is not None:
+                                assert step.anchor is not None
+                                resolution = self._retain_visual_resolution_evidence(
+                                    workflow=workflow,
+                                    anchor=step.anchor,
+                                    resolution=resolution,
+                                    matched_region=matched_region,
+                                    frame_png=before_png,
+                                    bundle_dir=bundle_dir,
+                                    run_dir=run_dir,
+                                )
                             result.resolution = resolution
                             if before_png is not last_frame:
                                 result.before_png = self._save_step_png(
@@ -6483,7 +6525,7 @@ class Replayer:
             step, resolution, frame_png, params, workflow, bundle_dir
         )
         if (
-            check.status == "verified"
+            check.status in {"verified", "mismatch"}
             and check.mode == "pixel"
             and workflow.qualification is not None
         ):
@@ -6640,6 +6682,91 @@ class Replayer:
             ),
         )
 
+    def _retain_visual_resolution_evidence(
+        self,
+        *,
+        workflow: Workflow,
+        anchor: Anchor,
+        resolution: Resolution,
+        matched_region: Region,
+        frame_png: bytes,
+        bundle_dir: Path,
+        run_dir: Path,
+        allow_target_ocr: bool = True,
+    ) -> Resolution:
+        """Bind a visual resolution to exact, locally retained resolver inputs."""
+
+        if self.qualification_fault_driver is None:
+            return resolution
+        if resolution.rung == "structural":
+            return resolution
+        if resolution.rung == "grounder":
+            # A model response is not independently reproducible from the
+            # retained frame.  Qualification rejects it as exact fault proof.
+            return resolution
+        template_png = self._asset_bytes(
+            bundle_dir,
+            anchor.template,
+            workflow=workflow,
+        )
+        if template_png is None:
+            raise OSError("visual resolution template is unavailable")
+        frame_sha256 = hashlib.sha256(frame_png).hexdigest()
+        template_sha256 = hashlib.sha256(template_png).hexdigest()
+        if (
+            workflow.manifest is None
+            or workflow.manifest.file_hashes.get(anchor.template) != template_sha256
+        ):
+            raise OSError("visual resolution template does not match the manifest")
+
+        root = Path(run_dir).resolve()
+        inventory_dir = root / "private" / "resolution-inputs"
+        if inventory_dir.is_symlink():
+            raise OSError("visual resolution inventory path is a symlink")
+        inventory_dir.mkdir(parents=True, exist_ok=True)
+        if inventory_dir.is_symlink() or not inventory_dir.resolve().is_relative_to(
+            root
+        ):
+            raise OSError("visual resolution inventory leaves the run root")
+        for digest, payload in (
+            (frame_sha256, frame_png),
+            (template_sha256, template_png),
+        ):
+            path = inventory_dir / f"{digest}.png"
+            if path.is_symlink():
+                raise OSError("visual resolution input path is a symlink")
+            existing = path.read_bytes() if path.exists() else None
+            if existing is not None and existing != payload:
+                raise OSError("visual resolution digest path has other bytes")
+            path.write_bytes(payload)
+
+        return resolution.model_copy(
+            update={
+                "visual_evidence": VisualResolutionEvidence(
+                    frame_sha256=frame_sha256,
+                    frame_inventory_ref=(
+                        f"private/resolution-inputs/{frame_sha256}.png"
+                    ),
+                    template_sha256=template_sha256,
+                    template_inventory_ref=(
+                        f"private/resolution-inputs/{template_sha256}.png"
+                    ),
+                    evaluator_contract_sha256=(
+                        visual_resolution_evaluator_contract_sha256()
+                    ),
+                    anchor_contract_sha256=(
+                        visual_resolution_anchor_contract_sha256(
+                            anchor,
+                            template_sha256=template_sha256,
+                            allow_target_ocr=allow_target_ocr,
+                        )
+                    ),
+                    matched_region=matched_region,
+                    allow_target_ocr=allow_target_ocr,
+                )
+            }
+        )
+
     def _step_is_consequential(self, step: Step, workflow: Workflow) -> bool:
         authorization = self.governed_authorization
         return is_consequential(step, workflow) or (
@@ -6714,6 +6841,21 @@ class Replayer:
             # It always needs an exact fresh-frame lease before the focus click
             # and another after focus before text+commit, independent of a
             # generic risk classifier's opinion of the TYPE step.
+            return True
+        if (
+            self.qualification_fault_driver is not None
+            and step.action
+            in {
+                ActionKind.CLICK,
+                ActionKind.DOUBLE_CLICK,
+                ActionKind.RIGHT_CLICK,
+                ActionKind.DRAG,
+            }
+            and isinstance(self.backend, RemoteActuationBackend)
+        ):
+            # Exact fault-prefix proof includes read-only prior actions. Arm a
+            # fresh remote lease for those actions only during the fault run,
+            # so ordinary demo replay keeps its reversible fast path.
             return True
         return self._step_is_consequential(step, workflow) and (
             isinstance(self.backend, RemoteActuationBackend)
@@ -7242,7 +7384,7 @@ class Replayer:
         screen_png: bytes,
         bundle_dir: Path,
         workflow: Workflow,
-    ) -> tuple[Optional[Resolution], Optional[str]]:
+    ) -> tuple[Optional[Resolution], Optional[Region], Optional[str]]:
         """Resolve a drag destination independently on the actuation frame.
 
         A drag is never replayed as a stored coordinate pair. The compiler
@@ -7252,20 +7394,24 @@ class Replayer:
         """
 
         if step.drag_end_anchor is None:
-            return None, (
-                f"Step '{step.id}' ({step.intent}) is a drag step but has no "
-                "destination anchor"
+            return (
+                None,
+                None,
+                (
+                    f"Step '{step.id}' ({step.intent}) is a drag step but has no "
+                    "destination anchor"
+                ),
             )
         endpoint_step = step.model_copy(
             update={"action": ActionKind.CLICK, "anchor": step.drag_end_anchor}
         )
-        resolution, _region, error = self._resolve_step(
+        resolution, region, error = self._resolve_step(
             endpoint_step,
             screen_png,
             bundle_dir,
             workflow,
         )
-        return resolution, error
+        return resolution, region, error
 
     @staticmethod
     def _deliver_backend_call(
@@ -7729,23 +7875,47 @@ class Replayer:
                 result.delivery_receipt = delivery_receipt
                 result.actuation = "uia" if delivery_receipt.native else "dom"
             else:
-                if requires_atomic_identity:
-                    if isinstance(self.backend, RemoteActuationBackend):
-                        refusal = self._delivery_authorization_refusal(
-                            workflow, params, step, result
+                remote_consequential = isinstance(
+                    self.backend, RemoteActuationBackend
+                ) and (
+                    self._step_is_consequential(step, workflow)
+                    or self.qualification_fault_driver is not None
+                )
+                if remote_consequential:
+                    if not isinstance(
+                        self.backend,
+                        GuardedRemotePointerActionBackend,
+                    ):
+                        result.safety_halt = True
+                        result.failure_category = "safety_halt"
+                        return (
+                            f"Step '{step.id}' ({step.intent}) is a consequential "
+                            "remote click, but this backend cannot bind its exact "
+                            "fresh frame and target to delivery; run aborted"
                         )
-                        if refusal is not None:
-                            return refusal
-                        self._require_qualification_environment_current()
-                        self._deliver_backend_call(
-                            result,
-                            lambda: self.backend.click(
-                                x,
-                                y,
-                                double=step.action is ActionKind.DOUBLE_CLICK,
-                            ),
-                        )
-                    elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                    refusal = self._delivery_authorization_refusal(
+                        workflow, params, step, result
+                    )
+                    if refusal is not None:
+                        return refusal
+                    self._require_qualification_environment_current()
+                    remote_pointer = cast(
+                        GuardedRemotePointerActionBackend, self.backend
+                    )
+                    result.delivery_receipt = self._deliver_backend_call(
+                        result,
+                        lambda: remote_pointer.click_guarded(
+                            x,
+                            y,
+                            expected_frame_sha256=hashlib.sha256(
+                                before_png
+                            ).hexdigest(),
+                            double=step.action is ActionKind.DOUBLE_CLICK,
+                        ),
+                    )
+                    result.actuation = "remote_guarded"
+                elif requires_atomic_identity:
+                    if isinstance(self.backend, GuardedCoordinateActionBackend):
                         refusal = self._delivery_authorization_refusal(
                             workflow, params, step, result
                         )
@@ -7811,27 +7981,40 @@ class Replayer:
             requires_atomic_identity = self._requires_atomic_identity_pointer(
                 step, workflow
             )
-            if requires_atomic_identity:
-                if isinstance(self.backend, RemoteActuationBackend):
-                    if not isinstance(self.backend, RichPointerActionBackend):
-                        return (
-                            f"Step '{step.id}' ({step.intent}) requires a right "
-                            "click, but this backend has no bounded right-click "
-                            "operation"
-                        )
-                    refusal = self._delivery_authorization_refusal(
-                        workflow, params, step, result
+            remote_consequential = isinstance(
+                self.backend, RemoteActuationBackend
+            ) and (
+                self._step_is_consequential(step, workflow)
+                or self.qualification_fault_driver is not None
+            )
+            if remote_consequential:
+                if not isinstance(
+                    self.backend,
+                    GuardedRemotePointerActionBackend,
+                ):
+                    return (
+                        f"Step '{step.id}' ({step.intent}) is a consequential "
+                        "remote right click, but this backend cannot bind its "
+                        "exact fresh frame and target to delivery; run aborted"
                     )
-                    if refusal is not None:
-                        return refusal
-                    self._require_qualification_environment_current()
-                    self._deliver_backend_call(
-                        result,
-                        lambda: cast(
-                            RichPointerActionBackend, self.backend
-                        ).right_click(x, y),
-                    )
-                elif isinstance(self.backend, GuardedCoordinateActionBackend):
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
+                if refusal is not None:
+                    return refusal
+                self._require_qualification_environment_current()
+                remote_pointer = cast(GuardedRemotePointerActionBackend, self.backend)
+                result.delivery_receipt = self._deliver_backend_call(
+                    result,
+                    lambda: remote_pointer.right_click_guarded(
+                        x,
+                        y,
+                        expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                    ),
+                )
+                result.actuation = "remote_guarded"
+            elif requires_atomic_identity:
+                if isinstance(self.backend, GuardedCoordinateActionBackend):
                     refusal = self._delivery_authorization_refusal(
                         workflow, params, step, result
                     )
@@ -7883,12 +8066,26 @@ class Replayer:
 
         if step.action is ActionKind.DRAG:
             assert resolution is not None  # guaranteed by _resolve_step
-            drag_end, drag_error = self._resolve_drag_end(
+            drag_end, drag_end_region, drag_error = self._resolve_drag_end(
                 step,
                 before_png,
                 bundle_dir,
                 workflow,
             )
+            if (
+                drag_end is not None
+                and drag_end_region is not None
+                and step.drag_end_anchor is not None
+            ):
+                drag_end = self._retain_visual_resolution_evidence(
+                    workflow=workflow,
+                    anchor=step.drag_end_anchor,
+                    resolution=drag_end,
+                    matched_region=drag_end_region,
+                    frame_png=before_png,
+                    bundle_dir=bundle_dir,
+                    run_dir=run_dir,
+                )
             result.drag_end_resolution = drag_end
             if drag_error is not None:
                 self._cancel_guarded_coordinate()
@@ -7932,6 +8129,39 @@ class Replayer:
                     ),
                 )
                 result.actuation = "dom"
+            elif isinstance(self.backend, RemoteActuationBackend) and (
+                self._step_is_consequential(step, workflow)
+                or self.qualification_fault_driver is not None
+            ):
+                if not isinstance(
+                    self.backend,
+                    GuardedRemotePointerActionBackend,
+                ):
+                    result.safety_halt = True
+                    result.failure_category = "safety_halt"
+                    return (
+                        f"Step '{step.id}' ({step.intent}) is a consequential "
+                        "remote drag, but this backend cannot bind both exact "
+                        "fresh-frame endpoints to delivery; run aborted"
+                    )
+                refusal = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
+                if refusal is not None:
+                    return refusal
+                self._require_qualification_environment_current()
+                remote_pointer = cast(GuardedRemotePointerActionBackend, self.backend)
+                result.delivery_receipt = self._deliver_backend_call(
+                    result,
+                    lambda: remote_pointer.drag_guarded(
+                        x,
+                        y,
+                        end_x,
+                        end_y,
+                        expected_frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                    ),
+                )
+                result.actuation = "remote_guarded"
             elif requires_atomic_identity and not isinstance(
                 self.backend, RemoteActuationBackend
             ):
@@ -8212,6 +8442,18 @@ class Replayer:
                                 "to a different field after focus; refusing "
                                 "option selection"
                             )
+                        assert step.anchor is not None
+                        if refreshed_region is not None:
+                            refreshed = self._retain_visual_resolution_evidence(
+                                workflow=workflow,
+                                anchor=step.anchor,
+                                resolution=refreshed,
+                                matched_region=refreshed_region,
+                                frame_png=before_png,
+                                bundle_dir=bundle_dir,
+                                run_dir=run_dir,
+                                allow_target_ocr=False,
+                            )
                         resolution = refreshed
                         result.resolution = refreshed
                         field_point = refreshed.point
@@ -8246,12 +8488,33 @@ class Replayer:
                 if refusal is not None:
                     return refusal
                 self._require_qualification_environment_current()
-                self._deliver_backend_call(
-                    result,
-                    lambda: cast(SelectOptionBackend, self.backend).select_option(
-                        text, selection_commit_key
-                    ),
-                )
+                if isinstance(self.backend, GuardedSelectOptionBackend):
+                    assert field_point is not None
+                    guarded_select = cast(GuardedSelectOptionBackend, self.backend)
+                    result.delivery_receipt = self._deliver_backend_call(
+                        result,
+                        lambda: guarded_select.select_option_guarded(
+                            text,
+                            selection_commit_key,
+                            target_point=field_point,
+                            expected_frame_sha256=hashlib.sha256(
+                                before_png
+                            ).hexdigest(),
+                        ),
+                    )
+                    result.actuation = (
+                        "remote_guarded"
+                        if isinstance(self.backend, RemoteActuationBackend)
+                        else "guarded_keyboard"
+                    )
+                else:
+                    select_backend = cast(SelectOptionBackend, self.backend)
+                    self._deliver_backend_call(
+                        result,
+                        lambda: select_backend.select_option(
+                            text, selection_commit_key
+                        ),
+                    )
                 return None
             guarded_type = (
                 requires_atomic_keyboard

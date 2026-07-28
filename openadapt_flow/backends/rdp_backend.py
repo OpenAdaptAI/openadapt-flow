@@ -57,11 +57,19 @@ import io
 import threading
 import time
 import unicodedata
+import uuid
+from datetime import datetime, timezone
 from typing import Callable, Optional, Protocol, Union, runtime_checkable
 
 from PIL import Image, ImageChops
 
-from openadapt_flow.backend import ActionDeliveryUncertain, FreshActuationRequired
+from openadapt_flow.backend import (
+    ActionDeliveryUncertain,
+    FreshActuationRequired,
+    StructuralResolutionRefused,
+)
+from openadapt_flow.ir import ActionDeliveryReceipt, Point
+from openadapt_flow.runtime.resolver import visual_resolution_point_fingerprint
 
 # What a transport may hand back as the current frame: a PIL image, or raw
 # pixel bytes (RGB or RGBA, row-major) that the backend wraps with the
@@ -596,8 +604,44 @@ class FreeRDPBackend:
             presses = 2 if double else 1
             for _ in range(presses):
                 self._assert_frame_fresh()
-                self._transport.pointer(int(x), int(y), "left", True)
-                self._transport.pointer(int(x), int(y), "left", False)
+                try:
+                    self._transport.pointer(int(x), int(y), "left", True)
+                    self._transport.pointer(int(x), int(y), "left", False)
+                except Exception as exc:
+                    try:
+                        self._transport.pointer(int(x), int(y), "left", False)
+                    except Exception:
+                        pass
+                    raise ActionDeliveryUncertain(
+                        operation="rdp_double_click" if double else "rdp_click",
+                        native=False,
+                        cause_type=type(exc).__name__,
+                    ) from exc
+
+    def click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+        double: bool = False,
+    ) -> ActionDeliveryReceipt:
+        """Click through the exact RDP fresh-frame lease."""
+
+        point = (int(x), int(y))
+        with self._input_lock:
+            self._require_exact_actuation_frame(expected_frame_sha256, "click")
+            self.click(*point, double=double)
+        return ActionDeliveryReceipt(
+            receipt_id=f"rdp-click-{uuid.uuid4().hex}",
+            operation="rdp_double_click" if double else "rdp_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                point,
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def right_click(self, x: int, y: int) -> None:
         """Right-click at a freshly resolved framebuffer point."""
@@ -619,6 +663,33 @@ class FreeRDPBackend:
                     native=False,
                     cause_type=type(exc).__name__,
                 ) from exc
+
+    def right_click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        """Right-click through the exact RDP fresh-frame lease."""
+
+        point = (int(x), int(y))
+        with self._input_lock:
+            self._require_exact_actuation_frame(
+                expected_frame_sha256,
+                "right click",
+            )
+            self.right_click(*point)
+        return ActionDeliveryReceipt(
+            receipt_id=f"rdp-right-click-{uuid.uuid4().hex}",
+            operation="rdp_right_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                point,
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def drag(self, x: int, y: int, end_x: int, end_y: int) -> None:
         """Drag between two points resolved from the same fresh framebuffer."""
@@ -658,6 +729,37 @@ class FreeRDPBackend:
                             native=False,
                             cause_type=type(exc).__name__,
                         ) from exc
+
+    def drag_guarded(
+        self,
+        x: int,
+        y: int,
+        end_x: int,
+        end_y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        """Drag through the exact RDP fresh-frame lease."""
+
+        start = (int(x), int(y))
+        end = (int(end_x), int(end_y))
+        with self._input_lock:
+            self._require_exact_actuation_frame(expected_frame_sha256, "drag")
+            self.drag(*start, *end)
+        return ActionDeliveryReceipt(
+            receipt_id=f"rdp-drag-{uuid.uuid4().hex}",
+            operation="rdp_drag",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                start,
+            ),
+            destination_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                end,
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def type_text(self, text: str) -> None:
         """Type text through a capability-gated bulk or per-character path.
@@ -721,17 +823,80 @@ class FreeRDPBackend:
         with self._input_lock:
             self._focus_input_surface()
             self._ensure_input_ready(operation="rdp_select_option")
-            try:
-                self._dispatch_text_locked(text, strict_release=True)
-                self._dispatch_key_locked(parts, strict_release=True)
-            except ActionDeliveryUncertain:
-                raise
-            except Exception as exc:
-                raise ActionDeliveryUncertain(
-                    operation="rdp_select_option",
-                    native=False,
-                    cause_type=type(exc).__name__,
-                ) from exc
+            self._select_option_locked(text, parts)
+
+    def select_option_guarded(
+        self,
+        text: str,
+        commit_key: str,
+        *,
+        target_point: Point,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        """Select one option through the exact remote frame/target lease."""
+
+        if not text:
+            raise ValueError("RDP option text must be non-empty")
+        if commit_key not in {"Enter", "Tab"}:
+            raise ValueError("RDP option commit key must be Enter or Tab")
+        parts = normalize_chord(commit_key)
+        point = (int(target_point[0]), int(target_point[1]))
+        with self._input_lock:
+            self._require_exact_actuation_frame(
+                expected_frame_sha256,
+                "option selection",
+            )
+            self._focus_input_surface()
+            self._ensure_input_ready(
+                point=point,
+                operation="rdp_select_option",
+            )
+            self._select_option_locked(text, parts)
+        return ActionDeliveryReceipt(
+            receipt_id=f"rdp-select-{uuid.uuid4().hex}",
+            operation="rdp_select_option",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                point,
+            ),
+            selection_value_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            selection_commit_key=commit_key,
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def _require_exact_actuation_frame(
+        self,
+        expected_frame_sha256: str,
+        operation: str,
+    ) -> None:
+        """Refuse a guarded pointer action without its exact PNG lease."""
+
+        leased_png = self._actuation_frame_png
+        if (
+            self._actuation_lease_state != _LEASE_ARMED
+            or leased_png is None
+            or hashlib.sha256(leased_png).hexdigest() != expected_frame_sha256
+        ):
+            self._invalidate_actuation_lease()
+            raise StructuralResolutionRefused(
+                f"RDP {operation} lacks its exact fresh-frame lease"
+            )
+
+    def _select_option_locked(self, text: str, parts: list[str]) -> None:
+        """Dispatch one selection while the caller owns the input lock."""
+
+        try:
+            self._dispatch_text_locked(text, strict_release=True)
+            self._dispatch_key_locked(parts, strict_release=True)
+        except ActionDeliveryUncertain:
+            raise
+        except Exception as exc:
+            raise ActionDeliveryUncertain(
+                operation="rdp_select_option",
+                native=False,
+                cause_type=type(exc).__name__,
+            ) from exc
 
     def _dispatch_text_locked(self, text: str, *, strict_release: bool = False) -> None:
         """Dispatch text while ``_input_lock`` and readiness are held."""

@@ -60,12 +60,20 @@ import sys
 import threading
 import time
 import unicodedata
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from PIL import Image, ImageChops
 
-from openadapt_flow.backend import ActionDeliveryUncertain, FreshActuationRequired
+from openadapt_flow.backend import (
+    ActionDeliveryUncertain,
+    FreshActuationRequired,
+    StructuralResolutionRefused,
+)
+from openadapt_flow.ir import ActionDeliveryReceipt
+from openadapt_flow.runtime.resolver import visual_resolution_point_fingerprint
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _LEASE_NONE = 0
@@ -720,6 +728,7 @@ class RemoteDisplayBackend:
             # back to the ordinary reversible-input path.
             if self._actuation_lease_state == _LEASE_ARMED:
                 self._actuation_lease_state = _LEASE_INVALIDATED
+                self._actuation_frame_png = None
             return png
 
     def acquire_actuation_frame(self) -> bytes:
@@ -972,10 +981,64 @@ class RemoteDisplayBackend:
                 # Revalidate immediately before every pointer-down edge.
                 self._assert_click_target(sx, sy)
                 self._assert_frame_fresh()
-                self._client.mouse(sx, sy, button="left", down=True, click_count=i + 1)
-                time.sleep(self._settle_s)
-                self._client.mouse(sx, sy, button="left", down=False, click_count=i + 1)
-                time.sleep(self._settle_s)
+                try:
+                    self._client.mouse(
+                        sx,
+                        sy,
+                        button="left",
+                        down=True,
+                        click_count=i + 1,
+                    )
+                    time.sleep(self._settle_s)
+                    self._client.mouse(
+                        sx,
+                        sy,
+                        button="left",
+                        down=False,
+                        click_count=i + 1,
+                    )
+                    time.sleep(self._settle_s)
+                except Exception as exc:
+                    try:
+                        self._client.mouse(
+                            sx,
+                            sy,
+                            button="left",
+                            down=False,
+                            click_count=i + 1,
+                        )
+                    except Exception:
+                        pass
+                    raise ActionDeliveryUncertain(
+                        operation=("remote_double_click" if double else "remote_click"),
+                        native=False,
+                        cause_type=type(exc).__name__,
+                    ) from exc
+
+    def click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+        double: bool = False,
+    ) -> ActionDeliveryReceipt:
+        """Click through the exact remote-display fresh-frame lease."""
+
+        point = (int(x), int(y))
+        with self._input_lock:
+            self._require_exact_actuation_frame(expected_frame_sha256, "click")
+            self.click(*point, double=double)
+        return ActionDeliveryReceipt(
+            receipt_id=f"remote-click-{uuid.uuid4().hex}",
+            operation="remote_double_click" if double else "remote_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                point,
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def right_click(self, x: int, y: int) -> None:
         """Right-click through the same exact-frame remote input lease."""
@@ -1034,6 +1097,33 @@ class RemoteDisplayBackend:
                     cause_type=type(exc).__name__,
                 ) from exc
             time.sleep(self._settle_s)
+
+    def right_click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        """Right-click through the exact remote-display fresh-frame lease."""
+
+        point = (int(x), int(y))
+        with self._input_lock:
+            self._require_exact_actuation_frame(
+                expected_frame_sha256,
+                "right click",
+            )
+            self.right_click(*point)
+        return ActionDeliveryReceipt(
+            receipt_id=f"remote-right-click-{uuid.uuid4().hex}",
+            operation="remote_right_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                point,
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def drag(self, x: int, y: int, end_x: int, end_y: int) -> None:
         """Drag between two points resolved on one fresh remote frame."""
@@ -1106,6 +1196,37 @@ class RemoteDisplayBackend:
                             cause_type=type(exc).__name__,
                         ) from exc
             time.sleep(self._settle_s)
+
+    def drag_guarded(
+        self,
+        x: int,
+        y: int,
+        end_x: int,
+        end_y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        """Drag through the exact remote-display fresh-frame lease."""
+
+        start = (int(x), int(y))
+        end = (int(end_x), int(end_y))
+        with self._input_lock:
+            self._require_exact_actuation_frame(expected_frame_sha256, "drag")
+            self.drag(*start, *end)
+        return ActionDeliveryReceipt(
+            receipt_id=f"remote-drag-{uuid.uuid4().hex}",
+            operation="remote_drag",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                start,
+            ),
+            destination_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                end,
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     def type_text(self, text: str) -> None:
         """Type ``text`` into the focused control (hardware-like key codes)."""
@@ -1383,6 +1504,24 @@ class RemoteDisplayBackend:
         changed_mask = ImageChops.lighter(ImageChops.lighter(red, green), blue)
         changed_pixel_count = sum(changed_mask.histogram()[1:])
         return changed_pixel_count, (x1, y1, x2 - x1, y2 - y1)
+
+    def _require_exact_actuation_frame(
+        self,
+        expected_frame_sha256: str,
+        operation: str,
+    ) -> None:
+        """Refuse a guarded pointer action without its exact PNG lease."""
+
+        leased_png = self._actuation_frame_png
+        if (
+            self._actuation_lease_state != _LEASE_ARMED
+            or leased_png is None
+            or hashlib.sha256(leased_png).hexdigest() != expected_frame_sha256
+        ):
+            self._invalidate_actuation_lease()
+            raise StructuralResolutionRefused(
+                f"remote-display {operation} lacks its exact fresh-frame lease"
+            )
 
     def _fresh_identity_frame(self) -> Optional[bytes]:
         """Passively capture one bounded frame without replacing a valid lease.

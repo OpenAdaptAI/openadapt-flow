@@ -30,12 +30,14 @@ from openadapt_flow.backend import (
     FreshActuationRequired,
     IdentityBackend,
     StructuralBackend,
+    StructuralResolutionRefused,
 )
 from openadapt_flow.backends.rdp_backend import (
     FreeRDPBackend,
     RDPTransport,
     normalize_chord,
 )
+from openadapt_flow.runtime.resolver import visual_resolution_point_fingerprint
 
 VIEWPORT = (1280, 800)
 
@@ -853,6 +855,174 @@ def test_select_option_holds_one_focus_and_input_lease_through_commit() -> None:
     assert transport.focus_calls == 1
     assert transport.events == ["focus", "bulk"]
     assert transport.key_events == [("enter", True), ("enter", False)]
+
+
+def test_guarded_select_option_returns_exact_delivery_receipt() -> None:
+    transport = _BulkTextTransport()
+    backend = FreeRDPBackend(transport)
+    frame = backend.acquire_actuation_frame()
+
+    receipt = backend.select_option_guarded(
+        "Massachusetts",
+        "Enter",
+        target_point=(40, 30),
+        expected_frame_sha256=hashlib.sha256(frame).hexdigest(),
+    )
+
+    assert receipt.operation == "rdp_select_option"
+    assert receipt.native is False
+    assert receipt.target_fingerprint is not None
+    assert (
+        receipt.selection_value_sha256 == hashlib.sha256(b"Massachusetts").hexdigest()
+    )
+    assert receipt.selection_commit_key == "Enter"
+    assert receipt.destination_fingerprint is None
+
+
+@pytest.mark.parametrize(
+    ("action", "operation", "destination"),
+    [
+        ("click", "rdp_click", None),
+        ("double_click", "rdp_double_click", None),
+        ("right_click", "rdp_right_click", None),
+        ("drag", "rdp_drag", (80, 60)),
+    ],
+)
+def test_guarded_pointer_actions_return_exact_delivery_receipts(
+    action: str,
+    operation: str,
+    destination: tuple[int, int] | None,
+) -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+    frame = backend.acquire_actuation_frame()
+    frame_sha256 = hashlib.sha256(frame).hexdigest()
+    source = (40, 30)
+
+    if action == "click":
+        receipt = backend.click_guarded(*source, expected_frame_sha256=frame_sha256)
+    elif action == "double_click":
+        receipt = backend.click_guarded(
+            *source,
+            expected_frame_sha256=frame_sha256,
+            double=True,
+        )
+    elif action == "right_click":
+        receipt = backend.right_click_guarded(
+            *source,
+            expected_frame_sha256=frame_sha256,
+        )
+    else:
+        assert destination is not None
+        receipt = backend.drag_guarded(
+            *source,
+            *destination,
+            expected_frame_sha256=frame_sha256,
+        )
+
+    assert receipt.operation == operation
+    assert receipt.native is False
+    assert receipt.target_fingerprint == visual_resolution_point_fingerprint(
+        frame_sha256,
+        source,
+    )
+    assert receipt.destination_fingerprint == (
+        visual_resolution_point_fingerprint(frame_sha256, destination)
+        if destination is not None
+        else None
+    )
+
+
+@pytest.mark.parametrize("action", ["click", "double_click", "right_click", "drag"])
+@pytest.mark.parametrize("refusal", ["wrong_hash", "invalidated"])
+def test_guarded_pointer_actions_refuse_without_the_exact_live_lease(
+    action: str,
+    refusal: str,
+) -> None:
+    transport = FakeRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+    frame = backend.acquire_actuation_frame()
+    frame_sha256 = hashlib.sha256(frame).hexdigest()
+    if refusal == "wrong_hash":
+        frame_sha256 = "0" * 64
+    else:
+        backend.screenshot()
+
+    with pytest.raises(StructuralResolutionRefused, match="fresh-frame lease"):
+        if action == "click":
+            backend.click_guarded(40, 30, expected_frame_sha256=frame_sha256)
+        elif action == "double_click":
+            backend.click_guarded(
+                40,
+                30,
+                expected_frame_sha256=frame_sha256,
+                double=True,
+            )
+        elif action == "right_click":
+            backend.right_click_guarded(40, 30, expected_frame_sha256=frame_sha256)
+        else:
+            backend.drag_guarded(
+                40,
+                30,
+                80,
+                60,
+                expected_frame_sha256=frame_sha256,
+            )
+
+    assert transport.pointer_events == []
+
+
+@pytest.mark.parametrize(
+    ("action", "operation"),
+    [
+        ("click", "rdp_click"),
+        ("double_click", "rdp_double_click"),
+        ("right_click", "rdp_right_click"),
+        ("drag", "rdp_drag"),
+    ],
+)
+def test_guarded_pointer_actions_never_receipt_uncertain_transport_delivery(
+    action: str,
+    operation: str,
+) -> None:
+    transport = RaisingRDPTransport(app_screens())
+    backend = FreeRDPBackend(transport)
+    frame = backend.acquire_actuation_frame()
+    frame_sha256 = hashlib.sha256(frame).hexdigest()
+    transport.raise_on_pointer = True
+    receipt = None
+
+    with pytest.raises(ActionDeliveryUncertain) as raised:
+        if action == "click":
+            receipt = backend.click_guarded(
+                40,
+                30,
+                expected_frame_sha256=frame_sha256,
+            )
+        elif action == "double_click":
+            receipt = backend.click_guarded(
+                40,
+                30,
+                expected_frame_sha256=frame_sha256,
+                double=True,
+            )
+        elif action == "right_click":
+            receipt = backend.right_click_guarded(
+                40,
+                30,
+                expected_frame_sha256=frame_sha256,
+            )
+        else:
+            receipt = backend.drag_guarded(
+                40,
+                30,
+                80,
+                60,
+                expected_frame_sha256=frame_sha256,
+            )
+
+    assert raised.value.operation == operation
+    assert receipt is None
 
 
 def test_select_option_failure_after_text_is_uncertain_and_never_retries() -> None:

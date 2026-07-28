@@ -46,7 +46,7 @@ class ExecutionOutcome(str, Enum):
 
 
 AUTOMATED_GUI_ACTUATIONS = frozenset(
-    {"uia", "dom", "guarded_coordinate", "guarded_keyboard"}
+    {"uia", "dom", "guarded_coordinate", "guarded_keyboard", "remote_guarded"}
 )
 HUMAN_ATTENDED_ACTUATIONS = frozenset({"human_attended", "human_attended_skip"})
 

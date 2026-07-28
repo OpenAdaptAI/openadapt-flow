@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -15,6 +16,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from PIL import Image, ImageDraw
 
+from openadapt_flow import vision as vision_module
 from openadapt_flow.backend import StructuralResolutionRefused
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
 from openadapt_flow.deployment import build_replayer
@@ -41,13 +43,24 @@ from openadapt_flow.qualification import (
     ActionRiskClass,
     ActionRiskClassification,
     EnvironmentBoundary,
+    EvidenceRef,
+    IdentityEnforcement,
+    IdentityEvidenceSource,
+    IdentityPolicy,
+    IdentitySignalKey,
+    IdentitySignalPolicy,
     QualificationActionTarget,
     QualificationCase,
     QualificationCaseKind,
+    QualificationCaseResult,
     QualificationOutcome,
+    _case_run_report_integrity_error,
     add_case,
     init_project,
     set_action_classification,
+    set_effect_policy,
+    set_identity_policy,
+    workflow_contract_sha256,
 )
 from openadapt_flow.qualification_environment import (
     BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256,
@@ -68,6 +81,7 @@ from openadapt_flow.runtime import Replayer
 from openadapt_flow.runtime.actuators import ActuationStatus, ApiActuationResult
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
+    runtime_inputs_bytes,
     runtime_inputs_digest,
 )
 from openadapt_flow.runtime.effects import (
@@ -77,6 +91,10 @@ from openadapt_flow.runtime.effects import (
     EffectVerdict,
     ValueExpr,
     Verdict,
+)
+from openadapt_flow.runtime.resolver import (
+    structural_resolution_fingerprint,
+    visual_resolution_point_fingerprint,
 )
 from openadapt_flow.verification import VerificationTier
 
@@ -145,11 +163,16 @@ def _screen_png(*, ambiguous: bool = False, wrong_identity: bool = False) -> byt
 class _ObservedBackend:
     viewport = (20, 20)
 
-    def __init__(self) -> None:
+    def __init__(self, *, structural: bool = True) -> None:
         self.actions: list[tuple[str, int, int]] = []
         self.ambiguous = False
         self.wrong_identity = False
+        self.structural = structural
         self._input_guard: Any = None
+        self._guarded_keyboard_point: tuple[int, int] | None = None
+        self._last_structural_locator: StructuralLocator | None = None
+        self._last_structural_handle: StructuralHandle | None = None
+        self._selected_value = ""
 
     def screenshot(self) -> bytes:
         return _screen_png(
@@ -157,14 +180,26 @@ class _ObservedBackend:
             wrong_identity=self.wrong_identity,
         )
 
-    def locate_structural(self, _locator: StructuralLocator) -> StructuralHandle:
+    def locate_structural(self, locator: StructuralLocator) -> StructuralHandle | None:
+        if not self.structural:
+            return None
         if self.ambiguous:
             raise StructuralResolutionRefused("two submit controls match")
-        return StructuralHandle(
-            point=(8, 8),
-            region=(5, 5, 6, 6),
-            target_fingerprint="c" * 64,
-        )
+        if locator.selector == "#drag-destination":
+            handle = StructuralHandle(
+                point=(15, 15),
+                region=(12, 12, 6, 6),
+                target_fingerprint="d" * 64,
+            )
+        else:
+            handle = StructuralHandle(
+                point=(8, 8),
+                region=(5, 5, 6, 6),
+                target_fingerprint="c" * 64,
+            )
+        self._last_structural_locator = locator
+        self._last_structural_handle = handle
+        return handle
 
     def set_qualification_input_guard(self, guard: Any) -> None:
         self._input_guard = guard
@@ -172,6 +207,106 @@ class _ObservedBackend:
     def _guard(self) -> None:
         if self._input_guard is not None:
             self._input_guard()
+
+    def arm_guarded_coordinate(self, _x: int, _y: int) -> None:
+        return None
+
+    def cancel_guarded_coordinate(self) -> None:
+        return None
+
+    def guarded_keyboard_frame(self) -> bytes:
+        return self.screenshot()
+
+    def arm_guarded_keyboard(self, x: int, y: int) -> None:
+        self._guarded_keyboard_point = (int(x), int(y))
+
+    def cancel_guarded_keyboard(self) -> None:
+        self._guarded_keyboard_point = None
+
+    def press_guarded(
+        self, _key: str, *, expected_frame_sha256: str
+    ) -> ActionDeliveryReceipt:
+        del expected_frame_sha256
+        raise AssertionError("the selection fixture does not use guarded press")
+
+    def type_text_guarded(
+        self, _text: str, *, expected_frame_sha256: str
+    ) -> ActionDeliveryReceipt:
+        del expected_frame_sha256
+        raise AssertionError("the selection fixture does not use guarded type")
+
+    def select_option(self, text: str, _commit_key: str) -> None:
+        self._selected_value = text
+
+    def select_option_guarded(
+        self,
+        text: str,
+        commit_key: str,
+        *,
+        target_point: tuple[int, int],
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        assert hashlib.sha256(self.screenshot()).hexdigest() == expected_frame_sha256
+        assert self._guarded_keyboard_point == target_point
+        assert self._last_structural_locator is not None
+        assert self._last_structural_handle is not None
+        self._guarded_keyboard_point = None
+        self.select_option(text, commit_key)
+        self.actions.append(("select_option", *target_point))
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="guarded_select_option",
+            native=False,
+            target_fingerprint=structural_resolution_fingerprint(
+                self._last_structural_locator,
+                self._last_structural_handle,
+            ),
+            selection_value_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            selection_commit_key=commit_key,
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def text_value_at(self, _x: int, _y: int) -> str:
+        return self._selected_value
+
+    def focused_text_value(self) -> str:
+        return self._selected_value
+
+    def act_guarded_coordinate(
+        self,
+        _x: int,
+        _y: int,
+        *,
+        expected_frame_sha256: str,
+        double: bool = False,
+        button: str = "left",
+    ) -> ActionDeliveryReceipt:
+        del expected_frame_sha256
+        if button != "right" or double:
+            raise AssertionError(
+                "the structural fixture uses coordinate actuation only for right click"
+            )
+        self._guard()
+        self.actions.append(("right_click", int(_x), int(_y)))
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="guarded_coordinate_right_click",
+            native=False,
+            target_fingerprint="c" * 64,
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def drag_guarded(
+        self,
+        _x: int,
+        _y: int,
+        _end_x: int,
+        _end_y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        del expected_frame_sha256
+        raise AssertionError("the structural fixture must not use coordinate drag")
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         assert not double
@@ -192,7 +327,32 @@ class _ObservedBackend:
             operation="invoke",
             native=True,
             target_fingerprint=handle.target_fingerprint,
-            delivered_at="2026-07-28T00:00:00+00:00",
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def drag_structural_guarded(
+        self,
+        source_locator: StructuralLocator,
+        source_handle: StructuralHandle,
+        destination_locator: StructuralLocator,
+        destination_handle: StructuralHandle,
+    ) -> ActionDeliveryReceipt:
+        self._guard()
+        self.actions.append(("drag", *source_handle.point))
+        assert destination_handle.point == (15, 15)
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="guarded_dom_drag",
+            native=False,
+            target_fingerprint=structural_resolution_fingerprint(
+                source_locator,
+                source_handle,
+            ),
+            destination_fingerprint=structural_resolution_fingerprint(
+                destination_locator,
+                destination_handle,
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
         )
 
     def structured_text_at(self, _x: int, _y: int) -> str:
@@ -200,6 +360,142 @@ class _ObservedBackend:
 
     def qualification_environment_identity(self) -> tuple[str, str, str, str]:
         return "https://fixture.example", "1", _SESSION, _ENVIRONMENT
+
+
+def _pixel_identity_png(*, wrong_identity: bool = False) -> bytes:
+    image = Image.new("L", (240, 48), "white")
+    if wrong_identity:
+        ImageDraw.Draw(image).rectangle((100, 0, 104, 47), fill="black")
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+class _PixelObservedBackend(_ObservedBackend):
+    viewport = (240, 48)
+
+    def screenshot(self) -> bytes:
+        return _pixel_identity_png(wrong_identity=self.wrong_identity)
+
+    def locate_structural(self, _locator: StructuralLocator) -> StructuralHandle | None:
+        return StructuralHandle(
+            point=(120, 24),
+            region=(100, 14, 40, 20),
+            target_fingerprint="c" * 64,
+        )
+
+    def structured_text_at(self, _x: int, _y: int) -> None:
+        return None
+
+
+class _SelectRemoteObservedBackend(_ObservedBackend):
+    def prepare_pointer_actuation(self, _x: int, _y: int) -> None:
+        return None
+
+    def acquire_actuation_frame(self) -> bytes:
+        return self.screenshot()
+
+    def arm_focused_element_lease(self, x: int, y: int) -> None:
+        self._guarded_keyboard_point = (int(x), int(y))
+
+    def cancel_focused_element_lease(self) -> None:
+        self._guarded_keyboard_point = None
+
+    def click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+        double: bool = False,
+    ) -> ActionDeliveryReceipt:
+        assert hashlib.sha256(self.screenshot()).hexdigest() == expected_frame_sha256
+        self._guard()
+        self.actions.append(("double_click" if double else "click", x, y))
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="rdp_double_click" if double else "rdp_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (x, y),
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def right_click_guarded(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        assert hashlib.sha256(self.screenshot()).hexdigest() == expected_frame_sha256
+        self._guard()
+        self.actions.append(("right_click", x, y))
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="rdp_right_click",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (x, y),
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def drag_guarded(
+        self,
+        x: int,
+        y: int,
+        end_x: int,
+        end_y: int,
+        *,
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        assert hashlib.sha256(self.screenshot()).hexdigest() == expected_frame_sha256
+        self._guard()
+        self.actions.append(("drag", x, y))
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="rdp_drag",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (x, y),
+            ),
+            destination_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (end_x, end_y),
+            ),
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def select_option_guarded(
+        self,
+        text: str,
+        commit_key: str,
+        *,
+        target_point: tuple[int, int],
+        expected_frame_sha256: str,
+    ) -> ActionDeliveryReceipt:
+        assert hashlib.sha256(self.screenshot()).hexdigest() == expected_frame_sha256
+        assert self._guarded_keyboard_point == target_point
+        self._guarded_keyboard_point = None
+        self.select_option(text, commit_key)
+        self.actions.append(("select_option", *target_point))
+        return ActionDeliveryReceipt(
+            receipt_id=f"fixture-{len(self.actions)}",
+            operation="rdp_select_option",
+            native=False,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                target_point,
+            ),
+            selection_value_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            selection_commit_key=commit_key,
+            delivered_at=datetime.now(timezone.utc).isoformat(),
+        )
 
 
 @dataclass(frozen=True)
@@ -383,6 +679,8 @@ def _fault_workflow(
     *,
     api_effect_only: bool = False,
     actuation_path: Literal["gui", "api"] = "gui",
+    action: ActionKind = ActionKind.CLICK,
+    search_pad: int = 96,
 ) -> tuple[Workflow, Path]:
     bundle = tmp_path / f"bundle-{kind.value}"
     (bundle / "templates").mkdir(parents=True)
@@ -392,6 +690,7 @@ def _fault_workflow(
         structural=StructuralLocator(selector="#submit"),
         region=(5, 5, 6, 6),
         click_point=(8, 8),
+        search_pad=search_pad,
     )
     anchor.structured_identity = "Synthetic record"
     step = Step(
@@ -461,6 +760,41 @@ def _fault_workflow(
             operator_confirmed=True,
         ),
     )
+    set_identity_policy(
+        workflow,
+        IdentityPolicy(
+            step_id="submit",
+            enforcement=(
+                IdentityEnforcement.SIGNAL_QUORUM
+                if actuation_path == "api"
+                else IdentityEnforcement.CANONICAL_LADDER
+            ),
+            signals=(
+                [
+                    IdentitySignalPolicy(
+                        key=IdentitySignalKey.RECORD_ID,
+                        source=IdentityEvidenceSource.STRUCTURED,
+                        extract_pattern=r"^(?P<value>.+)$",
+                    )
+                ]
+                if actuation_path == "api"
+                else []
+            ),
+            quorum=1 if actuation_path == "api" else 0,
+        ),
+    )
+    if (actuation_path == "gui" and step.effects) or (
+        actuation_path == "api"
+        and step.api_binding is not None
+        and step.api_binding.effects
+    ):
+        set_effect_policy(
+            workflow,
+            step_id="submit",
+            effect_index=0,
+            tier=VerificationTier.INDEPENDENT_SYSTEM,
+            actuation_path=actuation_path,
+        )
     add_case(
         workflow,
         QualificationCase(
@@ -591,16 +925,35 @@ def _run_fault(
 def _two_write_fault_workflow(
     tmp_path: Path,
     driver: _FaultDriver,
+    *,
+    first_action: ActionKind = ActionKind.CLICK,
+    remote_first: bool = False,
+    first_read_only: bool = False,
 ) -> tuple[Workflow, Path]:
     bundle = tmp_path / "bundle-two-write-fault"
     (bundle / "templates").mkdir(parents=True)
-    (bundle / "templates" / "button.png").write_bytes(_screen_png())
+    template_png = _screen_png()
+    if first_action is ActionKind.SELECT_OPTION:
+        with Image.open(io.BytesIO(template_png)) as image:
+            cropped = io.BytesIO()
+            image.crop((5, 5, 11, 11)).save(cropped, format="PNG")
+        template_png = cropped.getvalue()
+    (bundle / "templates" / "button.png").write_bytes(template_png)
 
     def write_step(step_id: str) -> Step:
+        action = first_action if step_id == "prepare" else ActionKind.CLICK
+        read_only = step_id == "prepare" and first_read_only
         return Step(
             id=step_id,
             intent=f"Write {step_id}",
-            action=ActionKind.CLICK,
+            action=action,
+            param="choice" if action is ActionKind.SELECT_OPTION else None,
+            selection_commit_key=(
+                "Enter" if action is ActionKind.SELECT_OPTION else None
+            ),
+            selection_region=(
+                (5, 5, 6, 6) if action is ActionKind.SELECT_OPTION else None
+            ),
             anchor=Anchor(
                 template="templates/button.png",
                 structural=StructuralLocator(selector=f"#{step_id}"),
@@ -609,27 +962,45 @@ def _two_write_fault_workflow(
                 structured_identity="Synthetic record",
             ),
             identity_armed=True,
-            risk="irreversible",
-            effects=[
-                Effect(
-                    kind=EffectKind.RECORD_WRITTEN,
-                    match={"record_id": ValueExpr(literal=step_id)},
-                    risk="irreversible",
+            risk="reversible" if read_only else "irreversible",
+            drag_end_anchor=(
+                Anchor(
+                    template="templates/button.png",
+                    structural=StructuralLocator(selector="#drag-destination"),
+                    region=(12, 12, 6, 6),
+                    click_point=(15, 15),
                 )
-            ],
+                if action is ActionKind.DRAG
+                else None
+            ),
+            effects=(
+                []
+                if read_only
+                else [
+                    Effect(
+                        kind=EffectKind.RECORD_WRITTEN,
+                        match={"record_id": ValueExpr(literal=step_id)},
+                        risk="irreversible",
+                    )
+                ]
+            ),
         )
 
-    backend = _ObservedBackend()
+    remote_surface = first_action is ActionKind.SELECT_OPTION or remote_first
+    backend = _SelectRemoteObservedBackend() if remote_surface else _ObservedBackend()
     observer = BackendQualificationEnvironmentObserver(backend)
     workflow = Workflow(
         name="two-write-fault",
-        surface="web",
+        surface="rdp" if remote_surface else "web",
+        execution_mode="external" if remote_surface else None,
         steps=[write_step("prepare"), write_step("submit")],
     )
+    if first_action is ActionKind.SELECT_OPTION:
+        workflow.params["choice"] = "Approved"
     init_project(
         workflow,
         environment=EnvironmentBoundary(
-            target_kind="web",
+            target_kind="rdp" if remote_surface else "web",
             application="Fixture application",
             application_identity="https://fixture.example",
             application_version="1",
@@ -642,15 +1013,34 @@ def _two_write_fault_workflow(
         ),
     )
     for step_id in ("prepare", "submit"):
+        read_only = step_id == "prepare" and first_read_only
         set_action_classification(
             workflow,
             ActionRiskClassification(
                 step_id=step_id,
-                classification=ActionRiskClass.IRREVERSIBLE,
+                classification=(
+                    ActionRiskClass.READ_ONLY
+                    if read_only
+                    else ActionRiskClass.IRREVERSIBLE
+                ),
                 explanation="qualification fixture changes business state",
                 operator_confirmed=True,
             ),
         )
+        set_identity_policy(
+            workflow,
+            IdentityPolicy(
+                step_id=step_id,
+                enforcement=IdentityEnforcement.CANONICAL_LADDER,
+            ),
+        )
+        if not read_only:
+            set_effect_policy(
+                workflow,
+                step_id=step_id,
+                effect_index=0,
+                tier=VerificationTier.INDEPENDENT_SYSTEM,
+            )
     add_case(
         workflow,
         QualificationCase(
@@ -761,6 +1151,994 @@ def test_later_fault_target_allows_prior_required_write_then_halts(
         )
         is ExecutionOutcome.COMPLETED_UNVERIFIED
     )
+
+
+def _fault_case_integrity_result(
+    *,
+    workflow: Workflow,
+    report: Any,
+    evidence_root: Path,
+    run_dir: Path,
+    case_id: str = "fault-missing-effect",
+) -> tuple[QualificationCase, QualificationCaseResult]:
+    """Retain one real two-write fault run for exact qualification checks."""
+
+    project = workflow.qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == case_id)
+    input_bytes = runtime_inputs_bytes(workflow, None, None)
+    report_bytes = report.model_dump_json().encode()
+    receipt = report.qualification_fault_mutations[0]
+    receipt_bytes = receipt.artifact_bytes()
+    mutation_bytes = f"test {receipt.fault_kind} fixture v1".encode()
+    artifacts = {
+        "report.json": report_bytes,
+        "input.json": input_bytes,
+        "receipt.json": receipt_bytes,
+        "mutation.bin": mutation_bytes,
+    }
+    for item in report.results:
+        if item.before_png is not None:
+            artifacts[item.before_png] = (run_dir / item.before_png).read_bytes()
+        for resolution in (item.resolution, item.drag_end_resolution):
+            if resolution is None or resolution.visual_evidence is None:
+                continue
+            visual = resolution.visual_evidence
+            for relative_path in (
+                visual.frame_inventory_ref,
+                visual.template_inventory_ref,
+            ):
+                artifacts[relative_path] = (run_dir / relative_path).read_bytes()
+        if item.identity is not None and item.identity.pixel_evidence is not None:
+            pixel = item.identity.pixel_evidence
+            for relative_path in (
+                pixel.recorded_crop_inventory_ref,
+                pixel.live_crop_inventory_ref,
+            ):
+                artifacts[relative_path] = (run_dir / relative_path).read_bytes()
+    evidence_root.mkdir()
+    for name, payload in artifacts.items():
+        path = evidence_root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    result = QualificationCaseResult(
+        case_id=case.id,
+        project_id=project.project_id,
+        project_revision=project.revision,
+        project_contract_sha256=project.contract_sha256(),
+        workflow_contract_sha256=workflow_contract_sha256(workflow),
+        environment_contract_sha256=project.environment.contract_sha256(),
+        environment_digest=project.environment.environment_digest,
+        runtime_version=project.environment.runtime_version,
+        runner_id="fixture-runner",
+        status="passed",
+        observed_outcome=QualificationOutcome.HALTED,
+        campaign_id_sha256=report.governed_qualification_campaign_id_sha256,
+        case_input_sha256=report.governed_qualification_case_input_sha256,
+        run_id_sha256=report.governed_qualification_run_id_sha256,
+        evidence=[
+            EvidenceRef(
+                kind="run_report",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                relative_path="report.json",
+            ),
+            EvidenceRef(
+                kind="case_input",
+                sha256=hashlib.sha256(input_bytes).hexdigest(),
+                relative_path="input.json",
+            ),
+            EvidenceRef(
+                kind="fault_receipt",
+                sha256=receipt.receipt_sha256(),
+                relative_path="receipt.json",
+            ),
+            EvidenceRef(
+                kind="fault_mutation",
+                sha256=hashlib.sha256(mutation_bytes).hexdigest(),
+                relative_path="mutation.bin",
+            ),
+            *[
+                EvidenceRef(
+                    kind="other",
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    relative_path=name,
+                )
+                for name, payload in artifacts.items()
+                if name
+                not in {"report.json", "input.json", "receipt.json", "mutation.bin"}
+            ],
+        ],
+        attestation_key_id="fixture-runner",
+    )
+    return case, result
+
+
+@pytest.mark.parametrize("mutation", ["identity", "resolution", "receipt"])
+def test_prior_fault_prefix_action_requires_exact_qualification_evidence(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Only the terminal fault row can use the qualification fault exemption."""
+
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(tmp_path, driver)
+    run_id = f"two-write-prefix-{mutation}"
+    report = Replayer(
+        _ObservedBackend(),
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+            action_paths={"prepare": "gui", "submit": "gui"},
+            required_identity_step_ids=("prepare", "submit"),
+            fault_step_id="submit",
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    )
+    run_dir = tmp_path / f"run-prefix-{mutation}"
+    report = report.run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+    project = workflow.qualification
+    assert project is not None
+    valid_root = tmp_path / f"evidence-valid-{mutation}"
+    valid_case, valid_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=valid_root,
+        run_dir=run_dir,
+    )
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=valid_case,
+            result=valid_result,
+            evidence_root=valid_root,
+        )
+        is None
+    )
+
+    changed = report.model_copy(deep=True)
+    if mutation == "identity":
+        assert changed.results[0].identity is not None
+        changed.results[0].identity = changed.results[0].identity.model_copy(
+            update={"coverage": 0.0}
+        )
+    elif mutation == "resolution":
+        changed.results[0].resolution = None
+    else:
+        changed.results[0].delivery_receipt = ActionDeliveryReceipt(
+            receipt_id="forged",
+            operation="delete_everything",
+            native=False,
+            target_fingerprint="f" * 64,
+            delivered_at="2099-01-01T00:00:00+00:00",
+        )
+
+    evidence_root = tmp_path / f"evidence-{mutation}"
+    case, result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=changed,
+        evidence_root=evidence_root,
+        run_dir=run_dir,
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=case,
+        result=result,
+        evidence_root=evidence_root,
+    )
+
+    assert error is not None
+    assert "prior action" in error[1]
+
+
+def test_read_only_prior_remote_click_has_exact_fault_prefix_proof(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(
+        tmp_path,
+        driver,
+        remote_first=True,
+        first_read_only=True,
+    )
+    run_id = "prior-read-only-remote-click"
+    run_dir = tmp_path / f"run-{run_id}"
+    report = Replayer(
+        _SelectRemoteObservedBackend(structural=False),
+        vision=vision_module,
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+            action_paths={"prepare": "gui", "submit": "gui"},
+            required_identity_step_ids=("submit",),
+            fault_step_id="submit",
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="rdp",
+    )
+
+    receipt = report.results[0].delivery_receipt
+    assert receipt is not None
+    assert receipt.operation == "rdp_click"
+    assert report.results[0].actuation == "remote_guarded"
+    project = workflow.qualification
+    assert project is not None
+    valid_root = tmp_path / "evidence-read-only-remote-valid"
+    valid_case, valid_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=valid_root,
+        run_dir=run_dir,
+    )
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=valid_case,
+            result=valid_result,
+            evidence_root=valid_root,
+        )
+        is None
+    )
+
+    forged = report.model_copy(deep=True)
+    forged_receipt = forged.results[0].delivery_receipt
+    assert forged_receipt is not None
+    forged.results[0].delivery_receipt = forged_receipt.model_copy(
+        update={"target_fingerprint": "0" * 64}
+    )
+    forged_root = tmp_path / "evidence-read-only-remote-forged"
+    forged_case, forged_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=forged,
+        evidence_root=forged_root,
+        run_dir=run_dir,
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=forged_case,
+        result=forged_result,
+        evidence_root=forged_root,
+    )
+    assert error is not None
+    assert "resolved target" in error[1]
+
+
+@pytest.mark.parametrize(
+    ("action", "operation", "mutation"),
+    [
+        (ActionKind.CLICK, "rdp_click", {"target_fingerprint": "0" * 64}),
+        (
+            ActionKind.DOUBLE_CLICK,
+            "rdp_double_click",
+            {"operation": "rdp_click"},
+        ),
+        (
+            ActionKind.RIGHT_CLICK,
+            "rdp_right_click",
+            {"operation": "remote_click"},
+        ),
+        (ActionKind.DRAG, "rdp_drag", {"destination_fingerprint": "0" * 64}),
+    ],
+)
+def test_prior_remote_pointer_receipt_binds_exact_fault_prefix(
+    tmp_path: Path,
+    action: ActionKind,
+    operation: str,
+    mutation: dict[str, str],
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(
+        tmp_path,
+        driver,
+        first_action=action,
+        remote_first=True,
+    )
+    run_id = f"prior-remote-{action.value}"
+    run_dir = tmp_path / f"run-{run_id}"
+    report = Replayer(
+        _SelectRemoteObservedBackend(structural=False),
+        vision=vision_module,
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+            action_paths={"prepare": "gui", "submit": "gui"},
+            required_identity_step_ids=("prepare", "submit"),
+            fault_step_id="submit",
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="rdp",
+    )
+
+    receipt = report.results[0].delivery_receipt
+    assert receipt is not None
+    assert receipt.operation == operation
+    assert report.results[0].actuation == "remote_guarded"
+    project = workflow.qualification
+    assert project is not None
+    valid_root = tmp_path / f"evidence-{run_id}-valid"
+    valid_case, valid_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=valid_root,
+        run_dir=run_dir,
+    )
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=valid_case,
+            result=valid_result,
+            evidence_root=valid_root,
+        )
+        is None
+    )
+
+    forged = report.model_copy(deep=True)
+    forged_receipt = forged.results[0].delivery_receipt
+    assert forged_receipt is not None
+    forged.results[0].delivery_receipt = forged_receipt.model_copy(update=mutation)
+    forged_root = tmp_path / f"evidence-{run_id}-forged"
+    forged_case, forged_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=forged,
+        evidence_root=forged_root,
+        run_dir=run_dir,
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=forged_case,
+        result=forged_result,
+        evidence_root=forged_root,
+    )
+    assert error is not None
+    assert "prior action" in error[1]
+
+
+@pytest.mark.parametrize(
+    ("kind", "actuation_path"),
+    [
+        (QualificationCaseKind.WEAK_EFFECT, "gui"),
+        (QualificationCaseKind.MISSING_EFFECT, "gui"),
+        (QualificationCaseKind.WEAK_EFFECT, "api"),
+        (QualificationCaseKind.MISSING_EFFECT, "api"),
+    ],
+)
+def test_exact_qualification_accepts_runtime_effect_fault_artifacts(
+    tmp_path: Path,
+    kind: QualificationCaseKind,
+    actuation_path: Literal["gui", "api"],
+) -> None:
+    """Both GUI and API lanes retain valid weak and missing effect proofs."""
+
+    driver = _FaultDriver(kind)
+    workflow, bundle = _fault_workflow(
+        tmp_path,
+        kind,
+        driver,
+        api_effect_only=actuation_path == "api",
+        actuation_path=actuation_path,
+    )
+    run_id = f"exact-{kind.value}-{actuation_path}"
+    replayer = Replayer(
+        _ObservedBackend(),
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            kind,
+            driver,
+            run_id=run_id,
+            actuation_path=actuation_path,
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        api_actuator=(_UnavailableApiActuator() if actuation_path == "api" else None),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    )
+    run_dir = tmp_path / f"run-{kind.value}-{actuation_path}"
+    report = replayer.run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+    project = workflow.qualification
+    assert project is not None
+    evidence_root = tmp_path / f"evidence-{kind.value}-{actuation_path}"
+    case, result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=evidence_root,
+        run_dir=run_dir,
+        case_id=f"fault-{kind.value.replace('_', '-')}",
+    )
+
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=case,
+            result=result,
+            evidence_root=evidence_root,
+        )
+        is None
+    )
+
+
+def test_fault_target_requires_runtime_emittable_visual_resolution(
+    tmp_path: Path,
+) -> None:
+    """A visual target is replayed from exact retained resolver inputs."""
+
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _fault_workflow(
+        tmp_path,
+        QualificationCaseKind.MISSING_EFFECT,
+        driver,
+        search_pad=0,
+    )
+    run_id = "visual-resolution-exact"
+    run_dir = tmp_path / f"run-{run_id}"
+    report = Replayer(
+        _ObservedBackend(structural=False),
+        vision=vision_module,
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+    resolution = report.results[-1].resolution
+    assert resolution is not None
+    assert resolution.rung == "template_global"
+    assert resolution.visual_evidence is not None
+    project = workflow.qualification
+    assert project is not None
+    evidence_root = tmp_path / "evidence-visual-valid"
+    case, result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=evidence_root,
+        run_dir=run_dir,
+    )
+
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=case,
+            result=result,
+            evidence_root=evidence_root,
+        )
+        is None
+    )
+
+    changed = report.model_copy(deep=True)
+    changed_resolution = changed.results[-1].resolution
+    assert changed_resolution is not None
+    changed.results[-1].resolution = changed_resolution.model_copy(
+        update={"point": (1, 18), "confidence": 0.999999, "elapsed_ms": 1.0}
+    )
+    changed_root = tmp_path / "evidence-visual-forged"
+    changed_case, changed_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=changed,
+        evidence_root=changed_root,
+        run_dir=run_dir,
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=changed_case,
+        result=changed_result,
+        evidence_root=changed_root,
+    )
+    assert error is not None
+    assert "fault refusal target resolution is not exact" in error[1]
+
+
+def test_real_pixel_wrong_identity_retains_exact_fault_evidence(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.WRONG_IDENTITY)
+    workflow, bundle = _fault_workflow(
+        tmp_path,
+        QualificationCaseKind.WRONG_IDENTITY,
+        driver,
+    )
+    identifier_path = "templates/identifiers/submit.png"
+    (bundle / "templates" / "identifiers").mkdir(parents=True, exist_ok=True)
+    (bundle / identifier_path).write_bytes(_pixel_identity_png())
+    step = workflow.steps[0]
+    assert step.anchor is not None
+    step.anchor.region = (100, 14, 40, 20)
+    step.anchor.click_point = (120, 24)
+    step.anchor.structured_identity = None
+    step.anchor.context_text = None
+    step.anchor.identifier_crop = identifier_path
+    step.anchor.identifier_region = (0, 0, 240, 48)
+    backend = _PixelObservedBackend()
+    assert workflow.qualification is not None
+    pixel_observer = BackendQualificationEnvironmentObserver(backend)
+    workflow.qualification.environment.environment_observer_id = (
+        pixel_observer.observer_id
+    )
+    workflow.qualification.environment.environment_observer_contract_sha256 = (
+        pixel_observer.contract_sha256
+    )
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    run_id = "pixel-wrong-identity"
+    run_dir = tmp_path / "run-pixel-wrong-identity"
+    report = Replayer(
+        backend,
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.WRONG_IDENTITY,
+            driver,
+            run_id=run_id,
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+    target = report.results[-1]
+    assert report.execution_outcome == "HALTED"
+    assert target.delivery_attempted is False
+    assert target.identity is not None
+    assert target.identity.status == "mismatch"
+    assert target.identity.mode == "pixel"
+    assert target.identity.pixel_evidence is not None
+    pixel = target.identity.pixel_evidence
+    assert (run_dir / pixel.recorded_crop_inventory_ref).is_file()
+    assert (run_dir / pixel.live_crop_inventory_ref).is_file()
+
+    project = workflow.qualification
+    assert project is not None
+    valid_root = tmp_path / "evidence-pixel-wrong-identity"
+    valid_case, valid_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=valid_root,
+        run_dir=run_dir,
+        case_id="fault-wrong-identity",
+    )
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=valid_case,
+            result=valid_result,
+            evidence_root=valid_root,
+        )
+        is None
+    )
+
+    changed = report.model_copy(deep=True)
+    changed_identity = changed.results[-1].identity
+    assert changed_identity is not None and changed_identity.pixel_evidence is not None
+    changed_identity.pixel_evidence = changed_identity.pixel_evidence.model_copy(
+        update={
+            "live_crop_sha256": pixel.recorded_crop_sha256,
+            "live_crop_inventory_ref": pixel.recorded_crop_inventory_ref,
+        }
+    )
+    changed_root = tmp_path / "evidence-pixel-forged"
+    changed_case, changed_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=changed,
+        evidence_root=changed_root,
+        run_dir=run_dir,
+        case_id="fault-wrong-identity",
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=changed_case,
+        result=changed_result,
+        evidence_root=changed_root,
+    )
+    assert error is not None
+    assert "pixel identity crop evidence does not reproduce" in error[1]
+
+
+def test_drag_fault_target_halts_before_unreached_endpoint_resolution(
+    tmp_path: Path,
+) -> None:
+    """A pre-delivery effect refusal does not invent a drag endpoint."""
+
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _fault_workflow(
+        tmp_path,
+        QualificationCaseKind.MISSING_EFFECT,
+        driver,
+        action=ActionKind.DRAG,
+    )
+    run_id = "drag-target-refusal"
+    run_dir = tmp_path / "run-drag-target-refusal"
+    report = Replayer(
+        _ObservedBackend(),
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+    assert report.results[-1].resolution is not None
+    assert report.results[-1].drag_end_resolution is None
+    project = workflow.qualification
+    assert project is not None
+    evidence_root = tmp_path / "evidence-drag-target-refusal"
+    case, result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=evidence_root,
+        run_dir=run_dir,
+    )
+
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=case,
+            result=result,
+            evidence_root=evidence_root,
+        )
+        is None
+    )
+
+
+def test_prior_drag_requires_exact_compiled_endpoint_resolution(tmp_path: Path) -> None:
+    """A successful prefix drag proves both compiled endpoints before delivery."""
+
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(
+        tmp_path,
+        driver,
+        first_action=ActionKind.DRAG,
+    )
+    run_id = "prior-drag-endpoint"
+    run_dir = tmp_path / "run-prior-drag-endpoint"
+    report = Replayer(
+        _ObservedBackend(),
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+            action_paths={"prepare": "gui", "submit": "gui"},
+            required_identity_step_ids=("prepare", "submit"),
+            fault_step_id="submit",
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+    assert report.results[0].drag_end_resolution is not None
+    project = workflow.qualification
+    assert project is not None
+    valid_root = tmp_path / "evidence-prior-drag-valid"
+    valid_case, valid_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=valid_root,
+        run_dir=run_dir,
+    )
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=valid_case,
+            result=valid_result,
+            evidence_root=valid_root,
+        )
+        is None
+    )
+
+    changed = report.model_copy(deep=True)
+    endpoint = changed.results[0].drag_end_resolution
+    assert endpoint is not None and endpoint.structural_handle is not None
+    changed_handle = endpoint.structural_handle.model_copy(update={"point": (12, 12)})
+    changed.results[0].drag_end_resolution = endpoint.model_copy(
+        update={"point": (12, 12), "structural_handle": changed_handle}
+    )
+    changed_root = tmp_path / "evidence-prior-drag-changed"
+    changed_case, changed_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=changed,
+        evidence_root=changed_root,
+        run_dir=run_dir,
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=changed_case,
+        result=changed_result,
+        evidence_root=changed_root,
+    )
+    assert error is not None
+    assert "prior action" in error[1]
+    assert "resolved drag destination" in error[1]
+
+    changed_fingerprint = report.model_copy(deep=True)
+    endpoint = changed_fingerprint.results[0].drag_end_resolution
+    assert endpoint is not None and endpoint.structural_handle is not None
+    changed_fingerprint.results[0].drag_end_resolution = endpoint.model_copy(
+        update={
+            "structural_handle": endpoint.structural_handle.model_copy(
+                update={"target_fingerprint": "e" * 64}
+            )
+        }
+    )
+    fingerprint_root = tmp_path / "evidence-prior-drag-fingerprint"
+    fingerprint_case, fingerprint_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=changed_fingerprint,
+        evidence_root=fingerprint_root,
+        run_dir=run_dir,
+    )
+    fingerprint_error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=fingerprint_case,
+        result=fingerprint_result,
+        evidence_root=fingerprint_root,
+    )
+    assert fingerprint_error is not None
+    assert "resolved drag destination" in fingerprint_error[1]
+
+
+def test_prior_right_click_accepts_only_the_runtime_guarded_receipt(
+    tmp_path: Path,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(
+        tmp_path,
+        driver,
+        first_action=ActionKind.RIGHT_CLICK,
+    )
+    run_id = "prior-guarded-right-click"
+    run_dir = tmp_path / "run-prior-guarded-right-click"
+    report = Replayer(
+        _ObservedBackend(),
+        vision=_Vision(),
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+            action_paths={"prepare": "gui", "submit": "gui"},
+            required_identity_step_ids=("prepare", "submit"),
+            fault_step_id="submit",
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="web",
+    )
+    receipt = report.results[0].delivery_receipt
+    assert receipt is not None
+    assert receipt.operation == "guarded_coordinate_right_click"
+    project = workflow.qualification
+    assert project is not None
+    valid_root = tmp_path / "evidence-right-click-valid"
+    valid_case, valid_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=valid_root,
+        run_dir=run_dir,
+    )
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=valid_case,
+            result=valid_result,
+            evidence_root=valid_root,
+        )
+        is None
+    )
+
+    changed = report.model_copy(deep=True)
+    changed.results[0].delivery_receipt = receipt.model_copy(
+        update={"operation": "coordinate_right_click"}
+    )
+    changed_root = tmp_path / "evidence-right-click-forged"
+    changed_case, changed_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=changed,
+        evidence_root=changed_root,
+        run_dir=run_dir,
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=changed_case,
+        result=changed_result,
+        evidence_root=changed_root,
+    )
+    assert error is not None
+    assert "delivery receipt operation conflicts" in error[1]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        ("operation", "guarded_dom_type"),
+        ("selection_commit_key", "Tab"),
+        ("selection_value_sha256", "0" * 64),
+    ],
+)
+def test_prior_selection_receipt_binds_value_commit_and_target(
+    tmp_path: Path,
+    mutation: str,
+    value: str,
+) -> None:
+    driver = _FaultDriver(QualificationCaseKind.MISSING_EFFECT)
+    workflow, bundle = _two_write_fault_workflow(
+        tmp_path,
+        driver,
+        first_action=ActionKind.SELECT_OPTION,
+    )
+    run_id = f"prior-select-{mutation}"
+    run_dir = tmp_path / f"run-{run_id}"
+    report = Replayer(
+        _SelectRemoteObservedBackend(structural=False),
+        vision=vision_module,
+        governed_authorization=_fault_authorization(
+            workflow,
+            QualificationCaseKind.MISSING_EFFECT,
+            driver,
+            run_id=run_id,
+            action_paths={"prepare": "gui", "submit": "gui"},
+            required_identity_step_ids=("prepare", "submit"),
+            fault_step_id="submit",
+        ),
+        qualification_fault_driver=driver,
+        effect_verifier=_StrongEffectVerifier(),
+        durable=True,
+        require_settled=True,
+        poll_interval_s=0.0,
+    ).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        run_id=run_id,
+        execution_target_kind="rdp",
+    )
+    receipt = report.results[0].delivery_receipt
+    assert receipt is not None
+    assert receipt.operation == "rdp_select_option"
+    assert report.results[0].actuation == "remote_guarded"
+    project = workflow.qualification
+    assert project is not None
+    valid_root = tmp_path / f"evidence-select-valid-{mutation}"
+    valid_case, valid_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=report,
+        evidence_root=valid_root,
+        run_dir=run_dir,
+    )
+    assert (
+        _case_run_report_integrity_error(
+            workflow=workflow,
+            project=project,
+            case=valid_case,
+            result=valid_result,
+            evidence_root=valid_root,
+        )
+        is None
+    )
+
+    changed = report.model_copy(deep=True)
+    changed.results[0].delivery_receipt = receipt.model_copy(update={mutation: value})
+    changed_root = tmp_path / f"evidence-select-forged-{mutation}"
+    changed_case, changed_result = _fault_case_integrity_result(
+        workflow=workflow,
+        report=changed,
+        evidence_root=changed_root,
+        run_dir=run_dir,
+    )
+    error = _case_run_report_integrity_error(
+        workflow=workflow,
+        project=project,
+        case=changed_case,
+        result=changed_result,
+        evidence_root=changed_root,
+    )
+    assert error is not None
+    assert "prior action" in error[1]
 
 
 def test_authorization_rejects_fault_target_removed_from_permitted_scope(

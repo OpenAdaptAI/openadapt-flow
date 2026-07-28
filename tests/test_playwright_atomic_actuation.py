@@ -493,6 +493,51 @@ def test_playwright_visual_fallback_uses_identity_bound_dom_click(tmp_path) -> N
     assert clicked == 1
 
 
+def test_playwright_guarded_right_click_emits_typed_receipt() -> None:
+    """The browser emits the operation that qualification accepts."""
+
+    sync = pytest.importorskip("playwright.sync_api")
+    from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+
+    with sync.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 800, "height": 400})
+        page.set_content(
+            """<!doctype html><html><body>
+            <table><tbody><tr data-openadapt-identity="record-1">
+              <td>MRN-1</td><td>Jane Sample</td><td>
+                <button id="target"
+                  oncontextmenu="event.preventDefault(); window.opened += 1">
+                  Review
+                </button>
+              </td>
+            </tr></tbody></table>
+            <script>window.opened = 0;</script>
+            </body></html>"""
+        )
+        backend = PlaywrightBackend(page)
+        box = page.locator("#target").bounding_box()
+        assert box is not None
+        point = (
+            int(round(box["x"] + box["width"] / 2)),
+            int(round(box["y"] + box["height"] / 2)),
+        )
+        backend.arm_guarded_coordinate(*point)
+        expected_frame_sha256 = hashlib.sha256(backend.screenshot()).hexdigest()
+        receipt = backend.act_guarded_coordinate(
+            *point,
+            expected_frame_sha256=expected_frame_sha256,
+            button="right",
+        )
+        opened = page.evaluate("window.opened")
+        browser.close()
+
+    assert receipt.operation == "guarded_coordinate_right_click"
+    assert receipt.native is False
+    assert receipt.target_fingerprint is not None
+    assert opened == 1
+
+
 def test_structural_revalidation_replaces_stale_guard(tmp_path) -> None:
     """A fresh pre-delivery structural guard must not invalidate itself."""
 

@@ -27,6 +27,10 @@ from openadapt_flow.ir import (
     StructuralHandle,
     StructuralLocator,
 )
+from openadapt_flow.runtime.resolver import (
+    structural_resolution_fingerprint,
+    visual_resolution_point_fingerprint,
+)
 
 VIEWPORT: tuple[int, int] = (1280, 800)
 
@@ -1792,7 +1796,14 @@ class PlaywrightBackend:
             receipt_id=f"playwright-{uuid.uuid4().hex}",
             operation="guarded_dom_drag",
             native=False,
-            target_fingerprint=source_fingerprint,
+            target_fingerprint=structural_resolution_fingerprint(
+                source_locator,
+                source_handle,
+            ),
+            destination_fingerprint=structural_resolution_fingerprint(
+                destination_locator,
+                destination_handle,
+            ),
             delivered_at=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -2305,7 +2316,14 @@ class PlaywrightBackend:
             receipt_id=f"playwright-coordinate-{uuid.uuid4().hex}",
             operation="guarded_coordinate_drag",
             native=False,
-            target_fingerprint=pending.fingerprint,
+            target_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                point,
+            ),
+            destination_fingerprint=visual_resolution_point_fingerprint(
+                expected_frame_sha256,
+                (int(end_x), int(end_y)),
+            ),
             delivered_at=datetime.now(timezone.utc).isoformat(),
         )
 

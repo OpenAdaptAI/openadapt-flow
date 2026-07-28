@@ -7,6 +7,7 @@ the existing policy/certification seam.  They do not pin CLI prose or UI copy.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from base64 import b64encode
 from collections.abc import Callable
@@ -16,7 +17,9 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from PIL import Image, ImageDraw
 
+from openadapt_flow import vision as vision_module
 from openadapt_flow.__main__ import main
 from openadapt_flow.execution_profiles import (
     ExecutionProfile,
@@ -27,15 +30,16 @@ from openadapt_flow.ir import (
     ActionKind,
     Anchor,
     ApiBinding,
+    BundleManifest,
     EffectVerificationEvidence,
     IdentityCheck,
     Postcondition,
     PostconditionKind,
-    Resolution,
     RunReport,
     SafetyRefusalEvidence,
     Step,
     StepResult,
+    VisualResolutionEvidence,
     Workflow,
 )
 from openadapt_flow.policy import (
@@ -95,6 +99,13 @@ from openadapt_flow.runtime.authorization import (
     runtime_inputs_digest,
 )
 from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
+from openadapt_flow.runtime.resolver import (
+    resolve as resolve_target,
+)
+from openadapt_flow.runtime.resolver import (
+    visual_resolution_anchor_contract_sha256,
+    visual_resolution_evaluator_contract_sha256,
+)
 
 _RUNNER_PRIVATE_KEY = Ed25519PrivateKey.generate()
 _RUNNER_PRIVATE_BYTES = _RUNNER_PRIVATE_KEY.private_bytes(
@@ -189,6 +200,21 @@ def _configure(workflow: Workflow, *, tier: VerificationTier) -> None:
     )
 
 
+def _qualification_visual_fixture() -> tuple[bytes, bytes]:
+    """Return one exact frame and its compiled target crop."""
+
+    frame_image = Image.new("RGB", (100, 60), "white")
+    draw = ImageDraw.Draw(frame_image)
+    draw.rectangle((10, 10, 49, 29), outline="black", width=2)
+    draw.line((14, 14, 44, 25), fill="navy", width=2)
+    draw.rectangle((36, 13, 44, 21), fill="orange")
+    frame_buffer = io.BytesIO()
+    frame_image.save(frame_buffer, format="PNG")
+    template_buffer = io.BytesIO()
+    frame_image.crop((10, 10, 50, 30)).save(template_buffer, format="PNG")
+    return frame_buffer.getvalue(), template_buffer.getvalue()
+
+
 def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
     project = workflow.qualification
     assert project is not None
@@ -262,6 +288,61 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
         qualified_effect_requirements(workflow, ExecutionProfile.STANDARD)
     )
     results: list[QualificationCaseResult] = []
+    fault_frame_bytes, fault_template_bytes = _qualification_visual_fixture()
+    fault_frame_sha256 = hashlib.sha256(fault_frame_bytes).hexdigest()
+    fault_template_sha256 = hashlib.sha256(fault_template_bytes).hexdigest()
+    fault_frame_inventory_ref = f"private/resolution-inputs/{fault_frame_sha256}.png"
+    fault_template_inventory_ref = (
+        f"private/resolution-inputs/{fault_template_sha256}.png"
+    )
+    if workflow.manifest is None:
+        workflow.manifest = BundleManifest(
+            file_hashes={action.anchor.template: fault_template_sha256}
+        )
+    else:
+        assert (
+            workflow.manifest.file_hashes[action.anchor.template]
+            == fault_template_sha256
+        )
+    reproduced = resolve_target(
+        action.anchor,
+        fault_frame_bytes,
+        vision_module,
+        None,
+        action.intent,
+        template_png=fault_template_bytes,
+        viewport=(100, 60),
+        structural=None,
+    )
+    assert reproduced is not None
+    fault_resolution, fault_matched_region = reproduced
+    fault_resolution = fault_resolution.model_copy(
+        update={
+            "visual_evidence": VisualResolutionEvidence(
+                frame_sha256=fault_frame_sha256,
+                frame_inventory_ref=fault_frame_inventory_ref,
+                template_sha256=fault_template_sha256,
+                template_inventory_ref=fault_template_inventory_ref,
+                evaluator_contract_sha256=(
+                    visual_resolution_evaluator_contract_sha256()
+                ),
+                anchor_contract_sha256=(
+                    visual_resolution_anchor_contract_sha256(
+                        action.anchor,
+                        template_sha256=fault_template_sha256,
+                        allow_target_ocr=True,
+                    )
+                ),
+                matched_region=fault_matched_region,
+            )
+        }
+    )
+    (evidence_root / fault_frame_inventory_ref).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    (evidence_root / fault_frame_inventory_ref).write_bytes(fault_frame_bytes)
+    (evidence_root / fault_template_inventory_ref).write_bytes(fault_template_bytes)
     for case in project.cases:
         run_sha256 = sha256_bytes(f"run:{case.id}".encode())
         if case.kind is QualificationCaseKind.REPRESENTATIVE:
@@ -433,6 +514,11 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             QualificationCaseKind.WEAK_EFFECT,
             QualificationCaseKind.MISSING_EFFECT,
         }
+        fault_frame_path = (
+            f"{case.id}.before.png"
+            if reached_target and case.kind is not QualificationCaseKind.STALE_IDENTITY
+            else None
+        )
         effect_contract_hashes = (
             [effect.contract_hash() for effect in resolved_action_effects]
             if case.kind
@@ -491,6 +577,9 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                     step_id=action_id,
                     intent=action.intent,
                     ok=False,
+                    risk=action.risk,
+                    risk_explanation=action.risk_explanation,
+                    risk_review_required=action.risk_review_required,
                     safety_halt=True,
                     failure_category=(
                         "safety_halt"
@@ -498,13 +587,9 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                         else "governed_refusal"
                     ),
                     delivery_attempted=False,
+                    before_png=fault_frame_path,
                     resolution=(
-                        Resolution(
-                            rung="template",
-                            point=(30, 20),
-                            confidence=1.0,
-                            elapsed_ms=0.0,
-                        )
+                        fault_resolution
                         if reached_target
                         and case.kind is not QualificationCaseKind.STALE_IDENTITY
                         else None
@@ -534,7 +619,15 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                     ),
                     effect_verified=False if reached_effect_gate else None,
                     effect_results=(
-                        ["effect verifier refused before actuation"]
+                        [
+                            (
+                                "no EffectVerifier configured for a step that "
+                                "declares effects (fail-safe HALT)"
+                                if case.kind is QualificationCaseKind.MISSING_EFFECT
+                                else "the qualification fault detector refused "
+                                "before actuation"
+                            )
+                        ]
                         if reached_effect_gate
                         else []
                     ),
@@ -558,6 +651,11 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
             f"{prefix}.input.json": case_input,
             f"{prefix}.receipt.json": receipt_bytes,
             f"{prefix}.mutation.bin": mutation_bytes,
+            **(
+                {fault_frame_path: fault_frame_bytes}
+                if fault_frame_path is not None
+                else {}
+            ),
         }
         for relative_path, payload in artifacts.items():
             (evidence_root / relative_path).write_bytes(payload)
@@ -581,6 +679,34 @@ def _record_passing_campaign(workflow: Workflow, evidence_root: Path) -> None:
                 kind="fault_mutation",
                 sha256=receipt.mutation_artifact_sha256,
                 relative_path=f"{prefix}.mutation.bin",
+            ),
+            *(
+                [
+                    EvidenceRef(
+                        kind="other",
+                        sha256=hashlib.sha256(fault_frame_bytes).hexdigest(),
+                        relative_path=fault_frame_path,
+                    )
+                ]
+                if fault_frame_path is not None
+                else []
+            ),
+            *(
+                [
+                    EvidenceRef(
+                        kind="other",
+                        sha256=fault_frame_sha256,
+                        relative_path=fault_frame_inventory_ref,
+                    ),
+                    EvidenceRef(
+                        kind="other",
+                        sha256=fault_template_sha256,
+                        relative_path=fault_template_inventory_ref,
+                    ),
+                ]
+                if reached_target
+                and case.kind is not QualificationCaseKind.STALE_IDENTITY
+                else []
             ),
         ]
         results.append(
@@ -1667,7 +1793,7 @@ def test_qualification_authorization_cannot_omit_project_identity_scope(
     )
     bundle = tmp_path / "bundle"
     (bundle / "templates").mkdir(parents=True)
-    (bundle / "templates" / "save.png").write_bytes(b"fixture")
+    (bundle / "templates" / "save.png").write_bytes(_qualification_visual_fixture()[1])
     workflow.save(bundle)
     workflow = Workflow.load(bundle)
     project = workflow.qualification
@@ -1944,7 +2070,7 @@ def test_minimum_effect_tier_versions_round_trips_and_invalidates_certification(
     workflow = _workflow()
     bundle = tmp_path / "bundle"
     (bundle / "templates").mkdir(parents=True)
-    (bundle / "templates" / "save.png").write_bytes(b"fixture")
+    (bundle / "templates" / "save.png").write_bytes(_qualification_visual_fixture()[1])
     workflow.save(bundle)
     _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
     evidence_root = tmp_path / "evidence"
@@ -1996,7 +2122,7 @@ def test_full_campaign_certifies_through_existing_policy_and_round_trips(
     workflow = _workflow()
     bundle = tmp_path / "bundle"
     (bundle / "templates").mkdir(parents=True)
-    (bundle / "templates" / "save.png").write_bytes(b"fixture")
+    (bundle / "templates" / "save.png").write_bytes(_qualification_visual_fixture()[1])
     workflow.save(bundle)
     workflow = Workflow.load(bundle)
     _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)

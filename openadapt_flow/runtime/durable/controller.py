@@ -463,16 +463,31 @@ def resumed_step_results(
     A resume skips steps ``[0, resume_from)`` -- they were verified in the
     original run and must NOT re-execute (never re-perform a confirmed write).
     But the report's ``success`` accounting counts one result per step, so we
-    reconstruct their results from the persisted checkpoints (falling back to
-    the workflow definition for any checkpoint the operator pruned). Each is
-    marked ``ok=True`` and annotated as resumed, for an honest audit trail.
+    reconstruct their results from the persisted checkpoints. A missing,
+    reordered, or mismatched checkpoint refuses the resume. The runtime never
+    invents verified success from the workflow definition.
     """
+    from openadapt_flow.runtime.durable.approval import StateDiverged
+
+    if resume_from < 0 or resume_from > len(workflow.steps):
+        raise StateDiverged("the linear resume cursor is outside the workflow")
     store = CheckpointStore(run_dir, key=key)
     by_index = {c.step_index: c for c in store.checkpoints()}
     results: list[StepResult] = []
-    for index in range(min(resume_from, len(workflow.steps))):
+    for index in range(resume_from):
         checkpoint = by_index.get(index)
         step = workflow.steps[index]
+        if (
+            checkpoint is None
+            or checkpoint.workflow_name != workflow.name
+            or checkpoint.step_index != index
+            or checkpoint.next_step_index != index + 1
+            or checkpoint.step_id != step.id
+        ):
+            raise StateDiverged(
+                "the linear resume cursor lacks an exact verified checkpoint "
+                f"for step {index}"
+            )
         results.append(
             StepResult(
                 step_id=step.id,
@@ -481,36 +496,18 @@ def resumed_step_results(
                 risk=step.risk,
                 risk_explanation=step.risk_explanation,
                 risk_review_required=step.risk_review_required,
-                skipped=checkpoint.skipped if checkpoint is not None else False,
-                effect_verified=(
-                    checkpoint.effect_verified if checkpoint is not None else None
-                ),
-                effect_approved_unverified=(
-                    checkpoint.effect_approved_unverified
-                    if checkpoint is not None
-                    else False
-                ),
-                effect_contract_hashes=(
-                    list(checkpoint.effect_contract_hashes)
-                    if checkpoint is not None
-                    else []
-                ),
-                effect_evidence=(
-                    list(checkpoint.effect_evidence) if checkpoint is not None else []
-                ),
-                identity=checkpoint.identity if checkpoint is not None else None,
-                postconditions_ok=(
-                    checkpoint.postconditions_ok if checkpoint is not None else None
-                ),
-                actuation=checkpoint.actuation if checkpoint is not None else None,
-                delivery_uncertainty=(
-                    checkpoint.delivery_uncertainty if checkpoint is not None else None
-                ),
-                resolution=checkpoint.resolution if checkpoint is not None else None,
-                drift_oracle_calls=(
-                    checkpoint.drift_oracle_calls if checkpoint is not None else 0
-                ),
-                heal=checkpoint.heal if checkpoint is not None else None,
+                skipped=checkpoint.skipped,
+                effect_verified=checkpoint.effect_verified,
+                effect_approved_unverified=checkpoint.effect_approved_unverified,
+                effect_contract_hashes=list(checkpoint.effect_contract_hashes),
+                effect_evidence=list(checkpoint.effect_evidence),
+                identity=checkpoint.identity,
+                postconditions_ok=checkpoint.postconditions_ok,
+                actuation=checkpoint.actuation,
+                delivery_uncertainty=checkpoint.delivery_uncertainty,
+                resolution=checkpoint.resolution,
+                drift_oracle_calls=checkpoint.drift_oracle_calls,
+                heal=checkpoint.heal,
                 error=None,
             )
         )

@@ -34,6 +34,7 @@ healed bundle is written.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -132,6 +133,10 @@ from openadapt_flow.vision.ocr import OcrResolutionRefused
 
 _DeliveryResultT = TypeVar("_DeliveryResultT")
 _MAX_FRESH_ACTUATION_REACQUISITIONS = 2
+# Private module capability.  The public ``run`` API cannot mint a durable
+# continuation.  ``runtime.durable.resume`` imports this object only after it
+# has validated the pause, approval, bundle, checkpoint, and live state.
+_DURABLE_RESUME_AUTHORITY = object()
 
 if TYPE_CHECKING:
     from openadapt_flow.runtime.control_overlay import RuntimeControlOverlayEmitter
@@ -457,6 +462,8 @@ class Replayer:
         self._current_graph_id: Optional[str] = None
         self._execution_workflow_snapshot: Optional[Workflow] = None
         self._execution_snapshot_required = False
+        self._durable_resume_secret = os.urandom(32)
+        self._durable_resume_admission: Optional[tuple[dict[str, Any], str]] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -549,6 +556,156 @@ class Replayer:
         # key is SUPPRESSED before any actuation (never blind-retried). None
         # (default) leaves the run path byte-for-byte unchanged.
         self.idempotency_ledger = idempotency_ledger
+
+    @staticmethod
+    def _canonical_resume_value(value: Any) -> Any:
+        """Return one deterministic JSON value for a resume admission field."""
+
+        if value is None:
+            return None
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return model_dump(mode="json")
+        if isinstance(value, list):
+            return [Replayer._canonical_resume_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): Replayer._canonical_resume_value(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _durable_resume_payload(
+        self,
+        *,
+        mode: Literal["linear", "program"],
+        workflow: Workflow,
+        run_dir: Path,
+        bundle_dir: Path,
+        run_id: str,
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        resume_from: Optional[int],
+        resume_program: Optional[ProgramCheckpoint],
+    ) -> dict[str, Any]:
+        """Bind one continuation to the exact retained durable context."""
+
+        from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+
+        store = CheckpointStore(run_dir, key=self.checkpoint_key)
+        return {
+            "mode": mode,
+            "run_dir": str(Path(run_dir).resolve()),
+            "bundle_dir": str(Path(bundle_dir).resolve()),
+            "bundle_version": _bundle_version(Path(bundle_dir)),
+            "run_id": run_id,
+            "workflow_name": workflow.name,
+            "workflow": workflow.model_dump(mode="json"),
+            "params": dict(params),
+            "worklists": self._canonical_resume_value(worklists),
+            "resume_from": resume_from,
+            "resume_program": self._canonical_resume_value(resume_program),
+            "manifest": self._canonical_resume_value(store.read_manifest()),
+            "pending": self._canonical_resume_value(store.read_pending()),
+            "approval": self._canonical_resume_value(store.read_approval()),
+            "linear_checkpoints": self._canonical_resume_value(store.checkpoints()),
+            "program_checkpoints": self._canonical_resume_value(
+                store.program_checkpoints()
+            ),
+        }
+
+    def _admit_durable_resume(
+        self,
+        authority: object,
+        *,
+        mode: Literal["linear", "program"],
+        workflow: Workflow,
+        run_dir: Path,
+        bundle_dir: Path,
+        run_id: Optional[str],
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        resume_from: Optional[int],
+        resume_program: Optional[ProgramCheckpoint],
+    ) -> str:
+        """Mint a single-use continuation after ``durable.resume`` admits it."""
+
+        if authority is not _DURABLE_RESUME_AUTHORITY:
+            raise PermissionError("durable resume authority is private")
+        effective_run_id = run_id or uuid.uuid4().hex
+        payload = self._durable_resume_payload(
+            mode=mode,
+            workflow=workflow,
+            run_dir=run_dir,
+            bundle_dir=bundle_dir,
+            run_id=effective_run_id,
+            params=params,
+            worklists=worklists,
+            resume_from=resume_from,
+            resume_program=resume_program,
+        )
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        signature = hmac.new(
+            self._durable_resume_secret, canonical, hashlib.sha256
+        ).hexdigest()
+        self._durable_resume_admission = (payload, signature)
+        return effective_run_id
+
+    def _consume_durable_resume_admission(
+        self,
+        *,
+        workflow: Workflow,
+        run_dir: Path,
+        bundle_dir: Path,
+        run_id: str,
+        params: dict[str, str],
+        worklists: dict[str, list[dict[str, str]]],
+        resume_from: Optional[int],
+        resume_program: Optional[ProgramCheckpoint],
+    ) -> None:
+        """Consume and verify the exact resume context before any callback."""
+
+        from openadapt_flow.runtime.durable.approval import ApprovalRequired
+        from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+
+        admission = self._durable_resume_admission
+        self._durable_resume_admission = None
+        if admission is None:
+            raise ApprovalRequired(
+                "durable continuation must enter through the authenticated resume API"
+            )
+        admitted, signature = admission
+        canonical = json.dumps(
+            admitted, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        expected_signature = hmac.new(
+            self._durable_resume_secret, canonical, hashlib.sha256
+        ).hexdigest()
+        mode = admitted.get("mode")
+        if mode not in {"linear", "program"} or not hmac.compare_digest(
+            signature, expected_signature
+        ):
+            raise ApprovalRequired("durable continuation admission is invalid")
+        current = self._durable_resume_payload(
+            mode=mode,
+            workflow=workflow,
+            run_dir=run_dir,
+            bundle_dir=bundle_dir,
+            run_id=run_id,
+            params=params,
+            worklists=worklists,
+            resume_from=resume_from,
+            resume_program=resume_program,
+        )
+        if current != admitted:
+            raise ApprovalRequired(
+                "durable continuation context changed after approval"
+            )
+        # The exact pause has now been admitted and consumed. Clear it before
+        # the resumed leg writes its next checkpoint or pause.
+        CheckpointStore(run_dir, key=self.checkpoint_key).clear_pending()
 
     # -- public API ----------------------------------------------------------
 
@@ -710,6 +867,21 @@ class Replayer:
         # authorization checks.  A callback that mutates it after admission
         # must invalidate the authorization before any reacquired input edge.
         self._active_runtime_worklists = worklists
+        if (
+            resume_from is not None
+            or resume_program is not None
+            or self._durable_resume_admission is not None
+        ):
+            self._consume_durable_resume_admission(
+                workflow=workflow,
+                run_dir=run_dir,
+                bundle_dir=bundle_dir,
+                run_id=self._run_id,
+                params=params,
+                worklists=worklists or {},
+                resume_from=resume_from,
+                resume_program=resume_program,
+            )
 
         report = RunReport(
             workflow_name=workflow.name,
@@ -897,7 +1069,7 @@ class Replayer:
                 model_calls=prior_model_calls,
                 external_network_calls=prior_external_network_calls,
             )
-        if resume_from:
+        if resume_from is not None:
             from openadapt_flow.runtime.durable import resumed_step_results
 
             resumed_results = resumed_step_results(
@@ -910,8 +1082,6 @@ class Replayer:
                 report.model_calls,
                 sum(self._result_model_calls(result) for result in resumed_results),
             )
-            if durable_run is not None:
-                durable_run.store.clear_pending()
 
         if workflow.program is not None:
             # Workflow-program IR, Phase 2: interpret the STATE MACHINE (loops /
@@ -934,7 +1104,7 @@ class Replayer:
             for step_index, step in enumerate(workflow.steps):
                 # Resume: never re-execute an already-verified step (no
                 # re-performed confirmed writes); its result was pre-loaded.
-                if resume_from and step_index < resume_from:
+                if resume_from is not None and step_index < resume_from:
                     continue
                 result = self._run_step(
                     step,
@@ -945,24 +1115,41 @@ class Replayer:
                     run_dir=run_dir,
                     new_crops=new_crops,
                 )
+                post_action_refusal = self._workflow_snapshot_refusal(workflow)
+                if post_action_refusal is not None:
+                    prior_error = (
+                        f"; earlier result: {result.error}" if result.error else ""
+                    )
+                    result.ok = False
+                    result.safety_halt = True
+                    result.failure_category = (
+                        "governed_refusal"
+                        if self.governed_authorization is not None
+                        else "safety_halt"
+                    )
+                    result.error = (
+                        f"{post_action_refusal}; the action result was checked, "
+                        f"but the workflow changed during delivery{prior_error}"
+                    )
                 report.results.append(result)
                 self._account_result(report, result)
                 if durable_run is not None:
                     self._sync_durable_audit(durable_run, report)
                     # Tier-3: verified step -> checkpoint; halt -> pending
                     # escalation (resumable from the last checkpoint).
-                    durable_run.record(
-                        step_index,
-                        step,
-                        result,
-                        params,
-                        workflow=workflow,
-                        transition_observation=(
-                            self._attended_transition_observation()
-                            if not result.ok
-                            else None
-                        ),
-                    )
+                    if post_action_refusal is None:
+                        durable_run.record(
+                            step_index,
+                            step,
+                            result,
+                            params,
+                            workflow=workflow,
+                            transition_observation=(
+                                self._attended_transition_observation()
+                                if not result.ok
+                                else None
+                            ),
+                        )
                 if not result.ok:
                     break
 
@@ -1502,6 +1689,7 @@ class Replayer:
                     depth=0,
                 )
             self._raise_on_governed_asset_mutation()
+            self._raise_on_workflow_snapshot_mutation(workflow)
             report.success = True
             if report.terminal_outcome is None:
                 # Fell off the top graph with no explicit terminal: a clean,
@@ -1512,7 +1700,13 @@ class Replayer:
             report.terminal_outcome = halt.outcome
             # Durably PAUSE (never just die): capture WHERE we stopped so an
             # approved resume can RESTORE the interpreter from here.
-            if self._program_durable is not None:
+            # A caller callback can mutate the live workflow. Never persist a
+            # new resumable cursor under semantics that differ from the exact
+            # run-entry snapshot. The report still records the refusal.
+            if (
+                self._program_durable is not None
+                and self._workflow_snapshot_refusal(workflow) is None
+            ):
                 self._record_program_pause(halt, report, workflow=workflow)
             report.results.append(
                 StepResult(
@@ -1630,6 +1824,7 @@ class Replayer:
 
             if state.kind is StateKind.TERMINAL:
                 self._raise_on_governed_asset_mutation()
+                self._raise_on_workflow_snapshot_mutation(workflow)
                 outcome = state.outcome or "success"
                 report.terminal_outcome = outcome
                 if outcome == "success":
@@ -1688,12 +1883,15 @@ class Replayer:
             # A branch performs no action: it picks an outgoing edge purely by
             # guard (evaluated on the current frame). No matching edge is a
             # fail-safe HALT unless the state routes to an exception handler.
-            nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
+            nxt = self._select_transition(
+                state, workflow=workflow, params=params, bundle_dir=bundle_dir
+            )
             if nxt is None:
                 return self._on_state_failure(
                     state,
                     f"branch state '{state.id}' has no transitions to follow "
                     "— run aborted",
+                    workflow=workflow,
                 )
             return nxt
 
@@ -1717,6 +1915,7 @@ class Replayer:
                     state,
                     f"subflow_call state '{state.id}' names undefined subflow "
                     f"'{state.subflow}' — run aborted",
+                    workflow=workflow,
                 )
             self._walk_graph(
                 sub,
@@ -1730,7 +1929,9 @@ class Replayer:
                 new_crops=new_crops,
                 depth=depth + 1,
             )
-            return self._select_transition(state, params=params, bundle_dir=bundle_dir)
+            return self._select_transition(
+                state, workflow=workflow, params=params, bundle_dir=bundle_dir
+            )
 
         raise _ProgramHalt(
             "halt", f"state '{state.id}' has unsupported kind {state.kind!r}"
@@ -1759,7 +1960,9 @@ class Replayer:
         # confirmed consequential write is never re-performed. Keyed on the
         # resolved effect contract hashes recorded in the completed-effect ledger.
         if self._skip_completed_effect_state(state, params, report):
-            return self._select_transition(state, params=params, bundle_dir=bundle_dir)
+            return self._select_transition(
+                state, workflow=workflow, params=params, bundle_dir=bundle_dir
+            )
         ctx = self._build_graph_ctx(state, graph)
         # Keep the exact validated interpreter cursor from before any backend,
         # vision, overlay, or verifier callback. A callback can corrupt the
@@ -1776,28 +1979,34 @@ class Replayer:
             new_crops=new_crops,
             graph_ctx=ctx,
         )
-        if result.ok:
+        try:
             post_action_refusal = self._active_program_frame_refusal(
                 workflow,
                 params,
                 action_step,
                 self._governed_base_params or {},
             )
-            if post_action_refusal is None:
-                post_action_refusal = self._workflow_snapshot_refusal(workflow)
-            if post_action_refusal is not None:
-                result.ok = False
-                result.safety_halt = True
-                result.failure_category = (
-                    "governed_refusal"
-                    if self.governed_authorization is not None
-                    else "safety_halt"
-                )
-                result.error = (
-                    f"{post_action_refusal}; the action result was checked, "
-                    "but the program changed during delivery; no later state "
-                    "was executed"
-                )
+        except Exception as exc:  # noqa: BLE001 - mutated interpreter boundary
+            post_action_refusal = (
+                "program frame validation failed closed after delivery "
+                f"({type(exc).__name__})"
+            )
+        if post_action_refusal is None:
+            post_action_refusal = self._workflow_snapshot_refusal(workflow)
+        if post_action_refusal is not None:
+            prior_error = f"; earlier result: {result.error}" if result.error else ""
+            result.ok = False
+            result.safety_halt = True
+            result.failure_category = (
+                "governed_refusal"
+                if self.governed_authorization is not None
+                else "safety_halt"
+            )
+            result.error = (
+                f"{post_action_refusal}; the action result was checked, "
+                "but the program changed during delivery; no later state "
+                f"was executed{prior_error}"
+            )
         report.results.append(result)
         self._account_result(report, result)
         if self._program_durable is not None:
@@ -1828,7 +2037,9 @@ class Replayer:
         # selecting an outgoing guarded edge: predicate evaluation can halt,
         # but the already-performed write must still enter the effect ledger.
         self._record_program_checkpoint(state, result, params, report)
-        nxt = self._select_transition(state, params=params, bundle_dir=bundle_dir)
+        nxt = self._select_transition(
+            state, workflow=workflow, params=params, bundle_dir=bundle_dir
+        )
         return nxt
 
     def _exec_loop_state(
@@ -1859,6 +2070,7 @@ class Replayer:
                 state,
                 f"loop state '{state.id}' body subflow '{loop.body}' is not "
                 "defined — run aborted",
+                workflow=workflow,
             )
         rows = self._resolve_worklist(state, loop, workflow, worklists)
         if len(rows) > loop.max_iterations:
@@ -1866,6 +2078,7 @@ class Replayer:
                 state,
                 f"loop state '{state.id}' worklist has {len(rows)} rows, "
                 f"exceeding max_iterations={loop.max_iterations} — run aborted",
+                workflow=workflow,
             )
         for i, row in enumerate(rows):
             iter_params = {**params, **row}
@@ -1887,11 +2100,16 @@ class Replayer:
                     rows=rows,
                 ),
             )
-        return self._select_transition(state, params=params, bundle_dir=bundle_dir)
+        return self._select_transition(
+            state, workflow=workflow, params=params, bundle_dir=bundle_dir
+        )
 
-    def _on_state_failure(self, state: State, reason: str) -> str:
+    def _on_state_failure(
+        self, state: State, reason: str, *, workflow: Workflow
+    ) -> str:
         """A non-action state hit an unrecoverable condition: route to its
         ``on_exception`` handler if it has one, else HALT the run."""
+        self._raise_on_workflow_snapshot_mutation(workflow)
         if state.on_exception is not None:
             return state.on_exception
         raise _ProgramHalt("halt", reason)
@@ -1923,6 +2141,7 @@ class Replayer:
         self,
         state: State,
         *,
+        workflow: Workflow,
         params: dict[str, str],
         bundle_dir: Path,
     ) -> Optional[str]:
@@ -1935,17 +2154,20 @@ class Replayer:
         edge). Screenshots only when a guard actually needs a frame, so a
         degenerate all-unconditional chain replays with no extra settles (the
         byte-identical linear lift)."""
+        self._raise_on_workflow_snapshot_mutation(workflow)
         transitions = state.transitions
         if not transitions:
             return None
         if all(t.guard is None for t in transitions):
             return transitions[0].target
         frame = self.vision.wait_settled(self.backend)
+        self._raise_on_workflow_snapshot_mutation(workflow)
         for t in transitions:
             matched = t.guard is None or self._predicate_holds(
                 t.guard, frame, bundle_dir, params
             )
             self._raise_on_governed_asset_mutation()
+            self._raise_on_workflow_snapshot_mutation(workflow)
             if matched:
                 return t.target
         raise _ProgramHalt(
@@ -2317,6 +2539,15 @@ class Replayer:
         caller persists that selected target in a transition receipt before
         resume, so neither the source action nor its edge selection is repeated.
         """
+        # This observation-only continuation runs outside ``run()``. Install
+        # the same exact semantic snapshot before its first vision/effect
+        # callback so a callback cannot rewrite an outgoing edge and then have
+        # that edge committed into the attended transition receipt.
+        self._execution_snapshot_required = True
+        try:
+            self._execution_workflow_snapshot = workflow.model_copy(deep=True)
+        except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
+            self._execution_workflow_snapshot = None
         graph = self._resolve_graph(workflow, graph_id)
         state = graph.states.get(state_id)
         if state is None or state.kind is not StateKind.ACTION or state.step is None:
@@ -2360,6 +2591,12 @@ class Replayer:
         bundle_dir: Path,
     ) -> Optional[str]:
         """Select and prove one exact successor for an attended action state."""
+        if not self._execution_snapshot_required:
+            self._execution_snapshot_required = True
+            try:
+                self._execution_workflow_snapshot = workflow.model_copy(deep=True)
+            except Exception:  # noqa: BLE001 - mutable caller-owned model boundary
+                self._execution_workflow_snapshot = None
         graph = self._resolve_graph(workflow, graph_id)
         state = graph.states.get(state_id)
         if state is None or state.kind is not StateKind.ACTION or state.step is None:
@@ -2368,7 +2605,7 @@ class Replayer:
             )
         try:
             target = self._select_transition(
-                state, params=params, bundle_dir=bundle_dir
+                state, workflow=workflow, params=params, bundle_dir=bundle_dir
             )
         except _ProgramHalt as exc:
             raise StateDiverged(
@@ -2764,6 +3001,7 @@ class Replayer:
                 )
                 if (
                     source_rows is None
+                    or len(source_rows) > loop.max_iterations
                     or cursor.rows != source_rows
                     or cursor.row_index < 0
                     or cursor.row_index >= len(source_rows)
@@ -2895,14 +3133,19 @@ class Replayer:
             if is_leaf:
                 # The verified state: re-drive from its SUCCESSOR (never re-run
                 # the verified state itself).
+                self._raise_on_workflow_snapshot_mutation(workflow)
                 nxt = (
                     attended_transition.target_state_id
                     if attended_transition is not None
                     else self._select_transition(
-                        state, params=params, bundle_dir=bundle_dir
+                        state,
+                        workflow=workflow,
+                        params=params,
+                        bundle_dir=bundle_dir,
                     )
                 )
                 if nxt is not None:
+                    self._raise_on_workflow_snapshot_mutation(workflow)
                     live["state_id"] = nxt
                     self._run_states_from(
                         graph,
@@ -2964,12 +3207,12 @@ class Replayer:
                         ),
                     )
                 nxt = self._select_transition(
-                    state, params=params, bundle_dir=bundle_dir
+                    state, workflow=workflow, params=params, bundle_dir=bundle_dir
                 )
             else:
                 # subflow_call: continue after the call once the child returned.
                 nxt = self._select_transition(
-                    state, params=params, bundle_dir=bundle_dir
+                    state, workflow=workflow, params=params, bundle_dir=bundle_dir
                 )
             if nxt is not None:
                 live["state_id"] = nxt
@@ -3793,9 +4036,14 @@ class Replayer:
             result.ok = False
             result.safety_halt = True
             result.failure_category = "safety_halt"
+            admission = (
+                "no further action was admitted after the earlier input edge"
+                if result.delivery_attempted is True
+                else "no action was admitted"
+            )
             result.error = (
                 f"Structural safety refusal for step '{step.id}' "
-                f"({step.intent}): {exc} — no action was admitted"
+                f"({step.intent}): {exc} — {admission}"
             )
         except Exception as exc:  # defensive: report, don't crash the run
             self._cancel_guarded_coordinate()
@@ -5499,6 +5747,17 @@ class Replayer:
         if current != admitted:
             return "workflow semantics changed after run admission"
         return None
+
+    def _raise_on_workflow_snapshot_mutation(self, workflow: Workflow) -> None:
+        """Stop a program edge or terminal when admitted semantics changed."""
+
+        refusal = self._workflow_snapshot_refusal(workflow)
+        if refusal is not None:
+            raise _ProgramHalt(
+                "halt",
+                f"{refusal}; no later program state was executed",
+                safety=True,
+            )
 
     def _delivery_authorization_refusal(
         self,

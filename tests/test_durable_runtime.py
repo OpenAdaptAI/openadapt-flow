@@ -16,6 +16,8 @@ network, no model call. The theses these pin:
 
 from __future__ import annotations
 
+import pytest
+
 from openadapt_flow.ir import (
     ActionKind,
     Postcondition,
@@ -26,10 +28,12 @@ from openadapt_flow.ir import (
 from openadapt_flow.runtime.durable import (
     ApprovalRecord,
     CheckpointStore,
+    StateDiverged,
     bundle_version,
     resume,
     resume_point,
 )
+from openadapt_flow.runtime.durable.controller import resumed_step_results
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
@@ -176,6 +180,13 @@ def test_clean_run_checkpoints_each_step_and_completes(tmp_path):
     assert store.read_pending() is None
     # $0: no model calls.
     assert report.model_calls == 0
+
+
+def test_linear_resume_never_synthesizes_missing_verified_history(tmp_path):
+    workflow = _three_step_workflow(with_effects=False)
+
+    with pytest.raises(StateDiverged, match="exact verified checkpoint"):
+        resumed_step_results(tmp_path / "empty-run", workflow, 1)
 
 
 # -- halt mid-way: pending escalation + prior checkpoints -------------------

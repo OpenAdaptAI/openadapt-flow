@@ -213,6 +213,20 @@ def resume(
 
     # -- linear resume (unchanged control flow; now gated by approval) --------
     start_index = resume_point(run_dir, key=key)
+    from openadapt_flow.runtime.replayer import _DURABLE_RESUME_AUTHORITY
+
+    effective_run_id = replayer._admit_durable_resume(
+        _DURABLE_RESUME_AUTHORITY,
+        mode="linear",
+        workflow=workflow,
+        run_dir=run_dir,
+        bundle_dir=resolved_bundle,
+        run_id=(manifest.run_id if manifest is not None else None),
+        params=resolved_params,
+        worklists=resolved_worklists,
+        resume_from=start_index,
+        resume_program=None,
+    )
     replayer.durable = True
     return replayer.run(
         workflow,
@@ -222,7 +236,7 @@ def resume(
         run_dir=run_dir,
         save_healed_to=(Path(resolved_healed) if resolved_healed else None),
         resume_from=start_index,
-        run_id=(manifest.run_id if manifest is not None else None),
+        run_id=effective_run_id,
         execution_target_kind=execution_target_kind,
         prior_screenshots_may_leave_box=(
             manifest.screenshots_may_leave_box if manifest is not None else False
@@ -297,7 +311,20 @@ def _resume_program(
         # the already-confirmed effects still hold (raises StateDiverged).
         replayer.revalidate_program_checkpoint(checkpoint, store.completed_effects())
 
-    store.clear_pending()
+    from openadapt_flow.runtime.replayer import _DURABLE_RESUME_AUTHORITY
+
+    effective_run_id = replayer._admit_durable_resume(
+        _DURABLE_RESUME_AUTHORITY,
+        mode="program",
+        workflow=workflow,
+        run_dir=store.run_dir,
+        bundle_dir=bundle_dir,
+        run_id=run_id,
+        params=params,
+        worklists=worklists,
+        resume_from=None,
+        resume_program=checkpoint,
+    )
     replayer.durable = True
     return replayer.run(
         workflow,
@@ -307,7 +334,7 @@ def _resume_program(
         run_dir=store.run_dir,
         save_healed_to=(Path(save_healed_to) if save_healed_to else None),
         resume_program=checkpoint,
-        run_id=run_id,
+        run_id=effective_run_id,
         execution_target_kind=execution_target_kind,
         prior_screenshots_may_leave_box=(
             manifest.screenshots_may_leave_box if manifest is not None else False

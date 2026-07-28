@@ -2573,6 +2573,56 @@ def test_post_focus_ocr_ambiguity_remains_a_no_keyboard_refusal(
         assert backend.select_calls == []
 
 
+def test_post_focus_structural_refusal_reports_the_prior_input_edge(bundle, run_dir):
+    from openadapt_flow.backend import StructuralResolutionRefused
+
+    class PostFocusStructuralRefusalReplayer(Replayer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.revalidations = 0
+
+        def _revalidate_consequential_actuation(self, *args, **kwargs):
+            self.revalidations += 1
+            if self.revalidations == 2:
+                raise StructuralResolutionRefused("synthetic stale structural target")
+            return super()._revalidate_consequential_actuation(*args, **kwargs)
+
+    frame = make_png()
+    backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+    vision = FakeVision()
+    vision.template_results = _selection_matches()
+    workflow = Workflow(
+        name="remote-type",
+        surface="rdp",
+        execution_mode="external",
+        steps=[
+            Step(
+                id="t1",
+                intent="type the governed value",
+                action=ActionKind.TYPE,
+                text="Massachusetts",
+                anchor=click_step().anchor,
+                risk="irreversible",
+            )
+        ],
+    )
+
+    report = PostFocusStructuralRefusalReplayer(backend, vision=vision).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert backend.actions == [("click", 110, 105, False)]
+    assert result.delivery_attempted is True
+    assert result.safety_halt is True
+    assert "no further action was admitted after the earlier input edge" in (
+        result.error or ""
+    )
+
+
 def test_remote_selection_verifies_committed_value_in_live_resolved_region(
     bundle, run_dir
 ):

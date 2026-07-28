@@ -206,17 +206,68 @@ def test_program_resume_rejects_non_action_verified_leaf_before_input(tmp_path, 
     )
     backend = FakeBackend()
 
-    report = Replayer(backend, vision=FakeVision()).run(
-        workflow,
-        params={},
-        bundle_dir=tmp_path / "bundle",
-        run_dir=tmp_path / "run",
-        resume_program=checkpoint,
-    )
+    with pytest.raises(_ProgramHalt, match="verified leaf"):
+        Replayer(backend, vision=FakeVision())._resume_program_state(
+            checkpoint,
+            workflow=workflow,
+            worklists={},
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run",
+            report=RunReport(workflow_name="w", started_at="now"),
+            new_crops={},
+        )
 
-    assert report.success is False
     assert backend.actions == []
-    assert "verified leaf" in (report.results[-1].error or "")
+
+
+def test_public_program_resume_requires_authenticated_durable_admission(tmp_path):
+    step = Step(id="key", intent="press", action=ActionKind.KEY, key="A")
+    workflow = Workflow(
+        name="w",
+        program=ProgramGraph(
+            entry="action",
+            states={"action": State(id="action", kind=StateKind.ACTION, step=step)},
+        ),
+    )
+    checkpoint = ProgramCheckpoint(
+        workflow_name="w",
+        seq=1,
+        verified_state_id="action",
+        step_id="key",
+        frames=[GraphFrame(graph_id="__program__", state_id="action")],
+        bound_params={},
+    )
+    backend = FakeBackend()
+
+    with pytest.raises(ApprovalRequired, match="authenticated resume API"):
+        Replayer(backend, vision=FakeVision()).run(
+            workflow,
+            params={},
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run",
+            resume_program=checkpoint,
+        )
+
+    assert backend.actions == []
+
+
+def test_public_linear_resume_requires_authenticated_durable_admission(tmp_path):
+    workflow = Workflow(
+        name="w",
+        steps=[Step(id="key", intent="press", action=ActionKind.KEY, key="A")],
+    )
+    backend = FakeBackend()
+
+    with pytest.raises(ApprovalRequired, match="authenticated resume API"):
+        Replayer(backend, vision=FakeVision()).run(
+            workflow,
+            params={},
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run",
+            resume_from=1,
+        )
+
+    assert backend.actions == []
 
 
 def test_program_resume_rejects_malformed_loop_ancestry_before_input(tmp_path):
@@ -265,17 +316,179 @@ def test_program_resume_rejects_malformed_loop_ancestry_before_input(tmp_path):
     )
     backend = FakeBackend()
 
+    with pytest.raises(_ProgramHalt, match="loop cursor"):
+        Replayer(backend, vision=FakeVision())._resume_program_state(
+            checkpoint,
+            workflow=workflow,
+            worklists={},
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run",
+            report=RunReport(workflow_name="w", started_at="now"),
+            new_crops={},
+        )
+
+    assert backend.actions == []
+
+
+def test_program_resume_rejects_worklist_over_loop_bound_before_input(tmp_path):
+    body_step = Step(id="body-key", intent="body", action=ActionKind.KEY, key="B")
+    workflow = Workflow(
+        name="w",
+        program=ProgramGraph(
+            entry="loop",
+            states={
+                "loop": State(
+                    id="loop",
+                    kind=StateKind.LOOP,
+                    loop=LoopSpec(relation="queue", body="body", max_iterations=1),
+                )
+            },
+        ),
+        subflows={
+            "body": ProgramGraph(
+                entry="body",
+                states={
+                    "body": State(id="body", kind=StateKind.ACTION, step=body_step)
+                },
+            )
+        },
+        data_sources={
+            "queue": Relation(name="queue", rows=[{"row": "1"}, {"row": "2"}])
+        },
+    )
+    checkpoint = ProgramCheckpoint(
+        workflow_name="w",
+        seq=1,
+        verified_state_id="body",
+        step_id="body-key",
+        frames=[
+            GraphFrame(graph_id="__program__", state_id="loop"),
+            GraphFrame(
+                graph_id="body",
+                state_id="body",
+                params={"row": "1"},
+                loop=LoopCursor(
+                    loop_state_id="loop",
+                    relation="queue",
+                    row_index=0,
+                    rows=[{"row": "1"}, {"row": "2"}],
+                ),
+            ),
+        ],
+        bound_params={"row": "1"},
+    )
+    backend = FakeBackend()
+
+    with pytest.raises(_ProgramHalt, match="authorized worklist"):
+        Replayer(backend, vision=FakeVision())._resume_program_state(
+            checkpoint,
+            workflow=workflow,
+            worklists={},
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run",
+            report=RunReport(workflow_name="w", started_at="now"),
+            new_crops={},
+        )
+
+    assert backend.actions == []
+
+
+def test_delivery_callback_cannot_remove_a_required_postcondition(tmp_path):
+    workflow = Workflow(
+        name="linear-mutation",
+        steps=[
+            Step(
+                id="key",
+                intent="submit",
+                action=ActionKind.KEY,
+                key="Enter",
+                expect=[
+                    Postcondition(
+                        kind=PostconditionKind.TEXT_PRESENT,
+                        text="Saved",
+                    )
+                ],
+            )
+        ],
+    )
+
+    class MutatingBackend(FakeBackend):
+        def press(self, key):
+            super().press(key)
+            workflow.steps[0].expect.clear()
+
+    backend = MutatingBackend()
     report = Replayer(backend, vision=FakeVision()).run(
         workflow,
-        params={},
         bundle_dir=tmp_path / "bundle",
         run_dir=tmp_path / "run",
-        resume_program=checkpoint,
     )
 
     assert report.success is False
-    assert backend.actions == []
-    assert "loop cursor" in (report.results[-1].error or "")
+    assert backend.actions == [("press", "Enter")]
+    assert report.results[0].safety_halt is True
+    assert "workflow semantics changed" in (report.results[0].error or "")
+
+
+def test_guard_callback_cannot_replace_the_selected_program_target(tmp_path):
+    workflow = Workflow(
+        name="transition-mutation",
+        program=ProgramGraph(
+            entry="first",
+            states={
+                "first": State(
+                    id="first",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="first-step",
+                        intent="first",
+                        action=ActionKind.KEY,
+                        key="A",
+                    ),
+                    transitions=[
+                        Transition(
+                            target="later",
+                            guard=Predicate(
+                                kind=PredicateKind.TEXT_PRESENT, text="ready"
+                            ),
+                        )
+                    ],
+                ),
+                "later": State(
+                    id="later",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="later-step",
+                        intent="later",
+                        action=ActionKind.KEY,
+                        key="L",
+                    ),
+                ),
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+    )
+
+    class MutatingVision(FakeVision):
+        def wait_settled(self, backend, **kwargs):
+            if self.settle_count == 2:
+                assert workflow.program is not None
+                workflow.program.states["first"].transitions[0].target = "done"
+            return super().wait_settled(backend, **kwargs)
+
+    backend = FakeBackend()
+    vision = MutatingVision()
+    vision.text_results["ready"] = (1, 1, 2, 2)
+    report = Replayer(backend, vision=vision).run(
+        workflow,
+        bundle_dir=tmp_path / "bundle",
+        run_dir=tmp_path / "run",
+    )
+
+    assert report.success is False
+    assert backend.actions == [("press", "A")]
+    assert report.results[-1].safety_halt is True
+    assert "workflow semantics changed" in (report.results[-1].error or "")
 
 
 def _patient_effect() -> Effect:

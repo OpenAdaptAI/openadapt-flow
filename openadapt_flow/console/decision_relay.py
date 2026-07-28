@@ -163,6 +163,19 @@ _ENGINE_DISPOSITION: dict[str, str] = {
 
 _ENGINE_ACTIONS = frozenset(_ENGINE_DISPOSITION)
 
+#: ``decision_action`` is the operator-facing action retained by the portable
+#: phone contract; ``action`` is the engine action the runner will execute.
+#: Both are signed. They must express one decision, not two independently
+#: trusted choices. A closed map makes a control-plane projection defect fail
+#: before the normal attended runtime receives any authority.
+_PORTABLE_TO_ENGINE_ACTION: dict[str, str] = {
+    "verify_and_resume": "continue",
+    "skip": "skip",
+    "reject": "reject",
+    "teach": "teach",
+    "escalate": "escalate",
+}
+
 #: The four terminal words the control plane accepts on acknowledgement.
 _ACK_RESULTS = frozenset({"accepted", "refused", "stale", "expired"})
 
@@ -397,9 +410,18 @@ def _validate_relay_shape(relay: Any) -> dict[str, Any]:
         )
     if relay.get("phase") != "paused":
         raise RelayRefused("the relayed decision is not bound to an open pause")
-    if relay.get("action") not in _ENGINE_ACTIONS:
+    action = relay.get("action")
+    decision_action = relay.get("decision_action")
+    if not isinstance(action, str) or action not in _ENGINE_ACTIONS:
         raise RelayRefused(
             "the relayed decision names an action the engine has no map for"
+        )
+    if (
+        not isinstance(decision_action, str)
+        or _PORTABLE_TO_ENGINE_ACTION.get(decision_action) != action
+    ):
+        raise RelayRefused(
+            "the relayed operator action does not match the engine action"
         )
     if not isinstance(relay.get("event_sequence"), int) or isinstance(
         relay.get("event_sequence"), bool

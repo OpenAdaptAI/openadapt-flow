@@ -384,6 +384,8 @@ def test_no_waiting_decision_is_not_an_error(tmp_path):
         {"local_revalidation_required": False},
         {"phase": "running"},
         {"action": "delete_everything"},
+        {"action": []},
+        {"decision_action": []},
         {"tenant_id": "tenant_someone_else"},
         {"runner_id": "runner_someone_else"},
     ],
@@ -394,6 +396,29 @@ def test_a_relay_that_claims_more_than_a_decision_is_refused(tmp_path, mutation)
     payload = {**_bound_relay_payload(run, item, _deployment()), **mutation}
     relay, _ = _relay(poll=(200, {"decision": _sign(payload)}))
     with pytest.raises(RelayRefused):
+        relay.poll(wait_s=0.0)
+
+
+@pytest.mark.parametrize(
+    ("decision_action", "action"),
+    [
+        ("verify_and_resume", "reject"),
+        ("skip", "continue"),
+        ("reject", "teach"),
+        ("teach", "escalate"),
+        ("escalate", "skip"),
+    ],
+)
+def test_a_signed_operator_action_cannot_name_a_different_engine_action(
+    tmp_path, decision_action, action
+):
+    """A signed relay still fails closed when its two action names disagree."""
+    run, item = _halted_run(tmp_path)
+    payload = _bound_relay_payload(run, item, _deployment())
+    payload.update(decision_action=decision_action, action=action)
+    relay, _ = _relay(poll=(200, {"decision": _sign(payload)}))
+
+    with pytest.raises(RelayRefused, match="operator action does not match"):
         relay.poll(wait_s=0.0)
 
 

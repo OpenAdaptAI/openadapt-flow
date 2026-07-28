@@ -119,6 +119,9 @@ class PublishReport:
     #: remote issuance refused). Not an error; the local console still serves
     #: them.
     not_projectable: tuple[str, ...] = ()
+    #: Pauses the control plane refused. Recorded rather than raised, so one
+    #: bad projection cannot make every other halt unreachable.
+    refused: tuple[str, ...] = ()
 
     @property
     def certain_count(self) -> int:
@@ -177,6 +180,11 @@ class DecisionSupervisor:
         self._deployment = deployment
         self._executor = executor
         self._now = now or (lambda: datetime.now(timezone.utc))
+        #: ``(task_id, capability_digest)`` pairs the control plane has already
+        #: accepted in this process. Not durable on purpose: a restarted
+        #: supervisor republishes, which is idempotent, rather than trusting a
+        #: file to say a remote surface still holds something.
+        self._confirmed: set[tuple[str, str]] = set()
 
     # -- scanning ---------------------------------------------------------
 
@@ -237,12 +245,29 @@ class DecisionSupervisor:
     # -- one cycle --------------------------------------------------------
 
     def publish_open_pauses(self, *, timeout_s: float = 15.0) -> PublishReport:
-        """Make every open pause answerable from the hosted surface."""
+        """Make every open pause answerable from the hosted surface.
+
+        One pause the control plane refuses must not silence the others. A
+        refusal is recorded per pause and the loop continues, because the
+        alternative -- letting it propagate -- would leave every OTHER halt in
+        the practice unreachable on a phone because of one bad projection.
+        """
         published: list[str] = []
         already: list[str] = []
         unknown: list[str] = []
         not_projectable: list[str] = []
+        refused: list[str] = []
+        confirmed: set[tuple[str, str]] = set()
         for pause in self.open_pauses():
+            key = (pause.task_id, pause.capability_digest)
+            if key in self._confirmed:
+                # Already accepted at this exact capability, and the signed task
+                # is a deterministic function of it, so re-POSTing would send
+                # identical bytes for no new information. A pause can stay open
+                # for hours; publishing it every cycle is noise, not safety.
+                already.append(pause.task_id)
+                confirmed.add(key)
+                continue
             try:
                 outcome: PublishOutcome = self._relay.publish(
                     pause.run_dir, pause.item, timeout_s=timeout_s
@@ -253,17 +278,29 @@ class DecisionSupervisor:
                 # satisfy. The local console still serves it.
                 not_projectable.append(pause.task_id)
                 continue
+            except RelayRefused:
+                refused.append(pause.task_id)
+                continue
             if outcome.state is PublishState.PUBLISHED:
                 published.append(pause.task_id)
+                confirmed.add(key)
             elif outcome.state is PublishState.ALREADY_PUBLISHED:
                 already.append(pause.task_id)
+                confirmed.add(key)
             else:
+                # Uncertain. Deliberately NOT confirmed, so the next cycle
+                # re-POSTs the identical idempotent projection and either
+                # resolves the uncertainty or leaves it unchanged.
                 unknown.append(pause.task_id)
+        # Rebuilt rather than updated, so a pause that closed stops being
+        # remembered and a later pause reusing its identity is republished.
+        self._confirmed = confirmed
         return PublishReport(
             published=tuple(published),
             already_published=tuple(already),
             unknown=tuple(unknown),
             not_projectable=tuple(not_projectable),
+            refused=tuple(refused),
         )
 
     def serve_once(

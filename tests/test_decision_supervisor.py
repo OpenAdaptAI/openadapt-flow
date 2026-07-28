@@ -227,6 +227,81 @@ def test_a_run_that_is_not_durably_paused_is_never_published(tmp_path):
     assert supervisor.open_pauses() == []
 
 
+class _ScriptedTransport(FakeTransport):
+    """A transport whose /tasks response changes per call."""
+
+    def __init__(self, task_responses: list, **responses) -> None:
+        super().__init__(responses)
+        self.task_responses = list(task_responses)
+
+    def post(self, path, payload, *, timeout_s):
+        self.calls.append((path, payload))
+        if path.endswith("/tasks"):
+            response = self.task_responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+        return super().post(path, payload, timeout_s=timeout_s)
+
+
+def test_one_refused_pause_does_not_silence_the_others(tmp_path):
+    """The failure that would leave a whole practice's halts unreachable."""
+    runs = tmp_path / "runs"
+    bundles = tmp_path / "bundles"
+    _halted_run(runs, bundles, "one")
+    _halted_run(runs, bundles, "two")
+    deployment = _deployment()
+    transport = _ScriptedTransport(
+        [
+            (400, {"error": "the projection is invalid"}),
+            (200, {"accepted": True, "created": True, "task_id": "task_x"}),
+        ]
+    )
+    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
+    supervisor = DecisionSupervisor(runs, relay=relay, deployment=deployment)
+
+    report = supervisor.publish_open_pauses()
+
+    assert len(report.refused) == 1
+    assert len(report.published) == 1
+    # Both were attempted; the refusal did not stop the loop.
+    assert len([p for p, _ in transport.calls if p.endswith("/tasks")]) == 2
+
+
+def test_an_accepted_pause_is_not_republished_every_cycle(tmp_path):
+    """An open pause can last hours; re-POSTing identical bytes is noise."""
+    runs = tmp_path / "runs"
+    _halted_run(runs, tmp_path / "bundles", "one")
+    supervisor, transport = _supervisor(
+        runs, tasks=(200, {"accepted": True, "created": True, "task_id": "task_x"})
+    )
+
+    first = supervisor.publish_open_pauses()
+    second = supervisor.publish_open_pauses()
+
+    assert len(first.published) == 1
+    assert len(second.already_published) == 1
+    assert len([p for p, _ in transport.calls if p.endswith("/tasks")]) == 1
+
+
+def test_an_uncertain_pause_is_republished_because_the_post_is_idempotent(tmp_path):
+    """Uncertainty is never memoized as success."""
+    runs = tmp_path / "runs"
+    _halted_run(runs, tmp_path / "bundles", "one")
+    deployment = _deployment()
+    transport = _ScriptedTransport(
+        [
+            RelayUncertain("connection reset"),
+            (200, {"accepted": True, "created": True, "task_id": "task_x"}),
+        ]
+    )
+    relay = DecisionRelay(transport, token=TOKEN, deployment=deployment)
+    supervisor = DecisionSupervisor(runs, relay=relay, deployment=deployment)
+
+    assert len(supervisor.publish_open_pauses().unknown) == 1
+    assert len(supervisor.publish_open_pauses().published) == 1
+
+
 # ---------------------------------------------------- resolving an answer
 
 

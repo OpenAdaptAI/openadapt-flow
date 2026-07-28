@@ -549,6 +549,8 @@ def test_happy_path_click_then_param_type(bundle, run_dir):
     assert report.results[0].before_png == "steps/s1_before.png"
     assert report.results[0].after_png == "steps/s1_after.png"
     assert report.results[0].postconditions_ok is True
+    assert report.results[1].input_verified is True
+    assert report.results[1].postconditions_ok is None
     assert report.results[0].elapsed_ms > 0
 
 

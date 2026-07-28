@@ -5649,7 +5649,13 @@ class Replayer:
                     if self._governed_asset_mutation is not None:
                         postconditions_ok = False
                         failed.append(self._governed_asset_mutation)
-                    result.postconditions_ok = postconditions_ok
+                    # ``postconditions_ok`` records the explicit ``expect``
+                    # contract only.  Input readback has its own typed field
+                    # and receipt evidence.  An empty predicate list is not an
+                    # implicit explicit-predicate pass.
+                    result.postconditions_ok = (
+                        postconditions_ok if step.expect else None
+                    )
                     if result.postcondition_drift_rescues:
                         # The rescue descriptions embed OCR'd on-screen text
                         # (postcondition literals) — scrub PHI before it hits the

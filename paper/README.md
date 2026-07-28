@@ -8,43 +8,111 @@ passes, `make -C paper` builds both PDFs with zero LaTeX warnings, and
 `sh paper/make_arxiv_tarball.sh` produces a verified submission tarball.
 `paper/ARTIFACT_CHECKLIST.md` records the evidence item by item.
 
+**Mechanically ready is not scientifically finished.** The build gate is green
+and the constants are bound to artifacts, but the draft's scope is itself an
+open question — see "Scope decision" immediately below. Do not read the green
+gate as "ready to submit anywhere."
+
 ---
 
-## Founder decisions (the only things left before submission)
+## Scope decision (open, and it precedes the other five)
 
-These five require a human decision and cannot be discharged by an agent. Every
-other checklist item is either closed with evidence or is an open *evidence*
-gap that requires new experiments, not a decision.
+A separate line of work has produced an optimization result that the current
+draft does not contain: under a sound out-of-band system-of-record oracle,
+selecting for a screen-based proxy reward raised apparent success while true
+persisted correctness fell. That result, plus a planned fine-tuning arm, could
+either be **merged into this paper** (one strong submission) or **kept as a
+second paper** with this one as the instrument.
 
+The two shapes are not small variants of each other:
+
+- **Merged.** The claim becomes a statement about optimization, this system
+  becomes the *apparatus* rather than the subject, and the breadth material —
+  the cross-system study, the cost/latency comparison, the substrate
+  qualifications, the resolution-ladder system description — is **cut**, not
+  carried. Roughly half the current draft goes.
+- **Separate.** This paper stays broadly as written and targets a
+  software-engineering venue; the optimization result becomes its own submission
+  and cites this one for the metric.
+
+The comparison of both routes, with verified venue dates, costs, the experiments
+each requires, and the gates that would kill either cheaply, is in the private
+decision memo `.private/PAPER_PLAN_ONE_SUBMISSION_2026-07-27.md`. **That memo
+recommends; it does not decide.** Every recommendation below is conditioned on
+which shape is chosen.
+
+---
+
+## Founder decisions (the things left before submission)
+
+These require a human decision and cannot be discharged by an agent. Every other
+checklist item is either closed with evidence or is an open *evidence* gap that
+requires new experiments, not a decision.
+
+0. **Paper scope and portfolio: one merged paper or two.** See "Scope decision"
+   above. This one comes first because it changes decisions 2 and 5 and changes
+   what the draft even is. It is not resolved here.
 1. **Authorship.** Final author list, order, ORCIDs, affiliations, and
    corresponding author. Currently `Richard Abrich, OpenAdapt.AI (MLDSAI Inc.),
    richard@openadapt.ai` (`paper/main.tex:36`, also `pdfauthor`). If the list
-   changes, update both.
+   changes, update both. *Relevant to decision 0:* both adversarial reviews and
+   both planning documents identify single, unaffiliated, commercially
+   interested authorship as a structural disadvantage at every candidate venue.
+   Dropping the human-subjects study from the plan removes the IRB dependency
+   that previously made an academic co-author a heavier ask, so the cost of that
+   conversation is now lower than it was. Still a decision, not a recommendation.
 2. **arXiv primary category, cross-lists, and endorsement.** Recommendation and
-   justification below. arXiv requires endorsement for a first submission to a
-   category; check your account before the deadline you care about, because
-   obtaining endorsement is not instant.
-3. **arXiv licence.** Recommendation below.
+   justification below — **it is now a rule keyed on decision 0, not a single
+   category.** arXiv requires endorsement for a first submission to a category,
+   and endorsement is **per subject class**, so a later change of primary
+   category can require a fresh endorsement. Check the account's standing for
+   *both* candidate primaries in one sitting; obtaining endorsement is not
+   instant.
+3. **arXiv licence.** Recommendation below. Unaffected by decision 0.
 4. **Funding and conflict-of-interest statement.** The paper currently has none.
    The author develops the evaluated system; `06_limitations.tex` already says
    so in the threats-to-validity paragraph, but a formal COI/funding statement
    is a separate, venue-facing decision (footnote on page 1 vs. an unnumbered
-   section before the bibliography).
-5. **Venue intent.** The workshop condensation
-   (`paper/workshop/main.tex`) is written venue-neutral and uses `article`.
-   Retarget its document class once a specific workshop is chosen; the full
-   report is formatted for arXiv rather than for any camera-ready style.
+   section before the bibliography). *Two additions if decision 0 goes to the
+   merged paper:* any donated or credited compute used for the fine-tuning arm
+   must be named in the funding statement, and the merged paper's own bias
+   mitigation — this system does not appear as a winning arm — belongs in the
+   COI paragraph, because it is the reason a favourable result was left out.
+5. **Venue intent.** The workshop condensation (`paper/workshop/main.tex`) is
+   written venue-neutral and uses `article`; retarget its document class once a
+   specific workshop is chosen, and **confirm the workshop is non-archival**
+   before submitting, or it can create a dual-submission problem with a later
+   main-track version. The full report is formatted for arXiv rather than for
+   any camera-ready style. Verified deadlines and the reachability analysis are
+   in the private memo; the choice between the software-engineering route and
+   the machine-learning route follows from decision 0 and is not made here.
 
 ### Recommended arXiv categories
 
-- **Primary: `cs.SE` (Software Engineering).** The contribution is a systems and
-  evaluation one: a runtime that treats an out-of-band system-of-record read as a
-  first-class execution gate, and a reliability metric (silent incorrect success
-  jointly with over-halt) for automation. Its intellectual lineage is the
-  test-oracle problem, runtime verification, the end-to-end argument, and
-  transactional idempotency hazards. Both adversarial reviews independently
-  concluded the paper has little novel machine learning, so a machine-learning
-  primary would put it in front of the wrong reviewers.
+**This is a rule, not a category, because the right answer depends on decision 0.**
+
+The previous recommendation — `cs.SE` primary — rested on one stated premise:
+*"both adversarial reviews independently concluded the paper has little novel
+machine learning, so a machine-learning primary would put it in front of the
+wrong reviewers."* That premise is true of the draft as it stands and false of
+the merged paper. So the recommendation splits.
+
+#### Case 1 — posting the draft substantially as it is (including as a v1 preprint ahead of a later merged version)
+
+- **Primary: `cs.SE` (Software Engineering).** Unchanged, and for the original
+  reason. The contribution is a systems and evaluation one: a runtime that treats
+  an out-of-band system-of-record read as a first-class execution gate, and a
+  reliability metric (silent incorrect success jointly with over-halt) for
+  automation. Its intellectual lineage is the test-oracle problem, runtime
+  verification, the end-to-end argument, and transactional idempotency hazards.
+  There is no gradient anywhere in this draft; claiming a machine-learning
+  primary for it would be an overclaim, arXiv moderators do reclassify, and a
+  mis-primaried preprint is a poor first impression in precisely the community
+  the work is trying to persuade.
+- **Cross-list `cs.LG` (Machine Learning).** New, and worth it even in this case:
+  it puts v1 in front of the audience that will need to have seen it when the
+  optimization result lands, and it makes any later change of primary a smaller
+  step.
 - **Cross-list `cs.PL` (Programming Languages).** Justified, not decorative: the
   compiler performs inductive program synthesis from demonstrations with explicit
   quarantine of underdetermined induction, and the paper argues in Related Work
@@ -61,8 +129,39 @@ gap that requires new experiments, not a decision.
 - **Optional cross-list `cs.AI`.** Only if you want the computer-use-agent
   audience to see it. The paper measures against a computer-use agent baseline
   and argues that task-success benchmarks mismeasure reliability, which is a
-  message for that community — but the paper contributes no model or training
-  method, so this is reach, not fit.
+  message for that community — but this draft contributes no model or training
+  method, so it is reach, not fit.
+
+#### Case 2 — the merged paper, once the optimization result and a training arm are actually in it
+
+- **Primary: `cs.LG` (Machine Learning).** The headline becomes a statement about
+  *what optimization does to a policy* — reward misspecification, proxy-versus-
+  gold overoptimization, rejection-sampling fine-tuning. Its direct lineage is
+  the reward-misspecification and reward-model-overoptimization literature, which
+  lives in `cs.LG`. Those are the reviewers who can adjudicate whether a turndown
+  curve is real, whether the best-of-n parameterisation is applied correctly, and
+  whether the fine-tuning control is the right control; no software-engineering
+  reader can. Note this is a *promotion of the ML claim*, not a demotion of the
+  systems work: the oracle is what makes the ML result measurable at all.
+- **Not `cs.AI` primary.** arXiv's own taxonomy defers machine learning from
+  `cs.AI` to `cs.LG`. A Goodhart result is machine learning.
+- **Cross-list `cs.AI`** — and in the merged paper this stops being "reach." The
+  computer-use-agent community is the community whose evaluation and optimization
+  practice the paper criticises; it has to see it.
+- **Cross-list `cs.SE`** — the oracle, the coverage principle, the pinned
+  digest-verified environments, and the artifact discipline. Also the audience
+  for any software-engineering-venue version of the work.
+- **Drop `cs.PL` and `cs.HC`.** Both were justified by material the merged paper
+  cuts: `cs.PL` by the inductive-synthesis and quarantine argument, `cs.HC` by
+  the recording loop and the repair lifecycle. Once those sections are gone the
+  cross-lists are decorative, and a decorative cross-list is a small but real
+  credibility cost with the moderators.
+
+**Endorsement, in both cases.** Endorsement is per subject class. If the primary
+moves from `cs.SE` to `cs.LG` between a v1 preprint and the merged version, that
+can require a separate `cs.LG` endorsement, and obtaining one is not instant.
+Check the account's standing for both classes now rather than in the week of a
+deadline.
 
 ### Recommended licence
 
@@ -121,8 +220,12 @@ strips auxiliary files, and prints the tarball's SHA-256 and the source commit.
 
 Submission steps, in order:
 
-1. Close the five founder decisions above. Set the byline and `pdfauthor` in
-   `paper/main.tex` and `paper/workshop/main.tex` before building.
+1. Close the scope decision (0) and then the five founder decisions above. The
+   scope decision comes first: it determines the primary category, and if it goes
+   to the merged paper it changes the title, the abstract, and roughly half the
+   sections, so building a tarball before it is settled builds the wrong paper.
+   Set the byline and `pdfauthor` in `paper/main.tex` and
+   `paper/workshop/main.tex` before building.
 2. Confirm the paper CI workflow is green on the exact commit you intend to
    submit (`.github/workflows/paper.yml`). Do not assume a green run from an
    earlier commit still holds.

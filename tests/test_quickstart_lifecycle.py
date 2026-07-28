@@ -71,6 +71,13 @@ def test_resolve_wheel_requires_exactly_one_match(tmp_path):
         lifecycle._resolve_wheel(str(tmp_path / "*.whl"))
 
 
+def test_browser_lifecycle_installs_the_wheel_browser_extra(tmp_path):
+    lifecycle = _module()
+    wheel = tmp_path / "openadapt_flow-0-py3-none-any.whl"
+
+    assert lifecycle._browser_wheel_requirement(wheel) == f"{wheel}[browser]"
+
+
 def test_run_forces_utf8_for_child_cli_and_log(tmp_path, monkeypatch):
     lifecycle = _module()
     captured = {}

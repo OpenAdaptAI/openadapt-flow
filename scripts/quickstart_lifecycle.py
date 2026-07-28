@@ -79,6 +79,11 @@ def _console_script(root: Path) -> Path:
     )
 
 
+def _browser_wheel_requirement(wheel: Path) -> str:
+    """Install the browser capability used by every MockMed lifecycle."""
+    return f"{wheel}[browser]"
+
+
 def _load_report(path: Path) -> dict:
     if not path.is_file():
         raise AssertionError(f"missing machine-readable run report: {path}")
@@ -254,7 +259,13 @@ def run_lifecycle(
 
     try:
         _run(
-            [str(python), "-m", "pip", "install", str(wheel)],
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                _browser_wheel_requirement(wheel),
+            ],
             cwd=artifacts,
             env=env,
             log=logs / "01-install.log",

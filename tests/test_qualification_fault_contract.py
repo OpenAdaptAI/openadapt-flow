@@ -33,6 +33,8 @@ from openadapt_flow.ir import (
     ApiBinding,
     ApiIdentityBinding,
     EffectVerificationEvidence,
+    Postcondition,
+    PostconditionKind,
     SafetyRefusalEvidence,
     Step,
     StepResult,
@@ -506,6 +508,14 @@ class _SettleResult:
 
 
 class _Vision:
+    def text_present(
+        self,
+        _screen_png: bytes,
+        _text: str,
+        **_kwargs: Any,
+    ) -> bool:
+        return False
+
     def wait_settled(self, backend: _ObservedBackend, **_kwargs: Any) -> bytes:
         return backend.screenshot()
 
@@ -973,6 +983,12 @@ def _two_write_fault_workflow(
             ),
             identity_armed=True,
             risk="reversible" if read_only else "irreversible",
+            expect=[
+                Postcondition(
+                    kind=PostconditionKind.TEXT_ABSENT,
+                    text="Save failed",
+                )
+            ],
             drag_end_anchor=(
                 Anchor(
                     template="templates/button.png",

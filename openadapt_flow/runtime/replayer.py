@@ -467,6 +467,11 @@ class Replayer:
         self._governed_authorization_snapshot_error: Optional[str] = None
         self._durable_resume_secret = os.urandom(32)
         self._durable_resume_admission: Optional[tuple[dict[str, Any], str]] = None
+        self._durable_resume_mode: Optional[Literal["linear", "program"]] = None
+        self._durable_linear_snapshot: tuple[Any, ...] = ()
+        self._durable_program_snapshot: tuple[ProgramCheckpoint, ...] = ()
+        self._durable_pending_snapshot: Optional[Any] = None
+        self._durable_continuation_guard: Optional[Any] = None
         # API/tool actuator -- the TOP of the capability ladder (RFC section 4
         # `api` tier). When set, a step carrying an `api_binding` has its write
         # performed via the API and confirmed by the effect_verifier, SKIPPING
@@ -590,12 +595,24 @@ class Replayer:
         worklists: dict[str, list[dict[str, str]]],
         resume_from: Optional[int],
         resume_program: Optional[ProgramCheckpoint],
+        durable_context: Optional[dict[str, Any]] = None,
+        authorizing_approval: Optional[Any] = None,
     ) -> dict[str, Any]:
         """Bind one continuation to the exact retained durable context."""
 
         from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 
         store = CheckpointStore(run_dir, key=self.checkpoint_key)
+        retained = durable_context or {
+            "manifest": store.read_manifest(),
+            "pending": store.read_pending(),
+            "approval": store.read_approval(),
+            "linear_checkpoints": store.checkpoints(),
+            "program_checkpoints": store.program_checkpoints(),
+            "auxiliary_digest": self._durable_auxiliary_digest(
+                run_dir, store.program_checkpoints()
+            ),
+        }
         return {
             "mode": mode,
             "run_dir": str(Path(run_dir).resolve()),
@@ -608,14 +625,59 @@ class Replayer:
             "worklists": self._canonical_resume_value(worklists),
             "resume_from": resume_from,
             "resume_program": self._canonical_resume_value(resume_program),
-            "manifest": self._canonical_resume_value(store.read_manifest()),
-            "pending": self._canonical_resume_value(store.read_pending()),
-            "approval": self._canonical_resume_value(store.read_approval()),
-            "linear_checkpoints": self._canonical_resume_value(store.checkpoints()),
-            "program_checkpoints": self._canonical_resume_value(
-                store.program_checkpoints()
+            "manifest": self._canonical_resume_value(retained["manifest"]),
+            "pending": self._canonical_resume_value(retained["pending"]),
+            "approval": self._canonical_resume_value(retained["approval"]),
+            "authorizing_approval": self._canonical_resume_value(authorizing_approval),
+            "linear_checkpoints": self._canonical_resume_value(
+                retained["linear_checkpoints"]
             ),
+            "program_checkpoints": self._canonical_resume_value(
+                retained["program_checkpoints"]
+            ),
+            "auxiliary_digest": retained["auxiliary_digest"],
         }
+
+    @staticmethod
+    def _durable_auxiliary_digest(
+        run_dir: Path,
+        program_checkpoints: list[ProgramCheckpoint],
+    ) -> str:
+        """Bind namespace, active capability, and every attended receipt."""
+
+        receipts_dir = Path(run_dir) / ".attended_program_receipts"
+        expected = {
+            f"{checkpoint.attended_transition.pause_id}.json"
+            for checkpoint in program_checkpoints
+            if checkpoint.attended_transition is not None
+        }
+        actual = (
+            {path.name for path in receipts_dir.glob("*.json")}
+            if receipts_dir.is_dir()
+            else set()
+        )
+        if actual != expected:
+            from openadapt_flow.runtime.durable.approval import StateDiverged
+
+            raise StateDiverged(
+                "attended program receipt inventory does not match checkpoints"
+            )
+        digest = hashlib.sha256()
+        paths = [
+            Path(run_dir) / ".durable_run.claim",
+            Path(run_dir) / "attended_capability.json",
+            Path(run_dir) / "attended_capability_history.json",
+            *[receipts_dir / name for name in sorted(actual)],
+        ]
+        for path in paths:
+            digest.update(path.name.encode("utf-8"))
+            digest.update(b"\0")
+            if path.is_file():
+                digest.update(path.read_bytes())
+            else:
+                digest.update(b"<missing>")
+            digest.update(b"\0")
+        return "sha256:" + digest.hexdigest()
 
     def _admit_durable_resume(
         self,
@@ -630,11 +692,22 @@ class Replayer:
         worklists: dict[str, list[dict[str, str]]],
         resume_from: Optional[int],
         resume_program: Optional[ProgramCheckpoint],
+        durable_context: dict[str, Any],
+        authorizing_approval: Any,
     ) -> str:
         """Mint a single-use continuation after ``durable.resume`` admits it."""
 
         if authority is not _DURABLE_RESUME_AUTHORITY:
             raise PermissionError("durable resume authority is private")
+        if set(durable_context) != {
+            "manifest",
+            "pending",
+            "approval",
+            "linear_checkpoints",
+            "program_checkpoints",
+            "auxiliary_digest",
+        }:
+            raise PermissionError("durable resume context is incomplete")
         effective_run_id = run_id or uuid.uuid4().hex
         payload = self._durable_resume_payload(
             mode=mode,
@@ -646,6 +719,8 @@ class Replayer:
             worklists=worklists,
             resume_from=resume_from,
             resume_program=resume_program,
+            durable_context=durable_context,
+            authorizing_approval=authorizing_approval,
         )
         canonical = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -671,7 +746,6 @@ class Replayer:
         """Consume and verify the exact resume context before any callback."""
 
         from openadapt_flow.runtime.durable.approval import ApprovalRequired
-        from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 
         admission = self._durable_resume_admission
         self._durable_resume_admission = None
@@ -701,14 +775,32 @@ class Replayer:
             worklists=worklists,
             resume_from=resume_from,
             resume_program=resume_program,
+            authorizing_approval=admitted.get("authorizing_approval"),
         )
         if current != admitted:
             raise ApprovalRequired(
                 "durable continuation context changed after approval"
             )
-        # The exact pause has now been admitted and consumed. Clear it before
-        # the resumed leg writes its next checkpoint or pause.
-        CheckpointStore(run_dir, key=self.checkpoint_key).clear_pending()
+        from openadapt_flow.runtime.durable.checkpoint import RunCheckpoint
+
+        self._durable_resume_mode = mode
+        self._durable_linear_snapshot = tuple(
+            RunCheckpoint.model_validate(value).model_copy(deep=True)
+            for value in admitted["linear_checkpoints"]
+        )
+        self._durable_program_snapshot = tuple(
+            ProgramCheckpoint.model_validate(value).model_copy(deep=True)
+            for value in admitted["program_checkpoints"]
+        )
+        pending_value = admitted.get("pending")
+        if pending_value is None:
+            self._durable_pending_snapshot = None
+        else:
+            from openadapt_flow.runtime.durable.checkpoint import PendingEscalation
+
+            self._durable_pending_snapshot = PendingEscalation.model_validate(
+                pending_value
+            ).model_copy(deep=True)
 
     # -- public API ----------------------------------------------------------
 
@@ -816,7 +908,6 @@ class Replayer:
         """
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
-        (run_dir / "steps").mkdir(parents=True, exist_ok=True)
         self._install_execution_snapshots(workflow)
         # Snapshot bundle declarations before authorization validation and
         # before the first backend/vision callback.  Execution uses only this
@@ -840,11 +931,7 @@ class Replayer:
         # ``__run_id__`` param so an idempotency key can be bound PER-RUN (via
         # ``ValueExpr(param="__run_id__")``) instead of reusing a frozen demo
         # literal across unrelated runs.
-        self._run_id = run_id or (
-            self.governed_authorization.authorization_id
-            if self.governed_authorization is not None
-            else uuid.uuid4().hex
-        )
+        self._run_id = run_id or uuid.uuid4().hex
         # Parameter resolution (Workflow-program IR, Phase 1): recorded defaults
         # (``params`` dict) plus each TYPED ``param_specs`` example as a default,
         # with caller-supplied values overriding both. A v0 bundle (empty
@@ -866,11 +953,17 @@ class Replayer:
         # authorization checks.  A callback that mutates it after admission
         # must invalidate the authorization before any reacquired input edge.
         self._active_runtime_worklists = worklists
-        if (
+        durable_resume = (
             resume_from is not None
             or resume_program is not None
             or self._durable_resume_admission is not None
-        ):
+        )
+        if not durable_resume:
+            self._durable_resume_mode = None
+            self._durable_linear_snapshot = ()
+            self._durable_program_snapshot = ()
+            self._durable_pending_snapshot = None
+        if durable_resume:
             self._consume_durable_resume_admission(
                 workflow=workflow,
                 run_dir=run_dir,
@@ -886,6 +979,34 @@ class Replayer:
         # caller-owned source remains available only for drift comparison.
         if self._execution_workflow_snapshot is not None:
             workflow = self._execution_workflow_snapshot
+
+        # Claim or validate the durable namespace before report output,
+        # screenshots, overlay callbacks, idempotency state, or any other
+        # execution side effect can touch the run directory. A fresh invocation
+        # must never overwrite an existing run's report before discovering that
+        # the directory is already owned.
+        durable_run = None
+        if self.durable:
+            from openadapt_flow.runtime.durable import DurableRun
+
+            durable_run = DurableRun(
+                run_dir,
+                run_id=self._run_id,
+                workflow_name=workflow.name,
+                bundle_dir=bundle_dir,
+                params=params,
+                worklists=worklists or {},
+                save_healed_to=save_healed_to,
+                key=self.checkpoint_key,
+                governed_authorization=self.governed_authorization,
+                screenshots_may_leave_box=(
+                    self._screenshots_may_leave_box or prior_screenshots_may_leave_box
+                ),
+                model_calls=prior_model_calls,
+                external_network_calls=prior_external_network_calls,
+                resume_existing=durable_resume,
+            )
+        (run_dir / "steps").mkdir(parents=True, exist_ok=True)
 
         report = RunReport(
             workflow_name=workflow.name,
@@ -941,8 +1062,7 @@ class Replayer:
         if (
             idempotency_key is not None
             and self.idempotency_ledger is not None
-            and resume_from is None
-            and resume_program is None
+            and not durable_resume
         ):
             if self.idempotency_ledger.seen(idempotency_key):
                 report.results.append(
@@ -1069,31 +1189,16 @@ class Replayer:
             report.total_ms = (time.monotonic() - t_run) * 1000.0
             return self._finalize_report(report, workflow, run_dir)
 
-        durable_run = None
-        if self.durable:
-            from openadapt_flow.runtime.durable import DurableRun
-
-            durable_run = DurableRun(
-                run_dir,
-                run_id=self._run_id,
-                workflow_name=workflow.name,
-                bundle_dir=bundle_dir,
-                params=params,
-                worklists=worklists or {},
-                save_healed_to=save_healed_to,
-                key=self.checkpoint_key,
-                governed_authorization=self.governed_authorization,
-                screenshots_may_leave_box=(
-                    self._screenshots_may_leave_box or prior_screenshots_may_leave_box
-                ),
-                model_calls=prior_model_calls,
-                external_network_calls=prior_external_network_calls,
-            )
         if resume_from is not None:
             from openadapt_flow.runtime.durable import resumed_step_results
 
             resumed_results = resumed_step_results(
-                run_dir, workflow, resume_from, key=self.checkpoint_key
+                run_dir,
+                workflow,
+                resume_from,
+                key=self.checkpoint_key,
+                checkpoints=list(self._durable_linear_snapshot),
+                run_id=self._run_id,
             )
             report.results.extend(resumed_results)
             for result in resumed_results:
@@ -1174,6 +1279,13 @@ class Replayer:
                                 else None
                             ),
                         )
+                        if (
+                            self._durable_continuation_guard is not None
+                            and result.failure_category != "continuation_preempted"
+                        ):
+                            self._durable_continuation_guard.acknowledge_progress(
+                                terminal=not result.ok
+                            )
                 if not result.ok:
                     break
 
@@ -1219,7 +1331,45 @@ class Replayer:
                         f"bundle stays ungoverned and non-promotable): {exc}"
                     )
 
-        return self._finalize_report(report, workflow, run_dir)
+        staged_durable_terminal = (
+            durable_resume and durable_run is not None and report.success
+        )
+        finalized = self._finalize_report(
+            report,
+            workflow,
+            run_dir,
+            persist=not staged_durable_terminal,
+            project_terminal=not staged_durable_terminal,
+        )
+        if staged_durable_terminal:
+            # Persist the terminal evidence before consuming the continuation
+            # pause. A crash can then leave either a restartable checkpoint or
+            # an exact successful report, never a cleared pause with only the
+            # stale pre-resume report.
+            if self._durable_continuation_guard is not None:
+                assert durable_run is not None
+                candidate = finalized.save(
+                    run_dir, filename=".report.terminal-candidate.json"
+                )
+                report_sha256 = self._durable_continuation_guard.prepare_terminal(
+                    candidate
+                )
+                durable_run.complete()
+                os.replace(candidate, run_dir / "report.json")
+                from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+
+                CheckpointStore._fsync_directory(run_dir)
+                self._durable_continuation_guard.completed(report_sha256=report_sha256)
+                self._record_idempotency_outcome(finalized)
+                self._emit_control_overlay_terminal(finalized.execution_outcome)
+            else:
+                # Authenticated durable continuation always installs the
+                # shared guard. Refuse to consume its pause if that admission
+                # invariant is ever lost.
+                raise RuntimeError(
+                    "durable continuation lost its terminal authority guard"
+                )
+        return finalized
 
     @staticmethod
     def _stamp_execution_outcome(report: RunReport, workflow: Workflow) -> None:
@@ -1362,6 +1512,9 @@ class Replayer:
         report: RunReport,
         workflow: Workflow,
         run_dir: Path,
+        *,
+        persist: bool = True,
+        project_terminal: bool = True,
     ) -> RunReport:
         """Persist exact evidence first, then project its terminal outcome."""
 
@@ -1369,6 +1522,16 @@ class Replayer:
         # Record the terminal transaction outcome against the reserved key so a
         # later duplicate (suppressed above) can surface what already happened.
         # The suppressed replay itself never overwrites the original outcome.
+        if persist:
+            self._record_idempotency_outcome(report)
+            report.save(run_dir)
+        if project_terminal:
+            self._emit_control_overlay_terminal(report.execution_outcome)
+        return report
+
+    def _record_idempotency_outcome(self, report: RunReport) -> None:
+        """Commit terminal idempotency state only with a persisted outcome."""
+
         if (
             self.idempotency_ledger is not None
             and report.idempotency_key is not None
@@ -1377,9 +1540,6 @@ class Replayer:
             self.idempotency_ledger.record_outcome(
                 report.idempotency_key, report.transaction_outcome
             )
-        report.save(run_dir)
-        self._emit_control_overlay_terminal(report.execution_outcome)
-        return report
 
     @staticmethod
     def _control_overlay_progress(
@@ -1660,20 +1820,43 @@ class Replayer:
         self._current_intent: str = ""
         self._current_params: dict[str, str] = dict(params)
         if durable_run is not None:
-            store = durable_run.store
-            # Continue the checkpoint sequence and the completed-effect ledger on
-            # a resume (the store already holds the pre-pause checkpoints).
-            self._program_seq = len(store.program_checkpoints())
-            self._completed_effect_keys = list(store.completed_effect_keys())
-            self._completed_effect_evidence = list(store.completed_effect_evidence())
-            self._completed_unverified_effect_keys = list(
-                store.completed_unverified_effect_keys()
-            )
             self._bundle_version = _bundle_version(bundle_dir)
-            if resume_checkpoint is not None:
-                resumed_results = self._resumed_program_results(
-                    store.program_checkpoints(), workflow
-                )
+            if self._durable_resume_mode == "program":
+                checkpoints = list(self._durable_program_snapshot)
+                pending_snapshot = self._durable_pending_snapshot
+                if (
+                    checkpoints
+                    and pending_snapshot is not None
+                    and pending_snapshot.program
+                    and len(checkpoints) > pending_snapshot.program_checkpoint_seq
+                ):
+                    base_history = list(checkpoints[-1].transition_history)
+                elif pending_snapshot is not None and pending_snapshot.program:
+                    base_history = list(pending_snapshot.program_history)
+                elif checkpoints:
+                    base_history = list(checkpoints[-1].transition_history)
+                else:
+                    base_history = []
+                report.visited_states.extend(base_history)
+                self._program_history_boundary_index = len(base_history)
+                self._program_history_parent_hash = _history_hash(base_history)
+                self._program_seq = len(checkpoints)
+                self._completed_effect_keys = [
+                    key
+                    for checkpoint in checkpoints
+                    for key in checkpoint.new_effect_keys
+                ]
+                self._completed_effect_evidence = [
+                    evidence
+                    for checkpoint in checkpoints
+                    for evidence in checkpoint.new_effect_evidence
+                ]
+                self._completed_unverified_effect_keys = [
+                    key
+                    for checkpoint in checkpoints
+                    for key in checkpoint.new_unverified_effect_keys
+                ]
+                resumed_results = self._resumed_program_results(checkpoints, workflow)
                 report.results.extend(resumed_results)
                 for result in resumed_results:
                     self._account_result(report, result, account_model_calls=False)
@@ -1681,8 +1864,19 @@ class Replayer:
                     report.model_calls,
                     sum(self._result_model_calls(result) for result in resumed_results),
                 )
+            else:
+                # A fresh program run must not import state from its output
+                # directory. DurableRun owns a newly claimed empty namespace.
+                self._program_seq = 0
+                self._program_history_boundary_index = 0
+                self._program_history_parent_hash = _history_hash([])
+                self._completed_effect_keys = []
+                self._completed_effect_evidence = []
+                self._completed_unverified_effect_keys = []
         else:
             self._program_seq = 0
+            self._program_history_boundary_index = 0
+            self._program_history_parent_hash = _history_hash([])
             self._completed_effect_keys = []
             self._completed_effect_evidence = []
             self._completed_unverified_effect_keys = []
@@ -2428,7 +2622,10 @@ class Replayer:
             else []
         )
         self._program_seq += 1
+        transition_history = list(report.visited_states)
+        transition_delta = transition_history[self._program_history_boundary_index :]
         checkpoint = ProgramCheckpoint(
+            run_id=self._run_id,
             workflow_name=durable.workflow_name,
             seq=self._program_seq,
             verified_state_id=state.id,
@@ -2461,9 +2658,16 @@ class Replayer:
             ),
             expected_texts=expected,
             transition_history_hash=_history_hash(report.visited_states),
+            transition_parent_hash=self._program_history_parent_hash,
+            transition_delta=transition_delta,
+            transition_history=transition_history,
             bundle_version=self._bundle_version,
         )
         durable.record_program_checkpoint(checkpoint)
+        self._program_history_boundary_index = len(transition_history)
+        self._program_history_parent_hash = checkpoint.transition_history_hash
+        if self._durable_continuation_guard is not None:
+            self._durable_continuation_guard.acknowledge_progress()
 
     def _record_program_pause(
         self, halt: "_ProgramHalt", report: RunReport, *, workflow: Workflow
@@ -2496,11 +2700,25 @@ class Replayer:
             transition_observation=self._attended_transition_observation(),
             program_frames=halt.program_frames,
             program_checkpoint_seq=self._program_seq,
-            program_history_hash=halt.program_history_hash,
+            program_history_hash=_history_hash(report.visited_states),
+            program_parent_history_hash=self._program_history_parent_hash,
+            program_history_delta=list(
+                report.visited_states[self._program_history_boundary_index :]
+            ),
+            program_history=list(report.visited_states),
         )
+        if (
+            self._durable_continuation_guard is not None
+            and failing.failure_category != "continuation_preempted"
+        ):
+            self._durable_continuation_guard.acknowledge_progress(terminal=True)
 
     def revalidate_program_checkpoint(
-        self, checkpoint: ProgramCheckpoint, completed_effects: list[dict]
+        self,
+        checkpoint: ProgramCheckpoint,
+        completed_effects: list[dict],
+        *,
+        workflow: Workflow,
     ) -> None:
         """Revalidate the live app before RESTORING a program checkpoint (RFC §5).
 
@@ -2528,21 +2746,84 @@ class Replayer:
                     + ") — refusing to resume a run whose app state diverged "
                     "from the checkpoint"
                 )
-        if self.effect_verifier is not None and completed_effects:
-            before = self.effect_verifier.capture_pre_state()
-            for dump in completed_effects:
-                try:
-                    effect = Effect.model_validate(dump)
-                except Exception:
-                    continue
-                verdict = self.effect_verifier.verify(effect, before)
-                if not verdict.confirmed:
-                    raise StateDiverged(
-                        "an already-confirmed effect no longer holds "
-                        f"({effect.kind.value}: {verdict.verdict.value}) — "
-                        "refusing to resume; the system of record diverged from "
-                        "the checkpoint"
-                    )
+        parsed: list[Effect] = []
+        for dump in completed_effects:
+            try:
+                parsed.append(Effect.model_validate(dump))
+            except Exception as exc:
+                raise StateDiverged(
+                    "a retained system-of-record effect contract is invalid"
+                ) from exc
+        self.revalidate_retained_effects(parsed, workflow=workflow)
+
+    def revalidate_retained_effects(
+        self,
+        effects: list[Effect],
+        *,
+        workflow: Optional[Workflow] = None,
+    ) -> None:
+        """Prove that previously confirmed effects still hold before resume."""
+
+        if not effects:
+            return
+        if self.effect_verifier is None:
+            raise StateDiverged(
+                "resume requires the qualified effect verifier for retained "
+                "confirmed writes"
+            )
+        if workflow is not None:
+            refusal = self._profile_effect_tier_refusal(
+                workflow, effects, self.effect_verifier
+            )
+            if refusal is not None:
+                raise StateDiverged(refusal)
+        try:
+            current = self.effect_verifier.capture_pre_state()
+        except Exception as exc:
+            raise StateDiverged(
+                "the retained effects could not be read before resume"
+            ) from exc
+        if not current.reachable:
+            raise StateDiverged("the retained effects could not be read before resume")
+        from openadapt_flow.runtime.effects._common import judge_records
+
+        for effect in effects:
+            if effect.needs_operator_confirmation:
+                raise StateDiverged(
+                    "a retained effect still requires an operator-authored binding"
+                )
+            # Historical evidence already proves the original delta and
+            # collateral-loss contract. Resume must prove that the intended
+            # effect still persists now. Re-read the current records through
+            # the qualified read-only verifier and judge the exact selector as
+            # an absolute persistence contract. Calling ``verify`` here would
+            # incorrectly use the current snapshot as a new pre-action
+            # baseline and can also invoke delivery-oriented verifier logic.
+            persistence_effect = effect.model_copy(
+                update={
+                    "count_new_only": False,
+                    "forbid_collateral_loss": False,
+                }
+            )
+            baseline = EffectState(
+                substrate=current.substrate,
+                reachable=True,
+                records=[],
+                detail={"durable_resume_persistence_readback": True},
+            )
+            verdict = judge_records(
+                persistence_effect,
+                baseline,
+                current.records,
+                substrate=current.substrate,
+            )
+            if not verdict.confirmed:
+                raise StateDiverged(
+                    "an already-confirmed effect no longer holds "
+                    f"({effect.kind.value}: {verdict.verdict.value}) — "
+                    "refusing to resume; the system of record diverged from "
+                    "the checkpoint"
+                )
 
     def revalidate_attended_program_completion(
         self,
@@ -2934,6 +3215,17 @@ class Replayer:
                         f"confirm the outcome ({verdict.verdict.value})"
                     )
                     break
+                tier = verifier_effect_tier(self.effect_verifier, effect)
+                result.effect_evidence.append(
+                    EffectVerificationEvidence(
+                        effect_contract_hash=effect.contract_hash(),
+                        substrate=verdict.substrate,
+                        verification_tier=(int(tier) if tier is not None else None),
+                        initial_verdict=verdict.verdict.value,
+                        final_verdict=verdict.verdict.value,
+                        observed_effect=verdict.observed_effect,
+                    )
+                )
             else:
                 result.effect_verified = True
             if result.error is not None:
@@ -2991,6 +3283,13 @@ class Replayer:
                         )
                         return result
 
+        # Screenshot persistence can invoke a deployment-provided scrubber.
+        # Persist before the last semantic comparison, then return VERIFIED
+        # only if that callback left the admitted workflow and authorization
+        # unchanged.
+        result.after_png = self._save_step_png(
+            run_dir, step.id, "attended-after", frame
+        )
         snapshot_refusal = self._workflow_snapshot_refusal(
             self._execution_workflow_snapshot or workflow
         )
@@ -3000,15 +3299,9 @@ class Replayer:
             result.safety_halt = True
             result.failure_category = "governed_refusal"
             result.error = snapshot_refusal
-            result.after_png = self._save_step_png(
-                run_dir, step.id, "attended-after", frame
-            )
             return result
         result.ok = True
         result.postconditions_ok = True if step.expect else None
-        result.after_png = self._save_step_png(
-            run_dir, step.id, "attended-after", frame
-        )
         return result
 
     def _resolve_graph(self, workflow: Workflow, graph_id: str) -> ProgramGraph:
@@ -5924,15 +6217,22 @@ class Replayer:
         """Recheck exact authority at the last point before input delivery."""
 
         refusal = self._fresh_actuation_authorization_refusal(workflow, params, step)
+        if refusal is None and self._durable_continuation_guard is not None:
+            try:
+                self._durable_continuation_guard.before_delivery()
+            except Exception as exc:  # noqa: BLE001 - durable fencing boundary
+                refusal = f"durable continuation was preempted before delivery: {exc}"
+                result.failure_category = "continuation_preempted"
         if refusal is not None:
             self._cancel_guarded_coordinate()
             self._cancel_guarded_keyboard()
             result.safety_halt = True
-            result.failure_category = (
-                "governed_refusal"
-                if self.governed_authorization is not None
-                else "safety_halt"
-            )
+            if result.failure_category != "continuation_preempted":
+                result.failure_category = (
+                    "governed_refusal"
+                    if self.governed_authorization is not None
+                    else "safety_halt"
+                )
         return refusal
 
     def _act(
@@ -6827,6 +7127,7 @@ class Replayer:
         before_png: bytes,
         bundle_dir: Path,
         params: dict[str, str],
+        result: StepResult,
         audit_events: list[InterstitialActionResult],
         workflow: Optional[Workflow],
     ) -> tuple[bytes, Optional[str]]:
@@ -6995,13 +7296,6 @@ class Replayer:
             mutation_error = self._interstitial_declaration_mutation(workflow)
             if mutation_error is not None:
                 return before_png, mutation_error
-            if workflow is not None:
-                authorization_error = self._fresh_actuation_authorization_refusal(
-                    workflow, params, step
-                )
-                if authorization_error is not None:
-                    return before_png, authorization_error
-
             # Append BEFORE delivery: a backend exception can never create an
             # unreported key/click attempt. The event carries the exact admitted
             # policy and expected visual outcome.
@@ -7015,33 +7309,82 @@ class Replayer:
             )
             audit_events.append(event)
             handled_indices.add(active_index)
+            if workflow is not None:
+                authorization_error = self._delivery_authorization_refusal(
+                    workflow, params, step, result
+                )
+                if authorization_error is not None:
+                    event.error = authorization_error
+                    return before_png, authorization_error
+            elif self._durable_continuation_guard is not None:
+                # Normal replay always supplies ``workflow``. Keep the shared
+                # continuation fence fail-closed for direct helper/test use as
+                # well: every backend input edge must cross the same lease.
+                try:
+                    self._durable_continuation_guard.before_delivery()
+                except Exception as exc:  # noqa: BLE001 - fencing boundary
+                    result.failure_category = "continuation_preempted"
+                    result.safety_halt = True
+                    event.error = (
+                        f"durable continuation was preempted before delivery: {exc}"
+                    )
+                    return before_png, event.error
             try:
                 if it.dismiss_key is not None:
-                    self.backend.press(it.dismiss_key)
+                    self._deliver_backend_call(
+                        result, lambda: self.backend.press(it.dismiss_key or "Escape")
+                    )
                 else:
                     assert resolution is not None
                     assert it.dismiss_anchor is not None
                     if resolution.rung == "structural":
                         native_act = getattr(self.backend, "act_structural", None)
+                        structural_anchor = it.dismiss_anchor.structural
                         if (
                             not callable(native_act)
                             or resolution.structural_handle is None
-                            or it.dismiss_anchor.structural is None
+                            or structural_anchor is None
                         ):
                             raise StructuralResolutionRefused(
                                 "structural dismissal cannot be delivered "
                                 "natively without a stable element handle"
                             )
-                        native_act(
-                            it.dismiss_anchor.structural,
-                            resolution.structural_handle,
+                        self._deliver_backend_call(
+                            result,
+                            lambda: native_act(
+                                structural_anchor,
+                                resolution.structural_handle,
+                            ),
                         )
                     else:
-                        self.backend.click(
-                            int(resolution.point[0]), int(resolution.point[1])
+                        self._deliver_backend_call(
+                            result,
+                            lambda: self.backend.click(
+                                int(resolution.point[0]), int(resolution.point[1])
+                            ),
                         )
                 event.delivered = True
             except Exception as exc:
+                if not isinstance(
+                    exc, (FreshActuationRequired, StructuralResolutionRefused)
+                ):
+                    target_fingerprint = None
+                    if (
+                        resolution is not None
+                        and resolution.structural_handle is not None
+                    ):
+                        target_fingerprint = (
+                            resolution.structural_handle.target_fingerprint
+                        )
+                    result.delivery_uncertainty = ActionDeliveryUncertainty(
+                        operation="interstitial_dismiss",
+                        native=(
+                            resolution is not None and resolution.rung == "structural"
+                        ),
+                        target_fingerprint=target_fingerprint,
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                        cause_type=type(exc).__name__,
+                    )
                 event.error = (
                     "dismissal delivery failed "
                     f"({type(exc).__name__}); outcome is unknown"
@@ -7160,6 +7503,7 @@ class Replayer:
             before_png,
             bundle_dir,
             params,
+            result,
             result.interstitial_actions,
             workflow,
         )

@@ -29,9 +29,9 @@ from openadapt_flow.runtime.authorization import (
     runtime_inputs_digest,
 )
 from openadapt_flow.runtime.durable import (
-    ApprovalRecord,
     CheckpointStore,
     bundle_version,
+    issue_resume_approval,
     resume,
 )
 from openadapt_flow.runtime.effects import (
@@ -61,6 +61,22 @@ def _seal(tmp_path, workflow: Workflow) -> tuple[Workflow, object]:
     (bundle / "templates" / "identity.png").write_bytes(make_png((80, 20)))
     workflow.save(bundle)
     return Workflow.load(bundle), bundle
+
+
+def _resume_approval(run_dir, bundle, resolution: str):
+    store = CheckpointStore(run_dir)
+    manifest = store.read_manifest()
+    pending = store.read_pending()
+    assert manifest is not None and pending is not None
+    return issue_resume_approval(
+        pending,
+        approver="operator@example.com",
+        resolution=resolution,
+        bundle_version=bundle_version(bundle),
+        run_id=manifest.run_id,
+        workflow_name=manifest.workflow_name,
+        run_dir=run_dir,
+    )
 
 
 class _MutatingVision(FakeVision):
@@ -525,10 +541,10 @@ def test_transition_halt_checkpoints_already_performed_write(tmp_path):
     resumed = resume(
         run_dir,
         Replayer(resumed_backend, vision=resumed_vision, poll_interval_s=0.0),
-        approval=ApprovalRecord(
-            approver="operator@example.com",
-            resolution="continue after guarded transition halt",
-            bundle_version=bundle_version(bundle),
+        approval=_resume_approval(
+            run_dir,
+            bundle,
+            "continue after guarded transition halt",
         ),
     )
     assert resumed.success is True
@@ -1126,10 +1142,10 @@ def test_durable_resume_restores_governed_authorization(tmp_path):
     resumed = resume(
         run_dir,
         Replayer(resumed_backend, vision=resumed_vision, poll_interval_s=0.0),
-        approval=ApprovalRecord(
-            approver="operator@example.com",
-            resolution="continue exact governed run",
-            bundle_version=bundle_version(bundle),
+        approval=_resume_approval(
+            run_dir,
+            bundle,
+            "continue exact governed run",
         ),
     )
 

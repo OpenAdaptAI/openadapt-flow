@@ -6,7 +6,12 @@ from openadapt_flow.backend import ActionDeliveryUncertain
 from openadapt_flow.execution_profiles import ExecutionOutcome, ExecutionProfile
 from openadapt_flow.ir import ActionKind
 from openadapt_flow.run_gate import build_runtime_authorization
-from openadapt_flow.runtime.durable import ApprovalRecord, ApprovalRequired, resume
+from openadapt_flow.runtime.durable import (
+    ApprovalRequired,
+    CheckpointStore,
+    issue_resume_approval,
+    resume,
+)
 from openadapt_flow.runtime.durable.program_checkpoint import bundle_version
 from openadapt_flow.runtime.effects import EffectState, EffectVerdict, Verdict
 from openadapt_flow.runtime.replayer import Replayer
@@ -279,10 +284,18 @@ def test_durable_resume_cannot_reenter_uncertain_step_without_explicit_retry(
         durable=True,
         require_settled=True,
     )
-    ordinary_approval = ApprovalRecord(
+    durable_store = CheckpointStore(run_dir)
+    manifest = durable_store.read_manifest()
+    pending = durable_store.read_pending()
+    assert manifest is not None and pending is not None
+    ordinary_approval = issue_resume_approval(
+        pending,
         approver="operator@example.com",
         resolution="resume after review",
         bundle_version=bundle_version(bundle),
+        run_id=manifest.run_id,
+        workflow_name=manifest.workflow_name,
+        run_dir=run_dir,
     )
 
     try:

@@ -142,7 +142,7 @@ class ProgramTransitionReceipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = 1
+    schema_version: int = 2
     run_id: str
     workflow_name: str
     bundle_version: str
@@ -173,7 +173,9 @@ class ProgramCheckpoint(BaseModel):
     resume RESTORES the interpreter rather than translating to a step index.
     """
 
-    schema_version: int = 1
+    schema_version: int = 2
+    #: Exact logical run that produced this interpreter checkpoint.
+    run_id: str = ""
     workflow_name: str
     #: Monotonic per-run sequence (checkpoint ordering; the highest is the resume
     #: point). Distinct from any state id, which can repeat across loop rows.
@@ -219,6 +221,9 @@ class ProgramCheckpoint(BaseModel):
     resolution: Optional[Resolution] = None
     drift_oracle_calls: int = Field(default=0, ge=0)
     heal: Optional[HealEvent] = None
+    #: HMAC-authenticated pause capability that supplied source identity for a
+    #: human-attended checkpoint. Empty on ordinary runtime checkpoints.
+    attended_capability_digest: Optional[str] = None
     governed_authorization_id: Optional[str] = None
     governed_approval_source: Optional[str] = None
     #: On-screen text expected at the resume point (this state's TEXT_PRESENT
@@ -227,6 +232,12 @@ class ProgramCheckpoint(BaseModel):
     expected_texts: list[str] = Field(default_factory=list)
     #: Rolling digest of the visited-state history up to and including this state.
     transition_history_hash: str = ""
+    #: Hash of the complete history at the previous durable boundary.
+    transition_parent_hash: str = ""
+    #: States added since that parent boundary.
+    transition_delta: list[str] = Field(default_factory=list)
+    #: Complete ordered history. State ids are PHI-free and keep recovery exact.
+    transition_history: list[str] = Field(default_factory=list)
     #: Present only when staff completed/skipped the action represented by this
     #: checkpoint. Resume consumes its exact target instead of re-evaluating a
     #: guarded edge or re-actuating the source action.

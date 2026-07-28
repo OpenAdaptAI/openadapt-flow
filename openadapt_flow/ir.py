@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -2143,7 +2145,12 @@ class StepResult(BaseModel):
     #: learning evidence but is not itself proof that a failure was a governed
     #: safety halt.
     failure_category: Optional[
-        Literal["governed_refusal", "safety_halt", "runtime_failure"]
+        Literal[
+            "governed_refusal",
+            "safety_halt",
+            "runtime_failure",
+            "continuation_preempted",
+        ]
     ] = None
     # One stable, NON-secret-bearing SHA-256 digest per verified effect, taken
     # AFTER the effect's ValueExpr contract was bound to THIS run's params
@@ -2649,11 +2656,43 @@ class RunReport(BaseModel):
             raise ValueError("ROLLED_BACK is a non-success outcome")
         return self
 
-    def save(self, run_dir: Path | str) -> Path:
+    def save(
+        self,
+        run_dir: Path | str,
+        *,
+        filename: str = "report.json",
+    ) -> Path:
         run = Path(run_dir)
         run.mkdir(parents=True, exist_ok=True)
-        path = run / "report.json"
-        path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        if Path(filename).name != filename:
+            raise ValueError("report filename must be one local file name")
+        path = run / filename
+        payload = self.model_dump_json(indent=2).encode("utf-8")
+        temporary = run / (f".{filename}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            try:
+                directory = os.open(run, os.O_RDONLY)
+            except OSError:
+                directory = None
+            if directory is not None:
+                try:
+                    os.fsync(directory)
+                except OSError:
+                    pass
+                finally:
+                    os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
         return path
 
 

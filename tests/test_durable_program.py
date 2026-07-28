@@ -478,6 +478,8 @@ def test_settling_callback_cannot_remove_a_required_postcondition(tmp_path):
             )
 
     backend = FakeBackend()
+    bundle = tmp_path / "bundle"
+    workflow.save(bundle)
     report = Replayer(
         backend,
         vision=MutatingVision(),
@@ -485,7 +487,7 @@ def test_settling_callback_cannot_remove_a_required_postcondition(tmp_path):
         durable=True,
     ).run(
         workflow,
-        bundle_dir=tmp_path / "bundle",
+        bundle_dir=bundle,
         run_dir=tmp_path / "run",
     )
 
@@ -816,9 +818,10 @@ def test_program_resume_requires_the_active_pause_and_exact_worklist(tmp_path):
             worklists={"queue": [{"patient": "different"}]},
         )
 
+    approval = _approval(bundle)
     CheckpointStore(run_dir).clear_pending()
     with pytest.raises(ApprovalRequired, match="no active durable pause"):
-        resume(run_dir, replayer, approval=_approval(bundle))
+        resume(run_dir, replayer, approval=approval)
     assert backend.actions == []
 
 
@@ -910,6 +913,7 @@ def test_program_resume_refused_when_confirmed_effect_no_longer_holds(tmp_path):
     # The app is still on the expected screen, but an already-confirmed effect
     # (s0) has since been reverted -> read-only re-verify REFUTES -> refuse.
     verifier.refute = {(("step", "s0"),)}
+    verifier.records = []
     resume_replayer = Replayer(
         FakeBackend(),
         vision=_vision_ok(),
@@ -966,3 +970,55 @@ def test_clean_program_run_checkpoints_each_state(tmp_path):
     assert [c.seq for c in cps] == [1, 2]
     assert store.read_pending() is None
     assert report.model_calls == 0  # $0 runtime preserved
+
+
+def test_fresh_program_run_refuses_an_owned_run_directory_before_actuation(tmp_path):
+    workflow = _branch_loop_workflow(["Alice"])
+    bundle, run_dir = _dirs(tmp_path)
+    workflow.save(bundle)
+    verifier = FakeSoRVerifier()
+    first = Replayer(
+        FakeBackend(), vision=FakeVision(), effect_verifier=verifier, durable=True
+    )
+    assert first.run(
+        workflow, params={"mode": "go"}, bundle_dir=bundle, run_dir=run_dir
+    ).success
+
+    second_backend = FakeBackend()
+    calls_before = verifier.capture_calls
+    with pytest.raises(StateDiverged, match="already contains a durable run"):
+        Replayer(
+            second_backend,
+            vision=FakeVision(),
+            effect_verifier=verifier,
+            durable=True,
+        ).run(
+            workflow,
+            params={"mode": "go"},
+            bundle_dir=bundle,
+            run_dir=run_dir,
+        )
+    assert second_backend.actions == []
+    assert verifier.capture_calls == calls_before
+
+
+def test_program_resume_refuses_a_noncontiguous_checkpoint_history(tmp_path):
+    _report, run_dir, bundle, verifier = _run_branch_loop_to_pause(tmp_path)
+    store = CheckpointStore(run_dir)
+    checkpoint = store.program_checkpoints()[0]
+    path = run_dir / "checkpoints" / "pstate_0001.json"
+    path.write_text(checkpoint.model_copy(update={"seq": 2}).model_dump_json(indent=2))
+
+    backend = FakeBackend()
+    calls_before = verifier.capture_calls
+    with pytest.raises(
+        StateDiverged,
+        match="checkpoint history|monotonic authority",
+    ):
+        resume(
+            run_dir,
+            Replayer(backend, vision=FakeVision(), effect_verifier=verifier),
+            approval=_approval(bundle),
+        )
+    assert backend.actions == []
+    assert verifier.capture_calls == calls_before

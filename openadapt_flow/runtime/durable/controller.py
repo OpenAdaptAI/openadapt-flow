@@ -29,11 +29,13 @@ pure bookkeeping over the ``StepResult`` the replayer already produces.
 from __future__ import annotations
 
 import re
+import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Optional
 
 from openadapt_flow.ir import Step, StepResult, Workflow
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
+from openadapt_flow.runtime.durable.approval import StateDiverged
 from openadapt_flow.runtime.durable.checkpoint import (
     CheckpointStore,
     PendingEscalation,
@@ -43,6 +45,7 @@ from openadapt_flow.runtime.durable.checkpoint import (
 from openadapt_flow.runtime.durable.program_checkpoint import (
     GraphFrame,
     ProgramCheckpoint,
+    bundle_version,
 )
 
 if TYPE_CHECKING:
@@ -252,27 +255,123 @@ class DurableRun:
         screenshots_may_leave_box: bool = False,
         model_calls: int = 0,
         external_network_calls: Literal["none", "observed", "unknown"] = "unknown",
+        resume_existing: bool = False,
     ) -> None:
         # ``key`` (None by default) opts the durable artifacts into AES-256-GCM
         # encryption-at-rest; unset => plaintext, exactly as before.
+        if not run_id:
+            raise StateDiverged("a durable run requires a nonempty run identity")
         self.store = CheckpointStore(run_dir, key=key)
+        from openadapt_flow.runtime.durable.authority import DurableAuthority
+
+        self._authority = DurableAuthority(run_dir, self.store)
         self.run_id = run_id
         self.workflow_name = workflow_name
         self.bundle_dir = Path(bundle_dir).resolve()
+        self.bundle_version = bundle_version(self.bundle_dir)
         self.governed_authorization = governed_authorization
-        self.store.write_manifest(
-            RunManifest(
-                run_id=run_id,
-                workflow_name=workflow_name,
-                bundle_dir=str(self.bundle_dir),
-                params=dict(params),
-                worklists=worklists,
-                governed_authorization=governed_authorization,
-                screenshots_may_leave_box=screenshots_may_leave_box,
-                model_calls=model_calls,
-                external_network_calls=external_network_calls,
-                save_healed_to=(str(save_healed_to) if save_healed_to else None),
+        existing = self.store.read_manifest()
+        namespace_id = (
+            existing.namespace_id
+            if resume_existing and existing is not None
+            else secrets.token_hex(16)
+        )
+        canonical_run_dir = (
+            existing.canonical_run_dir
+            if resume_existing and existing is not None
+            else str(Path(run_dir).resolve())
+        )
+        manifest = RunManifest(
+            run_id=run_id,
+            namespace_id=namespace_id,
+            canonical_run_dir=canonical_run_dir,
+            workflow_name=workflow_name,
+            bundle_dir=str(self.bundle_dir),
+            params=dict(params),
+            worklists=worklists,
+            governed_authorization=governed_authorization,
+            screenshots_may_leave_box=screenshots_may_leave_box,
+            model_calls=model_calls,
+            external_network_calls=external_network_calls,
+            save_healed_to=(str(save_healed_to) if save_healed_to else None),
+        )
+        retained_without_manifest = (
+            existing is None and self.store.has_durable_artifacts()
+        )
+        if retained_without_manifest:
+            raise StateDiverged(
+                "the run directory contains durable evidence without its run "
+                "manifest; use a new run directory"
             )
+        if resume_existing:
+            if existing is None:
+                raise StateDiverged(
+                    "durable resume lost the exact retained run manifest"
+                )
+            if (
+                existing.schema_version != 2
+                or existing.run_id != run_id
+                or not existing.namespace_id
+                or existing.canonical_run_dir != str(Path(run_dir).resolve())
+                or existing.workflow_name != workflow_name
+                or Path(existing.bundle_dir).resolve() != self.bundle_dir
+                or existing.params != params
+                or existing.worklists != worklists
+                or existing.governed_authorization != governed_authorization
+            ):
+                raise StateDiverged(
+                    "durable resume does not match the exact version-2 retained "
+                    "run manifest"
+                )
+            authority_record = self._authority.validate(existing)
+            self._authority_digest = authority_record.progress_digest
+            self._manifest = existing.model_copy(deep=True)
+            self._manifest_digest = self.store.model_digest(existing)
+            active_pause = self.store.read_pending()
+            self._active_pause_digest = self.store.model_digest(active_pause)
+            # Preserve the original manifest and its creation time. The resume
+            # admission already bound its exact serialized form.
+            return
+        if existing is not None:
+            raise StateDiverged(
+                "the run directory already contains a durable run; use the "
+                "authenticated resume API or choose a new run directory"
+            )
+        self.store.write_fresh_manifest(manifest)
+        authority_record = self._authority.validate(manifest)
+        self._authority_digest = authority_record.progress_digest
+        self._manifest = manifest.model_copy(deep=True)
+        self._manifest_digest = self.store.model_digest(manifest)
+        self._active_pause_digest = self.store.model_digest(None)
+
+    def _sync_authority(self) -> None:
+        """Commit one trusted local mutation to the external monotonic record."""
+
+        from openadapt_flow.runtime.durable.approval import approval_pause_digest
+        from openadapt_flow.runtime.durable.continuation import (
+            current_continuation_token,
+        )
+
+        pending = self.store.read_pending()
+        token = current_continuation_token()
+        if token is not None:
+            # The continuation guard advances local evidence and the external
+            # delivery fence together after the immutable checkpoint/pause is
+            # durable. Advancing here could acknowledge only an audit-manifest
+            # write before its action proof exists.
+            return
+        phase: Literal["active", "paused", "continuing"] = (
+            "paused" if pending is not None else "active"
+        )
+        self._authority_digest = self._authority.advance(
+            self._manifest,
+            expected_progress_digest=self._authority_digest,
+            phase=phase,
+            pause_binding_sha256=(
+                approval_pause_digest(pending) if pending is not None else ""
+            ),
+            attempt_id="",
+            owner_nonce_sha256="",
         )
 
     def update_audit_evidence(
@@ -283,17 +382,22 @@ class DurableRun:
     ) -> None:
         """Persist cumulative evidence shared by every leg of one run."""
 
-        manifest = self.store.read_manifest()
-        if manifest is None:
-            raise RuntimeError("durable run manifest disappeared during execution")
-        self.store.write_manifest(
-            manifest.model_copy(
-                update={
-                    "model_calls": model_calls,
-                    "external_network_calls": external_network_calls,
-                }
-            )
+        self.store.validate_namespace(self._manifest)
+        updated = self._manifest.model_copy(
+            update={
+                "model_calls": model_calls,
+                "external_network_calls": external_network_calls,
+            }
         )
+        self.store.cas_manifest(self._manifest_digest, updated)
+        self._manifest = updated.model_copy(deep=True)
+        self._manifest_digest = self.store.model_digest(updated)
+        from openadapt_flow.runtime.durable.continuation import (
+            current_continuation_token,
+        )
+
+        if current_continuation_token() is None:
+            self._sync_authority()
 
     def record(
         self,
@@ -315,7 +419,9 @@ class DurableRun:
         if result.ok:
             self.store.write_checkpoint(
                 RunCheckpoint(
+                    run_id=self.run_id,
                     workflow_name=self.workflow_name,
+                    bundle_version=self.bundle_version,
                     step_index=step_index,
                     step_id=step.id,
                     intent=step.intent,
@@ -345,6 +451,14 @@ class DurableRun:
                     heal=result.heal,
                 )
             )
+            self._sync_authority()
+            # Keep an approved/continuing pause as the crash-restart anchor.
+            # Terminal completion or a later halt consumes/replaces it by CAS.
+            return
+
+        if result.failure_category == "continuation_preempted":
+            # The shared continuation coordinator retained the exact approved
+            # pause so the winning Reject request can make it terminal.
             return
 
         # HALT: durably pause instead of just dying. Resume from the last
@@ -353,6 +467,7 @@ class DurableRun:
         resume_from = last.next_step_index if last is not None else 0
         category, options = classify_halt(step, result)
         pending = PendingEscalation(
+            run_id=self.run_id,
             workflow_name=self.workflow_name,
             step_index=step_index,
             step_id=step.id,
@@ -366,7 +481,8 @@ class DurableRun:
             params=dict(params),
             delivery_uncertainty=result.delivery_uncertainty,
         )
-        self.store.write_pending(pending)
+        self.store.cas_pending(self._active_pause_digest, pending)
+        self._active_pause_digest = self.store.model_digest(pending)
         if workflow is not None:
             from openadapt_flow.runtime.durable.attended import (
                 issue_attended_capability,
@@ -380,6 +496,7 @@ class DurableRun:
                 result=result,
                 transition_observation=transition_observation,
             )
+        self._sync_authority()
 
     # -- Phase-2 program (state-machine) durability --------------------------
 
@@ -391,7 +508,14 @@ class DurableRun:
         the whole interpreter state (frame stack, loop cursors, bound params,
         completed effect keys) so a resume RESTORES the interpreter rather than
         translating to a step index. Idempotent per ``seq``."""
+        if checkpoint.run_id != self.run_id:
+            raise StateDiverged(
+                "the program checkpoint does not match the active run identity"
+            )
         self.store.write_program_checkpoint(checkpoint)
+        self._sync_authority()
+        # Keep the old pause as the restart anchor until terminal completion or
+        # a replacement halt is durably committed.
 
     def record_program_halt(
         self,
@@ -405,6 +529,9 @@ class DurableRun:
         program_frames: Optional[list[GraphFrame]] = None,
         program_checkpoint_seq: int = 0,
         program_history_hash: str = "",
+        program_parent_history_hash: str = "",
+        program_history_delta: Optional[list[str]] = None,
+        program_history: Optional[list[str]] = None,
     ) -> None:
         """Persist a durable PROGRAM pause (the interpreter HALTED for a human).
 
@@ -415,9 +542,12 @@ class DurableRun:
         do NOT apply to a program run (the resume point is an interpreter state,
         not a step index), so they are left at their defaults; ``program=True``
         marks the pause as a state-machine pause."""
+        if result.failure_category == "continuation_preempted":
+            return
         last = self.store.last_program_checkpoint()
         category, options = classify_halt(None, result)
         pending = PendingEscalation(
+            run_id=self.run_id,
             workflow_name=self.workflow_name,
             step_index=0,
             step_id=state_id,
@@ -433,9 +563,13 @@ class DurableRun:
             program_frames=list(program_frames or []),
             program_checkpoint_seq=program_checkpoint_seq,
             program_history_hash=program_history_hash,
+            program_parent_history_hash=program_parent_history_hash,
+            program_history_delta=list(program_history_delta or []),
+            program_history=list(program_history or []),
             delivery_uncertainty=result.delivery_uncertainty,
         )
-        self.store.write_pending(pending)
+        self.store.cas_pending(self._active_pause_digest, pending)
+        self._active_pause_digest = self.store.model_digest(pending)
         if workflow is not None:
             from openadapt_flow.runtime.durable.attended import (
                 issue_attended_capability,
@@ -449,6 +583,20 @@ class DurableRun:
                 result=result,
                 transition_observation=transition_observation,
             )
+        self._sync_authority()
+
+    def complete(self) -> None:
+        """Consume only the exact pause that this successful leg admitted."""
+
+        current = self.store.read_pending()
+        if current is None:
+            if self._active_pause_digest != self.store.model_digest(None):
+                raise StateDiverged(
+                    "the durable pause disappeared before terminal commit"
+                )
+            return
+        self.store.cas_pending(self._active_pause_digest, None)
+        self._active_pause_digest = self.store.model_digest(None)
 
 
 def resumed_step_results(
@@ -457,6 +605,8 @@ def resumed_step_results(
     resume_from: int,
     *,
     key: Optional[str] = None,
+    checkpoints: Optional[list[RunCheckpoint]] = None,
+    run_id: Optional[str] = None,
 ) -> list[StepResult]:
     """Synthesize ``StepResult``s for the already-verified steps of a resume.
 
@@ -471,14 +621,27 @@ def resumed_step_results(
 
     if resume_from < 0 or resume_from > len(workflow.steps):
         raise StateDiverged("the linear resume cursor is outside the workflow")
-    store = CheckpointStore(run_dir, key=key)
-    by_index = {c.step_index: c for c in store.checkpoints()}
+    if checkpoints is None:
+        store = CheckpointStore(run_dir, key=key)
+        manifest = store.read_manifest()
+        if manifest is None or not manifest.run_id:
+            raise StateDiverged(
+                "the linear resume lacks exact verified checkpoint run identity"
+            )
+        checkpoints = store.checkpoints()
+        run_id = manifest.run_id
+    if not run_id:
+        raise StateDiverged(
+            "the linear resume lacks exact verified checkpoint run identity"
+        )
+    by_index = {c.step_index: c for c in checkpoints}
     results: list[StepResult] = []
     for index in range(resume_from):
         checkpoint = by_index.get(index)
         step = workflow.steps[index]
         if (
             checkpoint is None
+            or checkpoint.run_id != run_id
             or checkpoint.workflow_name != workflow.name
             or checkpoint.step_index != index
             or checkpoint.next_step_index != index + 1

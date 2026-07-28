@@ -110,6 +110,12 @@ def _row_type(
     whose note is absent, yields ``None``.
     """
     expected_note = normalize_text(note_text[:ROW_NOTE_CHARS])
+    normalized_line = normalize_text(line).lstrip(_ROW_DECORATION)
+    bare_note_ratio = difflib.SequenceMatcher(
+        None,
+        normalized_line,
+        expected_note,
+    ).ratio()
     for type_field, note_field in _split_row_line(line, known_types):
         scores = {
             known: difflib.SequenceMatcher(
@@ -122,7 +128,13 @@ def _row_type(
         if scores[best] < min_ratio or scores[best] <= runner_up:
             continue
         note_ratio = difflib.SequenceMatcher(None, note_field, expected_note).ratio()
-        if note_ratio >= min_ratio:
+        # A banner can segment its bare note into a separate OCR line. When a
+        # note itself begins with a known type, positional splitting can make
+        # that line look like ``<type><note>`` even though no row exists. The
+        # row hypothesis must therefore explain the line better than the bare
+        # note hypothesis. A real row includes an additional type prefix, so
+        # its parsed note field wins; an isolated note line does not.
+        if note_ratio >= min_ratio and note_ratio > bare_note_ratio:
             return best
     return None
 
@@ -179,6 +191,13 @@ def verify_encounter_saved(
         A :class:`VerifyResult`; ``success`` requires the banner, a
         correctly-typed row, and no wrong-type row.
     """
+    if not normalize_text(note_text):
+        return VerifyResult(
+            success=False,
+            banner_found=False,
+            note_found=False,
+            wrong_type_row=False,
+        )
     if encounter_type not in known_types:
         known_types = (*known_types, encounter_type)
 

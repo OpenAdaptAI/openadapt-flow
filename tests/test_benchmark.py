@@ -17,7 +17,6 @@ import pytest
 
 from openadapt_flow.benchmark import agent_baseline
 from openadapt_flow.benchmark.agent_baseline import (
-    AgentRunResult,
     _truncate_screenshots,
     compute_cost,
     load_api_key,
@@ -573,6 +572,40 @@ class TestVerifyEncounterType:
         verdict = verify_encounter_saved(screen, NOTE)
         assert verdict.banner_found
         assert not verdict.note_found
+        assert not verdict.success
+
+    def test_empty_note_contract_never_verifies(self) -> None:
+        screen = self.make_screen("Encounter saved -", "Triage -")
+        verdict = verify_encounter_saved(screen, "")
+        assert not verdict.banner_found
+        assert not verdict.note_found
+        assert not verdict.wrong_type_row
+        assert not verdict.success
+
+    @pytest.mark.parametrize(
+        "note",
+        [
+            "Triage follow-up remains stable after medication review.",
+            "Consult - follow-up remains stable after medication review.",
+        ],
+    )
+    def test_bare_note_starting_with_known_type_is_not_a_row(
+        self,
+        note: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Positional parsing tolerates a dropped row separator. It must not
+        # reinterpret a banner's isolated note line as that row merely because
+        # the note itself starts with a known categorical value.
+        screen = self.make_screen(f"Encounter saved - {note[:40]}", note[:60])
+        monkeypatch.setattr(
+            "openadapt_flow.benchmark.verify.ocr",
+            lambda _screen: [SimpleNamespace(text=note[:60])],
+        )
+        verdict = verify_encounter_saved(screen, note)
+        assert verdict.banner_found
+        assert not verdict.note_found
+        assert not verdict.wrong_type_row
         assert not verdict.success
 
     def test_unlisted_requested_type_is_still_checked(self) -> None:

@@ -1768,10 +1768,12 @@ def test_attended_console_owns_one_backend_and_closes_it(monkeypatch):
     )
     monkeypatch.setattr(
         "openadapt_flow.runtime.durable.attended_service.execute_attended_action",
-        lambda _run_dir, _request, *, operator, executor, key: executor.continue_run(
-            Path("run"),
-            SimpleNamespace(step_id=f"step-for-{operator}"),
-            SimpleNamespace(),
+        lambda _run_dir, _request, *, operator, executor, key, decided_by="unknown": (
+            executor.continue_run(
+                Path("run"),
+                SimpleNamespace(step_id=f"step-for-{operator}"),
+                SimpleNamespace(),
+            )
         ),
     )
 
@@ -1927,10 +1929,12 @@ def test_attended_web_playwright_lifecycle_stays_on_owner_thread(monkeypatch):
     )
     monkeypatch.setattr(
         "openadapt_flow.runtime.durable.attended_service.execute_attended_action",
-        lambda _run_dir, _request, *, operator, executor, key: executor.continue_run(
-            Path("run"),
-            SimpleNamespace(step_id=f"step-for-{operator}"),
-            SimpleNamespace(),
+        lambda _run_dir, _request, *, operator, executor, key, decided_by="unknown": (
+            executor.continue_run(
+                Path("run"),
+                SimpleNamespace(step_id=f"step-for-{operator}"),
+                SimpleNamespace(),
+            )
         ),
     )
 
@@ -2260,8 +2264,11 @@ def test_public_attended_action_service_contract_is_stable():
         "run_dir",
         "request",
         "operator",
+        "decided_by",
     ]
     assert execute.parameters["operator"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert execute.parameters["decided_by"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert execute.parameters["decided_by"].default == "unknown"
 
     service = AttendedActionService(DeploymentConfig())
     assert not hasattr(service, "continue_run")

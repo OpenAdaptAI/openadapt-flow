@@ -380,6 +380,12 @@ class DurableRun:
             owner_nonce_sha256="",
         )
 
+    @property
+    def started_at(self) -> str:
+        """Return the start of the complete logical run across resumed legs."""
+
+        return self._manifest.created_at
+
     def update_audit_evidence(
         self,
         *,
@@ -441,6 +447,10 @@ class DurableRun:
                     input_verified=result.input_verified,
                     starting_state_settled=result.starting_state_settled,
                     delivery_attempted=result.delivery_attempted,
+                    delivery_receipt=result.delivery_receipt,
+                    drag_end_resolution=result.drag_end_resolution,
+                    fresh_actuation_events=list(result.fresh_actuation_events),
+                    before_png=result.before_png,
                     governed_authorization_id=(
                         self.governed_authorization.authorization_id
                         if self.governed_authorization is not None
@@ -694,6 +704,10 @@ def resumed_step_results(
                 input_verified=checkpoint.input_verified,
                 starting_state_settled=checkpoint.starting_state_settled,
                 delivery_attempted=checkpoint.delivery_attempted,
+                delivery_receipt=checkpoint.delivery_receipt,
+                drag_end_resolution=checkpoint.drag_end_resolution,
+                fresh_actuation_events=list(checkpoint.fresh_actuation_events),
+                before_png=checkpoint.before_png,
                 postconditions_ok=checkpoint.postconditions_ok,
                 actuation=checkpoint.actuation,
                 delivery_uncertainty=checkpoint.delivery_uncertainty,

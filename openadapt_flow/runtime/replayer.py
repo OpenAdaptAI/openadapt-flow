@@ -1100,7 +1100,11 @@ class Replayer:
 
         report = RunReport(
             workflow_name=workflow.name,
-            started_at=datetime.now(timezone.utc).isoformat(),
+            started_at=(
+                durable_run.started_at
+                if durable_run is not None
+                else datetime.now(timezone.utc).isoformat()
+            ),
             execution_profile=(
                 self.governed_authorization.execution_profile
                 if self.governed_authorization is not None
@@ -3144,6 +3148,10 @@ class Replayer:
                     input_verified=checkpoint.input_verified,
                     starting_state_settled=checkpoint.starting_state_settled,
                     delivery_attempted=checkpoint.delivery_attempted,
+                    delivery_receipt=checkpoint.delivery_receipt,
+                    drag_end_resolution=checkpoint.drag_end_resolution,
+                    fresh_actuation_events=list(checkpoint.fresh_actuation_events),
+                    before_png=checkpoint.before_png,
                     postconditions_ok=checkpoint.postconditions_ok,
                     actuation=checkpoint.actuation,
                     delivery_uncertainty=checkpoint.delivery_uncertainty,
@@ -3264,6 +3272,10 @@ class Replayer:
             input_verified=result.input_verified,
             starting_state_settled=result.starting_state_settled,
             delivery_attempted=result.delivery_attempted,
+            delivery_receipt=result.delivery_receipt,
+            drag_end_resolution=result.drag_end_resolution,
+            fresh_actuation_events=list(result.fresh_actuation_events),
+            before_png=result.before_png,
             postconditions_ok=result.postconditions_ok,
             skipped=result.skipped,
             actuation=result.actuation,
@@ -3805,11 +3817,12 @@ class Replayer:
             risk_review_required=step.risk_review_required,
             actuation="human_attended",
         )
+        evidence_step_id = self._new_step_evidence_key(run_dir, step.id)
         self._run_id = run_id
         (Path(run_dir) / "steps").mkdir(parents=True, exist_ok=True)
         frame = self.vision.wait_settled(self.backend)
         result.before_png = self._save_step_png(
-            run_dir, step.id, "attended-before", frame
+            run_dir, evidence_step_id, "attended-before", frame
         )
 
         relative_kinds = {"url_changed", "title_changed", "new_tab_opened"}
@@ -3880,7 +3893,7 @@ class Replayer:
                     f"satisfied ({len(failed)} condition(s) failed)"
                 )
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "attended-after", frame
+                    run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
 
@@ -3892,7 +3905,7 @@ class Replayer:
                     "effect verifier; outcome is uncertain and Continue is refused"
                 )
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "attended-after", frame
+                    run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
             effects = self._resolve_effects(attended_effects, params)
@@ -3910,7 +3923,7 @@ class Replayer:
                 result.failure_category = "governed_refusal"
                 result.error = tier_refusal
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "attended-after", frame
+                    run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
             current = self.effect_verifier.capture_pre_state()
@@ -3927,7 +3940,7 @@ class Replayer:
                 result.failure_category = "governed_refusal"
                 result.error = tier_refusal
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "attended-after", frame
+                    run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
             snapshot_refusal = self._workflow_snapshot_refusal(profile_workflow)
@@ -3939,7 +3952,7 @@ class Replayer:
                 result.failure_category = "governed_refusal"
                 result.error = snapshot_refusal
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "attended-after", frame
+                    run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
             if not current.reachable:
@@ -3949,7 +3962,7 @@ class Replayer:
                     "and Continue is refused"
                 )
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "attended-after", frame
+                    run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
             for effect in effects:
@@ -4007,7 +4020,7 @@ class Replayer:
                 result.effect_verified = True
             if result.error is not None:
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "attended-after", frame
+                    run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
 
@@ -4018,7 +4031,7 @@ class Replayer:
                 "verification, so Continue is refused"
             )
             result.after_png = self._save_step_png(
-                run_dir, step.id, "attended-after", frame
+                run_dir, evidence_step_id, "attended-after", frame
             )
             return result
 
@@ -4037,7 +4050,7 @@ class Replayer:
                         "uniquely; live state diverged and Continue is refused"
                     )
                     result.after_png = self._save_step_png(
-                        run_dir, step.id, "attended-after", frame
+                        run_dir, evidence_step_id, "attended-after", frame
                     )
                     return result
                 if next_step.identity_armed:
@@ -4056,7 +4069,7 @@ class Replayer:
                             f"was {identity.status}; Continue is refused"
                         )
                         result.after_png = self._save_step_png(
-                            run_dir, step.id, "attended-after", frame
+                            run_dir, evidence_step_id, "attended-after", frame
                         )
                         return result
 
@@ -4065,7 +4078,7 @@ class Replayer:
         # only if that callback left the admitted workflow and authorization
         # unchanged.
         result.after_png = self._save_step_png(
-            run_dir, step.id, "attended-after", frame
+            run_dir, evidence_step_id, "attended-after", frame
         )
         snapshot_refusal = self._workflow_snapshot_refusal(
             self._execution_workflow_snapshot or workflow
@@ -4736,6 +4749,7 @@ class Replayer:
         so a linear run is byte-for-byte unchanged.
         """
         t0 = time.monotonic()
+        evidence_step_id = self._new_step_evidence_key(run_dir, step.id)
         result = StepResult(
             step_id=step.id,
             intent=step.intent,
@@ -4867,7 +4881,9 @@ class Replayer:
             if self.require_settled
             else self.vision.wait_settled(self.backend)
         )
-        result.before_png = self._save_step_png(run_dir, step.id, "before", before_png)
+        result.before_png = self._save_step_png(
+            run_dir, evidence_step_id, "before", before_png
+        )
         last_frame = before_png
         self._emit_control_overlay_phase(
             "observing",
@@ -4906,7 +4922,7 @@ class Replayer:
                 result.safety_halt = True
                 result.failure_category = "safety_halt"
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "after", last_frame
+                    run_dir, evidence_step_id, "after", last_frame
                 )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
@@ -4925,7 +4941,7 @@ class Replayer:
             )
             if before_png is not last_frame:
                 result.before_png = self._save_step_png(
-                    run_dir, step.id, "before", before_png
+                    run_dir, evidence_step_id, "before", before_png
                 )
                 last_frame = before_png
             if not proceed:
@@ -4944,7 +4960,7 @@ class Replayer:
                         else "safety_halt"
                     )
                 result.after_png = self._save_step_png(
-                    run_dir, step.id, "after", last_frame
+                    run_dir, evidence_step_id, "after", last_frame
                 )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
@@ -4956,7 +4972,7 @@ class Replayer:
                 effect_verifier=active_verifier,
             )
             result.before_png = self._save_step_png(
-                run_dir, step.id, "before", before_png
+                run_dir, evidence_step_id, "before", before_png
             )
             last_frame = before_png
             resolution, matched_region, error = self._resolve_step(
@@ -4977,7 +4993,7 @@ class Replayer:
                 time.sleep(self.poll_interval_s)
                 before_png = self.vision.wait_settled(self.backend)
                 result.before_png = self._save_step_png(
-                    run_dir, step.id, "before", before_png
+                    run_dir, evidence_step_id, "before", before_png
                 )
                 last_frame = before_png
                 resolution, matched_region, error = self._resolve_step(
@@ -5003,7 +5019,7 @@ class Replayer:
                     effect_verifier=active_verifier,
                 )
                 result.before_png = self._save_step_png(
-                    run_dir, step.id, "before", before_png
+                    run_dir, evidence_step_id, "before", before_png
                 )
                 last_frame = before_png
                 error = self._identity_gate_error(
@@ -5192,7 +5208,7 @@ class Replayer:
                 result.resolution = resolution
                 if before_png is not last_frame:
                     result.before_png = self._save_step_png(
-                        run_dir, step.id, "before", before_png
+                        run_dir, evidence_step_id, "before", before_png
                     )
                     last_frame = before_png
                 if error is not None and any(
@@ -5408,7 +5424,7 @@ class Replayer:
                             result.resolution = resolution
                             if before_png is not last_frame:
                                 result.before_png = self._save_step_png(
-                                    run_dir, step.id, "before", before_png
+                                    run_dir, evidence_step_id, "before", before_png
                                 )
                                 last_frame = before_png
 
@@ -5741,7 +5757,9 @@ class Replayer:
                     if self.governed_authorization is not None
                     else "safety_halt"
                 )
-        result.after_png = self._save_step_png(run_dir, step.id, "after", last_frame)
+        result.after_png = self._save_step_png(
+            run_dir, evidence_step_id, "after", last_frame
+        )
         result.elapsed_ms = (time.monotonic() - t0) * 1000.0
         return result
 
@@ -11471,6 +11489,24 @@ class Replayer:
                     admitted_state.step.anchor = event.new_anchor.model_copy(deep=True)
 
     # -- io ----------------------------------------------------------------------
+
+    @staticmethod
+    def _new_step_evidence_key(run_dir: Path, step_id: str) -> str:
+        """Allocate one stable, collision-free file key for an action occurrence."""
+
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", step_id).strip("._-") or "step"
+        if safe != step_id:
+            safe = f"{safe}_{hashlib.sha256(step_id.encode()).hexdigest()[:8]}"
+        steps_dir = Path(run_dir) / "steps"
+        candidate = safe
+        occurrence = 1
+        while any(
+            (steps_dir / f"{candidate}_{suffix}.png").exists()
+            for suffix in ("before", "after", "attended-before", "attended-after")
+        ):
+            occurrence += 1
+            candidate = f"{safe}__{occurrence:04d}"
+        return candidate
 
     @staticmethod
     def _save_step_png(run_dir: Path, step_id: str, suffix: str, png: bytes) -> str:

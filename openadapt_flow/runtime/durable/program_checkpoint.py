@@ -27,9 +27,11 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionDeliveryUncertainty,
     AttendedProgramTransitionEvidence,
     EffectVerificationEvidence,
+    FreshActuationEvent,
     HealEvent,
     IdentityCheck,
     Postcondition,
@@ -253,6 +255,10 @@ class ProgramCheckpoint(BaseModel):
     input_verified: Optional[bool] = None
     starting_state_settled: Optional[bool] = None
     delivery_attempted: Optional[bool] = None
+    delivery_receipt: Optional[ActionDeliveryReceipt] = None
+    drag_end_resolution: Optional[Resolution] = None
+    fresh_actuation_events: list[FreshActuationEvent] = Field(default_factory=list)
+    before_png: Optional[str] = None
     postconditions_ok: Optional[bool] = None
     skipped: bool = False
     actuation: Optional[str] = None

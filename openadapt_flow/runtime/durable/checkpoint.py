@@ -49,8 +49,10 @@ from typing import Iterator, Literal, Optional
 from pydantic import BaseModel, Field
 
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionDeliveryUncertainty,
     EffectVerificationEvidence,
+    FreshActuationEvent,
     HealEvent,
     IdentityCheck,
     Postcondition,
@@ -167,6 +169,10 @@ class RunCheckpoint(BaseModel):
     input_verified: Optional[bool] = None
     starting_state_settled: Optional[bool] = None
     delivery_attempted: Optional[bool] = None
+    delivery_receipt: Optional[ActionDeliveryReceipt] = None
+    drag_end_resolution: Optional[Resolution] = None
+    fresh_actuation_events: list[FreshActuationEvent] = Field(default_factory=list)
+    before_png: Optional[str] = None
     governed_authorization_id: Optional[str] = None
     governed_approval_source: Optional[str] = None
     postconditions_ok: Optional[bool] = None

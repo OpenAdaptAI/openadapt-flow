@@ -21,9 +21,12 @@ from datetime import datetime, timedelta
 import pytest
 
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionKind,
+    FreshActuationEvent,
     Postcondition,
     PostconditionKind,
+    Resolution,
     Step,
     Workflow,
 )
@@ -324,6 +327,65 @@ def test_resume_requires_the_active_pause_and_exact_inputs(tmp_path):
     assert replayer.backend.actions == []
 
 
+def test_linear_checkpoint_retains_exact_delivery_proof(tmp_path):
+    workflow = Workflow(
+        name="delivery-proof",
+        steps=[Step(id="submit", intent="Submit", action=ActionKind.CLICK)],
+    )
+    resolution = Resolution(
+        rung="template",
+        point=(8, 8),
+        confidence=0.99,
+        elapsed_ms=1.0,
+    )
+    drag_end = Resolution(
+        rung="template",
+        point=(15, 15),
+        confidence=0.98,
+        elapsed_ms=1.1,
+    )
+    receipt = ActionDeliveryReceipt(
+        receipt_id="receipt-1",
+        operation="guarded_coordinate_click",
+        native=False,
+        delivered_at="2026-07-28T00:00:01+00:00",
+    )
+    event = FreshActuationEvent(
+        attempt=1,
+        operation="click",
+        changed_pixel_count=4,
+        changed_bbox=(1, 1, 2, 2),
+        frame_size=(20, 20),
+        retried=True,
+    )
+    checkpoint = RunCheckpoint(
+        run_id="run-1",
+        workflow_name=workflow.name,
+        step_index=0,
+        step_id="submit",
+        next_step_index=1,
+        resolution=resolution,
+        drag_end_resolution=drag_end,
+        delivery_attempted=True,
+        delivery_receipt=receipt,
+        fresh_actuation_events=[event],
+        before_png="steps/submit_before.png",
+    )
+
+    restored = resumed_step_results(
+        tmp_path,
+        workflow,
+        1,
+        checkpoints=[RunCheckpoint.model_validate_json(checkpoint.model_dump_json())],
+        run_id="run-1",
+    )[0]
+
+    assert restored.delivery_receipt == receipt
+    assert restored.drag_end_resolution == drag_end
+    assert restored.fresh_actuation_events == [event]
+    assert restored.before_png == "steps/submit_before.png"
+
+
 def test_resume_refuses_a_checkpoint_added_after_the_pause(tmp_path):
     _report, run_dir, bundle, _backend, verifier = _run_to_halt(tmp_path)
     store = CheckpointStore(run_dir)
@@ -406,6 +468,11 @@ def test_resume_revalidates_but_does_not_repeat_confirmed_steps(tmp_path):
         poll_interval_s=0.01,
     )
     resumed = resume(run_dir, resume_replayer, approval=_approval(bundle))
+
+    manifest = CheckpointStore(run_dir).read_manifest()
+    assert manifest is not None
+    assert report.started_at == manifest.created_at
+    assert resumed.started_at == manifest.created_at
 
     assert resumed.success is True
     # Resume re-reads the retained effects before it continues. It does not

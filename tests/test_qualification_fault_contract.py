@@ -704,8 +704,18 @@ def _fault_workflow(
     step = Step(
         id="submit",
         intent="Submit",
-        action=ActionKind.CLICK,
+        action=action,
         anchor=anchor,
+        drag_end_anchor=(
+            Anchor(
+                template="templates/button.png",
+                structural=StructuralLocator(selector="#drag-destination"),
+                region=(12, 12, 6, 6),
+                click_point=(15, 15),
+            )
+            if action is ActionKind.DRAG
+            else None
+        ),
         identity_armed=True,
         risk="irreversible",
     )
@@ -1839,6 +1849,8 @@ def test_drag_fault_target_halts_before_unreached_endpoint_resolution(
         driver,
         action=ActionKind.DRAG,
     )
+    assert workflow.steps[0].action is ActionKind.DRAG
+    assert workflow.steps[0].drag_end_anchor is not None
     run_id = "drag-target-refusal"
     run_dir = tmp_path / "run-drag-target-refusal"
     report = Replayer(
@@ -2510,6 +2522,31 @@ def test_detector_receipt_rejects_any_result_after_the_fault_refusal() -> None:
         governed_qualification_case_action_paths={"submit": "gui"},
     )
     assert fault_detector_contract_error(program_report, receipt) is None
+
+    program_report.results = [refusal]
+    assert (
+        fault_detector_contract_error(program_report, receipt)
+        == "fault_detector_terminal_shape_invalid"
+    )
+
+    for terminal_outcome, terminal_update in (
+        (
+            "escalate",
+            {"intent": "program escalate", "error": "operator review requested"},
+        ),
+        ("halt", {"error": "an unrelated terminal error"}),
+    ):
+        program_report.terminal_outcome = terminal_outcome
+        program_report.results = [
+            refusal,
+            program_terminal.model_copy(update=terminal_update),
+        ]
+        assert (
+            fault_detector_contract_error(program_report, receipt)
+            == "fault_detector_terminal_shape_invalid"
+        )
+
+    program_report.terminal_outcome = "halt"
 
     for update in (
         {"delivery_attempted": True},

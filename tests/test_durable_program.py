@@ -25,7 +25,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from openadapt_flow.ir import (
+    ActionDeliveryReceipt,
     ActionKind,
+    FreshActuationEvent,
     LoopSpec,
     Postcondition,
     PostconditionKind,
@@ -33,6 +35,7 @@ from openadapt_flow.ir import (
     PredicateKind,
     ProgramGraph,
     Relation,
+    Resolution,
     RunReport,
     State,
     StateKind,
@@ -65,7 +68,7 @@ from openadapt_flow.runtime.replayer import Replayer, _ProgramHalt
 
 # Reuse the scripted fakes + the scripted system-of-record verifier.
 from tests.test_durable_runtime import FakeSoRVerifier, _approval, _vision_ok
-from tests.test_replayer import FakeBackend, FakeVision
+from tests.test_replayer import FakeBackend, FakeVision, make_png
 
 # -- builders ----------------------------------------------------------------
 
@@ -88,6 +91,69 @@ def test_program_checkpoint_rejects_an_empty_control_cursor():
             verified_state_id="verified",
             frames=[],
         )
+
+
+def test_program_checkpoint_retains_exact_delivery_proof():
+    receipt = ActionDeliveryReceipt(
+        receipt_id="receipt-1",
+        operation="guarded_coordinate_click",
+        native=False,
+        delivered_at="2026-07-28T00:00:01+00:00",
+    )
+    drag_end = Resolution(
+        rung="template",
+        point=(15, 15),
+        confidence=0.98,
+        elapsed_ms=1.1,
+    )
+    event = FreshActuationEvent(
+        attempt=1,
+        operation="click",
+        changed_pixel_count=4,
+        changed_bbox=(1, 1, 2, 2),
+        frame_size=(20, 20),
+        retried=True,
+    )
+    checkpoint = ProgramCheckpoint(
+        run_id="run-1",
+        workflow_name="w",
+        seq=1,
+        verified_state_id="action",
+        step_id="submit",
+        frames=[GraphFrame(graph_id="__program__", state_id="action")],
+        delivery_attempted=True,
+        delivery_receipt=receipt,
+        drag_end_resolution=drag_end,
+        fresh_actuation_events=[event],
+        before_png="steps/submit_before.png",
+    )
+    restored_checkpoint = ProgramCheckpoint.model_validate_json(
+        checkpoint.model_dump_json()
+    )
+    workflow = Workflow(
+        name="w",
+        program=ProgramGraph(
+            entry="action",
+            states={
+                "action": State(
+                    id="action",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="submit",
+                        intent="Submit",
+                        action=ActionKind.CLICK,
+                    ),
+                )
+            },
+        ),
+    )
+
+    restored = Replayer._resumed_program_results([restored_checkpoint], workflow)[0]
+
+    assert restored.delivery_receipt == receipt
+    assert restored.drag_end_resolution == drag_end
+    assert restored.fresh_actuation_events == [event]
+    assert restored.before_png == "steps/submit_before.png"
 
 
 def test_program_resume_rejects_a_constructed_inconsistent_leaf(tmp_path):
@@ -693,6 +759,38 @@ def _run_branch_loop_to_pause(tmp_path, *, refute="Bob"):
     return report, run_dir, bundle, verifier
 
 
+def test_program_loop_keeps_each_action_frame_across_checkpoints(tmp_path):
+    class ChangingFrameBackend(FakeBackend):
+        def type_text(self, text):
+            super().type_text(text)
+            color = (210, 220, 230) if text == "Alice" else (180, 200, 220)
+            self._frame = make_png(color=color)
+
+    workflow = _branch_loop_workflow(["Alice", "Bob"])
+    bundle, run_dir = _dirs(tmp_path)
+    workflow.save(bundle)
+    report = Replayer(
+        ChangingFrameBackend(),
+        vision=FakeVision(),
+        effect_verifier=FakeSoRVerifier(),
+        durable=True,
+        poll_interval_s=0.0,
+    ).run(workflow, params={"mode": "go"}, bundle_dir=bundle, run_dir=run_dir)
+
+    assert report.success is True
+    before_paths = [result.before_png for result in report.results]
+    assert len(before_paths) == 2
+    assert None not in before_paths
+    assert len(set(before_paths)) == 2
+    before_bytes = [(run_dir / path).read_bytes() for path in before_paths if path]
+    assert before_bytes[0] != before_bytes[1]
+    checkpoint_paths = [
+        checkpoint.before_png
+        for checkpoint in CheckpointStore(run_dir).program_checkpoints()
+    ]
+    assert checkpoint_paths == before_paths
+
+
 # -- 1. branch + loop: pause mid-loop, checkpoint interpreter state, resume ---
 
 
@@ -743,6 +841,14 @@ def test_program_resume_restores_interpreter_and_completes(tmp_path):
     assert resumed.success is True
     assert resumed.terminal_outcome == "success"
     assert resumed.results[0].risk == "irreversible"
+    resumed_before_paths = [result.before_png for result in resumed.results]
+    assert None not in resumed_before_paths
+    assert len(set(resumed_before_paths)) == len(resumed_before_paths)
+    assert all((run_dir / path).is_file() for path in resumed_before_paths if path)
+    manifest = CheckpointStore(run_dir).read_manifest()
+    assert manifest is not None
+    assert report.started_at == manifest.created_at
+    assert resumed.started_at == manifest.created_at
     # RESTORED from interpreter state: the already-confirmed row (Alice) was NOT
     # re-typed; the paused row onward (Bob, Cara) was -- in order.
     assert resume_backend.actions == [("type", "Bob"), ("type", "Cara")]

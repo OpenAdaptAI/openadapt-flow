@@ -2011,7 +2011,7 @@ def test_linear_completion_refused_by_remote_permit_keeps_local_progress_unchang
     monkeypatch.setattr(
         DurableAuthority,
         "_require_remote_delivery_permit",
-        lambda _self, _manifest, _record: (_ for _ in ()).throw(
+        lambda _self, _manifest, _record, **_kwargs: (_ for _ in ()).throw(
             DurableAuthorityBusy("remote delivery authority refused")
         ),
     )
@@ -2050,7 +2050,7 @@ def test_program_completion_refused_by_remote_permit_keeps_local_progress_unchan
     monkeypatch.setattr(
         DurableAuthority,
         "_require_remote_delivery_permit",
-        lambda _self, _manifest, _record: (_ for _ in ()).throw(
+        lambda _self, _manifest, _record, **_kwargs: (_ for _ in ()).throw(
             DurableAuthorityBusy("remote delivery authority refused")
         ),
     )
@@ -2075,7 +2075,9 @@ def test_program_completion_refused_by_remote_permit_keeps_local_progress_unchan
     assert store.program_checkpoints() == []
     assert store.read_approval() is None
     assert store.read_pending() is not None
-    assert not (run / ".attended_program_receipts" / f"{capability.pause_id}.json").exists()
+    assert not (
+        run / ".attended_program_receipts" / f"{capability.pause_id}.json"
+    ).exists()
 
 
 def test_continue_refuses_live_postcondition_failure_without_actuation(tmp_path):

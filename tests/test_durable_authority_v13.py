@@ -207,9 +207,12 @@ def test_production_delivery_requires_and_validates_remote_permit(
         response = {
             "schema_version": 1,
             "status": "issued",
-            "authority_id": "authority-1",
+            "authority_id": "22222222-2222-4222-8222-222222222222",
             "permit_id": "permit-1",
             "request_sha256": hashlib.sha256(body).hexdigest(),
+            "next_permit_cursor": hashlib.sha256(
+                ("cursor:" + (request["permit_cursor"] or "genesis")).encode()
+            ).hexdigest(),
             "delivery_sequence": request["delivery_sequence"],
             "issued_at": "2026-07-29T00:00:00+00:00",
         }
@@ -229,6 +232,13 @@ def test_production_delivery_requires_and_validates_remote_permit(
         "Accept": "application/json",
     }
     assert seen["request"] and seen["request"]["delivery_sequence"] == 0  # type: ignore[index]
+    request = seen["request"]
+    assert isinstance(request, dict)
+    assert request["remote_delivery_sequence"] == 0
+    assert request["permit_cursor"] is None
+    record_dump = authority.validate(manifest).model_dump(mode="json")
+    assert "remote_permit_cursor" not in record_dump
+    assert "next_permit_cursor" not in record_dump
 
 
 def test_production_delivery_requires_remote_configuration(
@@ -326,9 +336,12 @@ def test_production_remote_refusal_never_crosses_local_delivery_fence(
         response = {
             "schema_version": 1,
             "status": "issued",
-            "authority_id": "authority-1",
+            "authority_id": "22222222-2222-4222-8222-222222222222",
             "permit_id": "permit-1",
             "request_sha256": hashlib.sha256(body).hexdigest(),
+            "next_permit_cursor": hashlib.sha256(
+                ("cursor:" + (request["permit_cursor"] or "genesis")).encode()
+            ).hexdigest(),
             "delivery_sequence": request["delivery_sequence"],
             "issued_at": "2026-07-29T00:00:00+00:00",
         }
@@ -371,9 +384,12 @@ def test_remote_sequence_survives_complete_local_state_restore(
             {
                 "schema_version": 1,
                 "status": "issued",
-                "authority_id": "authority-1",
+                "authority_id": "22222222-2222-4222-8222-222222222222",
                 "permit_id": f"permit-{len(consumed)}",
                 "request_sha256": hashlib.sha256(body).hexdigest(),
+                "next_permit_cursor": hashlib.sha256(
+                    ("cursor:" + (request["permit_cursor"] or "genesis")).encode()
+                ).hexdigest(),
                 "delivery_sequence": request["delivery_sequence"],
                 "issued_at": "2026-07-29T00:00:00+00:00",
             }
@@ -434,21 +450,31 @@ def test_remote_sequence_spans_verified_progress_in_one_continuation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     expected_sequence = 0
-    observed: list[tuple[int, str]] = []
+    observed: list[tuple[int, str, int, str | None]] = []
 
     def transport(_url: str, _headers: dict[str, str], body: bytes) -> bytes:
         nonlocal expected_sequence
         request = json.loads(body)
         assert request["delivery_sequence"] == expected_sequence
-        observed.append((expected_sequence, request["progress_digest"]))
+        observed.append(
+            (
+                expected_sequence,
+                request["progress_digest"],
+                request["remote_delivery_sequence"],
+                request["permit_cursor"],
+            )
+        )
         expected_sequence += 1
         return json.dumps(
             {
                 "schema_version": 1,
                 "status": "issued",
-                "authority_id": "authority-1",
+                "authority_id": "22222222-2222-4222-8222-222222222222",
                 "permit_id": f"permit-{expected_sequence}",
                 "request_sha256": hashlib.sha256(body).hexdigest(),
+                "next_permit_cursor": hashlib.sha256(
+                    ("cursor:" + (request["permit_cursor"] or "genesis")).encode()
+                ).hexdigest(),
                 "delivery_sequence": request["delivery_sequence"],
                 "issued_at": "2026-07-29T00:00:00+00:00",
             }
@@ -506,8 +532,57 @@ def test_remote_sequence_spans_verified_progress_in_one_continuation(
         owner_nonce_sha256=owner,
     )
 
-    assert [sequence for sequence, _digest in observed] == [0, 1]
+    assert [sequence for sequence, _digest, _remote, _cursor in observed] == [0, 1]
+    assert [remote for _sequence, _digest, remote, _cursor in observed] == [0, 1]
+    assert observed[0][3] is None
+    assert isinstance(observed[1][3], str) and len(observed[1][3]) == 64
     assert observed[0][1] != observed[1][1]
+
+
+def test_lost_remote_response_leaves_stale_private_cursor_and_halts_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server commit without a local response cannot be retried as input."""
+
+    server_sequence = 0
+    server_cursor: str | None = None
+    calls = 0
+
+    def transport(_url: str, _headers: dict[str, str], body: bytes) -> bytes:
+        nonlocal server_sequence, server_cursor, calls
+        calls += 1
+        request = json.loads(body)
+        if (
+            request["remote_delivery_sequence"] != server_sequence
+            or request["permit_cursor"] != server_cursor
+        ):
+            raise OSError("409 stale remote cursor")
+        server_cursor = hashlib.sha256(
+            ("cursor:" + (server_cursor or "genesis")).encode()
+        ).hexdigest()
+        server_sequence += 1
+        if calls == 1:
+            raise TimeoutError("response lost after server commit")
+        raise OSError("the stale request must not receive a second permit")
+
+    manifest, authority, owner = _remote_ready_authority(
+        tmp_path, monkeypatch, transport
+    )
+    with pytest.raises(DurableAuthorityBusy, match="unavailable or refused"):
+        authority.before_delivery(
+            manifest,
+            attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            owner_nonce_sha256=owner,
+        )
+    assert authority.validate(manifest).delivery_sequence == 0
+    with pytest.raises(DurableAuthorityBusy, match="unavailable or refused"):
+        authority.before_delivery(
+            manifest,
+            attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            owner_nonce_sha256=owner,
+        )
+    assert calls == 2
+    assert authority.validate(manifest).delivery_sequence == 0
 
 
 def _restore(run_dir: Path, snapshot: Path) -> None:

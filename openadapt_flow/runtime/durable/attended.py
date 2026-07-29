@@ -57,6 +57,7 @@ from openadapt_flow.runtime.durable.approval import (
     ResumeRefused,
     StateDiverged,
     approval_pause_digest,
+    enforce_resume_authorization,
     issue_resume_approval,
     pause_is_expired,
 )
@@ -2469,6 +2470,7 @@ def checkpoint_human_completed_step(
     run_dir: Path | str,
     *,
     capability: AttendedPauseCapability,
+    approval: ApprovalRecord,
     result: StepResult,
     params: dict[str, str],
     key: Optional[str] = None,
@@ -2505,6 +2507,24 @@ def checkpoint_human_completed_step(
         raise AttendedActionRefused(
             "the human-completed checkpoint does not use the signed capability"
         )
+    pending = store.read_pending()
+    if pending is None or approval_pause_digest(pending) != capability.pause_digest:
+        raise AttendedActionRefused(
+            "the human-completed checkpoint does not match the active pause"
+        )
+    try:
+        approved = enforce_resume_authorization(
+            pending,
+            approval,
+            bundle_version=capability.bundle_version,
+            run_id=capability.run_id,
+            workflow_name=capability.workflow_name,
+            run_dir=run_dir,
+        )
+    except ResumeRefused as exc:
+        raise AttendedActionRefused(
+            "the human-completed checkpoint has invalid approval authority"
+        ) from exc
     if capability.source_identity_required and (
         capability.schema_version < 3
         or _identity_status(capability.source_identity) != "verified"
@@ -2564,7 +2584,26 @@ def checkpoint_human_completed_step(
         ),
         attended_capability_digest=capability.digest,
     )
+    from openadapt_flow.runtime.durable.continuation import (
+        ContinuationCoordinator,
+        current_continuation_token,
+    )
+
+    token = current_continuation_token()
+    if token is None:
+        raise AttendedActionRefused(
+            "the human-completed checkpoint lost its continuation authority"
+        )
+    coordinator = ContinuationCoordinator(run_dir, key=key)
+    coordinator.bind_approval(token, approved)
+    coordinator.before_delivery(token)
     store.write_checkpoint(checkpoint)
+    store.commit_approval_transition(
+        expected_pending=pending,
+        approval=approved,
+        target_status="approved",
+    )
+    coordinator.acknowledge_progress(token, external_delivery=True)
     return checkpoint
 
 

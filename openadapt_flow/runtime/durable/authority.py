@@ -54,9 +54,11 @@ _REMOTE_UUID_RE = re.compile(
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
+_REMOTE_AUTHORITY_ID_RE = _REMOTE_UUID_RE
 _REMOTE_TOKEN_RE = re.compile(r"[a-f0-9]{32}")
 _REMOTE_PATH_KEY_RE = re.compile(r"[a-f0-9]{64}")
 _REMOTE_DIGEST_RE = re.compile(r"sha256:[a-f0-9]{64}")
+_REMOTE_PERMIT_CURSOR_RE = re.compile(r"[a-f0-9]{64}")
 _REMOTE_OPERATIONS = {"resume", "continue", "skip", "reject", "teach", "escalate"}
 
 
@@ -651,6 +653,34 @@ class DurableAuthority:
                 raise DurableAuthorityBusy(
                     "the external durable authority schema is incompatible"
                 )
+            # Keep the bearer-like remote cursor outside the generic authority
+            # record.  Record snapshots and the attended journal can then never
+            # serialize it into an evidence artifact.
+            connection.execute(
+                """
+            CREATE TABLE IF NOT EXISTS remote_delivery_cursor (
+                path_key TEXT PRIMARY KEY,
+                authority_id TEXT NOT NULL,
+                next_sequence INTEGER NOT NULL,
+                cursor_secret TEXT NOT NULL
+            )
+            """
+            )
+            remote_cursor_columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(remote_delivery_cursor)"
+                ).fetchall()
+            }
+            if remote_cursor_columns != {
+                "path_key",
+                "authority_id",
+                "next_sequence",
+                "cursor_secret",
+            }:
+                raise DurableAuthorityBusy(
+                    "the remote delivery cursor schema is incompatible"
+                )
             connection.execute(
                 """
             CREATE TABLE IF NOT EXISTS attended_journal (
@@ -1112,6 +1142,85 @@ class DurableAuthority:
             ).fetchone()
         )
 
+    def _remote_cursor(
+        self, connection: sqlite3.Connection
+    ) -> tuple[str | None, int, str | None]:
+        """Read the private server cursor without adding it to a record dump."""
+
+        row = connection.execute(
+            "SELECT authority_id, next_sequence, cursor_secret "
+            "FROM remote_delivery_cursor WHERE path_key = ?",
+            (self.path_key,),
+        ).fetchone()
+        if row is None:
+            return None, 0, None
+        authority_id = row["authority_id"]
+        sequence = row["next_sequence"]
+        cursor = row["cursor_secret"]
+        if not (
+            isinstance(authority_id, str)
+            and authority_id
+            and type(sequence) is int
+            and sequence >= 0
+            and isinstance(cursor, str)
+            and _REMOTE_PERMIT_CURSOR_RE.fullmatch(cursor)
+        ):
+            raise DurableAuthorityBusy("the remote delivery cursor is invalid")
+        return authority_id, sequence, cursor
+
+    def _advance_remote_cursor(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        authority_id: str,
+        next_sequence: int,
+        cursor_secret: str,
+    ) -> None:
+        if not (
+            authority_id
+            and _REMOTE_AUTHORITY_ID_RE.fullmatch(authority_id)
+            and type(next_sequence) is int
+            and next_sequence > 0
+            and _REMOTE_PERMIT_CURSOR_RE.fullmatch(cursor_secret)
+        ):
+            raise DurableAuthorityBusy("the remote delivery permit is invalid")
+        existing_id, existing_sequence, existing_cursor = self._remote_cursor(
+            connection
+        )
+        if existing_id is not None and (
+            existing_id != authority_id
+            or existing_sequence + 1 != next_sequence
+            or existing_cursor is None
+        ):
+            raise DurableAuthorityBusy("the remote delivery cursor changed")
+        if existing_id is None:
+            if next_sequence != 1:
+                raise DurableAuthorityBusy(
+                    "the first remote delivery sequence is invalid"
+                )
+            connection.execute(
+                "INSERT INTO remote_delivery_cursor "
+                "(path_key, authority_id, next_sequence, cursor_secret) "
+                "VALUES (?, ?, ?, ?)",
+                (self.path_key, authority_id, next_sequence, cursor_secret),
+            )
+            return
+        cursor = connection.execute(
+            "UPDATE remote_delivery_cursor SET next_sequence = ?, cursor_secret = ? "
+            "WHERE path_key = ? AND authority_id = ? AND next_sequence = ? "
+            "AND cursor_secret = ?",
+            (
+                next_sequence,
+                cursor_secret,
+                self.path_key,
+                existing_id,
+                existing_sequence,
+                existing_cursor,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise DurableAuthorityBusy("the remote delivery cursor changed")
+
     @staticmethod
     def _identity_matches(record: DurableAuthorityRecord, manifest: Any) -> bool:
         return (
@@ -1193,7 +1302,12 @@ class DurableAuthority:
                     ) VALUES (?, ?, ?, 1, 1, 'claimed', '', '', '', '', '', '', '',
                               'none', 0, 0, '', '', ?)
                     """,
-                    (self.path_key, manifest.namespace_id, manifest.run_id, _now()),
+                    (
+                        self.path_key,
+                        manifest.namespace_id,
+                        manifest.run_id,
+                        _now(),
+                    ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise DurableAuthorityBusy(
@@ -1402,8 +1516,14 @@ class DurableAuthority:
         return hashlib.sha256(encoded).hexdigest()
 
     def _require_remote_delivery_permit(
-        self, manifest: Any, record: DurableAuthorityRecord
-    ) -> None:
+        self,
+        manifest: Any,
+        record: DurableAuthorityRecord,
+        *,
+        remote_authority_id: str | None,
+        remote_delivery_sequence: int,
+        permit_cursor: str | None,
+    ) -> tuple[str, int, str] | None:
         """Obtain the one server-owned permit for a production input edge.
 
         This intentionally records no local success before the response is
@@ -1415,7 +1535,7 @@ class DurableAuthority:
         authorization = getattr(manifest, "governed_authorization", None)
         profile = getattr(authorization, "execution_profile", None)
         if profile not in {"standard", "regulated"}:
-            return
+            return None
         required = {
             "run_id": manifest.run_id,
             "namespace_id": manifest.namespace_id,
@@ -1442,6 +1562,15 @@ class DurableAuthority:
             and isinstance(required["attempt_id"], str)
             and _REMOTE_TOKEN_RE.fullmatch(required["attempt_id"])
             and required["operation"] in _REMOTE_OPERATIONS
+            and type(remote_delivery_sequence) is int
+            and remote_delivery_sequence >= 0
+            and (
+                permit_cursor is None
+                or (
+                    isinstance(permit_cursor, str)
+                    and _REMOTE_PERMIT_CURSOR_RE.fullmatch(permit_cursor)
+                )
+            )
         ):
             raise DurableAuthorityBusy(
                 "production delivery requires privacy-safe retained remote authority inputs"
@@ -1476,6 +1605,8 @@ class DurableAuthority:
             "approval_digest": required["approval_digest"],
             "attempt_id": required["attempt_id"],
             "operation": required["operation"],
+            "remote_delivery_sequence": remote_delivery_sequence,
+            "permit_cursor": permit_cursor,
             "delivery_sequence": record.delivery_sequence,
         }
         request_digest = self._remote_request_digest(payload)
@@ -1520,6 +1651,7 @@ class DurableAuthority:
             "authority_id",
             "permit_id",
             "request_sha256",
+            "next_permit_cursor",
             "delivery_sequence",
             "issued_at",
         }
@@ -1531,17 +1663,31 @@ class DurableAuthority:
             response["schema_version"] == 1
             and type(response["schema_version"]) is int
             and response["status"] == "issued"
+            and isinstance(response["authority_id"], str)
+            and _REMOTE_AUTHORITY_ID_RE.fullmatch(response["authority_id"])
             and all(
                 isinstance(response[name], str) and response[name]
-                for name in ("authority_id", "permit_id", "request_sha256", "issued_at")
+                for name in ("permit_id", "request_sha256", "issued_at")
             )
             and type(response["delivery_sequence"]) is int
             and response["delivery_sequence"] == record.delivery_sequence
             and response["request_sha256"] == request_digest
+            and isinstance(response["next_permit_cursor"], str)
+            and _REMOTE_PERMIT_CURSOR_RE.fullmatch(response["next_permit_cursor"])
+            and response["next_permit_cursor"] != permit_cursor
+            and (
+                remote_authority_id is None
+                or response["authority_id"] == remote_authority_id
+            )
         ):
             raise DurableAuthorityBusy(
                 "remote delivery authority response does not match request"
             )
+        return (
+            response["authority_id"],
+            remote_delivery_sequence + 1,
+            response["next_permit_cursor"],
+        )
 
     def before_delivery(
         self,
@@ -1563,8 +1709,24 @@ class DurableAuthority:
                 raise DurableAuthorityBusy(
                     "durable state changed before the delivery fence"
                 )
-            self._require_remote_delivery_permit(manifest, record)
+            remote_authority_id, remote_sequence, remote_cursor = self._remote_cursor(
+                connection
+            )
+            remote_permit = self._require_remote_delivery_permit(
+                manifest,
+                record,
+                remote_authority_id=remote_authority_id,
+                remote_delivery_sequence=remote_sequence,
+                permit_cursor=remote_cursor,
+            )
             self._consume_delivery_fence(record, manifest)
+            if remote_permit is not None:
+                self._advance_remote_cursor(
+                    connection,
+                    authority_id=remote_permit[0],
+                    next_sequence=remote_permit[1],
+                    cursor_secret=remote_permit[2],
+                )
             self._update(
                 connection,
                 record,

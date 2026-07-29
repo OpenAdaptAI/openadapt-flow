@@ -8,6 +8,10 @@ blind retry after uncertain delivery), and the billing/success flags.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +39,7 @@ from openadapt_flow.runtime.effects.effect import (
 )
 from openadapt_flow.runtime.replayer import Replayer
 from openadapt_flow.transaction import (
+    DuplicateActuation,
     IdempotencyLedger,
     TransactionOutcome,
     build_effect_journal,
@@ -1114,6 +1119,95 @@ def test_different_keys_do_not_suppress(tmp_path):
     report = _simple_click_run(other, ledger, tmp_path / "run2", bundle, "b")
     assert report.idempotent_replay is False
     assert other.actions == [("click", 110, 105, False)]
+
+
+def test_two_ledger_instances_cannot_replace_the_first_owner(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    first = IdempotencyLedger(path)
+    second = IdempotencyLedger(path)
+
+    first.reserve("same-key", run_id="first-owner")
+    with pytest.raises(DuplicateActuation, match="first-owner"):
+        second.reserve("same-key", run_id="second-owner")
+
+    record = second.lookup("same-key")
+    assert record == first.lookup("same-key")
+    assert record is not None
+    assert record["run_id"] == "first-owner"
+
+
+def test_cross_process_reservation_has_one_durable_owner(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    ready = tmp_path / "ready"
+    script = """
+import sys
+import time
+from pathlib import Path
+from openadapt_flow.transaction import DuplicateActuation, IdempotencyLedger
+
+ledger = IdempotencyLedger(Path(sys.argv[1]))
+ready = Path(sys.argv[2])
+while not ready.exists():
+    time.sleep(0.005)
+try:
+    ledger.reserve("shared-key", run_id=sys.argv[3])
+except DuplicateActuation:
+    print("duplicate", flush=True)
+else:
+    print("owner", flush=True)
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(path), str(ready), owner],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for owner in ("process-a", "process-b")
+    ]
+    ready.touch()
+    results = [process.communicate(timeout=20) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0]
+    assert sorted(stdout.strip() for stdout, _stderr in results) == [
+        "duplicate",
+        "owner",
+    ]
+    record = IdempotencyLedger(path).lookup("shared-key")
+    assert record is not None
+    assert record["run_id"] in {"process-a", "process-b"}
+
+
+def test_legacy_json_projection_migrates_once_and_stays_path_bound(tmp_path):
+    path = tmp_path / "ledger.json"
+    path.write_text(
+        json.dumps(
+            {
+                "legacy-key": {
+                    "run_id": "legacy-owner",
+                    "reserved_at": "2026-07-28T00:00:00+00:00",
+                    "outcome": "VERIFIED",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ledger = IdempotencyLedger(path)
+    assert path.read_bytes().startswith(b"SQLite format 3\x00")
+    assert ledger.lookup("legacy-key") == {
+        "run_id": "legacy-owner",
+        "reserved_at": "2026-07-28T00:00:00+00:00",
+        "outcome": "VERIFIED",
+    }
+    with pytest.raises(DuplicateActuation, match="legacy-owner"):
+        ledger.reserve("legacy-key", run_id="replacement")
+
+    copied = tmp_path / "copied-ledger.sqlite"
+    shutil.copyfile(path, copied)
+    with pytest.raises(RuntimeError, match="owner/schema mismatch"):
+        IdempotencyLedger(copied)
 
 
 # -- no blind retry after uncertain delivery (builds on #250) ----------------

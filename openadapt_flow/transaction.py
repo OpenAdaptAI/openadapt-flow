@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -547,75 +550,400 @@ class DuplicateActuation(Exception):
 class IdempotencyLedger:
     """At-most-once ledger keyed by a caller-supplied idempotency key.
 
-    A tiny append-only JSON store mapping ``key -> {run_id, reserved_at,
-    outcome}``. A run RESERVES its key before any actuation; a repeat with an
-    already-reserved key is SUPPRESSED (never re-actuated) -- the safe
-    at-most-once posture, since a crash after reservation must reconcile rather
-    than blind-retry the consequential write.
+    A SQLite store maps ``(namespace, key)`` to ``{run_id, reserved_at,
+    outcome}``. A run RESERVES its key in one ``BEGIN IMMEDIATE`` transaction
+    before any actuation. The database UNIQUE constraint makes two independent
+    runtime processes race on the reservation itself, not on separate
+    ``seen`` and ``reserve`` operations. The first committed owner is never
+    replaced.
 
-    Concurrency: single-writer, last-write-wins JSON (adequate for the local
-    runtime). A shared/locked store is a Cloud follow-up and is scoped out.
+    Existing JSON projections are migrated once under an exclusive sibling
+    lock. The SQLite metadata binds the database to its exact canonical path
+    and namespace, so copying a ledger to a different path cannot silently
+    create a second reservation authority.
     """
 
-    def __init__(self, path: Optional[Path | str] = None) -> None:
+    _SCHEMA_VERSION = "openadapt.idempotency-ledger/v2"
+    _DEFAULT_NAMESPACE = "openadapt-flow-runtime/v1"
+    _SQLITE_HEADER = b"SQLite format 3\x00"
+    _MIGRATION_WAIT_S = 10.0
+
+    def __init__(
+        self,
+        path: Optional[Path | str] = None,
+        *,
+        namespace: str = _DEFAULT_NAMESPACE,
+    ) -> None:
         #: None keeps the ledger purely in memory (tests / ephemeral runs).
-        self.path: Optional[Path] = Path(path) if path is not None else None
+        if not namespace:
+            raise ValueError("idempotency ledger namespace must not be empty")
+        self.namespace = namespace
+        self.path: Optional[Path] = (
+            Path(path).expanduser().absolute() if path is not None else None
+        )
         self._records: dict[str, dict[str, Optional[str]]] = {}
-        if self.path is not None and self.path.exists():
-            try:
-                loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    self._records = loaded
-            except (json.JSONDecodeError, OSError):
-                # A corrupt ledger must not silently permit re-actuation; fail
-                # loud rather than treat every key as unseen.
-                raise
+        self._memory_lock = threading.RLock()
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._reject_symlink()
+            if self.path.exists() and not self._is_sqlite():
+                self._migrate_json_projection()
+            self._initialize_sqlite()
 
     def lookup(self, key: str) -> Optional[dict[str, Optional[str]]]:
         """Return the stored record for ``key``, or None when unseen."""
 
-        return self._records.get(key)
+        if self.path is None:
+            with self._memory_lock:
+                record = self._records.get(key)
+                return dict(record) if record is not None else None
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT run_id, reserved_at, outcome
+                  FROM reservations
+                 WHERE namespace = ? AND reservation_key = ?
+                """,
+                (self.namespace, key),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        return {
+            "run_id": str(row[0]),
+            "reserved_at": str(row[1]),
+            "outcome": str(row[2]) if row[2] is not None else None,
+        }
 
     def seen(self, key: str) -> bool:
-        return key in self._records
+        return self.lookup(key) is not None
 
     def reserve(self, key: str, *, run_id: str) -> None:
         """Reserve ``key`` before actuation. Raise if already reserved."""
 
-        if key in self._records:
-            raise DuplicateActuation(
-                f"idempotency key {key!r} already reserved by run "
-                f"{self._records[key].get('run_id')!r}"
-            )
-        self._records[key] = {
-            "run_id": run_id,
-            "reserved_at": datetime.now(timezone.utc).isoformat(),
-            "outcome": None,
-        }
-        self._flush()
+        reserved_at = datetime.now(timezone.utc).isoformat()
+        if self.path is None:
+            with self._memory_lock:
+                if key in self._records:
+                    self._raise_duplicate(key, self._records[key].get("run_id"))
+                self._records[key] = {
+                    "run_id": run_id,
+                    "reserved_at": reserved_at,
+                    "outcome": None,
+                }
+            return
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO reservations(
+                        namespace, reservation_key, run_id, reserved_at, outcome
+                    ) VALUES (?, ?, ?, ?, NULL)
+                    """,
+                    (self.namespace, key, run_id, reserved_at),
+                )
+            except sqlite3.IntegrityError:
+                row = connection.execute(
+                    """
+                    SELECT run_id
+                      FROM reservations
+                     WHERE namespace = ? AND reservation_key = ?
+                    """,
+                    (self.namespace, key),
+                ).fetchone()
+                connection.rollback()
+                self._raise_duplicate(key, str(row[0]) if row is not None else None)
+            connection.commit()
+        finally:
+            connection.close()
 
     def record_outcome(self, key: str, outcome: Optional[str]) -> None:
         """Record the terminal outcome for a previously reserved ``key``."""
 
-        record = self._records.get(key)
-        if record is None:
-            return
-        record["outcome"] = outcome
-        self._flush()
-
-    def _flush(self) -> None:
         if self.path is None:
+            with self._memory_lock:
+                record = self._records.get(key)
+                if record is not None:
+                    record["outcome"] = outcome
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic replace so a concurrent reader never sees a half-written file.
-        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+
+        connection = self._connect()
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(self._records, handle, indent=2, sort_keys=True)
-            os.replace(tmp, self.path)
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE reservations
+                   SET outcome = ?
+                 WHERE namespace = ? AND reservation_key = ?
+                """,
+                (outcome, self.namespace, key),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        assert self.path is not None
+        self._reject_symlink()
+        connection = sqlite3.connect(
+            self.path,
+            timeout=10.0,
+            isolation_level=None,
+        )
+        try:
+            connection.execute("PRAGMA busy_timeout = 10000")
+            connection.execute("PRAGMA synchronous = FULL")
+            self._verify_owner(connection)
         except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            connection.close()
             raise
+        return connection
+
+    def _initialize_sqlite(self) -> None:
+        assert self.path is not None
+        connection = sqlite3.connect(
+            self.path,
+            timeout=10.0,
+            isolation_level=None,
+        )
+        try:
+            connection.execute("PRAGMA busy_timeout = 10000")
+            connection.execute("PRAGMA journal_mode = DELETE")
+            connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ledger_metadata(
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    schema_version TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    owner_path TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reservations(
+                    namespace TEXT NOT NULL,
+                    reservation_key TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    reserved_at TEXT NOT NULL,
+                    outcome TEXT,
+                    PRIMARY KEY(namespace, reservation_key)
+                )
+                """
+            )
+            row = connection.execute(
+                """
+                SELECT schema_version, namespace, owner_path
+                  FROM ledger_metadata
+                 WHERE singleton = 1
+                """
+            ).fetchone()
+            expected = (
+                self._SCHEMA_VERSION,
+                self.namespace,
+                self._owner_path,
+            )
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO ledger_metadata(
+                        singleton, schema_version, namespace, owner_path
+                    ) VALUES (1, ?, ?, ?)
+                    """,
+                    expected,
+                )
+            elif tuple(row) != expected:
+                raise RuntimeError(
+                    "idempotency ledger owner/schema mismatch; refusing a "
+                    "second reservation authority"
+                )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        self._fsync_directory(self.path.parent)
+
+    @property
+    def _owner_path(self) -> str:
+        assert self.path is not None
+        return str(self.path.resolve(strict=False))
+
+    def _verify_owner(self, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            """
+            SELECT schema_version, namespace, owner_path
+              FROM ledger_metadata
+             WHERE singleton = 1
+            """
+        ).fetchone()
+        expected = (self._SCHEMA_VERSION, self.namespace, self._owner_path)
+        if row is None or tuple(row) != expected:
+            raise RuntimeError(
+                "idempotency ledger owner/schema mismatch; refusing a second "
+                "reservation authority"
+            )
+
+    def _reject_symlink(self) -> None:
+        assert self.path is not None
+        if self.path.is_symlink():
+            raise RuntimeError("idempotency ledger path must not be a symlink")
+
+    def _is_sqlite(self) -> bool:
+        assert self.path is not None
+        with self.path.open("rb") as handle:
+            return handle.read(len(self._SQLITE_HEADER)) == self._SQLITE_HEADER
+
+    def _migrate_json_projection(self) -> None:
+        """Replace one legacy JSON projection with a path-bound SQLite store."""
+
+        assert self.path is not None
+        lock_path = self.path.with_name(f"{self.path.name}.migration.lock")
+        deadline = time.monotonic() + self._MIGRATION_WAIT_S
+        lock_fd: Optional[int] = None
+        while lock_fd is None:
+            try:
+                lock_fd = os.open(
+                    lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+            except FileExistsError:
+                if self.path.exists() and self._is_sqlite():
+                    return
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "idempotency ledger migration is locked; refusing to "
+                        "treat the legacy projection as empty"
+                    )
+                time.sleep(0.02)
+        try:
+            os.write(lock_fd, f"{os.getpid()}\n".encode("ascii"))
+            os.fsync(lock_fd)
+            if self._is_sqlite():
+                return
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            records = self._validated_legacy_records(loaded)
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{self.path.name}.",
+                suffix=".sqlite.tmp",
+                dir=str(self.path.parent),
+            )
+            os.close(fd)
+            temporary = Path(temporary_name)
+            try:
+                connection = sqlite3.connect(temporary, isolation_level=None)
+                try:
+                    connection.execute("PRAGMA journal_mode = DELETE")
+                    connection.execute("PRAGMA synchronous = FULL")
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        """
+                        CREATE TABLE ledger_metadata(
+                            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                            schema_version TEXT NOT NULL,
+                            namespace TEXT NOT NULL,
+                            owner_path TEXT NOT NULL
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        CREATE TABLE reservations(
+                            namespace TEXT NOT NULL,
+                            reservation_key TEXT NOT NULL,
+                            run_id TEXT NOT NULL,
+                            reserved_at TEXT NOT NULL,
+                            outcome TEXT,
+                            PRIMARY KEY(namespace, reservation_key)
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO ledger_metadata(
+                            singleton, schema_version, namespace, owner_path
+                        ) VALUES (1, ?, ?, ?)
+                        """,
+                        (self._SCHEMA_VERSION, self.namespace, self._owner_path),
+                    )
+                    connection.executemany(
+                        """
+                        INSERT INTO reservations(
+                            namespace, reservation_key, run_id, reserved_at, outcome
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                self.namespace,
+                                key,
+                                record["run_id"],
+                                record["reserved_at"],
+                                record["outcome"],
+                            )
+                            for key, record in records.items()
+                        ],
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                with temporary.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self.path)
+                self._fsync_directory(self.path.parent)
+            finally:
+                temporary.unlink(missing_ok=True)
+        finally:
+            os.close(lock_fd)
+            lock_path.unlink(missing_ok=True)
+            self._fsync_directory(self.path.parent)
+
+    @staticmethod
+    def _validated_legacy_records(
+        loaded: object,
+    ) -> dict[str, dict[str, Optional[str]]]:
+        if not isinstance(loaded, dict):
+            raise ValueError("legacy idempotency ledger must be a JSON object")
+        records: dict[str, dict[str, Optional[str]]] = {}
+        for key, raw in loaded.items():
+            if not isinstance(key, str) or not isinstance(raw, dict):
+                raise ValueError("legacy idempotency ledger record is invalid")
+            run_id = raw.get("run_id")
+            reserved_at = raw.get("reserved_at")
+            outcome = raw.get("outcome")
+            if (
+                not isinstance(run_id, str)
+                or not isinstance(reserved_at, str)
+                or (outcome is not None and not isinstance(outcome, str))
+            ):
+                raise ValueError("legacy idempotency ledger record is invalid")
+            records[key] = {
+                "run_id": run_id,
+                "reserved_at": reserved_at,
+                "outcome": outcome,
+            }
+        return records
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        if os.name == "nt":
+            return
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _raise_duplicate(key: str, owner: Optional[str]) -> None:
+        raise DuplicateActuation(
+            f"idempotency key {key!r} already reserved by run {owner!r}"
+        )

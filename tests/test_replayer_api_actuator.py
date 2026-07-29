@@ -12,8 +12,8 @@ The theses these pin (RFC ``docs/design/WORKFLOW_PROGRAM_IR.md`` section 4, the
 - a step with a REACHABLE ``ApiBinding`` performs its write via the API, the
   EffectVerifier CONFIRMS it against the record, and the GUI actuation is
   SKIPPED entirely -- ``$0``, zero model calls;
-- an API transport failure HALTs without GUI fallback because a response loss
-  can follow a committed write;
+- an API response loss verifies the complete contract without retry or GUI
+  fallback because the write can already have committed;
 - a step with NO binding replays byte-identically to today (back-compat);
 - a REFUTED effect after an API write HALTS (the record, not the screen, is the
   oracle);
@@ -146,6 +146,25 @@ def _record_written(**over):
     return Effect(**kw)
 
 
+class _ResponseLossSession:
+    """Commit one real request, then lose its response."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+
+    def request(self, *args, **kwargs):
+        self.requests += 1
+        requests.request(*args, **kwargs)
+        raise requests.exceptions.ConnectionError(
+            ProtocolError("response lost after commit")
+        )
+
+
+class _UnavailableVerifier(RestRecordVerifier):
+    def verify(self, *args, **kwargs):
+        raise RuntimeError("verifier unavailable")
+
+
 # -- ACTUATED + CONFIRMED: API performs the write, GUI is skipped -----------
 
 
@@ -222,40 +241,104 @@ def test_unreachable_api_halts_without_gui_fallback(tmp_path):
         stop()
 
 
-def test_post_send_protocol_error_halts_without_a_second_gui_write(tmp_path):
+def test_post_send_protocol_error_is_proven_by_the_complete_contract(tmp_path):
     """A lost response after a committed API write is uncertain delivery.
 
     The session first sends the request to the live fault server, then loses
     its response through ``ProtocolError``.  The record proves that one write
-    landed.  The Replayer must halt instead of pressing Enter and creating a
-    second record.
+    landed and the screen postcondition confirms. The Replayer can complete
+    the step without pressing Enter or sending the API request again.
     """
-
-    class _ResponseLossSession:
-        def request(self, *args, **kwargs):
-            requests.request(*args, **kwargs)
-            raise requests.exceptions.ConnectionError(
-                ProtocolError("response lost after commit")
-            )
 
     url, db, stop = _fault_server()
     try:
         backend = GuiWritingBackend(url)
         workflow = _api_save_workflow(effects=[_record_written()])
         bundle, run_dir = _dirs(tmp_path)
+        session = _ResponseLossSession()
         report = Replayer(
             backend,
             vision=_vision_that_confirms_saved(),
             effect_verifier=RestRecordVerifier(url),
-            api_actuator=ApiActuator(url, session=_ResponseLossSession()),
+            api_actuator=ApiActuator(url, session=session),
+            poll_interval_s=0.01,
+        ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+        result = report.results[0]
+        assert report.success is True
+        assert result.actuation == "api"
+        assert result.delivery_attempted is True
+        assert result.postconditions_ok is True
+        assert result.effect_verified is True
+        assert result.delivery_uncertainty is not None
+        assert result.delivery_uncertainty.retried is False
+        assert result.delivery_uncertainty.resolved_by_contract is True
+        assert session.requests == 1
+        assert backend.actions == []
+        assert len(db.snapshot()["records"]) == 1
+    finally:
+        stop()
+
+
+def test_post_send_protocol_error_with_refuted_effect_requires_reconciliation(
+    tmp_path,
+):
+    url, db, stop = _fault_server()
+    try:
+        backend = GuiWritingBackend(url)
+        workflow = _api_save_workflow(effects=[_record_written()])
+        workflow.steps[0].api_binding.effects = [
+            _record_written(match={"patient_id": "p2", "type": "Triage"})
+        ]
+        session = _ResponseLossSession()
+        bundle, run_dir = _dirs(tmp_path)
+        report = Replayer(
+            backend,
+            vision=_vision_that_confirms_saved(),
+            effect_verifier=RestRecordVerifier(url),
+            api_actuator=ApiActuator(url, session=session),
             poll_interval_s=0.01,
         ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
 
         result = report.results[0]
         assert report.success is False
-        assert result.actuation == "api"
-        assert result.delivery_attempted is True
+        assert result.postconditions_ok is True
         assert result.effect_verified is False
+        assert result.delivery_uncertainty is not None
+        assert result.delivery_uncertainty.resolved_by_contract is False
+        assert report.transaction_outcome == "RECONCILIATION_REQUIRED"
+        assert session.requests == 1
+        assert backend.actions == []
+        assert len(db.snapshot()["records"]) == 1
+    finally:
+        stop()
+
+
+def test_post_send_protocol_error_with_unavailable_verifier_requires_reconciliation(
+    tmp_path,
+):
+    url, db, stop = _fault_server()
+    try:
+        backend = GuiWritingBackend(url)
+        workflow = _api_save_workflow(effects=[_record_written()])
+        session = _ResponseLossSession()
+        bundle, run_dir = _dirs(tmp_path)
+        report = Replayer(
+            backend,
+            vision=_vision_that_confirms_saved(),
+            effect_verifier=_UnavailableVerifier(url),
+            api_actuator=ApiActuator(url, session=session),
+            poll_interval_s=0.01,
+        ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+        result = report.results[0]
+        assert report.success is False
+        assert result.postconditions_ok is True
+        assert result.effect_verified is False
+        assert result.delivery_uncertainty is not None
+        assert result.delivery_uncertainty.resolved_by_contract is False
+        assert report.transaction_outcome == "RECONCILIATION_REQUIRED"
+        assert session.requests == 1
         assert backend.actions == []
         assert len(db.snapshot()["records"]) == 1
     finally:

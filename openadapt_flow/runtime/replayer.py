@@ -1160,7 +1160,17 @@ class Replayer:
             and self.idempotency_ledger is not None
             and not durable_resume
         ):
-            if self.idempotency_ledger.seen(idempotency_key):
+            from openadapt_flow.transaction import DuplicateActuation
+
+            try:
+                # One atomic reservation is the check. A separate ``seen``
+                # call would let two runtime processes both pass the check
+                # before either persisted ownership.
+                self.idempotency_ledger.reserve(
+                    idempotency_key,
+                    run_id=self._run_id,
+                )
+            except DuplicateActuation:
                 report.results.append(
                     StepResult(
                         step_id="<idempotency>",
@@ -1177,9 +1187,6 @@ class Replayer:
                 report.idempotent_replay = True
                 report.success = False
                 return self._finalize_report(report, workflow, run_dir)
-            # Reserve BEFORE any actuation: if this run crashes after the write,
-            # a naive retry is blocked and must reconcile rather than double-act.
-            self.idempotency_ledger.reserve(idempotency_key, run_id=self._run_id)
         if self.governed_authorization is not None:
             profile_refusal = self._profile_runtime_refusal(workflow)
             if profile_refusal is not None:
@@ -4929,6 +4936,7 @@ class Replayer:
                 result,
                 workflow=workflow,
                 step_index=step_index,
+                bundle_dir=bundle_dir,
                 effect_verifier=api_effect_verifier,
             ):
                 if not result.ok and result.failure_category is None:
@@ -6047,6 +6055,7 @@ class Replayer:
         *,
         workflow: Workflow,
         step_index: int,
+        bundle_dir: Path,
         effect_verifier: Any,
     ) -> bool:
         """Perform ``step.api_binding``'s write via the API and confirm it.
@@ -6065,8 +6074,9 @@ class Replayer:
         - snapshot the system of record, then actuate ONCE;
         - UNAVAILABLE (request never sent) -> use the binding's configured GUI
           fallback or typed pre-delivery halt; nothing was written;
-        - HALT (request sent, outcome unknown / rejected) -> stop the run; the
-          write may have landed, so it is NEVER re-done through the GUI;
+        - HALT (request sent, outcome unknown / rejected) -> run the configured
+          postcondition and independent-effect checks without retry or GUI
+          fallback; resolve only if the complete contract proves the effect;
         - ACTUATED (2xx) -> CONFIRM with the EffectVerifier; a non-CONFIRMED
           verdict HALTs exactly as it would for a GUI write.
 
@@ -6215,6 +6225,10 @@ class Replayer:
             result.ok = False
             result.error = refusal
             return True
+        # Structural postconditions compare against the last observation before
+        # request delivery, not against state captured earlier during
+        # authorization or verifier setup.
+        start_state = self._structural_state()
         # This transition is the explicit delivery boundary. Set it BEFORE the
         # call because an exception/timeout may occur after the request left the
         # process but before the actuator can return a receipt-like outcome.
@@ -6233,13 +6247,18 @@ class Replayer:
                 "[api] actuator raised after delivery may have begun "
                 f"({type(exc).__name__}); outcome requires reconciliation"
             )
-            result.ok = False
-            result.error = (
-                f"API actuation for step '{step.id}' ({step.intent}) raised "
-                f"{type(exc).__name__} after delivery may have begun; refusing "
-                "GUI fallback or blind retry — run aborted"
+            return self._verify_uncertain_api_delivery(
+                step,
+                result,
+                workflow=workflow,
+                step_index=step_index,
+                bundle_dir=bundle_dir,
+                start_state=start_state,
+                before=before,
+                effects=effects,
+                effect_verifier=effect_verifier,
+                cause_type=type(exc).__name__,
             )
-            return True
 
         from openadapt_flow.runtime.actuators import ActuationStatus
 
@@ -6265,14 +6284,19 @@ class Replayer:
         result.actuation = "api"
 
         if outcome.status == ActuationStatus.HALT:
-            result.effect_verified = False
             result.effect_results.append(f"[api] {outcome.reason}")
-            result.ok = False
-            result.error = (
-                f"API actuation HALTED step '{step.id}' ({step.intent}): "
-                f"{outcome.reason} -- run aborted"
+            return self._verify_uncertain_api_delivery(
+                step,
+                result,
+                workflow=workflow,
+                step_index=step_index,
+                bundle_dir=bundle_dir,
+                start_state=start_state,
+                before=before,
+                effects=effects,
+                effect_verifier=effect_verifier,
+                cause_type="ApiActuationHalt",
             )
-            return True
 
         # ACTUATED (2xx): confirm the write against the system of record with
         # the same EffectVerifier that gates a GUI write. A non-CONFIRMED
@@ -6305,6 +6329,119 @@ class Replayer:
             )
         result.ok = error is None
         result.error = error
+        return True
+
+    def _verify_uncertain_api_delivery(
+        self,
+        step: Step,
+        result: StepResult,
+        *,
+        workflow: Workflow,
+        step_index: int,
+        bundle_dir: Path,
+        start_state: dict[str, Any],
+        before: EffectState,
+        effects: list["Effect"],
+        effect_verifier: Any,
+        cause_type: str,
+    ) -> bool:
+        """Resolve one possibly dispatched API write without another actuation.
+
+        A response loss, non-success response, or non-conforming actuator
+        exception does not end verification. The runtime checks the configured
+        screen postcondition and the independent system-of-record effect. It
+        reports a resolved delivery only when both contracts confirm. The API
+        request is never retried and the GUI fallback never runs.
+        """
+
+        result.delivery_uncertainty = ActionDeliveryUncertainty(
+            operation="api_request",
+            native=False,
+            observed_at=datetime.now(timezone.utc).isoformat(),
+            cause_type=cause_type,
+        )
+        overlay_current, overlay_total = self._control_overlay_progress(
+            workflow, step_index, None
+        )
+        self._emit_control_overlay_phase(
+            "verifying",
+            current_step=overlay_current,
+            total_steps=overlay_total,
+        )
+        verification_errors: list[str] = []
+
+        if step.expect:
+            try:
+                after_png = self.vision.wait_settled(self.backend)
+                postconditions_ok, _last_frame, failed = self._check_postconditions(
+                    step,
+                    after_png,
+                    bundle_dir,
+                    start_state,
+                    result,
+                )
+                result.postconditions_ok = postconditions_ok
+                if not postconditions_ok:
+                    verification_errors.append(
+                        "postcondition did not confirm: "
+                        + ("; ".join(failed) or "unknown postcondition")
+                    )
+            except Exception as exc:  # noqa: BLE001 - observation boundary
+                result.postconditions_ok = False
+                verification_errors.append(
+                    f"postcondition observation failed ({type(exc).__name__})"
+                )
+        else:
+            # An absent postcondition cannot resolve uncertain delivery.
+            result.postconditions_ok = None
+            verification_errors.append("no postcondition was declared")
+
+        try:
+            effect_error = self._verify_effects(
+                step,
+                before,
+                result,
+                effects=effects,
+                verifier=effect_verifier,
+            )
+        except Exception as exc:  # noqa: BLE001 - deployment verifier boundary
+            result.effect_verified = False
+            result.effect_results.append(
+                "[api] effect verification raised after uncertain delivery "
+                f"({type(exc).__name__}); outcome requires reconciliation"
+            )
+            effect_error = (
+                f"independent effect verification failed ({type(exc).__name__})"
+            )
+        if effect_error is not None:
+            verification_errors.append(effect_error)
+
+        uncertainty = result.delivery_uncertainty
+        assert uncertainty is not None
+        uncertainty.verification_attempted = True
+        uncertainty.postconditions_confirmed = result.postconditions_ok is True
+        uncertainty.effects_confirmed = result.effect_verified is True
+        uncertainty.resolved_by_contract = (
+            uncertainty.postconditions_confirmed
+            and uncertainty.effects_confirmed
+            and not verification_errors
+        )
+        result.ok = uncertainty.resolved_by_contract
+        if result.ok:
+            result.error = None
+        else:
+            result.safety_halt = True
+            result.failure_category = (
+                "governed_refusal"
+                if self.governed_authorization is not None
+                else "safety_halt"
+            )
+            detail = "; ".join(verification_errors) or "verification was incomplete"
+            result.error = (
+                f"API delivery for step '{step.id}' ({step.intent}) was "
+                "uncertain and was not retried; the complete postcondition and "
+                f"independent effect contract did not confirm: {detail}"
+            )
         return True
 
     @staticmethod

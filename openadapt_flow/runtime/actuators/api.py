@@ -26,10 +26,10 @@ the server*:
   skip the GUI (never re-do the write).
 - :attr:`ActuationStatus.HALT` -- the request WAS sent but its outcome is
   unknown or a rejection (read-timeout after the bytes went out, a non-2xx
-  response, any post-send transport error). The write MAY have landed, so the
-  caller must NEITHER accept it as success NOR GUI-write it again -- it HALTs
-  (the same refuse-rather-than-guess posture as the EffectVerifier's
-  INDETERMINATE verdict).
+  response, any post-send transport error). The write MAY have landed. The
+  caller must NEITHER retry it NOR GUI-write it. The caller must continue to
+  the configured postcondition and independent-effect checks, then report
+  success only if that complete contract proves the intended effect.
 
 After ``session.request()`` begins, a transport exception cannot prove that a
 server did not receive the request. In particular, ``ConnectionError`` can
@@ -62,7 +62,8 @@ class ActuationStatus(str, Enum):
     #: GUI-fallback or halt policy.
     UNAVAILABLE = "unavailable"
     #: The request WAS sent but its outcome is unknown or a rejection -> the
-    #: write may have landed; HALT (never accept, never GUI-write it again).
+    #: write may have landed; verify the complete contract without retry or GUI
+    #: fallback, then halt if the contract cannot prove the intended effect.
     HALT = "halt"
 
 
@@ -181,8 +182,8 @@ class ApiActuator:
         Returns an :class:`ApiActuationResult` whose :attr:`status` tells the
         caller the delivery state for one safe next move: confirm-and-skip-GUI
         (ACTUATED), apply the binding's configured pre-delivery unavailability
-        policy (UNAVAILABLE), or HALT (attempted, outcome unknown -- never
-        double-write). Never raises.
+        policy (UNAVAILABLE), or verify-without-retry (HALT: attempted, outcome
+        unknown -- never double-write). Never raises.
         """
         summary = f"{binding.method} {binding.url_template}"
 

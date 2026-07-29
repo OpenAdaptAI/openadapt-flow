@@ -51,6 +51,40 @@ def _path_key(run_dir: Path) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _validate_projection_failure_report(
+    corrected_report_json: bytes,
+    manifest: Any,
+) -> None:
+    """Accept only the one typed terminal downgrade this authority permits."""
+
+    try:
+        from openadapt_flow.ir import RunReport
+
+        report = RunReport.model_validate_json(corrected_report_json)
+    except ValueError as exc:
+        raise DurableAuthorityBusy("the corrected terminal report is invalid") from exc
+    expected_run_id_sha256 = hashlib.sha256(manifest.run_id.encode("utf-8")).hexdigest()
+    if not (
+        report.success is False
+        and report.execution_outcome == "FAILED"
+        and report.transaction_outcome == "RECONCILIATION_REQUIRED"
+        and report.run_id_sha256 == expected_run_id_sha256
+        and bool(report.idempotency_key)
+        and report.results
+        and report.results[-1].step_id == "<idempotency>"
+        and report.results[-1].intent == "persist terminal idempotency outcome"
+        and report.results[-1].failure_category == "runtime_failure"
+        and report.results[-1].ok is False
+        and (report.results[-1].error or "").startswith(
+            "terminal idempotency outcome persistence failed "
+        )
+    ):
+        raise DurableAuthorityBusy(
+            "the corrected terminal report is not the required "
+            "idempotency-projection failure form"
+        )
+
+
 class DurableAuthorityBusy(StateDiverged):
     """A different process or uncertain delivery owns the durable authority."""
 
@@ -79,6 +113,15 @@ class DurableAuthorityRecord(BaseModel):
     pause_binding_sha256: str = ""
     approval_digest: str = ""
     report_sha256: str = ""
+    # A completed continuation report is not externally attestable until its
+    # terminal idempotency projection either settles or records one bounded
+    # fail-closed correction.  This closes the crash window between durable
+    # completion and the ledger update.
+    terminal_projection_state: Literal["none", "pending", "settled", "corrected"] = (
+        "none"
+    )
+    terminal_original_report_sha256: str = ""
+    terminal_correction_reason: str = ""
     attempt_id: str = ""
     operation: str = ""
     owner_nonce_sha256: str = ""
@@ -202,6 +245,9 @@ class DurableAuthority:
                 pause_binding_sha256 TEXT NOT NULL,
                 approval_digest TEXT NOT NULL,
                 report_sha256 TEXT NOT NULL,
+                terminal_projection_state TEXT NOT NULL DEFAULT 'none',
+                terminal_original_report_sha256 TEXT NOT NULL DEFAULT '',
+                terminal_correction_reason TEXT NOT NULL DEFAULT '',
                 attempt_id TEXT NOT NULL,
                 operation TEXT NOT NULL,
                 owner_nonce_sha256 TEXT NOT NULL,
@@ -256,7 +302,27 @@ class DurableAuthority:
                     f"'{JOURNAL_GENESIS_DIGEST}'"
                 )
                 columns = expected_columns
-            if columns != expected_columns:
+            correction_columns = {
+                "terminal_projection_state",
+                "terminal_original_report_sha256",
+                "terminal_correction_reason",
+            }
+            corrected_expected_columns = expected_columns | correction_columns
+            if columns == expected_columns:
+                connection.execute(
+                    "ALTER TABLE durable_authority ADD COLUMN "
+                    "terminal_projection_state TEXT NOT NULL DEFAULT 'none'"
+                )
+                connection.execute(
+                    "ALTER TABLE durable_authority ADD COLUMN "
+                    "terminal_original_report_sha256 TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execute(
+                    "ALTER TABLE durable_authority ADD COLUMN "
+                    "terminal_correction_reason TEXT NOT NULL DEFAULT ''"
+                )
+                columns = corrected_expected_columns
+            if columns != corrected_expected_columns:
                 raise DurableAuthorityBusy(
                     "the external durable authority schema is incompatible"
                 )
@@ -1156,7 +1222,7 @@ class DurableAuthority:
                     )
                 except OSError:
                     return None
-                if (
+                base_proof = (
                     record.pause_binding_sha256 == source_pause_binding
                     and record.attempt_phase == "none"
                     and not record.attempt_id
@@ -1164,8 +1230,15 @@ class DurableAuthority:
                     and record.progress_digest == digest
                     and bool(record.report_sha256)
                     and record.report_sha256 == report_sha256
-                ):
-                    return "completed", True
+                    and record.terminal_projection_state in {"settled", "corrected"}
+                )
+                if base_proof:
+                    if record.terminal_projection_state == "settled":
+                        return "completed", True
+                    # A corrected report records a post-action persistence
+                    # failure. It is durable evidence of a safe halt, not a
+                    # completed executor result.
+                    return "halted", False
                 return None
 
             owned = (
@@ -1269,6 +1342,7 @@ class DurableAuthority:
                 connection,
                 record,
                 phase="completed",
+                terminal_projection_state="pending",
                 progress_digest=digest,
                 attempt_id="",
                 operation="",
@@ -1278,6 +1352,80 @@ class DurableAuthority:
                 approval_digest="",
                 acquired_at="",
                 expires_at="",
+            )
+
+    def settle_terminal_projection(
+        self,
+        manifest: Any,
+        *,
+        report_sha256: str,
+    ) -> None:
+        """Mark the exact completed report as projection-settled.
+
+        A process crash before this transition leaves ``pending``.  Such a run
+        remains non-attestable instead of appearing as a successful durable
+        completion while its idempotency projection is unknown.
+        """
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy("durable authority identity changed")
+            if (
+                record.phase != "completed"
+                or record.terminal_projection_state != "pending"
+                or record.report_sha256 != report_sha256
+            ):
+                raise DurableAuthorityBusy(
+                    "the completed terminal report is not pending this projection"
+                )
+            self._update(connection, record, terminal_projection_state="settled")
+
+    def correct_terminal_projection_failure(
+        self,
+        manifest: Any,
+        *,
+        original_report_sha256: str,
+        corrected_report_sha256: str,
+        corrected_report_json: bytes,
+    ) -> None:
+        """Bind one fail-closed report replacement after projection failure.
+
+        The correction is intentionally narrow. It can happen once, only from
+        ``pending``, only after durable completion, and only for the typed
+        idempotency-projection failure path. Both old and new report hashes
+        remain in the monotonic authority record.
+        """
+
+        if not original_report_sha256 or not corrected_report_sha256:
+            raise DurableAuthorityBusy("terminal report correction requires hashes")
+        if original_report_sha256 == corrected_report_sha256:
+            raise DurableAuthorityBusy("terminal report correction must change hash")
+        actual_hash = "sha256:" + hashlib.sha256(corrected_report_json).hexdigest()
+        if not hmac.compare_digest(actual_hash, corrected_report_sha256):
+            raise DurableAuthorityBusy("terminal report correction hash mismatch")
+        _validate_projection_failure_report(corrected_report_json, manifest)
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if record is None or not self._identity_matches(record, manifest):
+                raise DurableAuthorityBusy("durable authority identity changed")
+            if (
+                record.phase != "completed"
+                or record.terminal_projection_state != "pending"
+                or record.report_sha256 != original_report_sha256
+                or record.terminal_original_report_sha256
+                or record.terminal_correction_reason
+            ):
+                raise DurableAuthorityBusy(
+                    "the completed terminal report cannot accept this correction"
+                )
+            self._update(
+                connection,
+                record,
+                report_sha256=corrected_report_sha256,
+                terminal_projection_state="corrected",
+                terminal_original_report_sha256=original_report_sha256,
+                terminal_correction_reason="idempotency_projection_failure",
             )
 
     def release(

@@ -909,6 +909,26 @@ class _MalformedResultActuator:
         return self.Result()
 
 
+class _DuckUnavailableActuator:
+    """An untrusted adapter result that falsely claims pre-delivery safety."""
+
+    class Result:
+        status = ActuationStatus.UNAVAILABLE
+        reason = "untrusted unavailable"
+
+    def actuate(self, binding, params):
+        del binding, params
+        return self.Result()
+
+
+class _OutcomeProjectionFailingLedger(IdempotencyLedger):
+    """Reserve durably, then fail only the terminal outcome projection."""
+
+    def record_outcome(self, key, outcome, *, run_id):
+        del key, outcome, run_id
+        raise OSError("ledger outcome store unavailable")
+
+
 def _path_effect(name: str) -> Effect:
     return Effect(
         kind=EffectKind.RECORD_WRITTEN,
@@ -1038,6 +1058,106 @@ def test_invalid_api_result_collects_evidence_and_stays_halted(tmp_path, actuato
     assert result.safety_halt is True
     assert "protocol error" in " ".join(result.effect_results).lower()
     assert backend.actions == []
+
+
+def test_duck_typed_unavailable_never_falls_through_to_gui(tmp_path):
+    """Only a revalidated ApiActuationResult can prove request non-delivery."""
+
+    workflow, _gui_effect, _api_effect = _api_or_gui_workflow(on_unavailable="gui")
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+        api_actuator=_DuckUnavailableActuator(),
+    ).run(workflow, bundle_dir=tmp_path / "bundle", run_dir=tmp_path / "run")
+
+    result = report.results[0]
+    assert report.success is False
+    assert result.delivery_attempted is True
+    assert result.actuation == "api"
+    assert result.delivery_uncertainty is not None
+    assert result.delivery_uncertainty.verification_attempted is True
+    assert result.delivery_uncertainty.resolved_by_contract is False
+    assert result.effect_verified is True
+    assert backend.actions == []
+
+
+def test_ledger_projection_failure_keeps_report_and_suppresses_replay(tmp_path):
+    """A post-action ledger failure cannot erase evidence or re-send a write."""
+
+    workflow, _gui_effect, _api_effect = _api_or_gui_workflow()
+    ledger = _OutcomeProjectionFailingLedger(tmp_path / "ledger.sqlite")
+    backend = FakeBackend()
+    run_dir = tmp_path / "run"
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+        api_actuator=_PathActuator(ActuationStatus.UNAVAILABLE),
+        idempotency_ledger=ledger,
+    ).run(
+        workflow,
+        bundle_dir=tmp_path / "bundle",
+        run_dir=run_dir,
+        idempotency_key="projection-failure-key",
+    )
+
+    # The GUI action happened once, but the retained terminal report is never
+    # a success after the ledger projection failed.
+    assert backend.actions == [("press", "Enter")]
+    assert report.success is False
+    assert report.execution_outcome == "FAILED"
+    assert report.transaction_outcome == "RECONCILIATION_REQUIRED"
+    persisted = RunReport.model_validate_json((run_dir / "report.json").read_text())
+    assert persisted.success is False
+    assert persisted.execution_outcome == "FAILED"
+    assert persisted.transaction_outcome == "RECONCILIATION_REQUIRED"
+    failure = persisted.results[-1]
+    assert failure.step_id == "<idempotency>"
+    assert failure.failure_category == "runtime_failure"
+    assert ledger.lookup("projection-failure-key")["outcome"] is None
+
+    replay_backend = FakeBackend()
+    replay = Replayer(
+        replay_backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+        api_actuator=_PathActuator(ActuationStatus.UNAVAILABLE),
+        idempotency_ledger=ledger,
+    ).run(
+        workflow,
+        bundle_dir=tmp_path / "bundle",
+        run_dir=tmp_path / "retry",
+        idempotency_key="projection-failure-key",
+    )
+    assert replay.idempotent_replay is True
+    assert replay_backend.actions == []
+
+
+def test_terminal_ledger_projection_rejects_a_missing_transaction_outcome(tmp_path):
+    """Every terminal ledger call requires an exact outcome taxonomy."""
+
+    ledger = IdempotencyLedger(tmp_path / "ledger.sqlite")
+    ledger.reserve("missing-outcome-key", run_id="owned-run")
+    replayer = Replayer(
+        FakeBackend(),
+        vision=FakeVision(),
+        idempotency_ledger=ledger,
+    )
+    replayer._run_id = "owned-run"  # noqa: SLF001 - exact ownership boundary
+    replayer._idempotency_reservation_owned = True  # noqa: SLF001
+    report = RunReport(
+        workflow_name="missing-outcome",
+        started_at="2026-07-29T00:00:00Z",
+        idempotency_key="missing-outcome-key",
+    )
+
+    with pytest.raises(RuntimeError, match="terminal transaction outcome is missing"):
+        replayer._record_idempotency_outcome(report)  # noqa: SLF001
+
+    assert ledger.lookup("missing-outcome-key")["outcome"] is None
 
 
 @pytest.mark.parametrize(
@@ -1228,6 +1348,27 @@ def test_record_outcome_requires_the_reservation_owner(tmp_path):
     assert ledger.lookup("write-42")["outcome"] == "VERIFIED"
 
 
+@pytest.mark.parametrize("path", [None, "ledger.sqlite"])
+def test_terminal_outcome_is_valid_write_once_and_owner_idempotent(tmp_path, path):
+    ledger = IdempotencyLedger(None if path is None else tmp_path / path)
+    ledger.reserve("write-42", run_id="owner")
+
+    # A pre-terminal no-op remains safe for callers that finalize conditionally.
+    ledger.record_outcome("write-42", None, run_id="owner")
+    with pytest.raises(ValueError, match="TransactionOutcome"):
+        ledger.record_outcome("write-42", "not-a-terminal-outcome", run_id="owner")
+
+    ledger.record_outcome("write-42", TransactionOutcome.VERIFIED, run_id="owner")
+    # The owner can repeat the same terminal report after a retrying caller
+    # loses its acknowledgment, but cannot change or clear it.
+    ledger.record_outcome("write-42", "VERIFIED", run_id="owner")
+    with pytest.raises(RuntimeError, match="write-once"):
+        ledger.record_outcome("write-42", "FAILED_PLATFORM", run_id="owner")
+    with pytest.raises(RuntimeError, match="write-once"):
+        ledger.record_outcome("write-42", None, run_id="owner")
+    assert ledger.lookup("write-42")["outcome"] == "VERIFIED"
+
+
 def test_ledger_rejects_ancestor_and_managed_path_symlinks(tmp_path):
     real_parent = tmp_path / "real"
     real_parent.mkdir()
@@ -1242,6 +1383,62 @@ def test_ledger_rejects_ancestor_and_managed_path_symlinks(tmp_path):
     migration_lock.symlink_to(tmp_path / "elsewhere")
     with pytest.raises(RuntimeError, match="must not be a symlink"):
         IdempotencyLedger(path)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX dir_fd")
+def test_ledger_refuses_ancestor_replacement_before_claim_creation(tmp_path):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    ledger = IdempotencyLedger(managed / "ledger.sqlite")
+
+    moved = tmp_path / "managed-original"
+    managed.rename(moved)
+    managed.mkdir()
+
+    with pytest.raises(RuntimeError, match="parent changed"):
+        ledger.reserve("write-42", run_id="owner")
+
+    # The redirected pathname gains no claim.  The retained descriptor pins
+    # the original directory, and the runtime refuses before it can create a
+    # reservation in either location.
+    assert not list(managed.glob("*.claims/*"))
+    assert not list(moved.glob("*.claims/*"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX dir_fd")
+def test_ledger_refuses_ancestor_replacement_during_json_migration(
+    tmp_path, monkeypatch
+):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    path = managed / "ledger.json"
+    path.write_text(
+        json.dumps(
+            {
+                "legacy-key": {
+                    "run_id": "owner",
+                    "reserved_at": "2026-07-28T00:00:00+00:00",
+                    "outcome": "VERIFIED",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    original = IdempotencyLedger._create_migration_tempfile
+
+    def replace_parent(self):
+        result = original(self)
+        managed.rename(tmp_path / "managed-original")
+        managed.mkdir()
+        return result
+
+    monkeypatch.setattr(IdempotencyLedger, "_create_migration_tempfile", replace_parent)
+    with pytest.raises(RuntimeError, match="parent changed"):
+        IdempotencyLedger(path)
+
+    # No replacement projection or claim appears under the redirected path.
+    assert not path.exists()
+    assert not list(managed.glob("*.claims/*"))
 
 
 def test_stale_unlocked_migration_lock_recovers_safely(tmp_path):

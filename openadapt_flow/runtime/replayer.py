@@ -564,6 +564,11 @@ class Replayer:
         # an empty default so a direct _execute_step call (tests) still resolves
         # effect contracts (a literal effect ignores it).
         self._run_id: str = ""
+        # ``True`` only after this runtime instance either creates an exact
+        # idempotency reservation or validates ownership of the reservation it
+        # resumes.  A refusal before reservation must never write a terminal
+        # outcome into an unrelated ledger record.
+        self._idempotency_reservation_owned = False
         # -- state-dependency robustness (docs/LIMITS.md "state dependency") ----
         # ``require_settled``: when True the step-entry readiness gate REFUSES to
         # act on a frame that never settled -- a still-loading / mid-transition
@@ -1010,6 +1015,7 @@ class Replayer:
             if self.governed_authorization is not None
             else uuid.uuid4().hex
         )
+        self._idempotency_reservation_owned = False
         self._qualification_fault_mutations = []
         self._qualification_fault_public_key = None
         self._qualification_case_action_paths = {}
@@ -1086,6 +1092,7 @@ class Replayer:
                 bundle_dir=bundle_dir,
                 params=params,
                 worklists=worklists or {},
+                idempotency_key=idempotency_key,
                 save_healed_to=save_healed_to,
                 key=self.checkpoint_key,
                 governed_authorization=self.governed_authorization,
@@ -1170,6 +1177,7 @@ class Replayer:
                     idempotency_key,
                     run_id=self._run_id,
                 )
+                self._idempotency_reservation_owned = True
             except DuplicateActuation:
                 report.results.append(
                     StepResult(
@@ -1187,6 +1195,42 @@ class Replayer:
                 report.idempotent_replay = True
                 report.success = False
                 return self._finalize_report(report, workflow, run_dir)
+        elif (
+            idempotency_key is not None
+            and self.idempotency_ledger is not None
+            and durable_resume
+        ):
+            # A resumed durable leg did not create a new reservation.  It may
+            # project the final outcome only when the existing reservation is
+            # bound to this exact stable run identity.
+            reservation_error: Optional[str]
+            try:
+                existing = self.idempotency_ledger.lookup(idempotency_key)
+            except Exception as exc:  # noqa: BLE001 - durable ledger boundary
+                existing = None
+                reservation_error = type(exc).__name__
+            else:
+                reservation_error = None
+            if existing is None or existing.get("run_id") != self._run_id:
+                detail = (
+                    f" ({reservation_error})" if reservation_error is not None else ""
+                )
+                report.results.append(
+                    StepResult(
+                        step_id="<idempotency>",
+                        intent="validate durable idempotency reservation",
+                        ok=False,
+                        safety_halt=True,
+                        failure_category="governed_refusal",
+                        error=(
+                            "durable continuation has no exact owned idempotency "
+                            "reservation; refusing to resume before actuation" + detail
+                        ),
+                    )
+                )
+                report.success = False
+                return self._finalize_report(report, workflow, run_dir)
+            self._idempotency_reservation_owned = True
         if self.governed_authorization is not None:
             profile_refusal = self._profile_runtime_refusal(workflow)
             if profile_refusal is not None:
@@ -1540,7 +1584,30 @@ class Replayer:
 
                 CheckpointStore._fsync_directory(run_dir)
                 self._durable_continuation_guard.completed(report_sha256=report_sha256)
-                self._record_idempotency_outcome(finalized)
+                # Do not project before ``completed``. A crash or authority
+                # failure between projection and durable completion would make
+                # the ledger claim a terminal outcome while the pause remains
+                # restartable. ``pending`` keeps this completion
+                # non-attestable until the projection settles or one typed
+                # fail-closed report correction is bound.
+                try:
+                    self._record_idempotency_outcome(finalized)
+                except Exception as exc:  # noqa: BLE001 - durable ledger boundary
+                    self._mark_idempotency_projection_failure(
+                        finalized,
+                        workflow,
+                        run_dir,
+                        exc,
+                    )
+                    corrected = finalized.save(run_dir)
+                    self._durable_continuation_guard.correct_terminal_projection_failure(
+                        original_report_sha256=report_sha256,
+                        corrected_report_path=corrected,
+                    )
+                else:
+                    self._durable_continuation_guard.settle_terminal_projection(
+                        report_sha256=report_sha256
+                    )
                 self._emit_control_overlay_terminal(finalized.execution_outcome)
             else:
                 # Authenticated durable continuation always installs the
@@ -1704,12 +1771,28 @@ class Replayer:
 
         report.qualification_fault_mutations = list(self._qualification_fault_mutations)
         self._stamp_execution_outcome(report, workflow, run_dir)
-        # Record the terminal transaction outcome against the reserved key so a
-        # later duplicate (suppressed above) can surface what already happened.
-        # The suppressed replay itself never overwrites the original outcome.
         if persist:
-            self._record_idempotency_outcome(report)
-            report.save(run_dir)
+            persisted_path = report.save(run_dir)
+            # The evidence file must exist before the terminal projection.  A
+            # projection error is a runtime failure, but it cannot erase the
+            # completed action evidence or make the same key available again.
+            durable_state = self._durable_terminal_state(run_dir)
+            if durable_state == "indeterminate":
+                self._mark_idempotency_projection_failure(
+                    report,
+                    workflow,
+                    run_dir,
+                    RuntimeError("durable terminal state is unavailable"),
+                    stage="durable terminal state persistence",
+                )
+                report.save(run_dir, filename=persisted_path.name)
+            elif durable_state != "restartable":
+                self._project_idempotency_outcome_after_persist(
+                    report,
+                    workflow,
+                    run_dir,
+                    persisted_path=persisted_path,
+                )
         clear_guard = getattr(self.backend, "set_qualification_input_guard", None)
         if callable(clear_guard):
             clear_guard(None)
@@ -1717,14 +1800,100 @@ class Replayer:
             self._emit_control_overlay_terminal(report.execution_outcome)
         return report
 
+    def _project_idempotency_outcome_after_persist(
+        self,
+        report: RunReport,
+        workflow: Workflow,
+        run_dir: Path,
+        *,
+        persisted_path: Path,
+    ) -> None:
+        """Project a durable report into the owned idempotency reservation.
+
+        The first save is the evidence boundary.  If the ledger cannot accept
+        the projection, retain that evidence and replace it with a typed,
+        fail-closed report.  The immutable reservation remains in force, so
+        the runtime never re-dispatches the action to recover from this error.
+        """
+
+        if not self._idempotency_reservation_owned:
+            return
+        try:
+            self._record_idempotency_outcome(report)
+        except Exception as exc:  # noqa: BLE001 - durable ledger boundary
+            self._mark_idempotency_projection_failure(report, workflow, run_dir, exc)
+            report.save(run_dir, filename=persisted_path.name)
+
+    def _durable_terminal_state(
+        self, run_dir: Path
+    ) -> Literal["not_durable", "restartable", "terminal", "indeterminate"]:
+        """Classify the durable state that controls terminal projection.
+
+        The idempotency reservation stays outcome-free across a restartable
+        durable halt. Only the logical terminal continuation writes its final
+        outcome. This prevents a write-once ledger from recording ``HALTED``
+        before a later approved resume can record ``VERIFIED``.
+        """
+
+        if not self.durable:
+            return "not_durable"
+        try:
+            from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+
+            pending = CheckpointStore(run_dir, key=self.checkpoint_key).read_pending()
+        except Exception:  # noqa: BLE001 - durable evidence boundary
+            return "indeterminate"
+        if pending is not None and pending.status in {
+            "pending",
+            "approved",
+            "continuing",
+        }:
+            return "restartable"
+        return "terminal"
+
+    def _mark_idempotency_projection_failure(
+        self,
+        report: RunReport,
+        workflow: Workflow,
+        run_dir: Path,
+        exc: Exception,
+        *,
+        stage: str = "terminal idempotency outcome persistence",
+    ) -> None:
+        """Turn a post-save ledger failure into one typed terminal failure."""
+
+        report.results.append(
+            StepResult(
+                step_id="<idempotency>",
+                intent="persist terminal idempotency outcome",
+                ok=False,
+                failure_category="runtime_failure",
+                error=(
+                    f"{stage} failed "
+                    f"({type(exc).__name__}); retained action evidence "
+                    "requires reconciliation and the action was not retried"
+                ),
+            )
+        )
+        # Do not preserve a successful or completed status when the exact
+        # terminal projection is unavailable. The transaction classifier will
+        # conservatively produce RECONCILIATION_REQUIRED if an action may have
+        # changed the business system.
+        report.success = False
+        report.execution_completed = False
+        self._stamp_execution_outcome(report, workflow, run_dir)
+
     def _record_idempotency_outcome(self, report: RunReport) -> None:
-        """Commit terminal idempotency state only with a persisted outcome."""
+        """Commit a terminal outcome only into this run's owned reservation."""
 
         if (
-            self.idempotency_ledger is not None
+            self._idempotency_reservation_owned
+            and self.idempotency_ledger is not None
             and report.idempotency_key is not None
             and not report.idempotent_replay
         ):
+            if report.transaction_outcome is None:
+                raise RuntimeError("terminal transaction outcome is missing")
             self.idempotency_ledger.record_outcome(
                 report.idempotency_key,
                 report.transaction_outcome,
@@ -6262,16 +6431,21 @@ class Replayer:
                 cause_type=type(exc).__name__,
             )
 
-        from openadapt_flow.runtime.actuators import ActuationStatus, ApiHaltKind
+        from openadapt_flow.runtime.actuators import (
+            ActuationStatus,
+            ApiActuationResult,
+            ApiHaltKind,
+        )
 
-        outcome_status = getattr(outcome, "status", None)
-        outcome_reason = getattr(outcome, "reason", "")
-        if not isinstance(outcome_reason, str):
-            outcome_reason = f"invalid reason type {type(outcome_reason).__name__}"
-        if not isinstance(outcome_status, ActuationStatus):
+        # Only the validated model can prove the pre-delivery UNAVAILABLE
+        # state.  A deployment-owned actuator may return any object after its
+        # call, including a duck-typed object that claims ``UNAVAILABLE``.
+        # Treat that as possible delivery: collect evidence, never fall
+        # through to the GUI, and never turn it into success.
+        if type(outcome) is not ApiActuationResult:
             result.actuation = "api"
             result.effect_results.append(
-                "[api] actuator returned an invalid result after delivery may "
+                "[api] actuator returned an untyped result after delivery may "
                 f"have begun ({type(outcome).__name__}); treating it as a "
                 "protocol error that cannot resolve to success"
             )
@@ -6288,6 +6462,37 @@ class Replayer:
                 cause_type="ApiActuatorProtocolError",
                 allow_contract_resolution=False,
             )
+        try:
+            # Revalidate the return value because an adapter can mutate a
+            # Pydantic instance after construction.  The runtime trusts the
+            # copied, validated receipt only.
+            outcome = ApiActuationResult.model_validate(
+                outcome.model_dump(mode="python")
+            )
+        except Exception as exc:  # noqa: BLE001 - deployment actuator boundary
+            result.actuation = "api"
+            result.effect_results.append(
+                "[api] actuator returned a malformed typed result after "
+                "delivery may have begun "
+                f"({type(exc).__name__}); treating it as a protocol error "
+                "that cannot resolve to success"
+            )
+            return self._verify_uncertain_api_delivery(
+                step,
+                result,
+                workflow=workflow,
+                step_index=step_index,
+                bundle_dir=bundle_dir,
+                start_state=start_state,
+                before=before,
+                effects=effects,
+                effect_verifier=effect_verifier,
+                cause_type="ApiActuatorProtocolError",
+                allow_contract_resolution=False,
+            )
+
+        outcome_status = outcome.status
+        outcome_reason = outcome.reason
 
         if outcome_status is ActuationStatus.UNAVAILABLE:
             # The request was NEVER sent -- nothing was written. Remove the

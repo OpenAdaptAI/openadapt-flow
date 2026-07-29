@@ -256,6 +256,7 @@ class DurableRun:
         bundle_dir: Path | str,
         params: dict[str, str],
         worklists: dict[str, list[dict[str, str]]],
+        idempotency_key: Optional[str] = None,
         save_healed_to: Optional[Path | str] = None,
         key: Optional[str] = None,
         governed_authorization: Optional[GovernedRunAuthorization] = None,
@@ -295,6 +296,7 @@ class DurableRun:
             workflow_name=workflow_name,
             bundle_dir=str(self.bundle_dir),
             params=dict(params),
+            idempotency_key=idempotency_key,
             worklists=worklists,
             governed_authorization=governed_authorization,
             screenshots_may_leave_box=screenshots_may_leave_box,
@@ -323,6 +325,7 @@ class DurableRun:
                 or existing.workflow_name != workflow_name
                 or Path(existing.bundle_dir).resolve() != self.bundle_dir
                 or existing.params != params
+                or existing.idempotency_key != idempotency_key
                 or existing.worklists != worklists
                 or existing.governed_authorization != governed_authorization
             ):

@@ -582,6 +582,70 @@ class ContinuationCoordinator:
                 )
             )
 
+    def settle_terminal_projection(
+        self, token: ContinuationToken, *, report_sha256: str
+    ) -> None:
+        """Make an exact completed report attestable after ledger projection."""
+
+        # Validate the local owner before changing the external authority. A
+        # stale or replaced lease must not settle a different attempt.
+        with self.store.state_lock():
+            record = self._validate_owned(token)
+            if record.phase != "completed":
+                raise ContinuationBusy("the local continuation is not completed")
+        manifest = self.store.read_manifest()
+        if manifest is None:
+            raise ContinuationBusy(
+                "the durable manifest disappeared after terminal completion"
+            )
+        try:
+            self.authority.settle_terminal_projection(
+                manifest,
+                report_sha256=report_sha256,
+            )
+        except StateDiverged as exc:
+            raise ContinuationBusy(str(exc)) from exc
+
+    def correct_terminal_projection_failure(
+        self,
+        token: ContinuationToken,
+        *,
+        original_report_sha256: str,
+        corrected_report_path: Path,
+    ) -> str:
+        """Bind the one allowed fail-closed terminal report correction."""
+
+        # Validate the owner before the external mutation. The local lease is
+        # the continuation capability and must still name this exact attempt.
+        with self.store.state_lock():
+            record = self._validate_owned(token)
+            if record.phase != "completed":
+                raise ContinuationBusy("the local continuation is not completed")
+        try:
+            corrected_report_json = corrected_report_path.read_bytes()
+        except OSError as exc:
+            raise ContinuationBusy(
+                "the corrected terminal report is unavailable"
+            ) from exc
+        manifest = self.store.read_manifest()
+        if manifest is None:
+            raise ContinuationBusy(
+                "the durable manifest disappeared after terminal completion"
+            )
+        corrected_report_sha256 = (
+            "sha256:" + hashlib.sha256(corrected_report_json).hexdigest()
+        )
+        try:
+            self.authority.correct_terminal_projection_failure(
+                manifest,
+                original_report_sha256=original_report_sha256,
+                corrected_report_sha256=corrected_report_sha256,
+                corrected_report_json=corrected_report_json,
+            )
+        except (OSError, StateDiverged) as exc:
+            raise ContinuationBusy(str(exc)) from exc
+        return corrected_report_sha256
+
     def release(self, token: ContinuationToken) -> None:
         """Remove only the exact lease file this token still owns."""
 
@@ -663,4 +727,22 @@ class ContinuationGuard:
         self.coordinator.completed(
             self.token,
             report_sha256=report_sha256,
+        )
+
+    def settle_terminal_projection(self, *, report_sha256: str) -> None:
+        self.coordinator.settle_terminal_projection(
+            self.token,
+            report_sha256=report_sha256,
+        )
+
+    def correct_terminal_projection_failure(
+        self,
+        *,
+        original_report_sha256: str,
+        corrected_report_path: Path,
+    ) -> str:
+        return self.coordinator.correct_terminal_projection_failure(
+            self.token,
+            original_report_sha256=original_report_sha256,
+            corrected_report_path=corrected_report_path,
         )

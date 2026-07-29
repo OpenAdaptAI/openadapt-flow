@@ -16,6 +16,7 @@ network, no model call. The theses these pin:
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta
 
 import pytest
@@ -27,6 +28,7 @@ from openadapt_flow.ir import (
     Postcondition,
     PostconditionKind,
     Resolution,
+    RunReport,
     Step,
     StepResult,
     Workflow,
@@ -55,6 +57,7 @@ from openadapt_flow.runtime.effects import (
     Verdict,
 )
 from openadapt_flow.runtime.replayer import Replayer
+from openadapt_flow.transaction import IdempotencyLedger
 
 # Reuse the scripted fakes from the main replayer unit tests (pytest's prepend
 # import mode puts tests/ on sys.path).
@@ -109,6 +112,17 @@ class FakeSoRVerifier:
             substrate=self.substrate,
             reason="exactly the intended record is present",
         )
+
+
+class _ResumeProjectionFailingLedger(IdempotencyLedger):
+    """Fail the only terminal projection after a restartable durable pause."""
+
+    def __init__(self, path):
+        super().__init__(path)
+
+    def record_outcome(self, key, outcome, *, run_id):
+        del key, outcome, run_id
+        raise OSError("terminal ledger projection unavailable")
 
 
 def _vision_ok() -> FakeVision:
@@ -308,6 +322,169 @@ def test_resume_continues_from_last_checkpoint(tmp_path):
     assert [c.step_index for c in store.checkpoints()] == [0, 1, 2]
     # The pending escalation was cleared when the resume started.
     assert store.read_pending() is None
+
+
+def test_durable_resume_projection_failure_keeps_fail_closed_terminal_evidence(
+    tmp_path,
+):
+    """The resumed action runs once when its terminal ledger projection fails."""
+
+    ledger = _ResumeProjectionFailingLedger(tmp_path / "ledger.sqlite")
+    verifier = FakeSoRVerifier()
+    verifier.refute.add((("step", "s2"),))
+    workflow = _three_step_workflow(with_effects=True)
+    bundle, run_dir = _dirs(tmp_path)
+    workflow.save(bundle)
+    initial = Replayer(
+        FakeBackend(),
+        vision=_vision_ok(),
+        effect_verifier=verifier,
+        idempotency_ledger=ledger,
+        durable=True,
+        poll_interval_s=0.01,
+    ).run(
+        workflow,
+        params={"who": "alice"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        idempotency_key="durable-projection-key",
+    )
+    assert initial.success is False
+    pending = CheckpointStore(run_dir).read_pending()
+    assert pending is not None
+
+    verifier.refute.clear()
+    resumed_backend = FakeBackend()
+    resumed = resume(
+        run_dir,
+        Replayer(
+            resumed_backend,
+            vision=_vision_ok(),
+            effect_verifier=verifier,
+            idempotency_ledger=ledger,
+            poll_interval_s=0.01,
+        ),
+        approval=_approval(bundle),
+    )
+
+    # The resumed action is delivered once. The failed projection does not
+    # dispatch it again and does not erase its retained report/effect evidence.
+    assert resumed_backend.actions == [("press", "C")]
+    assert resumed.success is False
+    assert resumed.execution_outcome == "FAILED"
+    assert resumed.transaction_outcome == "RECONCILIATION_REQUIRED"
+    persisted = RunReport.model_validate_json((run_dir / "report.json").read_text())
+    assert persisted.execution_outcome == "FAILED"
+    assert persisted.transaction_outcome == "RECONCILIATION_REQUIRED"
+    assert persisted.results[-1].step_id == "<idempotency>"
+    assert persisted.results[-1].failure_category == "runtime_failure"
+
+    store = CheckpointStore(run_dir)
+    manifest = store.read_manifest()
+    assert manifest is not None
+    authority = DurableAuthority(run_dir, store)
+    with authority._transaction() as connection:  # noqa: SLF001 - exact authority proof
+        record = authority._read(connection)  # noqa: SLF001 - exact authority proof
+    assert record is not None
+    assert record.terminal_projection_state == "corrected"
+    assert (
+        record.report_sha256
+        == "sha256:"
+        + hashlib.sha256((run_dir / "report.json").read_bytes()).hexdigest()
+    )
+    assert authority.prove_executor_outcome(
+        manifest,
+        attempt_id="irrelevant-after-completion",
+        owner_nonce_sha256="irrelevant-after-completion",
+        source_pause_binding=approval_pause_digest(pending),
+    ) == ("halted", False)
+
+
+def test_durable_pause_defers_ledger_outcome_until_resume_verifies(tmp_path):
+    """A restartable halt does not consume the logical terminal outcome."""
+
+    ledger = IdempotencyLedger(tmp_path / "ledger.sqlite")
+    verifier = FakeSoRVerifier()
+    verifier.refute.add((("step", "s2"),))
+    workflow = _three_step_workflow(with_effects=True)
+    bundle, run_dir = _dirs(tmp_path)
+    workflow.save(bundle)
+    Replayer(
+        FakeBackend(),
+        vision=_vision_ok(),
+        effect_verifier=verifier,
+        idempotency_ledger=ledger,
+        durable=True,
+        poll_interval_s=0.01,
+    ).run(
+        workflow,
+        params={"who": "alice"},
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        idempotency_key="durable-final-key",
+    )
+    assert ledger.lookup("durable-final-key")["outcome"] is None
+
+    verifier.refute.clear()
+    resumed = resume(
+        run_dir,
+        Replayer(
+            FakeBackend(),
+            vision=_vision_ok(),
+            effect_verifier=verifier,
+            idempotency_ledger=ledger,
+            poll_interval_s=0.01,
+        ),
+        approval=_approval(bundle),
+    )
+    assert resumed.success is True
+    # This fixture uses the Demo profile, so its correct terminal taxonomy is
+    # COMPLETED_UNVERIFIED. The important invariant is that the ledger receives
+    # that one final logical outcome, not the earlier restartable halt.
+    assert ledger.lookup("durable-final-key")["outcome"] == (
+        resumed.transaction_outcome
+    )
+
+
+def test_indeterminate_durable_state_fails_closed_without_ledger_projection(
+    tmp_path, monkeypatch
+):
+    """A failed durable-state read cannot retain a success-shaped report."""
+
+    ledger = IdempotencyLedger(tmp_path / "ledger.sqlite")
+    workflow = _three_step_workflow(with_effects=False)
+    bundle, run_dir = _dirs(tmp_path)
+    workflow.save(bundle)
+    replayer = Replayer(
+        FakeBackend(),
+        vision=_vision_ok(),
+        idempotency_ledger=ledger,
+        durable=True,
+        poll_interval_s=0.01,
+    )
+    monkeypatch.setattr(
+        replayer,
+        "_durable_terminal_state",
+        lambda _run_dir: "indeterminate",
+    )
+
+    report = replayer.run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+        idempotency_key="indeterminate-durable-state-key",
+    )
+
+    assert report.success is False
+    assert report.execution_outcome == "FAILED"
+    assert report.results[-1].step_id == "<idempotency>"
+    assert report.results[-1].failure_category == "runtime_failure"
+    assert "durable terminal state persistence failed" in (
+        report.results[-1].error or ""
+    )
+    persisted = RunReport.model_validate_json((run_dir / "report.json").read_text())
+    assert persisted.execution_outcome == "FAILED"
+    assert ledger.lookup("indeterminate-durable-state-key")["outcome"] is None
 
 
 def test_resume_requires_the_active_pause_and_exact_inputs(tmp_path):

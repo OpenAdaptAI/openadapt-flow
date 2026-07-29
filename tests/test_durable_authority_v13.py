@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from openadapt_flow.ir import ActionKind, Step, StepResult, Workflow
+from openadapt_flow.ir import ActionKind, RunReport, Step, StepResult, Workflow
 from openadapt_flow.runtime.durable.approval import (
     StateDiverged,
     approval_pause_digest,
@@ -351,6 +351,137 @@ def test_same_path_restore_cannot_reopen_completed_run(tmp_path: Path) -> None:
 
     with pytest.raises(DurableAuthorityBusy, match="completed"):
         DurableAuthority(run_dir, CheckpointStore(run_dir)).validate(manifest)
+
+
+def test_completed_terminal_is_not_attestable_until_projection_settles(
+    tmp_path: Path,
+) -> None:
+    """A crash after durable completion but before ledger projection is safe."""
+
+    run_dir, store, manifest, authority = _fresh_run(tmp_path)
+    pending = _pause(store, manifest, authority)
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    owner = _acquire(authority, manifest, pending, attempt="projection", now=now)
+    report = run_dir / "report.json"
+    report.write_bytes(b'{"outcome":"VERIFIED"}\n')
+    report_sha256 = "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+    authority.prepare_terminal(
+        manifest,
+        attempt_id="projection",
+        owner_nonce_sha256=owner,
+        report_sha256=report_sha256,
+    )
+    store.clear_pending()
+    authority.finalize_terminal(
+        manifest,
+        attempt_id="projection",
+        owner_nonce_sha256=owner,
+        report_sha256=report_sha256,
+    )
+
+    # The authority has consumed the pause, but the terminal report cannot yet
+    # prove completion until the idempotency projection commits.
+    assert (
+        authority.prove_executor_outcome(
+            manifest,
+            attempt_id="projection",
+            owner_nonce_sha256=owner,
+            source_pause_binding=approval_pause_digest(pending),
+        )
+        is None
+    )
+
+    authority.settle_terminal_projection(manifest, report_sha256=report_sha256)
+    assert authority.prove_executor_outcome(
+        manifest,
+        attempt_id="projection",
+        owner_nonce_sha256=owner,
+        source_pause_binding=approval_pause_digest(pending),
+    ) == ("completed", True)
+
+
+def test_projection_failure_binds_only_one_fail_closed_report_correction(
+    tmp_path: Path,
+) -> None:
+    """A replacement report is attestable only after its exact hash is bound."""
+
+    run_dir, store, manifest, authority = _fresh_run(tmp_path)
+    pending = _pause(store, manifest, authority)
+    now = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
+    owner = _acquire(authority, manifest, pending, attempt="correction", now=now)
+    report = run_dir / "report.json"
+    report.write_bytes(b'{"outcome":"VERIFIED"}\n')
+    original = "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+    authority.prepare_terminal(
+        manifest,
+        attempt_id="correction",
+        owner_nonce_sha256=owner,
+        report_sha256=original,
+    )
+    store.clear_pending()
+    authority.finalize_terminal(
+        manifest,
+        attempt_id="correction",
+        owner_nonce_sha256=owner,
+        report_sha256=original,
+    )
+
+    # A crash after replacement but before the authority correction makes the
+    # terminal proof fail closed because its state remains pending and hashes
+    # no longer agree.
+    corrected_report = RunReport(
+        workflow_name="authority-contract",
+        started_at="2026-07-28T12:00:00+00:00",
+        execution_profile="demo",
+        execution_outcome="FAILED",
+        transaction_outcome="RECONCILIATION_REQUIRED",
+        success=False,
+        run_id_sha256=hashlib.sha256(manifest.run_id.encode("utf-8")).hexdigest(),
+        idempotency_key="projection-failure-key",
+        results=[
+            StepResult(
+                step_id="<idempotency>",
+                intent="persist terminal idempotency outcome",
+                ok=False,
+                failure_category="runtime_failure",
+                error=(
+                    "terminal idempotency outcome persistence failed "
+                    "(OSError); retained action evidence requires reconciliation"
+                ),
+            )
+        ],
+    )
+    report.write_text(corrected_report.model_dump_json(), encoding="utf-8")
+    corrected = "sha256:" + hashlib.sha256(report.read_bytes()).hexdigest()
+    assert (
+        authority.prove_executor_outcome(
+            manifest,
+            attempt_id="correction",
+            owner_nonce_sha256=owner,
+            source_pause_binding=approval_pause_digest(pending),
+        )
+        is None
+    )
+
+    authority.correct_terminal_projection_failure(
+        manifest,
+        original_report_sha256=original,
+        corrected_report_sha256=corrected,
+        corrected_report_json=report.read_bytes(),
+    )
+    assert authority.prove_executor_outcome(
+        manifest,
+        attempt_id="correction",
+        owner_nonce_sha256=owner,
+        source_pause_binding=approval_pause_digest(pending),
+    ) == ("halted", False)
+    with pytest.raises(DurableAuthorityBusy, match="hash mismatch|cannot accept"):
+        authority.correct_terminal_projection_failure(
+            manifest,
+            original_report_sha256=corrected,
+            corrected_report_sha256=original,
+            corrected_report_json=report.read_bytes(),
+        )
 
 
 def test_only_one_unexpired_continuation_attempt_can_own_pause(

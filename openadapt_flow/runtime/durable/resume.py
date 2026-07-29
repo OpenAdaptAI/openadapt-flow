@@ -1046,6 +1046,7 @@ def _resume_under_lease(
         save_healed_to=(Path(resolved_healed) if resolved_healed else None),
         resume_from=start_index,
         run_id=effective_run_id,
+        idempotency_key=(manifest.idempotency_key if manifest is not None else None),
         execution_target_kind=execution_target_kind,
         prior_screenshots_may_leave_box=(
             manifest.screenshots_may_leave_box if manifest is not None else False
@@ -1191,6 +1192,7 @@ def _resume_program(
         save_healed_to=(Path(save_healed_to) if save_healed_to else None),
         resume_program=checkpoint,
         run_id=effective_run_id,
+        idempotency_key=manifest.idempotency_key,
         execution_target_kind=execution_target_kind,
         prior_screenshots_may_leave_box=(
             manifest.screenshots_may_leave_box if manifest is not None else False

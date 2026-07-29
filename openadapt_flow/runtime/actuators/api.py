@@ -46,7 +46,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from openadapt_flow.ir import ApiBinding
 
@@ -81,6 +81,8 @@ class ApiHaltKind(str, Enum):
 
 class ApiActuationResult(BaseModel):
     """Outcome of one :meth:`ApiActuator.actuate` call."""
+
+    model_config = ConfigDict(frozen=True)
 
     status: ActuationStatus
     substrate: str = "rest"

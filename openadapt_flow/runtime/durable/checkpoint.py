@@ -111,6 +111,9 @@ class RunManifest(BaseModel):
     #: The run's fully-resolved parameter bindings (defaults + caller
     #: overrides), so a resume re-binds identically.
     params: dict[str, str] = Field(default_factory=dict)
+    #: Stable at-most-once reservation for the complete logical durable run.
+    #: A resumed leg reuses it only after it proves ownership in the ledger.
+    idempotency_key: Optional[str] = None
     worklists: dict[str, list[dict[str, str]]] = Field(default_factory=dict)
     governed_authorization: Optional[GovernedRunAuthorization] = None
     #: Sticky audit posture for the whole logical run.  A resumed leg may use a

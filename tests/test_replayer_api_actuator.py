@@ -630,3 +630,10 @@ def test_actuator_halts_on_non_2xx():
 def test_halt_result_requires_typed_cause():
     with pytest.raises(ValueError, match="halt_kind"):
         ApiActuationResult(status=ActuationStatus.HALT)
+
+
+def test_api_actuation_result_is_immutable_after_validation():
+    result = ApiActuationResult(status=ActuationStatus.UNAVAILABLE)
+
+    with pytest.raises(ValueError, match="frozen"):
+        result.status = ActuationStatus.ACTUATED

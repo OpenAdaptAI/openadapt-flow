@@ -28,7 +28,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -579,6 +581,10 @@ class IdempotencyLedger:
             raise ValueError("idempotency ledger namespace must not be empty")
         self.namespace = namespace
         self.path: Optional[Path] = None
+        self._parent_descriptor: Optional[int] = None
+        self._parent_identity: Optional[tuple[int, int]] = None
+        self._owner_path_value: Optional[str] = None
+        self._closed = False
         if path is not None:
             candidate = Path(path).expanduser().absolute()
             # macOS exposes its real temporary directory through the
@@ -598,6 +604,13 @@ class IdempotencyLedger:
         if self.path is not None:
             self._ensure_parent_directory()
             self._assert_safe_path(self.path)
+            self._parent_identity = self._path_identity(self.path.parent)
+            self._parent_descriptor = self._open_parent_directory_descriptor()
+            # Keep this value stable.  Calling ``Path.resolve`` after an
+            # attacker replaces an ancestor would otherwise make a claim and
+            # the SQLite projection agree on the replacement path.
+            self._owner_path_value = str(self.path.resolve(strict=False))
+            self._assert_parent_path_matches_descriptor()
             setup_lock = self._acquire_migration_lock()
             try:
                 if self.path.exists() and not self._is_sqlite():
@@ -605,6 +618,21 @@ class IdempotencyLedger:
                 self._initialize_sqlite()
             finally:
                 self._release_migration_lock(setup_lock)
+
+    def close(self) -> None:
+        """Release the retained POSIX parent directory descriptor."""
+
+        self._closed = True
+        if self._parent_descriptor is not None:
+            os.close(self._parent_descriptor)
+            self._parent_descriptor = None
+
+    def __del__(self) -> None:
+        # ``close`` is intentionally best-effort during interpreter shutdown.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def lookup(self, key: str) -> Optional[dict[str, Optional[str]]]:
         """Return the stored record for ``key``, or None when unseen."""
@@ -633,10 +661,11 @@ class IdempotencyLedger:
                     "refusing to treat a reserved key as unseen"
                 )
             return None
+        outcome = self._normalize_outcome(row[2])
         record = {
             "run_id": str(row[0]),
             "reserved_at": str(row[1]),
-            "outcome": str(row[2]) if row[2] is not None else None,
+            "outcome": outcome,
         }
         if claim is None or (
             claim["run_id"] != record["run_id"]
@@ -704,11 +733,18 @@ class IdempotencyLedger:
         finally:
             connection.close()
 
-    def record_outcome(self, key: str, outcome: Optional[str], *, run_id: str) -> None:
+    def record_outcome(
+        self,
+        key: str,
+        outcome: Optional[str | TransactionOutcome],
+        *,
+        run_id: str,
+    ) -> None:
         """Record the terminal outcome for a previously reserved ``key``."""
 
         if not run_id:
             raise ValueError("idempotency ledger run_id must not be empty")
+        terminal_outcome = self._normalize_outcome(outcome)
         if self.path is None:
             with self._memory_lock:
                 record = self._records.get(key)
@@ -722,46 +758,94 @@ class IdempotencyLedger:
                         "idempotency ledger outcome owner mismatch; "
                         "refusing to alter transaction state"
                     )
-                record["outcome"] = outcome
+                self._record_memory_outcome(record, terminal_outcome)
             return
 
         self._require_claim_owner(key, run_id=run_id)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
+            row = connection.execute(
                 """
-                UPDATE reservations
-                   SET outcome = ?
-                 WHERE namespace = ? AND reservation_key = ? AND run_id = ?
+                SELECT run_id, outcome
+                  FROM reservations
+                 WHERE namespace = ? AND reservation_key = ?
                 """,
-                (outcome, self.namespace, key, run_id),
-            )
-            if cursor.rowcount != 1:
-                row = connection.execute(
-                    """
-                    SELECT run_id
-                      FROM reservations
-                     WHERE namespace = ? AND reservation_key = ?
-                    """,
-                    (self.namespace, key),
-                ).fetchone()
+                (self.namespace, key),
+            ).fetchone()
+            if row is None:
                 connection.rollback()
-                if row is None:
-                    raise RuntimeError(
-                        "idempotency ledger outcome has no reservation; "
-                        "refusing to alter transaction state"
-                    )
+                raise RuntimeError(
+                    "idempotency ledger outcome has no reservation; "
+                    "refusing to alter transaction state"
+                )
+            if str(row[0]) != run_id:
+                connection.rollback()
                 raise RuntimeError(
                     "idempotency ledger outcome owner mismatch; "
                     "refusing to alter transaction state"
                 )
+            existing = self._normalize_outcome(row[1])
+            if existing is None:
+                if terminal_outcome is not None:
+                    connection.execute(
+                        """
+                        UPDATE reservations
+                           SET outcome = ?
+                         WHERE namespace = ? AND reservation_key = ?
+                           AND run_id = ? AND outcome IS NULL
+                        """,
+                        (terminal_outcome, self.namespace, key, run_id),
+                    )
+            elif terminal_outcome != existing:
+                connection.rollback()
+                raise RuntimeError(
+                    "idempotency ledger terminal outcome is write-once; "
+                    "refusing to alter transaction state"
+                )
             connection.commit()
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
         finally:
             connection.close()
 
+    @staticmethod
+    def _record_memory_outcome(
+        record: dict[str, Optional[str]], terminal_outcome: Optional[str]
+    ) -> None:
+        """Apply the same terminal write-once rule as SQLite."""
+
+        existing = IdempotencyLedger._normalize_outcome(record["outcome"])
+        if existing is None:
+            if terminal_outcome is not None:
+                record["outcome"] = terminal_outcome
+            return
+        if terminal_outcome != existing:
+            raise RuntimeError(
+                "idempotency ledger terminal outcome is write-once; "
+                "refusing to alter transaction state"
+            )
+
+    @staticmethod
+    def _normalize_outcome(
+        outcome: object,
+    ) -> Optional[str]:
+        """Return one supported terminal value, or reject malformed state."""
+
+        if outcome is None:
+            return None
+        try:
+            return TransactionOutcome(outcome).value
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "idempotency ledger outcome must be a TransactionOutcome value"
+            ) from error
+
     def _connect(self) -> sqlite3.Connection:
         assert self.path is not None
+        self._assert_parent_path_matches_descriptor()
         self._assert_safe_path(self.path)
         connection = sqlite3.connect(
             self.path,
@@ -769,8 +853,14 @@ class IdempotencyLedger:
             isolation_level=None,
         )
         try:
+            self._assert_parent_path_matches_descriptor()
             connection.execute("PRAGMA busy_timeout = 10000")
             connection.execute("PRAGMA synchronous = FULL")
+            # ``sqlite3`` accepts only a pathname.  The immutable claim is
+            # therefore the reservation authority.  Revalidate the directory
+            # after SQLite opens the projection so an ancestor replacement is
+            # detected before its result can authorize an action.
+            self._assert_parent_path_matches_descriptor()
             self._verify_owner(connection)
         except BaseException:
             connection.close()
@@ -779,6 +869,7 @@ class IdempotencyLedger:
 
     def _initialize_sqlite(self) -> None:
         assert self.path is not None
+        self._assert_parent_path_matches_descriptor()
         self._assert_safe_path(self.path)
         connection = sqlite3.connect(
             self.path,
@@ -786,6 +877,7 @@ class IdempotencyLedger:
             isolation_level=None,
         )
         try:
+            self._assert_parent_path_matches_descriptor()
             connection.execute("PRAGMA busy_timeout = 10000")
             connection.execute("PRAGMA journal_mode = DELETE")
             connection.execute("PRAGMA synchronous = FULL")
@@ -844,12 +936,13 @@ class IdempotencyLedger:
             raise
         finally:
             connection.close()
-        self._fsync_directory(self.path.parent)
+        self._fsync_parent_directory()
 
     @property
     def _owner_path(self) -> str:
         assert self.path is not None
-        return str(self.path.resolve(strict=False))
+        assert self._owner_path_value is not None
+        return self._owner_path_value
 
     def _verify_owner(self, connection: sqlite3.Connection) -> None:
         row = connection.execute(
@@ -880,6 +973,75 @@ class IdempotencyLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._assert_existing_ancestors_not_symlinks(self.path.parent)
 
+    def _open_parent_directory_descriptor(self) -> Optional[int]:
+        """Open the managed parent without following a replaceable component.
+
+        POSIX ``dir_fd`` operations keep the immutable claim authority inside
+        the directory we inspected, even if a different process later renames
+        a pathname ancestor.  Windows does not expose equivalent directory-handle
+        operations through ``os``.  The Windows path remains fail-closed on
+        every detected reparse point and receives pre/post pathname identity
+        checks around projection I/O.
+        """
+
+        assert self.path is not None
+        if os.name == "nt":
+            return None
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(self.path.parent.anchor, flags)
+        try:
+            for component in self.path.parent.parts[1:]:
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise RuntimeError("idempotency ledger parent is not a directory")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _assert_parent_path_matches_descriptor(self) -> None:
+        """Reject a pathname that no longer names the trusted parent directory."""
+
+        assert self.path is not None
+        if self._closed:
+            raise RuntimeError("idempotency ledger is closed")
+        self._assert_safe_path(self.path.parent)
+        if self._parent_descriptor is None:
+            assert self._parent_identity is not None
+            if self._path_identity(self.path.parent) != self._parent_identity:
+                raise RuntimeError(
+                    "idempotency ledger parent changed after initialization; "
+                    "refusing redirected projection I/O"
+                )
+            return
+        expected = os.fstat(self._parent_descriptor)
+        actual = os.stat(self.path.parent, follow_symlinks=False)
+        if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            raise RuntimeError(
+                "idempotency ledger parent changed after initialization; "
+                "refusing redirected projection I/O"
+            )
+
+    @staticmethod
+    def _path_identity(path: Path) -> tuple[int, int]:
+        status = path.stat(follow_symlinks=False)
+        return (status.st_dev, status.st_ino)
+
+    @staticmethod
+    def _is_reparse_point(status: os.stat_result) -> bool:
+        """Return true for a Windows junction or another reparse point."""
+
+        return bool(
+            getattr(status, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        )
+
     @staticmethod
     def _assert_existing_ancestors_not_symlinks(path: Path) -> None:
         """Reject every existing symlink from the filesystem anchor onward."""
@@ -888,19 +1050,27 @@ class IdempotencyLedger:
         current = Path(absolute.anchor)
         for component in absolute.parts[1:]:
             current /= component
-            if current.is_symlink():
+            try:
+                status = current.lstat()
+            except FileNotFoundError:
+                # A descendant cannot exist when its parent does not exist.
+                break
+            if stat.S_ISLNK(status.st_mode) or IdempotencyLedger._is_reparse_point(
+                status
+            ):
                 raise RuntimeError(
                     "idempotency ledger managed path must not traverse a symlink"
                 )
-            if not current.exists():
-                # A descendant cannot exist when its parent does not exist.
-                break
 
     def _assert_safe_path(self, path: Path) -> None:
         """Reject a link target and every existing ancestor before I/O."""
 
         self._assert_existing_ancestors_not_symlinks(path.parent)
-        if path.is_symlink():
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(status.st_mode) or self._is_reparse_point(status):
             raise RuntimeError("idempotency ledger managed path must not be a symlink")
 
     @property
@@ -918,6 +1088,111 @@ class IdempotencyLedger:
             self.namespace.encode("utf-8") + b"\0" + key.encode("utf-8")
         ).hexdigest()
         return self._claims_directory / f"{digest}.claim"
+
+    def _claim_filename(self, key: str) -> str:
+        return self._claim_path(key).name
+
+    def _read_ledger_file_bytes(self) -> bytes:
+        """Read the SQLite/legacy projection from the trusted parent directory."""
+
+        assert self.path is not None
+        self._assert_parent_path_matches_descriptor()
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            if self._parent_descriptor is None:
+                descriptor = os.open(self.path, flags)
+            else:
+                descriptor = os.open(
+                    self.path.name, flags, dir_fd=self._parent_descriptor
+                )
+        except OSError as error:
+            raise RuntimeError(
+                "idempotency ledger projection cannot be read safely"
+            ) from error
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise RuntimeError(
+                    "idempotency ledger projection is not a regular file"
+                )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+
+    def _create_migration_tempfile(self) -> tuple[str, Path]:
+        """Create a private migration file in the trusted parent directory."""
+
+        assert self.path is not None
+        self._assert_parent_path_matches_descriptor()
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        for _attempt in range(32):
+            name = f".{self.path.name}.{secrets.token_hex(16)}.sqlite.tmp"
+            try:
+                if self._parent_descriptor is None:
+                    descriptor = os.open(self.path.parent / name, flags, 0o600)
+                else:
+                    descriptor = os.open(
+                        name, flags, 0o600, dir_fd=self._parent_descriptor
+                    )
+            except FileExistsError:
+                continue
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            return name, self.path.parent / name
+        raise RuntimeError("idempotency ledger cannot allocate a migration file")
+
+    def _remove_migration_tempfile(self, name: str, path: Path) -> None:
+        try:
+            if self._parent_descriptor is None:
+                self._assert_parent_path_matches_descriptor()
+                path.unlink(missing_ok=True)
+            else:
+                os.unlink(name, dir_fd=self._parent_descriptor)
+        except FileNotFoundError:
+            pass
+
+    def _fsync_migration_tempfile(self, name: str, path: Path) -> None:
+        self._assert_parent_path_matches_descriptor()
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if self._parent_descriptor is None:
+            descriptor = os.open(path, flags)
+        else:
+            descriptor = os.open(name, flags, dir_fd=self._parent_descriptor)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise RuntimeError("idempotency ledger migration file is not regular")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _replace_ledger_with_migration_tempfile(self, name: str, path: Path) -> None:
+        """Atomically replace the projection inside the trusted parent directory."""
+
+        assert self.path is not None
+        self._assert_parent_path_matches_descriptor()
+        if self._parent_descriptor is None:
+            os.replace(path, self.path)
+        else:
+            os.replace(
+                name,
+                self.path.name,
+                src_dir_fd=self._parent_descriptor,
+                dst_dir_fd=self._parent_descriptor,
+            )
+        self._fsync_parent_directory()
 
     def _claim_payload(self, key: str, *, run_id: str, reserved_at: str) -> bytes:
         return (
@@ -939,36 +1214,101 @@ class IdempotencyLedger:
         )
 
     def _ensure_claims_directory(self) -> None:
-        directory = self._claims_directory
-        self._assert_safe_path(directory)
+        descriptor = self._open_claims_directory(create=True)
         try:
-            directory.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-        self._assert_safe_path(directory)
-        if not directory.is_dir():
+            self._fsync_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+        self._fsync_parent_directory()
+
+    def _open_claims_directory(self, *, create: bool) -> int:
+        """Open the claim directory relative to the trusted ledger parent."""
+
+        assert self.path is not None
+        if self._parent_descriptor is None:
+            self._assert_parent_path_matches_descriptor()
+            directory = self._claims_directory
+            if create:
+                try:
+                    directory.mkdir(mode=0o700)
+                except FileExistsError:
+                    pass
+            try:
+                self._assert_safe_path(directory)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                raise
+            if not directory.exists() and not create:
+                raise FileNotFoundError(directory)
+            if not directory.is_dir():
+                raise RuntimeError("idempotency ledger claim path is not a directory")
+            flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            return os.open(directory, flags)
+
+        self._assert_parent_path_matches_descriptor()
+        name = self._claims_directory.name
+        if create:
+            try:
+                os.mkdir(name, 0o700, dir_fd=self._parent_descriptor)
+            except FileExistsError:
+                pass
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(name, flags, dir_fd=self._parent_descriptor)
+        except FileNotFoundError:
+            if not create:
+                raise
+            raise RuntimeError("idempotency ledger claim path cannot be opened safely")
+        except OSError as error:
+            raise RuntimeError(
+                "idempotency ledger claim path cannot be opened safely"
+            ) from error
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
             raise RuntimeError("idempotency ledger claim path is not a directory")
-        self._fsync_directory(directory.parent)
+        return descriptor
 
     def _read_claim(self, key: str) -> Optional[dict[str, str]]:
-        claim_path = self._claim_path(key)
-        self._assert_safe_path(self._claims_directory)
-        self._assert_safe_path(claim_path)
-        if not claim_path.exists():
+        try:
+            directory = self._open_claims_directory(create=False)
+        except FileNotFoundError:
             return None
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
-            descriptor = os.open(claim_path, flags)
+            if self._parent_descriptor is None:
+                descriptor = os.open(
+                    self._claims_directory / self._claim_filename(key), flags
+                )
+            else:
+                descriptor = os.open(self._claim_filename(key), flags, dir_fd=directory)
+        except FileNotFoundError:
+            os.close(directory)
+            return None
         except OSError as error:
+            os.close(directory)
             raise RuntimeError(
                 "idempotency ledger claim cannot be read safely; refusing to actuate"
             ) from error
         try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise RuntimeError(
+                    "idempotency ledger claim cannot be read safely; refusing to actuate"
+                )
             raw = os.read(descriptor, 64 * 1024)
         finally:
             os.close(descriptor)
+            os.close(directory)
         try:
             loaded = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -998,17 +1338,27 @@ class IdempotencyLedger:
 
     def _create_claim(self, key: str, *, run_id: str, reserved_at: str) -> None:
         self._ensure_claims_directory()
-        claim_path = self._claim_path(key)
-        self._assert_safe_path(claim_path)
+        directory = self._open_claims_directory(create=False)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
-            descriptor = os.open(claim_path, flags, 0o600)
+            if self._parent_descriptor is None:
+                descriptor = os.open(
+                    self._claims_directory / self._claim_filename(key),
+                    flags,
+                    0o600,
+                )
+            else:
+                descriptor = os.open(
+                    self._claim_filename(key), flags, 0o600, dir_fd=directory
+                )
         except FileExistsError:
+            os.close(directory)
             claim = self._read_claim(key)
             self._raise_duplicate(key, None if claim is None else claim["run_id"])
         except OSError as error:
+            os.close(directory)
             raise RuntimeError(
                 "idempotency ledger claim cannot be created safely; refusing to actuate"
             ) from error
@@ -1023,7 +1373,9 @@ class IdempotencyLedger:
             raise
         finally:
             os.close(descriptor)
-        self._fsync_directory(self._claims_directory)
+            self._fsync_descriptor(directory)
+            os.close(directory)
+        self._fsync_parent_directory()
 
     def _require_claim_owner(self, key: str, *, run_id: str) -> None:
         claim = self._read_claim(key)
@@ -1040,9 +1392,10 @@ class IdempotencyLedger:
 
     def _is_sqlite(self) -> bool:
         assert self.path is not None
-        self._assert_safe_path(self.path)
-        with self.path.open("rb") as handle:
-            return handle.read(len(self._SQLITE_HEADER)) == self._SQLITE_HEADER
+        return (
+            self._read_ledger_file_bytes()[: len(self._SQLITE_HEADER)]
+            == self._SQLITE_HEADER
+        )
 
     def _migrate_json_projection(self) -> None:
         """Replace one legacy JSON projection while the setup lock is held."""
@@ -1050,8 +1403,10 @@ class IdempotencyLedger:
         assert self.path is not None
         if self._is_sqlite():
             return
-        self._assert_safe_path(self.path)
-        loaded = json.loads(self.path.read_text(encoding="utf-8"))
+        try:
+            loaded = json.loads(self._read_ledger_file_bytes().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("legacy idempotency ledger is not valid JSON") from error
         records = self._validated_legacy_records(loaded)
         # Claims are intentionally created before the SQLite replacement. A
         # crash in this interval leaves a safe duplicate refusal. The next
@@ -1072,16 +1427,17 @@ class IdempotencyLedger:
                     "idempotency ledger claim/legacy ownership mismatch; "
                     "refusing to migrate"
                 )
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{self.path.name}.",
-            suffix=".sqlite.tmp",
-            dir=str(self.path.parent),
-        )
-        os.close(fd)
-        temporary = Path(temporary_name)
+        temporary_name, temporary = self._create_migration_tempfile()
         try:
+            # Python's sqlite3 API accepts a pathname, not a directory handle.
+            # The surrounding parent-identity checks reject a replacement
+            # before the projection can authorize a run.  The immutable claim
+            # files use descriptor-relative operations and remain the sole
+            # at-most-once authority if this pathname is redirected.
+            self._assert_parent_path_matches_descriptor()
             connection = sqlite3.connect(temporary, isolation_level=None)
             try:
+                self._assert_parent_path_matches_descriptor()
                 connection.execute("PRAGMA journal_mode = DELETE")
                 connection.execute("PRAGMA synchronous = FULL")
                 connection.execute("BEGIN IMMEDIATE")
@@ -1135,13 +1491,10 @@ class IdempotencyLedger:
                 connection.commit()
             finally:
                 connection.close()
-            with temporary.open("rb") as handle:
-                os.fsync(handle.fileno())
-            self._assert_safe_path(self.path)
-            os.replace(temporary, self.path)
-            self._fsync_directory(self.path.parent)
+            self._fsync_migration_tempfile(temporary_name, temporary)
+            self._replace_ledger_with_migration_tempfile(temporary_name, temporary)
         finally:
-            temporary.unlink(missing_ok=True)
+            self._remove_migration_tempfile(temporary_name, temporary)
 
     def _acquire_migration_lock(self) -> int:
         """Take a crash-safe migration lock without trusting a stale file.
@@ -1153,11 +1506,32 @@ class IdempotencyLedger:
         """
 
         lock_path = self._migration_lock_path
+        self._assert_parent_path_matches_descriptor()
         self._assert_safe_path(lock_path)
         flags = os.O_RDWR | os.O_CREAT
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(lock_path, flags, 0o600)
+        if self._parent_descriptor is None:
+            descriptor = os.open(lock_path, flags, 0o600)
+        else:
+            # Darwin can transiently return ENOENT for O_CREAT|O_NOFOLLOW on a
+            # descriptor-relative pathname while another process creates the
+            # same sibling.  Recheck the retained parent and retry; never fall
+            # back to an absolute pathname.
+            for attempt in range(4):
+                try:
+                    descriptor = os.open(
+                        lock_path.name,
+                        flags,
+                        0o600,
+                        dir_fd=self._parent_descriptor,
+                    )
+                    break
+                except FileNotFoundError:
+                    self._assert_parent_path_matches_descriptor()
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.01)
         deadline = time.monotonic() + self._MIGRATION_WAIT_S
         while True:
             try:
@@ -1217,16 +1591,12 @@ class IdempotencyLedger:
             run_id = raw.get("run_id")
             reserved_at = raw.get("reserved_at")
             outcome = raw.get("outcome")
-            if (
-                not isinstance(run_id, str)
-                or not isinstance(reserved_at, str)
-                or (outcome is not None and not isinstance(outcome, str))
-            ):
+            if not isinstance(run_id, str) or not isinstance(reserved_at, str):
                 raise ValueError("legacy idempotency ledger record is invalid")
             records[key] = {
                 "run_id": run_id,
                 "reserved_at": reserved_at,
-                "outcome": outcome,
+                "outcome": IdempotencyLedger._normalize_outcome(outcome),
             }
         return records
 
@@ -1239,6 +1609,22 @@ class IdempotencyLedger:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+    def _fsync_parent_directory(self) -> None:
+        """Durably persist a managed directory entry without reopening it by path."""
+
+        if os.name == "nt":
+            return
+        if self._parent_descriptor is not None:
+            self._fsync_descriptor(self._parent_descriptor)
+            return
+        assert self.path is not None
+        self._fsync_directory(self.path.parent)
+
+    @staticmethod
+    def _fsync_descriptor(descriptor: int) -> None:
+        if os.name != "nt":
+            os.fsync(descriptor)
 
     @staticmethod
     def _raise_duplicate(key: str, owner: Optional[str]) -> None:

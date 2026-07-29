@@ -418,7 +418,33 @@ def _qualified_entity_v2_fields(
             return None
         workflow, _ = data.load_workflow_safe(Path(manifest.bundle_dir))
         project = workflow.qualification if workflow is not None else None
-        if project is None:
+        certification = project.last_certification if project is not None else None
+        if (
+            workflow is None
+            or project is None
+            or certification is None
+            or not certification.passed
+        ):
+            return None
+        from openadapt_flow.qualification import (
+            current_certification_matches,
+            workflow_contract_sha256,
+        )
+
+        # Certification is the existing authority for qualification approval.
+        # Check its direct bindings before asking it to independently recompute
+        # the signed-case and policy decision from this exact sealed workflow.
+        if (
+            certification.project_revision != project.revision
+            or certification.project_contract_sha256 != project.contract_sha256()
+            or certification.workflow_contract_sha256
+            != workflow_contract_sha256(workflow)
+            or certification.policy_contract_sha256 is None
+            or not current_certification_matches(
+                workflow,
+                policy_contract_digest=certification.policy_contract_sha256,
+            )
+        ):
             return None
         entity = project.entity_labels.get(step_id)
         if entity is None:

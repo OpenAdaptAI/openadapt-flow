@@ -50,7 +50,9 @@ class ContinuationLeaseRecord(BaseModel):
     attempt_id: str
     run_id: str
     pause_binding_sha256: str
-    operation: Literal["resume", "continue", "skip", "reject", "teach", "escalate"]
+    operation: Literal[
+        "resume", "continue", "skip", "reject", "teach", "escalate", "reconcile"
+    ]
     owner_nonce_sha256: str
     phase: Literal[
         "validating",
@@ -162,7 +164,9 @@ class ContinuationCoordinator:
     def lease(
         self,
         *,
-        operation: Literal["resume", "continue", "skip", "reject", "teach", "escalate"],
+        operation: Literal[
+            "resume", "continue", "skip", "reject", "teach", "escalate", "reconcile"
+        ],
         ttl_s: float = 15 * 60.0,
         now: Optional[datetime] = None,
         wait_s: float = 0.0,
@@ -182,7 +186,7 @@ class ContinuationCoordinator:
             and current.pause_binding_sha256 == binding
         ):
             active_record = self._validate_owned(current)
-            if active_record.operation not in {"continue", "skip"}:
+            if active_record.operation not in {"continue", "skip", "reconcile"}:
                 raise ContinuationBusy(
                     "a direct continuation cannot recursively resume itself"
                 )

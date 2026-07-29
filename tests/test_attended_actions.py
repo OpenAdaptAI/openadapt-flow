@@ -127,6 +127,7 @@ def _digest_fixture_decision(
         message="vérifié",
         created_at="2026-07-01T00:00:00+00:00",
         report_success=True,
+        transition_receipt_digest="sha256:" + "c" * 64,
     )
 
 
@@ -2244,6 +2245,106 @@ def test_continue_confirms_absolute_effect_from_current_record_readback(tmp_path
     assert decision.status == "completed"
     assert store.checkpoints()[0].effect_verified is True
     assert not backend.actions
+
+
+def test_reconcile_proves_uncertain_write_without_re_dispatch(tmp_path):
+    """Reconciliation reads the current effect and never sends the old key."""
+
+    workflow = Workflow(
+        name="reconcile-absolute-effect",
+        steps=[
+            Step(
+                id="submit",
+                intent="submit the reviewed record",
+                action=ActionKind.KEY,
+                key="ENTER",
+                effects=[
+                    Effect(
+                        kind=EffectKind.RECORD_WRITTEN,
+                        match={"id": "row-1"},
+                        forbid_collateral_loss=False,
+                    )
+                ],
+            )
+        ],
+    )
+    _workflow, _bundle, run, store, _capability = _paused(tmp_path, workflow=workflow)
+    uncertainty = ActionDeliveryUncertainty(
+        operation="key",
+        native=True,
+        observed_at="2026-07-29T00:00:01+00:00",
+        cause_type="TimeoutError",
+    )
+    pending = store.read_pending()
+    assert pending is not None
+    pending = pending.model_copy(
+        update={
+            "category": "delivery_uncertain",
+            "reason": "the submit action may already have been delivered",
+            "delivery_uncertainty": uncertainty,
+        }
+    )
+    store.write_pending(pending)
+    uncertain_result = StepResult(
+        step_id="submit",
+        intent="submit the reviewed record",
+        ok=False,
+        error="the submit action may already have been delivered",
+        delivery_attempted=True,
+        delivery_uncertainty=uncertainty,
+    )
+    capability = issue_attended_capability(
+        run,
+        store=store,
+        pending=pending,
+        workflow=workflow,
+        result=uncertain_result,
+    )
+    _sync_v2_authority(store)
+    assert capability.delivery_state == "unknown"
+    assert "reconcile" in capability.allowed_actions
+    assert "reject" not in capability.allowed_actions
+
+    class CurrentRecords:
+        substrate = "fake"
+
+        def capture_pre_state(self, context=None):
+            return EffectState(
+                substrate="fake", reachable=True, records=[{"id": "row-1"}]
+            )
+
+    backend = FakeBackend()
+    decision = execute_attended_action(
+        run,
+        AttendedActionRequest(
+            capability_digest=capability.digest,
+            idempotency_key="reconcile-uncertain-write-001",
+            action="reconcile",
+            disposition="reconciliation_requested",
+        ),
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                backend,
+                vision=FakeVision(),
+                effect_verifier=CurrentRecords(),
+                poll_interval_s=0.0,
+            )
+        ),
+    )
+    assert decision.status == "completed"
+    assert decision.report_success is True
+    assert decision.transition_receipt_digest is not None
+    assert backend.actions == []
+    receipt = AttendedActionStore(run).read_reconciliation_receipt(capability.pause_id)
+    assert receipt.action == "reconcile"
+    assert receipt.request_digest == decision.request_digest
+    assert receipt.effect_contract_hashes
+    portable = decision_receipt(decision)
+    assert portable.action.value == "reconcile"
+    assert portable.reason_code.value == "reconciled_and_resumed"
+    assert portable.report_success is True
+    assert portable.transition_receipt_digest == receipt.digest
 
 
 def test_attended_skip_uses_canonical_qualified_risk(tmp_path, monkeypatch):

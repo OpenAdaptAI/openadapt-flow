@@ -81,6 +81,7 @@ DECISIONS_FILENAME = "attended_decisions.json"
 DECISIONS_LOCK_FILENAME = ".attended_decisions.lock"
 LEASE_FILENAME = ".attended_action.lease"
 PROGRAM_RECEIPTS_DIRNAME = ".attended_program_receipts"
+RECONCILIATION_RECEIPTS_DIRNAME = ".attended_reconciliation_receipts"
 RELAY_ACK_RECORD_DOMAIN = b"openadapt:relay-ack-record-v1\0"
 RELAY_ACK_WORKFLOW_DOMAIN = b"openadapt:relay-ack-workflow-v1\0"
 DEFAULT_CAPABILITY_TTL_S = 24 * 3600.0
@@ -142,6 +143,18 @@ class AttendedActionExecutor(Protocol):
     ) -> "AttendedExecutionResult":
         """Apply declared skip semantics and resume, or refuse."""
 
+    def reconcile_run(
+        self,
+        run_dir: Path,
+        capability: "AttendedPauseCapability",
+        approval: ApprovalRecord,
+        request_digest: str,
+    ) -> "AttendedExecutionResult":
+        """Read the live effect and resume only when it is independently proven.
+
+        This method must not dispatch the paused action again.
+        """
+
 
 class TransitionObservation(BaseModel):
     """Ephemeral pre-human browser state; never serialized to the run."""
@@ -195,7 +208,7 @@ class AttendedPauseCapability(BaseModel):
     issued_at: str
     expires_at: str
     allowed_actions: tuple[
-        Literal["continue", "skip", "reject", "teach", "escalate"], ...
+        Literal["continue", "skip", "reject", "teach", "escalate", "reconcile"], ...
     ] = (
         "reject",
         "teach",
@@ -231,7 +244,7 @@ class AttendedActionRequest(BaseModel):
         max_length=200,
         pattern=r"^[A-Za-z0-9._:-]+$",
     )
-    action: Literal["continue", "skip", "reject", "teach", "escalate"]
+    action: Literal["continue", "skip", "reject", "teach", "escalate", "reconcile"]
     #: Closed cause, never free text. ``rejected_by_operator`` is the only
     #: cause of a rejection today. A richer disagreement taxonomy would make
     #: the answer distribution more informative, but there is no evidence yet
@@ -246,6 +259,7 @@ class AttendedActionRequest(BaseModel):
             "needs_assistance",
             "teach_requested",
             "rejected_by_operator",
+            "reconciliation_requested",
         ]
     ] = None
 
@@ -263,6 +277,36 @@ class AttendedExecutionResult(BaseModel):
     transition_receipt_digest: Optional[str] = None
 
 
+class AttendedReconciliationReceipt(BaseModel):
+    """Private, signed proof for one no-re-dispatch reconciliation transition.
+
+    The portable receipt exports only this object's digest. The full record
+    remains on the customer-controlled runner and binds the completed result to
+    the exact pause authority, operator request, and source action.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    pause_id: str
+    capability_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    expected_transition_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    action: Literal["reconcile"] = "reconcile"
+    delivery_state: Literal["delivered", "unknown"]
+    effect_contract_hashes: tuple[str, ...] = ()
+    report_success: Literal[True] = True
+    reconciled_at: str
+    signature: str = ""
+
+    def unsigned(self) -> dict[str, Any]:
+        return self.model_dump(exclude={"signature"}, mode="json")
+
+    @property
+    def digest(self) -> str:
+        return _digest(self)
+
+
 class AttendedDecision(BaseModel):
     """Append-only audit record for an admitted or refused operator decision."""
 
@@ -272,7 +316,7 @@ class AttendedDecision(BaseModel):
     capability_digest: str
     request_digest: str
     idempotency_key: str
-    action: Literal["continue", "skip", "reject", "teach", "escalate"]
+    action: Literal["continue", "skip", "reject", "teach", "escalate", "reconcile"]
     operator: str
     #: Trusted route attribution. This is separate from ``operator``, which
     #: identifies the principal but not the class of decider attributed by the
@@ -345,7 +389,7 @@ class AttendedRelayBinding(BaseModel):
     )
     capability_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     event_sequence: int = Field(ge=1)
-    action: Literal["continue", "skip", "reject", "teach", "escalate"]
+    action: Literal["continue", "skip", "reject", "teach", "escalate", "reconcile"]
 
 
 RelayOutcomeStatus = Literal[
@@ -540,7 +584,10 @@ def _allowed_actions(
     baseline: SignedTransitionBaseline,
     manifest: Any,
     source_identity: Optional[IdentityCheck],
-) -> tuple[Literal["continue", "skip", "reject", "teach", "escalate"], ...]:
+    delivery_state: Literal["not_delivered", "delivered", "unknown"],
+) -> tuple[
+    Literal["continue", "skip", "reject", "teach", "escalate", "reconcile"], ...
+]:
     """Derive mutation authority from the exact workflow step semantics.
 
     ``reject`` is offered at every pause EXCEPT one where the runtime
@@ -572,10 +619,21 @@ def _allowed_actions(
     adds the matching live-journal check, because a delivery can become
     uncertain AFTER this capability was issued.
     """
-    actions: list[Literal["continue", "skip", "reject", "teach", "escalate"]] = [
+    actions: list[
+        Literal["continue", "skip", "reject", "teach", "escalate", "reconcile"]
+    ] = [
         "teach",
         "escalate",
     ]
+    # Reconciliation observes the current application and the independent
+    # effect verifier. It never re-dispatches this action. A capability for a
+    # proved pre-delivery halt must not advertise it: there is nothing to
+    # reconcile, and allowing it would manufacture a success-shaped path.
+    if pending.delivery_uncertainty is not None and delivery_state in {
+        "delivered",
+        "unknown",
+    }:
+        actions.insert(0, "reconcile")
     # Reject needs no step semantics: it neither actuates nor resumes, so it is
     # available even where the pause carries no resolvable action step at all
     # (a non-action program pause), unlike continue and skip below.
@@ -1001,6 +1059,81 @@ class AttendedActionStore:
             raise AttendedActionRefused("the program receipt pause id is invalid")
         return self.run_dir / PROGRAM_RECEIPTS_DIRNAME / f"{pause_id}.json"
 
+    def _reconciliation_receipt_path(self, pause_id: str) -> Path:
+        if len(pause_id) != 32 or any(ch not in "0123456789abcdef" for ch in pause_id):
+            raise AttendedActionRefused(
+                "the reconciliation receipt pause id is invalid"
+            )
+        return self.run_dir / RECONCILIATION_RECEIPTS_DIRNAME / f"{pause_id}.json"
+
+    def _sign_reconciliation_receipt(
+        self, receipt: AttendedReconciliationReceipt
+    ) -> str:
+        return (
+            "hmac-sha256:"
+            + hmac.new(
+                self._key(create=False),
+                b"openadapt-attended-reconciliation-receipt/v1\0"
+                + _canonical(receipt.unsigned()),
+                hashlib.sha256,
+            ).hexdigest()
+        )
+
+    def write_reconciliation_receipt(
+        self, receipt: AttendedReconciliationReceipt
+    ) -> AttendedReconciliationReceipt:
+        """Atomically retain one signed reconciliation proof for a pause.
+
+        A second write is idempotent only when every bound value is identical.
+        This prevents a stale request from replacing the result for the same
+        delivery-uncertain action.
+        """
+
+        sealed = receipt.model_copy(update={"signature": ""})
+        sealed = sealed.model_copy(
+            update={"signature": self._sign_reconciliation_receipt(sealed)}
+        )
+        path = self._reconciliation_receipt_path(sealed.pause_id)
+        if path.parent.is_symlink() or path.is_symlink():
+            raise AttendedActionRefused(
+                "the reconciliation receipt path must not be a symlink"
+            )
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            os.chmod(path.parent, 0o700)
+        if path.is_file():
+            existing = self.read_reconciliation_receipt(sealed.pause_id)
+            if existing != sealed:
+                raise AttendedActionRefused(
+                    "a different reconciliation receipt already exists for this pause"
+                )
+            return existing
+        self._atomic_write(path, sealed.model_dump_json(indent=2).encode("utf-8"))
+        return sealed
+
+    def read_reconciliation_receipt(
+        self, pause_id: str
+    ) -> AttendedReconciliationReceipt:
+        path = self._reconciliation_receipt_path(pause_id)
+        if path.parent.is_symlink() or path.is_symlink():
+            raise AttendedActionRefused(
+                "the reconciliation receipt path must not be a symlink"
+            )
+        try:
+            receipt = AttendedReconciliationReceipt.model_validate_json(
+                path.read_text()
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise AttendedActionRefused(
+                "the exact reconciliation receipt is missing or invalid"
+            ) from exc
+        expected = self._sign_reconciliation_receipt(receipt)
+        if not hmac.compare_digest(receipt.signature, expected):
+            raise AttendedActionRefused(
+                "the reconciliation receipt signature does not verify"
+            )
+        return receipt
+
     def _sign_program_receipt(self, receipt: ProgramTransitionReceipt) -> str:
         return (
             "hmac-sha256:"
@@ -1132,6 +1265,7 @@ class AttendedActionStore:
             baseline,
             manifest,
             source_identity,
+            delivery_state,
         )
         event_sequence = 1
         if self.capability_path.is_file():
@@ -2079,6 +2213,7 @@ def execute_attended_action(
         "teach": {None, "teach_requested"},
         "escalate": {None, "cannot_complete", "needs_assistance"},
         "reject": {None, "rejected_by_operator"},
+        "reconcile": {None, "reconciliation_requested"},
     }
     if request.disposition not in expected_dispositions[request.action]:
         raise AttendedActionRefused(
@@ -2265,7 +2400,11 @@ def execute_attended_action(
         resolution = (
             "operator completed the live-app task; verify and continue"
             if request.action == "continue"
-            else "operator requested policy-scoped skip"
+            else (
+                "operator requested read-only effect reconciliation; never re-dispatch"
+                if request.action == "reconcile"
+                else "operator requested policy-scoped skip"
+            )
         )
         approval = _approval(
             capability,
@@ -2321,7 +2460,13 @@ def execute_attended_action(
             raw_result = (
                 executor.continue_run(run_dir, capability, approval)
                 if request.action == "continue"
-                else executor.skip_run(run_dir, capability, approval)
+                else (
+                    executor.reconcile_run(
+                        run_dir, capability, approval, request_digest
+                    )
+                    if request.action == "reconcile"
+                    else executor.skip_run(run_dir, capability, approval)
+                )
             )
             executor_returned = True
             result = AttendedExecutionResult.model_validate(raw_result)
@@ -2865,6 +3010,12 @@ class BoundAttendedExecutor:
             report_success=resumed.success,
             resumed_from=capability.step_id,
             next_transition=capability.expected_next_transition,
+            # The durable checkpoint is the linear transition commitment. It
+            # records the exact source pause capability and the verified result
+            # before ``resume`` can execute any successor step.
+            transition_receipt_digest=(
+                _digest(checkpoint) if resumed.success else None
+            ),
         )
 
     @staticmethod
@@ -3352,6 +3503,197 @@ class BoundAttendedExecutor:
                 resumed_from=capability.step_id,
                 next_transition=capability.expected_next_transition,
             )
+
+    def reconcile_run(
+        self,
+        run_dir: Path,
+        capability: AttendedPauseCapability,
+        approval: ApprovalRecord,
+        request_digest: str,
+    ) -> AttendedExecutionResult:
+        """Re-read a possibly completed action without delivering it again."""
+
+        try:
+            with self._exclusive_live_session():
+                return self._reconcile_run_locked(
+                    run_dir, capability, approval, request_digest
+                )
+        except AttendedActionBusy as exc:
+            return AttendedExecutionResult(
+                status="refused",
+                message=str(exc),
+                report_success=False,
+                resumed_from=capability.step_id,
+                next_transition=capability.expected_next_transition,
+            )
+
+    def _reconcile_run_locked(
+        self,
+        run_dir: Path,
+        capability: AttendedPauseCapability,
+        approval: ApprovalRecord,
+        request_digest: str,
+    ) -> AttendedExecutionResult:
+        """Perform the read-only half of attended reconciliation.
+
+        This deliberately shares the fresh state, next-target identity, and
+        independent-effect verifier with attended completion. It does not call
+        ``_run_step`` or any backend delivery method. A failed read leaves the
+        original durable pause intact for further reconciliation or escalation.
+        """
+
+        if capability.delivery_state == "not_delivered":
+            return AttendedExecutionResult(
+                status="refused",
+                message=(
+                    "This pause has positive non-delivery evidence; there is no "
+                    "possible action to reconcile."
+                ),
+                report_success=False,
+                resumed_from=capability.step_id,
+                next_transition=capability.expected_next_transition,
+            )
+        program_context: Optional[
+            tuple[PendingEscalation, State, dict[str, str], Optional[str]]
+        ] = None
+        try:
+            store, manifest, workflow = self._load(run_dir, capability)
+            pending = store.read_pending()
+            if (
+                pending is None
+                or approval_pause_digest(pending) != capability.pause_digest
+            ):
+                raise AttendedActionRefused(
+                    "the exact attended pause changed before reconciliation"
+                )
+            if pending.delivery_uncertainty is None:
+                raise AttendedActionRefused(
+                    "this pause has no recorded uncertain delivery to reconcile"
+                )
+            replayer = self.replayer_factory(manifest)
+            self._bind_authorization(replayer, manifest)
+            attended_store = AttendedActionStore(run_dir)
+            if workflow.program is not None:
+                pending, state, params = self._program_context(
+                    store, workflow, capability
+                )
+                leaf = pending.program_frames[-1]
+                result, target = replayer.revalidate_attended_program_completion(
+                    workflow,
+                    graph_id=leaf.graph_id,
+                    state_id=state.id,
+                    params=params,
+                    bundle_dir=Path(manifest.bundle_dir),
+                    run_dir=run_dir,
+                    run_id=manifest.run_id,
+                    transition_baseline=capability.transition_baseline,
+                    transition_digest=attended_store.transition_value_digest,
+                )
+                program_context = (pending, state, params, target)
+            else:
+                result = replayer.revalidate_attended_completion(
+                    workflow,
+                    step_index=capability.step_index,
+                    params=dict(manifest.params),
+                    bundle_dir=Path(manifest.bundle_dir),
+                    run_dir=run_dir,
+                    run_id=manifest.run_id,
+                    transition_baseline=capability.transition_baseline,
+                    transition_digest=attended_store.transition_value_digest,
+                )
+        except Exception:
+            return AttendedExecutionResult(
+                status="refused",
+                message=(
+                    "Fresh reconciliation evidence was unavailable. The run remains "
+                    "paused and no workflow action was delivered."
+                ),
+                report_success=False,
+                resumed_from=capability.step_id,
+                next_transition=capability.expected_next_transition,
+            )
+
+        # Reconciliation is stricter than ordinary attended continuation: an
+        # action that may already have landed must prove a declared independent
+        # effect. A screen-only postcondition cannot settle an uncertain write.
+        if (
+            not result.ok
+            or result.effect_verified is not True
+            or not result.effect_contract_hashes
+        ):
+            return AttendedExecutionResult(
+                status="refused",
+                message=(
+                    "The current application and independent verifier did not prove "
+                    "the possibly delivered effect. The run remains paused for "
+                    "reconciliation."
+                ),
+                report_success=False,
+                resumed_from=capability.step_id,
+                next_transition=capability.expected_next_transition,
+            )
+
+        try:
+            if program_context is not None:
+                pending, state, params, target = program_context
+                resumed = self._resume_program(
+                    run_dir=run_dir,
+                    store=store,
+                    manifest=manifest,
+                    workflow=workflow,
+                    capability=capability,
+                    approval=approval,
+                    pending=pending,
+                    state=state,
+                    params=params,
+                    result=result,
+                    skipped=False,
+                    target_state_id=target,
+                    resume_replayer=replayer,
+                )
+            else:
+                resumed = self._resume(
+                    run_dir=run_dir,
+                    store=store,
+                    manifest=manifest,
+                    workflow=workflow,
+                    capability=capability,
+                    approval=approval,
+                    result=result,
+                    skipped=False,
+                    resume_replayer=replayer,
+                )
+        except ResumeRefused as exc:
+            return AttendedExecutionResult(
+                status="refused",
+                message=str(exc),
+                report_success=False,
+                resumed_from=capability.step_id,
+                next_transition=capability.expected_next_transition,
+            )
+        if resumed.status != "completed" or resumed.report_success is not True:
+            return resumed
+
+        receipt = attended_store.write_reconciliation_receipt(
+            AttendedReconciliationReceipt(
+                pause_id=capability.pause_id,
+                capability_digest=capability.digest,
+                request_digest=request_digest,
+                expected_transition_digest=capability.expected_transition_digest,
+                delivery_state=capability.delivery_state,
+                effect_contract_hashes=tuple(result.effect_contract_hashes),
+                reconciled_at=_iso(_now()),
+            )
+        )
+        return resumed.model_copy(
+            update={
+                "message": (
+                    "The independent effect readback proved the original action. "
+                    "OpenAdapt resumed without re-dispatching it."
+                ),
+                "transition_receipt_digest": receipt.digest,
+            }
+        )
 
     def skip_run(
         self,

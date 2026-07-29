@@ -3205,7 +3205,7 @@ def _v2_candidate_workflow() -> Workflow:
     set_entity_label(
         workflow,
         QualifiedEntityLabel(
-            step_id="humanstep", label="service record", fallback="record"
+            step_id="humanstep", label="patient record", fallback="record"
         ),
     )
     policy = load_policy("permissive")
@@ -3253,7 +3253,7 @@ def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(
         ),
     )
     assert v2.task.schema_version == "openadapt.human-decision-task/v2"
-    assert v2.task.entity.label == "service record"
+    assert v2.task.entity.label == "patient record"
     assert v2.task.entity.fallback.value == "record"
     assert v2.task.qualification_step_id == "humanstep"
     assert v2.task.qualification_project_id == workflow.qualification.project_id
@@ -3363,6 +3363,33 @@ def test_remote_v2_falls_back_when_a_current_certification_has_new_bundle_bytes(
     assert projection.task.schema_version == "openadapt.human-decision-task/v1"
 
 
+def test_remote_v2_falls_back_for_a_legacy_unreviewed_entity_label(
+    tmp_path, monkeypatch
+):
+    _accept_current_certification(monkeypatch)
+    workflow = _v2_candidate_workflow()
+    workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    assert workflow.qualification is not None
+    entity = workflow.qualification.entity_labels["humanstep"]
+    # Simulate a pre-vocabulary project object that bypassed current model
+    # validation. The persisted bundle remains valid for the version check.
+    object.__setattr__(entity, "label", "legacy unknown")
+    monkeypatch.setattr(
+        "openadapt_flow.console.human_decisions.data.load_workflow_safe",
+        lambda _bundle: (workflow, None),
+    )
+    item = attention_item(run.parent, run)
+    assert item is not None
+    projection = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+
+
 def test_remote_v2_falls_back_when_report_step_differs_from_capability(tmp_path):
     workflow = Workflow(
         name="attended-v2",
@@ -3382,7 +3409,7 @@ def test_remote_v2_falls_back_when_report_step_differs_from_capability(tmp_path)
         set_entity_label(
             workflow,
             QualifiedEntityLabel(
-                step_id=step_id, label="service record", fallback="record"
+                step_id=step_id, label="patient record", fallback="record"
             ),
         )
     _workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
@@ -3417,7 +3444,7 @@ def test_remote_v2_falls_back_after_the_paused_bundle_changes(tmp_path):
     set_entity_label(
         workflow,
         QualifiedEntityLabel(
-            step_id="humanstep", label="service record", fallback="record"
+            step_id="humanstep", label="patient record", fallback="record"
         ),
     )
     workflow, bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)

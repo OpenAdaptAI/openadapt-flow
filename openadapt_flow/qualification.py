@@ -59,6 +59,23 @@ _PARAM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _QUALIFIED_ENTITY_LABEL_RE = re.compile(r"^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$")
 
+#: The only qualification-approved class labels that a remote decision task
+#: may carry. These are class names, never observed identities or identifiers.
+REMOTE_SAFE_ENTITY_LABELS: Final[tuple[str, ...]] = (
+    "patient record",
+    "member record",
+    "insurance claim",
+    "loan application",
+    "customer account",
+    "service request",
+    "case",
+    "order",
+    "invoice",
+    "document",
+    "record",
+    "item",
+)
+
 
 def _qualification_identifier_sha256(value: str, *, kind: str) -> str:
     if not _ID_RE.fullmatch(value):
@@ -737,7 +754,11 @@ class QualifiedEntityLabel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     step_id: str = Field(pattern=_ID_RE.pattern)
-    label: str = Field(min_length=1, max_length=63)
+    label: str = Field(
+        min_length=1,
+        max_length=63,
+        json_schema_extra={"enum": list(REMOTE_SAFE_ENTITY_LABELS)},
+    )
     fallback: Literal["record", "item"]
 
     @field_validator("label")
@@ -747,6 +768,8 @@ class QualifiedEntityLabel(BaseModel):
             raise ValueError(
                 "entity label must use the qualified neutral-label vocabulary"
             )
+        if value not in REMOTE_SAFE_ENTITY_LABELS:
+            raise ValueError("entity label is not a reviewed remote-safe class")
         return value
 
 

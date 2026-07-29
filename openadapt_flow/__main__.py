@@ -2455,6 +2455,7 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     from pydantic import TypeAdapter
 
     from openadapt_flow.qualification import (
+        REMOTE_SAFE_ENTITY_LABELS,
         ActionRiskClass,
         ActionRiskClassification,
         EnvironmentBoundary,
@@ -2564,6 +2565,7 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
                     else None
                 ),
                 "report": report.model_dump(mode="json"),
+                "remote_safe_entity_labels": list(REMOTE_SAFE_ENTITY_LABELS),
             }
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
@@ -4344,6 +4346,8 @@ def build_parser() -> argparse.ArgumentParser:
         "label",
         help="Set, remove, or list qualification-owned entity labels",
     )
+    from openadapt_flow.qualification import REMOTE_SAFE_ENTITY_LABELS
+
     label_sub = q.add_subparsers(dest="label_cmd", required=True)
     label = label_sub.add_parser("set", help="Set a label for one qualified step")
     label.add_argument("bundle", help="Workflow bundle directory")
@@ -4351,6 +4355,7 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument(
         "--label",
         required=True,
+        choices=REMOTE_SAFE_ENTITY_LABELS,
         help="Qualification-approved class label, for example: insurance claim",
     )
     label.add_argument(

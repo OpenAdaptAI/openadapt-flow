@@ -119,13 +119,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "schemas" / "public-demo-evidence-v1.json"
 
 # These immutable packs predate retained, result-bound postcondition evidence.
-# The exporter will never create this format again.  Keep the exact source
-# commit allow-list here so byte validation can still inspect the historical
-# public record without treating it as a current executable RunReport.
-LEGACY_RETAINED_PACK_SOURCES = {
-    "mockmed-triage-v1": "6b64e2816d776673f6b7fd630a807fc9de6a3cae",
-    "mockmed-triage-v2": "130b9becf58c1fb9ad3b269a2010506162d78ad7",
-    "mockmed-triage-v3": "7cc518ee0b83dd571c0902423134a5525635e6b2",
+# The exporter will never create this format again.  Bind both the retained
+# source commit and the complete manifest bytes.  The latter prevents a pack
+# from retaining the old id/commit while replacing an old report and its
+# self-declared inventory digest.
+LEGACY_RETAINED_PACKS = {
+    "mockmed-triage-v1": {
+        "source_commit": "6b64e2816d776673f6b7fd630a807fc9de6a3cae",
+        "manifest_sha256": "4cadee17e091a1edd7a8db4b7a3a169f7fc767b70955611a375f67e3559c3e04",
+    },
+    "mockmed-triage-v2": {
+        "source_commit": "130b9becf58c1fb9ad3b269a2010506162d78ad7",
+        "manifest_sha256": "e6afc4b18bbff1f685dbf461e3496337f151a329c1c854c5d0b12393e3018051",
+    },
+    "mockmed-triage-v3": {
+        "source_commit": "7cc518ee0b83dd571c0902423134a5525635e6b2",
+        "manifest_sha256": "a4c531de62d875355a359dce4655fe80963ab1be421c99c1be317d82cdccd49d",
+    },
 }
 
 
@@ -138,7 +148,7 @@ class _LegacyRetainedPublicDemoReport:
     """A non-executable view of a pre-retention public-demo report.
 
     This type is only for exhaustive byte and aggregate validation of the
-    immutable historical packs listed in :data:`LEGACY_RETAINED_PACK_SOURCES`.
+    immutable historical packs listed in :data:`LEGACY_RETAINED_PACKS`.
     It is deliberately not a ``RunReport``.  In particular, it cannot be sent
     to the runtime, admission gate, or any production-verification path.
     """
@@ -168,10 +178,11 @@ def _legacy_retained_report(
     """
 
     pack_id = manifest.get("pack", {}).get("id")
-    expected_commit = LEGACY_RETAINED_PACK_SOURCES.get(pack_id)
+    expected = LEGACY_RETAINED_PACKS.get(pack_id)
     if (
-        expected_commit is None
-        or manifest.get("provenance", {}).get("source_commit") != expected_commit
+        expected is None
+        or manifest.get("provenance", {}).get("source_commit")
+        != expected["source_commit"]
     ):
         raise EvidencePackError(
             f"current RunReport validation failed for non-legacy report: {report_path}"
@@ -2196,10 +2207,20 @@ def validate_pack(pack_dir: Path | str) -> dict[str, Any]:
     if manifest.get("schema_version") != SCHEMA_VERSION:
         raise EvidencePackError("unsupported public-demo manifest schema")
     expected_digest = digest_path.read_text(encoding="ascii").split()[0]
-    if _sha256(manifest_path) != expected_digest:
+    manifest_sha256 = _sha256(manifest_path)
+    if manifest_sha256 != expected_digest:
         raise EvidencePackError("manifest.sha256 does not bind manifest.json")
     if manifest.get("pack", {}).get("immutable") is not True:
         raise EvidencePackError("public-demo pack is not marked immutable")
+    legacy_expectation = LEGACY_RETAINED_PACKS.get(manifest.get("pack", {}).get("id"))
+    if legacy_expectation is not None and (
+        manifest_sha256 != legacy_expectation["manifest_sha256"]
+        or manifest.get("provenance", {}).get("source_commit")
+        != legacy_expectation["source_commit"]
+    ):
+        raise EvidencePackError(
+            "retained legacy pack does not match its exact pinned manifest"
+        )
 
     inventory: dict[str, dict[str, Any]] = {}
     for ref in manifest.get("files", []):

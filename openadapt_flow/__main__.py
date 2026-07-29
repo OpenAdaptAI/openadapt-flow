@@ -2455,7 +2455,6 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     from pydantic import TypeAdapter
 
     from openadapt_flow.qualification import (
-        REMOTE_SAFE_ENTITY_LABELS,
         ActionRiskClass,
         ActionRiskClassification,
         EnvironmentBoundary,
@@ -2471,6 +2470,7 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
         add_case,
         add_requalification_condition,
         certify_project,
+        entity_label_options,
         init_project,
         list_entity_labels,
         project_schema,
@@ -2565,7 +2565,7 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
                     else None
                 ),
                 "report": report.model_dump(mode="json"),
-                "remote_safe_entity_labels": list(REMOTE_SAFE_ENTITY_LABELS),
+                "entity_label_options": entity_label_options(),
             }
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

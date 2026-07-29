@@ -81,9 +81,11 @@ from openadapt_flow.qualification import (
     add_requalification_condition,
     certify_project,
     current_certification_matches,
+    entity_label_options,
     evaluate_qualification,
     init_project,
     list_entity_labels,
+    project_schema,
     qualification_action_requirements,
     record_case_results,
     remove_entity_label,
@@ -219,10 +221,39 @@ def test_entity_labels_are_qualification_contract_and_invalidate_certification()
     assert project.entity_labels == {}
 
 
-@pytest.mark.parametrize("label", REMOTE_SAFE_ENTITY_LABELS)
-def test_entity_label_accepts_each_reviewed_remote_safe_class(label: str) -> None:
-    entity = QualifiedEntityLabel(step_id="save", label=label, fallback="record")
-    assert entity.label == label
+def test_entity_label_options_are_ordered_and_derive_every_public_label() -> None:
+    options = entity_label_options()
+    assert options == [
+        {"label": "patient record", "fallback": "record"},
+        {"label": "member record", "fallback": "record"},
+        {"label": "insurance claim", "fallback": "item"},
+        {"label": "loan application", "fallback": "item"},
+        {"label": "customer account", "fallback": "record"},
+        {"label": "service request", "fallback": "item"},
+        {"label": "case", "fallback": "item"},
+        {"label": "order", "fallback": "item"},
+        {"label": "invoice", "fallback": "item"},
+        {"label": "document", "fallback": "item"},
+        {"label": "record", "fallback": "record"},
+        {"label": "item", "fallback": "item"},
+    ]
+    assert REMOTE_SAFE_ENTITY_LABELS == tuple(option["label"] for option in options)
+    assert project_schema()["$defs"]["QualifiedEntityLabel"]["properties"]["label"][
+        "enum"
+    ] == list(REMOTE_SAFE_ENTITY_LABELS)
+
+
+@pytest.mark.parametrize("option", entity_label_options())
+def test_entity_label_accepts_each_reviewed_remote_safe_class(
+    option: dict[str, str],
+) -> None:
+    entity = QualifiedEntityLabel(step_id="save", **option)
+    assert entity.model_dump() == {"step_id": "save", **option}
+
+
+def test_entity_label_refuses_a_noncanonical_fallback() -> None:
+    with pytest.raises(ValueError, match="fallback"):
+        QualifiedEntityLabel(step_id="save", label="insurance claim", fallback="record")
 
 
 @pytest.mark.parametrize(
@@ -2924,9 +2955,7 @@ def test_cli_initializes_project_without_raw_manifest_editing(
     assert main(["qualify", "explain", str(bundle), "--json"]) == 2
     payload = capsys.readouterr().out
     assert '"representative_case_missing"' in payload
-    assert set(json.loads(payload)["remote_safe_entity_labels"]) == set(
-        REMOTE_SAFE_ENTITY_LABELS
-    )
+    assert json.loads(payload)["entity_label_options"] == entity_label_options()
 
 
 def test_cli_entity_label_notice_tracks_real_mutations(

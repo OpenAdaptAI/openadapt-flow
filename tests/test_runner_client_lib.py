@@ -1087,6 +1087,41 @@ class TestCommandMapping:
         with pytest.raises(ValueError, match="does not match its authorization"):
             Replayer(object(), managed_dispatch_binding=binding, durable=True)
 
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "durable",
+            "delivery_authority_kind",
+            "remote_delivery_run_id",
+            "governed_authorization",
+            "managed_dispatch_binding",
+        ],
+    )
+    def test_managed_replayer_refuses_public_state_mutation_before_run(
+        self, field, sealed, config, tmp_path
+    ):
+        workflow, bundle = sealed
+        verdict = verified_or_refusal(workflow, config)
+        assert not isinstance(verdict, Refusal)
+        binding = read_managed_dispatch_envelope(
+            write_managed_dispatch_envelope(tmp_path / "dispatch.json", verdict)
+        )
+        replayer = Replayer(object(), managed_dispatch_binding=binding, durable=True)
+        if field == "durable":
+            replayer.durable = False
+        elif field == "delivery_authority_kind":
+            replayer.delivery_authority_kind = "customer_local"
+        elif field == "remote_delivery_run_id":
+            replayer.remote_delivery_run_id = "11111111-1111-4111-8111-111111111111"
+        elif field == "governed_authorization":
+            replayer.governed_authorization = None
+        else:
+            replayer.managed_dispatch_binding = None
+        run_dir = tmp_path / f"run-{field}"
+        with pytest.raises(ValueError, match="managed dispatch"):
+            replayer.run(workflow, bundle_dir=bundle, run_dir=run_dir)
+        assert not run_dir.exists()
+
     def test_managed_dispatch_envelope_refuses_nested_authorization_extra(
         self, sealed, config, tmp_path
     ):

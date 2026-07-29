@@ -538,6 +538,18 @@ class Replayer:
         self.governed_authorization = governed_authorization
         self.delivery_authority_kind = delivery_authority_kind
         self.remote_delivery_run_id = remote_delivery_run_id
+        self._managed_dispatch_snapshot: tuple[str, str, str] | None = None
+        if managed_dispatch_binding is not None:
+            self._managed_dispatch_snapshot = (
+                managed_dispatch_binding.run_id,
+                managed_dispatch_binding.binding_sha256,
+                json.dumps(
+                    managed_dispatch_binding.authorization.model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+            )
         self.governed_continuation = governed_continuation
         self._governed_asset_snapshot: dict[str, bytes] = {}
         self._governed_asset_hashes: dict[str, str] = {}
@@ -1025,6 +1037,9 @@ class Replayer:
             aborts at the first failed step; a program run ends at a terminal
             state (or an unhandled failure). ``success`` reflects that outcome.
         """
+        managed_refusal = self._managed_dispatch_refusal()
+        if managed_refusal is not None:
+            raise ValueError(managed_refusal)
         bundle_dir = Path(bundle_dir)
         run_dir = Path(run_dir)
         self._install_execution_snapshots(workflow)
@@ -8408,6 +8423,48 @@ class Replayer:
                 safety=True,
             )
 
+    def _managed_dispatch_refusal(self) -> Optional[str]:
+        """Refuse public-field drift from the managed constructor capability."""
+
+        snapshot = self._managed_dispatch_snapshot
+        if snapshot is None:
+            return None
+        run_id, binding_sha256, authorization_json = snapshot
+        if self.durable is not True:
+            return "managed dispatch binding requires durable=True"
+        if self.delivery_authority_kind != "cloud_runner":
+            return "managed dispatch delivery authority changed after admission"
+        if self.remote_delivery_run_id != run_id:
+            return "managed dispatch run identity changed after admission"
+        binding = self.managed_dispatch_binding
+        try:
+            from openadapt_flow.runner.dispatch_envelope import ManagedDispatchBinding
+            from openadapt_flow.runner.protocol import dispatch_binding_sha256 as digest
+
+            if not isinstance(binding, ManagedDispatchBinding):
+                return "managed dispatch binding disappeared after admission"
+            authorization = self.governed_authorization
+            if authorization is None:
+                return "managed dispatch authorization disappeared after admission"
+            current_authorization_json = json.dumps(
+                authorization.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            if (
+                binding.run_id != run_id
+                or binding.binding_sha256 != binding_sha256
+                or binding.authorization.model_dump(mode="json")
+                != authorization.model_dump(mode="json")
+                or current_authorization_json != authorization_json
+                or binding_sha256 != digest(run_id, binding.authorization)
+            ):
+                return "managed dispatch binding changed after admission"
+        except Exception:  # noqa: BLE001 - managed capability boundary
+            return "managed dispatch binding is invalid after admission"
+        return None
+
     def _delivery_authorization_refusal(
         self,
         workflow: Workflow,
@@ -8417,7 +8474,11 @@ class Replayer:
     ) -> Optional[str]:
         """Recheck exact authority at the last point before input delivery."""
 
-        refusal = self._fresh_actuation_authorization_refusal(workflow, params, step)
+        refusal = self._managed_dispatch_refusal()
+        if refusal is None:
+            refusal = self._fresh_actuation_authorization_refusal(
+                workflow, params, step
+            )
         initial_guard = getattr(self, "_durable_initial_delivery_guard", None)
         if refusal is None and initial_guard is not None:
             try:

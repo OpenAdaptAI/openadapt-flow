@@ -62,6 +62,31 @@ is checkable the same way: by reading a schema, not by trusting a detector. The
 hosted control plane enforces it a third time in Postgres, in the same style as
 `human_decision_task_contract_valid`.
 
+## V2: qualification-approved entity wording
+
+V1 uses only domain-neutral wording such as `record` or `item`. A later V2 task
+can carry one useful entity label that the exact qualification contract already
+approved. For example, the contract can name a `patient record`, an insurance
+`claim`, or a `loan application`.
+
+This is not runtime inference. The producer reads the label from the exact
+qualified step and binds the task to the qualification project, qualification
+revision, qualification contract digest, and bundle digest. The task has no
+field for a screenshot, OCR output, parameter, application name, observed
+identity value, or model input. A label says what class of entity the workflow
+handles; it never says which entity is on screen.
+
+The runner and client use V2 only after explicit schema negotiation. A peer that
+does not negotiate V2 receives the byte-compatible V1 task and renders `record`
+or `item`. Before any action continues, the customer-controlled runner reads
+the live application and revalidates the required identity and effect
+contracts.
+
+!!! note "Release dependency"
+    This V2 section documents a coordinated Flow, Desktop, Cloud, and Types
+    release. It must not be published as an available decision path before the
+    V2 producer, consumer, and negotiated capability are released together.
+
 The one thing this tier gives up is `target_label` — the target control's own
 accessible name, which `halt_detail._safe_target_label` releases locally after
 six independent proofs. It stays local. The phone therefore says *"OpenAdapt

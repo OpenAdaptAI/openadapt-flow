@@ -2908,6 +2908,44 @@ def test_cli_initializes_project_without_raw_manifest_editing(
     assert '"representative_case_missing"' in payload
 
 
+def test_cli_entity_label_notice_tracks_real_mutations(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workflow = _workflow()
+    bundle = tmp_path / "bundle"
+    workflow.save(bundle)
+    init_project(workflow, environment=_environment())
+    workflow.save(bundle)
+
+    set_args = [
+        "qualify",
+        "label",
+        "set",
+        str(bundle),
+        "--step",
+        "save",
+        "--label",
+        "insurance claim",
+        "--fallback",
+        "item",
+    ]
+    assert main(set_args) == 0
+    first = capsys.readouterr()
+    assert json.loads(first.out)["entity_labels"]["save"]["label"] == "insurance claim"
+    assert first.err
+
+    assert main(set_args) == 0
+    unchanged = capsys.readouterr()
+    assert json.loads(unchanged.out)["entity_labels"]["save"]["fallback"] == "item"
+    assert not unchanged.err
+
+    assert main(["qualify", "label", "remove", str(bundle), "--step", "save"]) == 0
+    removed = capsys.readouterr()
+    assert json.loads(removed.out)["entity_labels"] == {}
+    assert removed.err
+
+
 def test_cli_identity_extract_pattern_round_trips_exactly(tmp_path: Path) -> None:
     workflow = _workflow()
     bundle = tmp_path / "bundle"

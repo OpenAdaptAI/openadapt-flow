@@ -427,8 +427,8 @@ def _qualified_entity_v2_fields(
         ):
             return None
         from openadapt_flow.qualification import (
-            REMOTE_SAFE_ENTITY_LABELS,
             current_certification_matches,
+            entity_label_options,
             workflow_contract_sha256,
         )
 
@@ -448,7 +448,14 @@ def _qualified_entity_v2_fields(
         ):
             return None
         entity = project.entity_labels.get(step_id)
-        if entity is None or entity.label not in REMOTE_SAFE_ENTITY_LABELS:
+        if (
+            entity is None
+            or {
+                "label": entity.label,
+                "fallback": entity.fallback,
+            }
+            not in entity_label_options()
+        ):
             return None
         return {
             "qualification_project_id": project.project_id,

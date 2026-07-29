@@ -59,21 +59,35 @@ _PARAM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _QUALIFIED_ENTITY_LABEL_RE = re.compile(r"^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$")
 
-#: The only qualification-approved class labels that a remote decision task
-#: may carry. These are class names, never observed identities or identifiers.
-REMOTE_SAFE_ENTITY_LABELS: Final[tuple[str, ...]] = (
-    "patient record",
-    "member record",
-    "insurance claim",
-    "loan application",
-    "customer account",
-    "service request",
-    "case",
-    "order",
-    "invoice",
-    "document",
-    "record",
-    "item",
+
+def entity_label_options() -> list[dict[str, str]]:
+    """Return the reviewed remote-safe class labels and their fallbacks.
+
+    This is the public, JSON-serializable source for Desktop and Flow. The
+    values are presentation classes only; no identity value or identifier may
+    enter this API.
+    """
+
+    return [
+        {"label": "patient record", "fallback": "record"},
+        {"label": "member record", "fallback": "record"},
+        {"label": "insurance claim", "fallback": "item"},
+        {"label": "loan application", "fallback": "item"},
+        {"label": "customer account", "fallback": "record"},
+        {"label": "service request", "fallback": "item"},
+        {"label": "case", "fallback": "item"},
+        {"label": "order", "fallback": "item"},
+        {"label": "invoice", "fallback": "item"},
+        {"label": "document", "fallback": "item"},
+        {"label": "record", "fallback": "record"},
+        {"label": "item", "fallback": "item"},
+    ]
+
+
+#: Derived compatibility view of :func:`entity_label_options` for callers that
+#: need only labels. Do not add an independent list of remote-safe classes.
+REMOTE_SAFE_ENTITY_LABELS: Final[tuple[str, ...]] = tuple(
+    option["label"] for option in entity_label_options()
 )
 
 
@@ -749,6 +763,20 @@ class QualifiedEntityLabel(BaseModel):
         if value not in REMOTE_SAFE_ENTITY_LABELS:
             raise ValueError("entity label is not a reviewed remote-safe class")
         return value
+
+    @model_validator(mode="after")
+    def _canonical_fallback(self) -> "QualifiedEntityLabel":
+        expected = next(
+            (
+                option["fallback"]
+                for option in entity_label_options()
+                if option["label"] == self.label
+            ),
+            None,
+        )
+        if self.fallback != expected:
+            raise ValueError("entity fallback must match the reviewed class mapping")
+        return self
 
 
 class QualificationProject(BaseModel):

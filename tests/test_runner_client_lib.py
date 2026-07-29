@@ -49,6 +49,7 @@ from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
     runtime_inputs_digest,
 )
+from openadapt_flow.runtime.replayer import Replayer
 from tests.test_replayer import click_step, make_png
 
 # ---------------------------------------------------------------------------
@@ -135,6 +136,7 @@ def dispatch_payload(workflow: Workflow, **overrides) -> dict:
         },
         "deployment_profile_id": "default",
         "authorization": authorization.model_dump(mode="json"),
+        "dispatch_binding_sha256": "sha256:" + "d" * 64,
         "params": {"values": dict(PARAMS)},
         "expires_at": "2099-01-01T00:00:00Z",
     }
@@ -235,6 +237,16 @@ class TestProtocol:
         assert parsed.job_kind == "governed_run"
         assert parsed.bundle.url == "mock://bundles/never-fetched"
         assert parsed.authorization.admitted_policy_name == "clinical-write"
+        assert parsed.dispatch_binding_sha256 == "sha256:" + "d" * 64
+
+    @pytest.mark.parametrize("binding", [None, "not-a-digest"])
+    def test_missing_or_malformed_dispatch_binding_refuses(self, sealed, binding):
+        workflow, _ = sealed
+        payload = dispatch_payload(workflow, dispatch_binding_sha256=binding)
+        if binding is None:
+            payload.pop("dispatch_binding_sha256")
+        with pytest.raises(DispatchParseError):
+            parse_dispatch(payload)
 
     def test_unknown_field_is_contract_drift(self, sealed):
         workflow, _ = sealed
@@ -966,6 +978,7 @@ class TestCommandMapping:
         retained = read_managed_dispatch_envelope(path)
         assert retained.run_id == "018f6c0a-4cce-4f47-8d71-c3d63bf1c001"
         assert retained.authorization == verdict.payload.authorization
+        assert retained.binding_sha256 == verdict.payload.dispatch_binding_sha256
         path.chmod(0o644)
         with pytest.raises(ManagedDispatchEnvelopeError):
             read_managed_dispatch_envelope(path)
@@ -979,8 +992,22 @@ class TestCommandMapping:
             bundle_content_digest=verdict.payload.authorization.bundle_content_digest,
             runtime_inputs_digest=verdict.payload.authorization.runtime_inputs_digest,
             authorization=verdict.payload.authorization,
+            dispatch_binding_sha256=verdict.payload.dispatch_binding_sha256,
         )
         assert not hasattr(envelope, "managed_binding")
+
+    def test_managed_binding_refuses_non_durable_replayer(
+        self, sealed, config, tmp_path
+    ):
+        workflow, _ = sealed
+        verdict = verified_or_refusal(workflow, config)
+        assert not isinstance(verdict, Refusal)
+        binding = read_managed_dispatch_envelope(
+            write_managed_dispatch_envelope(tmp_path / "dispatch.json", verdict)
+        )
+        backend = object()
+        with pytest.raises(ValueError, match="requires durable=True"):
+            Replayer(backend, managed_dispatch_binding=binding, durable=False)
 
     def test_managed_dispatch_envelope_refuses_nested_authorization_extra(
         self, sealed, config, tmp_path

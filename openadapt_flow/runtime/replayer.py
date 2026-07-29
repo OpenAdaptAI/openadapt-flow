@@ -514,6 +514,8 @@ class Replayer:
 
             if not isinstance(managed_dispatch_binding, ManagedDispatchBinding):
                 raise ValueError("managed dispatch binding is invalid")
+            if not durable:
+                raise ValueError("managed dispatch binding requires durable=True")
             if governed_authorization not in (
                 None,
                 managed_dispatch_binding.authorization,

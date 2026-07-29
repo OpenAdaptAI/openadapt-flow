@@ -89,6 +89,9 @@ class RunnerDispatchPayload(BaseModel):
     bundle: DispatchBundle
     deployment_profile_id: str
     authorization: GovernedRunAuthorization
+    #: Server-issued genesis binding. Flow transports this opaque digest to the
+    #: remote permit authority; it must never derive a replacement locally.
+    dispatch_binding_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     params: Union[DispatchParamsValues, DispatchParamsRef]
     expires_at: str
 

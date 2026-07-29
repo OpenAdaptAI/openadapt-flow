@@ -7,7 +7,6 @@ CLI reopens it with no-follow and ownership checks before it admits a run.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import stat
@@ -63,6 +62,7 @@ class ManagedDispatchEnvelope(BaseModel):
     bundle_content_digest: str = Field(pattern="^[a-f0-9]{64}$")
     runtime_inputs_digest: str = Field(pattern="^[a-f0-9]{64}$")
     authorization: GovernedRunAuthorization
+    dispatch_binding_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
 
     def exact_authorization(self) -> GovernedRunAuthorization:
         if (
@@ -85,6 +85,7 @@ def write_managed_dispatch_envelope(path: Path, verified: "VerifiedDispatch") ->
         bundle_content_digest=authorization.bundle_content_digest,
         runtime_inputs_digest=authorization.runtime_inputs_digest,
         authorization=authorization,
+        dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
     )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,10 +208,9 @@ def read_managed_dispatch_envelope(path: Path) -> ManagedDispatchBinding:
     """Strictly load the private file and mint its internal capability."""
 
     envelope = _read_managed_dispatch_envelope(path)
-    raw = envelope.model_dump_json().encode("utf-8")
     return ManagedDispatchBinding(
         _BINDING_FACTORY,
         run_id=envelope.run_id,
         authorization=envelope.exact_authorization(),
-        binding_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+        binding_sha256=envelope.dispatch_binding_sha256,
     )

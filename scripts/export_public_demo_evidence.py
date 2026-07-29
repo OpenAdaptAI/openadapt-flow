@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
@@ -46,6 +47,7 @@ from urllib.request import Request, urlopen
 
 from jsonschema import Draft202012Validator
 from PIL import Image
+from pydantic import ValidationError
 
 from openadapt_flow import __version__ as FLOW_VERSION
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
@@ -116,9 +118,162 @@ NON_PUBLIC_RUN_AUTHORITY = frozenset(
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "schemas" / "public-demo-evidence-v1.json"
 
+# These immutable packs predate retained, result-bound postcondition evidence.
+# The exporter will never create this format again.  Keep the exact source
+# commit allow-list here so byte validation can still inspect the historical
+# public record without treating it as a current executable RunReport.
+LEGACY_RETAINED_PACK_SOURCES = {
+    "mockmed-triage-v1": "6b64e2816d776673f6b7fd630a807fc9de6a3cae",
+    "mockmed-triage-v2": "130b9becf58c1fb9ad3b269a2010506162d78ad7",
+    "mockmed-triage-v3": "7cc518ee0b83dd571c0902423134a5525635e6b2",
+}
+
 
 class EvidencePackError(RuntimeError):
     """The evidence pack could not be generated or validated safely."""
+
+
+@dataclass(frozen=True)
+class _LegacyRetainedPublicDemoReport:
+    """A non-executable view of a pre-retention public-demo report.
+
+    This type is only for exhaustive byte and aggregate validation of the
+    immutable historical packs listed in :data:`LEGACY_RETAINED_PACK_SOURCES`.
+    It is deliberately not a ``RunReport``.  In particular, it cannot be sent
+    to the runtime, admission gate, or any production-verification path.
+    """
+
+    execution_outcome: str | None
+    execution_profile: str | None
+    execution_completed: bool
+    model_calls: int
+    external_network_calls: str
+    screenshots_may_leave_box: bool
+    total_ms: float
+    production_eligible: bool = False
+
+
+def _legacy_retained_report(
+    *,
+    report_path: Path,
+    manifest: dict[str, Any],
+    raw: dict[str, Any],
+) -> _LegacyRetainedPublicDemoReport:
+    """Validate the narrow historical report schema without upgrading it.
+
+    A migration must not fabricate the per-contract postcondition evidence that
+    a current :class:`RunReport` requires.  The returned view therefore keeps
+    only the fields required to verify the retained pack inventory and marks
+    the report as non-production evidence.
+    """
+
+    pack_id = manifest.get("pack", {}).get("id")
+    expected_commit = LEGACY_RETAINED_PACK_SOURCES.get(pack_id)
+    if (
+        expected_commit is None
+        or manifest.get("provenance", {}).get("source_commit") != expected_commit
+    ):
+        raise EvidencePackError(
+            f"current RunReport validation failed for non-legacy report: {report_path}"
+        )
+    envelope = raw.get("outcome_envelope")
+    if not isinstance(envelope, dict) or (
+        envelope.get("version") != "openadapt.execution-outcome/v1"
+        or "postcondition_evidence" in envelope
+        or "workflow_contract_sha256" in envelope
+    ):
+        raise EvidencePackError(
+            f"retained legacy report has an unsupported outcome schema: {report_path}"
+        )
+    required = envelope.get("required_contracts")
+    passed = envelope.get("passed_contracts")
+    contract_keys = {"authorization", "identity", "postcondition", "effect"}
+    if (
+        not isinstance(required, dict)
+        or not isinstance(passed, dict)
+        or set(required) != contract_keys
+        or set(passed) != contract_keys
+        or any(
+            isinstance(required[key], bool)
+            or isinstance(passed[key], bool)
+            or not isinstance(required[key], int)
+            or not isinstance(passed[key], int)
+            or required[key] < 0
+            or passed[key] < 0
+            or passed[key] > required[key]
+            for key in contract_keys
+        )
+        or required["postcondition"] < 1
+    ):
+        raise EvidencePackError(
+            f"retained legacy report has invalid contract counts: {report_path}"
+        )
+
+    def _required_str(name: str) -> str:
+        value = raw.get(name)
+        if not isinstance(value, str):
+            raise EvidencePackError(
+                f"retained legacy report has invalid {name}: {report_path}"
+            )
+        return value
+
+    def _required_bool(name: str) -> bool:
+        value = raw.get(name)
+        if not isinstance(value, bool):
+            raise EvidencePackError(
+                f"retained legacy report has invalid {name}: {report_path}"
+            )
+        return value
+
+    total_ms = raw.get("total_ms")
+    model_calls = raw.get("model_calls")
+    if (
+        isinstance(total_ms, bool)
+        or not isinstance(total_ms, (int, float))
+        or total_ms < 0
+        or isinstance(model_calls, bool)
+        or not isinstance(model_calls, int)
+        or model_calls < 0
+        or raw.get("execution_outcome") != envelope.get("outcome")
+    ):
+        raise EvidencePackError(
+            f"retained legacy report has invalid runtime facts: {report_path}"
+        )
+    outcome = raw.get("execution_outcome")
+    if outcome is not None and not isinstance(outcome, str):
+        raise EvidencePackError(
+            f"retained legacy report has invalid execution outcome: {report_path}"
+        )
+    return _LegacyRetainedPublicDemoReport(
+        execution_outcome=outcome,
+        execution_profile=_required_str("execution_profile"),
+        execution_completed=_required_bool("execution_completed"),
+        model_calls=model_calls,
+        external_network_calls=_required_str("external_network_calls"),
+        screenshots_may_leave_box=_required_bool("screenshots_may_leave_box"),
+        total_ms=float(total_ms),
+    )
+
+
+def _load_retained_public_demo_report(
+    report_path: Path, manifest: dict[str, Any]
+) -> RunReport | _LegacyRetainedPublicDemoReport:
+    """Load a current report, or the strict non-production legacy view."""
+
+    payload = report_path.read_text(encoding="utf-8")
+    try:
+        return RunReport.model_validate_json(payload)
+    except ValidationError:
+        raw = json.loads(payload)
+        if not isinstance(raw, dict):
+            raise EvidencePackError(
+                f"retained report is not a JSON object: {report_path}"
+            ) from None
+        return _legacy_retained_report(
+            report_path=report_path,
+            manifest=manifest,
+            raw=raw,
+        )
 
 
 def _now() -> str:
@@ -1804,6 +1959,7 @@ def _safe_file(root: Path, relative: str) -> Path:
 def _validate_presentation_artifacts(
     root: Path,
     *,
+    manifest: dict[str, Any],
     inventory: dict[str, dict[str, Any]],
     pack_id: str,
     artifacts: dict[str, Any],
@@ -1984,9 +2140,7 @@ def _validate_presentation_artifacts(
                     f"{clip_id} presentation source mapping does not match its case"
                 )
             report_path = _safe_file(root, str(clip["report"]["path"]))
-            report = RunReport.model_validate_json(
-                report_path.read_text(encoding="utf-8")
-            )
+            report = _load_retained_public_demo_report(report_path, manifest)
             outcome = json.loads(
                 _safe_file(root, str(clip["outcome"]["path"])).read_text(
                     encoding="utf-8"
@@ -2103,6 +2257,7 @@ def validate_pack(pack_dir: Path | str) -> dict[str, Any]:
     if "presentation" in artifacts:
         _validate_presentation_artifacts(
             root,
+            manifest=manifest,
             inventory=inventory,
             pack_id=str(manifest["pack"]["id"]),
             artifacts=artifacts,
@@ -2170,9 +2325,7 @@ def validate_pack(pack_dir: Path | str) -> dict[str, Any]:
             start=1,
         ):
             report_path = _safe_file(root, report_ref["path"])
-            report = RunReport.model_validate_json(
-                report_path.read_text(encoding="utf-8")
-            )
+            report = _load_retained_public_demo_report(report_path, manifest)
             outcome = json.loads(
                 _safe_file(root, outcome_ref["path"]).read_text(encoding="utf-8")
             )

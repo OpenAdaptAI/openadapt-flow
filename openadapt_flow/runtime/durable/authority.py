@@ -3,7 +3,15 @@
 The run directory is evidence, not the only authority. A backup can restore
 every file in that directory to an older approved pause. This registry lives
 outside the run directory and records monotonic delivery/terminal state, so a
-same-path restore cannot repeat a consequential continuation.
+same-path run-directory restore cannot repeat a consequential continuation.
+
+The authority store is a deployment trust boundary. Its storage and backups
+must not be restored with the run directory or modified by an untrusted
+principal. This module protects that trusted store from concurrent writers,
+active path replacement, and accidental reuse. No local file format can remain
+monotonic after a principal with write access replaces the complete authority
+store. Customer-controlled deployments must therefore keep this store on the
+runner's protected service volume and restrict its backup and restore policy.
 """
 
 from __future__ import annotations
@@ -204,7 +212,7 @@ class DurableAuthorityRecord(BaseModel):
 
 
 class DurableAuthority:
-    """SQLite-backed single-host authority for one durable run directory."""
+    """SQLite-backed authority on one trusted, non-rollback service volume."""
 
     def __init__(self, run_dir: Path | str, store: Any) -> None:
         self.run_dir = Path(run_dir).resolve()

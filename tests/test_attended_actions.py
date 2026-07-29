@@ -51,8 +51,10 @@ from openadapt_flow.privacy import reset_scrubbers, set_image_scrubber
 from openadapt_flow.qualification import (
     ActionRiskClassification,
     EnvironmentBoundary,
+    QualifiedEntityLabel,
     init_project,
     set_action_classification,
+    set_entity_label,
     workflow_contract_sha256,
 )
 from openadapt_flow.runtime.authorization import (
@@ -317,7 +319,7 @@ def _request(capability, action="continue", key="request-key-0001"):
     )
 
 
-def _remote_deployment() -> DeploymentConfig:
+def _remote_deployment(**remote: object) -> DeploymentConfig:
     return DeploymentConfig.model_validate(
         {
             "human_decisions": {
@@ -325,6 +327,7 @@ def _remote_deployment() -> DeploymentConfig:
                     "enabled": True,
                     "tenant_id": "tenant_exact_01",
                     "runner_id": "runner_exact_01",
+                    **remote,
                 }
             }
         }
@@ -3183,6 +3186,75 @@ def test_remote_projection_is_explicit_aal2_phi_free_and_exactly_bound(tmp_path)
         str(run.parent / "bundle"),
     ):
         assert protected not in serialized
+
+
+def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(tmp_path):
+    workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
+    workflow, bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="qualified-app",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+    )
+    set_entity_label(
+        workflow,
+        QualifiedEntityLabel(
+            step_id="humanstep", label="service record", fallback="record"
+        ),
+    )
+    workflow.save(bundle)
+    item = attention_item(run.parent, run)
+    assert item is not None
+
+    v1 = portable_remote_decision_task(run, item, deployment=_remote_deployment())
+    assert v1.task.schema_version == "openadapt.human-decision-task/v1"
+
+    v2 = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert v2.task.schema_version == "openadapt.human-decision-task/v2"
+    assert v2.task.entity.label == "service record"
+    assert v2.task.entity.fallback.value == "record"
+    assert v2.task.qualification_step_id == "humanstep"
+    assert v2.task.qualification_project_id == workflow.qualification.project_id
+    assert v2.task.qualification_contract_digest == (
+        "sha256:" + workflow.qualification.contract_sha256()
+    )
+
+
+def test_remote_v2_falls_back_when_the_exact_failed_step_has_no_label(tmp_path):
+    workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
+    workflow, bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="qualified-app",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+    )
+    workflow.save(bundle)
+    item = attention_item(run.parent, run)
+    assert item is not None
+    projection = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
 
 
 def test_remote_response_refuses_scope_or_binding_drift(tmp_path):

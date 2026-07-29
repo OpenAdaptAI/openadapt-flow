@@ -4468,6 +4468,12 @@ def certify_project(
             case_evidence_contract_sha256=_case_evidence_contract_sha256(project),
             execution_profile=execution_profile,
         )
+    # A failed campaign must remove any template from an earlier accepted
+    # campaign.  Manifest provenance is outside the bundle content digest, so
+    # retaining that template would leave stale production authority attached
+    # to a newly failed qualification decision.
+    if not report.passed and workflow.manifest is not None:
+        workflow.manifest.provenance.governed_authorization_template = None
     workflow.stamp_certification(
         policy_name=policy.name,
         passed=report.passed,
@@ -4481,24 +4487,26 @@ def _authorization_parameter_contract(
 ) -> tuple[tuple[Any, ...], str]:
     """Return value-free parameter metadata and its exact contract digest."""
 
-    from openadapt_flow.ir import GovernedAuthorizationParameter, ParamKind
+    from openadapt_flow.bundle_validation import (
+        build_runtime_parameter_schema,
+        compute_parameter_schema_digest,
+    )
+    from openadapt_flow.ir import GovernedAuthorizationParameter
 
-    secret_names = set(workflow.secret_params)
     records: list[GovernedAuthorizationParameter] = []
-    for name in sorted(
-        set(workflow.params).union(workflow.param_specs).union(workflow.secret_params)
-    ):
+    for parameter in build_runtime_parameter_schema(workflow):
+        name = parameter["name"]
         spec = workflow.param_specs.get(name)
-        choice_values: list[str] = spec.choices if spec is not None else []
+        choice_values = parameter["choices"]
         choices_bytes = json.dumps(
             choice_values, sort_keys=True, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
         records.append(
             GovernedAuthorizationParameter(
                 name=name,
-                type=spec.type if spec is not None else ParamKind.STRING,
-                required=spec.required if spec is not None else True,
-                secret=name in secret_names,
+                type=parameter["type"],
+                required=parameter["required"],
+                secret=parameter["secret"],
                 has_default=(
                     name in workflow.params
                     or (spec is not None and spec.example is not None)
@@ -4507,13 +4515,7 @@ def _authorization_parameter_contract(
                 choices_sha256=hashlib.sha256(choices_bytes).hexdigest(),
             )
         )
-    payload = [record.model_dump(mode="json") for record in records]
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8"
-        )
-    ).hexdigest()
-    return tuple(records), digest
+    return tuple(records), compute_parameter_schema_digest(workflow)
 
 
 def build_governed_authorization_template(

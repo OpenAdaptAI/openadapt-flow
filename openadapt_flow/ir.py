@@ -1924,6 +1924,29 @@ class Workflow(BaseModel):
                 )
             else:
                 _bv.verify_integrity(wf, bundle, wf.manifest)
+            template = wf.manifest.provenance.governed_authorization_template
+            if template is not None:
+                # Manifest provenance is intentionally outside the content
+                # digest.  Rebuild this derived authority from the sealed
+                # workflow and accepted certification so a replacement
+                # self-consistent template cannot weaken production policy.
+                from openadapt_flow.qualification import (
+                    QualificationError,
+                    build_governed_authorization_template,
+                )
+
+                try:
+                    expected_template = build_governed_authorization_template(wf)
+                except QualificationError as exc:
+                    raise _bv.BundleIntegrityError(
+                        "governed authorization template cannot be reproduced "
+                        "from the sealed certification"
+                    ) from exc
+                if template != expected_template:
+                    raise _bv.BundleIntegrityError(
+                        "governed authorization template does not match the "
+                        "sealed workflow and certification"
+                    )
 
         if wf.manifest is None:
             wf.manifest = _bv.build_manifest(wf, bundle)

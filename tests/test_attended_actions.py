@@ -2350,8 +2350,10 @@ def test_reconcile_proves_uncertain_write_without_re_dispatch(tmp_path):
     assert portable.transition_receipt_digest == receipt.transition_receipt_digest
 
 
-def test_reconciliation_recovers_receipt_after_resume_commit(tmp_path, monkeypatch):
-    """A receipt-write fault after resume cannot cause a second delivery."""
+def test_linear_reconciliation_recovers_receipt_and_refuses_zero_or_multiple_matches(
+    tmp_path, monkeypatch
+):
+    """Recovery selects one bound checkpoint and never re-dispatches the action."""
 
     workflow = Workflow(
         name="reconcile-receipt-recovery",
@@ -2476,6 +2478,32 @@ def test_reconciliation_recovers_receipt_after_resume_commit(tmp_path, monkeypat
     assert decision.status == "completed"
     assert decision.transition_receipt_digest == receipt.transition_receipt_digest
     assert decision.transition_receipt_digest == _digest(store.checkpoints()[0])
+
+    recovery = BoundAttendedExecutor(
+        lambda _manifest: Replayer(
+            backend,
+            vision=FakeVision(),
+            effect_verifier=CurrentRecords(),
+            poll_interval_s=0.0,
+        )
+    )
+    with pytest.raises(AttendedActionRefused, match="does not bind"):
+        recovery.recover_reconciliation_receipt(
+            run, capability, _digest({"request": "no-match"})
+        )
+    original_checkpoint = store.checkpoints()[0]
+    store.write_checkpoint(
+        original_checkpoint.model_copy(
+            update={
+                "step_index": 99,
+                "step_id": "duplicate-reconciliation-binding",
+                "next_step_index": 100,
+            }
+        )
+    )
+    with pytest.raises(AttendedActionRefused, match="does not bind"):
+        recovery.recover_reconciliation_receipt(run, capability, _digest(request))
+    assert backend.actions == []
 
 
 def test_program_reconciliation_recovers_receipt_from_history_after_later_checkpoint(
@@ -2628,7 +2656,10 @@ def test_program_reconciliation_recovers_receipt_from_history_after_later_checkp
     assert decision.transition_receipt_digest == _digest(checkpoints[0].attended_transition)
 
 
-def test_completed_executor_result_without_receipt_is_refused(tmp_path, monkeypatch):
+@pytest.mark.parametrize("report_success", [True, False, None])
+def test_completed_executor_result_without_receipt_is_refused(
+    tmp_path, monkeypatch, report_success
+):
     """The public boundary never journals an unbound completed result."""
 
     _workflow, _bundle, run, _store, capability = _paused(tmp_path)
@@ -2638,7 +2669,7 @@ def test_completed_executor_result_without_receipt_is_refused(tmp_path, monkeypa
             return AttendedExecutionResult(
                 status="completed",
                 message="unsafe custom result",
-                report_success=True,
+                report_success=report_success,
             )
 
         def skip_run(self, _run_dir, _capability, _approval):
@@ -2654,7 +2685,7 @@ def test_completed_executor_result_without_receipt_is_refused(tmp_path, monkeypa
         "attest_executor_outcome",
         lambda *_args, **_kwargs: None,
     )
-    with pytest.raises(AttendedActionRefused, match="exact durable transition receipt"):
+    with pytest.raises(AttendedActionRefused, match="completed attended result requires"):
         execute_attended_action(
             run,
             _request(capability),

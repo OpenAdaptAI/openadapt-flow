@@ -170,6 +170,7 @@ def _matches_reconciliation_checkpoint(
         and checkpoint.attended_reconciliation_expected_transition_digest
         == capability.expected_transition_digest
         and checkpoint.attended_reconciliation_delivery_state == delivery_state
+        and bool(checkpoint.attended_reconciliation_effect_contract_hashes)
         and tuple(checkpoint.attended_reconciliation_effect_contract_hashes)
         == effect_contract_hashes
         and checkpoint.attended_reconciliation_at == capability.issued_at
@@ -2657,14 +2658,14 @@ def execute_attended_action(
                 raise AttendedActionRefused(
                     "the executor did not return an outcome proven by durable state"
                 ) from exc
-        if (
-            result.status == "completed"
-            and result.report_success is True
-            and result.transition_receipt_digest is None
+        if result.status == "completed" and (
+            result.report_success is not True
+            or result.transition_receipt_digest is None
         ):
             raise AttendedActionRefused(
-                "a completed attended result requires an exact durable transition "
-                "receipt before it can enter the decision journal"
+                "a completed attended result requires report_success=true and an "
+                "exact durable transition receipt before it can enter the decision "
+                "journal"
             )
         decision = AttendedDecision(
             pause_id=capability.pause_id,

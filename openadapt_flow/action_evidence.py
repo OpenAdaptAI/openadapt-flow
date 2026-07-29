@@ -410,6 +410,13 @@ def action_evidence_error(
 
     if identity_required:
         return nonvacuous_identity_error(result.identity)
-    if result.identity is not None and result.identity.status != "verified":
-        return "successful action retains a non-verified identity verdict"
+    # A step without an armed identity contract may continue when the optional
+    # identity ladder cannot decide.  That preserves ordinary non-entity work
+    # on substrates that cannot observe an identity band.  A positive mismatch
+    # is different: it is affirmative evidence for a different entity and must
+    # always reject the action, even when the step did not require identity.
+    # Required identity remains above: ``nonvacuous_identity_error`` requires
+    # a fully retained, verified identity proof.
+    if result.identity is not None and result.identity.status == "mismatch":
+        return "successful action retains an identity mismatch verdict"
     return None

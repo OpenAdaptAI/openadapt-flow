@@ -58,6 +58,8 @@ def _fresh_run(
     tmp_path: Path,
     *,
     execution_profile: Literal["demo", "standard", "regulated"] | None = None,
+    run_id: str = "11111111-1111-4111-8111-111111111111",
+    namespace_id: str = "0123456789abcdef0123456789abcdef",
 ) -> tuple[
     Path,
     CheckpointStore,
@@ -89,8 +91,8 @@ def _fresh_run(
         else None
     )
     manifest = RunManifest(
-        run_id="run-v13-authority",
-        namespace_id="namespace-v13-authority",
+        run_id=run_id,
+        namespace_id=namespace_id,
         canonical_run_dir=str(run_dir.resolve()),
         workflow_name="authority-contract",
         bundle_dir=str(bundle_dir.resolve()),
@@ -171,14 +173,14 @@ def _remote_ready_authority(
         authority,
         manifest,
         pending,
-        attempt="remote-attempt",
+        attempt="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         now=datetime.now(timezone.utc),
     )
     authority.bind_approval(
         manifest,
-        attempt_id="remote-attempt",
+        attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         owner_nonce_sha256=owner,
-        approval_digest="approval",
+        approval_digest="sha256:" + "b" * 64,
     )
     monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
     monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
@@ -217,7 +219,9 @@ def test_production_delivery_requires_and_validates_remote_permit(
         tmp_path, monkeypatch, transport
     )
     authority.before_delivery(
-        manifest, attempt_id="remote-attempt", owner_nonce_sha256=owner
+        manifest,
+        attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        owner_nonce_sha256=owner,
     )
     assert seen["headers"] == {
         "Authorization": "Bearer secret-token",
@@ -243,7 +247,52 @@ def test_production_delivery_requires_remote_configuration(
     monkeypatch.delenv(REMOTE_AUTHORITY_URL_ENV)
     with pytest.raises(DurableAuthorityBusy, match="requires configured remote"):
         authority.before_delivery(
-            manifest, attempt_id="remote-attempt", owner_nonce_sha256=owner
+            manifest,
+            attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            owner_nonce_sha256=owner,
+        )
+    assert not called
+    assert authority.validate(manifest).delivery_sequence == 0
+
+
+def test_production_delivery_refuses_free_text_before_remote_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = False
+
+    def transport(_url: str, _headers: dict[str, str], _body: bytes) -> bytes:
+        nonlocal called
+        called = True
+        return b"{}"
+
+    _run_dir, store, manifest, _authority = _fresh_run(
+        tmp_path,
+        execution_profile="standard",
+        run_id="Patient Jane Doe",
+    )
+    pending = _pause(store, manifest, DurableAuthority(store.run_dir, store))
+    authority = DurableAuthority(store.run_dir, store, remote_transport=transport)
+    owner = _acquire(
+        authority,
+        manifest,
+        pending,
+        attempt="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        now=datetime.now(timezone.utc),
+    )
+    authority.bind_approval(
+        manifest,
+        attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        owner_nonce_sha256=owner,
+        approval_digest="sha256:" + "b" * 64,
+    )
+    monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
+    monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
+
+    with pytest.raises(DurableAuthorityBusy, match="privacy-safe"):
+        authority.before_delivery(
+            manifest,
+            attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            owner_nonce_sha256=owner,
         )
     assert not called
     assert authority.validate(manifest).delivery_sequence == 0
@@ -256,7 +305,7 @@ def test_production_delivery_rejects_insecure_remote_endpoint(
     with pytest.raises(DurableAuthorityBusy, match="must use HTTPS"):
         authority.before_delivery(
             manifest,
-            attempt_id="remote-attempt",
+            attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             owner_nonce_sha256=owner,
         )
     assert authority.validate(manifest).delivery_sequence == 0
@@ -296,7 +345,9 @@ def test_production_remote_refusal_never_crosses_local_delivery_fence(
     )
     with pytest.raises(DurableAuthorityBusy):
         authority.before_delivery(
-            manifest, attempt_id="remote-attempt", owner_nonce_sha256=owner
+            manifest,
+            attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            owner_nonce_sha256=owner,
         )
     assert authority.validate(manifest).delivery_sequence == 0
 
@@ -337,14 +388,14 @@ def test_remote_sequence_survives_complete_local_state_restore(
         authority,
         manifest,
         pending,
-        attempt="remote-restore",
+        attempt="cccccccccccccccccccccccccccccccc",
         now=datetime.now(timezone.utc),
     )
     authority.bind_approval(
         manifest,
-        attempt_id="remote-restore",
+        attempt_id="cccccccccccccccccccccccccccccccc",
         owner_nonce_sha256=owner,
-        approval_digest="approval",
+        approval_digest="sha256:" + "d" * 64,
     )
     run_snapshot = tmp_path / "run-before-delivery"
     db_snapshot = tmp_path / "authority-before-delivery.sqlite3"
@@ -355,7 +406,7 @@ def test_remote_sequence_survives_complete_local_state_restore(
 
     authority.before_delivery(
         manifest,
-        attempt_id="remote-restore",
+        attempt_id="cccccccccccccccccccccccccccccccc",
         owner_nonce_sha256=owner,
     )
 
@@ -372,7 +423,7 @@ def test_remote_sequence_survives_complete_local_state_restore(
     with pytest.raises(DurableAuthorityBusy, match="unavailable or refused"):
         restarted.before_delivery(
             restarted_manifest,
-            attempt_id="remote-restore",
+            attempt_id="cccccccccccccccccccccccccccccccc",
             owner_nonce_sha256=owner,
         )
     assert len(consumed) == 1
@@ -412,21 +463,21 @@ def test_remote_sequence_spans_verified_progress_in_one_continuation(
         authority,
         manifest,
         pending,
-        attempt="remote-progress",
+        attempt="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         now=datetime.now(timezone.utc),
     )
     authority.bind_approval(
         manifest,
-        attempt_id="remote-progress",
+        attempt_id="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         owner_nonce_sha256=owner,
-        approval_digest="approval",
+        approval_digest="sha256:" + "f" * 64,
     )
     monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
     monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
 
     authority.before_delivery(
         manifest,
-        attempt_id="remote-progress",
+        attempt_id="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         owner_nonce_sha256=owner,
     )
     store.write_checkpoint(
@@ -445,13 +496,13 @@ def test_remote_sequence_spans_verified_progress_in_one_continuation(
     )
     authority.acknowledge_progress(
         manifest,
-        attempt_id="remote-progress",
+        attempt_id="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         owner_nonce_sha256=owner,
         terminal_pause=False,
     )
     authority.before_delivery(
         manifest,
-        attempt_id="remote-progress",
+        attempt_id="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         owner_nonce_sha256=owner,
     )
 

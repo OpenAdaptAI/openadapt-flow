@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -48,6 +49,15 @@ MAX_REMOTE_AUTHORITY_RESPONSE_BYTES = 64 * 1024
 AUTHORITY_SCHEMA_VERSION = 1
 JOURNAL_GENESIS_DIGEST = "sha256:" + hashlib.sha256(b"").hexdigest()
 JOURNAL_MAC_DOMAIN = b"openadapt-attended-journal-v1\0"
+_REMOTE_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+_REMOTE_TOKEN_RE = re.compile(r"[a-f0-9]{32}")
+_REMOTE_PATH_KEY_RE = re.compile(r"[a-f0-9]{64}")
+_REMOTE_DIGEST_RE = re.compile(r"sha256:[a-f0-9]{64}")
+_REMOTE_OPERATIONS = {"resume", "continue", "skip", "reject", "teach", "escalate"}
 
 
 def _is_windows() -> bool:
@@ -1416,12 +1426,25 @@ class DurableAuthority:
             "attempt_id": record.attempt_id,
             "operation": record.operation,
         }
-        if any(
-            not isinstance(value, str) or not value or len(value) > 512
-            for value in required.values()
+        if not (
+            isinstance(required["run_id"], str)
+            and _REMOTE_UUID_RE.fullmatch(required["run_id"])
+            and isinstance(required["namespace_id"], str)
+            and _REMOTE_TOKEN_RE.fullmatch(required["namespace_id"])
+            and isinstance(required["path_key"], str)
+            and _REMOTE_PATH_KEY_RE.fullmatch(required["path_key"])
+            and isinstance(required["pause_binding_sha256"], str)
+            and _REMOTE_DIGEST_RE.fullmatch(required["pause_binding_sha256"])
+            and isinstance(required["progress_digest"], str)
+            and _REMOTE_DIGEST_RE.fullmatch(required["progress_digest"])
+            and isinstance(required["approval_digest"], str)
+            and _REMOTE_DIGEST_RE.fullmatch(required["approval_digest"])
+            and isinstance(required["attempt_id"], str)
+            and _REMOTE_TOKEN_RE.fullmatch(required["attempt_id"])
+            and required["operation"] in _REMOTE_OPERATIONS
         ):
             raise DurableAuthorityBusy(
-                "production delivery requires complete retained remote authority inputs"
+                "production delivery requires privacy-safe retained remote authority inputs"
             )
         url = os.getenv(REMOTE_AUTHORITY_URL_ENV, "")
         token = os.getenv(REMOTE_AUTHORITY_TOKEN_ENV, "")

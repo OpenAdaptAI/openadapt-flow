@@ -2774,12 +2774,6 @@ class BoundAttendedExecutor:
             resolution=retained_result.resolution,
             attended_capability_digest=capability.digest,
         )
-        store.write_checkpoint(checkpoint)
-        store.commit_approval_transition(
-            expected_pending=pending,
-            approval=approval,
-            target_status="approved",
-        )
         from openadapt_flow.runtime.durable.continuation import (
             ContinuationCoordinator,
             current_continuation_token,
@@ -2790,7 +2784,20 @@ class BoundAttendedExecutor:
             raise AttendedActionRefused(
                 "the attended completion lost its continuation authority"
             )
-        ContinuationCoordinator(run_dir, key=self.key).acknowledge_progress(
+        # A human has already completed the source action, but Flow must not
+        # commit that continuation into durable local state until the same
+        # exact delivery sequence has a server-owned permit.  This makes a
+        # missing or refused production authority leave the checkpoint and
+        # approval untouched for reconciliation.
+        coordinator = ContinuationCoordinator(run_dir, key=self.key)
+        coordinator.before_delivery(token)
+        store.write_checkpoint(checkpoint)
+        store.commit_approval_transition(
+            expected_pending=pending,
+            approval=approval,
+            target_status="approved",
+        )
+        coordinator.acknowledge_progress(
             token,
             external_delivery=True,
         )
@@ -3024,6 +3031,22 @@ class BoundAttendedExecutor:
             raise AttendedActionRefused(
                 "the exact attended program pause changed before transition commit"
             )
+        from openadapt_flow.runtime.durable.continuation import (
+            ContinuationCoordinator,
+            current_continuation_token,
+        )
+
+        token = current_continuation_token()
+        if token is None:
+            raise AttendedActionRefused(
+                "the attended program completion lost its continuation authority"
+            )
+        # Commit the signed program receipt, checkpoint, and approval only
+        # after the server-owned delivery permit accepts this exact sequence.
+        # A refusal leaves the program continuation available for safe
+        # reconciliation instead of creating local-only progress.
+        coordinator = ContinuationCoordinator(run_dir, key=self.key)
+        coordinator.before_delivery(token)
         receipt = action_store.write_program_receipt(receipt)
         prior_decision_indexes = (
             [
@@ -3129,17 +3152,7 @@ class BoundAttendedExecutor:
             approval=approval,
             target_status="approved",
         )
-        from openadapt_flow.runtime.durable.continuation import (
-            ContinuationCoordinator,
-            current_continuation_token,
-        )
-
-        token = current_continuation_token()
-        if token is None:
-            raise AttendedActionRefused(
-                "the attended program completion lost its continuation authority"
-            )
-        ContinuationCoordinator(run_dir, key=self.key).acknowledge_progress(
+        coordinator.acknowledge_progress(
             token,
             external_delivery=True,
         )

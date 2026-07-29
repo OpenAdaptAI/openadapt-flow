@@ -78,7 +78,10 @@ from openadapt_flow.runtime.durable.attended import (
     validate_attended_program_receipt,
 )
 from openadapt_flow.runtime.durable.attended_service import AttendedActionService
-from openadapt_flow.runtime.durable.authority import DurableAuthority
+from openadapt_flow.runtime.durable.authority import (
+    DurableAuthority,
+    DurableAuthorityBusy,
+)
 from openadapt_flow.runtime.durable.checkpoint import (
     CheckpointStore,
     PendingEscalation,
@@ -1997,6 +2000,82 @@ def test_linear_continue_rebinds_exact_pause_before_checkpoint_commit(tmp_path):
     pending = store.read_pending()
     assert pending is not None
     assert pending.step_id == "independently-replaced-pause"
+
+
+def test_linear_completion_refused_by_remote_permit_keeps_local_progress_unchanged(
+    tmp_path, monkeypatch
+):
+    """A refused production permit cannot commit attended local state."""
+
+    _workflow, _bundle, run, store, capability = _paused(tmp_path)
+    monkeypatch.setattr(
+        DurableAuthority,
+        "_require_remote_delivery_permit",
+        lambda _self, _manifest, _record: (_ for _ in ()).throw(
+            DurableAuthorityBusy("remote delivery authority refused")
+        ),
+    )
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="linear-refused-remote-permit"),
+        operator="front-desk",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                FakeBackend(), vision=vision, poll_interval_s=0.0
+            )
+        ),
+    )
+
+    assert decision.status == "refused"
+    assert "remote delivery authority refused" in decision.message
+    assert store.checkpoints() == []
+    assert store.read_approval() is None
+    assert store.read_pending() is not None
+
+
+def test_program_completion_refused_by_remote_permit_keeps_local_progress_unchanged(
+    tmp_path, monkeypatch
+):
+    """The program receipt and checkpoint use the same production fence."""
+
+    workflow = _attended_program()
+    _bundle, run, _initial_backend, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    monkeypatch.setattr(
+        DurableAuthority,
+        "_require_remote_delivery_permit",
+        lambda _self, _manifest, _record: (_ for _ in ()).throw(
+            DurableAuthorityBusy("remote delivery authority refused")
+        ),
+    )
+    vision = FakeVision()
+    vision.text_results["DONE"] = Match(
+        point=(10, 10), region=(0, 0, 20, 20), confidence=1.0
+    )
+
+    decision = execute_attended_action(
+        run,
+        _request(capability, key="program-refused-remote-permit"),
+        operator="front-desk",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                FakeBackend(), vision=vision, poll_interval_s=0.0
+            )
+        ),
+    )
+
+    assert decision.status == "refused"
+    assert "remote delivery authority refused" in decision.message
+    assert store.program_checkpoints() == []
+    assert store.read_approval() is None
+    assert store.read_pending() is not None
+    assert not (run / ".attended_program_receipts" / f"{capability.pause_id}.json").exists()
 
 
 def test_continue_refuses_live_postcondition_failure_without_actuation(tmp_path):

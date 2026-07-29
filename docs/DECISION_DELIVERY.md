@@ -59,9 +59,14 @@ hosted control plane enforces it a third time in Postgres, in the same style as
 ## V2: qualification-approved entity wording
 
 V1 uses only domain-neutral wording such as `record` or `item`. A later V2 task
-can carry one useful entity label that the exact qualification contract already
-approved. For example, the contract can name a `patient record`, an insurance
-`claim`, or a `loan application`.
+can carry one useful entity class that the exact qualification contract already
+approved. The remote emitter accepts only the reviewed remote-safe vocabulary.
+The canonical vocabulary and cross-vertical examples are in
+[Attended decisions and the halt-learn loop](https://docs.openadapt.ai/concepts/halt-learn-loop/#a-qualified-entity-label-not-a-guessed-domain).
+
+Qualification can retain a custom class for a local operator surface. A remote
+task does not carry a custom or unrecognized class. The remote client renders
+the signed neutral `record` or `item` fallback instead.
 
 This is not runtime inference. The producer reads the label from the exact
 qualified step and binds the task to the qualification project, qualification
@@ -72,9 +77,10 @@ handles; it never says which entity is on screen.
 
 The runner and client use V2 only after explicit schema negotiation. A peer that
 does not negotiate V2 receives the byte-compatible V1 task and renders `record`
-or `item`. Before any action continues, the customer-controlled runner reads
-the live application and revalidates the required identity and effect
-contracts.
+or `item`. The same neutral fallback applies when the class is not in the
+reviewed remote-safe vocabulary. Before any action continues, the
+customer-controlled runner reads the live application and revalidates the
+required identity and effect contracts.
 
 !!! note "Release dependency"
     This V2 section documents a coordinated Flow, Desktop, Cloud, and Types

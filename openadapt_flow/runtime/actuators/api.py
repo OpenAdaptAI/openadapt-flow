@@ -46,7 +46,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from openadapt_flow.ir import ApiBinding
 
@@ -67,6 +67,18 @@ class ActuationStatus(str, Enum):
     HALT = "halt"
 
 
+class ApiHaltKind(str, Enum):
+    """Why an attempted API request must halt."""
+
+    #: No response proved the business outcome. The request can have reached
+    #: the server, so the runtime must verify without retrying.
+    DELIVERY_UNCERTAIN = "delivery_uncertain"
+    #: The server returned a status outside the binding's accepted contract.
+    #: The runtime can collect effect evidence, but the rejected response
+    #: prevents this attempt from becoming a successful run.
+    RESPONSE_REJECTED = "response_rejected"
+
+
 class ApiActuationResult(BaseModel):
     """Outcome of one :meth:`ApiActuator.actuate` call."""
 
@@ -78,8 +90,20 @@ class ApiActuationResult(BaseModel):
     reason: str = ""
     #: HTTP status code when a response was received; None otherwise.
     http_status: Optional[int] = None
+    #: Required classification for a HALT result. It separates response loss
+    #: from an explicit server rejection so the runtime cannot accept a weak
+    #: screen signal after a rejected request.
+    halt_kind: Optional[ApiHaltKind] = None
     #: ``"METHOD url_template"`` (unsubstituted) for the audit line.
     request_summary: str = ""
+
+    @model_validator(mode="after")
+    def _validate_halt_kind(self) -> "ApiActuationResult":
+        if self.status is ActuationStatus.HALT and self.halt_kind is None:
+            raise ValueError("HALT API results require halt_kind")
+        if self.status is not ActuationStatus.HALT and self.halt_kind is not None:
+            raise ValueError("halt_kind is valid only for HALT API results")
+        return self
 
     @property
     def actuated(self) -> bool:
@@ -239,6 +263,7 @@ class ApiActuator:
             return ApiActuationResult(
                 status=ActuationStatus.HALT,
                 substrate=self.substrate,
+                halt_kind=ApiHaltKind.DELIVERY_UNCERTAIN,
                 reason=(
                     f"request transport failed after dispatch began "
                     f"({type(exc).__name__}) -- the write may have landed; HALT "
@@ -252,6 +277,7 @@ class ApiActuator:
             return ApiActuationResult(
                 status=ActuationStatus.HALT,
                 substrate=self.substrate,
+                halt_kind=ApiHaltKind.DELIVERY_UNCERTAIN,
                 reason=(
                     f"request failed after being sent ({type(exc).__name__}) -- "
                     "outcome unknown; HALT (never double-write via the GUI)"
@@ -277,6 +303,7 @@ class ApiActuator:
         return ApiActuationResult(
             status=ActuationStatus.HALT,
             substrate=self.substrate,
+            halt_kind=ApiHaltKind.RESPONSE_REJECTED,
             reason=(
                 f"{summary} returned {resp.status_code} (not success) -- the "
                 "write was attempted; HALT (never double-write via the GUI)"

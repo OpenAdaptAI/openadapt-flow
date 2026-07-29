@@ -29,6 +29,7 @@ from openadapt_flow.runtime.actuators import (
     ActuationStatus,
     ApiActuationResult,
     ApiActuator,
+    ApiHaltKind,
 )
 from openadapt_flow.runtime.effects import Verdict
 from openadapt_flow.runtime.effects.effect import (
@@ -853,7 +854,15 @@ class _PathActuator:
 
     def actuate(self, binding, params):
         del binding, params
-        return ApiActuationResult(status=self.status, reason=self.status.value)
+        return ApiActuationResult(
+            status=self.status,
+            halt_kind=(
+                ApiHaltKind.DELIVERY_UNCERTAIN
+                if self.status is ActuationStatus.HALT
+                else None
+            ),
+            reason=self.status.value,
+        )
 
 
 class _FailingPathVerifier(_PathVerifier):

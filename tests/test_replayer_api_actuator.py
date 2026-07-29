@@ -22,6 +22,7 @@ The theses these pin (RFC ``docs/design/WORKFLOW_PROGRAM_IR.md`` section 4, the
 
 from __future__ import annotations
 
+import pytest
 import requests
 from urllib3.exceptions import ProtocolError
 
@@ -34,7 +35,12 @@ from openadapt_flow.ir import (
     Workflow,
 )
 from openadapt_flow.mockmed.fault_server import serve as fault_serve
-from openadapt_flow.runtime.actuators import ActuationStatus, ApiActuator
+from openadapt_flow.runtime.actuators import (
+    ActuationStatus,
+    ApiActuationResult,
+    ApiActuator,
+    ApiHaltKind,
+)
 from openadapt_flow.runtime.effects import (
     Effect,
     EffectKind,
@@ -572,6 +578,7 @@ def test_actuator_halts_on_connection_refused_after_dispatch_begins():
     )
     res = ApiActuator().actuate(binding, {})
     assert res.status is ActuationStatus.HALT
+    assert res.halt_kind is ApiHaltKind.DELIVERY_UNCERTAIN
     assert res.should_fall_through is False
     assert res.should_halt is True
 
@@ -613,7 +620,13 @@ def test_actuator_halts_on_non_2xx():
         )
         res = ApiActuator(url).actuate(binding, {})
         assert res.status is ActuationStatus.HALT
+        assert res.halt_kind is ApiHaltKind.RESPONSE_REJECTED
         assert res.http_status == 401
         assert res.should_halt is True
     finally:
         stop()
+
+
+def test_halt_result_requires_typed_cause():
+    with pytest.raises(ValueError, match="halt_kind"):
+        ApiActuationResult(status=ActuationStatus.HALT)

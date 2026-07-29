@@ -6260,7 +6260,7 @@ class Replayer:
                 cause_type=type(exc).__name__,
             )
 
-        from openadapt_flow.runtime.actuators import ActuationStatus
+        from openadapt_flow.runtime.actuators import ActuationStatus, ApiHaltKind
 
         if outcome.status == ActuationStatus.UNAVAILABLE:
             # The request was NEVER sent -- nothing was written. Remove the
@@ -6295,7 +6295,14 @@ class Replayer:
                 before=before,
                 effects=effects,
                 effect_verifier=effect_verifier,
-                cause_type="ApiActuationHalt",
+                cause_type=(
+                    "ApiResponseRejected"
+                    if outcome.halt_kind is ApiHaltKind.RESPONSE_REJECTED
+                    else "ApiDeliveryUncertain"
+                ),
+                allow_contract_resolution=(
+                    outcome.halt_kind is ApiHaltKind.DELIVERY_UNCERTAIN
+                ),
             )
 
         # ACTUATED (2xx): confirm the write against the system of record with
@@ -6344,14 +6351,17 @@ class Replayer:
         effects: list["Effect"],
         effect_verifier: Any,
         cause_type: str,
+        allow_contract_resolution: bool = True,
     ) -> bool:
         """Resolve one possibly dispatched API write without another actuation.
 
-        A response loss, non-success response, or non-conforming actuator
-        exception does not end verification. The runtime checks the configured
-        screen postcondition and the independent system-of-record effect. It
-        reports a resolved delivery only when both contracts confirm. The API
-        request is never retried and the GUI fallback never runs.
+        A response loss, rejected response, or non-conforming actuator
+        exception does not end evidence collection. The runtime checks the
+        configured postcondition and the independent system-of-record effect.
+        A response loss can resolve only when both contracts confirm. An
+        explicit response outside the binding's accepted contract always
+        remains halted, even when later evidence confirms a business effect.
+        The API request is never retried and the GUI fallback never runs.
         """
 
         result.delivery_uncertainty = ActionDeliveryUncertainty(
@@ -6422,7 +6432,8 @@ class Replayer:
         uncertainty.postconditions_confirmed = result.postconditions_ok is True
         uncertainty.effects_confirmed = result.effect_verified is True
         uncertainty.resolved_by_contract = (
-            uncertainty.postconditions_confirmed
+            allow_contract_resolution
+            and uncertainty.postconditions_confirmed
             and uncertainty.effects_confirmed
             and not verification_errors
         )
@@ -6436,12 +6447,21 @@ class Replayer:
                 if self.governed_authorization is not None
                 else "safety_halt"
             )
-            detail = "; ".join(verification_errors) or "verification was incomplete"
-            result.error = (
-                f"API delivery for step '{step.id}' ({step.intent}) was "
-                "uncertain and was not retried; the complete postcondition and "
-                f"independent effect contract did not confirm: {detail}"
-            )
+            detail = "; ".join(verification_errors) or "verification confirmed"
+            if allow_contract_resolution:
+                result.error = (
+                    f"API delivery for step '{step.id}' ({step.intent}) was "
+                    "uncertain and was not retried; the complete postcondition "
+                    "and independent effect contract did not confirm: "
+                    f"{detail}"
+                )
+            else:
+                result.error = (
+                    f"API delivery for step '{step.id}' ({step.intent}) "
+                    "received a response outside the binding's accepted "
+                    "contract and was not retried; later verification evidence "
+                    f"was collected but cannot override that rejection: {detail}"
+                )
         return True
 
     @staticmethod

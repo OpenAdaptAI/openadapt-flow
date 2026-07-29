@@ -8,6 +8,7 @@ the delivery fence can never make the same pause eligible for automatic retry.
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import stat
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from openadapt_flow.ir import ActionKind, Step, Workflow
+from openadapt_flow.runtime.durable import authority as authority_module
 from openadapt_flow.runtime.durable.approval import approval_pause_digest
 from openadapt_flow.runtime.durable.authority import (
     AUTHORITY_DB_ENV,
@@ -115,7 +117,9 @@ def test_configured_authority_ancestor_symlink_cannot_reenter_run_directory(
     configured = external_alias / authority_target.name / "authority.sqlite3"
     monkeypatch.setenv(AUTHORITY_DB_ENV, str(configured))
 
-    with pytest.raises(DurableAuthorityBusy, match="outside the run directory"):
+    with pytest.raises(
+        DurableAuthorityBusy, match="outside the run directory|must not traverse a link"
+    ):
         DurableAuthority(run_dir, store).claim(manifest)
 
     assert not (authority_target / "authority.sqlite3").exists()
@@ -138,10 +142,220 @@ def test_authority_rejects_ancestor_retargeted_after_construction(
     redirected_parent.mkdir(parents=True)
     admitted_ancestor.symlink_to(run_dir / "redirect", target_is_directory=True)
 
-    with pytest.raises(DurableAuthorityBusy, match="ancestor changed"):
+    with pytest.raises(
+        DurableAuthorityBusy, match="ancestor changed|must not traverse a link"
+    ):
         authority.claim(manifest)
 
     assert not (redirected_parent / "authority.sqlite3").exists()
+
+
+def test_windows_authority_guard_pins_each_path_without_delete_sharing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Win32 guard retains typed, non-reparse handles through SQLite use."""
+
+    configured = tmp_path / "external" / "authority.sqlite3"
+    monkeypatch.setenv(AUTHORITY_DB_ENV, str(configured))
+    run_dir, store, _manifest_value = _manifest(tmp_path)
+    authority = DurableAuthority(run_dir, store)
+
+    class FakeKernel32:
+        def __init__(self) -> None:
+            self.opened: list[tuple[str, int, int, int, int, int]] = []
+            self.closed: list[int] = []
+            self.paths: dict[int, str] = {}
+
+        def CreateFileW(
+            self,
+            path: str,
+            access: int,
+            share: int,
+            _security: object,
+            creation: int,
+            flags: int,
+            _template: object,
+        ) -> int:
+            handle = (1 << 33) + len(self.opened) + 1
+            self.opened.append((path, access, share, creation, flags, handle))
+            self.paths[handle] = path
+            return handle
+
+        def CloseHandle(self, handle: int) -> bool:
+            self.closed.append(handle)
+            return True
+
+    fake = FakeKernel32()
+    monkeypatch.setattr(authority_module, "_is_windows", lambda: True)
+    monkeypatch.setattr(authority_module, "_windows_kernel32", lambda: fake)
+    monkeypatch.setattr(
+        authority_module,
+        "_windows_handle_attributes",
+        lambda _kernel32, handle: (
+            0 if fake.paths[handle] == str(authority.db_path) else 0x00000010
+        ),
+    )
+
+    with authority._windows_active_race_handles():
+        assert fake.closed == []
+
+    assert fake.opened
+    assert all(share == 0x00000003 for _, _, share, _, _, _ in fake.opened)
+    assert all(not (share & 0x00000004) for _, _, share, _, _, _ in fake.opened)
+    database = fake.opened[-1]
+    assert database[0] == str(authority.db_path)
+    assert database[1] == 0xC0000000
+    assert database[3] == 4
+    assert database[4] == 0x00200000
+    assert fake.closed == [entry[-1] for entry in reversed(fake.opened)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX descriptor-relative fences")
+def test_replaced_authority_database_cannot_reuse_a_delivery_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A final-file swap during SQLite open cannot authorize re-dispatch."""
+
+    configured = tmp_path / "external" / "authority.sqlite3"
+    monkeypatch.setenv(AUTHORITY_DB_ENV, str(configured))
+    store, manifest, authority, pending = _active_pause(tmp_path)
+    binding = approval_pause_digest(pending)
+    authority.acquire(
+        manifest,
+        pause_binding_sha256=binding,
+        attempt_id="replace-race",
+        operation="continue",
+        owner_nonce_sha256="sha256:replace-race",
+        acquired_at="2026-07-29T00:00:00+00:00",
+        expires_at="2026-07-29T00:10:00+00:00",
+        now=datetime(2026, 7, 29, tzinfo=timezone.utc),
+    )
+    authority.bind_approval(
+        manifest,
+        attempt_id="replace-race",
+        owner_nonce_sha256="sha256:replace-race",
+        approval_digest="sha256:replace-race",
+    )
+    stale = tmp_path / "stale-authority.sqlite3"
+    shutil.copy2(authority.db_path, stale)
+
+    authority.before_delivery(
+        manifest,
+        attempt_id="replace-race",
+        owner_nonce_sha256="sha256:replace-race",
+    )
+
+    original_connect = sqlite3.connect
+    replaced = False
+
+    def replace_between_check_and_open(
+        *args: object, **kwargs: object
+    ) -> sqlite3.Connection:
+        nonlocal replaced
+        if not replaced:
+            replacement = tmp_path / "replacement-authority.sqlite3"
+            shutil.copy2(stale, replacement)
+            replacement.replace(authority.db_path)
+            replaced = True
+        return original_connect(*args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(
+        authority_module.sqlite3, "connect", replace_between_check_and_open
+    )
+
+    with pytest.raises(
+        DurableAuthorityBusy, match="delivery fence was already consumed"
+    ):
+        authority.before_delivery(
+            manifest,
+            attempt_id="replace-race",
+            owner_nonce_sha256="sha256:replace-race",
+        )
+    assert replaced
+    restarted = DurableAuthority(store.run_dir, store)
+    with pytest.raises(
+        DurableAuthorityBusy, match="delivery fence was already consumed"
+    ):
+        restarted.before_delivery(
+            manifest,
+            attempt_id="replace-race",
+            owner_nonce_sha256="sha256:replace-race",
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX descriptor-relative fences")
+def test_replaced_authority_ancestor_cannot_reuse_a_delivery_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ancestor swap during SQLite open still uses the admitted fence."""
+
+    configured = tmp_path / "external" / "authority.sqlite3"
+    monkeypatch.setenv(AUTHORITY_DB_ENV, str(configured))
+    store, manifest, authority, pending = _active_pause(tmp_path)
+    binding = approval_pause_digest(pending)
+    authority.acquire(
+        manifest,
+        pause_binding_sha256=binding,
+        attempt_id="ancestor-race",
+        operation="continue",
+        owner_nonce_sha256="sha256:ancestor-race",
+        acquired_at="2026-07-29T00:00:00+00:00",
+        expires_at="2026-07-29T00:10:00+00:00",
+        now=datetime(2026, 7, 29, tzinfo=timezone.utc),
+    )
+    authority.bind_approval(
+        manifest,
+        attempt_id="ancestor-race",
+        owner_nonce_sha256="sha256:ancestor-race",
+        approval_digest="sha256:ancestor-race",
+    )
+    stale = tmp_path / "stale-ancestor-authority.sqlite3"
+    shutil.copy2(authority.db_path, stale)
+    authority.before_delivery(
+        manifest,
+        attempt_id="ancestor-race",
+        owner_nonce_sha256="sha256:ancestor-race",
+    )
+
+    original_connect = sqlite3.connect
+    replaced = False
+
+    def replace_ancestor_between_check_and_open(
+        *args: object, **kwargs: object
+    ) -> sqlite3.Connection:
+        nonlocal replaced
+        if not replaced:
+            admitted_parent = tmp_path / "admitted-authority"
+            redirected_parent = tmp_path / "redirected-authority"
+            authority.db_path.parent.rename(admitted_parent)
+            redirected_parent.mkdir()
+            shutil.copy2(stale, redirected_parent / authority.db_path.name)
+            authority.db_path.parent.symlink_to(
+                redirected_parent, target_is_directory=True
+            )
+            replaced = True
+        return original_connect(*args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(
+        authority_module.sqlite3,
+        "connect",
+        replace_ancestor_between_check_and_open,
+    )
+
+    with pytest.raises(
+        DurableAuthorityBusy, match="delivery fence was already consumed"
+    ):
+        authority.before_delivery(
+            manifest,
+            attempt_id="ancestor-race",
+            owner_nonce_sha256="sha256:ancestor-race",
+        )
+    assert replaced
+    with pytest.raises(DurableAuthorityBusy, match="must not traverse a link"):
+        DurableAuthority(store.run_dir, store)
 
 
 def test_unexpected_existing_sqlite_schema_fails_closed(

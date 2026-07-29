@@ -33,6 +33,68 @@ JOURNAL_GENESIS_DIGEST = "sha256:" + hashlib.sha256(b"").hexdigest()
 JOURNAL_MAC_DOMAIN = b"openadapt-attended-journal-v1\0"
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _windows_kernel32() -> Any:
+    """Return a typed Win32 file API for active authority path pinning."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    win_dll = getattr(ctypes, "WinDLL", None)
+    if win_dll is None:
+        raise DurableAuthorityBusy("the Windows authority API is unavailable")
+    kernel32 = win_dll("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    return kernel32
+
+
+def _windows_handle_attributes(kernel32: Any, handle: int) -> int:
+    """Read attributes from the exact open Win32 handle."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("reparse_tag", wintypes.DWORD),
+        ]
+
+    info = FileAttributeTagInfo()
+    # FILE_INFO_BY_HANDLE_CLASS.FileAttributeTagInfo
+    if not kernel32.GetFileInformationByHandleEx(
+        handle,
+        9,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        raise DurableAuthorityBusy(
+            "the external durable authority cannot inspect its Windows path"
+        )
+    return int(info.file_attributes)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -148,6 +210,7 @@ class DurableAuthority:
         self.run_dir = Path(run_dir).resolve()
         self.store = store
         self._configured_db_path = _default_db_path()
+        self._assert_configured_ancestors_are_not_links()
         try:
             # Resolve the parent only. This catches an ancestor symlink that
             # redirects the database back into the rollback-capable run tree,
@@ -172,22 +235,48 @@ class DurableAuthority:
         # component stays lexical so `_connect` can still reject a database-file
         # symlink without following it.
         self.db_path = effective_db_path
+        self._authority_parent_descriptor = self._prepare_authority_parent()
         self.path_key = _path_key(self.run_dir)
 
-    def _connect(self) -> sqlite3.Connection:
-        try:
-            current_db_path = (
-                self._configured_db_path.parent.resolve()
-                / self._configured_db_path.name
-            )
-        except OSError as exc:
-            raise DurableAuthorityBusy(
-                "the external durable authority path is unavailable"
-            ) from exc
-        if current_db_path != self.db_path:
-            raise DurableAuthorityBusy(
-                "the external durable authority ancestor changed after admission"
-            )
+    def _assert_configured_ancestors_are_not_links(self) -> None:
+        """Reject a lexical authority path that crosses a link or junction."""
+
+        parent = self._configured_db_path.parent.absolute()
+        current = Path(parent.anchor)
+        for component in parent.parts[1:]:
+            current /= component
+            try:
+                status = current.lstat()
+            except FileNotFoundError:
+                break
+            if stat.S_ISLNK(status.st_mode) or bool(
+                getattr(status, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            ):
+                raise DurableAuthorityBusy(
+                    "the external durable authority path must not traverse a link"
+                )
+
+    def __del__(self) -> None:
+        """Release the retained POSIX directory descriptor."""
+
+        descriptor = getattr(self, "_authority_parent_descriptor", None)
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def _prepare_authority_parent(self) -> Optional[int]:
+        """Retain the authority parent used for irreversible delivery fences.
+
+        ``sqlite3`` only accepts a pathname, so it cannot open the database
+        relative to this descriptor.  Delivery therefore also consumes a
+        descriptor-relative exclusive claim.  A restored SQLite projection
+        cannot recreate a consumed claim, even if the database pathname is
+        replaced between its checks and SQLite's open.
+        """
+
         parent_existed = self.db_path.parent.exists()
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -202,6 +291,207 @@ class DurableAuthority:
             )
         if not parent_existed and os.name != "nt":
             os.chmod(self.db_path.parent, 0o700)
+        if os.name == "nt":
+            return None
+        flags = (
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(self.db_path.parent, flags)
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority directory is unavailable"
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            named = os.stat(self.db_path.parent, follow_symlinks=False)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                raise DurableAuthorityBusy(
+                    "the external durable authority ancestor changed after admission"
+                )
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _consume_delivery_fence(
+        self, record: DurableAuthorityRecord, manifest: Any
+    ) -> None:
+        """Consume one non-reusable delivery sequence before an input edge."""
+
+        if self._authority_parent_descriptor is None:
+            # Windows pins the complete authority path with delete-denying
+            # handles for the full SQLite transaction.
+            return
+        # ``delivery_sequence`` is scoped to one continuation attempt and is
+        # reset when a later pause is approved.  The record revision is the
+        # monotonic delivery identity across all attempts for this run.
+        authority_revision = record.revision
+        name = f".delivery-fence-{self.path_key}-{authority_revision}"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(
+                name,
+                flags,
+                0o600,
+                dir_fd=self._authority_parent_descriptor,
+            )
+        except FileExistsError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable delivery fence was already consumed"
+            ) from exc
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable delivery fence is unavailable"
+            ) from exc
+        try:
+            payload = self._canonical(
+                {
+                    "path_key": self.path_key,
+                    "namespace_id": manifest.namespace_id,
+                    "run_id": manifest.run_id,
+                    "authority_revision": authority_revision,
+                }
+            )
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            os.fsync(self._authority_parent_descriptor)
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable delivery fence is unavailable"
+            ) from exc
+
+    @contextmanager
+    def _windows_active_race_handles(self) -> Iterator[None]:
+        """Hold Windows ancestors and the DB without delete sharing.
+
+        SQLite still opens by pathname on Windows.  These handles deny delete
+        sharing from the admission check until that SQLite connection closes,
+        so neither an ancestor nor the final database can be renamed or
+        replaced in that interval.
+        """
+
+        if not _is_windows():
+            yield
+            return
+        import ctypes
+
+        kernel32 = _windows_kernel32()
+        invalid_handle = ctypes.c_void_p(-1).value
+        file_read_attributes = 0x00000080
+        generic_read = 0x80000000
+        generic_write = 0x40000000
+        share_read_write = 0x00000003
+        open_existing = 3
+        open_always = 4
+        file_flag_backup_semantics = 0x02000000
+        file_flag_open_reparse_point = 0x00200000
+        file_attribute_directory = 0x00000010
+        file_attribute_reparse_point = 0x00000400
+        handles: list[int] = []
+
+        def open_handle(
+            path: Path,
+            creation: int,
+            flags: int,
+            access: int,
+            *,
+            expect_directory: bool,
+        ) -> int:
+            handle = kernel32.CreateFileW(
+                str(path),
+                access,
+                share_read_write,
+                None,
+                creation,
+                flags,
+                None,
+            )
+            raw_handle = getattr(handle, "value", handle)
+            if raw_handle is None or int(raw_handle) == invalid_handle:
+                raise DurableAuthorityBusy(
+                    "the external durable authority cannot pin its Windows path"
+                )
+            opened_handle = int(raw_handle)
+            attributes = _windows_handle_attributes(kernel32, opened_handle)
+            if attributes & file_attribute_reparse_point:
+                kernel32.CloseHandle(opened_handle)
+                raise DurableAuthorityBusy(
+                    "the external durable authority Windows path must not "
+                    "traverse a reparse point"
+                )
+            is_directory = bool(attributes & file_attribute_directory)
+            if is_directory != expect_directory:
+                kernel32.CloseHandle(opened_handle)
+                raise DurableAuthorityBusy(
+                    "the external durable authority Windows path has the wrong type"
+                )
+            return opened_handle
+
+        try:
+            current = Path(self.db_path.parent.anchor)
+            handles.append(
+                open_handle(
+                    current,
+                    open_existing,
+                    file_flag_backup_semantics | file_flag_open_reparse_point,
+                    file_read_attributes,
+                    expect_directory=True,
+                )
+            )
+            for component in self.db_path.parent.parts[1:]:
+                current /= component
+                handles.append(
+                    open_handle(
+                        current,
+                        open_existing,
+                        file_flag_backup_semantics | file_flag_open_reparse_point,
+                        file_read_attributes,
+                        expect_directory=True,
+                    )
+                )
+            handles.append(
+                open_handle(
+                    self.db_path,
+                    open_always,
+                    file_flag_open_reparse_point,
+                    generic_read | generic_write,
+                    expect_directory=False,
+                )
+            )
+            yield
+        finally:
+            for handle in reversed(handles):
+                kernel32.CloseHandle(handle)
+
+    def _connect(self) -> sqlite3.Connection:
+        self._assert_configured_ancestors_are_not_links()
+        try:
+            current_db_path = (
+                self._configured_db_path.parent.resolve()
+                / self._configured_db_path.name
+            )
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority path is unavailable"
+            ) from exc
+        if current_db_path != self.db_path:
+            raise DurableAuthorityBusy(
+                "the external durable authority ancestor changed after admission"
+            )
+        try:
+            parent_stat = os.lstat(self.db_path.parent)
+        except OSError as exc:
+            raise DurableAuthorityBusy(
+                "the external durable authority directory is unavailable"
+            ) from exc
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise DurableAuthorityBusy(
+                "the external durable authority parent must be a directory"
+            )
         if self.db_path.is_symlink():
             raise DurableAuthorityBusy(
                 "the external durable authority database must not be a symlink"
@@ -738,34 +1028,35 @@ class DurableAuthority:
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         connection: Optional[sqlite3.Connection] = None
-        try:
-            connection = self._connect()
-            connection.execute("BEGIN IMMEDIATE")
-        except (OSError, sqlite3.Error) as exc:
-            if connection is not None:
+        with self._windows_active_race_handles():
+            try:
+                connection = self._connect()
+                connection.execute("BEGIN IMMEDIATE")
+            except (OSError, sqlite3.Error) as exc:
+                if connection is not None:
+                    connection.close()
+                raise DurableAuthorityBusy(
+                    "the external durable authority is unavailable"
+                ) from exc
+            try:
+                yield connection
+                connection.execute("COMMIT")
+            except sqlite3.Error as exc:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise DurableAuthorityBusy(
+                    "the external durable authority transaction failed"
+                ) from exc
+            except Exception:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+            finally:
                 connection.close()
-            raise DurableAuthorityBusy(
-                "the external durable authority is unavailable"
-            ) from exc
-        try:
-            yield connection
-            connection.execute("COMMIT")
-        except sqlite3.Error as exc:
-            try:
-                connection.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise DurableAuthorityBusy(
-                "the external durable authority transaction failed"
-            ) from exc
-        except Exception:
-            try:
-                connection.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise
-        finally:
-            connection.close()
 
     @staticmethod
     def _record(row: Optional[sqlite3.Row]) -> Optional[DurableAuthorityRecord]:
@@ -1088,6 +1379,7 @@ class DurableAuthority:
                 raise DurableAuthorityBusy(
                     "durable state changed before the delivery fence"
                 )
+            self._consume_delivery_fence(record, manifest)
             self._update(
                 connection,
                 record,

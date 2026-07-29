@@ -15,12 +15,11 @@ classifies every attempt into exactly one of three fail-safe outcomes
 (:class:`ActuationStatus`), keyed on *whether the request could have reached
 the server*:
 
-- :attr:`ActuationStatus.UNAVAILABLE` -- the request was **never sent** (the
-  TCP connection was never established: connection refused, DNS failure,
-  connect-timeout) or the binding could not even be built (a param the URL/body
-  needs was not supplied). Nothing was written. The binding's configured
-  unavailability policy can therefore use GUI fallback or halt without risking
-  a duplicate write.
+- :attr:`ActuationStatus.UNAVAILABLE` -- the request was **proven not to have
+  started** because OpenAdapt could not construct it (for example, a required
+  parameter or API base URL was absent). Nothing was written. The binding's
+  configured unavailability policy can therefore use GUI fallback or halt
+  without risking a duplicate write.
 - :attr:`ActuationStatus.ACTUATED` -- the request was sent and the server
   returned success (2xx, or an explicitly-allowed status). The write was
   performed; the caller MUST now confirm it with the EffectVerifier and MUST
@@ -32,10 +31,11 @@ the server*:
   (the same refuse-rather-than-guess posture as the EffectVerifier's
   INDETERMINATE verdict).
 
-The connect-phase / read-phase split is exact in ``requests``:
-``ConnectTimeout`` subclasses ``ConnectionError`` (nothing sent -> UNAVAILABLE)
-while ``ReadTimeout`` does not (bytes sent -> HALT), so catching
-``ConnectionError`` before ``Timeout`` gives the right classification.
+After ``session.request()`` begins, a transport exception cannot prove that a
+server did not receive the request. In particular, ``ConnectionError`` can
+represent a response loss after a committed write. All such exceptions HALT.
+Only OpenAdapt's typed before-request construction failures produce
+``UNAVAILABLE``.
 
 Import-light: ``requests`` is imported lazily so importing this module (and the
 runtime package) stays cheap and model-free.
@@ -214,7 +214,7 @@ class ApiActuator:
                 request_summary=summary,
             )
 
-        import requests  # lazy; hierarchy: ConnectTimeout is a ConnectionError
+        import requests  # lazy
 
         timeout = binding.timeout_s or self.default_timeout_s
         try:
@@ -226,27 +226,20 @@ class ApiActuator:
                 headers=headers or None,
                 timeout=timeout,
             )
-        except requests.exceptions.ConnectionError as exc:
-            # Connection never established (refused / DNS / connect-timeout):
-            # the request was NEVER sent, so nothing was written. The caller
-            # applies the binding's GUI-fallback or halt policy.
-            return ApiActuationResult(
-                status=ActuationStatus.UNAVAILABLE,
-                substrate=self.substrate,
-                reason=(
-                    f"endpoint unreachable ({type(exc).__name__}) -- request "
-                    "not sent; API tier unavailable"
-                ),
-                request_summary=summary,
-            )
-        except requests.exceptions.Timeout as exc:
-            # Read-timeout: the bytes WENT OUT and the server may have processed
-            # the write. Outcome unknown -> HALT (never GUI-write it again).
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+        ) as exc:
+            # Once ``session.request`` began, neither requests nor this adapter
+            # can prove that no byte reached the server.  A connection reset,
+            # DNS/proxy error, or timeout can follow a committed write whose
+            # response was lost.  Treat every transport exception as uncertain
+            # delivery; GUI fallback would risk a duplicate write.
             return ApiActuationResult(
                 status=ActuationStatus.HALT,
                 substrate=self.substrate,
                 reason=(
-                    f"request sent but timed out awaiting the response "
+                    f"request transport failed after dispatch began "
                     f"({type(exc).__name__}) -- the write may have landed; HALT "
                     "(never double-write via the GUI)"
                 ),

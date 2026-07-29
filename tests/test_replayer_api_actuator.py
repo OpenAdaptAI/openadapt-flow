@@ -12,8 +12,8 @@ The theses these pin (RFC ``docs/design/WORKFLOW_PROGRAM_IR.md`` section 4, the
 - a step with a REACHABLE ``ApiBinding`` performs its write via the API, the
   EffectVerifier CONFIRMS it against the record, and the GUI actuation is
   SKIPPED entirely -- ``$0``, zero model calls;
-- an UNREACHABLE API falls through to the GUI ladder CLEANLY, with NO
-  double-write (the request never left the client, so nothing was written);
+- an API transport failure HALTs without GUI fallback because a response loss
+  can follow a committed write;
 - a step with NO binding replays byte-identically to today (back-compat);
 - a REFUTED effect after an API write HALTS (the record, not the screen, is the
   oracle);
@@ -191,12 +191,12 @@ def test_api_binding_actuates_and_confirms_skipping_gui(tmp_path):
 # -- UNREACHABLE API falls through to the GUI ladder cleanly (no double-write) --
 
 
-def test_unreachable_api_falls_through_to_gui_no_double_write(tmp_path):
+def test_unreachable_api_halts_without_gui_fallback(tmp_path):
     url, db, stop = _fault_server()
     try:
-        # The actuator points at a DEAD endpoint (connection refused): the
-        # request is never sent, so the API tier is UNAVAILABLE and the step
-        # falls through to the GUI, which performs the write exactly once.
+        # A dead endpoint raises ConnectionError only after request dispatch
+        # begins.  It does not prove that no proxy/server received the write,
+        # so the API path must halt and may not drive the GUI.
         dead = "http://127.0.0.1:1"  # nothing listens here -> ConnectionError
         backend = GuiWritingBackend(url)
         vision = _vision_that_confirms_saved()
@@ -211,18 +211,50 @@ def test_unreachable_api_falls_through_to_gui_no_double_write(tmp_path):
         )
         report = replayer.run(workflow, bundle_dir=bundle, run_dir=run_dir)
 
-        assert report.success is True
+        assert report.success is False
         r = report.results[0]
-        # Fell through to the GUI: actuation is NOT "api"; the keypress fired.
-        assert r.actuation is None
-        assert ("press", "Enter") in backend.actions
-        # An audit breadcrumb records the API tier was unavailable.
-        assert any("unavailable" in line.lower() for line in r.effect_results)
-        # The write happened EXACTLY ONCE (no double-write): the GUI wrote it,
-        # the dead API did not, and the effect check CONFIRMS the single row.
+        assert r.actuation == "api"
+        assert r.effect_verified is False
+        assert backend.actions == []
+        assert db.snapshot()["records"] == []
+    finally:
+        stop()
+
+
+def test_post_send_protocol_error_halts_without_a_second_gui_write(tmp_path):
+    """A lost response after a committed API write is uncertain delivery.
+
+    The session first sends the request to the live fault server, then loses
+    its response through ``ProtocolError``.  The record proves that one write
+    landed.  The Replayer must halt instead of pressing Enter and creating a
+    second record.
+    """
+
+    class _ResponseLossSession:
+        def request(self, *args, **kwargs):
+            requests.request(*args, **kwargs)
+            raise requests.exceptions.ProtocolError("response lost after commit")
+
+    url, db, stop = _fault_server()
+    try:
+        backend = GuiWritingBackend(url)
+        workflow = _api_save_workflow(effects=[_record_written()])
+        bundle, run_dir = _dirs(tmp_path)
+        report = Replayer(
+            backend,
+            vision=_vision_that_confirms_saved(),
+            effect_verifier=RestRecordVerifier(url),
+            api_actuator=ApiActuator(url, session=_ResponseLossSession()),
+            poll_interval_s=0.01,
+        ).run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+        result = report.results[0]
+        assert report.success is False
+        assert result.actuation == "api"
+        assert result.delivery_attempted is True
+        assert result.effect_verified is False
+        assert backend.actions == []
         assert len(db.snapshot()["records"]) == 1
-        assert r.effect_verified is True
-        assert report.model_calls == 0
     finally:
         stop()
 
@@ -446,15 +478,16 @@ def test_no_binding_bundle_replays_unchanged(tmp_path):
 # -- Unit: the actuator's fail-safe classification (no double-write contract) --
 
 
-def test_actuator_unavailable_on_connection_refused():
+def test_actuator_halts_on_connection_refused_after_dispatch_begins():
     binding = ApiBinding(
         url_template="http://127.0.0.1:1/api/encounter",
         body_template={"patient_id": "p1"},
         timeout_s=1.0,
     )
     res = ApiActuator().actuate(binding, {})
-    assert res.status is ActuationStatus.UNAVAILABLE
-    assert res.should_fall_through is True
+    assert res.status is ActuationStatus.HALT
+    assert res.should_fall_through is False
+    assert res.should_halt is True
 
 
 def test_actuator_unavailable_on_missing_param():

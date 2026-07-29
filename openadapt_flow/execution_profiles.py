@@ -1736,7 +1736,13 @@ def classify_execution_outcome(
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if api_actuation and result.delivery_attempted is not True:
             return ExecutionOutcome.COMPLETED_UNVERIFIED
-        if result.identity is not None and result.identity.status != "verified":
+        # An unarmed step can retain an optional identity observation.  An
+        # abstain/unreadable observation means the optional ladder could not
+        # decide; it must not downgrade an otherwise complete safe action.
+        # A mismatch is affirmative wrong-entity evidence and always rejects
+        # the outcome. Required identities were checked above and still need
+        # nonvacuous verified proof.
+        if result.identity is not None and result.identity.status == "mismatch":
             return ExecutionOutcome.COMPLETED_UNVERIFIED
         if any(
             not interstitial.ok

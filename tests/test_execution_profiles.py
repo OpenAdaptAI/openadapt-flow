@@ -779,6 +779,39 @@ def test_production_outcome_refuses_contradictory_terminal_and_effect_evidence()
         )
 
 
+def test_profile_classifier_allows_optional_identity_abstention_but_not_mismatch():
+    """Optional identity does not weaken a positive wrong-entity signal."""
+
+    workflow = Workflow(
+        name="optional-identity-observation",
+        steps=[Step(id="wait", intent="wait for ready state", action=ActionKind.WAIT)],
+    )
+    base = _verified_production_report(_workflow())
+    base.workflow_name = workflow.name
+    base.required_identity_step_ids = []
+    base.results = [
+        StepResult(
+            step_id="wait",
+            intent="wait for ready state",
+            ok=True,
+            identity=IdentityCheck(status="abstain"),
+        )
+    ]
+    _bind_report_to_workflow(base, workflow)
+
+    assert (
+        classify_execution_outcome(base, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.VERIFIED
+    )
+
+    mismatch = base.model_copy(deep=True)
+    mismatch.results[0].identity = IdentityCheck(status="mismatch")
+    assert (
+        classify_execution_outcome(mismatch, workflow, ExecutionProfile.STANDARD)
+        is ExecutionOutcome.COMPLETED_UNVERIFIED
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     (

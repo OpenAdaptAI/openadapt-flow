@@ -23,6 +23,7 @@ The theses these pin (RFC ``docs/design/WORKFLOW_PROGRAM_IR.md`` section 4, the
 from __future__ import annotations
 
 import requests
+from urllib3.exceptions import ProtocolError
 
 from openadapt_flow.ir import (
     ActionKind,
@@ -233,7 +234,9 @@ def test_post_send_protocol_error_halts_without_a_second_gui_write(tmp_path):
     class _ResponseLossSession:
         def request(self, *args, **kwargs):
             requests.request(*args, **kwargs)
-            raise requests.exceptions.ProtocolError("response lost after commit")
+            raise requests.exceptions.ConnectionError(
+                ProtocolError("response lost after commit")
+            )
 
     url, db, stop = _fault_server()
     try:

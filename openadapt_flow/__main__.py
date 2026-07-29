@@ -2464,17 +2464,21 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
         QualificationCaseKind,
         QualificationCaseResult,
         QualificationOutcome,
+        QualifiedEntityLabel,
         RequalificationCondition,
         VerificationTier,
         add_case,
         add_requalification_condition,
         certify_project,
         init_project,
+        list_entity_labels,
         project_schema,
         record_case_results,
+        remove_entity_label,
         save_qualified_workflow,
         set_action_classification,
         set_effect_policy,
+        set_entity_label,
         set_identity_policy,
         set_trusted_runner_key,
     )
@@ -2487,6 +2491,33 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
         return 0
 
     workflow = _qualification_workflow(args)
+
+    if verb == "label":
+        if args.label_cmd == "list":
+            print(
+                json.dumps(
+                    [
+                        label.model_dump(mode="json")
+                        for label in list_entity_labels(workflow)
+                    ],
+                    indent=2,
+                )
+            )
+            return 0
+        if args.label_cmd == "set":
+            set_entity_label(
+                workflow,
+                QualifiedEntityLabel(
+                    step_id=args.step, label=args.label, fallback=args.fallback
+                ),
+            )
+        elif args.label_cmd == "remove":
+            remove_entity_label(workflow, args.step)
+        else:  # pragma: no cover - argparse requires a known command.
+            raise SystemExit(f"unknown qualification label command {args.label_cmd!r}")
+        save_qualified_workflow(workflow, args.bundle)
+        print(workflow.qualification.model_dump_json(indent=2))
+        return 0
 
     if verb == "init":
         environment = EnvironmentBoundary(
@@ -4299,6 +4330,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = qsub.add_parser("schema", help="Print the qualification-project JSON Schema")
     q.set_defaults(func=_cmd_qualify)
+
+    q = qsub.add_parser(
+        "label",
+        help="Set, remove, or list qualification-owned entity labels",
+    )
+    label_sub = q.add_subparsers(dest="label_cmd", required=True)
+    label = label_sub.add_parser("set", help="Set a label for one qualified step")
+    label.add_argument("bundle", help="Workflow bundle directory")
+    label.add_argument("--step", required=True)
+    label.add_argument("--label", required=True)
+    label.add_argument("--fallback", choices=("record", "item"), required=True)
+    label.set_defaults(func=_cmd_qualify)
+    label = label_sub.add_parser("remove", help="Remove a step entity label")
+    label.add_argument("bundle", help="Workflow bundle directory")
+    label.add_argument("--step", required=True)
+    label.set_defaults(func=_cmd_qualify)
+    label = label_sub.add_parser("list", help="List qualification-owned entity labels")
+    label.add_argument("bundle", help="Workflow bundle directory")
+    label.set_defaults(func=_cmd_qualify)
 
     q = qsub.add_parser("init", help="Initialize a bundle's qualification project")
     q.add_argument("bundle", help="Workflow bundle directory")

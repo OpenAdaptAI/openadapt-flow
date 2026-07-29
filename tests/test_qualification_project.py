@@ -73,6 +73,7 @@ from openadapt_flow.qualification import (
     QualificationError,
     QualificationOutcome,
     QualificationRefusalCode,
+    QualifiedEntityLabel,
     RequalificationCondition,
     VerificationTier,
     add_case,
@@ -81,11 +82,14 @@ from openadapt_flow.qualification import (
     current_certification_matches,
     evaluate_qualification,
     init_project,
+    list_entity_labels,
     qualification_action_requirements,
     record_case_results,
+    remove_entity_label,
     set_action_classification,
     set_case_scope,
     set_effect_policy,
+    set_entity_label,
     set_identity_policy,
     set_minimum_effect_tier,
     set_trusted_fault_driver_key,
@@ -182,6 +186,36 @@ def _environment() -> EnvironmentBoundary:
         runtime_version="1.20.2",
         required_capabilities=["pixel_observation", "effect_verification"],
     )
+
+
+def test_entity_labels_are_qualification_contract_and_invalidate_certification():
+    workflow = _workflow()
+    project = init_project(workflow, environment=_environment())
+    before = project.contract_sha256()
+    certification = QualificationCertification(
+        project_revision=project.revision,
+        project_contract_sha256=before,
+        workflow_contract_sha256="a" * 64,
+        environment_contract_sha256="c" * 64,
+        policy_name="clinical-write",
+        policy_contract_sha256="b" * 64,
+        passed=True,
+        report_sha256="d" * 64,
+        certified_at="2026-07-01T00:00:00+00:00",
+    )
+    project.last_certification = certification
+
+    set_entity_label(
+        workflow,
+        QualifiedEntityLabel(step_id="save", label="service record", fallback="record"),
+    )
+    assert project.entity_labels["save"].label == "service record"
+    assert project.contract_sha256() != before
+    assert project.last_certification is None
+    assert list_entity_labels(workflow) == [project.entity_labels["save"]]
+
+    remove_entity_label(workflow, "save")
+    assert project.entity_labels == {}
 
 
 def test_api_only_qualification_uses_only_executable_targets() -> None:

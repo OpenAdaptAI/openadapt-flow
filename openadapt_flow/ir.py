@@ -1261,6 +1261,99 @@ def lift_to_program(workflow: "Workflow") -> ProgramGraph:
     return ProgramGraph(entry=entry, states=states)
 
 
+class GovernedAuthorizationParameter(BaseModel):
+    """One value-free parameter declaration in a governed template."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    type: ParamKind
+    required: bool
+    secret: bool
+    has_default: bool
+    choices_count: int = Field(ge=0)
+    choices_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+
+
+class GovernedAuthorizationTemplate(BaseModel):
+    """Immutable production authorization shape for one certified bundle.
+
+    This is not a bearer capability.  It deliberately excludes runtime input
+    values, approval identity, credentials, and effect or identity recipes.
+    The template lives in manifest provenance so it can commit to the final
+    content digest without creating a content-digest cycle.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["openadapt.governed-authorization-template/v1"] = (
+        "openadapt.governed-authorization-template/v1"
+    )
+    bundle_content_digest: str = Field(pattern="^[a-f0-9]{64}$")
+    workflow_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+    qualification_project_id: str = Field(
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    )
+    qualification_project_revision: int = Field(ge=1)
+    qualification_project_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+    qualification_environment_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+    qualification_report_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+    qualification_case_evidence_contract_sha256: str = Field(
+        pattern="^[a-f0-9]{64}$"
+    )
+    policy_name: str = Field(min_length=1, max_length=128)
+    policy_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+    execution_profile: Literal["standard", "regulated"]
+    minimum_effect_tier: int = Field(ge=1, le=4)
+    qualified_effect_requirements: tuple["QualifiedEffectRequirement", ...] = ()
+    required_identity_step_ids: tuple[str, ...] = Field(default_factory=tuple)
+    identity_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+    parameters: tuple[GovernedAuthorizationParameter, ...] = ()
+    parameter_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+    template_sha256: str = Field(pattern="^[a-f0-9]{64}$")
+
+    def canonical_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude={"template_sha256"})
+
+    def computed_sha256(self) -> str:
+        raw = json.dumps(
+            self.canonical_payload(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    @model_validator(mode="after")
+    def _exact_hash_and_order(self) -> "GovernedAuthorizationTemplate":
+        if self.template_sha256 != self.computed_sha256():
+            raise ValueError("governed authorization template hash does not match")
+        if self.required_identity_step_ids != tuple(sorted(self.required_identity_step_ids)):
+            raise ValueError("governed authorization template identity steps must be ordered")
+        if len(self.required_identity_step_ids) != len(set(self.required_identity_step_ids)):
+            raise ValueError("governed authorization template identity steps must be unique")
+        parameter_names = tuple(item.name for item in self.parameters)
+        if parameter_names != tuple(sorted(parameter_names)):
+            raise ValueError("governed authorization template parameters must be ordered")
+        if len(parameter_names) != len(set(parameter_names)):
+            raise ValueError("governed authorization template parameters must be unique")
+        requirements = tuple(
+            (item.step_id, item.actuation_path, item.effect_index)
+            for item in self.qualified_effect_requirements
+        )
+        if requirements != tuple(sorted(requirements)) or len(requirements) != len(
+            set(requirements)
+        ):
+            raise ValueError("governed authorization template effects must be ordered")
+        return self
+
+    @classmethod
+    def create(cls, **values: Any) -> "GovernedAuthorizationTemplate":
+        """Create a template with its canonical self-hash."""
+
+        candidate = cls.model_construct(**values, template_sha256="0" * 64)
+        return cls.model_validate(
+            {**candidate.canonical_payload(), "template_sha256": candidate.computed_sha256()}
+        )
+
+
 class BundleProvenance(BaseModel):
     """Who produced a bundle and, if certified, under what policy (schema v2).
 
@@ -1323,6 +1416,15 @@ class BundleProvenance(BaseModel):
             "PHI-free reason the persisted certification was invalidated; "
             "the bundle must be certified again before production use"
         ),
+    )
+    governed_authorization_template: Optional["GovernedAuthorizationTemplate"] = (
+        Field(
+            default=None,
+            description=(
+                "Value-free, hash-bound production authorization template for this "
+                "exact certified bundle"
+            ),
+        )
     )
 
 
@@ -3420,6 +3522,7 @@ from openadapt_flow.runtime.effects.effect import Effect  # noqa: E402,F401
 
 ApiBinding.model_rebuild()
 Step.model_rebuild()
+GovernedAuthorizationTemplate.model_rebuild()
 # Phase-2 state-machine models: State embeds Step (whose Effect forward ref is
 # resolved just above), Transition embeds Predicate, ProgramGraph embeds State,
 # and Workflow embeds ProgramGraph/Relation -- rebuild in dependency order so

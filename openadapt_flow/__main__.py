@@ -2308,6 +2308,7 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
             workflow,
             policy=policy,
             evidence_root=args.evidence_root,
+            execution_profile=args.profile,
         )
         save_qualified_workflow(workflow, args.bundle)
         print(report.model_dump_json(indent=2) if args.json else report.render())
@@ -4062,6 +4063,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("bundle", help="Workflow bundle directory")
     q.add_argument("--policy", default="clinical-write")
+    q.add_argument(
+        "--profile",
+        choices=("standard", "regulated"),
+        default="standard",
+        help="Production execution profile bound into the emitted template",
+    )
     q.add_argument("--evidence-root", required=True)
     q.add_argument("--json", action="store_true")
     q.set_defaults(func=_cmd_qualify)

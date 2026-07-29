@@ -47,10 +47,12 @@ from openadapt_flow.ir import (
     Transition,
     Workflow,
 )
+from openadapt_flow.policy import load_policy, policy_contract_sha256
 from openadapt_flow.privacy import reset_scrubbers, set_image_scrubber
 from openadapt_flow.qualification import (
     ActionRiskClassification,
     EnvironmentBoundary,
+    QualificationCertification,
     QualifiedEntityLabel,
     init_project,
     set_action_classification,
@@ -3188,9 +3190,9 @@ def test_remote_projection_is_explicit_aal2_phi_free_and_exactly_bound(tmp_path)
         assert protected not in serialized
 
 
-def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(tmp_path):
+def _v2_candidate_workflow() -> Workflow:
     workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
-    init_project(
+    project = init_project(
         workflow,
         environment=EnvironmentBoundary(
             target_kind="web",
@@ -3206,6 +3208,36 @@ def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(tm
             step_id="humanstep", label="service record", fallback="record"
         ),
     )
+    policy = load_policy("permissive")
+    project.last_certification = QualificationCertification(
+        project_revision=project.revision,
+        project_contract_sha256=project.contract_sha256(),
+        workflow_contract_sha256=workflow_contract_sha256(workflow),
+        environment_contract_sha256=project.environment.contract_sha256(),
+        policy_name=policy.name,
+        policy_contract_sha256=policy_contract_sha256(policy),
+        policy_contract=policy.model_dump(mode="json"),
+        passed=True,
+        report_sha256="a" * 64,
+        case_evidence_contract_sha256="b" * 64,
+    )
+    return workflow
+
+
+def _accept_current_certification(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "openadapt_flow.qualification.current_certification_matches",
+        lambda _workflow, *, policy=None, policy_contract_digest=None: (
+            policy is None and policy_contract_digest is not None
+        ),
+    )
+
+
+def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(
+    tmp_path, monkeypatch
+):
+    _accept_current_certification(monkeypatch)
+    workflow = _v2_candidate_workflow()
     workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
     item = attention_item(run.parent, run)
     assert item is not None
@@ -3243,6 +3275,82 @@ def test_remote_v2_falls_back_when_the_exact_failed_step_has_no_label(tmp_path):
         ),
     )
     workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    item = attention_item(run.parent, run)
+    assert item is not None
+    projection = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+
+
+def test_remote_v2_falls_back_without_a_current_certification(tmp_path, monkeypatch):
+    _accept_current_certification(monkeypatch)
+    workflow = _v2_candidate_workflow()
+    assert workflow.qualification is not None
+    workflow.qualification.last_certification = None
+    _workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    item = attention_item(run.parent, run)
+    assert item is not None
+    projection = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+
+
+@pytest.mark.parametrize("field", ("project_revision", "project_contract_sha256"))
+def test_remote_v2_falls_back_for_a_stale_certification(tmp_path, field, monkeypatch):
+    _accept_current_certification(monkeypatch)
+    workflow = _v2_candidate_workflow()
+    assert workflow.qualification is not None
+    certification = workflow.qualification.last_certification
+    assert certification is not None
+    if field == "project_revision":
+        certification.project_revision += 1
+    else:
+        certification.project_contract_sha256 = "0" * 64
+    _workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    item = attention_item(run.parent, run)
+    assert item is not None
+    projection = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+
+
+def test_remote_v2_falls_back_when_a_current_certification_has_new_bundle_bytes(
+    tmp_path, monkeypatch
+):
+    _accept_current_certification(monkeypatch)
+    workflow = _v2_candidate_workflow()
+    workflow, bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    assert workflow.qualification is not None
+    certification = workflow.qualification.last_certification
+    assert (
+        certification is not None and certification.policy_contract_sha256 is not None
+    )
+    # `certified_at` is not an input to qualification evaluation. This changes
+    # sealed bundle bytes while leaving the existing certification current.
+    certification.certified_at = "2026-07-30T00:00:00+00:00"
+    workflow.save(bundle)
+    current = Workflow.load(bundle)
+    from openadapt_flow import qualification
+
+    assert qualification.current_certification_matches(
+        current,
+        policy_contract_digest=certification.policy_contract_sha256,
+    )
     item = attention_item(run.parent, run)
     assert item is not None
     projection = portable_remote_decision_task(

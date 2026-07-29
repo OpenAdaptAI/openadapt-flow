@@ -4486,7 +4486,9 @@ def build_parser() -> argparse.ArgumentParser:
         "validate-hosted",
         help=(
             "Bind strict lint, policy certification, and a successful local "
-            "replay to an expiring Cloud challenge and exact approved artifacts"
+            "replay to an expiring Cloud challenge and exact approved artifacts. "
+            "Standard and Regulated activation also binds the sealed governed "
+            "authorization template."
         ),
     )
     p.add_argument(

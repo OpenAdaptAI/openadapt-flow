@@ -401,8 +401,8 @@ def _qualified_entity_v2_fields(
 
     This deliberately reads no screenshots, OCR, accessibility observation,
     parameters, application name, or model output.  Any missing, unreadable,
-    or mismatched capability/bundle binding falls back to V1.  This gate proves
-    integrity sealing, not qualification certification.
+    or mismatched capability/bundle binding falls back to V1. This gate
+    requires both bundle integrity and current qualification certification.
     """
 
     if step_id is None or step_id != capability.step_id:

@@ -498,6 +498,21 @@ class ContinuationCoordinator:
         except StateDiverged as exc:
             raise ContinuationBusy(str(exc)) from exc
 
+    def prove_completed_pause(self, *, source_pause_binding: str) -> bool:
+        """Prove an already terminal completion after an executor crash."""
+
+        manifest = self.store.read_manifest()
+        if manifest is None:
+            raise ContinuationBusy(
+                "the durable manifest disappeared before terminal recovery"
+            )
+        try:
+            return self.authority.prove_completed_pause(
+                manifest, source_pause_binding=source_pause_binding
+            )
+        except StateDiverged as exc:
+            raise ContinuationBusy(str(exc)) from exc
+
     def mark_executor_uncertain(self, token: ContinuationToken) -> None:
         """Permanently fence an executor call that lacks a proven receipt."""
 

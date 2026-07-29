@@ -124,6 +124,28 @@ class AttendedActionBusy(AttendedActionRefused):
     """Another operator request currently owns the run's single-flight lease."""
 
 
+def _committed_transition_receipt_digest(
+    run_dir: Path, capability: "AttendedPauseCapability", *, key: Optional[str]
+) -> Optional[str]:
+    """Return only the exact durable receipt bound to this attended pause."""
+
+    store = CheckpointStore(run_dir, key=key)
+    program = store.last_program_checkpoint()
+    if (
+        program is not None
+        and program.attended_capability_digest == capability.digest
+        and program.attended_transition is not None
+    ):
+        return _digest(program.attended_transition)
+    checkpoint = store.last_checkpoint()
+    if (
+        checkpoint is not None
+        and checkpoint.attended_capability_digest == capability.digest
+    ):
+        return _digest(checkpoint)
+    return None
+
+
 class AttendedActionExecutor(Protocol):
     """Deployment-bound bridge used only after the engine admits a decision."""
 
@@ -292,6 +314,10 @@ class AttendedReconciliationReceipt(BaseModel):
     capability_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     expected_transition_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    #: Digest of the durable linear checkpoint or signed program transition.
+    #: This is the execution receipt exported to callers.  The digest of this
+    #: reconciliation record is only a local audit reference.
+    transition_receipt_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     action: Literal["reconcile"] = "reconcile"
     delivery_state: Literal["delivered", "unknown"]
     effect_contract_hashes: tuple[str, ...] = ()
@@ -2234,6 +2260,46 @@ def execute_attended_action(
     prior = actions.prior(request)
     if prior is not None:
         if prior.status in {"delivery_started", "delivery_uncertain"}:
+            recovery = getattr(executor, "recover_reconciliation_receipt", None)
+            capability = actions.signed_capability_for_digest(request.capability_digest)
+            if (
+                request.action == "reconcile"
+                and prior.action == "reconcile"
+                and prior.capability_digest == capability.digest
+                and callable(recovery)
+            ):
+                from openadapt_flow.runtime.durable.continuation import (
+                    ContinuationCoordinator,
+                )
+
+                if ContinuationCoordinator(run_dir, key=key).prove_completed_pause(
+                    source_pause_binding=capability.pause_digest
+                ):
+                    result = AttendedExecutionResult.model_validate(
+                        recovery(run_dir, capability, _digest(request))
+                    )
+                    if (
+                        result.status == "completed"
+                        and result.report_success is True
+                        and result.transition_receipt_digest is not None
+                    ):
+                        decision = AttendedDecision(
+                            pause_id=capability.pause_id,
+                            capability_digest=capability.digest,
+                            request_digest=_digest(request),
+                            idempotency_key=request.idempotency_key,
+                            action="reconcile",
+                            operator=operator,
+                            decided_by=decided_by,
+                            disposition=request.disposition,
+                            status="completed",
+                            message=result.message,
+                            report_success=True,
+                            next_transition=result.next_transition,
+                            transition_receipt_digest=result.transition_receipt_digest,
+                        )
+                        actions.append(decision, relay_binding=relay_binding, key=key)
+                        return decision
             raise AttendedActionRefused(
                 "the prior request may have crossed the delivery boundary; "
                 "automatic retry is refused until an audited reconciliation"
@@ -2483,24 +2549,57 @@ def execute_attended_action(
             )
             if proven is not None and proven[0] in {"completed", "halted"}:
                 proven_status, proven_success = proven
-                result = AttendedExecutionResult(
-                    status=proven_status,
-                    message=(
-                        "The durable run completed and its exact report was "
-                        "verified after the executor transport failed."
-                        if proven_status == "completed"
-                        else (
-                            "The durable continuation halted at a new exact pause; "
-                            "the executor transport did not carry its valid receipt."
-                            if proven_status == "halted"
-                            else "The durable state proves that no continuation "
-                            "delivery was admitted."
+                recovery = getattr(executor, "recover_reconciliation_receipt", None)
+                if request.action == "reconcile" and proven_status == "completed":
+                    if not callable(recovery):
+                        raise AttendedActionRefused(
+                            "the durable reconciliation completed but this executor "
+                            "cannot recover its exact transition receipt"
+                        ) from exc
+                    result = AttendedExecutionResult.model_validate(
+                        recovery(run_dir, capability, request_digest)
+                    )
+                    if (
+                        result.status != "completed"
+                        or result.report_success is not True
+                        or result.transition_receipt_digest is None
+                    ):
+                        raise AttendedActionRefused(
+                            "the recovered reconciliation receipt is not a completed "
+                            "durable transition"
+                        ) from exc
+                else:
+                    durable_receipt = (
+                        _committed_transition_receipt_digest(
+                            run_dir, capability, key=key
                         )
-                    ),
-                    report_success=proven_success,
-                    resumed_from=capability.step_id,
-                    next_transition=capability.expected_next_transition,
-                )
+                        if proven_status == "completed"
+                        else None
+                    )
+                    if proven_status == "completed" and durable_receipt is None:
+                        raise AttendedActionRefused(
+                            "the recovered completed outcome has no exact durable "
+                            "transition receipt"
+                        ) from exc
+                    result = AttendedExecutionResult(
+                        status=proven_status,
+                        message=(
+                            "The durable run completed and its exact report was "
+                            "verified after the executor transport failed."
+                            if proven_status == "completed"
+                            else (
+                                "The durable continuation halted at a new exact pause; "
+                                "the executor transport did not carry its valid receipt."
+                                if proven_status == "halted"
+                                else "The durable state proves that no continuation "
+                                "delivery was admitted."
+                            )
+                        ),
+                        report_success=proven_success,
+                        resumed_from=capability.step_id,
+                        next_transition=capability.expected_next_transition,
+                        transition_receipt_digest=durable_receipt,
+                    )
             else:
                 try:
                     coordinator.mark_executor_uncertain(continuation_token)
@@ -2871,6 +2970,98 @@ class BoundAttendedExecutor:
                 )
         return store, manifest, workflow
 
+    def recover_reconciliation_receipt(
+        self,
+        run_dir: Path,
+        capability: AttendedPauseCapability,
+        request_digest: str,
+    ) -> AttendedExecutionResult:
+        """Rebuild a missing local receipt from one committed transition.
+
+        This path is used only after durable authority proves terminal success.
+        It never opens the target application and it never repeats the source
+        action.  The checkpoint/program receipt is the source of truth; the
+        local reconciliation record is a signed, idempotent projection of it.
+        """
+
+        if capability.delivery_state == "not_delivered":
+            raise AttendedActionRefused(
+                "positive non-delivery evidence cannot produce reconciliation"
+            )
+        delivery_state = cast(
+            Literal["delivered", "unknown"], capability.delivery_state
+        )
+        store = CheckpointStore(run_dir, key=self.key)
+        manifest = store.read_manifest()
+        if manifest is None or manifest.run_id != capability.run_id:
+            raise AttendedActionRefused(
+                "the durable reconciliation run identity is unavailable"
+            )
+        if bundle_version(manifest.bundle_dir) != capability.bundle_version:
+            raise BundleMismatch("bundle changed after attended capability issuance")
+        workflow = Workflow.load(manifest.bundle_dir, key=self.key)
+        if workflow.name != capability.workflow_name:
+            raise AttendedActionRefused(
+                "workflow identity changed after attended capability issuance"
+            )
+        if (
+            AttendedActionStore(run_dir).signed_capability_for_digest(capability.digest)
+            != capability
+        ):
+            raise AttendedActionRefused(
+                "the reconciliation recovery capability is not signed"
+            )
+        checkpoint: Any
+        if workflow.program is not None:
+            checkpoint = store.last_program_checkpoint()
+            durable_receipt = (
+                _digest(checkpoint.attended_transition)
+                if checkpoint is not None and checkpoint.attended_transition is not None
+                else None
+            )
+        else:
+            checkpoint = store.last_checkpoint()
+            durable_receipt = _digest(checkpoint) if checkpoint is not None else None
+        if (
+            checkpoint is None
+            or durable_receipt is None
+            or checkpoint.attended_capability_digest != capability.digest
+            or checkpoint.attended_reconciliation_request_digest != request_digest
+            or checkpoint.attended_reconciliation_expected_transition_digest
+            != capability.expected_transition_digest
+            or checkpoint.attended_reconciliation_delivery_state != delivery_state
+            or not checkpoint.attended_reconciliation_effect_contract_hashes
+            or checkpoint.attended_reconciliation_at != capability.issued_at
+        ):
+            raise AttendedActionRefused(
+                "the completed durable transition does not bind this reconciliation"
+            )
+        AttendedActionStore(run_dir).write_reconciliation_receipt(
+            AttendedReconciliationReceipt(
+                pause_id=capability.pause_id,
+                capability_digest=capability.digest,
+                request_digest=request_digest,
+                expected_transition_digest=capability.expected_transition_digest,
+                transition_receipt_digest=durable_receipt,
+                delivery_state=delivery_state,
+                effect_contract_hashes=tuple(
+                    checkpoint.attended_reconciliation_effect_contract_hashes
+                ),
+                reconciled_at=capability.issued_at,
+            )
+        )
+        return AttendedExecutionResult(
+            status="completed",
+            message=(
+                "The durable reconciliation transition completed and its local "
+                "receipt was recovered without re-dispatching the source action."
+            ),
+            report_success=True,
+            resumed_from=capability.step_id,
+            next_transition=capability.expected_next_transition,
+            transition_receipt_digest=durable_receipt,
+        )
+
     @staticmethod
     def _bind_authorization(replayer: Any, manifest: Any) -> None:
         if manifest.governed_authorization is not None:
@@ -2894,6 +3085,9 @@ class BoundAttendedExecutor:
         result: StepResult,
         skipped: bool,
         resume_replayer: Any,
+        reconciliation_request_digest: Optional[str] = None,
+        reconciliation_delivery_state: Optional[Literal["delivered", "unknown"]] = None,
+        reconciliation_effect_contract_hashes: tuple[str, ...] = (),
     ) -> AttendedExecutionResult:
         # Fresh verification can take long enough for an independent durable
         # CLI/operator process to replace or clear the pause.  Re-bind the
@@ -2957,6 +3151,25 @@ class BoundAttendedExecutor:
             delivery_uncertainty=retained_result.delivery_uncertainty,
             resolution=retained_result.resolution,
             attended_capability_digest=capability.digest,
+            attended_reconciliation_request_digest=reconciliation_request_digest,
+            attended_reconciliation_expected_transition_digest=(
+                capability.expected_transition_digest
+                if reconciliation_request_digest is not None
+                else None
+            ),
+            attended_reconciliation_delivery_state=(
+                reconciliation_delivery_state
+                if reconciliation_request_digest is not None
+                else None
+            ),
+            attended_reconciliation_effect_contract_hashes=list(
+                reconciliation_effect_contract_hashes
+            ),
+            attended_reconciliation_at=(
+                capability.issued_at
+                if reconciliation_request_digest is not None
+                else None
+            ),
         )
         from openadapt_flow.runtime.durable.continuation import (
             ContinuationCoordinator,
@@ -3054,6 +3267,9 @@ class BoundAttendedExecutor:
         skipped: bool,
         target_state_id: Optional[str],
         resume_replayer: Any,
+        reconciliation_request_digest: Optional[str] = None,
+        reconciliation_delivery_state: Optional[Literal["delivered", "unknown"]] = None,
+        reconciliation_effect_contract_hashes: tuple[str, ...] = (),
     ) -> AttendedExecutionResult:
         if state.step is None or not pending.program_frames:
             raise AttendedActionRefused("the paused program action is unavailable")
@@ -3198,6 +3414,25 @@ class BoundAttendedExecutor:
             transition_history=list(pending.program_history),
             bundle_version=capability.bundle_version,
             attended_transition=receipt,
+            attended_reconciliation_request_digest=reconciliation_request_digest,
+            attended_reconciliation_expected_transition_digest=(
+                capability.expected_transition_digest
+                if reconciliation_request_digest is not None
+                else None
+            ),
+            attended_reconciliation_delivery_state=(
+                reconciliation_delivery_state
+                if reconciliation_request_digest is not None
+                else None
+            ),
+            attended_reconciliation_effect_contract_hashes=list(
+                reconciliation_effect_contract_hashes
+            ),
+            attended_reconciliation_at=(
+                capability.issued_at
+                if reconciliation_request_digest is not None
+                else None
+            ),
             created_at=capability.issued_at,
         )
         existing = store.last_program_checkpoint()
@@ -3553,6 +3788,9 @@ class BoundAttendedExecutor:
                 resumed_from=capability.step_id,
                 next_transition=capability.expected_next_transition,
             )
+        reconciliation_delivery_state = cast(
+            Literal["delivered", "unknown"], capability.delivery_state
+        )
         program_context: Optional[
             tuple[PendingEscalation, State, dict[str, str], Optional[str]]
         ] = None
@@ -3650,6 +3888,11 @@ class BoundAttendedExecutor:
                     skipped=False,
                     target_state_id=target,
                     resume_replayer=replayer,
+                    reconciliation_request_digest=request_digest,
+                    reconciliation_delivery_state=reconciliation_delivery_state,
+                    reconciliation_effect_contract_hashes=tuple(
+                        result.effect_contract_hashes
+                    ),
                 )
             else:
                 resumed = self._resume(
@@ -3662,6 +3905,11 @@ class BoundAttendedExecutor:
                     result=result,
                     skipped=False,
                     resume_replayer=replayer,
+                    reconciliation_request_digest=request_digest,
+                    reconciliation_delivery_state=reconciliation_delivery_state,
+                    reconciliation_effect_contract_hashes=tuple(
+                        result.effect_contract_hashes
+                    ),
                 )
         except ResumeRefused as exc:
             return AttendedExecutionResult(
@@ -3674,15 +3922,20 @@ class BoundAttendedExecutor:
         if resumed.status != "completed" or resumed.report_success is not True:
             return resumed
 
-        receipt = attended_store.write_reconciliation_receipt(
+        if resumed.transition_receipt_digest is None:
+            raise AttendedActionRefused(
+                "the completed reconciliation has no durable transition receipt"
+            )
+        attended_store.write_reconciliation_receipt(
             AttendedReconciliationReceipt(
                 pause_id=capability.pause_id,
                 capability_digest=capability.digest,
                 request_digest=request_digest,
                 expected_transition_digest=capability.expected_transition_digest,
-                delivery_state=capability.delivery_state,
+                transition_receipt_digest=resumed.transition_receipt_digest,
+                delivery_state=reconciliation_delivery_state,
                 effect_contract_hashes=tuple(result.effect_contract_hashes),
-                reconciled_at=_iso(_now()),
+                reconciled_at=capability.issued_at,
             )
         )
         return resumed.model_copy(
@@ -3690,8 +3943,7 @@ class BoundAttendedExecutor:
                 "message": (
                     "The independent effect readback proved the original action. "
                     "OpenAdapt resumed without re-dispatching it."
-                ),
-                "transition_receipt_digest": receipt.digest,
+                )
             }
         )
 

@@ -58,6 +58,7 @@ from openadapt_flow.policy import (
     policy_contract_sha256,
 )
 from openadapt_flow.qualification import (
+    REMOTE_SAFE_ENTITY_LABELS,
     ActionRiskClass,
     ActionRiskClassification,
     EnvironmentBoundary,
@@ -207,15 +208,32 @@ def test_entity_labels_are_qualification_contract_and_invalidate_certification()
 
     set_entity_label(
         workflow,
-        QualifiedEntityLabel(step_id="save", label="service record", fallback="record"),
+        QualifiedEntityLabel(step_id="save", label="patient record", fallback="record"),
     )
-    assert project.entity_labels["save"].label == "service record"
+    assert project.entity_labels["save"].label == "patient record"
     assert project.contract_sha256() != before
     assert project.last_certification is None
     assert list_entity_labels(workflow) == [project.entity_labels["save"]]
 
     remove_entity_label(workflow, "save")
     assert project.entity_labels == {}
+
+
+@pytest.mark.parametrize("label", REMOTE_SAFE_ENTITY_LABELS)
+def test_entity_label_accepts_each_reviewed_remote_safe_class(label: str) -> None:
+    entity = QualifiedEntityLabel(step_id="save", label=label, fallback="record")
+    assert entity.label == label
+
+
+@pytest.mark.parametrize(
+    "label",
+    ("jane smith", "patient 004219", "account 1234", "unknown class"),
+)
+def test_entity_label_refuses_identity_identifier_and_unknown_classes(
+    label: str,
+) -> None:
+    with pytest.raises(ValueError, match="reviewed remote-safe class"):
+        QualifiedEntityLabel(step_id="save", label=label, fallback="record")
 
 
 def test_api_only_qualification_uses_only_executable_targets() -> None:
@@ -2906,6 +2924,9 @@ def test_cli_initializes_project_without_raw_manifest_editing(
     assert main(["qualify", "explain", str(bundle), "--json"]) == 2
     payload = capsys.readouterr().out
     assert '"representative_case_missing"' in payload
+    assert set(json.loads(payload)["remote_safe_entity_labels"]) == set(
+        REMOTE_SAFE_ENTITY_LABELS
+    )
 
 
 def test_cli_entity_label_notice_tracks_real_mutations(
@@ -2930,6 +2951,14 @@ def test_cli_entity_label_notice_tracks_real_mutations(
         "--fallback",
         "item",
     ]
+    invalid_args = [*set_args]
+    invalid_args[invalid_args.index("insurance claim")] = "jane smith"
+    with pytest.raises(SystemExit):
+        main(invalid_args)
+    rejected = capsys.readouterr()
+    assert rejected.err
+    assert Workflow.load(bundle).qualification.entity_labels == {}
+
     assert main(set_args) == 0
     first = capsys.readouterr()
     assert json.loads(first.out)["entity_labels"]["save"]["label"] == "insurance claim"

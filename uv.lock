@@ -2315,6 +2315,10 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/bf/39ec24f545b3fc09bdff8cc61ca448bb968450c43a99f8a6808e538a3c57/openadapt_types-0.7.0.tar.gz", hash = "sha256:80a470aa4e8870d2a2b2645f2dbfac04ab9f158fb6d21b314d9eff0296a0ee2f", size = 126130, upload-time = "2026-07-29T19:32:31.082Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/39/b78fcd51096939884db01ea10bb4594a9e88aaa7d40c3eff537cfba8d971/openadapt_types-0.7.0-py3-none-any.whl", hash = "sha256:4805f2f97dbe46c15874d0fbf88dc9bf94a430b2b9a2f3e7ed24cddef013b7f2", size = 81743, upload-time = "2026-07-29T19:32:29.584Z" },
+]
 
 [[package]]
 name = "openai"

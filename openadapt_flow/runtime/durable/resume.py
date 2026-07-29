@@ -711,6 +711,20 @@ def resume(
         from openadapt_flow.runtime.durable.approval import RunRejected
 
         raise RunRejected("the durable run was rejected and cannot be resumed")
+    manifest = coordinator.store.read_manifest()
+    if manifest is None:
+        raise ApprovalRequired("the durable manifest is missing")
+    if manifest.delivery_authority_kind == "cloud_runner":
+        binding = getattr(replayer, "managed_dispatch_binding", None)
+        if (
+            binding is None
+            or binding.run_id != manifest.remote_delivery_run_id
+            or binding.authorization != manifest.governed_authorization
+            or binding.binding_sha256 != manifest.managed_dispatch_binding_sha256
+        ):
+            raise ApprovalRequired(
+                "managed resume requires the exact validated dispatch binding"
+            )
     with coordinator.lease(operation="resume", now=now) as token:
         prior_guard = getattr(replayer, "_durable_continuation_guard", None)
         replayer._durable_continuation_guard = ContinuationGuard(coordinator, token)

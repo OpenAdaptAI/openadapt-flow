@@ -59,7 +59,15 @@ _REMOTE_TOKEN_RE = re.compile(r"[a-f0-9]{32}")
 _REMOTE_PATH_KEY_RE = re.compile(r"[a-f0-9]{64}")
 _REMOTE_DIGEST_RE = re.compile(r"sha256:[a-f0-9]{64}")
 _REMOTE_PERMIT_CURSOR_RE = re.compile(r"[a-f0-9]{64}")
-_REMOTE_OPERATIONS = {"resume", "continue", "skip", "reject", "teach", "escalate"}
+_REMOTE_OPERATIONS = {
+    "initial",
+    "resume",
+    "continue",
+    "skip",
+    "reject",
+    "teach",
+    "escalate",
+}
 
 
 def _is_windows() -> bool:
@@ -1541,14 +1549,21 @@ class DurableAuthority:
             return None
         if authority_kind != "cloud_runner":
             raise DurableAuthorityBusy("durable run has an invalid delivery authority")
+        initial = record.operation == "initial"
+        pause_binding = (
+            getattr(manifest, "managed_dispatch_binding_sha256", None)
+            if initial
+            else record.pause_binding_sha256
+        )
+        initial_binding = getattr(manifest, "managed_dispatch_binding_sha256", None)
         required = {
             "run_id": getattr(manifest, "remote_delivery_run_id", None),
             "namespace_id": manifest.namespace_id,
             "path_key": record.path_key,
-            "pause_binding_sha256": record.pause_binding_sha256,
+            "pause_binding_sha256": pause_binding,
             "progress_digest": record.progress_digest,
-            "approval_digest": record.approval_digest,
-            "attempt_id": record.attempt_id,
+            "approval_digest": initial_binding if initial else record.approval_digest,
+            "attempt_id": manifest.namespace_id if initial else record.attempt_id,
             "operation": record.operation,
         }
         if not (
@@ -1558,8 +1573,10 @@ class DurableAuthority:
             and _REMOTE_TOKEN_RE.fullmatch(required["namespace_id"])
             and isinstance(required["path_key"], str)
             and _REMOTE_PATH_KEY_RE.fullmatch(required["path_key"])
-            and isinstance(required["pause_binding_sha256"], str)
-            and _REMOTE_DIGEST_RE.fullmatch(required["pause_binding_sha256"])
+            and (
+                isinstance(required["pause_binding_sha256"], str)
+                and _REMOTE_DIGEST_RE.fullmatch(required["pause_binding_sha256"])
+            )
             and isinstance(required["progress_digest"], str)
             and _REMOTE_DIGEST_RE.fullmatch(required["progress_digest"])
             and isinstance(required["approval_digest"], str)
@@ -1736,6 +1753,52 @@ class DurableAuthority:
                 connection,
                 record,
                 attempt_phase="delivery_started",
+                delivery_sequence=record.delivery_sequence + 1,
+            )
+
+    def before_initial_delivery(self, manifest: Any) -> None:
+        """Consume the managed genesis permit immediately before any first input.
+
+        The server-owned cursor is the cross-directory, cross-process authority.
+        A copied envelope can therefore not start a second logical Cloud run.
+        """
+
+        with self._transaction() as connection:
+            record = self._read(connection)
+            if (
+                record is None
+                or not self._identity_matches(record, manifest)
+                or record.phase != "active"
+            ):
+                raise DurableAuthorityBusy(
+                    "the managed initial delivery authority is unavailable"
+                )
+            if self.store.continuation_state_digest() != record.progress_digest:
+                raise DurableAuthorityBusy(
+                    "durable state changed before the initial delivery fence"
+                )
+            initial_record = record.model_copy(update={"operation": "initial"})
+            remote_authority_id, remote_sequence, remote_cursor = self._remote_cursor(
+                connection
+            )
+            remote_permit = self._require_remote_delivery_permit(
+                manifest,
+                initial_record,
+                remote_authority_id=remote_authority_id,
+                remote_delivery_sequence=remote_sequence,
+                permit_cursor=remote_cursor,
+            )
+            self._consume_delivery_fence(record, manifest)
+            if remote_permit is not None:
+                self._advance_remote_cursor(
+                    connection,
+                    authority_id=remote_permit[0],
+                    next_sequence=remote_permit[1],
+                    cursor_secret=remote_permit[2],
+                )
+            self._update(
+                connection,
+                record,
                 delivery_sequence=record.delivery_sequence + 1,
             )
 

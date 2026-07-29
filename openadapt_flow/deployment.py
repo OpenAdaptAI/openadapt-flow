@@ -681,6 +681,7 @@ def build_replayer(
         "customer_local", "cloud_runner"
     ] = "customer_local",
     remote_delivery_run_id: Optional[str] = None,
+    managed_dispatch_binding: Any = None,
     runtime_config: Optional["RuntimeSection"] = None,
     phi_mode: Optional[bool] = None,
     checkpoint_key: Optional[str] = None,
@@ -841,6 +842,7 @@ def build_replayer(
         governed_authorization=governed_authorization,
         delivery_authority_kind=delivery_authority_kind,
         remote_delivery_run_id=remote_delivery_run_id,
+        managed_dispatch_binding=managed_dispatch_binding,
         checkpoint_key=checkpoint_key,
         require_settled=require_settled,
         qualification_fault_driver=qualification_fault_driver,

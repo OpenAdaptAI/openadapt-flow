@@ -42,6 +42,7 @@ from openadapt_flow.runtime.durable.checkpoint import (
     RunCheckpoint,
     RunManifest,
 )
+from openadapt_flow.runtime.replayer import Replayer
 
 
 @pytest.fixture(autouse=True)
@@ -110,6 +111,9 @@ def _fresh_run(
         governed_authorization=authorization,
         delivery_authority_kind=managed,
         remote_delivery_run_id=(run_id if managed == "cloud_runner" else None),
+        managed_dispatch_binding_sha256=(
+            "sha256:" + "c" * 64 if managed == "cloud_runner" else None
+        ),
     )
     store.write_fresh_manifest(manifest)
     authority = DurableAuthority(run_dir, store)
@@ -289,6 +293,83 @@ def test_production_delivery_requires_remote_configuration(
             owner_nonce_sha256=owner,
         )
     assert not called
+    assert authority.validate(manifest).delivery_sequence == 0
+
+
+def test_initial_customer_local_delivery_needs_no_cloud_credentials(
+    tmp_path: Path,
+) -> None:
+    _run_dir, _store, manifest, authority = _fresh_run(
+        tmp_path, execution_profile="standard", delivery_authority_kind="customer_local"
+    )
+    authority.before_initial_delivery(manifest)
+
+
+def test_initial_managed_edges_advance_remote_and_local_sequences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[dict[str, object]] = []
+
+    def transport(_url: str, _headers: dict[str, str], body: bytes) -> bytes:
+        request = json.loads(body)
+        requests.append(request)
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "status": "issued",
+                "authority_id": "22222222-2222-4222-8222-222222222222",
+                "permit_id": f"permit-{len(requests)}",
+                "request_sha256": hashlib.sha256(body).hexdigest(),
+                "next_permit_cursor": hashlib.sha256(
+                    f"cursor-{len(requests)}".encode()
+                ).hexdigest(),
+                "delivery_sequence": request["delivery_sequence"],
+                "issued_at": "2026-07-29T00:00:00+00:00",
+            }
+        ).encode()
+
+    _run_dir, _store, manifest, authority = _fresh_run(
+        tmp_path, execution_profile="standard"
+    )
+    monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "https://control.example/permit")
+    monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "token")
+    authority = DurableAuthority(
+        authority.run_dir, authority.store, remote_transport=transport
+    )
+    authority.before_initial_delivery(manifest)
+    authority.before_initial_delivery(manifest)
+    assert [request["delivery_sequence"] for request in requests] == [0, 1]
+    assert [request["remote_delivery_sequence"] for request in requests] == [0, 1]
+    assert requests[0]["permit_cursor"] is None
+    assert requests[1]["permit_cursor"] is not None
+    assert authority.validate(manifest).delivery_sequence == 2
+
+
+def test_replayer_refuses_public_cloud_runner_strings() -> None:
+    with pytest.raises(ValueError, match="verified internal managed dispatch binding"):
+        Replayer(
+            object(),
+            delivery_authority_kind="cloud_runner",
+            remote_delivery_run_id="11111111-1111-4111-8111-111111111111",
+        )
+
+
+def test_lost_initial_permit_response_does_not_advance_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def transport(_url: str, _headers: dict[str, str], _body: bytes) -> bytes:
+        raise TimeoutError("response lost after server commit")
+
+    _run_dir, _store, manifest, authority = _fresh_run(
+        tmp_path, execution_profile="standard"
+    )
+    monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "https://control.example/permit")
+    monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "token")
+    authority = DurableAuthority(
+        authority.run_dir, authority.store, remote_transport=transport
+    )
+    with pytest.raises(DurableAuthorityBusy, match="unavailable or refused"):
+        authority.before_initial_delivery(manifest)
     assert authority.validate(manifest).delivery_sequence == 0
 
 

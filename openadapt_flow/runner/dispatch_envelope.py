@@ -7,6 +7,7 @@ CLI reopens it with no-follow and ownership checks before it admits a run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -23,6 +24,29 @@ if TYPE_CHECKING:  # pragma: no cover
 
 class ManagedDispatchEnvelopeError(ValueError):
     """A managed dispatch envelope is unsafe or does not bind exactly."""
+
+
+_BINDING_FACTORY = object()
+
+
+class ManagedDispatchBinding:
+    """Opaque capability produced only after strict envelope validation."""
+
+    __slots__ = ("run_id", "authorization", "binding_sha256")
+
+    def __init__(
+        self,
+        factory: object,
+        *,
+        run_id: str,
+        authorization: GovernedRunAuthorization,
+        binding_sha256: str,
+    ) -> None:
+        if factory is not _BINDING_FACTORY:
+            raise ManagedDispatchEnvelopeError("managed dispatch binding is internal")
+        self.run_id = run_id
+        self.authorization = authorization
+        self.binding_sha256 = binding_sha256
 
 
 class ManagedDispatchEnvelope(BaseModel):
@@ -93,7 +117,7 @@ def write_managed_dispatch_envelope(path: Path, verified: "VerifiedDispatch") ->
     return path
 
 
-def read_managed_dispatch_envelope(path: Path) -> ManagedDispatchEnvelope:
+def _read_managed_dispatch_envelope(path: Path) -> ManagedDispatchEnvelope:
     """Read only a regular, private file owned by this effective user."""
 
     path = Path(path)
@@ -177,3 +201,16 @@ def read_managed_dispatch_envelope(path: Path) -> ManagedDispatchEnvelope:
         raise ManagedDispatchEnvelopeError(
             "managed dispatch envelope has an invalid exact binding"
         ) from exc
+
+
+def read_managed_dispatch_envelope(path: Path) -> ManagedDispatchBinding:
+    """Strictly load the private file and mint its internal capability."""
+
+    envelope = _read_managed_dispatch_envelope(path)
+    raw = envelope.model_dump_json().encode("utf-8")
+    return ManagedDispatchBinding(
+        _BINDING_FACTORY,
+        run_id=envelope.run_id,
+        authorization=envelope.exact_authorization(),
+        binding_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+    )

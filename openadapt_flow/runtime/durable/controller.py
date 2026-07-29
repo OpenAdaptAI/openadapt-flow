@@ -264,6 +264,7 @@ class DurableRun:
             "customer_local", "cloud_runner"
         ] = "customer_local",
         remote_delivery_run_id: Optional[str] = None,
+        managed_dispatch_binding_sha256: Optional[str] = None,
         screenshots_may_leave_box: bool = False,
         model_calls: int = 0,
         external_network_calls: Literal["none", "observed", "unknown"] = "unknown",
@@ -312,6 +313,7 @@ class DurableRun:
             governed_authorization=governed_authorization,
             delivery_authority_kind=delivery_authority_kind,
             remote_delivery_run_id=remote_delivery_run_id,
+            managed_dispatch_binding_sha256=managed_dispatch_binding_sha256,
             screenshots_may_leave_box=screenshots_may_leave_box,
             model_calls=model_calls,
             external_network_calls=external_network_calls,
@@ -343,6 +345,8 @@ class DurableRun:
                 or existing.governed_authorization != governed_authorization
                 or existing.delivery_authority_kind != delivery_authority_kind
                 or existing.remote_delivery_run_id != remote_delivery_run_id
+                or existing.managed_dispatch_binding_sha256
+                != managed_dispatch_binding_sha256
             ):
                 raise StateDiverged(
                     "durable resume does not match the exact version-2 retained "

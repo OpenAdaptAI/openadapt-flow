@@ -126,6 +126,9 @@ class RunManifest(BaseModel):
         "customer_local"
     )
     remote_delivery_run_id: Optional[str] = None
+    #: Digest of the private, verified managed-dispatch envelope. It binds the
+    #: first Cloud permit without retaining a permit, cursor, or credential.
+    managed_dispatch_binding_sha256: Optional[str] = None
     #: Sticky audit posture for the whole logical run.  A resumed leg may use a
     #: local-only replayer, but that must not erase that an earlier leg was
     #: configured with an egress-capable screenshot consumer.
@@ -144,7 +147,10 @@ class RunManifest(BaseModel):
     @model_validator(mode="after")
     def _delivery_authority_binding_is_exact(self) -> "RunManifest":
         if self.delivery_authority_kind == "customer_local":
-            if self.remote_delivery_run_id is not None:
+            if (
+                self.remote_delivery_run_id is not None
+                or self.managed_dispatch_binding_sha256 is not None
+            ):
                 raise ValueError("customer-local runs cannot retain a Cloud run id")
             return self
         if (
@@ -152,6 +158,12 @@ class RunManifest(BaseModel):
             or _CLOUD_RUN_UUID_RE.fullmatch(self.remote_delivery_run_id) is None
         ):
             raise ValueError("Cloud-runner runs require a canonical Cloud run id")
+        if not isinstance(
+            self.managed_dispatch_binding_sha256, str
+        ) or not re.fullmatch(
+            r"sha256:[a-f0-9]{64}", self.managed_dispatch_binding_sha256
+        ):
+            raise ValueError("Cloud-runner runs require a managed dispatch binding")
         if (
             self.governed_authorization is None
             or self.governed_authorization.execution_profile

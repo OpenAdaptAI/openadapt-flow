@@ -97,6 +97,7 @@ def build_resume_argv(
     run_dir: Path,
     *,
     params_file: Optional[Path] = None,
+    managed_dispatch_file: Optional[Path] = None,
     require_approval: bool = True,
 ) -> list[str]:
     """Governed durable resume of a paused run directory.
@@ -110,6 +111,8 @@ def build_resume_argv(
         argv.append("--require-approval")
     if params_file is not None:
         argv += ["--params-file", str(params_file)]
+    if managed_dispatch_file is not None:
+        argv += ["--managed-dispatch-file", str(managed_dispatch_file)]
     return argv
 
 

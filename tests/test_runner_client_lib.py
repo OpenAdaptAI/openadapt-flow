@@ -34,6 +34,7 @@ from openadapt_flow.runner.config import (
     load_runner_config,
 )
 from openadapt_flow.runner.dispatch_envelope import (
+    ManagedDispatchEnvelope,
     ManagedDispatchEnvelopeError,
     read_managed_dispatch_envelope,
     write_managed_dispatch_envelope,
@@ -945,6 +946,13 @@ class TestCommandMapping:
         assert argv[2:4] == ["openadapt_flow", "resume"]
         assert "--require-approval" in argv
 
+    def test_managed_resume_passes_the_private_dispatch_file(self, tmp_path):
+        dispatch_file = tmp_path / "managed-dispatch.json"
+        argv = commands.build_resume_argv(
+            tmp_path / "run", managed_dispatch_file=dispatch_file
+        )
+        assert argv[argv.index("--managed-dispatch-file") + 1] == str(dispatch_file)
+
     def test_managed_dispatch_envelope_is_private_and_exact(
         self, sealed, config, tmp_path
     ):
@@ -957,10 +965,22 @@ class TestCommandMapping:
         )
         retained = read_managed_dispatch_envelope(path)
         assert retained.run_id == "018f6c0a-4cce-4f47-8d71-c3d63bf1c001"
-        assert retained.exact_authorization() == verdict.payload.authorization
+        assert retained.authorization == verdict.payload.authorization
         path.chmod(0o644)
         with pytest.raises(ManagedDispatchEnvelopeError):
             read_managed_dispatch_envelope(path)
+
+    def test_dispatch_model_cannot_mint_a_managed_binding(self, sealed, config):
+        workflow, _ = sealed
+        verdict = verified_or_refusal(workflow, config)
+        assert not isinstance(verdict, Refusal)
+        envelope = ManagedDispatchEnvelope(
+            run_id=verdict.payload.run_id,
+            bundle_content_digest=verdict.payload.authorization.bundle_content_digest,
+            runtime_inputs_digest=verdict.payload.authorization.runtime_inputs_digest,
+            authorization=verdict.payload.authorization,
+        )
+        assert not hasattr(envelope, "managed_binding")
 
     def test_managed_dispatch_envelope_refuses_nested_authorization_extra(
         self, sealed, config, tmp_path

@@ -518,6 +518,7 @@ def _configured_replayer(
         "customer_local", "cloud_runner"
     ] = "customer_local",
     remote_delivery_run_id: Optional[str] = None,
+    managed_dispatch_binding=None,
     runtime_config=None,
 ):
     """Wire the grounding, verification, and actuation layers into a Replayer.
@@ -553,6 +554,7 @@ def _configured_replayer(
         governed_authorization=governed_authorization,
         delivery_authority_kind=delivery_authority_kind,
         remote_delivery_run_id=remote_delivery_run_id,
+        managed_dispatch_binding=managed_dispatch_binding,
         runtime_config=runtime_config,
         checkpoint_key=checkpoint_key,
     )
@@ -578,6 +580,7 @@ def _build_and_run_replayer(
         "customer_local", "cloud_runner"
     ] = "customer_local",
     remote_delivery_run_id: Optional[str] = None,
+    managed_dispatch_binding=None,
     runtime_config=None,
     execution_target_kind: Optional["ExecutionTargetKind"] = None,
     surface_override: bool = False,
@@ -597,6 +600,7 @@ def _build_and_run_replayer(
         governed_authorization=governed_authorization,
         delivery_authority_kind=delivery_authority_kind,
         remote_delivery_run_id=remote_delivery_run_id,
+        managed_dispatch_binding=managed_dispatch_binding,
         runtime_config=runtime_config,
     ).run(
         workflow,
@@ -661,6 +665,7 @@ def _replay_desktop(
         "customer_local", "cloud_runner"
     ] = "customer_local",
     remote_delivery_run_id: Optional[str] = None,
+    managed_dispatch_binding=None,
     runtime_config=None,
 ) -> int:
     """Replay against a non-browser native/remote backend built by the factory.
@@ -702,6 +707,7 @@ def _replay_desktop(
             governed_authorization=governed_authorization,
             delivery_authority_kind=delivery_authority_kind,
             remote_delivery_run_id=remote_delivery_run_id,
+            managed_dispatch_binding=managed_dispatch_binding,
             runtime_config=runtime_config,
             execution_target_kind=_report_backend_kind(backend_cfg.kind),
             surface_override=bool(getattr(args, "_surface_override", False)),
@@ -1192,6 +1198,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 args, "_delivery_authority_kind", "customer_local"
             ),
             remote_delivery_run_id=getattr(args, "_remote_delivery_run_id", None),
+            managed_dispatch_binding=getattr(args, "_managed_dispatch_binding", None),
             runtime_config=cfg.runtime,
         )
 
@@ -1265,6 +1272,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     ),
                     remote_delivery_run_id=getattr(
                         args, "_remote_delivery_run_id", None
+                    ),
+                    managed_dispatch_binding=getattr(
+                        args, "_managed_dispatch_binding", None
                     ),
                     runtime_config=cfg.runtime,
                     execution_target_kind="web",
@@ -1417,8 +1427,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             getattr(args, "worklist", None), workflow
         )
         try:
-            envelope = read_managed_dispatch_envelope(Path(dispatch_file))
-            authorization = envelope.exact_authorization()
+            managed_binding = read_managed_dispatch_envelope(Path(dispatch_file))
+            authorization = managed_binding.authorization
         except ManagedDispatchEnvelopeError:
             print(
                 "run REFUSED: managed dispatch binding is invalid. Nothing was executed."
@@ -1450,10 +1460,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 for field in safety_fields
             )
             or (
-                envelope.bundle_content_digest != workflow.manifest.content_digest
+                authorization.bundle_content_digest != workflow.manifest.content_digest
                 or authorization.validate_workflow(workflow) is not None
                 or runtime_inputs_digest(workflow, runtime_params, runtime_worklists)
-                != envelope.runtime_inputs_digest
+                != authorization.runtime_inputs_digest
             )
         ):
             print(
@@ -1461,8 +1471,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
             return 2
         args._governed_run_authorization = authorization
+        args._managed_dispatch_binding = managed_binding
         args._delivery_authority_kind = "cloud_runner"
-        args._remote_delivery_run_id = envelope.run_id
+        args._remote_delivery_run_id = managed_binding.run_id
 
     if getattr(args, "dry_run", False) or getattr(args, "explain", False):
         # A managed dry run also validates its protected Cloud handoff above.
@@ -1521,6 +1532,32 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             "paused workflow cannot be identified safely. Nothing was executed."
         )
         return 3
+    managed_binding = None
+    if manifest.delivery_authority_kind == "cloud_runner":
+        from openadapt_flow.runner.dispatch_envelope import (
+            ManagedDispatchEnvelopeError,
+            read_managed_dispatch_envelope,
+        )
+
+        try:
+            managed_binding = read_managed_dispatch_envelope(
+                Path(getattr(args, "managed_dispatch_file", ""))
+            )
+        except (ManagedDispatchEnvelopeError, TypeError, ValueError):
+            print(
+                "Resume REFUSED: managed dispatch binding is invalid. Nothing was executed."
+            )
+            return 3
+        if (
+            managed_binding.run_id != manifest.remote_delivery_run_id
+            or managed_binding.authorization != manifest.governed_authorization
+            or managed_binding.binding_sha256
+            != manifest.managed_dispatch_binding_sha256
+        ):
+            print(
+                "Resume REFUSED: managed dispatch does not match this run. Nothing was executed."
+            )
+            return 3
     from openadapt_flow.ir import Workflow
 
     try:
@@ -1582,6 +1619,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             durable=True,  # resume forces durability so it can pause again
             checkpoint_key=ckpt_key,
             allow_model_grounding=allow_egress,
+            managed_dispatch_binding=managed_binding,
         )
         return resume(
             run_dir,
@@ -3610,6 +3648,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("run_dir", help="The paused run directory (holds checkpoints)")
+    p.add_argument("--managed-dispatch-file", default=None, help=argparse.SUPPRESS)
     p.add_argument(
         "--url",
         default=None,

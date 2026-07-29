@@ -425,6 +425,7 @@ class Replayer:
             "customer_local", "cloud_runner"
         ] = "customer_local",
         remote_delivery_run_id: Optional[str] = None,
+        managed_dispatch_binding: Optional[Any] = None,
         governed_continuation: bool = False,
         require_settled: bool = False,
         settle_readiness_timeout_s: float = 10.0,
@@ -501,6 +502,29 @@ class Replayer:
         # behavior.  When present it carries exact identity/effect decisions
         # from the run gate into the shared executor instead of reducing them
         # to a boolean that could authorize a different workflow.
+        if (
+            delivery_authority_kind == "cloud_runner"
+            and managed_dispatch_binding is None
+        ):
+            raise ValueError(
+                "cloud_runner requires a verified internal managed dispatch binding"
+            )
+        if managed_dispatch_binding is not None:
+            from openadapt_flow.runner.dispatch_envelope import ManagedDispatchBinding
+
+            if not isinstance(managed_dispatch_binding, ManagedDispatchBinding):
+                raise ValueError("managed dispatch binding is invalid")
+            if governed_authorization not in (
+                None,
+                managed_dispatch_binding.authorization,
+            ) or remote_delivery_run_id not in (None, managed_dispatch_binding.run_id):
+                raise ValueError(
+                    "managed dispatch binding does not match public inputs"
+                )
+            governed_authorization = managed_dispatch_binding.authorization
+            delivery_authority_kind = "cloud_runner"
+            remote_delivery_run_id = managed_dispatch_binding.run_id
+        self.managed_dispatch_binding = managed_dispatch_binding
         self.governed_authorization = governed_authorization
         self.delivery_authority_kind = delivery_authority_kind
         self.remote_delivery_run_id = remote_delivery_run_id
@@ -1104,6 +1128,11 @@ class Replayer:
                 governed_authorization=self.governed_authorization,
                 delivery_authority_kind=self.delivery_authority_kind,
                 remote_delivery_run_id=self.remote_delivery_run_id,
+                managed_dispatch_binding_sha256=(
+                    self.managed_dispatch_binding.binding_sha256
+                    if self.managed_dispatch_binding is not None
+                    else None
+                ),
                 screenshots_may_leave_box=(
                     self._screenshots_may_leave_box or prior_screenshots_may_leave_box
                 ),
@@ -1111,6 +1140,24 @@ class Replayer:
                 external_network_calls=prior_external_network_calls,
                 resume_existing=durable_resume,
             )
+        self._durable_initial_delivery_guard = None
+        if (
+            durable_run is not None
+            and not durable_resume
+            and self.managed_dispatch_binding is not None
+        ):
+            from openadapt_flow.runtime.durable.authority import DurableAuthority
+
+            class _ManagedInitialDeliveryGuard:
+                def before_delivery(self_nonlocal) -> None:
+                    assert durable_run is not None
+                    DurableAuthority(
+                        run_dir, durable_run.store
+                    ).before_initial_delivery(
+                        durable_run._manifest  # noqa: SLF001 - exact retained manifest
+                    )
+
+            self._durable_initial_delivery_guard = _ManagedInitialDeliveryGuard()
         (run_dir / "steps").mkdir(parents=True, exist_ok=True)
 
         report = RunReport(
@@ -8361,6 +8408,15 @@ class Replayer:
         """Recheck exact authority at the last point before input delivery."""
 
         refusal = self._fresh_actuation_authorization_refusal(workflow, params, step)
+        initial_guard = getattr(self, "_durable_initial_delivery_guard", None)
+        if refusal is None and initial_guard is not None:
+            try:
+                initial_guard.before_delivery()
+            except Exception as exc:  # noqa: BLE001 - durable fencing boundary
+                refusal = (
+                    f"managed initial delivery was preempted before delivery: {exc}"
+                )
+                result.failure_category = "continuation_preempted"
         if refusal is None and self._durable_continuation_guard is not None:
             try:
                 self._durable_continuation_guard.before_delivery()

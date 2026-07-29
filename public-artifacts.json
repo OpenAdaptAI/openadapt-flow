@@ -1797,7 +1797,7 @@
     },
     {
       "path": "docs/verification.json",
-      "sha256": "07f719c23242d5ddd93c1aa417c24eec300a6dad9ec3aa6d7aa713f767b8875b"
+      "sha256": "a6dd22a344b684b2f034d5aa7c2105378dc9d9903bd75bc6093067943790c818"
     },
     {
       "path": "openadapt_flow/console/static/console.css",

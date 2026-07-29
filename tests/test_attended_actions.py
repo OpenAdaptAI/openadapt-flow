@@ -3190,7 +3190,6 @@ def test_remote_projection_is_explicit_aal2_phi_free_and_exactly_bound(tmp_path)
 
 def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(tmp_path):
     workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
-    workflow, bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
     init_project(
         workflow,
         environment=EnvironmentBoundary(
@@ -3207,7 +3206,7 @@ def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(tm
             step_id="humanstep", label="service record", fallback="record"
         ),
     )
-    workflow.save(bundle)
+    workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
     item = attention_item(run.parent, run)
     assert item is not None
 
@@ -3233,7 +3232,6 @@ def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(tm
 
 def test_remote_v2_falls_back_when_the_exact_failed_step_has_no_label(tmp_path):
     workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
-    workflow, bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
     init_project(
         workflow,
         environment=EnvironmentBoundary(
@@ -3242,6 +3240,83 @@ def test_remote_v2_falls_back_when_the_exact_failed_step_has_no_label(tmp_path):
             application_version="1",
             environment_digest="a" * 64,
             runtime_version="1.26.0",
+        ),
+    )
+    workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    item = attention_item(run.parent, run)
+    assert item is not None
+    projection = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+
+
+def test_remote_v2_falls_back_when_report_step_differs_from_capability(tmp_path):
+    workflow = Workflow(
+        name="attended-v2",
+        steps=[_step("humanstep", "A"), _step("otherstep", "B")],
+    )
+    init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="qualified-app",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+    )
+    for step_id in ("humanstep", "otherstep"):
+        set_entity_label(
+            workflow,
+            QualifiedEntityLabel(
+                step_id=step_id, label="service record", fallback="record"
+            ),
+        )
+    _workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    report_path = run / "report.json"
+    report_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    report_payload["results"][0]["step_id"] = "otherstep"
+    report_path.write_text(json.dumps(report_payload), encoding="utf-8")
+    item = attention_item(run.parent, run)
+    assert item is not None
+    projection = portable_remote_decision_task(
+        run,
+        item,
+        deployment=_remote_deployment(
+            peer_task_schemas=["openadapt.human-decision-task/v2"]
+        ),
+    )
+    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+
+
+def test_remote_v2_falls_back_after_the_paused_bundle_changes(tmp_path):
+    workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
+    init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="qualified-app",
+            application_version="1",
+            environment_digest="a" * 64,
+            runtime_version="1.26.0",
+        ),
+    )
+    set_entity_label(
+        workflow,
+        QualifiedEntityLabel(
+            step_id="humanstep", label="service record", fallback="record"
+        ),
+    )
+    workflow, bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    set_entity_label(
+        workflow,
+        QualifiedEntityLabel(
+            step_id="humanstep", label="insurance claim", fallback="item"
         ),
     )
     workflow.save(bundle)

@@ -395,21 +395,26 @@ def _qualified_entity_v2_fields(
     run_dir: Path,
     *,
     step_id: Optional[str],
+    capability: Any,
 ) -> Optional[dict[str, Any]]:
-    """Read a V2 entity only from the sealed project and its exact step.
+    """Read a V2 entity only from the current integrity-sealed project.
 
     This deliberately reads no screenshots, OCR, accessibility observation,
     parameters, application name, or model output.  Any missing, unreadable,
-    or mismatched binding falls back to V1.
+    or mismatched capability/bundle binding falls back to V1.  This gate proves
+    integrity sealing, not qualification certification.
     """
 
-    if step_id is None:
+    if step_id is None or step_id != capability.step_id:
         return None
     try:
         from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+        from openadapt_flow.runtime.durable.program_checkpoint import bundle_version
 
         manifest = CheckpointStore(run_dir).read_manifest()
         if manifest is None:
+            return None
+        if bundle_version(manifest.bundle_dir) != capability.bundle_version:
             return None
         workflow, _ = data.load_workflow_safe(Path(manifest.bundle_dir))
         project = workflow.qualification if workflow is not None else None
@@ -605,6 +610,7 @@ def _task_and_presentation(
         _qualified_entity_v2_fields(
             run_dir,
             step_id=failed.step_id if failed is not None else None,
+            capability=capability,
         )
         if _peer_negotiated_v2(deployment)
         else None

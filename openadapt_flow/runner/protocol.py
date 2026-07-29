@@ -77,7 +77,14 @@ class RunnerDispatchPayload(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     job_kind: str
-    run_id: str
+    # This is the Cloud-owned run identity.  It is deliberately not a local
+    # workflow/authorization id: durable remote delivery permits bind to this
+    # exact UUID across runner restart and reassignment.
+    run_id: str = Field(
+        pattern=(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+    )
     workflow_id: str
     bundle: DispatchBundle
     deployment_profile_id: str

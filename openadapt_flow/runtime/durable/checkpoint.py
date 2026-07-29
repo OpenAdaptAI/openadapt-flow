@@ -40,13 +40,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openadapt_flow.ir import (
     ActionDeliveryReceipt,
@@ -81,6 +82,9 @@ PROGRAM_CHECKPOINT_PREFIX = "pstate_"
 #: Default stale-pause window: a pause older than this is refused on resume
 #: (the app state a stale checkpoint expects can no longer be trusted). 7 days.
 DEFAULT_STALE_AFTER_S = 7 * 24 * 3600.0
+_CLOUD_RUN_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
 def _now() -> str:
@@ -116,6 +120,12 @@ class RunManifest(BaseModel):
     idempotency_key: Optional[str] = None
     worklists: dict[str, list[dict[str, str]]] = Field(default_factory=dict)
     governed_authorization: Optional[GovernedRunAuthorization] = None
+    #: Customer-controlled runs use their local durable authority only. Managed
+    #: Cloud runs retain the Cloud UUID that owns remote continuation permits.
+    delivery_authority_kind: Literal["customer_local", "cloud_runner"] = (
+        "customer_local"
+    )
+    remote_delivery_run_id: Optional[str] = None
     #: Sticky audit posture for the whole logical run.  A resumed leg may use a
     #: local-only replayer, but that must not erase that an earlier leg was
     #: configured with an egress-capable screenshot consumer.
@@ -130,6 +140,27 @@ class RunManifest(BaseModel):
     #: Optional healed-bundle output path, mirrored from the original run.
     save_healed_to: Optional[str] = None
     created_at: str = Field(default_factory=_now)
+
+    @model_validator(mode="after")
+    def _delivery_authority_binding_is_exact(self) -> "RunManifest":
+        if self.delivery_authority_kind == "customer_local":
+            if self.remote_delivery_run_id is not None:
+                raise ValueError("customer-local runs cannot retain a Cloud run id")
+            return self
+        if (
+            self.remote_delivery_run_id is None
+            or _CLOUD_RUN_UUID_RE.fullmatch(self.remote_delivery_run_id) is None
+        ):
+            raise ValueError("Cloud-runner runs require a canonical Cloud run id")
+        if (
+            self.governed_authorization is None
+            or self.governed_authorization.execution_profile
+            not in {"standard", "regulated"}
+        ):
+            raise ValueError(
+                "Cloud-runner runs require a Standard or Regulated authorization"
+            )
+        return self
 
 
 class RunCheckpoint(BaseModel):

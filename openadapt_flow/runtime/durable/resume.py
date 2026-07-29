@@ -906,6 +906,11 @@ def _resume_under_lease(
             )
         replayer.governed_authorization = manifest.governed_authorization
         replayer.governed_continuation = True
+    # Resume never accepts a caller override for delivery authority.  The
+    # retained manifest is the sole source for both customer-local and managed
+    # Cloud continuation binding.
+    replayer.delivery_authority_kind = manifest.delivery_authority_kind
+    replayer.remote_delivery_run_id = manifest.remote_delivery_run_id
     # Keep the resumed leg sealing new checkpoints with the same key.
     replayer.checkpoint_key = key
     if workflow.program is not None:

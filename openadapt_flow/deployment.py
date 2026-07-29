@@ -677,6 +677,10 @@ def build_replayer(
     use_structural: bool,
     pixel_verify_enabled: bool = False,
     governed_authorization: Any = None,
+    delivery_authority_kind: Literal[
+        "customer_local", "cloud_runner"
+    ] = "customer_local",
+    remote_delivery_run_id: Optional[str] = None,
     runtime_config: Optional["RuntimeSection"] = None,
     phi_mode: Optional[bool] = None,
     checkpoint_key: Optional[str] = None,
@@ -835,6 +839,8 @@ def build_replayer(
         use_structural=use_structural,
         pixel_verify_enabled=pixel_verify_enabled,
         governed_authorization=governed_authorization,
+        delivery_authority_kind=delivery_authority_kind,
+        remote_delivery_run_id=remote_delivery_run_id,
         checkpoint_key=checkpoint_key,
         require_settled=require_settled,
         qualification_fault_driver=qualification_fault_driver,

@@ -60,6 +60,7 @@ def _fresh_run(
     execution_profile: Literal["demo", "standard", "regulated"] | None = None,
     run_id: str = "11111111-1111-4111-8111-111111111111",
     namespace_id: str = "0123456789abcdef0123456789abcdef",
+    delivery_authority_kind: Literal["customer_local", "cloud_runner"] | None = None,
 ) -> tuple[
     Path,
     CheckpointStore,
@@ -90,6 +91,15 @@ def _fresh_run(
         if execution_profile is not None
         else None
     )
+    managed = (
+        delivery_authority_kind
+        if delivery_authority_kind is not None
+        else (
+            "cloud_runner"
+            if execution_profile in {"standard", "regulated"}
+            else "customer_local"
+        )
+    )
     manifest = RunManifest(
         run_id=run_id,
         namespace_id=namespace_id,
@@ -98,6 +108,8 @@ def _fresh_run(
         bundle_dir=str(bundle_dir.resolve()),
         params={"case": "A-100"},
         governed_authorization=authorization,
+        delivery_authority_kind=managed,
+        remote_delivery_run_id=(run_id if managed == "cloud_runner" else None),
     )
     store.write_fresh_manifest(manifest)
     authority = DurableAuthority(run_dir, store)
@@ -196,6 +208,21 @@ def test_demo_delivery_stays_local_without_remote_configuration(tmp_path: Path) 
     authority.before_delivery(manifest, attempt_id="demo", owner_nonce_sha256=owner)
 
 
+def test_customer_controlled_standard_delivery_stays_local_without_cloud(
+    tmp_path: Path,
+) -> None:
+    _run_dir, store, manifest, authority = _fresh_run(
+        tmp_path,
+        execution_profile="standard",
+        delivery_authority_kind="customer_local",
+    )
+    pending = _pause(store, manifest, authority)
+    owner = _acquire(
+        authority, manifest, pending, attempt="local", now=datetime.now(timezone.utc)
+    )
+    authority.before_delivery(manifest, attempt_id="local", owner_nonce_sha256=owner)
+
+
 def test_production_delivery_requires_and_validates_remote_permit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -265,7 +292,7 @@ def test_production_delivery_requires_remote_configuration(
     assert authority.validate(manifest).delivery_sequence == 0
 
 
-def test_production_delivery_refuses_free_text_before_remote_transport(
+def test_cloud_manifest_refuses_free_text_before_remote_transport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     called = False
@@ -275,37 +302,25 @@ def test_production_delivery_refuses_free_text_before_remote_transport(
         called = True
         return b"{}"
 
-    _run_dir, store, manifest, _authority = _fresh_run(
-        tmp_path,
-        execution_profile="standard",
-        run_id="Patient Jane Doe",
-    )
-    pending = _pause(store, manifest, DurableAuthority(store.run_dir, store))
-    authority = DurableAuthority(store.run_dir, store, remote_transport=transport)
-    owner = _acquire(
-        authority,
-        manifest,
-        pending,
-        attempt="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        now=datetime.now(timezone.utc),
-    )
-    authority.bind_approval(
-        manifest,
-        attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        owner_nonce_sha256=owner,
-        approval_digest="sha256:" + "b" * 64,
-    )
-    monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
-    monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
-
-    with pytest.raises(DurableAuthorityBusy, match="privacy-safe"):
-        authority.before_delivery(
-            manifest,
-            attempt_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            owner_nonce_sha256=owner,
+    with pytest.raises(ValueError, match="canonical Cloud run id"):
+        _fresh_run(
+            tmp_path,
+            execution_profile="standard",
+            run_id="Patient Jane Doe",
         )
     assert not called
-    assert authority.validate(manifest).delivery_sequence == 0
+
+
+def test_cloud_manifest_requires_a_production_authorization(tmp_path: Path) -> None:
+    with pytest.raises(
+        ValueError,
+        match="Standard or Regulated authorization",
+    ):
+        _fresh_run(
+            tmp_path,
+            execution_profile="demo",
+            delivery_authority_kind="cloud_runner",
+        )
 
 
 def test_production_delivery_rejects_insecure_remote_endpoint(

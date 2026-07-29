@@ -1536,8 +1536,13 @@ class DurableAuthority:
         profile = getattr(authorization, "execution_profile", None)
         if profile not in {"standard", "regulated"}:
             return None
+        authority_kind = getattr(manifest, "delivery_authority_kind", "customer_local")
+        if authority_kind == "customer_local":
+            return None
+        if authority_kind != "cloud_runner":
+            raise DurableAuthorityBusy("durable run has an invalid delivery authority")
         required = {
-            "run_id": manifest.run_id,
+            "run_id": getattr(manifest, "remote_delivery_run_id", None),
             "namespace_id": manifest.namespace_id,
             "path_key": record.path_key,
             "pause_binding_sha256": record.pause_binding_sha256,

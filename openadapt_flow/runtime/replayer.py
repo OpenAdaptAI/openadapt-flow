@@ -421,6 +421,10 @@ class Replayer:
         pixel_verify_enabled: bool = False,
         allow_model_grounding: bool = False,
         governed_authorization: Optional[GovernedRunAuthorization] = None,
+        delivery_authority_kind: Literal[
+            "customer_local", "cloud_runner"
+        ] = "customer_local",
+        remote_delivery_run_id: Optional[str] = None,
         governed_continuation: bool = False,
         require_settled: bool = False,
         settle_readiness_timeout_s: float = 10.0,
@@ -498,6 +502,8 @@ class Replayer:
         # from the run gate into the shared executor instead of reducing them
         # to a boolean that could authorize a different workflow.
         self.governed_authorization = governed_authorization
+        self.delivery_authority_kind = delivery_authority_kind
+        self.remote_delivery_run_id = remote_delivery_run_id
         self.governed_continuation = governed_continuation
         self._governed_asset_snapshot: dict[str, bytes] = {}
         self._governed_asset_hashes: dict[str, str] = {}
@@ -1096,6 +1102,8 @@ class Replayer:
                 save_healed_to=save_healed_to,
                 key=self.checkpoint_key,
                 governed_authorization=self.governed_authorization,
+                delivery_authority_kind=self.delivery_authority_kind,
+                remote_delivery_run_id=self.remote_delivery_run_id,
                 screenshots_may_leave_box=(
                     self._screenshots_may_leave_box or prior_screenshots_may_leave_box
                 ),

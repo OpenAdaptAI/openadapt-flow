@@ -260,6 +260,10 @@ class DurableRun:
         save_healed_to: Optional[Path | str] = None,
         key: Optional[str] = None,
         governed_authorization: Optional[GovernedRunAuthorization] = None,
+        delivery_authority_kind: Literal[
+            "customer_local", "cloud_runner"
+        ] = "customer_local",
+        remote_delivery_run_id: Optional[str] = None,
         screenshots_may_leave_box: bool = False,
         model_calls: int = 0,
         external_network_calls: Literal["none", "observed", "unknown"] = "unknown",
@@ -278,6 +282,13 @@ class DurableRun:
         self.bundle_dir = Path(bundle_dir).resolve()
         self.bundle_version = bundle_version(self.bundle_dir)
         self.governed_authorization = governed_authorization
+        if delivery_authority_kind == "cloud_runner" and not remote_delivery_run_id:
+            raise StateDiverged("a managed durable run requires its Cloud run identity")
+        if (
+            delivery_authority_kind == "customer_local"
+            and remote_delivery_run_id is not None
+        ):
+            raise StateDiverged("a local durable run cannot carry a Cloud run identity")
         existing = self.store.read_manifest()
         namespace_id = (
             existing.namespace_id
@@ -299,6 +310,8 @@ class DurableRun:
             idempotency_key=idempotency_key,
             worklists=worklists,
             governed_authorization=governed_authorization,
+            delivery_authority_kind=delivery_authority_kind,
+            remote_delivery_run_id=remote_delivery_run_id,
             screenshots_may_leave_box=screenshots_may_leave_box,
             model_calls=model_calls,
             external_network_calls=external_network_calls,
@@ -328,6 +341,8 @@ class DurableRun:
                 or existing.idempotency_key != idempotency_key
                 or existing.worklists != worklists
                 or existing.governed_authorization != governed_authorization
+                or existing.delivery_authority_kind != delivery_authority_kind
+                or existing.remote_delivery_run_id != remote_delivery_run_id
             ):
                 raise StateDiverged(
                     "durable resume does not match the exact version-2 retained "

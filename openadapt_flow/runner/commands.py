@@ -46,7 +46,11 @@ VERB_STATUS: dict[str, str] = {
 
 
 def build_run_argv(
-    verified: VerifiedDispatch, run_dir: Path, params_file: Optional[Path]
+    verified: VerifiedDispatch,
+    run_dir: Path,
+    params_file: Optional[Path],
+    *,
+    managed_dispatch_file: Path,
 ) -> list[str]:
     """The exact governed CLI invocation for a verified ``run`` dispatch.
 
@@ -72,6 +76,8 @@ def build_run_argv(
         str(run_dir),
         "--pin-digest",
         verified.payload.authorization.bundle_content_digest,
+        "--managed-dispatch-file",
+        str(managed_dispatch_file),
     ]
     if params_file is not None:
         argv += ["--params-file", str(params_file)]

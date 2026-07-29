@@ -23,10 +23,14 @@ import os
 import secrets
 import sqlite3
 import stat
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict
 
@@ -36,6 +40,11 @@ from openadapt_flow.runtime.durable.approval import (
 )
 
 AUTHORITY_DB_ENV = "OPENADAPT_DURABLE_AUTHORITY_DB"
+REMOTE_AUTHORITY_URL_ENV = "OPENADAPT_DURABLE_AUTHORITY_URL"
+# Reuse the enrolled runner credential. The operator configures one trust
+# relationship with the control plane, not a second delivery-only secret.
+REMOTE_AUTHORITY_TOKEN_ENV = "OPENADAPT_RUNNER_TOKEN"
+MAX_REMOTE_AUTHORITY_RESPONSE_BYTES = 64 * 1024
 AUTHORITY_SCHEMA_VERSION = 1
 JOURNAL_GENESIS_DIGEST = "sha256:" + hashlib.sha256(b"").hexdigest()
 JOURNAL_MAC_DOMAIN = b"openadapt-attended-journal-v1\0"
@@ -214,10 +223,18 @@ class DurableAuthorityRecord(BaseModel):
 class DurableAuthority:
     """SQLite-backed authority on one trusted, non-rollback service volume."""
 
-    def __init__(self, run_dir: Path | str, store: Any) -> None:
+    def __init__(
+        self,
+        run_dir: Path | str,
+        store: Any,
+        *,
+        remote_transport: Callable[[str, dict[str, str], bytes], bytes] | None = None,
+    ) -> None:
         self.run_dir = Path(run_dir).resolve()
         self.store = store
         self._configured_db_path = _default_db_path()
+        # Tests can inject an in-memory transport. Production always uses HTTPS.
+        self._remote_transport = remote_transport
         self._assert_configured_ancestors_are_not_links()
         try:
             # Resolve the parent only. This catches an ancestor symlink that
@@ -1367,6 +1384,142 @@ class DurableAuthority:
                 )
             self._update(connection, record, approval_digest=approval_digest)
 
+    @staticmethod
+    def _remote_request_digest(payload: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _require_remote_delivery_permit(
+        self, manifest: Any, record: DurableAuthorityRecord
+    ) -> None:
+        """Obtain the one server-owned permit for a production input edge.
+
+        This intentionally records no local success before the response is
+        completely validated.  A lost response after a server commit therefore
+        leaves the local sequence unchanged; a retry asks for the same sequence
+        and must halt when the authority rejects that duplicate.
+        """
+
+        authorization = getattr(manifest, "governed_authorization", None)
+        profile = getattr(authorization, "execution_profile", None)
+        if profile not in {"standard", "regulated"}:
+            return
+        required = {
+            "run_id": manifest.run_id,
+            "namespace_id": manifest.namespace_id,
+            "path_key": record.path_key,
+            "pause_binding_sha256": record.pause_binding_sha256,
+            "progress_digest": record.progress_digest,
+            "approval_digest": record.approval_digest,
+            "attempt_id": record.attempt_id,
+            "operation": record.operation,
+        }
+        if any(
+            not isinstance(value, str) or not value or len(value) > 512
+            for value in required.values()
+        ):
+            raise DurableAuthorityBusy(
+                "production delivery requires complete retained remote authority inputs"
+            )
+        url = os.getenv(REMOTE_AUTHORITY_URL_ENV, "")
+        token = os.getenv(REMOTE_AUTHORITY_TOKEN_ENV, "")
+        if not url or not token:
+            raise DurableAuthorityBusy(
+                "production delivery requires configured remote authority credentials"
+            )
+        if self._remote_transport is None:
+            parsed = urlparse(url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+                or bool(parsed.query)
+                or bool(parsed.fragment)
+            ):
+                raise DurableAuthorityBusy(
+                    "production delivery authority endpoint must use HTTPS"
+                )
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "run_id": required["run_id"],
+            "namespace_id": required["namespace_id"],
+            "path_key": required["path_key"],
+            "execution_profile": profile,
+            "pause_binding_sha256": required["pause_binding_sha256"],
+            "progress_digest": required["progress_digest"],
+            "approval_digest": required["approval_digest"],
+            "attempt_id": required["attempt_id"],
+            "operation": required["operation"],
+            "delivery_sequence": record.delivery_sequence,
+        }
+        request_digest = self._remote_request_digest(payload)
+        body = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            if self._remote_transport is not None:
+                response_bytes = self._remote_transport(url, headers, body)
+            else:
+                request = Request(url, data=body, headers=headers, method="POST")
+                with urlopen(request, timeout=10) as response:  # nosec B310 - HTTPS above
+                    if not 200 <= response.status < 300:
+                        raise DurableAuthorityBusy("remote delivery authority refused")
+                    response_bytes = response.read(
+                        MAX_REMOTE_AUTHORITY_RESPONSE_BYTES + 1
+                    )
+                    if len(response_bytes) > MAX_REMOTE_AUTHORITY_RESPONSE_BYTES:
+                        raise DurableAuthorityBusy(
+                            "remote delivery authority response is too large"
+                        )
+        except DurableAuthorityBusy:
+            raise
+        except (HTTPError, URLError, OSError, TimeoutError) as exc:
+            raise DurableAuthorityBusy(
+                "remote delivery authority is unavailable or refused the permit"
+            ) from exc
+        try:
+            response = json.loads(response_bytes.decode("utf-8"))
+        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DurableAuthorityBusy(
+                "remote delivery authority returned invalid JSON"
+            ) from exc
+        expected_keys = {
+            "schema_version",
+            "status",
+            "authority_id",
+            "permit_id",
+            "request_sha256",
+            "delivery_sequence",
+            "issued_at",
+        }
+        if not isinstance(response, dict) or set(response) != expected_keys:
+            raise DurableAuthorityBusy(
+                "remote delivery authority response has invalid schema"
+            )
+        if not (
+            response["schema_version"] == 1
+            and type(response["schema_version"]) is int
+            and response["status"] == "issued"
+            and all(
+                isinstance(response[name], str) and response[name]
+                for name in ("authority_id", "permit_id", "request_sha256", "issued_at")
+            )
+            and type(response["delivery_sequence"]) is int
+            and response["delivery_sequence"] == record.delivery_sequence
+            and response["request_sha256"] == request_digest
+        ):
+            raise DurableAuthorityBusy(
+                "remote delivery authority response does not match request"
+            )
+
     def before_delivery(
         self,
         manifest: Any,
@@ -1387,6 +1540,7 @@ class DurableAuthority:
                 raise DurableAuthorityBusy(
                     "durable state changed before the delivery fence"
                 )
+            self._require_remote_delivery_permit(manifest, record)
             self._consume_delivery_fence(record, manifest)
             self._update(
                 connection,

@@ -7,15 +7,18 @@ restore of local evidence must therefore never restore permission to continue.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from openadapt_flow.ir import ActionKind, RunReport, Step, StepResult, Workflow
+from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 from openadapt_flow.runtime.durable.approval import (
     StateDiverged,
     approval_pause_digest,
@@ -28,6 +31,8 @@ from openadapt_flow.runtime.durable.attended import (
 )
 from openadapt_flow.runtime.durable.authority import (
     AUTHORITY_DB_ENV,
+    REMOTE_AUTHORITY_TOKEN_ENV,
+    REMOTE_AUTHORITY_URL_ENV,
     DurableAuthority,
     DurableAuthorityBusy,
 )
@@ -51,6 +56,8 @@ def _isolated_authority(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 def _fresh_run(
     tmp_path: Path,
+    *,
+    execution_profile: Literal["demo", "standard", "regulated"] | None = None,
 ) -> tuple[
     Path,
     CheckpointStore,
@@ -71,6 +78,16 @@ def _fresh_run(
         ],
     ).save(bundle_dir)
     store = CheckpointStore(run_dir)
+    authorization = (
+        GovernedRunAuthorization(
+            bundle_content_digest="a" * 64,
+            runtime_inputs_digest="b" * 64,
+            admitted_policy_name="test",
+            execution_profile=execution_profile,
+        )
+        if execution_profile is not None
+        else None
+    )
     manifest = RunManifest(
         run_id="run-v13-authority",
         namespace_id="namespace-v13-authority",
@@ -78,6 +95,7 @@ def _fresh_run(
         workflow_name="authority-contract",
         bundle_dir=str(bundle_dir.resolve()),
         params={"case": "A-100"},
+        governed_authorization=authorization,
     )
     store.write_fresh_manifest(manifest)
     authority = DurableAuthority(run_dir, store)
@@ -139,6 +157,306 @@ def _acquire(
 
 def _snapshot(run_dir: Path, target: Path) -> None:
     shutil.copytree(run_dir, target)
+
+
+def _remote_ready_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: object
+) -> tuple[RunManifest, DurableAuthority, str]:
+    _run_dir, store, manifest, _authority = _fresh_run(
+        tmp_path, execution_profile="standard"
+    )
+    pending = _pause(store, manifest, DurableAuthority(store.run_dir, store))
+    authority = DurableAuthority(store.run_dir, store, remote_transport=transport)  # type: ignore[arg-type]
+    owner = _acquire(
+        authority,
+        manifest,
+        pending,
+        attempt="remote-attempt",
+        now=datetime.now(timezone.utc),
+    )
+    authority.bind_approval(
+        manifest,
+        attempt_id="remote-attempt",
+        owner_nonce_sha256=owner,
+        approval_digest="approval",
+    )
+    monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
+    monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
+    return manifest, authority, owner
+
+
+def test_demo_delivery_stays_local_without_remote_configuration(tmp_path: Path) -> None:
+    _run_dir, store, manifest, authority = _fresh_run(tmp_path)
+    pending = _pause(store, manifest, authority)
+    owner = _acquire(
+        authority, manifest, pending, attempt="demo", now=datetime.now(timezone.utc)
+    )
+    authority.before_delivery(manifest, attempt_id="demo", owner_nonce_sha256=owner)
+
+
+def test_production_delivery_requires_and_validates_remote_permit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def transport(_url: str, headers: dict[str, str], body: bytes) -> bytes:
+        request = json.loads(body)
+        seen.update(headers=headers, request=request)
+        response = {
+            "schema_version": 1,
+            "status": "issued",
+            "authority_id": "authority-1",
+            "permit_id": "permit-1",
+            "request_sha256": hashlib.sha256(body).hexdigest(),
+            "delivery_sequence": request["delivery_sequence"],
+            "issued_at": "2026-07-29T00:00:00+00:00",
+        }
+        return json.dumps(response).encode()
+
+    manifest, authority, owner = _remote_ready_authority(
+        tmp_path, monkeypatch, transport
+    )
+    authority.before_delivery(
+        manifest, attempt_id="remote-attempt", owner_nonce_sha256=owner
+    )
+    assert seen["headers"] == {
+        "Authorization": "Bearer secret-token",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    assert seen["request"] and seen["request"]["delivery_sequence"] == 0  # type: ignore[index]
+
+
+def test_production_delivery_requires_remote_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = False
+
+    def transport(_url: str, _headers: dict[str, str], _body: bytes) -> bytes:
+        nonlocal called
+        called = True
+        return b"{}"
+
+    manifest, authority, owner = _remote_ready_authority(
+        tmp_path, monkeypatch, transport
+    )
+    monkeypatch.delenv(REMOTE_AUTHORITY_URL_ENV)
+    with pytest.raises(DurableAuthorityBusy, match="requires configured remote"):
+        authority.before_delivery(
+            manifest, attempt_id="remote-attempt", owner_nonce_sha256=owner
+        )
+    assert not called
+    assert authority.validate(manifest).delivery_sequence == 0
+
+
+def test_production_delivery_rejects_insecure_remote_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, authority, owner = _remote_ready_authority(tmp_path, monkeypatch, None)
+    with pytest.raises(DurableAuthorityBusy, match="must use HTTPS"):
+        authority.before_delivery(
+            manifest,
+            attempt_id="remote-attempt",
+            owner_nonce_sha256=owner,
+        )
+    assert authority.validate(manifest).delivery_sequence == 0
+
+
+@pytest.mark.parametrize(
+    "fault", ["malformed", "timeout", "duplicate", "sequence", "digest"]
+)
+def test_production_remote_refusal_never_crosses_local_delivery_fence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    def transport(_url: str, _headers: dict[str, str], body: bytes) -> bytes:
+        if fault == "timeout":
+            raise TimeoutError("response lost after remote commit")
+        if fault == "malformed":
+            return b"{"
+        request = json.loads(body)
+        response = {
+            "schema_version": 1,
+            "status": "issued",
+            "authority_id": "authority-1",
+            "permit_id": "permit-1",
+            "request_sha256": hashlib.sha256(body).hexdigest(),
+            "delivery_sequence": request["delivery_sequence"],
+            "issued_at": "2026-07-29T00:00:00+00:00",
+        }
+        if fault == "duplicate":
+            raise OSError("409 duplicate delivery sequence")
+        if fault == "sequence":
+            response["delivery_sequence"] += 1
+        if fault == "digest":
+            response["request_sha256"] = "0" * 64
+        return json.dumps(response).encode()
+
+    manifest, authority, owner = _remote_ready_authority(
+        tmp_path, monkeypatch, transport
+    )
+    with pytest.raises(DurableAuthorityBusy):
+        authority.before_delivery(
+            manifest, attempt_id="remote-attempt", owner_nonce_sha256=owner
+        )
+    assert authority.validate(manifest).delivery_sequence == 0
+
+
+def test_remote_sequence_survives_complete_local_state_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    consumed: set[tuple[str, str, int]] = set()
+
+    def transport(_url: str, _headers: dict[str, str], body: bytes) -> bytes:
+        request = json.loads(body)
+        key = (
+            request["run_id"],
+            request["pause_binding_sha256"],
+            request["delivery_sequence"],
+        )
+        if key in consumed:
+            raise OSError("409 duplicate delivery sequence")
+        consumed.add(key)
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "status": "issued",
+                "authority_id": "authority-1",
+                "permit_id": f"permit-{len(consumed)}",
+                "request_sha256": hashlib.sha256(body).hexdigest(),
+                "delivery_sequence": request["delivery_sequence"],
+                "issued_at": "2026-07-29T00:00:00+00:00",
+            }
+        ).encode()
+
+    run_dir, store, manifest, _authority = _fresh_run(
+        tmp_path, execution_profile="standard"
+    )
+    authority = DurableAuthority(run_dir, store, remote_transport=transport)
+    pending = _pause(store, manifest, authority)
+    owner = _acquire(
+        authority,
+        manifest,
+        pending,
+        attempt="remote-restore",
+        now=datetime.now(timezone.utc),
+    )
+    authority.bind_approval(
+        manifest,
+        attempt_id="remote-restore",
+        owner_nonce_sha256=owner,
+        approval_digest="approval",
+    )
+    run_snapshot = tmp_path / "run-before-delivery"
+    db_snapshot = tmp_path / "authority-before-delivery.sqlite3"
+    _snapshot(run_dir, run_snapshot)
+    shutil.copy2(authority.db_path, db_snapshot)
+    monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
+    monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
+
+    authority.before_delivery(
+        manifest,
+        attempt_id="remote-restore",
+        owner_nonce_sha256=owner,
+    )
+
+    _restore(run_dir, run_snapshot)
+    shutil.copy2(db_snapshot, authority.db_path)
+    restarted_store = CheckpointStore(run_dir)
+    restarted_manifest = restarted_store.read_manifest()
+    assert restarted_manifest is not None
+    restarted = DurableAuthority(
+        run_dir,
+        restarted_store,
+        remote_transport=transport,
+    )
+    with pytest.raises(DurableAuthorityBusy, match="unavailable or refused"):
+        restarted.before_delivery(
+            restarted_manifest,
+            attempt_id="remote-restore",
+            owner_nonce_sha256=owner,
+        )
+    assert len(consumed) == 1
+    assert restarted.validate(restarted_manifest).delivery_sequence == 0
+
+
+def test_remote_sequence_spans_verified_progress_in_one_continuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected_sequence = 0
+    observed: list[tuple[int, str]] = []
+
+    def transport(_url: str, _headers: dict[str, str], body: bytes) -> bytes:
+        nonlocal expected_sequence
+        request = json.loads(body)
+        assert request["delivery_sequence"] == expected_sequence
+        observed.append((expected_sequence, request["progress_digest"]))
+        expected_sequence += 1
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "status": "issued",
+                "authority_id": "authority-1",
+                "permit_id": f"permit-{expected_sequence}",
+                "request_sha256": hashlib.sha256(body).hexdigest(),
+                "delivery_sequence": request["delivery_sequence"],
+                "issued_at": "2026-07-29T00:00:00+00:00",
+            }
+        ).encode()
+
+    run_dir, store, manifest, _authority = _fresh_run(
+        tmp_path, execution_profile="standard"
+    )
+    authority = DurableAuthority(run_dir, store, remote_transport=transport)
+    pending = _pause(store, manifest, authority)
+    owner = _acquire(
+        authority,
+        manifest,
+        pending,
+        attempt="remote-progress",
+        now=datetime.now(timezone.utc),
+    )
+    authority.bind_approval(
+        manifest,
+        attempt_id="remote-progress",
+        owner_nonce_sha256=owner,
+        approval_digest="approval",
+    )
+    monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
+    monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
+
+    authority.before_delivery(
+        manifest,
+        attempt_id="remote-progress",
+        owner_nonce_sha256=owner,
+    )
+    store.write_checkpoint(
+        RunCheckpoint(
+            run_id=manifest.run_id,
+            workflow_name=manifest.workflow_name,
+            bundle_version="sha256:bundle-v1",
+            step_index=0,
+            step_id="write-case",
+            intent="write the case",
+            next_step_index=1,
+            params=dict(manifest.params),
+            effect_verified=True,
+            postconditions_ok=True,
+        )
+    )
+    authority.acknowledge_progress(
+        manifest,
+        attempt_id="remote-progress",
+        owner_nonce_sha256=owner,
+        terminal_pause=False,
+    )
+    authority.before_delivery(
+        manifest,
+        attempt_id="remote-progress",
+        owner_nonce_sha256=owner,
+    )
+
+    assert [sequence for sequence, _digest in observed] == [0, 1]
+    assert observed[0][1] != observed[1][1]
 
 
 def _restore(run_dir: Path, snapshot: Path) -> None:

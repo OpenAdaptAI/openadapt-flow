@@ -25,6 +25,7 @@ human-reconciliation-task UI, and Cloud/runner propagation of the taxonomy.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -550,23 +551,22 @@ class DuplicateActuation(Exception):
 class IdempotencyLedger:
     """At-most-once ledger keyed by a caller-supplied idempotency key.
 
-    A SQLite store maps ``(namespace, key)`` to ``{run_id, reserved_at,
-    outcome}``. A run RESERVES its key in one ``BEGIN IMMEDIATE`` transaction
-    before any actuation. The database UNIQUE constraint makes two independent
-    runtime processes race on the reservation itself, not on separate
-    ``seen`` and ``reserve`` operations. The first committed owner is never
-    replaced.
+    An immutable claim file is the durable reservation authority for each
+    ``(namespace, key)``. Atomic exclusive creation makes independent runtime
+    processes race on one claim before any actuation. SQLite retains queryable
+    ``{run_id, reserved_at, outcome}`` data. A database rollback cannot remove
+    the separate claim and make a used key available again.
 
     Existing JSON projections are migrated once under an exclusive sibling
-    lock. The SQLite metadata binds the database to its exact canonical path
-    and namespace, so copying a ledger to a different path cannot silently
-    create a second reservation authority.
+    lock. Metadata and claims bind the ledger to its exact canonical path and
+    namespace, so copying only the database cannot create a second authority.
     """
 
-    _SCHEMA_VERSION = "openadapt.idempotency-ledger/v2"
+    _SCHEMA_VERSION = "openadapt.idempotency-ledger/v3"
     _DEFAULT_NAMESPACE = "openadapt-flow-runtime/v1"
     _SQLITE_HEADER = b"SQLite format 3\x00"
     _MIGRATION_WAIT_S = 10.0
+    _CLAIM_DIRECTORY_SUFFIX = ".claims"
 
     def __init__(
         self,
@@ -584,11 +584,15 @@ class IdempotencyLedger:
         self._records: dict[str, dict[str, Optional[str]]] = {}
         self._memory_lock = threading.RLock()
         if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._reject_symlink()
-            if self.path.exists() and not self._is_sqlite():
-                self._migrate_json_projection()
-            self._initialize_sqlite()
+            self._ensure_parent_directory()
+            self._assert_safe_path(self.path)
+            setup_lock = self._acquire_migration_lock()
+            try:
+                if self.path.exists() and not self._is_sqlite():
+                    self._migrate_json_projection()
+                self._initialize_sqlite()
+            finally:
+                self._release_migration_lock(setup_lock)
 
     def lookup(self, key: str) -> Optional[dict[str, Optional[str]]]:
         """Return the stored record for ``key``, or None when unseen."""
@@ -597,6 +601,7 @@ class IdempotencyLedger:
             with self._memory_lock:
                 record = self._records.get(key)
                 return dict(record) if record is not None else None
+        claim = self._read_claim(key)
         connection = self._connect()
         try:
             row = connection.execute(
@@ -610,12 +615,26 @@ class IdempotencyLedger:
         finally:
             connection.close()
         if row is None:
+            if claim is not None:
+                raise RuntimeError(
+                    "idempotency ledger claim/database ownership mismatch; "
+                    "refusing to treat a reserved key as unseen"
+                )
             return None
-        return {
+        record = {
             "run_id": str(row[0]),
             "reserved_at": str(row[1]),
             "outcome": str(row[2]) if row[2] is not None else None,
         }
+        if claim is None or (
+            claim["run_id"] != record["run_id"]
+            or claim["reserved_at"] != record["reserved_at"]
+        ):
+            raise RuntimeError(
+                "idempotency ledger claim/database ownership mismatch; "
+                "refusing to trust the reservation"
+            )
+        return record
 
     def seen(self, key: str) -> bool:
         return self.lookup(key) is not None
@@ -623,6 +642,8 @@ class IdempotencyLedger:
     def reserve(self, key: str, *, run_id: str) -> None:
         """Reserve ``key`` before actuation. Raise if already reserved."""
 
+        if not run_id:
+            raise ValueError("idempotency ledger run_id must not be empty")
         reserved_at = datetime.now(timezone.utc).isoformat()
         if self.path is None:
             with self._memory_lock:
@@ -635,6 +656,10 @@ class IdempotencyLedger:
                 }
             return
 
+        # The durable claim is the at-most-once authority. It is intentionally
+        # written before SQLite: a crash after this point can cause a false
+        # duplicate, but can never permit a duplicate consequential action.
+        self._create_claim(key, run_id=run_id, reserved_at=reserved_at)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -657,39 +682,75 @@ class IdempotencyLedger:
                     (self.namespace, key),
                 ).fetchone()
                 connection.rollback()
-                self._raise_duplicate(key, str(row[0]) if row is not None else None)
+                if row is None or str(row[0]) != run_id:
+                    raise RuntimeError(
+                        "idempotency ledger claim/database ownership mismatch; "
+                        "refusing to actuate"
+                    )
+                self._raise_duplicate(key, run_id)
             connection.commit()
         finally:
             connection.close()
 
-    def record_outcome(self, key: str, outcome: Optional[str]) -> None:
+    def record_outcome(self, key: str, outcome: Optional[str], *, run_id: str) -> None:
         """Record the terminal outcome for a previously reserved ``key``."""
 
+        if not run_id:
+            raise ValueError("idempotency ledger run_id must not be empty")
         if self.path is None:
             with self._memory_lock:
                 record = self._records.get(key)
-                if record is not None:
-                    record["outcome"] = outcome
+                if record is None:
+                    raise RuntimeError(
+                        "idempotency ledger outcome has no reservation; "
+                        "refusing to alter transaction state"
+                    )
+                if record["run_id"] != run_id:
+                    raise RuntimeError(
+                        "idempotency ledger outcome owner mismatch; "
+                        "refusing to alter transaction state"
+                    )
+                record["outcome"] = outcome
             return
 
+        self._require_claim_owner(key, run_id=run_id)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE reservations
                    SET outcome = ?
-                 WHERE namespace = ? AND reservation_key = ?
+                 WHERE namespace = ? AND reservation_key = ? AND run_id = ?
                 """,
-                (outcome, self.namespace, key),
+                (outcome, self.namespace, key, run_id),
             )
+            if cursor.rowcount != 1:
+                row = connection.execute(
+                    """
+                    SELECT run_id
+                      FROM reservations
+                     WHERE namespace = ? AND reservation_key = ?
+                    """,
+                    (self.namespace, key),
+                ).fetchone()
+                connection.rollback()
+                if row is None:
+                    raise RuntimeError(
+                        "idempotency ledger outcome has no reservation; "
+                        "refusing to alter transaction state"
+                    )
+                raise RuntimeError(
+                    "idempotency ledger outcome owner mismatch; "
+                    "refusing to alter transaction state"
+                )
             connection.commit()
         finally:
             connection.close()
 
     def _connect(self) -> sqlite3.Connection:
         assert self.path is not None
-        self._reject_symlink()
+        self._assert_safe_path(self.path)
         connection = sqlite3.connect(
             self.path,
             timeout=10.0,
@@ -706,6 +767,7 @@ class IdempotencyLedger:
 
     def _initialize_sqlite(self) -> None:
         assert self.path is not None
+        self._assert_safe_path(self.path)
         connection = sqlite3.connect(
             self.path,
             timeout=10.0,
@@ -792,119 +854,343 @@ class IdempotencyLedger:
                 "reservation authority"
             )
 
-    def _reject_symlink(self) -> None:
+    def _ensure_parent_directory(self) -> None:
+        """Create the ledger parent only after link checks.
+
+        We manage the SQLite file, migration lock, and claim files below this
+        parent. Every existing ancestor must be a real directory before a
+        managed write can occur. The checks are repeated for each managed
+        derivative path because a caller may replace one between operations.
+        """
+
         assert self.path is not None
-        if self.path.is_symlink():
-            raise RuntimeError("idempotency ledger path must not be a symlink")
+        self._assert_existing_ancestors_not_symlinks(self.path.parent)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._assert_existing_ancestors_not_symlinks(self.path.parent)
+
+    @staticmethod
+    def _assert_existing_ancestors_not_symlinks(path: Path) -> None:
+        """Reject every existing symlink from the filesystem anchor onward."""
+
+        absolute = path.absolute()
+        current = Path(absolute.anchor)
+        for component in absolute.parts[1:]:
+            current /= component
+            if current.is_symlink():
+                raise RuntimeError(
+                    "idempotency ledger managed path must not traverse a symlink"
+                )
+            if not current.exists():
+                # A descendant cannot exist when its parent does not exist.
+                break
+
+    def _assert_safe_path(self, path: Path) -> None:
+        """Reject a link target and every existing ancestor before I/O."""
+
+        self._assert_existing_ancestors_not_symlinks(path.parent)
+        if path.is_symlink():
+            raise RuntimeError("idempotency ledger managed path must not be a symlink")
+
+    @property
+    def _claims_directory(self) -> Path:
+        assert self.path is not None
+        return self.path.with_name(f".{self.path.name}{self._CLAIM_DIRECTORY_SUFFIX}")
+
+    @property
+    def _migration_lock_path(self) -> Path:
+        assert self.path is not None
+        return self.path.with_name(f"{self.path.name}.migration.lock")
+
+    def _claim_path(self, key: str) -> Path:
+        digest = hashlib.sha256(
+            self.namespace.encode("utf-8") + b"\0" + key.encode("utf-8")
+        ).hexdigest()
+        return self._claims_directory / f"{digest}.claim"
+
+    def _claim_payload(self, key: str, *, run_id: str, reserved_at: str) -> bytes:
+        return (
+            json.dumps(
+                {
+                    "namespace": self.namespace,
+                    "owner_path": self._owner_path,
+                    "reservation_key_sha256": hashlib.sha256(
+                        key.encode("utf-8")
+                    ).hexdigest(),
+                    "reserved_at": reserved_at,
+                    "run_id": run_id,
+                    "schema_version": self._SCHEMA_VERSION,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+    def _ensure_claims_directory(self) -> None:
+        directory = self._claims_directory
+        self._assert_safe_path(directory)
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        self._assert_safe_path(directory)
+        if not directory.is_dir():
+            raise RuntimeError("idempotency ledger claim path is not a directory")
+        self._fsync_directory(directory.parent)
+
+    def _read_claim(self, key: str) -> Optional[dict[str, str]]:
+        claim_path = self._claim_path(key)
+        self._assert_safe_path(self._claims_directory)
+        self._assert_safe_path(claim_path)
+        if not claim_path.exists():
+            return None
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(claim_path, flags)
+        except OSError as error:
+            raise RuntimeError(
+                "idempotency ledger claim cannot be read safely; refusing to actuate"
+            ) from error
+        try:
+            raw = os.read(descriptor, 64 * 1024)
+        finally:
+            os.close(descriptor)
+        try:
+            loaded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                "idempotency ledger claim is invalid; refusing to actuate"
+            ) from error
+        required = {
+            "namespace": self.namespace,
+            "owner_path": self._owner_path,
+            "reservation_key_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest(),
+            "schema_version": self._SCHEMA_VERSION,
+        }
+        if (
+            not isinstance(loaded, dict)
+            or any(
+                loaded.get(field) != expected for field, expected in required.items()
+            )
+            or not isinstance(loaded.get("run_id"), str)
+            or not isinstance(loaded.get("reserved_at"), str)
+        ):
+            raise RuntimeError(
+                "idempotency ledger claim ownership mismatch; refusing to actuate"
+            )
+        return {
+            field: str(loaded[field]) for field in (*required, "run_id", "reserved_at")
+        }
+
+    def _create_claim(self, key: str, *, run_id: str, reserved_at: str) -> None:
+        self._ensure_claims_directory()
+        claim_path = self._claim_path(key)
+        self._assert_safe_path(claim_path)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(claim_path, flags, 0o600)
+        except FileExistsError:
+            claim = self._read_claim(key)
+            self._raise_duplicate(key, None if claim is None else claim["run_id"])
+        except OSError as error:
+            raise RuntimeError(
+                "idempotency ledger claim cannot be created safely; refusing to actuate"
+            ) from error
+        try:
+            payload = self._claim_payload(key, run_id=run_id, reserved_at=reserved_at)
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        except BaseException:
+            # A partially created claim is deliberately retained. Deleting it
+            # could allow a second process to re-actuate after an uncertain
+            # crash. Future runs fail closed on the invalid claim.
+            raise
+        finally:
+            os.close(descriptor)
+        self._fsync_directory(self._claims_directory)
+
+    def _require_claim_owner(self, key: str, *, run_id: str) -> None:
+        claim = self._read_claim(key)
+        if claim is None:
+            raise RuntimeError(
+                "idempotency ledger outcome has no reservation or durable claim; "
+                "refusing to alter transaction state"
+            )
+        if claim["run_id"] != run_id:
+            raise RuntimeError(
+                "idempotency ledger outcome owner mismatch; "
+                "refusing to alter transaction state"
+            )
 
     def _is_sqlite(self) -> bool:
         assert self.path is not None
+        self._assert_safe_path(self.path)
         with self.path.open("rb") as handle:
             return handle.read(len(self._SQLITE_HEADER)) == self._SQLITE_HEADER
 
     def _migrate_json_projection(self) -> None:
-        """Replace one legacy JSON projection with a path-bound SQLite store."""
+        """Replace one legacy JSON projection while the setup lock is held."""
 
         assert self.path is not None
-        lock_path = self.path.with_name(f"{self.path.name}.migration.lock")
-        deadline = time.monotonic() + self._MIGRATION_WAIT_S
-        lock_fd: Optional[int] = None
-        while lock_fd is None:
-            try:
-                lock_fd = os.open(
-                    lock_path,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                    0o600,
+        if self._is_sqlite():
+            return
+        self._assert_safe_path(self.path)
+        loaded = json.loads(self.path.read_text(encoding="utf-8"))
+        records = self._validated_legacy_records(loaded)
+        # Claims are intentionally created before the SQLite replacement. A
+        # crash in this interval leaves a safe duplicate refusal. The next
+        # migration validates and reuses the same immutable claims.
+        for key, record in records.items():
+            claim = self._read_claim(key)
+            if claim is None:
+                self._create_claim(
+                    key,
+                    run_id=str(record["run_id"]),
+                    reserved_at=str(record["reserved_at"]),
                 )
-            except FileExistsError:
-                if self.path.exists() and self._is_sqlite():
-                    return
+            elif (
+                claim["run_id"] != record["run_id"]
+                or claim["reserved_at"] != record["reserved_at"]
+            ):
+                raise RuntimeError(
+                    "idempotency ledger claim/legacy ownership mismatch; "
+                    "refusing to migrate"
+                )
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.",
+            suffix=".sqlite.tmp",
+            dir=str(self.path.parent),
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
+        try:
+            connection = sqlite3.connect(temporary, isolation_level=None)
+            try:
+                connection.execute("PRAGMA journal_mode = DELETE")
+                connection.execute("PRAGMA synchronous = FULL")
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    CREATE TABLE ledger_metadata(
+                        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                        schema_version TEXT NOT NULL,
+                        namespace TEXT NOT NULL,
+                        owner_path TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE reservations(
+                        namespace TEXT NOT NULL,
+                        reservation_key TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        reserved_at TEXT NOT NULL,
+                        outcome TEXT,
+                        PRIMARY KEY(namespace, reservation_key)
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO ledger_metadata(
+                        singleton, schema_version, namespace, owner_path
+                    ) VALUES (1, ?, ?, ?)
+                    """,
+                    (self._SCHEMA_VERSION, self.namespace, self._owner_path),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO reservations(
+                        namespace, reservation_key, run_id, reserved_at, outcome
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            self.namespace,
+                            key,
+                            record["run_id"],
+                            record["reserved_at"],
+                            record["outcome"],
+                        )
+                        for key, record in records.items()
+                    ],
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+            self._assert_safe_path(self.path)
+            os.replace(temporary, self.path)
+            self._fsync_directory(self.path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _acquire_migration_lock(self) -> int:
+        """Take a crash-safe migration lock without trusting a stale file.
+
+        POSIX ``flock`` ownership is released by the kernel when a process
+        dies. The lock file can therefore remain after a crash without
+        granting a second migration authority. Platforms without ``fcntl``
+        use an exclusive create lock and fail closed when it remains present.
+        """
+
+        lock_path = self._migration_lock_path
+        self._assert_safe_path(lock_path)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(lock_path, flags, 0o600)
+        deadline = time.monotonic() + self._MIGRATION_WAIT_S
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    if os.fstat(descriptor).st_size == 0:
+                        os.write(descriptor, b"\0")
+                        os.fsync(descriptor)
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(  # type: ignore[attr-defined]
+                        descriptor,
+                        msvcrt.LK_NBLCK,  # type: ignore[attr-defined]
+                        1,
+                    )
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return descriptor
+            except (BlockingIOError, OSError):
                 if time.monotonic() >= deadline:
+                    os.close(descriptor)
                     raise RuntimeError(
-                        "idempotency ledger migration is locked; refusing to "
+                        "idempotency ledger migration is active; refusing to "
                         "treat the legacy projection as empty"
                     )
                 time.sleep(0.02)
-        try:
-            os.write(lock_fd, f"{os.getpid()}\n".encode("ascii"))
-            os.fsync(lock_fd)
-            if self._is_sqlite():
-                return
-            loaded = json.loads(self.path.read_text(encoding="utf-8"))
-            records = self._validated_legacy_records(loaded)
-            fd, temporary_name = tempfile.mkstemp(
-                prefix=f".{self.path.name}.",
-                suffix=".sqlite.tmp",
-                dir=str(self.path.parent),
+
+    @staticmethod
+    def _release_migration_lock(descriptor: int) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(  # type: ignore[attr-defined]
+                descriptor,
+                msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                1,
             )
-            os.close(fd)
-            temporary = Path(temporary_name)
-            try:
-                connection = sqlite3.connect(temporary, isolation_level=None)
-                try:
-                    connection.execute("PRAGMA journal_mode = DELETE")
-                    connection.execute("PRAGMA synchronous = FULL")
-                    connection.execute("BEGIN IMMEDIATE")
-                    connection.execute(
-                        """
-                        CREATE TABLE ledger_metadata(
-                            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                            schema_version TEXT NOT NULL,
-                            namespace TEXT NOT NULL,
-                            owner_path TEXT NOT NULL
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        CREATE TABLE reservations(
-                            namespace TEXT NOT NULL,
-                            reservation_key TEXT NOT NULL,
-                            run_id TEXT NOT NULL,
-                            reserved_at TEXT NOT NULL,
-                            outcome TEXT,
-                            PRIMARY KEY(namespace, reservation_key)
-                        )
-                        """
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO ledger_metadata(
-                            singleton, schema_version, namespace, owner_path
-                        ) VALUES (1, ?, ?, ?)
-                        """,
-                        (self._SCHEMA_VERSION, self.namespace, self._owner_path),
-                    )
-                    connection.executemany(
-                        """
-                        INSERT INTO reservations(
-                            namespace, reservation_key, run_id, reserved_at, outcome
-                        ) VALUES (?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                self.namespace,
-                                key,
-                                record["run_id"],
-                                record["reserved_at"],
-                                record["outcome"],
-                            )
-                            for key, record in records.items()
-                        ],
-                    )
-                    connection.commit()
-                finally:
-                    connection.close()
-                with temporary.open("rb") as handle:
-                    os.fsync(handle.fileno())
-                os.replace(temporary, self.path)
-                self._fsync_directory(self.path.parent)
-            finally:
-                temporary.unlink(missing_ok=True)
-        finally:
-            os.close(lock_fd)
-            lock_path.unlink(missing_ok=True)
-            self._fsync_directory(self.path.parent)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
     @staticmethod
     def _validated_legacy_records(

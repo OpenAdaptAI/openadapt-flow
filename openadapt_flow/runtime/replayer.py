@@ -1726,7 +1726,9 @@ class Replayer:
             and not report.idempotent_replay
         ):
             self.idempotency_ledger.record_outcome(
-                report.idempotency_key, report.transaction_outcome
+                report.idempotency_key,
+                report.transaction_outcome,
+                run_id=self._run_id,
             )
 
     @staticmethod
@@ -6262,19 +6264,44 @@ class Replayer:
 
         from openadapt_flow.runtime.actuators import ActuationStatus, ApiHaltKind
 
-        if outcome.status == ActuationStatus.UNAVAILABLE:
+        outcome_status = getattr(outcome, "status", None)
+        outcome_reason = getattr(outcome, "reason", "")
+        if not isinstance(outcome_reason, str):
+            outcome_reason = f"invalid reason type {type(outcome_reason).__name__}"
+        if not isinstance(outcome_status, ActuationStatus):
+            result.actuation = "api"
+            result.effect_results.append(
+                "[api] actuator returned an invalid result after delivery may "
+                f"have begun ({type(outcome).__name__}); treating it as a "
+                "protocol error that cannot resolve to success"
+            )
+            return self._verify_uncertain_api_delivery(
+                step,
+                result,
+                workflow=workflow,
+                step_index=step_index,
+                bundle_dir=bundle_dir,
+                start_state=start_state,
+                before=before,
+                effects=effects,
+                effect_verifier=effect_verifier,
+                cause_type="ApiActuatorProtocolError",
+                allow_contract_resolution=False,
+            )
+
+        if outcome_status is ActuationStatus.UNAVAILABLE:
             # The request was NEVER sent -- nothing was written. Remove the
             # unused API-path contracts before applying the binding's exact
             # unavailability policy. A GUI fallback result must describe only
             # the path responsible for delivery, never both alternatives.
             result.delivery_attempted = False
             del result.effect_contract_hashes[api_hash_start:]
-            result.effect_results.append(f"[api] {outcome.reason}")
+            result.effect_results.append(f"[api] {outcome_reason}")
             if binding.on_unavailable == "halt":
                 self._set_api_unavailable_refusal(
                     step,
                     result,
-                    reason=outcome.reason,
+                    reason=outcome_reason,
                 )
                 return True
             return False
@@ -6283,8 +6310,16 @@ class Replayer:
         # NEVER also GUI-written (the no-double-write contract).
         result.actuation = "api"
 
-        if outcome.status == ActuationStatus.HALT:
-            result.effect_results.append(f"[api] {outcome.reason}")
+        if outcome_status is ActuationStatus.HALT:
+            result.effect_results.append(f"[api] {outcome_reason}")
+            halt_kind = getattr(outcome, "halt_kind", None)
+            typed_halt = isinstance(halt_kind, ApiHaltKind)
+            if not typed_halt:
+                result.effect_results.append(
+                    "[api] actuator returned an untyped HALT result; treating "
+                    "the delivery as a protocol error that cannot resolve to "
+                    "success"
+                )
             return self._verify_uncertain_api_delivery(
                 step,
                 result,
@@ -6296,12 +6331,16 @@ class Replayer:
                 effects=effects,
                 effect_verifier=effect_verifier,
                 cause_type=(
-                    "ApiResponseRejected"
-                    if outcome.halt_kind is ApiHaltKind.RESPONSE_REJECTED
-                    else "ApiDeliveryUncertain"
+                    "ApiActuatorProtocolError"
+                    if not typed_halt
+                    else (
+                        "ApiResponseRejected"
+                        if halt_kind is ApiHaltKind.RESPONSE_REJECTED
+                        else "ApiDeliveryUncertain"
+                    )
                 ),
                 allow_contract_resolution=(
-                    outcome.halt_kind is ApiHaltKind.DELIVERY_UNCERTAIN
+                    typed_halt and halt_kind is ApiHaltKind.DELIVERY_UNCERTAIN
                 ),
             )
 
@@ -6309,7 +6348,7 @@ class Replayer:
         # the same EffectVerifier that gates a GUI write. A non-CONFIRMED
         # verdict HALTs. The GUI resolve/act (and screen postconditions) are
         # SKIPPED -- the record, not the screen, is the oracle for an API write.
-        result.effect_results.append(f"[api] actuated {outcome.reason}")
+        result.effect_results.append(f"[api] actuated {outcome_reason}")
         self._emit_control_overlay_phase(
             "verifying",
             current_step=overlay_current,

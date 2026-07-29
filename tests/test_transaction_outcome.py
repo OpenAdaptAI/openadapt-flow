@@ -886,6 +886,29 @@ class _RaisingPathActuator:
         raise RuntimeError("actuator failed")
 
 
+class _LegacyUntypedHaltActuator:
+    """A pre-halt-kind deployment actuator that may have sent the request."""
+
+    class Result:
+        status = ActuationStatus.HALT
+        reason = "legacy untyped halt"
+
+    def actuate(self, binding, params):
+        del binding, params
+        return self.Result()
+
+
+class _MalformedResultActuator:
+    """A deployment actuator that returned no typed status after its call."""
+
+    class Result:
+        reason = "missing status"
+
+    def actuate(self, binding, params):
+        del binding, params
+        return self.Result()
+
+
 def _path_effect(name: str) -> Effect:
     return Effect(
         kind=EffectKind.RECORD_WRITTEN,
@@ -986,6 +1009,34 @@ def test_api_only_attempted_halt_never_falls_through_to_gui(tmp_path):
     assert result.delivery_attempted is True
     assert result.actuation == "api"
     assert result.safety_refusal_evidence is None
+    assert backend.actions == []
+
+
+@pytest.mark.parametrize(
+    "actuator",
+    [_LegacyUntypedHaltActuator(), _MalformedResultActuator()],
+)
+def test_invalid_api_result_collects_evidence_and_stays_halted(tmp_path, actuator):
+    workflow, _gui_effect, _api_effect = _api_or_gui_workflow(on_unavailable="halt")
+    backend = FakeBackend()
+
+    report = Replayer(
+        backend,
+        vision=FakeVision(),
+        effect_verifier=_PathVerifier(),
+        api_actuator=actuator,
+    ).run(workflow, bundle_dir=tmp_path / "bundle", run_dir=tmp_path / "run")
+
+    result = report.results[0]
+    assert report.success is False
+    assert result.delivery_attempted is True
+    assert result.delivery_uncertainty is not None
+    assert result.delivery_uncertainty.verification_attempted is True
+    assert result.delivery_uncertainty.resolved_by_contract is False
+    assert result.effect_verified is True
+    assert result.actuation == "api"
+    assert result.safety_halt is True
+    assert "protocol error" in " ".join(result.effect_results).lower()
     assert backend.actions == []
 
 
@@ -1143,6 +1194,66 @@ def test_two_ledger_instances_cannot_replace_the_first_owner(tmp_path):
     assert record == first.lookup("same-key")
     assert record is not None
     assert record["run_id"] == "first-owner"
+
+
+def test_claim_prevents_key_reuse_after_same_path_database_rollback(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    ledger = IdempotencyLedger(path)
+    before_reservation = tmp_path / "before-reservation.sqlite"
+    shutil.copyfile(path, before_reservation)
+
+    ledger.reserve("write-42", run_id="first-owner")
+    # Simulate an external SQLite rollback. The database no longer knows the
+    # key, but the immutable claim beside it must still prevent re-actuation.
+    shutil.copyfile(before_reservation, path)
+
+    rolled_back = IdempotencyLedger(path)
+    with pytest.raises(DuplicateActuation, match="first-owner"):
+        rolled_back.reserve("write-42", run_id="second-owner")
+    with pytest.raises(RuntimeError, match="claim/database ownership mismatch"):
+        rolled_back.lookup("write-42")
+
+
+def test_record_outcome_requires_the_reservation_owner(tmp_path):
+    ledger = IdempotencyLedger(tmp_path / "ledger.sqlite")
+    ledger.reserve("write-42", run_id="owner")
+
+    with pytest.raises(RuntimeError, match="owner mismatch"):
+        ledger.record_outcome("write-42", "VERIFIED", run_id="other")
+    with pytest.raises(RuntimeError, match="has no reservation"):
+        ledger.record_outcome("missing", "VERIFIED", run_id="owner")
+    assert ledger.lookup("write-42")["outcome"] is None
+
+    ledger.record_outcome("write-42", "VERIFIED", run_id="owner")
+    assert ledger.lookup("write-42")["outcome"] == "VERIFIED"
+
+
+def test_ledger_rejects_ancestor_and_managed_path_symlinks(tmp_path):
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="must not traverse a symlink"):
+        IdempotencyLedger(linked_parent / "ledger.sqlite")
+
+    path = tmp_path / "legacy.json"
+    path.write_text("{}", encoding="utf-8")
+    migration_lock = path.with_name(f"{path.name}.migration.lock")
+    migration_lock.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(RuntimeError, match="must not be a symlink"):
+        IdempotencyLedger(path)
+
+
+def test_stale_unlocked_migration_lock_recovers_safely(tmp_path):
+    path = tmp_path / "ledger.json"
+    path.write_text("{}", encoding="utf-8")
+    # Advisory locks release when a process dies. A leftover file must not
+    # force a caller to discard the legacy ledger or treat it as empty.
+    path.with_name(f"{path.name}.migration.lock").write_text("stale", encoding="utf-8")
+
+    ledger = IdempotencyLedger(path)
+    assert path.read_bytes().startswith(b"SQLite format 3\x00")
+    assert ledger.lookup("missing") is None
 
 
 def test_cross_process_reservation_has_one_durable_owner(tmp_path):

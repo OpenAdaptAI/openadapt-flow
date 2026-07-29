@@ -130,20 +130,50 @@ def _committed_transition_receipt_digest(
     """Return only the exact durable receipt bound to this attended pause."""
 
     store = CheckpointStore(run_dir, key=key)
-    program = store.last_program_checkpoint()
-    if (
-        program is not None
-        and program.attended_capability_digest == capability.digest
-        and program.attended_transition is not None
-    ):
-        return _digest(program.attended_transition)
-    checkpoint = store.last_checkpoint()
-    if (
-        checkpoint is not None
-        and checkpoint.attended_capability_digest == capability.digest
-    ):
-        return _digest(checkpoint)
-    return None
+    program = [
+        checkpoint
+        for checkpoint in store.program_checkpoints()
+        if checkpoint.attended_capability_digest == capability.digest
+        and checkpoint.attended_transition is not None
+    ]
+    linear = [
+        checkpoint
+        for checkpoint in store.checkpoints()
+        if checkpoint.attended_capability_digest == capability.digest
+    ]
+    if len(program) + len(linear) != 1:
+        return None
+    if program:
+        return _digest(program[0].attended_transition)
+    return _digest(linear[0])
+
+
+def _matches_reconciliation_checkpoint(
+    checkpoint: Any,
+    *,
+    capability: "AttendedPauseCapability",
+    request_digest: str,
+    delivery_state: Literal["delivered", "unknown"],
+    effect_contract_hashes: tuple[str, ...],
+) -> bool:
+    """Return whether one immutable checkpoint binds this reconciliation.
+
+    The reconciliation fields are duplicated from the independently verified
+    result into the committed checkpoint.  Requiring their exact values here
+    prevents a later ordinary checkpoint, or a different reconciliation for
+    the same pause, from being projected as this request's receipt.
+    """
+
+    return (
+        checkpoint.attended_capability_digest == capability.digest
+        and checkpoint.attended_reconciliation_request_digest == request_digest
+        and checkpoint.attended_reconciliation_expected_transition_digest
+        == capability.expected_transition_digest
+        and checkpoint.attended_reconciliation_delivery_state == delivery_state
+        and tuple(checkpoint.attended_reconciliation_effect_contract_hashes)
+        == effect_contract_hashes
+        and checkpoint.attended_reconciliation_at == capability.issued_at
+    )
 
 
 class AttendedActionExecutor(Protocol):
@@ -2627,6 +2657,15 @@ def execute_attended_action(
                 raise AttendedActionRefused(
                     "the executor did not return an outcome proven by durable state"
                 ) from exc
+        if (
+            result.status == "completed"
+            and result.report_success is True
+            and result.transition_receipt_digest is None
+        ):
+            raise AttendedActionRefused(
+                "a completed attended result requires an exact durable transition "
+                "receipt before it can enter the decision journal"
+            )
         decision = AttendedDecision(
             pause_id=capability.pause_id,
             capability_digest=capability.digest,
@@ -2988,9 +3027,7 @@ class BoundAttendedExecutor:
             raise AttendedActionRefused(
                 "positive non-delivery evidence cannot produce reconciliation"
             )
-        delivery_state = cast(
-            Literal["delivered", "unknown"], capability.delivery_state
-        )
+        delivery_state = capability.delivery_state
         store = CheckpointStore(run_dir, key=self.key)
         manifest = store.read_manifest()
         if manifest is None or manifest.run_id != capability.run_id:
@@ -3013,25 +3050,43 @@ class BoundAttendedExecutor:
             )
         checkpoint: Any
         if workflow.program is not None:
-            checkpoint = store.last_program_checkpoint()
+            program_candidates: list[ProgramCheckpoint] = [
+                item
+                for item in store.program_checkpoints()
+                if item.attended_transition is not None
+                and _matches_reconciliation_checkpoint(
+                    item,
+                    capability=capability,
+                    request_digest=request_digest,
+                    delivery_state=delivery_state,
+                    effect_contract_hashes=tuple(item.new_effect_keys),
+                )
+            ]
+            checkpoint = (
+                program_candidates[0] if len(program_candidates) == 1 else None
+            )
             durable_receipt = (
                 _digest(checkpoint.attended_transition)
-                if checkpoint is not None and checkpoint.attended_transition is not None
+                if checkpoint is not None
                 else None
             )
         else:
-            checkpoint = store.last_checkpoint()
+            linear_candidates: list[RunCheckpoint] = [
+                item
+                for item in store.checkpoints()
+                if _matches_reconciliation_checkpoint(
+                    item,
+                    capability=capability,
+                    request_digest=request_digest,
+                    delivery_state=delivery_state,
+                    effect_contract_hashes=tuple(item.effect_contract_hashes),
+                )
+            ]
+            checkpoint = linear_candidates[0] if len(linear_candidates) == 1 else None
             durable_receipt = _digest(checkpoint) if checkpoint is not None else None
         if (
             checkpoint is None
             or durable_receipt is None
-            or checkpoint.attended_capability_digest != capability.digest
-            or checkpoint.attended_reconciliation_request_digest != request_digest
-            or checkpoint.attended_reconciliation_expected_transition_digest
-            != capability.expected_transition_digest
-            or checkpoint.attended_reconciliation_delivery_state != delivery_state
-            or not checkpoint.attended_reconciliation_effect_contract_hashes
-            or checkpoint.attended_reconciliation_at != capability.issued_at
         ):
             raise AttendedActionRefused(
                 "the completed durable transition does not bind this reconciliation"
@@ -3788,9 +3843,7 @@ class BoundAttendedExecutor:
                 resumed_from=capability.step_id,
                 next_transition=capability.expected_next_transition,
             )
-        reconciliation_delivery_state = cast(
-            Literal["delivered", "unknown"], capability.delivery_state
-        )
+        reconciliation_delivery_state = capability.delivery_state
         program_context: Optional[
             tuple[PendingEscalation, State, dict[str, str], Optional[str]]
         ] = None

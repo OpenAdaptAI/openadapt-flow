@@ -70,6 +70,7 @@ from openadapt_flow.runtime.durable.attended import (
     AttendedActionRequest,
     AttendedActionStore,
     AttendedDecision,
+    AttendedExecutionResult,
     BoundAttendedExecutor,
     TransitionObservation,
     _digest,
@@ -2367,7 +2368,12 @@ def test_reconciliation_recovers_receipt_after_resume_commit(tmp_path, monkeypat
                         forbid_collateral_loss=False,
                     )
                 ],
-            )
+            ),
+            Step(
+                id="settle",
+                intent="wait for the saved record",
+                action=ActionKind.WAIT,
+            ),
         ],
     )
     _workflow, _bundle, run, store, capability = _paused(tmp_path, workflow=workflow)
@@ -2444,6 +2450,9 @@ def test_reconciliation_recovers_receipt_after_resume_commit(tmp_path, monkeypat
             ),
         )
     monkeypatch.setattr(AttendedActionStore, "write_reconciliation_receipt", original)
+    # Construct a new executor and checkpoint store to model a process that
+    # starts after the transition committed but before its local receipt did.
+    recovered_store = CheckpointStore(run)
     decision = execute_attended_action(
         run,
         request,
@@ -2460,9 +2469,201 @@ def test_reconciliation_recovers_receipt_after_resume_commit(tmp_path, monkeypat
     receipt = AttendedActionStore(run).read_reconciliation_receipt(capability.pause_id)
     assert calls == 2
     assert backend.actions == []
+    assert [checkpoint.step_id for checkpoint in recovered_store.checkpoints()] == [
+        "submit",
+        "settle",
+    ]
     assert decision.status == "completed"
     assert decision.transition_receipt_digest == receipt.transition_receipt_digest
-    assert decision.transition_receipt_digest == _digest(store.last_checkpoint())
+    assert decision.transition_receipt_digest == _digest(store.checkpoints()[0])
+
+
+def test_program_reconciliation_recovers_receipt_from_history_after_later_checkpoint(
+    tmp_path, monkeypatch
+):
+    """A fresh process selects the one matching program transition, not the last."""
+
+    effect = Effect(
+        kind=EffectKind.RECORD_WRITTEN,
+        match={"id": "row-1"},
+        forbid_collateral_loss=False,
+    )
+    workflow = Workflow(
+        name="program-reconcile-receipt-recovery",
+        program=ProgramGraph(
+            entry="human",
+            states={
+                "human": State(
+                    id="human",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="submit",
+                        intent="submit the reviewed record",
+                        action=ActionKind.KEY,
+                        key="ENTER",
+                        effects=[effect],
+                    ),
+                    transitions=[Transition(target="settle")],
+                ),
+                "settle": State(
+                    id="settle",
+                    kind=StateKind.ACTION,
+                    step=Step(
+                        id="settle",
+                        intent="wait for the saved record",
+                        action=ActionKind.WAIT,
+                    ),
+                    transitions=[Transition(target="done")],
+                ),
+                "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+            },
+        ),
+    )
+    _bundle, run, _initial, store, capability = _run_attended_program_to_pause(
+        tmp_path, workflow
+    )
+    manifest = store.read_manifest()
+    assert manifest is not None
+    _AUTHORITY_DIGESTS[str(run.resolve())] = DurableAuthority(run, store).validate(
+        manifest
+    ).progress_digest
+    uncertainty = ActionDeliveryUncertainty(
+        operation="key",
+        native=True,
+        observed_at="2026-07-29T00:00:01+00:00",
+        cause_type="TimeoutError",
+    )
+    pending = store.read_pending()
+    assert pending is not None
+    pending = pending.model_copy(
+        update={
+            "category": "delivery_uncertain",
+            "reason": "the submit action may already have been delivered",
+            "delivery_uncertainty": uncertainty,
+        }
+    )
+    store.write_pending(pending)
+    capability = issue_attended_capability(
+        run,
+        store=store,
+        pending=pending,
+        workflow=workflow,
+        result=StepResult(
+            step_id="submit",
+            intent="submit the reviewed record",
+            ok=False,
+            error="the submit action may already have been delivered",
+            delivery_attempted=True,
+            delivery_uncertainty=uncertainty,
+        ),
+    )
+    _sync_v2_authority(store)
+
+    class CurrentRecords:
+        substrate = "fake"
+
+        def capture_pre_state(self, context=None):
+            return EffectState(
+                substrate="fake", reachable=True, records=[{"id": "row-1"}]
+            )
+
+    backend = FakeBackend()
+    original = AttendedActionStore.write_reconciliation_receipt
+    calls = 0
+
+    def fail_after_resume(self, receipt):
+        nonlocal calls
+        calls += 1
+        raise OSError("receipt persistence interrupted after durable resume")
+
+    request = AttendedActionRequest(
+        capability_digest=capability.digest,
+        idempotency_key="program-reconcile-crash-after-resume-001",
+        action="reconcile",
+        disposition="reconciliation_requested",
+    )
+    monkeypatch.setattr(
+        AttendedActionStore, "write_reconciliation_receipt", fail_after_resume
+    )
+    with pytest.raises(OSError, match="interrupted after durable resume"):
+        execute_attended_action(
+            run,
+            request,
+            operator="staff",
+            executor=BoundAttendedExecutor(
+                lambda _manifest: Replayer(
+                    backend,
+                    vision=FakeVision(),
+                    effect_verifier=CurrentRecords(),
+                    poll_interval_s=0.0,
+                )
+            ),
+        )
+    monkeypatch.setattr(AttendedActionStore, "write_reconciliation_receipt", original)
+
+    recovered_store = CheckpointStore(run)
+    decision = execute_attended_action(
+        run,
+        request,
+        operator="staff",
+        executor=BoundAttendedExecutor(
+            lambda _manifest: Replayer(
+                backend,
+                vision=FakeVision(),
+                effect_verifier=CurrentRecords(),
+                poll_interval_s=0.0,
+            )
+        ),
+    )
+    receipt = AttendedActionStore(run).read_reconciliation_receipt(capability.pause_id)
+    checkpoints = recovered_store.program_checkpoints()
+    assert calls == 2
+    assert backend.actions == []
+    assert [checkpoint.verified_state_id for checkpoint in checkpoints] == [
+        "human",
+        "settle",
+    ]
+    assert decision.status == "completed"
+    assert decision.transition_receipt_digest == receipt.transition_receipt_digest
+    assert decision.transition_receipt_digest == _digest(checkpoints[0].attended_transition)
+
+
+def test_completed_executor_result_without_receipt_is_refused(tmp_path, monkeypatch):
+    """The public boundary never journals an unbound completed result."""
+
+    _workflow, _bundle, run, _store, capability = _paused(tmp_path)
+
+    class MissingReceiptExecutor:
+        def continue_run(self, _run_dir, _capability, _approval):
+            return AttendedExecutionResult(
+                status="completed",
+                message="unsafe custom result",
+                report_success=True,
+            )
+
+        def skip_run(self, _run_dir, _capability, _approval):
+            raise AssertionError("not used")
+
+        def reconcile_run(self, _run_dir, _capability, _approval, _request_digest):
+            raise AssertionError("not used")
+
+    from openadapt_flow.runtime.durable.continuation import ContinuationCoordinator
+
+    monkeypatch.setattr(
+        ContinuationCoordinator,
+        "attest_executor_outcome",
+        lambda *_args, **_kwargs: None,
+    )
+    with pytest.raises(AttendedActionRefused, match="exact durable transition receipt"):
+        execute_attended_action(
+            run,
+            _request(capability),
+            operator="staff",
+            executor=MissingReceiptExecutor(),
+        )
+    assert [
+        item.status for item in AttendedActionStore(run)._read_log().decisions
+    ] == ["prepared", "delivery_started"]
 
 
 def test_attended_skip_uses_canonical_qualified_risk(tmp_path, monkeypatch):

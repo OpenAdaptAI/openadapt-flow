@@ -2552,9 +2552,9 @@ def test_program_reconciliation_recovers_receipt_from_history_after_later_checkp
     )
     manifest = store.read_manifest()
     assert manifest is not None
-    _AUTHORITY_DIGESTS[str(run.resolve())] = DurableAuthority(run, store).validate(
-        manifest
-    ).progress_digest
+    _AUTHORITY_DIGESTS[str(run.resolve())] = (
+        DurableAuthority(run, store).validate(manifest).progress_digest
+    )
     uncertainty = ActionDeliveryUncertainty(
         operation="key",
         native=True,
@@ -2653,7 +2653,9 @@ def test_program_reconciliation_recovers_receipt_from_history_after_later_checkp
     ]
     assert decision.status == "completed"
     assert decision.transition_receipt_digest == receipt.transition_receipt_digest
-    assert decision.transition_receipt_digest == _digest(checkpoints[0].attended_transition)
+    assert decision.transition_receipt_digest == _digest(
+        checkpoints[0].attended_transition
+    )
 
 
 @pytest.mark.parametrize("report_success", [True, False, None])
@@ -2685,16 +2687,19 @@ def test_completed_executor_result_without_receipt_is_refused(
         "attest_executor_outcome",
         lambda *_args, **_kwargs: None,
     )
-    with pytest.raises(AttendedActionRefused, match="completed attended result requires"):
+    with pytest.raises(
+        AttendedActionRefused, match="completed attended result requires"
+    ):
         execute_attended_action(
             run,
             _request(capability),
             operator="staff",
             executor=MissingReceiptExecutor(),
         )
-    assert [
-        item.status for item in AttendedActionStore(run)._read_log().decisions
-    ] == ["prepared", "delivery_started"]
+    assert [item.status for item in AttendedActionStore(run)._read_log().decisions] == [
+        "prepared",
+        "delivery_started",
+    ]
 
 
 def test_attended_skip_uses_canonical_qualified_risk(tmp_path, monkeypatch):

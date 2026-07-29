@@ -3063,9 +3063,7 @@ class BoundAttendedExecutor:
                     effect_contract_hashes=tuple(item.new_effect_keys),
                 )
             ]
-            checkpoint = (
-                program_candidates[0] if len(program_candidates) == 1 else None
-            )
+            checkpoint = program_candidates[0] if len(program_candidates) == 1 else None
             durable_receipt = (
                 _digest(checkpoint.attended_transition)
                 if checkpoint is not None
@@ -3085,10 +3083,7 @@ class BoundAttendedExecutor:
             ]
             checkpoint = linear_candidates[0] if len(linear_candidates) == 1 else None
             durable_receipt = _digest(checkpoint) if checkpoint is not None else None
-        if (
-            checkpoint is None
-            or durable_receipt is None
-        ):
+        if checkpoint is None or durable_receipt is None:
             raise AttendedActionRefused(
                 "the completed durable transition does not bind this reconciliation"
             )

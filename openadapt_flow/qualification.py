@@ -4533,13 +4533,21 @@ def build_governed_authorization_template(
     certification = project.last_certification if project is not None else None
     manifest = workflow.manifest
     if project is None or certification is None or not certification.passed:
-        raise QualificationError("governed authorization template requires certification")
+        raise QualificationError(
+            "governed authorization template requires certification"
+        )
     if manifest is None or not manifest.content_digest:
-        raise QualificationError("governed authorization template requires a sealed bundle")
+        raise QualificationError(
+            "governed authorization template requires a sealed bundle"
+        )
     if certification.policy_contract_sha256 is None:
-        raise QualificationError("governed authorization template requires policy digest")
+        raise QualificationError(
+            "governed authorization template requires policy digest"
+        )
     if certification.case_evidence_contract_sha256 is None:
-        raise QualificationError("governed authorization template requires case evidence digest")
+        raise QualificationError(
+            "governed authorization template requires case evidence digest"
+        )
     from openadapt_flow.policy import Policy
 
     try:
@@ -4565,9 +4573,9 @@ def build_governed_authorization_template(
         },
     }
     identity_digest = hashlib.sha256(
-        json.dumps(identity_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-            "utf-8"
-        )
+        json.dumps(
+            identity_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
     ).hexdigest()
     parameters, parameter_digest = _authorization_parameter_contract(workflow)
     return GovernedAuthorizationTemplate.create(

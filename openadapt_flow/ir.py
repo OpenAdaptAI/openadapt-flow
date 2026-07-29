@@ -1298,9 +1298,7 @@ class GovernedAuthorizationTemplate(BaseModel):
     qualification_project_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
     qualification_environment_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
     qualification_report_sha256: str = Field(pattern="^[a-f0-9]{64}$")
-    qualification_case_evidence_contract_sha256: str = Field(
-        pattern="^[a-f0-9]{64}$"
-    )
+    qualification_case_evidence_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
     policy_name: str = Field(min_length=1, max_length=128)
     policy_contract_sha256: str = Field(pattern="^[a-f0-9]{64}$")
     execution_profile: Literal["standard", "regulated"]
@@ -1317,7 +1315,10 @@ class GovernedAuthorizationTemplate(BaseModel):
 
     def computed_sha256(self) -> str:
         raw = json.dumps(
-            self.canonical_payload(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            self.canonical_payload(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
         ).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()
 
@@ -1325,15 +1326,27 @@ class GovernedAuthorizationTemplate(BaseModel):
     def _exact_hash_and_order(self) -> "GovernedAuthorizationTemplate":
         if self.template_sha256 != self.computed_sha256():
             raise ValueError("governed authorization template hash does not match")
-        if self.required_identity_step_ids != tuple(sorted(self.required_identity_step_ids)):
-            raise ValueError("governed authorization template identity steps must be ordered")
-        if len(self.required_identity_step_ids) != len(set(self.required_identity_step_ids)):
-            raise ValueError("governed authorization template identity steps must be unique")
+        if self.required_identity_step_ids != tuple(
+            sorted(self.required_identity_step_ids)
+        ):
+            raise ValueError(
+                "governed authorization template identity steps must be ordered"
+            )
+        if len(self.required_identity_step_ids) != len(
+            set(self.required_identity_step_ids)
+        ):
+            raise ValueError(
+                "governed authorization template identity steps must be unique"
+            )
         parameter_names = tuple(item.name for item in self.parameters)
         if parameter_names != tuple(sorted(parameter_names)):
-            raise ValueError("governed authorization template parameters must be ordered")
+            raise ValueError(
+                "governed authorization template parameters must be ordered"
+            )
         if len(parameter_names) != len(set(parameter_names)):
-            raise ValueError("governed authorization template parameters must be unique")
+            raise ValueError(
+                "governed authorization template parameters must be unique"
+            )
         requirements = tuple(
             (item.step_id, item.actuation_path, item.effect_index)
             for item in self.qualified_effect_requirements
@@ -1350,7 +1363,10 @@ class GovernedAuthorizationTemplate(BaseModel):
 
         candidate = cls.model_construct(**values, template_sha256="0" * 64)
         return cls.model_validate(
-            {**candidate.canonical_payload(), "template_sha256": candidate.computed_sha256()}
+            {
+                **candidate.canonical_payload(),
+                "template_sha256": candidate.computed_sha256(),
+            }
         )
 
 
@@ -1417,14 +1433,12 @@ class BundleProvenance(BaseModel):
             "the bundle must be certified again before production use"
         ),
     )
-    governed_authorization_template: Optional["GovernedAuthorizationTemplate"] = (
-        Field(
-            default=None,
-            description=(
-                "Value-free, hash-bound production authorization template for this "
-                "exact certified bundle"
-            ),
-        )
+    governed_authorization_template: Optional["GovernedAuthorizationTemplate"] = Field(
+        default=None,
+        description=(
+            "Value-free, hash-bound production authorization template for this "
+            "exact certified bundle"
+        ),
     )
 
 

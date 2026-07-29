@@ -13,8 +13,9 @@ import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from openadapt_flow.runner.protocol import dispatch_binding_sha256
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -33,6 +34,11 @@ class ManagedDispatchBinding:
 
     __slots__ = ("run_id", "authorization", "binding_sha256")
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if hasattr(self, name):
+            raise AttributeError("managed dispatch binding is immutable")
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         factory: object,
@@ -43,6 +49,10 @@ class ManagedDispatchBinding:
     ) -> None:
         if factory is not _BINDING_FACTORY:
             raise ManagedDispatchEnvelopeError("managed dispatch binding is internal")
+        if binding_sha256 != dispatch_binding_sha256(run_id, authorization):
+            raise ManagedDispatchEnvelopeError(
+                "managed dispatch binding does not match its authorization"
+            )
         self.run_id = run_id
         self.authorization = authorization
         self.binding_sha256 = binding_sha256
@@ -63,6 +73,14 @@ class ManagedDispatchEnvelope(BaseModel):
     runtime_inputs_digest: str = Field(pattern="^[a-f0-9]{64}$")
     authorization: GovernedRunAuthorization
     dispatch_binding_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def _binding_commits_to_exact_dispatch(self) -> "ManagedDispatchEnvelope":
+        if self.dispatch_binding_sha256 != dispatch_binding_sha256(
+            self.run_id, self.authorization
+        ):
+            raise ValueError("managed dispatch binding does not match authorization")
+        return self
 
     def exact_authorization(self) -> GovernedRunAuthorization:
         if (

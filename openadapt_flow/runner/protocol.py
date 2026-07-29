@@ -15,9 +15,11 @@ re-validates it locally before any GUI is touched.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Union
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 
@@ -35,6 +37,25 @@ POLL_MAX_WAIT_S = 25
 
 class DispatchParseError(ValueError):
     """A dispatch payload could not be strictly parsed (contract drift)."""
+
+
+def dispatch_binding_sha256(
+    run_id: str, authorization: GovernedRunAuthorization
+) -> str:
+    """Commit to the exact Cloud run and governed authorization.
+
+    This is canonical JSON, not a bearer credential. Cloud and Flow use this
+    one function's field ordering and UTF-8 encoding contract.
+    """
+
+    payload = {
+        "run_id": run_id,
+        "authorization": authorization.model_dump(mode="json"),
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 class DispatchBundle(BaseModel):
@@ -94,6 +115,14 @@ class RunnerDispatchPayload(BaseModel):
     dispatch_binding_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     params: Union[DispatchParamsValues, DispatchParamsRef]
     expires_at: str
+
+    @model_validator(mode="after")
+    def _binding_commits_to_exact_dispatch(self) -> "RunnerDispatchPayload":
+        if self.dispatch_binding_sha256 != dispatch_binding_sha256(
+            self.run_id, self.authorization
+        ):
+            raise ValueError("dispatch binding does not match run authorization")
+        return self
 
 
 class LeasedDispatch(BaseModel):

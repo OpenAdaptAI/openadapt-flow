@@ -42,6 +42,7 @@ from openadapt_flow.runner.dispatch_envelope import (
 from openadapt_flow.runner.outbox import EvidenceOutbox
 from openadapt_flow.runner.protocol import (
     DispatchParseError,
+    dispatch_binding_sha256,
     parse_dispatch,
 )
 from openadapt_flow.runner.verify import Refusal, RefusalCode, verify_dispatch
@@ -136,7 +137,9 @@ def dispatch_payload(workflow: Workflow, **overrides) -> dict:
         },
         "deployment_profile_id": "default",
         "authorization": authorization.model_dump(mode="json"),
-        "dispatch_binding_sha256": "sha256:" + "d" * 64,
+        "dispatch_binding_sha256": dispatch_binding_sha256(
+            "018f6c0a-4cce-4f47-8d71-c3d63bf1c001", authorization
+        ),
         "params": {"values": dict(PARAMS)},
         "expires_at": "2099-01-01T00:00:00Z",
     }
@@ -237,7 +240,36 @@ class TestProtocol:
         assert parsed.job_kind == "governed_run"
         assert parsed.bundle.url == "mock://bundles/never-fetched"
         assert parsed.authorization.admitted_policy_name == "clinical-write"
-        assert parsed.dispatch_binding_sha256 == "sha256:" + "d" * 64
+        assert parsed.dispatch_binding_sha256 == dispatch_binding_sha256(
+            parsed.run_id, parsed.authorization
+        )
+
+    def test_dispatch_binding_known_vector(self):
+        authorization = GovernedRunAuthorization(
+            bundle_content_digest="a" * 64,
+            runtime_inputs_digest="b" * 64,
+            admitted_policy_name="test",
+            authorization_id="0123456789abcdef0123456789abcdef",
+            created_at="2026-07-29T00:00:00+00:00",
+        )
+        assert (
+            dispatch_binding_sha256(
+                "11111111-1111-4111-8111-111111111111", authorization
+            )
+            == "sha256:367411c4ff350c05d6dad465db3dd1f57e8d47d620d3c0f16b70adec0857047e"
+        )
+
+    def test_dispatch_binding_refuses_changed_run_or_authorization(self, sealed):
+        workflow, _ = sealed
+        payload = dispatch_payload(workflow)
+        changed_run = dict(payload, run_id="11111111-1111-4111-8111-111111111111")
+        with pytest.raises(DispatchParseError):
+            parse_dispatch(changed_run)
+        changed_auth = dict(payload)
+        changed_auth["authorization"] = dict(payload["authorization"])
+        changed_auth["authorization"]["admitted_policy_name"] = "different"
+        with pytest.raises(DispatchParseError):
+            parse_dispatch(changed_auth)
 
     @pytest.mark.parametrize("binding", [None, "not-a-digest"])
     def test_missing_or_malformed_dispatch_binding_refuses(self, sealed, binding):
@@ -996,6 +1028,34 @@ class TestCommandMapping:
         )
         assert not hasattr(envelope, "managed_binding")
 
+    def test_envelope_and_private_binding_refuse_mismatched_commitment(
+        self, sealed, config
+    ):
+        from openadapt_flow.runner.dispatch_envelope import (
+            _BINDING_FACTORY,
+            ManagedDispatchBinding,
+        )
+
+        workflow, _ = sealed
+        verdict = verified_or_refusal(workflow, config)
+        assert not isinstance(verdict, Refusal)
+        authorization = verdict.payload.authorization
+        with pytest.raises(ValueError, match="does not match authorization"):
+            ManagedDispatchEnvelope(
+                run_id=verdict.payload.run_id,
+                bundle_content_digest=authorization.bundle_content_digest,
+                runtime_inputs_digest=authorization.runtime_inputs_digest,
+                authorization=authorization,
+                dispatch_binding_sha256="sha256:" + "0" * 64,
+            )
+        with pytest.raises(ManagedDispatchEnvelopeError, match="does not match"):
+            ManagedDispatchBinding(
+                _BINDING_FACTORY,
+                run_id=verdict.payload.run_id,
+                authorization=authorization,
+                binding_sha256="sha256:" + "0" * 64,
+            )
+
     def test_managed_binding_refuses_non_durable_replayer(
         self, sealed, config, tmp_path
     ):
@@ -1008,6 +1068,24 @@ class TestCommandMapping:
         backend = object()
         with pytest.raises(ValueError, match="requires durable=True"):
             Replayer(backend, managed_dispatch_binding=binding, durable=False)
+
+    def test_replayer_refuses_an_in_process_mutated_managed_binding(
+        self, sealed, config, tmp_path
+    ):
+        workflow, _ = sealed
+        verdict = verified_or_refusal(workflow, config)
+        assert not isinstance(verdict, Refusal)
+        binding = read_managed_dispatch_envelope(
+            write_managed_dispatch_envelope(tmp_path / "dispatch.json", verdict)
+        )
+        with pytest.raises(AttributeError, match="immutable"):
+            binding.authorization = verdict.payload.authorization
+        changed = verdict.payload.authorization.model_copy(
+            update={"admitted_policy_name": "changed"}
+        )
+        object.__setattr__(binding, "authorization", changed)
+        with pytest.raises(ValueError, match="does not match its authorization"):
+            Replayer(object(), managed_dispatch_binding=binding, durable=True)
 
     def test_managed_dispatch_envelope_refuses_nested_authorization_extra(
         self, sealed, config, tmp_path
@@ -1097,7 +1175,12 @@ class TestCommandMapping:
             update={"execution_profile": "standard"}
         )
         managed_payload = verdict.payload.model_copy(
-            update={"authorization": standard_authorization}
+            update={
+                "authorization": standard_authorization,
+                "dispatch_binding_sha256": dispatch_binding_sha256(
+                    verdict.payload.run_id, standard_authorization
+                ),
+            }
         )
         managed_verdict = replace(verdict, payload=managed_payload)
         envelope = write_managed_dispatch_envelope(
@@ -1160,7 +1243,14 @@ class TestCommandMapping:
         assert args._remote_delivery_run_id == managed_verdict.payload.run_id
 
         weaker = standard_authorization.model_copy(update={"execution_profile": "demo"})
-        weak_payload = managed_payload.model_copy(update={"authorization": weaker})
+        weak_payload = managed_payload.model_copy(
+            update={
+                "authorization": weaker,
+                "dispatch_binding_sha256": dispatch_binding_sha256(
+                    managed_payload.run_id, weaker
+                ),
+            }
+        )
         weak_envelope = write_managed_dispatch_envelope(
             tmp_path / "weak-dispatch.json",
             replace(managed_verdict, payload=weak_payload),

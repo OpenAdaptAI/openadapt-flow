@@ -511,11 +511,19 @@ class Replayer:
             )
         if managed_dispatch_binding is not None:
             from openadapt_flow.runner.dispatch_envelope import ManagedDispatchBinding
+            from openadapt_flow.runner.protocol import dispatch_binding_sha256
 
             if not isinstance(managed_dispatch_binding, ManagedDispatchBinding):
                 raise ValueError("managed dispatch binding is invalid")
             if not durable:
                 raise ValueError("managed dispatch binding requires durable=True")
+            if managed_dispatch_binding.binding_sha256 != dispatch_binding_sha256(
+                managed_dispatch_binding.run_id,
+                managed_dispatch_binding.authorization,
+            ):
+                raise ValueError(
+                    "managed dispatch binding does not match its authorization"
+                )
             if governed_authorization not in (
                 None,
                 managed_dispatch_binding.authorization,

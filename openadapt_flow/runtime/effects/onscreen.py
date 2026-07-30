@@ -162,6 +162,11 @@ class OnScreenReadbackVerifier(VerifierAdapterBase):
             return VerificationTier.PERSISTED_STATE_REACQUISITION
         return VerificationTier.IMMEDIATE_SCREEN
 
+    @staticmethod
+    def requires_readable_pre_state_for(effect: Effect) -> bool:
+        """Read-back proof occurs after input and has no pre-action delta baseline."""
+        return False
+
     def __init__(
         self,
         backend: Any = None,

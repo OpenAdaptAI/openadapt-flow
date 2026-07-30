@@ -3899,7 +3899,7 @@ class Replayer:
         if refusal is not None:
             raise StateDiverged(refusal)
         try:
-            current = self.effect_verifier.capture_pre_state()
+            current = self._capture_effect_pre_state(self.effect_verifier, effects)
         except Exception as exc:
             raise StateDiverged(
                 "the retained effects could not be read before resume"
@@ -3926,8 +3926,9 @@ class Replayer:
                     "forbid_collateral_loss": False,
                 }
             )
+            effect_current = self._effect_pre_state_for(current, effect)
             baseline = EffectState(
-                substrate=current.substrate,
+                substrate=effect_current.substrate,
                 reachable=True,
                 records=[],
                 detail={"durable_resume_persistence_readback": True},
@@ -3935,8 +3936,8 @@ class Replayer:
             verdict = judge_records(
                 persistence_effect,
                 baseline,
-                current.records,
-                substrate=current.substrate,
+                effect_current.records,
+                substrate=effect_current.substrate,
             )
             if not verdict.confirmed:
                 raise StateDiverged(
@@ -4262,7 +4263,7 @@ class Replayer:
                     run_dir, evidence_step_id, "attended-after", frame
                 )
                 return result
-            current = self.effect_verifier.capture_pre_state()
+            current = self._capture_effect_pre_state(self.effect_verifier, effects)
             tier_refusal = self._profile_effect_tier_refusal(
                 profile_workflow,
                 step,
@@ -4302,6 +4303,7 @@ class Replayer:
                 )
                 return result
             for effect in effects:
+                effect_current = self._effect_pre_state_for(current, effect)
                 if effect.needs_operator_confirmation:
                     result.effect_verified = False
                     result.error = (
@@ -4318,7 +4320,7 @@ class Replayer:
                     )
                     break
                 baseline = EffectState(
-                    substrate=current.substrate,
+                    substrate=effect_current.substrate,
                     reachable=True,
                     records=[],
                     detail={"attended_current_state_readback": True},
@@ -4326,8 +4328,8 @@ class Replayer:
                 verdict = judge_records(
                     effect,
                     baseline,
-                    current.records,
-                    substrate=current.substrate,
+                    effect_current.records,
+                    substrate=effect_current.substrate,
                 )
                 result.effect_contract_hashes.append(effect.contract_hash())
                 result.effect_results.append(
@@ -5494,14 +5496,24 @@ class Replayer:
                         active_verifier,
                     )
                     if error is None:
-                        effect_pre_state = active_verifier.capture_pre_state()
-                        error = self._profile_effect_tier_refusal(
-                            workflow,
-                            step,
-                            "gui",
-                            resolved_effects,
-                            active_verifier,
+                        effect_pre_state = self._capture_effect_pre_state(
+                            active_verifier, resolved_effects
                         )
+                        if self._required_effect_pre_state_unreadable(
+                            active_verifier, effect_pre_state, resolved_effects
+                        ):
+                            error = (
+                                "the selected system-of-record effect verifier is "
+                                "unreachable before actuation; refusing input"
+                            )
+                        if error is None:
+                            error = self._profile_effect_tier_refusal(
+                                workflow,
+                                step,
+                                "gui",
+                                resolved_effects,
+                                active_verifier,
+                            )
                     if error is not None:
                         result.effect_verified = False
                         result.safety_halt = True
@@ -5795,16 +5807,28 @@ class Replayer:
                                 active_verifier,
                             )
                             if effect_refresh_error is None:
-                                effect_pre_state = active_verifier.capture_pre_state()
-                                effect_refresh_error = (
-                                    self._profile_effect_tier_refusal(
-                                        workflow,
-                                        step,
-                                        "gui",
-                                        resolved_effects,
-                                        active_verifier,
-                                    )
+                                effect_pre_state = self._capture_effect_pre_state(
+                                    active_verifier, resolved_effects
                                 )
+                                if self._required_effect_pre_state_unreadable(
+                                    active_verifier,
+                                    effect_pre_state,
+                                    resolved_effects,
+                                ):
+                                    effect_refresh_error = (
+                                        "the selected system-of-record effect verifier "
+                                        "is unreachable before actuation; refusing input"
+                                    )
+                                if effect_refresh_error is None:
+                                    effect_refresh_error = (
+                                        self._profile_effect_tier_refusal(
+                                            workflow,
+                                            step,
+                                            "gui",
+                                            resolved_effects,
+                                            active_verifier,
+                                        )
+                                    )
                             error = effect_refresh_error
 
                         if error is not None:
@@ -6427,7 +6451,7 @@ class Replayer:
         # only what THIS actuation wrote (delta / at-most-once / collateral
         # loss), then actuate exactly once.
         try:
-            before = effect_verifier.capture_pre_state()
+            before = self._capture_effect_pre_state(effect_verifier, effects)
         except Exception as exc:  # noqa: BLE001 - deployment verifier boundary
             result.effect_verified = False
             result.effect_results.append(
@@ -6437,6 +6461,20 @@ class Replayer:
             result.ok = False
             result.error = (
                 f"Step '{step.id}' ({step.intent}) could not capture the "
+                "system-of-record pre-state before API actuation; refusing to "
+                "send the request — run aborted"
+            )
+            return True
+        if self._required_effect_pre_state_unreadable(
+            effect_verifier, before, effects
+        ):
+            result.effect_verified = False
+            result.effect_results.append(
+                "[api] effect pre-state is unreachable before request delivery"
+            )
+            result.ok = False
+            result.error = (
+                f"Step '{step.id}' ({step.intent}) could not read the "
                 "system-of-record pre-state before API actuation; refusing to "
                 "send the request — run aborted"
             )
@@ -6850,6 +6888,49 @@ class Replayer:
             )
             for effect in effects
         ]
+
+    @staticmethod
+    def _capture_effect_pre_state(
+        verifier: Any, effects: list["Effect"]
+    ) -> Any:
+        """Capture the pre-action baseline for resolved effect contracts.
+
+        Multi-candidate deployments select an adapter per resolved effect.  A
+        normal verifier keeps the established single snapshot behavior.
+        """
+        capture_for_effects = getattr(verifier, "capture_pre_state_for_effects", None)
+        if callable(capture_for_effects):
+            return capture_for_effects(effects)
+        return verifier.capture_pre_state()
+
+    @staticmethod
+    def _effect_pre_state_for(before: Any, effect: "Effect") -> Any:
+        """Return one selected effect baseline, or a normal shared baseline."""
+        selected = getattr(before, "for_effect", None)
+        if callable(selected):
+            return selected(effect).state
+        return before
+
+    @classmethod
+    def _required_effect_pre_state_unreadable(
+        cls, verifier: Any, before: Any, effects: list["Effect"]
+    ) -> bool:
+        """Return true only when a selected effect needs, but lacks, a baseline.
+
+        Different-path on-screen read-back proves persistence after input and
+        deliberately has no readable pre-action state.  Delta, duplicate, and
+        collateral checks still require their selected verifier baseline.
+        """
+        requirement = getattr(verifier, "requires_readable_pre_state_for", None)
+        for effect in effects:
+            required = (
+                bool(requirement(effect))
+                if callable(requirement)
+                else bool(effect.count_new_only or effect.forbid_collateral_loss)
+            )
+            if required and not cls._effect_pre_state_for(before, effect).reachable:
+                return True
+        return False
 
     def _profile_effect_tier_refusal(
         self,

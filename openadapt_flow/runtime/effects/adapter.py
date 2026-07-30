@@ -88,7 +88,9 @@ plugin in ``tests/example_verifier_plugin.py``.
 from __future__ import annotations
 
 import hashlib
+import json
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional, Protocol, runtime_checkable
@@ -102,7 +104,7 @@ from openadapt_flow.runtime.effects.effect import (
     EffectVerdict,
     Verdict,
 )
-from openadapt_flow.verification import VerificationTier
+from openadapt_flow.verification import VerificationTier, verifier_effect_tier
 
 #: Entry-point group a customer verifier package registers its factory under.
 #: Each entry point's NAME is the ``effects.kind`` it serves; its value loads
@@ -509,6 +511,162 @@ class VerifierAdapterBase:
         self, expected: Effect, before: EffectState, context: Any = None
     ) -> EffectVerdict:
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class CandidatePreState:
+    """The pre-action verifier and snapshot selected for one effect."""
+
+    verifier: Any
+    state: EffectState
+    tier: VerificationTier
+
+
+class CandidateEffectState:
+    """Effect-semantics-indexed pre-states from :class:`CandidateEffectVerifier`."""
+
+    def __init__(self, selections: Mapping[str, CandidatePreState]) -> None:
+        self._selections = dict(selections)
+
+    @property
+    def reachable(self) -> bool:
+        return all(selection.state.reachable for selection in self._selections.values())
+
+    def for_effect(self, effect: Effect) -> CandidatePreState:
+        try:
+            return self._selections[_candidate_effect_key(effect)]
+        except KeyError as exc:
+            raise ValueError("effect has no captured candidate pre-state") from exc
+
+
+class CandidateEffectVerifier:
+    """Select the strongest configured verifier separately for each effect.
+
+    Selection happens before actuation and the returned ``CandidateEffectState``
+    pins the verifier plus its baseline.  ``verify`` uses that exact selection;
+    it never tries a weaker candidate after delivery.
+    """
+
+    def __init__(self, candidates: list[Any]) -> None:
+        if not candidates:
+            raise ValueError("candidate verifier list must not be empty")
+        self._candidates = tuple(candidates)
+
+    def _select(self, effect: Effect) -> tuple[Any, VerificationTier]:
+        ranked: list[tuple[int, int, Any, VerificationTier]] = []
+        for index, candidate in enumerate(self._candidates):
+            tier = verifier_effect_tier(candidate, effect)
+            if tier is None:
+                raise ValueError(
+                    "effects.candidates entry has no valid verification tier for "
+                    "this effect"
+                )
+            ranked.append((int(tier), index, candidate, tier))
+        _rank, _index, candidate, tier = min(ranked, key=lambda item: item[:2])
+        return candidate, tier
+
+    def verification_tier_for(self, effect: Effect) -> VerificationTier:
+        return self._select(effect)[1]
+
+    def requires_readable_pre_state_for(self, effect: Effect) -> bool:
+        candidate, _tier = self._select(effect)
+        requirement = getattr(candidate, "requires_readable_pre_state_for", None)
+        if callable(requirement):
+            return bool(requirement(effect))
+        return bool(effect.count_new_only or effect.forbid_collateral_loss)
+
+    def test_connection(self, context: Any = None) -> ConnectionProbe:
+        """Probe every candidate without selecting or downgrading one.
+
+        ``ok`` is true only when every configured candidate is readable.  This
+        conservative aggregate is deterministic and cannot advertise a weak
+        fallback as readiness for a stronger effect-specific selection.
+        """
+        probes: list[ConnectionProbe] = []
+        for candidate in self._candidates:
+            try:
+                probe = getattr(candidate, "test_connection", None)
+                if callable(probe):
+                    result = probe(context) if context is not None else probe()
+                    if isinstance(result, ConnectionProbe):
+                        probes.append(result)
+                        continue
+                state = (
+                    candidate.capture_pre_state()
+                    if context is None
+                    else candidate.capture_pre_state(context)
+                )
+                probes.append(
+                    ConnectionProbe(
+                        ok=bool(state.reachable),
+                        substrate=state.substrate or getattr(candidate, "substrate", ""),
+                        reason="reachable" if state.reachable else "unreachable",
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - preflight must not raise
+                probes.append(
+                    ConnectionProbe(
+                        ok=False,
+                        substrate=str(getattr(candidate, "substrate", "")),
+                        reason=f"connection probe raised: {type(exc).__name__}",
+                    )
+                )
+        return ConnectionProbe(
+            ok=bool(probes) and all(probe.ok for probe in probes),
+            substrate="candidates",
+            reason="all candidate verifiers reachable"
+            if probes and all(probe.ok for probe in probes)
+            else "one or more candidate verifiers are unreachable",
+            detail={
+                "candidates": [
+                    {"substrate": probe.substrate, "ok": probe.ok, "reason": probe.reason}
+                    for probe in probes
+                ]
+            },
+        )
+
+    def capture_pre_state_for_effects(
+        self, effects: list[Effect], context: Any = None
+    ) -> CandidateEffectState:
+        selections: dict[str, CandidatePreState] = {}
+        captured: dict[int, EffectState] = {}
+        for effect in effects:
+            candidate, tier = self._select(effect)
+            key = id(candidate)
+            if key not in captured:
+                captured[key] = (
+                    candidate.capture_pre_state()
+                    if context is None
+                    else candidate.capture_pre_state(context)
+                )
+            selections[_candidate_effect_key(effect)] = CandidatePreState(
+                verifier=candidate,
+                state=captured[key],
+                tier=tier,
+            )
+        return CandidateEffectState(selections)
+
+    def capture_pre_state(self, context: Any = None) -> EffectState:
+        raise ValueError(
+            "candidate verifier selection requires resolved effects before "
+            "pre-state capture"
+        )
+
+    def verify(
+        self, expected: Effect, before: CandidateEffectState, context: Any = None
+    ) -> EffectVerdict:
+        selection = before.for_effect(expected)
+        if context is None:
+            return selection.verifier.verify(expected, selection.state)
+        return selection.verifier.verify(expected, selection.state, context)
+
+
+def _candidate_effect_key(effect: Effect) -> str:
+    """Key every resolved effect, including read-back semantics outside its contract hash."""
+    payload = json.dumps(
+        effect.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class RedactingVerifier:

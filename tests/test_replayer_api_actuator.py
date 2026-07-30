@@ -247,6 +247,31 @@ def test_unreachable_api_halts_without_gui_fallback(tmp_path):
         stop()
 
 
+def test_unreachable_effect_pre_state_refuses_api_actuation(tmp_path):
+    """A readable pre-action proof is required before any API write."""
+    url, db, stop = _fault_server()
+    try:
+        backend = GuiWritingBackend(url)
+        workflow = _api_save_workflow(effects=[_record_written()])
+        bundle, run_dir = _dirs(tmp_path)
+        replayer = Replayer(
+            backend,
+            vision=_vision_that_confirms_saved(),
+            effect_verifier=RestRecordVerifier("http://127.0.0.1:1"),
+            api_actuator=ApiActuator(url),
+            poll_interval_s=0.01,
+        )
+
+        report = replayer.run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+        assert report.success is False
+        assert report.results[0].effect_verified is False
+        assert backend.actions == []
+        assert db.snapshot()["records"] == []
+    finally:
+        stop()
+
+
 def test_post_send_protocol_error_is_proven_by_the_complete_contract(tmp_path):
     """A lost response after a committed API write is uncertain delivery.
 

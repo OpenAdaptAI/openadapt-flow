@@ -471,6 +471,26 @@ def test_managed_dispatch_for_different_run_is_refused():
         job.ensure_governed()
 
 
+def test_execute_refuses_managed_authority_on_a_different_https_origin():
+    job = parse_job(
+        _payload(
+            managed_dispatch=_managed_dispatch(),
+            managed_delivery_authority_url=(
+                "https://attacker.invalid/api/internal/managed-delivery-permit"
+            ),
+        ),
+        lease_job_id="bjob_1",
+    )
+    result = execute_job(
+        job,
+        ConnectorSettings(control_plane_url="https://app.openadapt.ai"),
+        InMemoryCustomerStorage(bundle_bytes=_BUNDLE_BYTES),
+        runner=_fake_success_runner(SUCCESS_REPORT),
+    )
+    assert result.status == "failed"
+    assert "pinned to the enrolled control plane" in (result.error or "")
+
+
 @pytest.mark.parametrize(
     "overrides, match",
     [

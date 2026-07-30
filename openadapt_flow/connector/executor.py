@@ -42,6 +42,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
+from urllib.parse import urlsplit
 
 from openadapt_flow.connector.config import ConnectorSettings
 from openadapt_flow.connector.protocol import ByocGovernanceError, ByocJob
@@ -72,6 +73,8 @@ class RunOutcome:
 #: A runner maps argv -> RunOutcome. The default shells the governed ``run`` CLI
 #: in a child process; tests inject a fake to avoid launching a GUI.
 Runner = Callable[[list[str], Path, Mapping[str, str]], RunOutcome]
+
+_MANAGED_DELIVERY_AUTHORITY_PATH = "/api/internal/managed-delivery-permit"
 
 
 @dataclass
@@ -284,6 +287,44 @@ def _write_policy_audit(job: ByocJob, run_dir: Path) -> None:
         pass
 
 
+def _assert_managed_authority_is_pinned(
+    job: ByocJob, settings: ConnectorSettings
+) -> None:
+    """Keep the run capability on the enrolled control-plane origin."""
+
+    if job.managed_dispatch is None:
+        return
+    try:
+        configured = urlsplit(settings.control_plane_url)
+        delivered = urlsplit(job.managed_delivery_authority_url or "")
+        configured_port = configured.port or (
+            443 if configured.scheme == "https" else None
+        )
+        delivered_port = delivered.port or (
+            443 if delivered.scheme == "https" else None
+        )
+    except ValueError as exc:
+        raise ByocGovernanceError(
+            "byoc managed delivery authority URL is invalid"
+        ) from exc
+    if (
+        configured.scheme != "https"
+        or not configured.hostname
+        or configured.username is not None
+        or configured.password is not None
+        or bool(configured.query)
+        or bool(configured.fragment)
+        or delivered.scheme != "https"
+        or delivered.hostname != configured.hostname
+        or delivered_port != configured_port
+        or delivered.path != _MANAGED_DELIVERY_AUTHORITY_PATH
+    ):
+        raise ByocGovernanceError(
+            "byoc managed delivery authority is not pinned to the enrolled "
+            "control plane (fail closed)"
+        )
+
+
 def execute_job(
     job: ByocJob,
     settings: ConnectorSettings,
@@ -301,6 +342,7 @@ def execute_job(
     # 1. Governance gates (fail closed BEFORE any bundle is fetched or run).
     try:
         job.ensure_governed(require_run_token=require_run_token)
+        _assert_managed_authority_is_pinned(job, settings)
     except ByocGovernanceError as exc:
         return ExecutionResult("failed", {}, None, job.report_ref(), str(exc))
     if not _grounding_env_available(job):

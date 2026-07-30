@@ -69,6 +69,7 @@ from openadapt_flow.backend import (
     StructuralResolutionRefused,
 )
 from openadapt_flow.ir import ActionDeliveryReceipt, Point
+from openadapt_flow.remote_frame_contract import RemoteFrameContract
 from openadapt_flow.runtime.resolver import visual_resolution_point_fingerprint
 
 # What a transport may hand back as the current frame: a PIL image, or raw
@@ -307,8 +308,10 @@ class FreeRDPBackend:
         session_marker: Optional[str] = None,
         session_marker_probe: Optional[Callable[[bytes], bool]] = None,
         session_identity_observer: Optional[Callable[[], Optional[str]]] = None,
+        remote_frame_contract: Optional["RemoteFrameContract"] = None,
     ) -> None:
         self._transport = transport
+        self._remote_frame_contract = remote_frame_contract
         self._viewport = viewport
         self._max_frame_age_s = float(max_frame_age_s)
         if self._max_frame_age_s <= 0:
@@ -398,6 +401,8 @@ class FreeRDPBackend:
             # and screenshot can never disagree.
             self._viewport = img.size
             png = self._png_bytes(img)
+            if self._remote_frame_contract is not None:
+                self._remote_frame_contract.require_geometry(img.size)
             self._last_frame_monotonic = time.monotonic()
             self._last_frame_digest = self._canonical_frame_digest(img)
             self._last_session_identity = self._session_identity_from_frame(png)

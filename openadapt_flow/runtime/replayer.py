@@ -8974,8 +8974,7 @@ class Replayer:
                 step, workflow
             )
             requires_atomic_keyboard = (
-                identity_atomic_keyboard
-                or self.qualification_fault_driver is not None
+                identity_atomic_keyboard or self.qualification_fault_driver is not None
             )
             if (
                 requires_atomic_keyboard

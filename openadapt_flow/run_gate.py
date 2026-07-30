@@ -1191,8 +1191,7 @@ def build_qualification_case_authorization(
     validation_error = bound.validate_workflow(workflow)
     if validation_error is not None:
         raise ValueError(
-            "qualification evidence does not match this exact case: "
-            f"{validation_error}"
+            f"qualification evidence does not match this exact case: {validation_error}"
         )
     return bound
 

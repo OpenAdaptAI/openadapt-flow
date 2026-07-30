@@ -55,3 +55,9 @@ def test_overlap_and_geometry_mismatch_fail_closed() -> None:
         )
     with pytest.raises(ValueError, match="geometry"):
         _contract().require_geometry((99, 80))
+
+
+def test_runtime_target_or_identity_overlap_refuses_after_static_review() -> None:
+    contract = _contract()
+    with pytest.raises(ValueError, match="runtime protected"):
+        contract.arm(((80, 0, 10, 10),))

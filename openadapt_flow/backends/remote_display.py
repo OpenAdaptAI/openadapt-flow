@@ -809,6 +809,12 @@ class RemoteDisplayBackend:
             self._actuation_frame_png = png
             return png
 
+    def arm_remote_frame_contract(
+        self, *, protected_regions: tuple[tuple[int, int, int, int], ...]
+    ) -> None:
+        if self._remote_frame_contract is not None:
+            self._remote_frame_contract.arm(protected_regions)
+
     def reset_fresh_actuation_state(self) -> None:
         """Reset only a typed zero-input content invalidation.
 

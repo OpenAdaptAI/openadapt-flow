@@ -951,7 +951,9 @@ def build_effect_verifier(
             (fail loud rather than wire a broken verifier).
     """
     if cfg.candidates:
-        built = [build_effect_verifier(candidate, params) for candidate in cfg.candidates]
+        built = [
+            build_effect_verifier(candidate, params) for candidate in cfg.candidates
+        ]
         for candidate in built:
             if candidate is None:  # guarded by EffectsConfig, retained fail-closed
                 raise ValueError("effects.candidates entry did not build a verifier")
@@ -1205,11 +1207,16 @@ def _build_effect_verifier_unredacted(
 
     # Plugin seam: a customer adapter registered programmatically or under the
     # 'openadapt_flow.effect_verifiers' entry-point group serves its own kind.
-    from openadapt_flow.runtime.effects.adapter import resolve_verifier_factory
+    from openadapt_flow.runtime.effects.adapter import (
+        resolve_verifier_factory,
+        validate_verifier_adapter,
+    )
 
     factory = resolve_verifier_factory(kind)
     if factory is not None:
-        return factory(cfg, params)
+        verifier = factory(cfg, params)
+        validate_verifier_adapter(verifier)
+        return verifier
 
     raise ValueError(
         f"unknown effects.kind {cfg.kind!r} "

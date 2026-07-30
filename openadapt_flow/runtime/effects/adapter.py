@@ -513,6 +513,82 @@ class VerifierAdapterBase:
         raise NotImplementedError
 
 
+def validate_verifier_adapter(adapter: Any) -> None:
+    """Refuse an incomplete third-party adapter before a run can use it.
+
+    Plugin factories run at deployment construction time.  Validate their full
+    lifecycle there, rather than discovering a missing method after a delivery
+    boundary.  Built-in compatibility adapters do not use this function; they
+    inherit the complete lifecycle from :class:`VerifierAdapterBase`.
+    """
+    missing = [
+        name
+        for name in (
+            "test_connection",
+            "capture_pre_state",
+            "capture_post_state",
+            "verify",
+        )
+        if not callable(getattr(adapter, name, None))
+    ]
+    if missing:
+        raise ValueError(
+            "effect-verifier plugin is not a complete VerifierAdapter; missing "
+            + ", ".join(missing)
+        )
+    substrate = getattr(adapter, "substrate", None)
+    if not isinstance(substrate, str) or not substrate.strip():
+        raise ValueError(
+            "effect-verifier plugin is not a complete VerifierAdapter; "
+            "substrate must be a non-empty string"
+        )
+    tier = getattr(adapter, "verification_tier", None)
+    if not isinstance(tier, VerificationTier):
+        raise ValueError(
+            "effect-verifier plugin is not a complete VerifierAdapter; "
+            "verification_tier must be a VerificationTier"
+        )
+
+
+def _probe_adapter_connection(adapter: Any, context: Any = None) -> ConnectionProbe:
+    """Run an adapter readiness probe without letting a preflight exception out.
+
+    This also supports older adapters that only expose ``capture_pre_state``.
+    The helper deliberately does not select a candidate or change a selection.
+    """
+    try:
+        probe = getattr(adapter, "test_connection", None)
+        if callable(probe):
+            result = probe() if context is None else probe(context)
+            if isinstance(result, ConnectionProbe):
+                return result
+            return ConnectionProbe(
+                ok=False,
+                substrate=str(getattr(adapter, "substrate", "")),
+                reason="connection probe returned an invalid result",
+            )
+        capture = getattr(adapter, "capture_pre_state", None)
+        if not callable(capture):
+            return ConnectionProbe(
+                ok=False,
+                substrate=str(getattr(adapter, "substrate", "")),
+                reason="adapter has no pre-state capture method",
+            )
+        state = capture() if context is None else capture(context)
+        return ConnectionProbe(
+            ok=bool(state.reachable),
+            substrate=state.substrate or str(getattr(adapter, "substrate", "")),
+            reason="reachable" if state.reachable else "unreachable",
+            detail=dict(state.detail),
+        )
+    except Exception as exc:  # noqa: BLE001 - preflight must not raise
+        return ConnectionProbe(
+            ok=False,
+            substrate=str(getattr(adapter, "substrate", "")),
+            reason=f"connection probe raised: {type(exc).__name__}",
+        )
+
+
 @dataclass(frozen=True)
 class CandidatePreState:
     """The pre-action verifier and snapshot selected for one effect."""
@@ -582,35 +658,10 @@ class CandidateEffectVerifier:
         conservative aggregate is deterministic and cannot advertise a weak
         fallback as readiness for a stronger effect-specific selection.
         """
-        probes: list[ConnectionProbe] = []
-        for candidate in self._candidates:
-            try:
-                probe = getattr(candidate, "test_connection", None)
-                if callable(probe):
-                    result = probe(context) if context is not None else probe()
-                    if isinstance(result, ConnectionProbe):
-                        probes.append(result)
-                        continue
-                state = (
-                    candidate.capture_pre_state()
-                    if context is None
-                    else candidate.capture_pre_state(context)
-                )
-                probes.append(
-                    ConnectionProbe(
-                        ok=bool(state.reachable),
-                        substrate=state.substrate or getattr(candidate, "substrate", ""),
-                        reason="reachable" if state.reachable else "unreachable",
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - preflight must not raise
-                probes.append(
-                    ConnectionProbe(
-                        ok=False,
-                        substrate=str(getattr(candidate, "substrate", "")),
-                        reason=f"connection probe raised: {type(exc).__name__}",
-                    )
-                )
+        probes = [
+            _probe_adapter_connection(candidate, context)
+            for candidate in self._candidates
+        ]
         return ConnectionProbe(
             ok=bool(probes) and all(probe.ok for probe in probes),
             substrate="candidates",
@@ -619,7 +670,11 @@ class CandidateEffectVerifier:
             else "one or more candidate verifiers are unreachable",
             detail={
                 "candidates": [
-                    {"substrate": probe.substrate, "ok": probe.ok, "reason": probe.reason}
+                    {
+                        "substrate": probe.substrate,
+                        "ok": probe.ok,
+                        "reason": probe.reason,
+                    }
                     for probe in probes
                 ]
             },
@@ -688,17 +743,7 @@ class RedactingVerifier:
         return getattr(self._inner, name)
 
     def test_connection(self, context: Any = None) -> ConnectionProbe:
-        probe = getattr(self._inner, "test_connection", None)
-        if callable(probe):
-            result = probe(context)
-            if isinstance(result, ConnectionProbe):
-                return result
-        state = self._inner.capture_pre_state(context)
-        return ConnectionProbe(
-            ok=state.reachable,
-            substrate=state.substrate,
-            reason="" if state.reachable else "unreachable",
-        )
+        return _probe_adapter_connection(self._inner, context)
 
     def capture_pre_state(self, context: Any = None) -> EffectState:
         return self._inner.capture_pre_state(context)

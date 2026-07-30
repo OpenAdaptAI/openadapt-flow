@@ -741,7 +741,11 @@ def _default_fault_cases() -> list[QualificationCase]:
 
 
 class QualifiedEntityLabel(BaseModel):
-    """A safe presentation label explicitly approved for one qualified step."""
+    """An optional safe presentation label for one qualified step.
+
+    Qualification and execution do not require this label.  A consumer uses
+    the neutral ``record`` or ``item`` presentation when it is absent.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -801,8 +805,9 @@ class QualificationProject(BaseModel):
     )
     identity_policies: dict[str, IdentityPolicy] = Field(default_factory=dict)
     effect_policies: list[EffectVerificationPolicy] = Field(default_factory=list)
-    #: Presentation-only names chosen during qualification.  They are not
-    #: observations and must never be inferred from a runtime artifact.
+    #: Optional presentation-only names selected during qualification. They are
+    #: not safety evidence, observations, or runtime-derived values. An empty
+    #: mapping is valid and does not affect qualification admission.
     entity_labels: dict[str, "QualifiedEntityLabel"] = Field(default_factory=dict)
     cases: list[QualificationCase] = Field(default_factory=_default_fault_cases)
     exclusions: list[str] = Field(default_factory=list)

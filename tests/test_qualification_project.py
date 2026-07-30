@@ -221,6 +221,33 @@ def test_entity_labels_are_qualification_contract_and_invalidate_certification()
     assert project.entity_labels == {}
 
 
+def test_entity_label_is_optional_for_certification(tmp_path: Path) -> None:
+    """Presentation metadata must never become a safety admission gate."""
+
+    workflow = _workflow()
+    bundle = tmp_path / "bundle"
+    (bundle / "templates").mkdir(parents=True)
+    (bundle / "templates" / "save.png").write_bytes(
+        _qualification_visual_fixture()[1]
+    )
+    workflow.save(bundle)
+    workflow = Workflow.load(bundle)
+    _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
+    assert workflow.qualification is not None
+    assert workflow.qualification.entity_labels == {}
+    evidence_root = tmp_path / "evidence"
+    _record_passing_campaign(workflow, evidence_root)
+
+    report = certify_project(
+        workflow,
+        policy=load_policy("clinical-write"),
+        evidence_root=evidence_root,
+    )
+
+    assert report.passed
+    assert workflow.qualification.entity_labels == {}
+
+
 def test_entity_label_options_are_ordered_and_derive_every_public_label() -> None:
     options = entity_label_options()
     assert options == [
@@ -2977,8 +3004,6 @@ def test_cli_entity_label_notice_tracks_real_mutations(
         "save",
         "--label",
         "insurance claim",
-        "--fallback",
-        "item",
     ]
     invalid_args = [*set_args]
     invalid_args[invalid_args.index("insurance claim")] = "jane smith"

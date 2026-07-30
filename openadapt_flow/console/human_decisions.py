@@ -397,12 +397,14 @@ def _qualified_entity_v2_fields(
     step_id: Optional[str],
     capability: Any,
 ) -> Optional[dict[str, Any]]:
-    """Read a V2 entity only from the current integrity-sealed project.
+    """Read V2 bindings only from the current integrity-sealed project.
 
     This deliberately reads no screenshots, OCR, accessibility observation,
-    parameters, application name, or model output.  Any missing, unreadable,
-    or mismatched capability/bundle binding falls back to V1. This gate
-    requires both bundle integrity and current qualification certification.
+    parameters, application name, or model output. A missing optional domain
+    label uses the reviewed neutral ``record`` class without weakening the V2
+    qualification and step bindings. Any missing, unreadable, or mismatched
+    capability/bundle binding falls back to V1. This gate requires both bundle
+    integrity and current qualification certification.
     """
 
     if step_id is None or step_id != capability.step_id:
@@ -448,21 +450,19 @@ def _qualified_entity_v2_fields(
         ):
             return None
         entity = project.entity_labels.get(step_id)
-        if (
-            entity is None
-            or {
-                "label": entity.label,
-                "fallback": entity.fallback,
-            }
-            not in entity_label_options()
-        ):
+        entity_payload = (
+            entity.model_dump(mode="json", exclude={"step_id"})
+            if entity is not None
+            else {"label": "record", "fallback": "record"}
+        )
+        if entity_payload not in entity_label_options():
             return None
         return {
             "qualification_project_id": project.project_id,
             "qualification_revision_id": f"qualification_revision_{project.revision}",
             "qualification_contract_digest": "sha256:" + project.contract_sha256(),
             "qualification_step_id": step_id,
-            "entity": entity.model_dump(mode="json", exclude={"step_id"}),
+            "entity": entity_payload,
         }
     except (OSError, ValueError, TypeError, AttendedActionRefused):
         return None

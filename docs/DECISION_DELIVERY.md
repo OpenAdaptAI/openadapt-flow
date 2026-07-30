@@ -54,8 +54,8 @@ evidence.
 a vocabulary the engine already owns — `Rung`, `ActionKind`, the console's halt
 categories, the ARIA/UIA role names, `RecheckKind` — or is a bounded integer or
 a boolean. A relay that stores this object is *structurally incapable* of
-representing a patient name, an MRN, an observed value, a path, or a workflow
-label.
+representing a person name, a record identifier, an observed value, a path, or
+a workflow label.
 
 That is the same kind of guarantee `HumanDecisionTaskV1` already gives, and it
 is checkable the same way: by reading a schema, not by trusting a detector. The

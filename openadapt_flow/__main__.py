@@ -2507,8 +2507,13 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
             return 0
         changed = False
         if args.label_cmd == "set":
+            fallback = next(
+                option["fallback"]
+                for option in entity_label_options()
+                if option["label"] == args.label
+            )
             label = QualifiedEntityLabel(
-                step_id=args.step, label=args.label, fallback=args.fallback
+                step_id=args.step, label=args.label, fallback=fallback
             )
             assert workflow.qualification is not None
             changed = workflow.qualification.entity_labels.get(args.step) != label
@@ -4344,12 +4349,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = qsub.add_parser(
         "label",
-        help="Set, remove, or list qualification-owned entity labels",
+        help="Optionally set, remove, or list presentation-only entity labels",
     )
     from openadapt_flow.qualification import REMOTE_SAFE_ENTITY_LABELS
 
     label_sub = q.add_subparsers(dest="label_cmd", required=True)
-    label = label_sub.add_parser("set", help="Set a label for one qualified step")
+    label = label_sub.add_parser(
+        "set",
+        help="Set an optional presentation label for one qualified step",
+    )
     label.add_argument("bundle", help="Workflow bundle directory")
     label.add_argument("--step", required=True, help="Exact qualified workflow step ID")
     label.add_argument(
@@ -4357,12 +4365,6 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         choices=REMOTE_SAFE_ENTITY_LABELS,
         help="Qualification-approved class label, for example: insurance claim",
-    )
-    label.add_argument(
-        "--fallback",
-        choices=("record", "item"),
-        required=True,
-        help="Neutral fallback if a consumer cannot render the class label",
     )
     label.set_defaults(func=_cmd_qualify)
     label = label_sub.add_parser("remove", help="Remove a step entity label")

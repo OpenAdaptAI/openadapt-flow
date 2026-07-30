@@ -3190,7 +3190,7 @@ def test_remote_projection_is_explicit_aal2_phi_free_and_exactly_bound(tmp_path)
         assert protected not in serialized
 
 
-def _v2_candidate_workflow() -> Workflow:
+def _v2_candidate_workflow(*, with_entity_label: bool = True) -> Workflow:
     workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
     project = init_project(
         workflow,
@@ -3202,12 +3202,13 @@ def _v2_candidate_workflow() -> Workflow:
             runtime_version="1.26.0",
         ),
     )
-    set_entity_label(
-        workflow,
-        QualifiedEntityLabel(
-            step_id="humanstep", label="patient record", fallback="record"
-        ),
-    )
+    if with_entity_label:
+        set_entity_label(
+            workflow,
+            QualifiedEntityLabel(
+                step_id="humanstep", label="patient record", fallback="record"
+            ),
+        )
     policy = load_policy("permissive")
     project.last_certification = QualificationCertification(
         project_revision=project.revision,
@@ -3262,18 +3263,11 @@ def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(
     )
 
 
-def test_remote_v2_falls_back_when_the_exact_failed_step_has_no_label(tmp_path):
-    workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
-    init_project(
-        workflow,
-        environment=EnvironmentBoundary(
-            target_kind="web",
-            application="qualified-app",
-            application_version="1",
-            environment_digest="a" * 64,
-            runtime_version="1.26.0",
-        ),
-    )
+def test_remote_v2_uses_neutral_entity_when_optional_label_is_absent(
+    tmp_path, monkeypatch
+):
+    _accept_current_certification(monkeypatch)
+    workflow = _v2_candidate_workflow(with_entity_label=False)
     workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
     item = attention_item(run.parent, run)
     assert item is not None
@@ -3284,7 +3278,10 @@ def test_remote_v2_falls_back_when_the_exact_failed_step_has_no_label(tmp_path):
             peer_task_schemas=["openadapt.human-decision-task/v2"]
         ),
     )
-    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+    assert projection.task.schema_version == "openadapt.human-decision-task/v2"
+    assert projection.task.entity.label == "record"
+    assert projection.task.entity.fallback.value == "record"
+    assert projection.task.qualification_step_id == "humanstep"
 
 
 def test_remote_v2_falls_back_without_a_current_certification(tmp_path, monkeypatch):

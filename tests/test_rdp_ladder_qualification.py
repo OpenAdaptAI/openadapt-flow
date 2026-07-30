@@ -372,9 +372,7 @@ def test_headless_bundle_is_encrypted_and_admitted_before_any_replay(
         steps.append(
             Step(
                 id=f"step_{index:03d}",
-                intent=(
-                    "click 'Save appointment'" if index == 7 else "click fixture"
-                ),
+                intent=("click 'Save appointment'" if index == 7 else "click fixture"),
                 action=ActionKind.CLICK,
                 risk=risk,
                 anchor=Anchor(

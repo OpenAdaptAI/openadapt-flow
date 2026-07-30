@@ -414,9 +414,7 @@ class PresentationRDPTransport:
         if down:
             self._capture.input_event(
                 "key",
-                category=(
-                    "character" if len(keysym_or_char) == 1 else "named-key"
-                ),
+                category=("character" if len(keysym_or_char) == 1 else "named-key"),
             )
         self._inner.key(keysym_or_char, down)
         if down and (len(keysym_or_char) == 1 or keysym_or_char == "space"):
@@ -933,8 +931,8 @@ def run_qualification(
         if presentation_dir is not None
         else None
     )
-    transport: DockerX11RdpTransport | PresentationRDPTransport = (
-        DockerX11RdpTransport(container)
+    transport: DockerX11RdpTransport | PresentationRDPTransport = DockerX11RdpTransport(
+        container
     )
     if record_capture is not None:
         transport = PresentationRDPTransport(
@@ -1338,9 +1336,7 @@ def run_qualification(
             "policy_bound": policy_bound,
             "effect_after_wrong_record": rows_after_wrong_record,
             "passed": bool(wrong_ok),
-            "failure_class": (
-                None if wrong_ok else "wrong_record_contract_violation"
-            ),
+            "failure_class": (None if wrong_ok else "wrong_record_contract_violation"),
         }
         wrong_record_trials.append(trial)
         trials.append(trial)

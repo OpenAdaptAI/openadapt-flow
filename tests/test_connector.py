@@ -655,6 +655,7 @@ class StubControlPlane:
         self.tokens = {}  # token -> org_id
         self.jobs = []  # queued jobs (each {id, org_id, payload, status, leased_by})
         self.callbacks = []
+        self.poll_bodies = []
         self.callback_attempts = 0
         self.callback_status = 200
         self.acks = []
@@ -690,6 +691,7 @@ class StubControlPlane:
         if path == "/api/connector/poll":
             if org is None:
                 return httpx.Response(401, json={"error": "invalid connector token"})
+            self.poll_bodies.append(body)
             for j in self.jobs:
                 # ISOLATION: a connector only ever leases ITS OWN org jobs.
                 if j["status"] == "queued" and j["org_id"] == org:
@@ -759,6 +761,9 @@ def test_full_loop_dispatch_execute_callback_ack():
         storage_factory=lambda job: storage,
     )
     assert result["status"] == "success"
+    assert cp.poll_bodies == [
+        {"wait": 0, "capabilities": ["managed_delivery_authority_v1"]}
+    ]
 
     # A PHI-free callback carrying the run-scoped token was posted.
     assert len(cp.callbacks) == 1

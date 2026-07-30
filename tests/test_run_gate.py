@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -981,6 +983,54 @@ def test_qualification_run_case_derives_exact_standard_authorization(
     assert authorization.validate_workflow(workflow) is None
     assert list((tmp_path / "state" / "qualification-attempts").glob("*.json"))
     assert not (bundle / ".openadapt").exists()
+
+
+def test_qualification_run_case_tightens_owned_legacy_state_root(tmp_path, monkeypatch):
+    """A connector-created state root stays usable after private-ledger rollout."""
+    if os.name == "nt":
+        pytest.skip("POSIX permission migration is not applicable on Windows")
+    import openadapt_flow.__main__ as main
+
+    _workflow, bundle, inputs = _representative_qualification_bundle(tmp_path)
+    state_root = tmp_path / "legacy-state"
+    state_root.mkdir()
+    state_root.chmod(0o755)
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    monkeypatch.setenv("OPENADAPT_HOME", str(state_root))
+    inputs_path = tmp_path / "case-inputs.json"
+    inputs_path.write_bytes(inputs)
+    inputs_path.chmod(0o600)
+    called = []
+    monkeypatch.setattr(main, "_cmd_replay", lambda args: called.append(args) or 0)
+
+    assert (
+        main.main(
+            [
+                "qualify",
+                "run-case",
+                str(bundle),
+                "--case-id",
+                "representative-1",
+                "--inputs",
+                str(inputs_path),
+                "--campaign-id",
+                "campaign-1",
+                "--run-id",
+                "run-1",
+                "--run-dir",
+                str(tmp_path / "case-run"),
+                "--effects-kind",
+                "rest",
+                "--effects-base-url",
+                "http://sor.local",
+                "--backend",
+                "web",
+            ]
+        )
+        == 0
+    )
+    assert called
+    assert stat.S_IMODE(state_root.stat().st_mode) == 0o700
 
 
 def test_qualification_run_case_refuses_changed_inputs_and_duplicate_attempt(

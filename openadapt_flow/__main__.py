@@ -2190,25 +2190,67 @@ def _claim_qualification_case_attempt(args: argparse.Namespace) -> bool:
     import os
     import stat
 
-    def private_directory(path: Path) -> Path:
+    def private_directory(path: Path, *, migrate_owned_root: bool = False) -> Path:
+        """Open a private directory without trusting a pathname after inspection."""
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
-            metadata = os.lstat(path)
+            initial = os.lstat(path)
         except OSError as exc:
             raise ValueError(
                 "qualification attempt ledger could not be inspected"
             ) from exc
-        unsafe = os.name != "nt" and (
-            not hasattr(os, "geteuid")
-            or metadata.st_uid != os.geteuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o700
-        )
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISDIR(metadata.st_mode)
-            or unsafe
-        ):
+        if stat.S_ISLNK(initial.st_mode) or not stat.S_ISDIR(initial.st_mode):
             raise ValueError("qualification attempt ledger is not a private directory")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise ValueError(
+                "qualification attempt ledger is not a private directory"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_dev != initial.st_dev
+                or metadata.st_ino != initial.st_ino
+            ):
+                raise ValueError(
+                    "qualification attempt ledger changed while it was inspected"
+                )
+            if os.name != "nt":
+                if not hasattr(os, "geteuid") or metadata.st_uid != os.geteuid():
+                    raise ValueError(
+                        "qualification attempt ledger is not owned by this user"
+                    )
+                if migrate_owned_root and stat.S_IMODE(metadata.st_mode) != 0o700:
+                    os.fchmod(descriptor, 0o700)
+                    metadata = os.fstat(descriptor)
+                if stat.S_IMODE(metadata.st_mode) != 0o700:
+                    raise ValueError(
+                        "qualification attempt ledger is not a private directory"
+                    )
+        finally:
+            os.close(descriptor)
+        try:
+            final = os.lstat(path)
+        except OSError as exc:
+            raise ValueError(
+                "qualification attempt ledger could not be inspected"
+            ) from exc
+        if (
+            stat.S_ISLNK(final.st_mode)
+            or not stat.S_ISDIR(final.st_mode)
+            or final.st_dev != initial.st_dev
+            or final.st_ino != initial.st_ino
+        ):
+            raise ValueError(
+                "qualification attempt ledger changed while it was inspected"
+            )
         return path
 
     case = args._qualification_case_execution["case"]
@@ -2244,7 +2286,8 @@ def _claim_qualification_case_attempt(args: argparse.Namespace) -> bool:
     state_root = Path(os.environ.get("OPENADAPT_HOME", Path.home() / ".openadapt"))
     try:
         ledger_dir = private_directory(
-            private_directory(state_root) / "qualification-attempts"
+            private_directory(state_root, migrate_owned_root=True)
+            / "qualification-attempts"
         )
     except ValueError:
         print(
@@ -2281,6 +2324,8 @@ def _claim_qualification_case_attempt(args: argparse.Namespace) -> bool:
         directory_flags = os.O_RDONLY
         if hasattr(os, "O_DIRECTORY"):
             directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
         directory = os.open(ledger_dir, directory_flags)
         try:
             os.fsync(directory)

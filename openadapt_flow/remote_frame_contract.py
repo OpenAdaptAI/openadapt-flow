@@ -47,6 +47,13 @@ class RemoteFrameContract(BaseModel):
         if size != (self.frame_width, self.frame_height):
             raise ValueError("remote frame contract geometry does not match live frame")
 
+    def arm(self, protected_regions: tuple[Region, ...]) -> None:
+        """Refuse a newly observed target/identity/effect overlap before input."""
+        for region in protected_regions:
+            self._validate(region)
+            if any(_overlap(region, volatile) for volatile in self.volatile_regions):
+                raise ValueError("volatile region overlaps a runtime protected region")
+
     def comparison_digest(self, png: bytes) -> bytes:
         """Hash a derived masked copy. Raw evidence and leases stay unmasked."""
         image = Image.open(io.BytesIO(png)).convert("RGB")

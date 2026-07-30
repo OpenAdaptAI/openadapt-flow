@@ -538,6 +538,15 @@ class RemoteActuationBackend(Protocol):
 
 
 @runtime_checkable
+class RemoteFrameContractBackend(Protocol):
+    """Optional pre-input protected-region binding for remote comparison masks."""
+
+    def arm_remote_frame_contract(
+        self, *, protected_regions: tuple[tuple[int, int, int, int], ...]
+    ) -> None: ...
+
+
+@runtime_checkable
 class FreshActuationReacquisitionBackend(Protocol):
     """Reset one proved zero-input invalidation for bounded reacquisition.
 

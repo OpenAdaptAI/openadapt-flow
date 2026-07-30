@@ -6465,9 +6465,7 @@ class Replayer:
                 "send the request — run aborted"
             )
             return True
-        if self._required_effect_pre_state_unreadable(
-            effect_verifier, before, effects
-        ):
+        if self._required_effect_pre_state_unreadable(effect_verifier, before, effects):
             result.effect_verified = False
             result.effect_results.append(
                 "[api] effect pre-state is unreachable before request delivery"
@@ -6890,9 +6888,7 @@ class Replayer:
         ]
 
     @staticmethod
-    def _capture_effect_pre_state(
-        verifier: Any, effects: list["Effect"]
-    ) -> Any:
+    def _capture_effect_pre_state(verifier: Any, effects: list["Effect"]) -> Any:
         """Capture the pre-action baseline for resolved effect contracts.
 
         Multi-candidate deployments select an adapter per resolved effect.  A

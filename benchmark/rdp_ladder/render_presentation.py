@@ -387,12 +387,14 @@ def _verifier_view(frame: Image.Image, summary: dict) -> Image.Image:
         fill=TEXT,
     )
 
-    app = ImageOps.fit(
+    app = ImageOps.contain(
         frame.convert("RGB"),
         (700, 500),
         method=Image.Resampling.LANCZOS,
     )
-    image.paste(app, (42, 172))
+    app_x = 42 + (700 - app.width) // 2
+    app_y = 172 + (500 - app.height) // 2
+    image.paste(app, (app_x, app_y))
     draw.rounded_rectangle((42, 172, 742, 672), 18, outline="#31535a", width=3)
     draw.rounded_rectangle((774, 172, 1238, 672), 18, fill=PANEL)
     draw.text((804, 202), "READ-ONLY SQL", font=_font(15, bold=True), fill=BLUE)

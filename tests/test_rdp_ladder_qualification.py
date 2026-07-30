@@ -115,7 +115,8 @@ def test_presentation_is_hash_bound_and_renders_without_staged_video_frames(
         start=1,
     ):
         capture = qualification.PresentationCapture(
-            tmp_path / f"0{index}-{'demonstration' if index == 1 else 'verified-replay' if index == 2 else 'safe-halt'}",
+            tmp_path
+            / f"0{index}-{'demonstration' if index == 1 else 'verified-replay' if index == 2 else 'safe-halt'}",
             phase=phase,
         )
         image = Image.new("RGB", qualification.VIEWPORT, (index * 30, 60, 90))

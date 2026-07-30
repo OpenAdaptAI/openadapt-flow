@@ -306,9 +306,11 @@ def _best_target_text(
     OCR engine retained the complete line. That truncation can remove a
     consequential verb such as ``Save`` or ``Submit``. Prefer the most
     confident complete full-frame line whose box contains the exact click
-    point. Fall back to the existing crop result when no such line exists.
+    point. Keep the crop's word boundaries when both OCR passes contain the
+    same characters. Fall back to the crop when no complete line exists.
     """
     click_x, click_y = click
+    crop_text = _best_crop_text(crop_lines, click_y=click_y)
     clicked_lines = [
         line
         for line in frame_lines
@@ -319,8 +321,13 @@ def _best_target_text(
     ]
     if clicked_lines:
         best = max(clicked_lines, key=lambda line: line.confidence)
-        return best.text.strip()
-    return _best_crop_text(crop_lines, click_y=click_y)
+        frame_text = best.text.strip()
+        if crop_text and re.sub(r"\W+", "", crop_text).casefold() == re.sub(
+            r"\W+", "", frame_text
+        ).casefold():
+            return crop_text
+        return frame_text
+    return crop_text
 
 
 def _landmarks_for(

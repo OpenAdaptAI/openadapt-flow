@@ -1172,6 +1172,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         durable,
         allow_egress,
     ) = _deployment_runtime(args, params=params)
+    # Qualification cases are always Standard and must keep their durable
+    # evidence/recovery contract through this second deployment resolution.
+    # ``_cmd_run`` already checked this; retain it here so a future replay
+    # wiring change cannot silently construct a non-durable Replayer.
+    if qualification_case is not None:
+        durable = True
     worklists = (
         qualification_case["worklists"]
         if qualification_case is not None
@@ -2182,6 +2188,28 @@ def _claim_qualification_case_attempt(args: argparse.Namespace) -> bool:
     import hashlib
     import json
     import os
+    import stat
+
+    def private_directory(path: Path) -> Path:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            metadata = os.lstat(path)
+        except OSError as exc:
+            raise ValueError(
+                "qualification attempt ledger could not be inspected"
+            ) from exc
+        unsafe = os.name != "nt" and (
+            not hasattr(os, "geteuid")
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        )
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or unsafe
+        ):
+            raise ValueError("qualification attempt ledger is not a private directory")
+        return path
 
     case = args._qualification_case_execution["case"]
     workflow = args._qualification_case_execution["workflow"]
@@ -2213,8 +2241,17 @@ def _claim_qualification_case_attempt(args: argparse.Namespace) -> bool:
     attempt_key = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    ledger_dir = Path(args.bundle) / ".openadapt" / "qualification-attempts"
-    ledger_dir.mkdir(parents=True, exist_ok=True)
+    state_root = Path(os.environ.get("OPENADAPT_HOME", Path.home() / ".openadapt"))
+    try:
+        ledger_dir = private_directory(
+            private_directory(state_root) / "qualification-attempts"
+        )
+    except ValueError:
+        print(
+            "run REFUSED: qualification attempt ledger is not available safely. "
+            "Nothing was executed."
+        )
+        return False
     marker = ledger_dir / f"{attempt_key}.json"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):

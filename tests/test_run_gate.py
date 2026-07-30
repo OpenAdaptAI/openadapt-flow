@@ -854,13 +854,13 @@ def test_cli_run_hands_bound_authorization_to_replay(tmp_path, monkeypatch, caps
 
 
 def _representative_qualification_bundle(
-    tmp_path: Path,
+    tmp_path: Path, *, target_kind: str = "web"
 ) -> tuple[Workflow, Path, bytes]:
     workflow = _good_workflow("qualification_case")
     init_project(
         workflow,
         environment=EnvironmentBoundary(
-            target_kind="web",
+            target_kind=target_kind,
             application="Qualification fixture",
             application_version="1",
             environment_digest="a" * 64,
@@ -922,9 +922,11 @@ def test_qualification_run_case_derives_exact_standard_authorization(
 
     workflow, bundle, inputs = _representative_qualification_bundle(tmp_path)
     monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    monkeypatch.setenv("OPENADAPT_HOME", str(tmp_path / "state"))
     inputs_path = tmp_path / "case-inputs.json"
     inputs_path.write_bytes(inputs)
     inputs_path.chmod(0o600)
+    bundle.chmod(0o555)
     captured = {}
 
     def capture(args):
@@ -977,7 +979,8 @@ def test_qualification_run_case_derives_exact_standard_authorization(
         == hashlib.sha256(b"run-1").hexdigest()
     )
     assert authorization.validate_workflow(workflow) is None
-    assert list((bundle / ".openadapt" / "qualification-attempts").glob("*.json"))
+    assert list((tmp_path / "state" / "qualification-attempts").glob("*.json"))
+    assert not (bundle / ".openadapt").exists()
 
 
 def test_qualification_run_case_refuses_changed_inputs_and_duplicate_attempt(
@@ -987,6 +990,7 @@ def test_qualification_run_case_refuses_changed_inputs_and_duplicate_attempt(
 
     _workflow, bundle, inputs = _representative_qualification_bundle(tmp_path)
     monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    monkeypatch.setenv("OPENADAPT_HOME", str(tmp_path / "state"))
     inputs_path = tmp_path / "case-inputs.json"
     inputs_path.write_bytes(inputs.replace(b"{}", b'{"changed":true}'))
     inputs_path.chmod(0o600)
@@ -1027,6 +1031,73 @@ def test_qualification_run_case_refuses_changed_inputs_and_duplicate_attempt(
     assert main.main(alternate_argv) == 2
     assert len(called) == 1
     assert "already started" in capsys.readouterr().out
+
+
+def test_qualification_run_case_constructs_a_durable_replayer(tmp_path, monkeypatch):
+    import openadapt_flow.__main__ as main
+    import openadapt_flow.backends.factory as factory
+    import openadapt_flow.deployment as deployment
+    import openadapt_flow.report as report_module
+
+    _workflow, bundle, inputs = _representative_qualification_bundle(
+        tmp_path, target_kind="windows"
+    )
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    monkeypatch.setenv("OPENADAPT_HOME", str(tmp_path / "state"))
+    inputs_path = tmp_path / "case-inputs.json"
+    inputs_path.write_bytes(inputs)
+    inputs_path.chmod(0o600)
+    captured = {}
+
+    class Backend:
+        def close(self):
+            pass
+
+    class Report:
+        success = True
+        execution_outcome = "VERIFIED"
+        screenshots_may_leave_box = False
+
+    class Replayer:
+        def run(self, *_args, **_kwargs):
+            return Report()
+
+    monkeypatch.setattr(factory, "build_backend", lambda _cfg: Backend())
+    monkeypatch.setattr(
+        deployment,
+        "build_replayer",
+        lambda _backend, **kwargs: (
+            captured.setdefault("durable", kwargs["durable"]) and Replayer()
+        ),
+    )
+    monkeypatch.setattr(
+        report_module, "render_run_report", lambda _run_dir: "REPORT.md"
+    )
+    argv = [
+        "qualify",
+        "run-case",
+        str(bundle),
+        "--case-id",
+        "representative-1",
+        "--inputs",
+        str(inputs_path),
+        "--campaign-id",
+        "campaign-1",
+        "--run-id",
+        "run-1",
+        "--run-dir",
+        str(tmp_path / "case-run"),
+        "--backend",
+        "windows",
+        "--agent-url",
+        "http://127.0.0.1:5001",
+        "--effects-kind",
+        "rest",
+        "--effects-base-url",
+        "http://sor.local",
+    ]
+    assert main.main(argv) == 0
+    assert captured["durable"] is True
 
 
 def test_cli_run_refuses_citrix_without_readiness_before_execution(

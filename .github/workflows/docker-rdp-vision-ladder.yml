@@ -93,6 +93,8 @@ jobs:
 
       - name: Render the paced RDP presentation
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
           python benchmark/rdp_ladder/render_presentation.py \
             --presentation-dir runs/rdp-ladder/presentation \
             --output runs/rdp-ladder/openadapt-rdp-demo.mp4

@@ -907,6 +907,7 @@ def run_qualification(
 ) -> dict:
     from openadapt_flow.backends.rdp_backend import FreeRDPBackend
     from openadapt_flow.compiler import compile_recording
+    from openadapt_flow.ir import ActionKind
     from openadapt_flow.recorder import Recorder
     from openadapt_flow.run_gate import build_runtime_authorization
     from openadapt_flow.runtime.replayer import Replayer
@@ -1243,6 +1244,17 @@ def run_qualification(
         trials.append(trial)
 
     wrong_record_trials: list[dict] = []
+    pointer_actions = {
+        ActionKind.CLICK,
+        ActionKind.DOUBLE_CLICK,
+        ActionKind.RIGHT_CLICK,
+        ActionKind.DRAG,
+    }
+    final_pointer_acquire = sum(
+        step.action in pointer_actions for step in workflow.steps
+    )
+    if final_pointer_acquire < 1:
+        raise RuntimeError("qualification workflow has no pointer actuation")
     for condition_trial in range(1, TRIALS_PER_CONDITION + 1):
         _reset_kiosk(container, oracle_root)
         params = dict(REPLAY_PARAMS)
@@ -1280,7 +1292,7 @@ def run_qualification(
         def acquire_with_wrong_record() -> bytes:
             nonlocal acquire_count, fault_injected
             acquire_count += 1
-            if acquire_count == len(workflow.steps):
+            if acquire_count == final_pointer_acquire:
                 raw_fault_transport.pointer(*GRACE_ROW, "left", True)
                 raw_fault_transport.pointer(*GRACE_ROW, "left", False)
                 time.sleep(0.45)
@@ -1327,6 +1339,8 @@ def run_qualification(
                 "Grace Hopper / MRN B2002 before the final write"
             ),
             "fault_injected": fault_injected,
+            "fresh_frame_acquisitions": acquire_count,
+            "fault_acquisition_index": final_pointer_acquire,
             "halted": halted,
             "identity_mismatch": identity_mismatch,
             "identity_statuses": identity_results,

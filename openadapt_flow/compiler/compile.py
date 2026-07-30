@@ -322,9 +322,11 @@ def _best_target_text(
     if clicked_lines:
         best = max(clicked_lines, key=lambda line: line.confidence)
         frame_text = best.text.strip()
-        if crop_text and re.sub(r"\W+", "", crop_text).casefold() == re.sub(
-            r"\W+", "", frame_text
-        ).casefold():
+        if (
+            crop_text
+            and re.sub(r"\W+", "", crop_text).casefold()
+            == re.sub(r"\W+", "", frame_text).casefold()
+        ):
             return crop_text
         return frame_text
     return crop_text

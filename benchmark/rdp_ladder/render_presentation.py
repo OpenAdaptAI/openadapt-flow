@@ -553,9 +553,7 @@ def render(presentation_dir: Path, output: Path) -> dict:
         raise RuntimeError("FFmpeg is required to render the presentation MP4")
 
     request = _load_json(presentation_dir / "execution-request.json")
-    graph = _load_json(
-        presentation_dir / request["program_graph"]
-    )
+    graph = _load_json(presentation_dir / request["program_graph"])
     manifests: dict[str, dict] = {}
     phase_frames: dict[str, list[tuple[dict, Image.Image]]] = {}
     for name in PHASE_DIRS:

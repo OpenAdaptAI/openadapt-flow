@@ -93,9 +93,7 @@ def main() -> None:
         font=("DejaVu Sans", 16, "bold"),
         bg=BG,
         fg=FG,
-    ).place(
-        x=50, y=116
-    )
+    ).place(x=50, y=116)
 
     active_lbl = tk.Label(
         root,
@@ -209,7 +207,9 @@ def main() -> None:
                 fg="#b42318",
             )
             return
-        appointment_id = "APT-" + hashlib.sha256(request.encode()).hexdigest()[:8].upper()
+        appointment_id = (
+            "APT-" + hashlib.sha256(request.encode()).hexdigest()[:8].upper()
+        )
         with _connect() as connection:
             try:
                 connection.execute(

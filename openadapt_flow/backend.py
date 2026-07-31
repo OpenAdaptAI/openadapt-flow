@@ -528,7 +528,9 @@ class RemoteActuationBackend(Protocol):
     The backend owns a one-shot content lease for the returned frame.  Its next
     input method captures once more under the backend input lock and refuses
     before the first input edge if the window/session, dimensions, readiness,
-    or exact frame content changed.  The lease is consumed once so a
+    or exact frame content changed.  A sealed remote frame contract can exclude
+    reviewed volatile regions from a derived comparison.  Raw frame evidence
+    and the exact lease stay unmodified.  The lease is consumed once so a
     multi-character type or double-click gesture cannot invalidate itself.
     """
 

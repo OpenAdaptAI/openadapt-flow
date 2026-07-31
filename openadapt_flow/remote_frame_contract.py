@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from typing import Literal
 
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -15,7 +16,9 @@ class RemoteFrameContract(BaseModel):
     """Reviewed exact-geometry exclusions for derived settle inputs only."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: str = "openadapt.remote-frame-contract/v1"
+    schema_version: Literal["openadapt.remote-frame-contract/v1"] = (
+        "openadapt.remote-frame-contract/v1"
+    )
     frame_width: int = Field(gt=0, le=32768)
     frame_height: int = Field(gt=0, le=32768)
     volatile_regions: tuple[Region, ...] = Field(min_length=1, max_length=32)

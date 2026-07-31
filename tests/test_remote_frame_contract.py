@@ -55,6 +55,10 @@ def test_overlap_and_geometry_mismatch_fail_closed() -> None:
         )
     with pytest.raises(ValueError, match="geometry"):
         _contract().require_geometry((99, 80))
+    with pytest.raises(ValueError, match="schema_version"):
+        RemoteFrameContract.model_validate(
+            {**_contract().model_dump(), "schema_version": "unsupported/v1"}
+        )
 
 
 def test_runtime_target_or_identity_overlap_refuses_after_static_review() -> None:

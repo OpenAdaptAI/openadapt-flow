@@ -1298,8 +1298,9 @@ class RemoteDisplayBackend:
         hover/cursor update reaches the remote framebuffer.  Sampling one frame
         after a fixed sleep can therefore arm a lease on the old pixels and
         invalidate it moments later.  This gate waits for consecutive,
-        byte-decoded RGB-identical frames; it never masks cursor regions or
-        weakens the exact post-resolution digest used at the delivery edge.
+        byte-decoded RGB-identical frames outside any reviewed volatile regions.
+        The contract applies only to derived comparisons. It never changes the
+        exact raw frame evidence or learns regions from ordinary runs.
         """
 
         deadline = time.monotonic() + self._pointer_settle_timeout_s
@@ -1439,8 +1440,16 @@ class RemoteDisplayBackend:
                 # Consume once before the first input edge.  A double click or
                 # multi-character type is one gesture and must not invalidate
                 # itself after its first state-changing edge.
-                digest = _canonical_rgb_digest(png)
-                if self._last_frame_digest is None or digest != self._last_frame_digest:
+                raw_digest = _canonical_rgb_digest(png)
+                digest = (
+                    self._remote_frame_contract.comparison_digest(png)
+                    if self._remote_frame_contract is not None
+                    else raw_digest
+                )
+                if (
+                    self._last_comparison_digest is None
+                    or digest != self._last_comparison_digest
+                ):
                     changed_pixel_count, changed_bbox = self._frame_difference(
                         self._actuation_frame_png,
                         png,

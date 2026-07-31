@@ -360,6 +360,7 @@ class FreeRDPBackend:
         self._session_identity_observer = session_identity_observer
         self._last_frame_monotonic: Optional[float] = None
         self._last_frame_digest: Optional[bytes] = None
+        self._last_comparison_digest: Optional[bytes] = None
         self._last_session_identity: Optional[str] = None
         self._qualification_environment: Optional[tuple[str, str, str, str]] = None
         self._qualification_input_guard: Optional[Callable[[], None]] = None
@@ -405,6 +406,11 @@ class FreeRDPBackend:
                 self._remote_frame_contract.require_geometry(img.size)
             self._last_frame_monotonic = time.monotonic()
             self._last_frame_digest = self._canonical_frame_digest(img)
+            self._last_comparison_digest = (
+                self._remote_frame_contract.comparison_digest(png)
+                if self._remote_frame_contract is not None
+                else self._last_frame_digest
+            )
             self._last_session_identity = self._session_identity_from_frame(png)
             if self._actuation_lease_state == _LEASE_ARMED:
                 self._invalidate_actuation_lease()
@@ -1122,8 +1128,16 @@ class FreeRDPBackend:
                     "capture; refusing input"
                 )
             if exact_lease_ready:
-                digest = self._canonical_frame_digest(current_img)
-                if self._last_frame_digest is None or digest != self._last_frame_digest:
+                raw_digest = self._canonical_frame_digest(current_img)
+                digest = (
+                    self._remote_frame_contract.comparison_digest(current_png)
+                    if self._remote_frame_contract is not None
+                    else raw_digest
+                )
+                if (
+                    self._last_comparison_digest is None
+                    or digest != self._last_comparison_digest
+                ):
                     changed_pixel_count, changed_bbox = self._frame_difference(
                         self._actuation_frame_png,
                         current_img,

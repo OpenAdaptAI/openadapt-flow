@@ -295,6 +295,21 @@ def test_presentation_is_hash_bound_and_renders_without_staged_video_frames(
     ]
 
 
+def test_public_presentation_finalizer_refuses_unsigned_extra_candidate_files(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    video, timeline, manifest = renderer._candidate_paths(candidate)
+    video.write_bytes(b"video")
+    timeline.write_text("{}", encoding="utf-8")
+    manifest.write_text("{}", encoding="utf-8")
+    (candidate / "unreviewed.txt").write_text("extra", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="inventory is not exact"):
+        renderer._candidate_inventory(candidate)
+
+
 @pytest.mark.parametrize(
     ("character", "keysym"),
     [("-", "minus"), ("/", "slash"), (":", "colon")],

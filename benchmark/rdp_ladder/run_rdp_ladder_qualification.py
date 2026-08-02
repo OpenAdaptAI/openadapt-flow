@@ -251,29 +251,42 @@ class DockerX11RdpTransport:
         img = self._grab()
         return img, img.width, img.height
 
-    def _focus_client(self) -> None:
-        """Focus the isolated FreeRDP window before injecting XTest input.
-
-        The fixture runs a minimal Openbox session. Focusing its only visible
-        FreeRDP window once is deterministic and remains entirely inside
-        display ``:1`` in the container.
-        """
-        self._exec(
+    def _client_window_id(self) -> int:
+        raw = self._exec(
             [
                 "xdotool",
                 "search",
                 "--onlyvisible",
                 "--name",
                 "^FreeRDP:",
-                "windowfocus",
-                "%@",
             ]
         )
+        try:
+            return int(raw.decode().splitlines()[0])
+        except (IndexError, ValueError) as exc:
+            raise RuntimeError("isolated FreeRDP window is unavailable") from exc
+
+    def _focus_client(self, window_id: Optional[int] = None) -> None:
+        """Focus the isolated FreeRDP window before injecting XTest input.
+
+        The fixture runs a minimal Openbox session. Focusing its only visible
+        FreeRDP window once is deterministic and remains entirely inside
+        display ``:1`` in the container.
+        """
+        client_window = window_id if window_id is not None else self._client_window_id()
+        self._exec(["xdotool", "windowfocus", str(client_window)])
 
     def focus_input_surface(self) -> None:
         """Restore the outer FreeRDP window before keyboard delivery."""
 
-        self._focus_client()
+        client_window = self._client_window_id()
+        try:
+            active_window = int(self._exec(["xdotool", "getactivewindow"]).decode())
+        except ValueError as exc:
+            raise RuntimeError("active X11 input window is unavailable") from exc
+        if active_window == client_window:
+            return
+        self._focus_client(client_window)
         # Let the window manager and FreeRDP restore the keyboard grab before
         # the next XTest key event. This delay is outside the production RDP
         # transport. It makes the two-Xvfb qualification fixture deterministic.

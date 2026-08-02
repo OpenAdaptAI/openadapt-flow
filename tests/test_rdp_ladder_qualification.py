@@ -337,6 +337,25 @@ def test_rdp_fixture_transport_types_parameter_in_one_input_operation() -> None:
     ]
 
 
+def test_rdp_fixture_does_not_refocus_an_already_active_client() -> None:
+    transport = qualification.DockerX11RdpTransport("synthetic-fixture")
+    commands: list[list[str]] = []
+
+    def execute(args, **_kwargs):
+        commands.append(args)
+        if args[1] == "search":
+            return b"123\n"
+        if args[1] == "getactivewindow":
+            return b"123\n"
+        raise AssertionError(f"unexpected input-changing command: {args!r}")
+
+    transport._exec = execute  # type: ignore[method-assign]
+
+    transport.focus_input_surface()
+
+    assert [command[1] for command in commands] == ["search", "getactivewindow"]
+
+
 def test_recorded_identity_regions_cover_every_pointer_action(tmp_path: Path) -> None:
     recording = tmp_path / "recording"
     recording.mkdir()

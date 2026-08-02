@@ -11786,15 +11786,15 @@ class Replayer:
                 intent=next_step.intent,
             )
         if stop_pred is None or (dx == 0 and dy == 0):
+            remote_preflight_error = self._prepare_remote_scroll_input(step, result)
+            if remote_preflight_error is not None:
+                return remote_preflight_error
             refusal = self._delivery_authorization_refusal(
                 workflow, params, step, result
             )
             if refusal is not None:
                 return refusal
             self._require_qualification_environment_current()
-            remote_preflight_error = self._prepare_remote_scroll_input(step, result)
-            if remote_preflight_error is not None:
-                return remote_preflight_error
             self._deliver_backend_call(
                 result,
                 lambda: self.backend.scroll(dx, dy),
@@ -11833,7 +11833,6 @@ class Replayer:
             # every wheel edge to a new exact remote frame and repeat the
             # context/identity checks after those callbacks.  This also avoids
             # reusing the one-shot lease consumed by the prior wheel edge.
-            remote_scroll_revalidated = False
             if self._step_needs_consequential_revalidation(step, workflow):
                 (
                     _scroll_resolution,
@@ -11855,19 +11854,15 @@ class Replayer:
                     return scroll_error
                 if readiness_holds(fresh_scroll_frame):
                     return None
-                remote_scroll_revalidated = isinstance(
-                    self.backend, RemoteActuationBackend
-                )
+            remote_preflight_error = self._prepare_remote_scroll_input(step, result)
+            if remote_preflight_error is not None:
+                return remote_preflight_error
             refusal = self._delivery_authorization_refusal(
                 workflow, params, step, result
             )
             if refusal is not None:
                 return refusal
             self._require_qualification_environment_current()
-            if not remote_scroll_revalidated:
-                remote_preflight_error = self._prepare_remote_scroll_input(step, result)
-                if remote_preflight_error is not None:
-                    return remote_preflight_error
             self._deliver_backend_call(
                 result,
                 lambda: self.backend.scroll(dx, dy),
@@ -11915,8 +11910,9 @@ class Replayer:
         Target-readiness probes can take longer than a remote backend's frame
         lease.  A wheel gesture has no coordinate to re-resolve, but it is
         still real input into an opaque session.  Acquire the remote backend's
-        exact-content lease immediately before delivery instead of extending
-        the allowed frame age or reusing the observation from the probe.
+        exact-content lease after readiness checks and before the final
+        authorization, environment, and delivery checks.  Do not extend the
+        allowed frame age or reuse the observation from the probe.
         """
 
         if not isinstance(self.backend, RemoteActuationBackend):

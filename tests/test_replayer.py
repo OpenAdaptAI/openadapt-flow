@@ -1984,6 +1984,62 @@ def test_remote_scroll_preflight_refusal_sends_no_input(bundle, run_dir):
     assert report.results[0].error is not None
 
 
+def test_closed_loop_remote_scroll_orders_fresh_lease_before_final_gates(
+    bundle, run_dir, monkeypatch
+):
+    events = []
+
+    class OrderedRemoteScrollBackend(RemoteLeaseBackend):
+        def acquire_actuation_frame(self):
+            events.append("acquire")
+            return super().acquire_actuation_frame()
+
+        def scroll(self, dx, dy):
+            events.append("scroll")
+            return super().scroll(dx, dy)
+
+    backend = OrderedRemoteScrollBackend(
+        initial_frame=make_png(), fresh_frame=make_png()
+    )
+    replayer = Replayer(backend, vision=FakeVision())
+    monkeypatch.setattr(
+        replayer,
+        "_implicit_scroll_target_ready",
+        lambda *args, **kwargs: events.append("readiness") or False,
+    )
+    monkeypatch.setattr(
+        replayer,
+        "_delivery_authorization_refusal",
+        lambda *args, **kwargs: events.append("authorization") or None,
+    )
+    monkeypatch.setattr(
+        replayer,
+        "_require_qualification_environment_current",
+        lambda: events.append("environment"),
+    )
+
+    report = replayer.run(
+        Workflow(name="wf", steps=[scroll_step(), click_step()]),
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is False
+    assert events == [
+        "readiness",
+        "acquire",
+        "authorization",
+        "environment",
+        "scroll",
+        "readiness",
+        "acquire",
+        "authorization",
+        "environment",
+        "scroll",
+        "readiness",
+    ]
+
+
 def scroll_step(step_id="sc1", dx=0, dy=400) -> Step:
     return Step(
         id=step_id,
@@ -2191,7 +2247,8 @@ def test_consequential_remote_scroll_reacquires_each_wheel_edge(bundle, run_dir)
 
     assert report.success is False
     assert backend.actions == [("scroll", 0, -400), ("scroll", 0, -400)]
-    assert backend.acquire_count == 3  # outer preflight plus one per wheel edge
+    # One outer step preflight, then identity and final wheel leases per edge.
+    assert backend.acquire_count == 5
 
 
 def test_consecutive_scroll_steps_share_the_loop(bundle, run_dir):

@@ -125,6 +125,14 @@ def _read_ack(root: Path) -> Optional[str]:
         return None
 
 
+def _read_fault_ack(root: Path) -> Optional[dict[str, Any]]:
+    try:
+        value = json.loads((root / "fault_ack.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _read_database(root: Path) -> Optional[list[dict[str, str]]]:
     path = root / "appointments.sqlite3"
     if not path.exists():
@@ -191,7 +199,7 @@ def _read_input_ledger(root: Path) -> Optional[list[dict[str, Any]]]:
         return None
 
 
-def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
+def _reset(_container: str, root: Path, scenario: str = "healthy") -> dict[str, Any]:
     token = secrets.token_hex(16)
     root.mkdir(parents=True, exist_ok=True)
     (root / "control.json").write_text(
@@ -207,6 +215,7 @@ def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
         worklist = _read_worklist(root)
         mail = _read_mail(root)
         input_ledger = _read_input_ledger(root)
+        fault_ack = _read_fault_ack(root)
         diagnostics = {
             "ack_expected": token,
             "ack_after": after,
@@ -215,6 +224,7 @@ def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
             "worklist_rows": None if worklist is None else len(worklist),
             "mail": mail,
             "input_ledger": input_ledger,
+            "fault_ack": fault_ack,
             "root_entries": (
                 sorted(path.name for path in root.iterdir()) if root.is_dir() else None
             ),
@@ -225,12 +235,54 @@ def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
             and worklist
             and mail == []
             and input_ledger == []
+            and fault_ack is not None
+            and fault_ack.get("reset_token") == token
+            and fault_ack.get("scenario") == scenario
         ):
-            return
+            return fault_ack
         time.sleep(0.1)
     raise RuntimeError(
         "fixture reset did not produce clean persisted state: "
         + json.dumps(diagnostics, sort_keys=True, default=str)
+    )
+
+
+def _arm_partial_render(root: Path) -> dict[str, Any]:
+    """Arm the latched incomplete frame without changing the reset token."""
+
+    token = secrets.token_hex(16)
+    try:
+        control = json.loads((root / "control.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(
+            "fixture control is unavailable before partial render"
+        ) from exc
+    if not isinstance(control, dict) or not isinstance(control.get("reset_token"), str):
+        raise RuntimeError("fixture control has no reset token before partial render")
+    control.update({"fault": "partial_render", "fault_token": token})
+    (root / "control.json").write_text(
+        json.dumps(control, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    deadline = time.monotonic() + 10
+    latest: Optional[dict[str, Any]] = None
+    while time.monotonic() < deadline:
+        latest = _read_fault_ack(root)
+        if (
+            latest is not None
+            and latest.get("reset_token") == control["reset_token"]
+            and latest.get("scenario") == "healthy"
+            and latest.get("fault") == "partial_render"
+            and latest.get("fault_token") == token
+            and latest.get("scheduler_ready_visible") is False
+            and latest.get("active_identity_visible") is False
+            and latest.get("save_control_count") == 1
+            and latest.get("identity_surface") == "loading_skeleton"
+        ):
+            return latest
+        time.sleep(0.05)
+    raise RuntimeError(
+        "fixture did not acknowledge latched partial render: "
+        + json.dumps(latest, sort_keys=True, default=str)
     )
 
 
@@ -511,6 +563,12 @@ def _oracle_result(root: Path, params: dict[str, str]) -> dict[str, Any]:
         and target_rows[0].get("status") == "Scheduled"
         and adjacent_unchanged
     )
+    worklist_unchanged = bool(
+        worklist is not None
+        and len(worklist) == 19
+        and len(target_rows) == 1
+        and all(row.get("status") == "New" for row in worklist)
+    )
     mail_ok = bool(
         mail is not None
         and len(mail) == 1
@@ -547,6 +605,7 @@ def _oracle_result(root: Path, params: dict[str, str]) -> dict[str, Any]:
         "worklist_target": target_rows,
         "mail": mail,
         "adjacent_rows_unchanged": adjacent_unchanged,
+        "worklist_unchanged": worklist_unchanged,
         "input_ledger": input_ledger,
         "input_counts": input_counts,
         "input_cardinality_ok": input_cardinality_ok,
@@ -588,9 +647,13 @@ def _run_once(
     from openadapt_flow.run_gate import build_runtime_authorization
     from openadapt_flow.runtime.replayer import Replayer
 
-    _reset(
-        container, root, "row_reordered" if condition == "row_reordered" else "healthy"
+    fixture_scenarios = {"row_reordered", "duplicate_save_control"}
+    reset_ack = _reset(
+        container,
+        root,
+        condition if condition in fixture_scenarios else "healthy",
     )
+    fault_ack = reset_ack
     params = dict(REPLAY_PARAMS)
     authorization = build_runtime_authorization(
         workflow,
@@ -605,7 +668,7 @@ def _run_once(
     injected = False
 
     def acquire_with_fault() -> bytes:
-        nonlocal acquisitions, injected
+        nonlocal acquisitions, fault_ack, injected
         acquisitions += 1
         if acquisitions == save_pointer_acquisition:
             if condition == "wrong_record_before_write":
@@ -617,6 +680,12 @@ def _run_once(
                 transport.pointer(*INBOX_TAB, "left", True)
                 transport.pointer(*INBOX_TAB, "left", False)
                 time.sleep(0.45)
+                injected = True
+            elif condition == "partial_render":
+                # This runs after the form fields are populated and immediately
+                # before the qualified Save fresh-frame acquisition. The fixture
+                # polling loop only removes visual regions; it never resets data.
+                fault_ack = _arm_partial_render(root)
                 injected = True
         return original_acquire()
 
@@ -646,15 +715,62 @@ def _run_once(
     expected_halt = condition in {
         "wrong_record_before_write",
         "focus_theft_before_write",
+        "duplicate_save_control",
+        "partial_render",
     }
+    errors = [result.error for result in report.results if result.error]
+    refusal_evidence = [
+        result.safety_refusal_evidence
+        for result in report.results
+        if result.safety_refusal_evidence is not None
+    ]
+    typed_target_refusal = any(
+        evidence.code == "target_ambiguous"
+        and evidence.stage in {"target_resolution", "actuation_revalidation"}
+        for evidence in refusal_evidence
+    )
+    relevant_partial_refusal = any(
+        result.safety_halt
+        and result.failure_category in {"governed_refusal", "safety_halt"}
+        and result.safety_refusal_evidence is not None
+        and result.safety_refusal_evidence.stage == "identity_verification"
+        and result.safety_refusal_evidence.code
+        in {"identity_conflict", "identity_unverifiable"}
+        and result.delivery_attempted is False
+        for result in report.results
+    )
+    exact_fault_evidence = {
+        "duplicate_save_control": bool(
+            fault_ack.get("scenario") == condition
+            and fault_ack.get("save_control_count") == 2
+            and typed_target_refusal
+        ),
+        "partial_render": bool(
+            fault_ack.get("scenario") == "healthy"
+            and fault_ack.get("fault") == "partial_render"
+            and isinstance(fault_ack.get("fault_token"), str)
+            and fault_ack.get("scheduler_ready_visible") is False
+            and fault_ack.get("active_identity_visible") is False
+            and fault_ack.get("save_control_count") == 1
+            and fault_ack.get("identity_surface") == "loading_skeleton"
+            and relevant_partial_refusal
+        ),
+    }.get(condition, True)
     safe_halt = bool(
         expected_halt
         and not report.success
         and not oracle["database"]
+        and oracle["worklist_unchanged"]
+        and oracle["mail"] == []
         and oracle["no_consequential_input"]
     )
     if expected_halt:
-        passed = bool(injected and safe_halt)
+        injected_fault = (
+            injected
+            if condition in {"wrong_record_before_write", "focus_theft_before_write"}
+            else exact_fault_evidence
+        )
+        passed = bool(injected_fault and safe_halt)
     elif condition == "commit_then_timeout":
         save_result = next(
             (result for result in report.results if result.step_id == save_step_id),
@@ -696,7 +812,22 @@ def _run_once(
         "runtime_s": round(time.monotonic() - started, 3),
         "runtime_success": bool(report.success),
         "model_calls": int(report.model_calls),
-        "fault_injected": bool(injected or commit_timeout["injected"]),
+        "fault_injected": bool(
+            injected
+            or commit_timeout["injected"]
+            or (
+                condition in {"duplicate_save_control", "partial_render"}
+                and exact_fault_evidence
+            )
+        ),
+        "fault_ack": fault_ack,
+        "reset_ack": reset_ack,
+        "exact_fault_evidence": exact_fault_evidence,
+        "typed_target_refusal": typed_target_refusal,
+        "relevant_partial_refusal": relevant_partial_refusal,
+        "safety_refusal_evidence": [
+            evidence.model_dump(mode="json") for evidence in refusal_evidence
+        ],
         "commit_timeout_injected": bool(commit_timeout["injected"]),
         "save_delivery_calls": int(commit_timeout["save_delivery_calls"]),
         "transaction_outcome": (
@@ -711,7 +842,7 @@ def _run_once(
         ),
         "oracle": oracle,
         "rung_counts": dict(report.rung_counts),
-        "errors": [result.error for result in report.results if result.error],
+        "errors": errors,
     }
 
 
@@ -748,6 +879,8 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         "row_reordered",
         "wrong_record_before_write",
         "focus_theft_before_write",
+        "duplicate_save_control",
+        "partial_render",
         "commit_then_timeout",
     )
     trials: list[dict[str, Any]] = []
@@ -781,8 +914,6 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         "implemented_conditions": list(conditions),
         "full_campaign_complete": False,
         "full_campaign_pending_conditions": [
-            "duplicate_save_control",
-            "partial_render",
             "moderate_display_drift",
             "severe_display_drift",
         ],

@@ -15,6 +15,7 @@ import os
 import sqlite3
 import tkinter as tk
 from email.message import EmailMessage
+from functools import partial
 from pathlib import Path
 
 ROOT = Path(os.environ.get("RDP_MULTIAPP_ORACLE_ROOT", "/opt/rdp_multiapp/oracle"))
@@ -23,6 +24,7 @@ CSV_PATH = ROOT / "worklist.csv"
 MAILDIR = ROOT / "outbox"
 CONTROL_PATH = ROOT / "control.json"
 ACK_PATH = ROOT / "reset_ack.txt"
+FAULT_ACK_PATH = ROOT / "fault_ack.json"
 INPUT_LEDGER_PATH = ROOT / "input-ledger.jsonl"
 
 BG = "#eef2f6"
@@ -70,6 +72,36 @@ def _reset_token() -> str | None:
     except (OSError, ValueError, TypeError):
         return None
     return value if isinstance(value, str) and value else None
+
+
+def _fault_control() -> tuple[str | None, str | None]:
+    try:
+        control = json.loads(CONTROL_PATH.read_text())
+    except (OSError, ValueError, TypeError):
+        return None, None
+    fault = control.get("fault")
+    token = control.get("fault_token")
+    return (
+        fault if isinstance(fault, str) and fault else None,
+        token if isinstance(token, str) and token else None,
+    )
+
+
+def _fault_ack_payload() -> dict[str, object]:
+    """Describe the exact synthetic visual fault armed by the control token."""
+
+    scenario = _scenario()
+    fault, token = _fault_control()
+    partial = fault == "partial_render"
+    return {
+        "reset_token": _reset_token(),
+        "scenario": scenario,
+        "fault": fault,
+        "fault_token": token,
+        "scheduler_ready_visible": not partial,
+        "active_identity_visible": not partial,
+        "save_control_count": 2 if scenario == "duplicate_save_control" else 1,
+    }
 
 
 def _rows() -> list[dict[str, str]]:
@@ -143,6 +175,8 @@ class Suite:
         self.selected_request: str | None = None
         self.active_record: tuple[str, str] | None = None
         self.last_reset_token = _reset_token()
+        self.last_fault_token: str | None = None
+        self.partial_render_latched = False
         self._build_inbox()
         self._build_worklist()
         self._build_scheduler()
@@ -187,7 +221,7 @@ class Suite:
             tk.Button(
                 launcher,
                 text=title,
-                command=lambda value=title: self.show(value),
+                command=partial(self.show, title),
                 bg="#2d3d5e",
                 fg="white",
                 activebackground=BLUE,
@@ -369,7 +403,7 @@ class Suite:
             button = tk.Button(
                 self.work_inner,
                 text=text,
-                command=lambda value=row["request_id"]: self._select_work(value),
+                command=partial(self._select_work, row["request_id"]),
                 anchor="w",
                 bg=PANEL,
                 fg=FG,
@@ -427,7 +461,7 @@ class Suite:
             button = tk.Button(
                 window,
                 text=f"{name}    {record_id}",
-                command=lambda n=name, r=record_id: self._select_record(n, r),
+                command=partial(self._select_record, name, record_id),
                 anchor="w",
                 bg=PANEL,
                 fg=FG,
@@ -438,9 +472,19 @@ class Suite:
         self.active_label = _label(
             window, "Active record: (none)", 520, 94, font=("DejaVu Sans", 16, "bold")
         )
-        self.slot = self._entry(window, "Appointment date and time", 520, 165)
-        self.kind = self._entry(window, "Appointment type", 520, 285)
-        self.request = self._entry(window, "Request ID", 520, 405)
+        self.identity_loading = tk.Label(
+            window,
+            text="Loading record identity…",
+            bg="#d8dee8",
+            fg="#667085",
+            font=("DejaVu Sans", 16, "bold"),
+            anchor="w",
+        )
+        self.slot, self.slot_label = self._entry(
+            window, "Appointment date and time", 520, 165
+        )
+        self.kind, self.kind_label = self._entry(window, "Appointment type", 520, 285)
+        self.request, self.request_label = self._entry(window, "Request ID", 520, 405)
         self.save_button = tk.Button(
             window,
             text="Save appointment",
@@ -450,15 +494,25 @@ class Suite:
             font=("DejaVu Sans", 16, "bold"),
         )
         self.save_button.place(x=520, y=540, width=260, height=56)
+        self.duplicate_save_button = tk.Button(
+            window,
+            text="Save appointment",
+            command=self._save_appointment,
+            bg=BLUE,
+            fg="white",
+            font=("DejaVu Sans", 16, "bold"),
+        )
         self.scheduler_status = _label(
             window, "", 520, 625, font=("DejaVu Sans", 16, "bold")
         )
 
-    def _entry(self, parent: tk.Misc, title: str, x: int, y: int) -> tk.Entry:
-        _label(parent, title, x, y, font=("DejaVu Sans", 14, "bold"))
+    def _entry(
+        self, parent: tk.Misc, title: str, x: int, y: int
+    ) -> tuple[tk.Entry, tk.Label]:
+        label = _label(parent, title, x, y, font=("DejaVu Sans", 14, "bold"))
         entry = tk.Entry(parent, font=("DejaVu Sans", 17), bg=PANEL, fg=FG)
         entry.place(x=x, y=y + 36, width=590, height=42)
-        return entry
+        return entry, label
 
     def _select_record(self, name: str, record_id: str) -> None:
         self.active_record = (name, record_id)
@@ -504,10 +558,40 @@ class Suite:
         if token is not None and token != self.last_reset_token:
             self.last_reset_token = token
             self.reset()
+        fault, fault_token = _fault_control()
+        if (
+            fault == "partial_render"
+            and fault_token is not None
+            and fault_token != self.last_fault_token
+        ):
+            self.last_fault_token = fault_token
+            self.partial_render_latched = True
+            self._apply_partial_render()
+            self._write_fault_ack()
         self.root.after(100, self._poll_control)
+
+    def _apply_partial_render(self) -> None:
+        """Latch the incomplete scheduler frame without changing saved state."""
+
+        self.active_label.place_forget()
+        self.identity_loading.place(x=520, y=94, width=740, height=44)
+
+    def _write_fault_ack(self) -> None:
+        payload = _fault_ack_payload()
+        payload["scheduler_ready_visible"] = not self.partial_render_latched
+        payload["active_identity_visible"] = not self.partial_render_latched
+        payload["identity_surface"] = (
+            "loading_skeleton" if self.partial_render_latched else "active_record"
+        )
+        FAULT_ACK_PATH.write_text(
+            json.dumps(payload, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     def reset(self) -> None:
         _reset_persisted_state()
+        self.partial_render_latched = False
+        self.last_fault_token = None
         self.selected_request = None
         self.active_record = None
         self.inbox_detail.config(
@@ -519,10 +603,30 @@ class Suite:
         self.work_status.config(text="No request selected", fg=FG)
         self.mark_button.config(state="disabled")
         self.active_label.config(text="Active record: (none)")
+        self.identity_loading.place_forget()
+        self.active_label.place(x=520, y=94)
+        self.slot_label.place(x=520, y=165)
+        self.slot.place(x=520, y=201, width=590, height=42)
+        self.kind_label.place(x=520, y=285)
+        self.kind.place(x=520, y=321, width=590, height=42)
+        self.request.place(x=520, y=441, width=590, height=42)
+        self.request_label.place(x=520, y=405)
+        if _scenario() == "duplicate_save_control":
+            # Neither same-label candidate remains at the recorded target
+            # origin. The pixel resolver must therefore refuse ambiguity
+            # instead of preferring the original coordinate.
+            self.save_button.place(x=260, y=540, width=260, height=56)
+        else:
+            self.save_button.place(x=520, y=540, width=260, height=56)
+        if _scenario() == "duplicate_save_control":
+            self.duplicate_save_button.place(x=840, y=540, width=260, height=56)
+        else:
+            self.duplicate_save_button.place_forget()
         for entry in (self.slot, self.kind, self.request):
             entry.delete(0, "end")
         self.scheduler_status.config(text="")
         ACK_PATH.write_text(self.last_reset_token or "startup", encoding="utf-8")
+        self._write_fault_ack()
         self.show("Inbox")
 
     def run(self) -> None:

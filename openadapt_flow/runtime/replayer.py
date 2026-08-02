@@ -7934,6 +7934,17 @@ class Replayer:
                     result,
                     evidence_run_dir=run_dir,
                 )
+                if error is not None and result.identity is not None:
+                    code: Literal["identity_conflict", "identity_unverifiable"] = (
+                        "identity_conflict"
+                        if result.identity.status == "mismatch"
+                        else "identity_unverifiable"
+                    )
+                    result.safety_refusal_evidence = SafetyRefusalEvidence(
+                        stage="identity_verification",
+                        code=code,
+                        detector_input_sha256=sha256_bytes(fresh_png),
+                    )
             except Exception:
                 if guarded_coordinate:
                     self._cancel_guarded_coordinate()

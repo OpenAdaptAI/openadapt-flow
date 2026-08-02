@@ -30,6 +30,18 @@ def test_visual_campaign_has_repeated_trials_and_business_oracles() -> None:
     assert by_id["row_reordered"]["expect"] == "verified"
     assert by_id["wrong_record_before_write"]["expect"] == "safe_halt"
     assert by_id["focus_theft_before_write"]["expect"] == "safe_halt"
+    assert by_id["duplicate_save_control"] == {
+        "id": "duplicate_save_control",
+        "expect": "safe_halt",
+        "fault": "A competing Save appointment control appears in the same visual state.",
+        "oracle": ["sqlite"],
+    }
+    assert by_id["partial_render"] == {
+        "id": "partial_render",
+        "expect": "safe_halt",
+        "fault": "The target window is incomplete when the next action is due.",
+        "oracle": ["sqlite", "csv", "maildir"],
+    }
     assert by_id["commit_then_timeout"]["oracle"] == ["sqlite"]
 
 

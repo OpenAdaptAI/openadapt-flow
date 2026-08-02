@@ -2343,6 +2343,39 @@ def test_consequential_remote_reruns_identity_on_fresh_frame(bundle, run_dir):
     assert "Identity check failed" in report.results[0].error
 
 
+def test_fresh_pre_actuation_identity_loss_has_typed_refusal_and_zero_input(
+    bundle, run_dir
+):
+    frame = make_png()
+    backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99),
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.99),
+    ]
+    vision.ocr_results = [
+        [OcrLine("Jane Sample Knee pain referral High")],
+        [OcrLine("Taylor Duplicate Knee pain referral High")],
+    ]
+    step = context_click_step(
+        "Jane Sample Knee pain referral High", risk="irreversible"
+    )
+
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="wf", steps=[step]),
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    result = report.results[0]
+    assert report.success is False
+    assert backend.actions == []
+    assert result.delivery_attempted is False
+    assert result.safety_refusal_evidence is not None
+    assert result.safety_refusal_evidence.stage == "identity_verification"
+    assert result.safety_refusal_evidence.code == "identity_conflict"
+
+
 def test_identity_verified_clicks_normally(bundle, run_dir):
     vision = resolving_vision()
     vision.ocr_lines = [OcrLine("Jane Sample Knee pain referral High")]

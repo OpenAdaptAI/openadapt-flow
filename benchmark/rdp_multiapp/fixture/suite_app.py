@@ -23,6 +23,7 @@ CSV_PATH = ROOT / "worklist.csv"
 MAILDIR = ROOT / "outbox"
 CONTROL_PATH = ROOT / "control.json"
 ACK_PATH = ROOT / "reset_ack.txt"
+INPUT_LEDGER_PATH = ROOT / "input-ledger.jsonl"
 
 BG = "#eef2f6"
 PANEL = "#ffffff"
@@ -112,12 +113,19 @@ def _reset_persisted_state() -> None:
         connection.execute("DELETE FROM appointments")
         connection.commit()
     _write_rows(_rows())
+    INPUT_LEDGER_PATH.write_text("", encoding="utf-8")
     for subdir in ("cur", "new", "tmp"):
         path = MAILDIR / subdir
         path.mkdir(parents=True, exist_ok=True)
         for child in path.iterdir():
             if child.is_file():
                 child.unlink()
+
+
+def _record_input(action: str, **details: str | None) -> None:
+    entry = {"action": action, **details}
+    with INPUT_LEDGER_PATH.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
 def _label(parent: tk.Misc, text: str, x: int, y: int, **kwargs) -> tk.Label:
@@ -249,6 +257,10 @@ class Suite:
         self.send_button.config(state="normal")
 
     def _send_confirmation(self) -> None:
+        _record_input(
+            "send_confirmation",
+            selected_request=self.selected_request,
+        )
         rows = _read_rows()
         status = next(
             (row["status"] for row in rows if row["request_id"] == TARGET_REQUEST),
@@ -366,6 +378,7 @@ class Suite:
         self.mark_button.config(state="normal")
 
     def _mark_scheduled(self) -> None:
+        _record_input("mark_scheduled", selected_request=self.work_selected)
         if self.work_selected != TARGET_REQUEST:
             self.work_status.config(text="Refused: wrong request selected", fg=RED)
             return
@@ -440,6 +453,13 @@ class Suite:
         slot = self.slot.get().strip()
         kind = self.kind.get().strip()
         request_id = self.request.get().strip()
+        _record_input(
+            "save_appointment",
+            active_record_id=(self.active_record or (None, None))[1],
+            appointment_slot=slot,
+            appointment_type=kind,
+            request_id=request_id,
+        )
         if self.active_record != (TARGET_NAME, TARGET_RECORD):
             self.scheduler_status.config(text="Refused: wrong active record", fg=RED)
             return

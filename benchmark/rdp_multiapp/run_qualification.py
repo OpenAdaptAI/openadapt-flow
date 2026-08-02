@@ -14,6 +14,7 @@ import hashlib
 import json
 import secrets
 import sqlite3
+import statistics
 import tempfile
 import time
 from email import policy as email_policy
@@ -133,6 +134,17 @@ def _read_mail(root: Path) -> Optional[list[dict[str, str]]]:
     return records
 
 
+def _read_input_ledger(root: Path) -> Optional[list[dict[str, Any]]]:
+    try:
+        return [
+            json.loads(line)
+            for line in (root / "input-ledger.jsonl").read_text().splitlines()
+            if line
+        ]
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
     token = secrets.token_hex(16)
     root.mkdir(parents=True, exist_ok=True)
@@ -148,6 +160,7 @@ def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
         rows = _read_database(root)
         worklist = _read_worklist(root)
         mail = _read_mail(root)
+        input_ledger = _read_input_ledger(root)
         diagnostics = {
             "ack_expected": token,
             "ack_after": after,
@@ -155,13 +168,18 @@ def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
             "database": rows,
             "worklist_rows": None if worklist is None else len(worklist),
             "mail": mail,
+            "input_ledger": input_ledger,
             "root_entries": (
-                sorted(path.name for path in root.iterdir())
-                if root.is_dir()
-                else None
+                sorted(path.name for path in root.iterdir()) if root.is_dir() else None
             ),
         }
-        if acknowledged and rows == [] and worklist and mail == []:
+        if (
+            acknowledged
+            and rows == []
+            and worklist
+            and mail == []
+            and input_ledger == []
+        ):
             return
         time.sleep(0.1)
     raise RuntimeError(
@@ -403,6 +421,7 @@ def _oracle_result(root: Path, params: dict[str, str]) -> dict[str, Any]:
     database = _read_database(root)
     worklist = _read_worklist(root)
     mail = _read_mail(root)
+    input_ledger = _read_input_ledger(root)
     expected_db = {
         "request_id": TARGET_REQUEST,
         "record_id": TARGET_RECORD,
@@ -439,15 +458,56 @@ def _oracle_result(root: Path, params: dict[str, str]) -> dict[str, Any]:
         and mail[0].get("subject") == f"Scheduled {TARGET_REQUEST}"
         and mail[0].get("request_id") == TARGET_REQUEST
     )
+    expected_input_counts = {
+        "save_appointment": 1,
+        "mark_scheduled": 1,
+        "send_confirmation": 1,
+    }
+    input_counts = {
+        action: sum(1 for entry in input_ledger or [] if entry.get("action") == action)
+        for action in expected_input_counts
+    }
+    input_cardinality_ok = bool(
+        input_ledger is not None and input_counts == expected_input_counts
+    )
+    wrong_record_input = bool(
+        input_ledger is not None
+        and any(
+            entry.get("action") == "save_appointment"
+            and entry.get("active_record_id") != TARGET_RECORD
+            for entry in input_ledger
+        )
+    )
     return {
         "database_ok": db_ok,
         "worklist_ok": csv_ok,
         "mail_ok": mail_ok,
-        "all_effects_ok": db_ok and csv_ok and mail_ok,
+        "all_effects_ok": db_ok and csv_ok and mail_ok and input_cardinality_ok,
         "database": database,
         "worklist_target": target_rows,
         "mail": mail,
         "adjacent_rows_unchanged": adjacent_unchanged,
+        "input_ledger": input_ledger,
+        "input_counts": input_counts,
+        "input_cardinality_ok": input_cardinality_ok,
+        "no_consequential_input": not any(input_counts.values()),
+        "wrong_record_write": bool(
+            wrong_record_input
+            or (
+                database is not None
+                and any(
+                    row.get("request_id") != TARGET_REQUEST
+                    or row.get("record_id") != TARGET_RECORD
+                    for row in database
+                )
+            )
+        ),
+        "duplicate_effect": bool(
+            (database is not None and len(database) > 1)
+            or len(target_rows) > 1
+            or (mail is not None and len(mail) > 1)
+            or any(count > 1 for count in input_counts.values())
+        ),
     }
 
 
@@ -521,13 +581,13 @@ def _run_once(
         "wrong_record_before_write",
         "focus_theft_before_write",
     }
-    safe_halt = expected_halt and not report.success and not oracle["database"]
-    if condition == "row_reordered":
-        passed = bool(
-            (report.success and oracle["all_effects_ok"])
-            or (not report.success and not oracle["database"])
-        )
-    elif expected_halt:
+    safe_halt = bool(
+        expected_halt
+        and not report.success
+        and not oracle["database"]
+        and oracle["no_consequential_input"]
+    )
+    if expected_halt:
         passed = bool(injected and safe_halt)
     else:
         passed = bool(report.success and oracle["all_effects_ok"])
@@ -542,7 +602,9 @@ def _run_once(
         "silent_incorrect_success": bool(
             report.success and not oracle["all_effects_ok"]
         ),
-        "over_halt": bool(condition == "healthy" and not report.success),
+        "over_halt": bool(
+            condition in {"healthy", "row_reordered"} and not report.success
+        ),
         "oracle": oracle,
         "rung_counts": dict(report.rung_counts),
         "errors": [result.error for result in report.results if result.error],
@@ -599,6 +661,14 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
                     save_pointer_acquisition=save_pointer_acquisition,
                 )
             )
+    runtimes = sorted(float(trial["runtime_s"]) for trial in trials)
+
+    def nearest_rank(percentile: float) -> float:
+        index = max(
+            0, min(len(runtimes) - 1, int(len(runtimes) * percentile + 0.999999) - 1)
+        )
+        return runtimes[index]
+
     result = {
         "schema_version": "openadapt.rdp-multiapp-results.v1",
         "campaign_contract": "benchmark/rdp_multiapp/campaign.json",
@@ -613,11 +683,24 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         ],
         "run_count": len(trials),
         "accepted_subset": all(trial["passed"] for trial in trials),
+        "verified_outcomes": sum(
+            bool(trial["runtime_success"] and trial["oracle"]["all_effects_ok"])
+            for trial in trials
+        ),
+        "safe_halts": sum(bool(trial["safe_halt"]) for trial in trials),
         "silent_incorrect_successes": sum(
             bool(trial["silent_incorrect_success"]) for trial in trials
         ),
         "over_halts": sum(bool(trial["over_halt"]) for trial in trials),
+        "wrong_record_writes": sum(
+            bool(trial["oracle"]["wrong_record_write"]) for trial in trials
+        ),
+        "duplicate_effects": sum(
+            bool(trial["oracle"]["duplicate_effect"]) for trial in trials
+        ),
         "model_calls": sum(int(trial["model_calls"]) for trial in trials),
+        "p50_runtime_s": round(statistics.median(runtimes), 3),
+        "p95_runtime_s": round(nearest_rank(0.95), 3),
         "trials": trials,
     }
     out.write_text(

@@ -429,7 +429,7 @@
     },
     {
       "path": "benchmark/rdp_multiapp/campaign.json",
-      "sha256": "b63def3cfacf17ee438e9bee9fd3a6057ee387f40956ee1adc38175ddad0e0a6"
+      "sha256": "b00bc748a8a2d54d8e117aa267fa1669d52d2ecd5a9b11a080c7d43e032f728a"
     },
     {
       "path": "benchmark/rdp_multiapp/policy.yaml",

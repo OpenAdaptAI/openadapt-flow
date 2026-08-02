@@ -22,7 +22,7 @@
     },
     {
       "id": "row_reordered",
-      "expect": "verified_or_safe_halt",
+      "expect": "verified",
       "fault": "The target worklist row moves to a different visual position.",
       "oracle": ["sqlite", "csv", "maildir"]
     },

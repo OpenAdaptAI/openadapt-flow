@@ -27,6 +27,7 @@ def test_visual_campaign_has_repeated_trials_and_business_oracles() -> None:
     } <= set(campaign["required_metrics"])
 
     by_id = {condition["id"]: condition for condition in conditions}
+    assert by_id["row_reordered"]["expect"] == "verified"
     assert by_id["wrong_record_before_write"]["expect"] == "safe_halt"
     assert by_id["focus_theft_before_write"]["expect"] == "safe_halt"
     assert by_id["commit_then_timeout"]["oracle"] == ["sqlite"]

@@ -14,7 +14,6 @@ import hashlib
 import json
 import secrets
 import sqlite3
-import subprocess
 import tempfile
 import time
 from email import policy as email_policy
@@ -71,10 +70,11 @@ INBOX_DETAIL_REGION = (35, 238, 915, 150)
 POLICY_PATH = Path(__file__).with_name("policy.yaml")
 
 
-def _read_ack(root: Path) -> Optional[int]:
+def _read_ack(root: Path) -> Optional[str]:
     try:
-        return int((root / "reset_ack.txt").read_text().strip())
-    except (OSError, ValueError):
+        value = (root / "reset_ack.txt").read_text().strip()
+        return value or None
+    except OSError:
         return None
 
 
@@ -133,32 +133,25 @@ def _read_mail(root: Path) -> Optional[list[dict[str, str]]]:
     return records
 
 
-def _reset(container: str, root: Path, scenario: str = "healthy") -> None:
-    before = _read_ack(root)
+def _reset(_container: str, root: Path, scenario: str = "healthy") -> None:
+    token = secrets.token_hex(16)
     root.mkdir(parents=True, exist_ok=True)
     (root / "control.json").write_text(
-        json.dumps({"scenario": scenario}) + "\n", encoding="utf-8"
+        json.dumps({"reset_token": token, "scenario": scenario}) + "\n",
+        encoding="utf-8",
     )
-    result = subprocess.run(
-        ["docker", "exec", container, "pkill", "-USR1", "-f", "suite_app.py"],
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.decode(errors="replace")[:300])
     deadline = time.monotonic() + 10
     diagnostics: dict[str, Any] = {}
     while time.monotonic() < deadline:
         after = _read_ack(root)
-        advanced = after is not None and (before is None or after > before)
+        acknowledged = after == token
         rows = _read_database(root)
         worklist = _read_worklist(root)
         mail = _read_mail(root)
         diagnostics = {
-            "ack_before": before,
+            "ack_expected": token,
             "ack_after": after,
-            "ack_advanced": advanced,
+            "acknowledged": acknowledged,
             "database": rows,
             "worklist_rows": None if worklist is None else len(worklist),
             "mail": mail,
@@ -168,7 +161,7 @@ def _reset(container: str, root: Path, scenario: str = "healthy") -> None:
                 else None
             ),
         }
-        if advanced and rows == [] and worklist and mail == []:
+        if acknowledged and rows == [] and worklist and mail == []:
             return
         time.sleep(0.1)
     raise RuntimeError(

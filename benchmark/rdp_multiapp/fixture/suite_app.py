@@ -12,7 +12,6 @@ import csv
 import hashlib
 import json
 import os
-import signal
 import sqlite3
 import tkinter as tk
 from email.message import EmailMessage
@@ -62,6 +61,14 @@ def _scenario() -> str:
         return str(json.loads(CONTROL_PATH.read_text()).get("scenario", "healthy"))
     except (OSError, ValueError, TypeError):
         return "healthy"
+
+
+def _reset_token() -> str | None:
+    try:
+        value = json.loads(CONTROL_PATH.read_text()).get("reset_token")
+    except (OSError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 def _rows() -> list[dict[str, str]]:
@@ -127,14 +134,14 @@ class Suite:
         self.windows: dict[str, tk.Toplevel] = {}
         self.selected_request: str | None = None
         self.active_record: tuple[str, str] | None = None
-        self.reset_counter = 0
+        self.last_reset_token = _reset_token()
         self._build_inbox()
         self._build_worklist()
         self._build_scheduler()
         self._build_launcher()
         self.reset()
         self.root.after(250, lambda: self.show("Inbox"))
-        signal.signal(signal.SIGUSR1, self._signal_reset)
+        self.root.after(100, self._poll_control)
 
     def _window(self, title: str) -> tk.Toplevel:
         window = tk.Toplevel(self.root)
@@ -457,8 +464,12 @@ class Suite:
             text=f"Appointment saved  ·  {appointment_id}", fg=GREEN
         )
 
-    def _signal_reset(self, _signum, _frame) -> None:
-        self.root.after(0, self.reset)
+    def _poll_control(self) -> None:
+        token = _reset_token()
+        if token is not None and token != self.last_reset_token:
+            self.last_reset_token = token
+            self.reset()
+        self.root.after(100, self._poll_control)
 
     def reset(self) -> None:
         _reset_persisted_state()
@@ -476,8 +487,7 @@ class Suite:
         for entry in (self.slot, self.kind, self.request):
             entry.delete(0, "end")
         self.scheduler_status.config(text="")
-        self.reset_counter += 1
-        ACK_PATH.write_text(str(self.reset_counter), encoding="utf-8")
+        ACK_PATH.write_text(self.last_reset_token or "startup", encoding="utf-8")
         self.show("Inbox")
 
     def run(self) -> None:

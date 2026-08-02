@@ -25,10 +25,12 @@ approved write remains visibly unverified and still must pass its screen
 postconditions; direct API writes always require an independent verifier. This
 path makes ZERO model calls — effect verification reads the system of record.
 
-Steps that succeed via any rung other than ``template`` are healed: the
-anchor is refreshed from the live frame, the heal is recorded under
-``run_dir/heals/<step_id>/``, and — when ``save_healed_to`` is set — a full
-healed bundle is written.
+Steps that succeed via any rung other than ``template`` produce a governed
+repair. An ungoverned local run can apply the refreshed anchor in memory. An
+exactly authorized run records a promotable candidate without changing its
+admitted program. Repair evidence is written under
+``run_dir/heals/<step_id>/``; an explicit later lifecycle can qualify and
+promote a new bundle.
 """
 
 from __future__ import annotations
@@ -11887,7 +11889,7 @@ class Replayer:
                 lambda: self.backend.scroll(dx, dy),
             )
             scrolled += increment
-            frame = self.vision.wait_settled(self.backend)
+            frame = self._wait_for_scroll_transition_and_settle(before_png)
             before_png = frame
             holds = readiness_holds(frame)
             if self._governed_asset_mutation is not None:
@@ -11918,6 +11920,27 @@ class Replayer:
             f"{SCROLL_BUDGET_FACTOR}x the recorded distance) without "
             f"{target_desc} resolving — target never came into view; run aborted"
         )
+
+    def _wait_for_scroll_transition_and_settle(self, baseline_png: bytes) -> bytes:
+        """Wait for a delivered scroll to change the frame, then settle it.
+
+        A remote client can return two identical pre-action frames before the
+        wheel packet reaches the remote application. A generic settle poll can
+        therefore accept the old screen as stable. Require one visual
+        transition within the configured readiness window before applying the
+        normal settled-state check. At a real scroll boundary, return the last
+        unchanged frame after the bounded wait so the closed loop can continue
+        or refuse when its action budget is exhausted.
+        """
+
+        deadline = time.monotonic() + self.settle_readiness_timeout_s
+        frame = self.backend.screenshot()
+        while not self.vision.pixels_changed(baseline_png, frame):
+            if time.monotonic() >= deadline:
+                return frame
+            time.sleep(self.poll_interval_s)
+            frame = self.backend.screenshot()
+        return self.vision.wait_settled(self.backend)
 
     def _prepare_remote_scroll_input(
         self,
@@ -12268,7 +12291,7 @@ class Replayer:
         run_dir: Path,
         new_crops: dict[str, bytes],
     ):
-        """Build, govern, and (if promoted) apply/persist a heal.
+        """Build, govern, and persist a repair candidate.
 
         A heal is a governed PATCH, not a silent bundle swap: the raw event is
         wrapped in a reviewable :class:`~openadapt_flow.runtime.healing.HealPatch`
@@ -12276,21 +12299,31 @@ class Replayer:
         it may touch the workflow. A patch that would weaken the step's
         identity band -- the reviewed context-drop bug -- is QUARANTINED
         (persisted under ``run_dir/heals/<step_id>/patch.json`` for review)
-        and NOT applied; the returned outcome's ``promoted`` is False and the
-        caller halts the run (refuse-rather-than-guess).
+        and NOT applied; the caller halts the run. A gate-passing local repair
+        can update the in-memory workflow. A gate-passing repair discovered
+        under exact authorization remains a promotable candidate, because the
+        running program cannot change after admission.
         """
         event, crop_png = heal_mod.build_heal_event(
             step, resolution, matched_region, frame_png, self.vision
         )
         outcome = healing_mod.govern_heal(step, event, run_dir=run_dir)
         if outcome.promoted:
-            heal_mod.apply_heal(workflow, event)
-            source = self._execution_workflow_source
-            if source is not None and source is not workflow:
-                heal_mod.apply_heal(source, event)
-            self._accept_healed_anchor_in_workflow_snapshot(workflow, event)
+            if self.governed_authorization is None:
+                heal_mod.apply_heal(workflow, event)
+                source = self._execution_workflow_source
+                if source is not None and source is not workflow:
+                    heal_mod.apply_heal(source, event)
+                self._accept_healed_anchor_in_workflow_snapshot(workflow, event)
+                new_crops[step.id] = crop_png
+            else:
+                # Exact authorization binds the admitted workflow semantics.
+                # Keep a gate-passing repair as a reviewable candidate for a
+                # later qualified bundle. Never change the program that is
+                # currently executing under that authorization.
+                outcome.patch.status = "promotable"
+                healing_mod.persist_patch(outcome.patch, run_dir)
             heal_mod.persist_heal(event, crop_png, frame_png, run_dir)
-            new_crops[step.id] = crop_png
         return outcome
 
     def _accept_healed_anchor_in_workflow_snapshot(

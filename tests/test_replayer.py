@@ -2074,6 +2074,28 @@ def test_closed_loop_scroll_stops_when_next_anchor_resolves(bundle, run_dir):
     assert report.rung_counts == {"template": 1}
 
 
+def test_closed_loop_scroll_waits_for_delayed_visual_transition(bundle, run_dir):
+    """A delayed remote wheel packet cannot make the old frame look settled."""
+
+    vision = FakeVision()
+    target = Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+    vision.template_results = [None, None, target, target]
+    vision.pixels_changed_results = [False, False, True]
+    backend = FakeBackend()
+    workflow = Workflow(name="wf", steps=[scroll_step(), click_step()])
+
+    report = Replayer(backend, vision=vision, poll_interval_s=0.001).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is True
+    assert backend.actions == [
+        ("scroll", 0, 400),
+        ("click", 110, 105, False),
+    ]
+    assert len(vision.pixels_changed_calls) >= 3
+
+
 def test_closed_loop_scroll_noops_when_anchor_already_in_view(bundle, run_dir):
     """The pre-scroll probe resolving means the target is already on screen:
     the SCROLL step must not scroll at all."""

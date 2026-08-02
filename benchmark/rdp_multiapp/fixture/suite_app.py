@@ -120,7 +120,9 @@ def _rows() -> list[dict[str, str]]:
         "name": TARGET_NAME,
         "status": "New",
     }
-    insert_at = 4 if _scenario() == "row_reordered" else 15
+    # One scroll keeps the target inside the viewport in both layouts. The
+    # reordered case moves it to a different row so replay must re-resolve it.
+    insert_at = 11 if _scenario() == "row_reordered" else 13
     rows.insert(insert_at, target)
     return rows
 
@@ -170,7 +172,10 @@ class Suite:
     def __init__(self) -> None:
         _reset_persisted_state()
         self.root = tk.Tk()
-        self.root.withdraw()
+        # The remote display has no window manager. Keep the root mapped so
+        # its toplevels can own the X focus used by RDP keyboard delivery.
+        self.root.geometry("1x1+0+0")
+        self.root.overrideredirect(True)
         self.windows: dict[str, tk.Toplevel] = {}
         self.selected_request: str | None = None
         self.active_record: tuple[str, str] | None = None
@@ -197,6 +202,8 @@ class Suite:
 
     def show(self, title: str) -> None:
         window = self.windows[title]
+        if title == "Worklist":
+            self.work_canvas.yview_moveto(0)
         window.deiconify()
         window.lift()
         window.focus_force()
@@ -510,7 +517,14 @@ class Suite:
         self, parent: tk.Misc, title: str, x: int, y: int
     ) -> tuple[tk.Entry, tk.Label]:
         label = _label(parent, title, x, y, font=("DejaVu Sans", 14, "bold"))
-        entry = tk.Entry(parent, font=("DejaVu Sans", 17), bg=PANEL, fg=FG)
+        entry = tk.Entry(
+            parent,
+            font=("DejaVu Sans", 17),
+            bg=PANEL,
+            fg=FG,
+            insertbackground=FG,
+            insertofftime=0,
+        )
         entry.place(x=x, y=y + 36, width=590, height=42)
         return entry, label
 

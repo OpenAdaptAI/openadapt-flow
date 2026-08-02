@@ -9243,7 +9243,26 @@ class Replayer:
                         resolution = refreshed
                         result.resolution = refreshed
                         field_point = refreshed.point
-                    field_region = refreshed_region
+                    # A visual match region is the retained template crop. It
+                    # is not the editable control's bounds. Treating that crop
+                    # as the typed-value readback region can exclude text that
+                    # renders at the left edge of a wide field. Keep exact
+                    # structural bounds when the backend supplies them;
+                    # otherwise use the point-centred visual readback window.
+                    if step.action is ActionKind.SELECT_OPTION:
+                        # Composite selection binds its type-ahead and commit
+                        # to the exact live resolved selection region.
+                        field_region = refreshed_region
+                    else:
+                        field_region = (
+                            refreshed.structural_handle.region
+                            if (
+                                refreshed is not None
+                                and refreshed.rung == "structural"
+                                and refreshed.structural_handle is not None
+                            )
+                            else None
+                        )
                 else:
                     before_png = self.backend.screenshot()
             elif self._prev_was_click(workflow, step_index, graph_ctx):

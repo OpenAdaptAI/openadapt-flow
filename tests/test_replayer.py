@@ -3419,6 +3419,62 @@ def test_visual_click_crop_does_not_narrow_following_type_verification(bundle, r
     assert vision.pixels_changed_calls == [(0, 0, 300, 200)]
 
 
+def test_remote_visual_type_revalidation_does_not_use_template_crop_as_field_bounds(
+    bundle, run_dir
+):
+    """The final remote resolve retains target evidence, not field bounds.
+
+    A compact template can correctly locate a wide remote field while the
+    typed value renders outside that crop. The visual verifier must use the
+    point-centred readback window after the post-focus fresh-frame resolve.
+    """
+
+    class RegionAwareVision(FakeVision):
+        def ocr(self, screen_png, *, region=None):
+            del screen_png
+            if region == (0, 0, 300, 200):
+                return [OcrLine("Massachusetts")]
+            return []
+
+    vision = RegionAwareVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+        for _ in range(3)
+    ]
+    vision.pixels_changed_results = [True]
+    frame = make_png()
+    backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+    backend._text_value_supported = False
+    workflow = Workflow(
+        name="remote-visual-type",
+        surface="rdp",
+        execution_mode="external",
+        steps=[
+            Step(
+                id="t1",
+                intent="type the governed value",
+                action=ActionKind.TYPE,
+                text="Massachusetts",
+                anchor=click_step().anchor,
+                risk="irreversible",
+            )
+        ],
+    )
+
+    report = Replayer(backend, vision=vision).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is True
+    assert report.results[0].input_verified is True
+    assert backend.actions == [
+        ("click", 110, 105, False),
+        ("type", "Massachusetts"),
+    ]
+
+
 def test_type_verification_prefers_exact_structural_field_region() -> None:
     """Wide native text fields must be observed across their full UIA bounds.
 

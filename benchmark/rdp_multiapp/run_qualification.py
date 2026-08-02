@@ -148,16 +148,33 @@ def _reset(container: str, root: Path, scenario: str = "healthy") -> None:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode(errors="replace")[:300])
     deadline = time.monotonic() + 10
+    diagnostics: dict[str, Any] = {}
     while time.monotonic() < deadline:
         after = _read_ack(root)
         advanced = after is not None and (before is None or after > before)
         rows = _read_database(root)
         worklist = _read_worklist(root)
         mail = _read_mail(root)
+        diagnostics = {
+            "ack_before": before,
+            "ack_after": after,
+            "ack_advanced": advanced,
+            "database": rows,
+            "worklist_rows": None if worklist is None else len(worklist),
+            "mail": mail,
+            "root_entries": (
+                sorted(path.name for path in root.iterdir())
+                if root.is_dir()
+                else None
+            ),
+        }
         if advanced and rows == [] and worklist and mail == []:
             return
         time.sleep(0.1)
-    raise RuntimeError("fixture reset did not produce clean persisted state")
+    raise RuntimeError(
+        "fixture reset did not produce clean persisted state: "
+        + json.dumps(diagnostics, sort_keys=True, default=str)
+    )
 
 
 def _record(backend: Any, recording_dir: Path) -> None:

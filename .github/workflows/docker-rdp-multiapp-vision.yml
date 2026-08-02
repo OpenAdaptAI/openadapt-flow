@@ -61,7 +61,15 @@ jobs:
         with:
           name: rdp-multiapp-vision-subset
           path: ${{ runner.temp }}/rdp-multiapp-result/results.json
-          if-no-files-found: error
+          if-no-files-found: warn
+
+      - name: Print bounded fixture diagnostics
+        if: failure()
+        run: |
+          docker logs --tail 80 oaflow-rdp-multiapp || true
+          docker exec oaflow-rdp-multiapp sh -c \
+            'for path in /tmp/suite.log /tmp/client.log /tmp/shadow.log; do echo "== ${path} =="; tail -n 80 "${path}" 2>/dev/null || true; done'
+          ls -la "${RUNNER_TEMP}/rdp-multiapp-oracle" || true
 
       - name: Tear down
         if: always()

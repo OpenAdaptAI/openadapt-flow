@@ -17,7 +17,6 @@ import sqlite3
 import statistics
 import tempfile
 import time
-from collections.abc import Callable
 from email import policy as email_policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -62,6 +61,7 @@ SLOT_FIELD = (720, 222)
 TYPE_FIELD = (720, 342)
 REQUEST_FIELD = (720, 462)
 SAVE_APPOINTMENT = (650, 568)
+SAVE_APPOINTMENT_REGION = (520, 540, 260, 56)
 SEND_CONFIRMATION = (165, 447)
 
 # Identity bands are recorded pixels, not live values sent out of the runner.
@@ -81,8 +81,7 @@ def _install_commit_then_timeout_fault(
     backend: Any,
     *,
     condition: str,
-    save_pointer_acquisition: int,
-    acquisition_count: Callable[[], int],
+    save_region: tuple[int, int, int, int],
 ) -> dict[str, Any]:
     """Lose the receipt only after the real qualified Save click returns.
 
@@ -98,10 +97,11 @@ def _install_commit_then_timeout_fault(
         from openadapt_flow.backend import ActionDeliveryUncertain
 
         receipt = original_click_guarded(*args, **kwargs)
-        if (
-            condition == "commit_then_timeout"
-            and acquisition_count() == save_pointer_acquisition
-        ):
+        x = int(args[0] if args else kwargs["x"])
+        y = int(args[1] if len(args) > 1 else kwargs["y"])
+        left, top, width, height = save_region
+        is_save_attempt = left <= x < left + width and top <= y < top + height
+        if condition == "commit_then_timeout" and is_save_attempt:
             state["save_delivery_calls"] += 1
             if not state["injected"]:
                 state["injected"] = True
@@ -582,6 +582,7 @@ def _run_once(
     run_dir: Path,
     condition: str,
     save_pointer_acquisition: int,
+    save_step_id: str,
 ) -> dict[str, Any]:
     from openadapt_flow.backends.rdp_backend import FreeRDPBackend
     from openadapt_flow.run_gate import build_runtime_authorization
@@ -623,8 +624,7 @@ def _run_once(
     commit_timeout = _install_commit_then_timeout_fault(
         backend,
         condition=condition,
-        save_pointer_acquisition=save_pointer_acquisition,
-        acquisition_count=lambda: acquisitions,
+        save_region=SAVE_APPOINTMENT_REGION,
     )
     started = time.monotonic()
     report = Replayer(
@@ -657,11 +657,12 @@ def _run_once(
         passed = bool(injected and safe_halt)
     elif condition == "commit_then_timeout":
         save_result = next(
-            result
-            for result in report.results
-            if result.step_id == workflow.steps[13].id
+            (result for result in report.results if result.step_id == save_step_id),
+            None,
         )
-        uncertainty = save_result.delivery_uncertainty
+        uncertainty = (
+            save_result.delivery_uncertainty if save_result is not None else None
+        )
         sqlite_proved_one_write = bool(
             oracle["database_ok"]
             and oracle["input_counts"].get("save_appointment") == 1
@@ -698,17 +699,8 @@ def _run_once(
         "fault_injected": bool(injected or commit_timeout["injected"]),
         "commit_timeout_injected": bool(commit_timeout["injected"]),
         "save_delivery_calls": int(commit_timeout["save_delivery_calls"]),
-        "uncertain_delivery_outcome": (
-            "verified"
-            if condition == "commit_then_timeout"
-            and report.success
-            and report.transaction_outcome == "VERIFIED"
-            and oracle["database_ok"]
-            else (
-                "reconciliation_required"
-                if condition == "commit_then_timeout"
-                else None
-            )
+        "transaction_outcome": (
+            report.transaction_outcome if condition == "commit_then_timeout" else None
         ),
         "safe_halt": safe_halt,
         "silent_incorrect_success": bool(
@@ -772,6 +764,7 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
                     run_dir=work / f"run-{condition}-{index}",
                     condition=condition,
                     save_pointer_acquisition=save_pointer_acquisition,
+                    save_step_id=step_ids["save"],
                 )
             )
     runtimes = sorted(float(trial["runtime_s"]) for trial in trials)

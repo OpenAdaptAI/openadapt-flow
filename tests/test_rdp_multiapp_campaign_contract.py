@@ -59,8 +59,7 @@ def test_commit_then_timeout_fault_raises_only_after_one_real_save_delivery() ->
     state = _install_commit_then_timeout_fault(
         backend,
         condition="commit_then_timeout",
-        save_pointer_acquisition=7,
-        acquisition_count=lambda: 7,
+        save_region=(0, 0, 100, 100),
     )
 
     try:
@@ -74,3 +73,7 @@ def test_commit_then_timeout_fault_raises_only_after_one_real_save_delivery() ->
 
     assert backend.calls == 1
     assert state == {"injected": True, "save_delivery_calls": 1}
+
+    backend.click_guarded(10, 20, expected_frame_sha256="0" * 64)
+    assert backend.calls == 2
+    assert state == {"injected": True, "save_delivery_calls": 2}

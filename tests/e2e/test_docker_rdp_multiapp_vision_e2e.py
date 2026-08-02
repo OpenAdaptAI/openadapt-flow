@@ -41,7 +41,7 @@ def test_real_rdp_multiapp_visual_subset(tmp_path: Path) -> None:
         trial["oracle"]["input_counts"]["save_appointment"] == 1 for trial in uncertain
     )
     assert all(
-        trial["uncertain_delivery_outcome"] in {"verified", "reconciliation_required"}
+        trial["transaction_outcome"] in {"VERIFIED", "RECONCILIATION_REQUIRED"}
         for trial in uncertain
     )
     assert json.loads(output.read_text()) == result

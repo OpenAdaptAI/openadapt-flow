@@ -952,20 +952,24 @@ def render(presentation_dir: Path, output: Path) -> dict:
 def _candidate_paths(candidate_dir: Path) -> tuple[Path, Path, Path]:
     """Return the only files that a public RDP presentation may contain."""
     video = candidate_dir / CANDIDATE_VIDEO_NAME
-    return video, video.with_suffix(".timeline.json"), video.with_suffix(
-        ".manifest.json"
+    return (
+        video,
+        video.with_suffix(".timeline.json"),
+        video.with_suffix(".manifest.json"),
     )
 
 
 def _candidate_inventory(candidate_dir: Path) -> tuple[Path, Path, Path]:
     """Refuse a candidate directory with any unsigned extra file or directory."""
+    if candidate_dir.is_symlink() or not candidate_dir.is_dir():
+        raise RuntimeError(
+            "public artifact candidate directory is not a real directory"
+        )
     video, timeline, manifest = _candidate_paths(candidate_dir)
     expected = {video.name, timeline.name, manifest.name}
-    if not candidate_dir.is_dir():
-        raise RuntimeError("public artifact candidate directory does not exist")
     actual = {path.name for path in candidate_dir.iterdir()}
     if actual != expected or not all(
-        path.is_file() for path in (video, timeline, manifest)
+        path.is_file() and not path.is_symlink() for path in (video, timeline, manifest)
     ):
         raise RuntimeError("public artifact candidate inventory is not exact")
     return video, timeline, manifest

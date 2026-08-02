@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from PIL import Image
 
 from openadapt_flow.ir import (
@@ -295,19 +297,94 @@ def test_presentation_is_hash_bound_and_renders_without_staged_video_frames(
     ]
 
 
-def test_public_presentation_finalizer_refuses_unsigned_extra_candidate_files(
+def _signed_publication_candidate(
     tmp_path: Path,
-) -> None:
+) -> tuple[Path, Path, dict[str, bytes]]:
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     video, timeline, manifest = renderer._candidate_paths(candidate)
     video.write_bytes(b"video")
     timeline.write_text("{}", encoding="utf-8")
     manifest.write_text("{}", encoding="utf-8")
-    (candidate / "unreviewed.txt").write_text("extra", encoding="utf-8")
+    private_key = Ed25519PrivateKey.generate()
+    approval = renderer.approve_public_artifact_set(
+        candidate,
+        approval_path=tmp_path / "approval.json",
+        key_id="test-key",
+        private_key=private_key.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        ),
+    )
+    trusted_keys = {
+        "test-key": private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    }
+    return candidate, approval, trusted_keys
+
+
+def _finalize_signed_candidate(
+    tmp_path: Path,
+    candidate: Path,
+    approval: Path,
+    trusted_keys: dict[str, bytes],
+) -> None:
+    renderer.finalize_public_artifact_set(
+        tmp_path / "presentation",
+        candidate,
+        tmp_path / "published",
+        approval_path=approval,
+        trusted_public_keys=trusted_keys,
+    )
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    [
+        renderer.CANDIDATE_VIDEO_NAME,
+        "openadapt-rdp-demo.timeline.json",
+        "openadapt-rdp-demo.manifest.json",
+    ],
+)
+def test_public_presentation_finalizer_refuses_symlinked_candidate_artifacts(
+    tmp_path: Path, artifact_name: str
+) -> None:
+    candidate, approval, trusted_keys = _signed_publication_candidate(tmp_path)
+    external = tmp_path / "outside"
+    external.write_bytes(b"outside")
+    artifact = candidate / artifact_name
+    artifact.unlink()
+    artifact.symlink_to(external)
 
     with pytest.raises(RuntimeError, match="inventory is not exact"):
-        renderer._candidate_inventory(candidate)
+        _finalize_signed_candidate(tmp_path, candidate, approval, trusted_keys)
+    assert not (tmp_path / "published").exists()
+
+
+def test_public_presentation_finalizer_refuses_a_symlinked_candidate_directory(
+    tmp_path: Path,
+) -> None:
+    candidate, approval, trusted_keys = _signed_publication_candidate(tmp_path)
+    candidate_link = tmp_path / "candidate-link"
+    candidate_link.symlink_to(candidate, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="not a real directory"):
+        _finalize_signed_candidate(tmp_path, candidate_link, approval, trusted_keys)
+    assert not (tmp_path / "published").exists()
+
+
+def test_public_presentation_finalizer_refuses_an_extra_candidate_directory(
+    tmp_path: Path,
+) -> None:
+    candidate, approval, trusted_keys = _signed_publication_candidate(tmp_path)
+    (candidate / "unreviewed").mkdir()
+
+    with pytest.raises(RuntimeError, match="inventory is not exact"):
+        _finalize_signed_candidate(tmp_path, candidate, approval, trusted_keys)
+    assert not (tmp_path / "published").exists()
 
 
 @pytest.mark.parametrize(
